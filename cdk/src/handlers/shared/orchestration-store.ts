@@ -39,6 +39,7 @@ import {
   type DynamoDBDocumentClient,
   BatchWriteCommand,
   GetCommand,
+  PutCommand,
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -380,8 +381,10 @@ const BATCH_WRITE_BACKOFF_MS = 100;
  * was short of child rows while its meta row said otherwise: a child that waits
  * for a missing one waits for ever. They are sent again here, a bounded number
  * of times with a growing pause. Rows that are still left then are an error:
- * the request after them is not sent (for a seed that is the one with the meta
- * row), and the caller must not go on as if they were stored.
+ * no request after theirs is sent, and the caller must not go on as if they
+ * were stored. Within ONE request there is no such order: DynamoDB can store
+ * any of its rows and hand the others back, so a row that must not exist
+ * without the others (the meta row of a seed) is not passed here with them.
  */
 async function putRows(
   ddb: DynamoDBDocumentClient,
@@ -578,24 +581,26 @@ export async function seedOrchestration(
     ...(ttl !== undefined && { ttl }),
   };
 
-  // BatchWrite in chunks of 25 (DDB limit). The meta row goes last so a
-  // partial failure can't leave a meta row claiming a fully-seeded
-  // orchestration when child rows are missing — a replay re-derives the
-  // same id, sees no meta row, and re-seeds.
-  const allRows: Array<Record<string, unknown>> = [
-    ...childRows.map((r) => ({ ...r })),
-    { ...metaRow },
-  ];
-  await putRows(ddb, tableName, allRows);
+  // The child rows first, every one of them (BatchWrite in chunks of 25, the
+  // DDB limit), then the meta row in a request of its own. The meta row is
+  // what says the epic exists: the gate above, `loadOrchestration` and the
+  // sweep all start from it. Sent in one request with child rows, it could be
+  // stored while they were handed back, and a seed that then gave up left an
+  // epic short of children that the replay took for seeded. Written last and
+  // alone, a failed seed leaves no meta row: a replay re-derives the same id,
+  // sees none, and re-seeds.
+  await putRows(ddb, tableName, childRows.map((r) => ({ ...r })));
+  await ddb.send(new PutCommand({ TableName: tableName, Item: metaRow }));
+  const rowsWritten = childRows.length + 1;
 
   logger.info('Orchestration seeded', {
     orchestration_id: orchestrationId,
     parent_issue_ref: parentIssueRef,
     child_count: children.length,
-    rows_written: allRows.length,
+    rows_written: rowsWritten,
   });
 
-  return { orchestrationId, rowsWritten: allRows.length, alreadyExisted: false };
+  return { orchestrationId, rowsWritten, alreadyExisted: false };
 }
 
 /** Result of extending an already-seeded orchestration with newly-added sub-issues. */

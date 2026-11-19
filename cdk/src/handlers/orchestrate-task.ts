@@ -271,10 +271,20 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // mark the task RUNNING before this point, and the event must not depend
       // on which writer got there first.
       if (handle.strategyType !== 'lambda-microvm') {
-        await emitTaskEvent(taskId, 'session_started', {
-          session_id: handle.sessionId,
-          strategy_type: handle.strategyType,
-        }, correlation);
+        // The transition above is the commit point: the session runs and the
+        // task row names it. A failed event write must not throw from here:
+        // Durable Execution would run the step again, the re-read above would
+        // see a RUNNING task, and every run would start another session.
+        try {
+          await emitTaskEvent(taskId, 'session_started', {
+            session_id: handle.sessionId,
+            strategy_type: handle.strategyType,
+          }, correlation);
+        } catch (emitErr) {
+          log.warn('session_started event failed after the session was registered', {
+            session_id: handle.sessionId, error: String(emitErr),
+          });
+        }
       }
 
       log.info('Session started', {
@@ -525,7 +535,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         if (state.lastStatus && TERMINAL_STATUSES.includes(state.lastStatus)) {
           return { shouldContinue: false };
         }
-        if (state.sessionUnhealthy) {
+        // A lost session, or a task row that several polls in a row could not
+        // read: finalization reads the row itself and ends the task.
+        if (state.sessionUnhealthy || state.statusUnreadable) {
           return { shouldContinue: false };
         }
         if (state.microvmSupervisor) {

@@ -57,6 +57,9 @@ export const ISSUE_TITLE_MAX_LENGTH = 256;
 /** Conservative fallback token count for images where metadata could not be read. */
 const MAX_IMAGE_TOKENS_FALLBACK = 1568;
 
+/** Failed reads of the task row in a row after which `pollTaskStatus` reports it unreadable. */
+const MAX_CONSECUTIVE_STATUS_READ_FAILURES = 3;
+
 /**
  * State tracked across waitForCondition poll cycles.
  */
@@ -65,6 +68,10 @@ export interface PollState {
   readonly lastStatus?: TaskStatusType;
   /** True when the agent stopped sending heartbeats while still RUNNING (likely crash/OOM). */
   readonly sessionUnhealthy?: boolean;
+  /** Failed reads of the task row in a row; a read that works starts the count again. */
+  readonly consecutiveStatusReadFailures?: number;
+  /** True once that count reaches its cap: the wait ends and finalization reads the row itself. */
+  readonly statusUnreadable?: boolean;
   /** Consecutive ECS poll failures — escalated to error after 3. */
   readonly consecutiveEcsPollFailures?: number;
   /** Consecutive polls where ECS reports completed but DDB is not terminal — escalated after 5. */
@@ -949,7 +956,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
  * @param state - current poll state.
  * @param computeType - the compute backend for this task (controls heartbeat checks).
  * @returns updated poll state with the latest task status; when the read fails,
- *   the state it was given with one more attempt.
+ *   the state it was given with one more attempt and one more failure in a row.
  */
 export async function pollTaskStatus(
   taskId: string,
@@ -969,12 +976,21 @@ export async function pollTaskStatus(
     // A failed read is one missed poll, not the end of the orchestration: an
     // error thrown from the waitForCondition check fails the durable execution,
     // and then nothing finalizes the task. The attempt counts, so the poll
-    // window still closes.
+    // window still closes. Failures in a row are counted as well: a read that
+    // fails for good would otherwise keep the task RUNNING for that whole
+    // window, so at the cap the wait ends and finalization takes over.
+    const consecutiveStatusReadFailures = (state.consecutiveStatusReadFailures ?? 0) + 1;
     logger.warn('Task status read failed, counting it as a missed poll', {
       task_id: taskId,
+      consecutive_failures: consecutiveStatusReadFailures,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { ...state, attempts: state.attempts + 1 };
+    return {
+      ...state,
+      attempts: state.attempts + 1,
+      consecutiveStatusReadFailures,
+      statusUnreadable: consecutiveStatusReadFailures >= MAX_CONSECUTIVE_STATUS_READ_FAILURES,
+    };
   }
 
   const currentStatus = item?.status as TaskStatusType | undefined;
@@ -1206,6 +1222,26 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
 
     await emitTaskEvent(taskId, `task_${currentStatus.toLowerCase()}`, {
       final_status: currentStatus,
+      poll_attempts: pollState.attempts,
+    }, correlation);
+    await decrementConcurrency(userId);
+    return;
+  }
+
+  // The wait ended because the task row could not be read for several polls in
+  // a row (`pollTaskStatus`). The strong read of `finalizeTask` worked and the
+  // task is not over, but nothing has watched it since: fail it and say why,
+  // rather than report a poll timeout that did not happen. A write that is
+  // refused (the agent moved the task first) or that fails is left to throw:
+  // the durable step runs again and finalizes the row as it then reads.
+  if (pollState.statusUnreadable) {
+    await transitionTask(taskId, currentStatus, TaskStatus.FAILED, {
+      completed_at: new Date().toISOString(),
+      error_message: `Task status read failed ${pollState.consecutiveStatusReadFailures} consecutive times: `
+        + 'the orchestrator stopped waiting for the agent',
+    });
+    await emitTaskEvent(taskId, 'task_failed', {
+      reason: 'status_read_failed',
       poll_attempts: pollState.attempts,
     }, correlation);
     await decrementConcurrency(userId);

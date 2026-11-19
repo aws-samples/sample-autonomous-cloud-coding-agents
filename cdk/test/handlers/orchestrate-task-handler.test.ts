@@ -42,19 +42,22 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
 }));
 
 const mockAdmissionControl = jest.fn();
+const mockEmitTaskEvent = jest.fn();
 const mockFailTask = jest.fn();
 const mockFinalizeTask = jest.fn();
 const mockHydrateAndTransition = jest.fn();
 const mockLoadBlueprintConfig = jest.fn();
 const mockLoadTask = jest.fn();
+const mockLogWarn = jest.fn();
+const mockPollTaskStatus = jest.fn();
 const mockQueueTask = jest.fn();
 const mockTransitionTask = jest.fn();
 jest.mock('../../src/handlers/shared/orchestrator', () => ({
   admissionControl: (...a: unknown[]) => mockAdmissionControl(...a),
   buildComputeMetadata: () => ({}),
-  emitTaskEvent: jest.fn(),
+  emitTaskEvent: (...a: unknown[]) => mockEmitTaskEvent(...a),
   envelopeFor: () => ({
-    log: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+    log: { info: jest.fn(), warn: (...a: unknown[]) => mockLogWarn(...a), error: jest.fn() },
     correlation: { user_id: 'user-1', repo: 'org/repo' },
   }),
   failTask: (...a: unknown[]) => mockFailTask(...a),
@@ -62,7 +65,7 @@ jest.mock('../../src/handlers/shared/orchestrator', () => ({
   hydrateAndTransition: (...a: unknown[]) => mockHydrateAndTransition(...a),
   loadBlueprintConfig: (...a: unknown[]) => mockLoadBlueprintConfig(...a),
   loadTask: (...a: unknown[]) => mockLoadTask(...a),
-  pollTaskStatus: jest.fn(),
+  pollTaskStatus: (...a: unknown[]) => mockPollTaskStatus(...a),
   queueTask: (...a: unknown[]) => mockQueueTask(...a),
   transitionTask: (...a: unknown[]) => mockTransitionTask(...a),
 }));
@@ -72,10 +75,11 @@ jest.mock('../../src/handlers/shared/preflight', () => ({
 }));
 
 const mockStartSession = jest.fn();
+const mockPollSession = jest.fn();
 jest.mock('../../src/handlers/shared/compute-strategy', () => ({
   resolveComputeStrategy: () => ({
     startSession: (...a: unknown[]) => mockStartSession(...a),
-    pollSession: jest.fn(),
+    pollSession: (...a: unknown[]) => mockPollSession(...a),
     stopSession: jest.fn(),
   }),
 }));
@@ -97,6 +101,13 @@ const handler = exportedHandler as unknown as DurableExecutionHandler<{ task_id:
 
 const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test';
 const HANDLE = { sessionId: 'session-1', strategyType: 'agentcore', runtimeArn: RUNTIME_ARN };
+const ECS_TASK_ARN = 'arn:aws:ecs:us-east-1:123456789012:task/test-cluster/abc123';
+const ECS_HANDLE = {
+  sessionId: ECS_TASK_ARN,
+  strategyType: 'ecs',
+  clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/test-cluster',
+  taskArn: ECS_TASK_ARN,
+};
 
 type WaitStrategy = (state: PollState) => { shouldContinue: boolean; delay?: { seconds: number } };
 
@@ -124,6 +135,28 @@ function fakeContext() {
         waitStrategy = cfg.waitStrategy;
         return { attempts: 1, lastStatus: TaskStatus.COMPLETED };
       },
+    },
+  };
+}
+
+/**
+ * The same context, but `waitForCondition` polls as the SDK does: the handler's check
+ * runs until its wait strategy says stop. Delays are not waited for.
+ */
+function pollingContext() {
+  return {
+    ...fakeContext().ctx,
+    waitForCondition: async (
+      _name: string,
+      check: (state: PollState) => Promise<PollState>,
+      cfg: { initialState: PollState; waitStrategy: WaitStrategy },
+    ) => {
+      let state = cfg.initialState;
+      for (let polls = 0; polls < 10; polls++) {
+        state = await check(state);
+        if (!cfg.waitStrategy(state).shouldContinue) return state;
+      }
+      throw new Error('the wait strategy never stopped the poll loop');
     },
   };
 }
@@ -238,6 +271,33 @@ describe('start-session step', () => {
     expect(mockStartSession).not.toHaveBeenCalled();
     expect(taskStatus).toBe(TaskStatus.CANCELLED);
   });
+
+  test.each([
+    ['agentcore', HANDLE],
+    ['ecs', ECS_HANDLE],
+  ])('starts one %s session when the session_started event cannot be written', async (computeType, handle) => {
+    // The task is RUNNING and its row names the session when the event write
+    // fails. If the step threw now, the durable SDK would run it again, the
+    // task would not read as over, and every run would start another session.
+    mockLoadBlueprintConfig.mockResolvedValue({ compute_type: computeType, runtime_arn: RUNTIME_ARN });
+    mockStartSession.mockResolvedValue(handle);
+    mockEmitTaskEvent.mockRejectedValueOnce(
+      Object.assign(new Error('Throughput exceeds the current capacity of your table'), { name: 'ThrottlingException' }),
+    );
+
+    const [outcome] = await Promise.allSettled([handler({ task_id: 'TASK001' }, fakeContext().ctx as never)]);
+
+    expect(mockEmitTaskEvent.mock.calls.map(call => call[1])).toEqual(['session_started']);
+    expect(mockStartSession).toHaveBeenCalledTimes(1);
+    expect(outcome.status).toBe('fulfilled');
+    expect(taskStatus).toBe(TaskStatus.RUNNING);
+    expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+    // The event is missing from the task's stream: the log has to say why.
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      expect.stringContaining('session_started'),
+      expect.objectContaining({ session_id: handle.sessionId }),
+    );
+  });
 });
 
 describe('poll window', () => {
@@ -271,5 +331,56 @@ describe('poll window', () => {
 
     expect(after(101)).toEqual({ shouldContinue: true, delay: { seconds: 300 } });
     expect(after(102)).toEqual({ shouldContinue: false });
+  });
+});
+
+describe('status reads that fail during the wait', () => {
+  /** What pollTaskStatus answers for a read that failed: the last status, and the failures in a row. */
+  const failedRead = (attempts: number, failures: number): PollState => ({
+    attempts,
+    lastStatus: TaskStatus.RUNNING,
+    consecutiveStatusReadFailures: failures,
+    statusUnreadable: failures >= 3,
+  });
+
+  test.each([
+    ['agentcore', HANDLE],
+    ['ecs', ECS_HANDLE],
+  ])('stops waiting for an %s task once its row is reported unreadable', async (computeType, handle) => {
+    // A read that fails for good: without an end, the task stays RUNNING and
+    // keeps its concurrency seat for the whole poll window.
+    mockLoadBlueprintConfig.mockResolvedValue({ compute_type: computeType, runtime_arn: RUNTIME_ARN });
+    mockStartSession.mockResolvedValue(handle);
+    mockPollSession.mockResolvedValue({ status: 'running' });
+    mockPollTaskStatus
+      .mockResolvedValueOnce(failedRead(1, 1))
+      .mockResolvedValueOnce(failedRead(2, 2))
+      .mockResolvedValue(failedRead(3, 3));
+
+    await handler({ task_id: 'TASK001' }, pollingContext() as never);
+
+    expect(mockPollTaskStatus).toHaveBeenCalledTimes(3);
+    // Finalization reads the row itself; it needs to know why the wait ended.
+    expect(mockFinalizeTask).toHaveBeenCalledWith(
+      'TASK001',
+      expect.objectContaining({ consecutiveStatusReadFailures: 3, statusUnreadable: true }),
+      'user-1',
+    );
+    expect(mockFailTask).not.toHaveBeenCalled();
+  });
+
+  test('keeps waiting after a read that failed once', async () => {
+    mockPollTaskStatus
+      .mockResolvedValueOnce(failedRead(1, 1))
+      .mockResolvedValueOnce({ attempts: 2, lastStatus: TaskStatus.COMPLETED, sessionUnhealthy: false });
+
+    await handler({ task_id: 'TASK001' }, pollingContext() as never);
+
+    expect(mockPollTaskStatus).toHaveBeenCalledTimes(2);
+    expect(mockFinalizeTask).toHaveBeenCalledWith(
+      'TASK001',
+      expect.objectContaining({ attempts: 2, lastStatus: TaskStatus.COMPLETED }),
+      'user-1',
+    );
   });
 });
