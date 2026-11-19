@@ -97,6 +97,12 @@ export interface AdfTextRun {
 export type AdfParagraph = ReadonlyArray<AdfTextRun>;
 
 /**
+ * One block of a comment body: a paragraph, or a block of code, which Jira
+ * shows as written, line breaks included.
+ */
+export type AdfBlock = AdfParagraph | { readonly code: string };
+
+/**
  * Parse the controlled Markdown emitted by ABCA's own status renderers.
  *
  * This is intentionally not a general Markdown parser. The generated comments
@@ -150,7 +156,8 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
       const end = line.indexOf('**', cursor + 2);
       if (end !== -1) {
         for (const run of parseMarkdownRuns(line.slice(cursor + 2, end))) {
-          append({ ...run, strong: true });
+          // As for italics above: a code run takes no other emphasis.
+          append(run.code ? run : { ...run, strong: true });
         }
         cursor = end + 2;
         continue;
@@ -188,24 +195,65 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
   return runs;
 }
 
+/** A line that opens or closes a fenced code block; an opening one may name a language. */
+const CODE_FENCE = /^\s*```[^`]*$/;
+
 /**
- * Build a multi-paragraph ADF document. Each element of ``paragraphs``
+ * Parse Markdown the agent wrote (an answer, a question) into blocks: the
+ * lines between two fences are one code block, every other line is a paragraph
+ * of {@link parseMarkdownRuns}. What that subset does not know (a heading, a
+ * list marker) stays as typed.
+ */
+export function parseMarkdownBlocks(text: string): AdfBlock[] {
+  const blocks: AdfBlock[] = [];
+  // The lines of the code block that is open, if one is.
+  let open: string[] | undefined;
+  const closeBlock = (lines: string[]): void => {
+    const code = lines.join('\n');
+    // An ADF text node cannot be empty, so a block without text is left out.
+    if (code) blocks.push({ code });
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (!CODE_FENCE.test(line)) {
+      // Inside a block nothing is Markdown.
+      if (open) open.push(line);
+      else blocks.push(parseMarkdownRuns(line));
+    } else if (open) {
+      closeBlock(open);
+      open = undefined;
+    } else {
+      open = [];
+    }
+  }
+  // A fence left open runs to the end of the text, as in Markdown: the
+  // agent's text is cut at a length limit.
+  if (open) closeBlock(open);
+  return blocks;
+}
+
+/**
+ * Build a multi-paragraph ADF document. Each paragraph of ``blocks``
  * becomes one ADF ``paragraph`` node; an empty run list yields an empty
  * paragraph (Jira renders it as a blank line, which is how we get the
  * spacing between the header, the metrics line, and the footer without
- * embedding ``\n`` — ADF text nodes do not honor newlines).
+ * embedding ``\n`` — ADF text nodes do not honor newlines). A code block
+ * becomes one ``codeBlock`` node, the one place where a newline is kept.
  *
  * Exported for the fan-out final-status renderer + its tests. The
  * single-paragraph {@link toAdfDocument} stays for the short processor
  * messages that have no structure to preserve.
  */
-export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Record<string, unknown> {
+export function buildAdfDocument(blocks: ReadonlyArray<AdfBlock>): Record<string, unknown> {
   return {
     type: 'doc',
     version: 1,
-    content: paragraphs.map((runs) => ({
+    content: blocks.map((block) => ('code' in block ? {
+      type: 'codeBlock',
+      // No marks: ADF allows none on the text of a code block.
+      content: [{ type: 'text', text: block.code }],
+    } : {
       type: 'paragraph',
-      content: runs.map((run) => {
+      content: block.map((run) => {
         const marks: Array<Record<string, unknown>> = [];
         if (run.strong) marks.push({ type: 'strong' });
         if (run.em) marks.push({ type: 'em' });

@@ -186,6 +186,8 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   ) => mockUpdateIssueCommentAdf(ctx, issueKey, commentId, body),
   buildAdfDocument: (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) =>
     mockBuildAdfDocument(paragraphs),
+  // The agent's own text goes through the real parser: it is pure.
+  parseMarkdownBlocks: jest.requireActual('../../src/handlers/shared/jira-feedback').parseMarkdownBlocks,
 }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
@@ -215,6 +217,7 @@ import {
 } from '../../src/handlers/fanout-task-events';
 import { parseCommentTrigger } from '../../src/handlers/shared/comment-trigger';
 import { MAX_REPLY_ATTEMPTS } from '../../src/handlers/shared/iteration-reply-claim';
+import type { AdfBlock, AdfParagraph } from '../../src/handlers/shared/jira-feedback';
 import {
   renderJiraFinalStatusText,
   renderJiraFinishedPointer,
@@ -2682,6 +2685,10 @@ describe('fanout-task-events: Jira dispatcher', () => {
     const result = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
     expect(result).toMatch(/^⚠️ Shipped a PR but stopped early/);
     expect(result).not.toContain('✅');
+    // Such a run stores no error message, so the frame names the reason itself.
+    expect(result.split('\n')[0]).toBe(
+      '⚠️ Shipped a PR but stopped early — Build or tests did not pass — review and decide if more work is needed',
+    );
   });
 
   test('a run that stopped to ask a question posts the question, not a completion', async () => {
@@ -2707,6 +2714,31 @@ describe('fanout-task-events: Jira dispatcher', () => {
     // Jira has no reply-to-resume path, so the comment says how to run again.
     expect(text).toMatch(/re-apply the trigger label/);
     expect(text).toContain('task t-jira');
+  });
+
+  test('the question of a held run is rendered from its Markdown, not posted as literal text', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      pr_url: undefined,
+      code_changed: false,
+      answer_text: 'Do you mean `login.tsx` or **the admin page**?\n```\nsrc/login.tsx\nsrc/admin/login.tsx\n```',
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const body = mockPostIssueCommentAdf.mock.calls[0][2] as { _adf: ReadonlyArray<unknown> };
+    expect(body._adf.slice(0, 3)).toEqual([
+      // The marker of ABCA's own comments stays the first run.
+      [{ text: '🤖 ' }, { text: 'ABCA has a question before it starts', strong: true }],
+      [
+        { text: 'Do you mean ' },
+        { text: 'login.tsx', code: true },
+        { text: ' or ' },
+        { text: 'the admin page', strong: true },
+        { text: '?' },
+      ],
+      { code: 'src/login.tsx\nsrc/admin/login.tsx' },
+    ]);
   });
 
   test('a held run without a stored question still asks for detail', async () => {
@@ -3189,9 +3221,13 @@ describe('fanout-task-events: Jira dispatcher', () => {
 // ---------------------------------------------------------------------------
 
 describe('renderJiraFinalStatusComment', () => {
+  // No case here has a fenced block of the agent's answer (those are in
+  // shared/jira-status-comment.test.ts): every block is a paragraph.
+  type Paragraphs = ReadonlyArray<AdfParagraph>;
+
   /** Flatten the renderer's ADF-paragraph output to a single string. */
-  const flatten = (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) =>
-    paragraphs.map((runs) => runs.map((r) => r.text).join('')).join('\n');
+  const flatten = (paragraphs: ReadonlyArray<AdfBlock>) =>
+    (paragraphs as Paragraphs).map((runs) => runs.map((r) => r.text).join('')).join('\n');
 
   test('all metrics null → renders em-dash placeholders', () => {
     const text = flatten(renderJiraFinalStatusComment({
@@ -3217,7 +3253,7 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 60,
       taskId: 't',
       errorTitle: null,
-    });
+    }) as Paragraphs;
     const text = flatten(paragraphs);
     expect(text).toContain('✅');
     expect(text).toContain('PR: https://github.com/o/r/pull/7');
@@ -3274,7 +3310,7 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 1272,
       taskId: 't-abca-91',
       errorTitle: 'Hit max-turns cap',
-    });
+    }) as Paragraphs;
     const text = flatten(paragraphs);
     expect(text).toContain('⚠️');
     expect(text).toContain('Shipped a PR but stopped early');
@@ -3302,7 +3338,7 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 3600,
       taskId: 't-timeout',
       errorTitle: null,
-    });
+    }) as Paragraphs;
     expect(paragraphs[0][0]).toEqual({ text: '❌ Task timed out', strong: true });
     expect(flatten(paragraphs)).not.toContain('timed_out');
   });
@@ -3371,7 +3407,7 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 60,
       taskId: 't-foot',
       errorTitle: null,
-    });
+    }) as Paragraphs;
     expect(paragraphs[paragraphs.length - 1][0]).toEqual({ text: 'task t-foot', em: true });
   });
 });

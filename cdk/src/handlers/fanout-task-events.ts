@@ -55,11 +55,13 @@ import { renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim, terminalReplyClaimed } from './shared/iteration-reply-claim';
 import {
   buildAdfDocument,
+  parseMarkdownBlocks,
   postIssueCommentAdf,
-  type AdfParagraph,
+  type AdfBlock,
 } from './shared/jira-feedback';
 import { updateJiraIterationComment } from './shared/jira-preview';
 import {
+  jiraIterationFrame,
   renderJiraFinalStatusComment,
   renderJiraFinishedPointer,
   type JiraFinishedPointerKind,
@@ -1612,7 +1614,7 @@ export { renderJiraFinalStatusComment };
  * (``shared/comment-trigger.ts``) refuses to read as a trigger, with the
  * emoji outside the bold run so the marker survives a wiki-text body too.
  */
-function renderJiraHoldQuestion(task: TaskRecord, event: FanOutEvent): ReadonlyArray<AdfParagraph> | null {
+function renderJiraHoldQuestion(task: TaskRecord, event: FanOutEvent): ReadonlyArray<AdfBlock> | null {
   if (
     task.channel_metadata?.trigger_comment_id
     || event.event_type !== 'task_completed'
@@ -1624,10 +1626,8 @@ function renderJiraHoldQuestion(task: TaskRecord, event: FanOutEvent): ReadonlyA
   const question = typeof task.answer_text === 'string' ? task.answer_text.trim() : '';
   return [
     [{ text: '🤖 ' }, { text: 'ABCA has a question before it starts', strong: true }],
-    // One paragraph per line: an ADF text node does not honor newlines.
-    ...(question || 'Could you share a bit more detail so I build the right thing?')
-      .split(/\r?\n/)
-      .map((line) => (line ? [{ text: line }] : [])),
+    // Rendered from the Markdown the agent wrote it in.
+    ...parseMarkdownBlocks(question || 'Could you share a bit more detail so I build the right thing?'),
     [{ text: 'Add the details to the issue, then re-apply the trigger label to run it again.' }],
     [{ text: `task ${task.task_id}`, em: true }],
   ];
@@ -1721,14 +1721,15 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
   // Same classifier the Linear dispatcher + API surface use — "Hit max-turns
   // cap", "Insufficient GitHub permissions", etc. Returns null only when
   // error_message is empty (the task_completed case).
-  const classification = classifyError(task.error_message);
+  const classifiedTitle = classifyError(task.error_message)?.title ?? null;
 
   // A completed iteration whose build is red is not a clean success: it gets
-  // the failure pointer and frame, as it does on Linear, in the reconciler and
-  // when ``jira-preview.ts`` re-renders the comment.
-  const eventType = isIteration && event.event_type === 'task_completed' && task.build_passed === false
-    ? 'task_failed'
-    : event.event_type;
+  // the failure pointer and frame, with the reason, as it does on Linear, in
+  // the reconciler and when ``jira-preview.ts`` re-renders the comment. The
+  // first run of an issue is rendered from the event alone.
+  const { eventType, errorTitle } = isIteration
+    ? jiraIterationFrame(event.event_type, task.build_passed, classifiedTitle)
+    : { eventType: event.event_type, errorTitle: classifiedTitle };
 
   const paragraphs = renderJiraHoldQuestion(task, event) ?? renderJiraFinalStatusComment({
     eventType,
@@ -1757,7 +1758,7 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       logger,
     ),
     taskId: task.task_id,
-    errorTitle: classification?.title ?? null,
+    errorTitle,
     // An iteration that answered a question: the pointer below says "answer
     // posted below", so the result carries what the agent said.
     answerText: task.answer_text,

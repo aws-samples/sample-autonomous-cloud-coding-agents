@@ -103,6 +103,8 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   postIssueCommentAdf: (...args: unknown[]) => jiraPostIssueCommentAdfMock(...args),
   updateIssueCommentAdf: (...args: unknown[]) => jiraUpdateIssueCommentAdfMock(...args),
   buildAdfDocument: (...args: Parameters<typeof jiraBuildAdfDocumentMock>) => jiraBuildAdfDocumentMock(...args),
+  // The agent's own text goes through the real parser: it is pure.
+  parseMarkdownBlocks: jest.requireActual('../../src/handlers/shared/jira-feedback').parseMarkdownBlocks,
   transitionIssueState: (...args: unknown[]) => jiraTransitionIssueStateMock(...args),
 }));
 
@@ -1470,6 +1472,52 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     const lines = (result._adf as Array<Array<{ text: string }>>)
       .map((runs) => runs.map((run) => run.text).join(''));
     expect(lines.slice(0, 2)).toEqual(['✅ Task completed', 'Because the queue already retries.']);
+  });
+
+  test('a Jira orchestration iteration that completes with a red build names the reason in its result', async () => {
+    // The gate counts regressions only: a build that was red before the
+    // iteration leaves the task COMPLETED with build_passed=false, and no
+    // error message that a reason could be read from.
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        build_passed: false,
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+      })],
+    } as never);
+
+    const pointer = jiraUpdateIssueCommentAdfMock.mock.calls.find(
+      (([, , commentId]) => commentId === 'jira-status-1'),
+    );
+    expect(pointer![3]).toEqual({
+      _adf: [[{ text: '❌ Finished — details posted below.', strong: true }]],
+    });
+    expect(jiraPostIssueCommentAdfMock).toHaveBeenCalledTimes(1);
+    const [, , result] = jiraPostIssueCommentAdfMock.mock.calls[0];
+    const header = (result._adf as Array<Array<{ text: string }>>)[0].map((run) => run.text).join('');
+    expect(header).toBe(
+      '⚠️ Shipped a PR but stopped early — Build or tests did not pass — review and decide if more work is needed',
+    );
   });
 
   test('a Jira iteration advances the sub-issue with the review status of its own project mapping', async () => {

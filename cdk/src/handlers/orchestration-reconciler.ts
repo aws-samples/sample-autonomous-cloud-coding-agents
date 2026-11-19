@@ -59,6 +59,7 @@ import {
 } from './shared/jira-feedback';
 import { updateJiraIterationComment } from './shared/jira-preview';
 import {
+  jiraIterationFrame,
   renderJiraFinalStatusComment,
   renderJiraFinishedPointer,
 } from './shared/jira-status-comment';
@@ -1267,7 +1268,7 @@ async function maybeRecoverFailedNode(
  * caller wins and posts; redeliveries lose the conditional write and skip.
  * Best-effort throughout — a Linear or DDB hiccup never blocks the cascade.
  */
-// eslint-disable-next-line complexity -- predates the ceiling (54 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (52, down from 54 when it landed); must not grow
 async function replyToIterationComment(
   evt: TerminalTaskEvent,
   changedSubIssueId: string,
@@ -1358,18 +1359,18 @@ async function replyToIterationComment(
       registryTableName: JIRA_REGISTRY_TABLE!,
     };
     jiraFinalBody = buildAdfDocument(renderJiraFinalStatusComment({
-      eventType: succeeded
-        ? 'task_completed'
-        : (evt.status === TaskStatus.COMPLETED
-          ? 'task_failed'
-          : `task_${evt.status.toLowerCase()}`),
+      // A completed iteration with a red build gets the failure frame and its reason.
+      ...jiraIterationFrame(
+        `task_${evt.status.toLowerCase()}`,
+        evt.buildPassed,
+        classifyError(evt.errorMessage)?.title ?? null,
+      ),
       prUrl,
       costUsd: evt.costUsd ?? null,
       turns: evt.turns ?? null,
       maxTurns: evt.maxTurns ?? null,
       durationS: evt.durationS ?? null,
       taskId: evt.taskId,
-      errorTitle: classifyError(evt.errorMessage)?.title ?? null,
       answerText: evt.answerText,
     }));
     if (existing) {

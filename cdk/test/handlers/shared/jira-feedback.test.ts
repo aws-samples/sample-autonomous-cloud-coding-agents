@@ -24,6 +24,7 @@ jest.mock('../../../src/handlers/shared/jira-oauth-resolver', () => ({
 
 import {
   buildAdfDocument,
+  parseMarkdownBlocks,
   parseMarkdownRuns,
   postIssueComment,
   postIssueCommentAdf,
@@ -483,6 +484,20 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
     ]);
   });
 
+  test('keeps a code run inside a bold run free of the strong mark (ADF allows code only with a link)', () => {
+    // A text node that is both code and bold is not valid ADF, and one such
+    // node makes the whole comment invalid. The agent's own text writes this.
+    expect(parseMarkdownRuns('**Run `npm test` first**')).toEqual([
+      { text: 'Run ', strong: true },
+      { text: 'npm test', code: true },
+      { text: ' first', strong: true },
+    ]);
+    expect(parseMarkdownRuns('_**`npm test`** fails_')).toEqual([
+      { text: 'npm test', code: true },
+      { text: ' fails', em: true },
+    ]);
+  });
+
   test('leaves underscores that do not wrap the whole line alone', () => {
     expect(parseMarkdownRuns('fix user_id and task_id')).toEqual([{ text: 'fix user_id and task_id' }]);
     expect(parseMarkdownRuns('_private stays as typed')).toEqual([{ text: '_private stays as typed' }]);
@@ -548,6 +563,51 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
       text: 'link',
       marks: [{ type: 'strong' }, { type: 'link', attrs: { href: 'https://x.example/pull/1' } }],
     });
+  });
+
+  test('a code block becomes one codeBlock node: its text keeps the line breaks and carries no marks', () => {
+    const doc = buildAdfDocument([[{ text: 'Run:' }], { code: 'npm ci\n  npm test' }]);
+    expect(doc.content).toEqual([
+      { type: 'paragraph', content: [{ type: 'text', text: 'Run:' }] },
+      { type: 'codeBlock', content: [{ type: 'text', text: 'npm ci\n  npm test' }] },
+    ]);
+  });
+});
+
+describe('jira-feedback: parseMarkdownBlocks (Markdown the agent wrote)', () => {
+  test('turns the lines between two fences into one code block and every other line into a paragraph', () => {
+    expect(parseMarkdownBlocks(
+      'Run **this**:\r\n```bash\r\nnpm ci\r\n\r\n  npm test\r\n```\r\n\r\nThen `push`.',
+    )).toEqual([
+      [{ text: 'Run ' }, { text: 'this', strong: true }, { text: ':' }],
+      // Inside the block nothing is Markdown, and a blank line stays a line.
+      { code: 'npm ci\n\n  npm test' },
+      [],
+      [{ text: 'Then ' }, { text: 'push', code: true }, { text: '.' }],
+    ]);
+  });
+
+  test('a fence that never closes runs to the end of the text', () => {
+    // The agent's text is cut at a length limit, which can fall inside a block.
+    expect(parseMarkdownBlocks('See:\n```\nconst a = 1;\n**not bold**')).toEqual([
+      [{ text: 'See:' }],
+      { code: 'const a = 1;\n**not bold**' },
+    ]);
+  });
+
+  test('leaves out a block without text: an ADF text node cannot be empty', () => {
+    expect(parseMarkdownBlocks('before\n```\n```\nafter\n```')).toEqual([
+      [{ text: 'before' }],
+      [{ text: 'after' }],
+    ]);
+  });
+
+  test('reads a line with more backticks after its fence as inline code, not as a fence', () => {
+    // As a fence it would open a block and swallow the rest of the answer.
+    expect(parseMarkdownBlocks('```npm test```\nand more')).toEqual([
+      [{ text: 'npm test', code: true }],
+      [{ text: 'and more' }],
+    ]);
   });
 });
 
