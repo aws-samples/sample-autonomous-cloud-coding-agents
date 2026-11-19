@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { loadConfig, loadCredentials, saveConfig, saveCredentials } from '../src/config';
+import { CliError } from '../src/errors';
 
 describe('config', () => {
   let tmpDir: string;
@@ -51,9 +52,22 @@ describe('config', () => {
       expect(() => loadConfig()).toThrow('Not configured');
     });
 
-    test('throws a CliError pointing at `bgagent configure` on corrupt JSON', () => {
-      fs.writeFileSync(path.join(tmpDir, 'config.json'), '{ not valid json');
-      expect(() => loadConfig()).toThrow('bgagent configure');
+    // Not "Not configured": that sends the user to `bgagent configure`, which replaces a file
+    // that may only need a repair, without a word that the file was there.
+    test.each([
+      [
+        'is cut short',
+        (file: string) => fs.writeFileSync(file, '{\n  "api_url": "https://api.example.com/v1",\n  "region":'),
+        'Unexpected end of JSON input',
+      ],
+      ['cannot be read', (file: string) => fs.mkdirSync(file), 'EISDIR: illegal operation on a directory, read'],
+    ])('reports a config file that %s, with its path and the reason', (_how, damage, reason) => {
+      const file = path.join(tmpDir, 'config.json');
+      damage(file);
+
+      expect(() => loadConfig()).toThrow(new CliError(
+        `Cannot read the config file ${file}: ${reason}. Fix or remove the file, or run \`bgagent configure\` to replace it.`,
+      ));
     });
   });
 

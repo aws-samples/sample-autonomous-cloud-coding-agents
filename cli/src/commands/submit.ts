@@ -32,6 +32,7 @@ import {
   AttachmentType,
   AttachmentUploadInstruction,
   CreateTaskRequest,
+  CreateTaskResponse,
   DEFAULT_CODING_WORKFLOW_ID,
   INITIAL_APPROVALS_MAX_ENTRIES,
   INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
@@ -41,6 +42,7 @@ import {
   MICROVM_SLEEP_AFTER_S_MAX,
   MICROVM_SLEEP_AFTER_S_MIN,
   TaskDetail,
+  TERMINAL_STATUSES,
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
@@ -104,7 +106,7 @@ export function makeSubmitCommand(): Command {
     )
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
-    // eslint-disable-next-line complexity -- predates the ceiling (69, down from 70 when it landed); must not grow
+    // eslint-disable-next-line complexity -- predates the ceiling (68, down from 70 when it landed); must not grow
     .action(async (opts) => {
       if (opts.pr !== undefined && isNaN(opts.pr)) {
         throw new CliError('--pr must be a valid number.');
@@ -248,15 +250,10 @@ export function makeSubmitCommand(): Command {
       let task = createResponse;
       if (createResponse.upload_instructions && createResponse.upload_instructions.length > 0) {
         process.stderr.write(`Uploading ${createResponse.upload_instructions.length} attachment(s)...\n`);
-        // The files declared for upload, in the order of the request. Two of them can have the
-        // same name (before/shot.png, after/shot.png): each instruction takes the next of its name.
+        // The files declared for upload, in the order of the request.
         const toUpload = attachmentArgs.filter((_, i) => attachments[i].expected_size_bytes !== undefined);
         for (const instruction of createResponse.upload_instructions) {
-          const next = toUpload.findIndex(arg => path.basename(safeResolvePath(arg)) === instruction.filename);
-          if (next < 0) {
-            throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
-          }
-          await uploadViaPresignedPost(safeResolvePath(toUpload.splice(next, 1)[0]), instruction);
+          await uploadViaPresignedPost(fileToUpload(instruction, createResponse, toUpload), instruction);
           process.stderr.write(`  Uploaded: ${instruction.filename}\n`);
         }
 
@@ -306,6 +303,31 @@ function safeResolvePath(userPath: string): string {
     );
   }
   return resolved;
+}
+
+/**
+ * The local file an upload instruction is for. Its name alone does not say: two files can
+ * have the same one (before/shot.png, after/shot.png), and a retried submission is asked
+ * only for the uploads that are still missing. The task lists its attachments of that name
+ * with the uploads last, in the order of the request, so the place of the instruction's
+ * attachment among those is the place of its file among the files of that name. The
+ * pairing is by place alone: a retry has to name the files of one name in the order of
+ * the first run.
+ *
+ * @param declared - the files declared for upload, in the order of the request.
+ */
+function fileToUpload(
+  instruction: AttachmentUploadInstruction,
+  task: CreateTaskResponse,
+  declared: readonly string[],
+): string {
+  const files = declared.filter(file => path.basename(safeResolvePath(file)) === instruction.filename);
+  const uploads = (task.attachments ?? []).filter(a => a.filename === instruction.filename).slice(-files.length);
+  const file = files[uploads.findIndex(a => a.attachment_id === instruction.attachment_id)];
+  if (file === undefined) {
+    throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
+  }
+  return safeResolvePath(file);
 }
 
 const MAX_INLINE_SIZE_BYTES = 500 * 1024; // 500 KB
@@ -470,11 +492,13 @@ const CONFIRM_MAX_POLLS = 33;
  * Confirm the uploads, and do not take a gateway timeout for a failure.
  *
  * API Gateway ends a request after 29 s, but the confirmation runs on behind it and
- * then submits or fails the task. So after a 504, wait until the task has left
- * PENDING_UPLOADS, or until the confirmation cannot be running any more, and confirm
- * again: that call answers with the outcome, or goes on from the progress a
- * confirmation that ran out of time has saved. It is not sent while the first one may
- * still be running, because a second confirmation beside it screens every upload again.
+ * then submits or fails the task. So after a 504, read the task until it has left
+ * PENDING_UPLOADS: it is then the answer, and one that has ended without completing is
+ * reported with its reason (a second confirmation is refused for it, without the reason).
+ * Confirm again only when the task is still pending once the confirmation cannot be
+ * running any more: that call goes on from the progress a confirmation that ran out of
+ * time has saved. It is not sent while the first one may still be running, because a
+ * second confirmation beside it screens every upload again.
  */
 async function confirmUploadsWithRetry(client: ApiClient, taskId: string): Promise<TaskDetail> {
   for (let attempt = 1; ; attempt++) {
@@ -486,12 +510,17 @@ async function confirmUploadsWithRetry(client: ApiClient, taskId: string): Promi
       process.stderr.write(`  Screening of task ${taskId} is still running; waiting for it to finish...\n`);
       for (let poll = 0; poll < CONFIRM_MAX_POLLS; poll++) {
         await abortableSleep(CONFIRM_POLL_INTERVAL_MS);
+        let task: TaskDetail;
         try {
-          if ((await client.getTask(taskId)).status !== 'PENDING_UPLOADS') break;
+          task = await client.getTask(taskId);
         } catch (readErr) {
           // A read that fails for a moment (5xx, network) is no answer: read again.
           if (!isTransientError(readErr)) throw readErr;
+          continue;
         }
+        if (task.status === 'PENDING_UPLOADS') continue;
+        if (task.status === 'COMPLETED' || !TERMINAL_STATUSES.includes(task.status)) return task;
+        throw new CliError(`Task ${taskId} is ${task.status}${task.error_message ? `: ${task.error_message}` : '.'}`);
       }
     }
   }
