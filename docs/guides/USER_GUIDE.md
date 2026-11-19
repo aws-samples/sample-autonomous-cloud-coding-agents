@@ -236,7 +236,7 @@ Blueprints can configure per-repository settings that override platform defaults
 | `github_token_secret_arn` | Per-repo GitHub token (Secrets Manager ARN) | Platform default |
 | `poll_interval_ms` | Poll interval for awaiting completion (5000–300000) | 30000 |
 
-> `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.6.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs` — see the [Deployment guide](./DEPLOYMENT_GUIDE.md#lambda-microvms-backend-experimental).
+> `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.9.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs` — see the [Deployment guide](./DEPLOYMENT_GUIDE.md#lambda-microvms-backend-experimental).
 
 When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) is used. The same override pattern applies to `--max-budget` / `max_budget_usd`, except there is no platform default  - if neither the task nor the Blueprint specifies a budget, no cost limit is applied.
 
@@ -639,6 +639,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
 | `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
+| `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
 | `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
@@ -931,6 +932,18 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 6
 `--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+
+For Lambda MicroVM tasks, a waiting approval can put the worker to sleep so it
+stops billing compute. With the defaults (a 300-second approval window and a
+60-second sleep delay) the worker sleeps after one minute and wakes when you
+answer, or 60 seconds before the deadline so a timeout is still recorded
+normally. `--microvm-sleep-after 120` selects two minutes and
+`--microvm-sleep-after off` keeps the worker awake. The delay starts when each
+approval request is created; sleep never extends the approval deadline. The API
+equivalent is `microvm_sleep_after_s` (zero means off), and task details return
+the saved setting. Automatic sleep is disabled by default for new deployments.
+An operator enables it after [verifying the deployed image and
+coordinator](../verification/README.md#live-acceptance-for-an-installation).
 
 ## Webhook integration
 

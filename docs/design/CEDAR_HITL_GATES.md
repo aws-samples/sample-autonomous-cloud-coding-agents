@@ -1324,6 +1324,8 @@ AgentCore Runtime's `maxLifetime = 28800s` (8h) is an absolute timer from sessio
 
 This has a concrete implication: the hook computes an `effective_timeout` bounded by `maxLifetime - remaining - CLEANUP_MARGIN_120S`. If the task has been running 7h55m and hits a soft-deny gate, the effective timeout might be clamped to a much shorter value than the task default. Below the 30s floor → immediate DENY with reason `"insufficient lifetime"`.
 
+**Lambda MicroVM suspension (ADR-021 P3).** A MicroVM waiting on a gate may be suspended, which freezes the agent's monotonic clock. The gate therefore expires at `min(monotonic budget, created_at + timeout_s)`, evaluated on every poll and on `/resume`, and the row stores `deadline_epoch` so approve/deny reject a decision after the wall-clock deadline. The orchestrator wakes the worker 60 s before that deadline, so a timeout is recorded by the same agent that created the request. The 8-hour `maximumDurationInSeconds` includes suspended time and still bounds the session, exactly as `maxLifetime` does above.
+
 ### 9.6 Stranded-approval reconciliation
 
 `reconcile-stranded-tasks.ts` gains an AWAITING_APPROVAL-aware branch:

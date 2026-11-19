@@ -80,6 +80,7 @@ process.env.REPO_TABLE_NAME = 'RepoConfig';
 
 import { createTaskCore, type TaskCreationContext } from '../../../src/handlers/shared/create-task-core';
 import { logger } from '../../../src/handlers/shared/logger';
+import { MICROVM_SLEEP_AFTER_S_DEFAULT } from '../../../src/handlers/shared/types';
 
 function makeContext(overrides: Partial<TaskCreationContext> = {}): TaskCreationContext {
   return {
@@ -852,6 +853,26 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(400);
     expect(result.body).toContain('pr_number');
+  });
+
+  test.each([undefined, 0, 1, 600, 3600])('persists and returns the resolved MicroVM sleep delay %s', async value => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'wait preference', ...(value !== undefined && { microvm_sleep_after_s: value }) },
+      makeContext(), 'req-sleep',
+    );
+    expect(result.statusCode).toBe(201);
+    expect(getPersistedTaskRecord().microvm_sleep_after_s).toBe(value ?? MICROVM_SLEEP_AFTER_S_DEFAULT);
+    expect(JSON.parse(result.body).data.microvm_sleep_after_s).toBe(value ?? MICROVM_SLEEP_AFTER_S_DEFAULT);
+  });
+
+  test.each([-1, 3601, 0.5, '600', null, false, {}, []])('rejects invalid MicroVM sleep delay %j before creating a task', async value => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'invalid delay', microvm_sleep_after_s: value } as any,
+      makeContext(), 'req-sleep-invalid',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.message).toContain('microvm_sleep_after_s');
+    expect(mockSend.mock.calls.some(([command]) => command._type === 'Put')).toBe(false);
   });
 
   // -- trace flag (design §10.1) --------------------------------------

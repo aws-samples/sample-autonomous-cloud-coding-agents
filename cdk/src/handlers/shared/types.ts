@@ -287,6 +287,8 @@ export interface TaskRecord {
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
+  /** Approval-wait seconds before MicroVM sleep; 0 keeps it awake. Captured at submission. */
+  readonly microvm_sleep_after_s?: number;
   readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
   /**
@@ -448,6 +450,8 @@ export interface TaskNotificationsConfig {
  * Strips internal fields not exposed in the API.
  */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -722,6 +726,8 @@ export interface ReplayBundle {
  * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the contract default). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) is submitted without it.
    *  Required-ness is enforced conditionally in ``createTaskCore`` based on
@@ -953,6 +959,9 @@ export function toTaskDetail(
 ): TaskDetail {
   const ctx = { task_id: record.task_id };
   return {
+    ...(typeof record.microvm_sleep_after_s === 'number' && Number.isInteger(record.microvm_sleep_after_s)
+      && record.microvm_sleep_after_s >= MICROVM_SLEEP_AFTER_S_MIN && record.microvm_sleep_after_s <= MICROVM_SLEEP_AFTER_S_MAX
+      && { microvm_sleep_after_s: record.microvm_sleep_after_s }),
     task_id: record.task_id,
     status: record.status,
     repo: record.repo ?? null,
@@ -1283,6 +1292,18 @@ export type ApprovalScope =
   | `rule:${string}`;
 
 /**
+ * Approval row status values. PENDING is the only non-terminal state —
+ * every other transition is final, which matches the
+ * `ConditionExpression: status = :pending` guard on every mutator.
+ */
+export type ApprovalStatus =
+  | 'PENDING'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'TIMED_OUT'
+  | 'STRANDED';
+
+/**
  * Cedar HITL severity, surfaced in the CLI approval prompt and used
  * for severity-gated channel routing (§11.2: high-severity rules
  * skip Slack-button auto-approval). Shared alias so the same literal
@@ -1444,6 +1465,11 @@ export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
  *  `maxLifetime - 300` clip is applied (§7.3).
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
+
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = sharedConstants.microvm_sleep_after_s.min;
+export const MICROVM_SLEEP_AFTER_S_MAX = sharedConstants.microvm_sleep_after_s.max;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = sharedConstants.microvm_sleep_after_s.default;
 
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap
