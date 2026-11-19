@@ -139,8 +139,10 @@ permit (principal, action, resource);
 // Covers both long-form (--force) and short-form (-f) variants, including
 // the bare \`git push -f\` invocation with no branch argument, and the flag
 // after the remote and branch (\`git push origin feature --force\`). After
-// the branch, \`-f\` is matched only at the end of the command: followed by
-// more text it is also the flag of a later program (\`&& gh api ... -f ...\`).
+// the branch, \`-f\` is matched at the end of the command or of a line and
+// before \`;\`, \`&\`, \`|\`, \`>\` or \` 2>\`, as in
+// \`git push origin feature -f 2>&1 | tail -5\`: followed by other text it
+// is also the flag of a later program (\`&& gh api ... -f ...\`).
 @tier("soft")
 @rule_id("force_push_any")
 @approval_timeout_s("300")
@@ -151,7 +153,17 @@ when { context.command like "*git push --force*"
     || context.command like "*git push -f *"
     || context.command like "*git push -f"
     || context.command like "*git push * --force*"
-    || context.command like "*git push * -f" };
+    || context.command like "*git push * -f"
+    || context.command like "*git push * -f\\n*"
+    || context.command like "*git push * -f;*"
+    || context.command like "*git push * -f ;*"
+    || context.command like "*git push * -f&*"
+    || context.command like "*git push * -f &*"
+    || context.command like "*git push * -f|*"
+    || context.command like "*git push * -f |*"
+    || context.command like "*git push * -f>*"
+    || context.command like "*git push * -f >*"
+    || context.command like "*git push * -f 2>*" };
 
 // Force-push to main/prod specifically — longer window, higher severity.
 // Multi-match with force_push_any is expected: the engine's annotation
