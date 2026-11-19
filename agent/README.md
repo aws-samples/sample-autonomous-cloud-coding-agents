@@ -40,8 +40,10 @@ Go to GitHub > **Settings** > **Developer settings** > **Personal access tokens*
 
 | Scope | Reason |
 |-------|--------|
-| `repo` | Full repository access (clone, push, PRs, issues) |
+| `public_repo` (public repositories) or `repo` (private repositories) | Clone, push, PRs and issues. `public_repo` reaches public repositories only; `repo` grants every private repository the token's owner can reach, so use it only when a target repository is private |
 | `read:org` | Resolve org membership for org-owned repos |
+
+A token acts for its owner: whatever the scopes, the owner needs write access to the repository (collaborator or team role) for the agent to push.
 
 Set an expiration (90 days recommended) and store it in Secrets Manager the same way as a fine-grained token.
 
@@ -66,7 +68,9 @@ A token can read a repository and still be refused every push. A classic PAT wit
 | The organization enforces SAML single sign-on, or an IP allow list | `GitHub organization policy blocks pushes to <repo>`, naming the policy and its fix |
 | No answer: GitHub or the network down after retries, or no reply within 120 s | `BLOCKED[dependency_unreachable]`, retryable |
 
-The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Read-only workflows (`coding/pr-review-v1`) never push and skip the check.
+The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Tasks that never push skip the check: read-only workflows (`coding/pr-review-v1`) and repository-bound workflows that deliver an artifact instead of a PR.
+
+Setup clears the credential helpers the clone would inherit from the machine's git configuration (a saved GitHub login, for instance) before adding `gh`, so the check and the final push use the task's token, never another credential.
 
 ### AWS Credentials
 

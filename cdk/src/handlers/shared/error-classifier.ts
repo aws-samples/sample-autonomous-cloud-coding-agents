@@ -748,6 +748,30 @@ const PATTERNS: readonly ErrorPattern[] = [
 ];
 
 /**
+ * The agent's push preflight refusal (``PushCapabilityError`` in agent/src/repo.py):
+ * ``Token cannot push to <repo>: GitHub refused the <token type> write access (<git
+ * line>). To fix it, <fix>. The task stopped before the agent ran …``. The fix
+ * depends on the token type (scope for a classic PAT, repository access and
+ * Contents for a fine-grained one, installation for a GitHub App), so the
+ * classification carries the agent's own fix rather than the generic remedy of
+ * the ``Token cannot push`` pattern, which the orchestrator's preflight shares.
+ * The fix is matched up to the sentence that follows it, so a period inside it (a
+ * repository named ``a.b``) does not cut it short.
+ */
+const AGENT_PUSH_REFUSAL = /Token cannot push to (\S+): GitHub refused the (.+?) write access \(.*?\)\. To fix it, (.+?)\. The task stopped before the agent ran/;
+
+function agentPushRefusalClassification(repo: string, tokenType: string, fix: string): ErrorClassification {
+  return {
+    category: ErrorCategory.AUTH,
+    title: 'Insufficient GitHub token scopes',
+    description: `GitHub refused the ${tokenType} write access to ${repo}.`,
+    remedy: `${fix.charAt(0).toUpperCase()}${fix.slice(1)}. Then resubmit. The permissions each token type needs are in agent/README.md, GitHub PAT — Minimal Permissions.`,
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  };
+}
+
+/**
  * Canonical blocker-reason contract. Matches ``BLOCKED[<kind>]`` and,
  * separately, the optional `` (resource: <resource>)``
  * segment ``format_blocker_reason`` appends. This is the SINGLE source of truth
@@ -899,6 +923,11 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
   if (kindMatch) {
     const resource = BLOCKED_RESOURCE.exec(errorMessage)?.[1];
     return blockerClassification(kindMatch[1].toLowerCase(), resource);
+  }
+
+  const pushRefusal = AGENT_PUSH_REFUSAL.exec(errorMessage);
+  if (pushRefusal) {
+    return agentPushRefusalClassification(pushRefusal[1], pushRefusal[2], pushRefusal[3]);
   }
 
   for (const { pattern, exclude, classification } of PATTERNS) {

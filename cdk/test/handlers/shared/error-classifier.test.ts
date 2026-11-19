@@ -21,6 +21,13 @@ import { classifyError, ErrorCategory, ErrorClass, isTransientError, retryGuidan
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../../src/handlers/shared/microvm-regions';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
+// Persisted agent push preflight refusals, printed from agent/src/repo.py.
+const MSG_CLASSIC = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the classic personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the token the `public_repo` scope if owner/repo is public, or `repo` if it is private (`repo` grants every private repository its owner can reach); its owner needs write access to owner/repo. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_FINE = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the fine-grained personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, include owner/repo in the token\'s repository access and give it the Contents permission with Read and write access; its owner needs write access to owner/repo. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_APP = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the GitHub App token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the app the Contents permission with Read and write access and install it on owner/repo. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_UNKNOWN = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the GitHub token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, for a fine-grained personal access token, include owner/repo in the token\'s repository access and give it the Contents permission with Read and write access; for a classic one, give the token the `public_repo` scope if owner/repo is public, or `repo` if it is private (`repo` grants every private repository its owner can reach); either way, its owner needs write access to owner/repo. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_DOTTED = 'PushCapabilityError: Token cannot push to owner/my.repo: GitHub refused the classic personal access token write access (remote: Permission to owner/my.repo.git denied to <token user>). To fix it, give the token the `public_repo` scope if owner/my.repo is public, or `repo` if it is private (`repo` grants every private repository its owner can reach); its owner needs write access to owner/my.repo. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+
 describe('classifyError', () => {
   // --- Null / empty inputs ---
 
@@ -94,7 +101,7 @@ describe('classifyError', () => {
     test.each([
       [
         'a token without write access',
-        'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the classic personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the token the `repo` scope. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.',
+        MSG_CLASSIC,
         ErrorCategory.AUTH,
         'Insufficient GitHub token scopes',
       ],
@@ -129,6 +136,33 @@ describe('classifyError', () => {
       expect(result!.category).toBe(category);
       expect(result!.title).toBe(title);
       expect(result!.retryable).toBe(false);
+    });
+
+    // The refusal's fix depends on the token type. The classification (which the
+    // web console's failure banner shows) carries the agent's fix, not the generic
+    // fine-grained-PAT remedy of the orchestrator's message (#801 review).
+    test.each([
+      ['a classic PAT', MSG_CLASSIC, 'owner/repo', ['`public_repo` scope if owner/repo is public', '`repo` if it is private', 'its owner needs write access']],
+      ['a fine-grained PAT', MSG_FINE, 'owner/repo', ['repository access', 'Contents permission with Read and write access']],
+      ['a GitHub App token', MSG_APP, 'owner/repo', ['install it on owner/repo']],
+      ['an unknown token type', MSG_UNKNOWN, 'owner/repo', ['For a fine-grained personal access token', 'for a classic one']],
+      ['a repository with a dot in its name', MSG_DOTTED, 'owner/my.repo', ['its owner needs write access to owner/my.repo']],
+    ])('carries the agent push preflight fix for %s (#801)', (_label, message, repo, fragments) => {
+      const result = classifyError(message);
+      expect(result!.title).toBe('Insufficient GitHub token scopes');
+      expect(result!.description).toContain(repo);
+      for (const fragment of fragments) {
+        expect(result!.remedy).toContain(fragment);
+      }
+      expect(result!.remedy).toMatch(/Then resubmit\.$|Then resubmit\. /);
+      // Not the orchestrator pattern's generic remedy.
+      expect(result!.remedy).not.toContain('Update the PAT with');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('keeps the generic remedy for the orchestrator preflight message', () => {
+      const result = classifyError('Pre-flight check failed: INSUFFICIENT_GITHUB_REPO_PERMISSIONS — Token cannot push to owner/repo. Required: push.');
+      expect(result!.title).toBe('Insufficient GitHub permissions');
     });
 
     test('classifies bare "Token cannot interact with pull requests on" without error code', () => {
@@ -1060,6 +1094,15 @@ describe('classifyError', () => {
       expect(detail.error_classification).not.toBeNull();
       expect(detail.error_classification!.category).toBe('concurrency');
       expect(detail.error_classification!.title).toBe('Concurrency limit reached');
+    });
+
+    test('gives the console the token-specific fix of an agent push preflight refusal (#801)', () => {
+      // web/src/core/util/progress.ts shows `${description} What to do: ${remedy}`.
+      const detail = toTaskDetail({ ...baseRecord, error_message: MSG_APP });
+      expect(detail.error_classification!.description).toContain('GitHub App token');
+      expect(detail.error_classification!.remedy).toContain('install it on owner/repo');
+      expect(detail.error_classification!.remedy).not.toContain('fine-grained');
+      expect(detail.error_classification!.remedy).not.toContain('Update the PAT');
     });
 
     test('returns null error_classification when error_message is undefined', () => {

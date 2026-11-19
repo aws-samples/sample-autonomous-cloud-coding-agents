@@ -239,3 +239,16 @@ class Workflow(BaseModel):
         if self.requires_repo is not None:
             return self.requires_repo
         return self.domain == "coding"
+
+    @property
+    def delivers_repo_artifact(self) -> bool:
+        """A repository-bound workflow whose terminal outcome is a document, not a PR.
+
+        It clones the repository for context, skips the build and PR post-hooks and
+        delivers the agent's result as an artifact, so it never pushes. Both
+        conditions matter: ``default/agent-v1`` declares ``primary: artifact`` but
+        ``requires_repo: false``, and run with a repository it still opens a PR.
+        Reads the declared ``requires_repo``, not ``resolved_requires_repo``: a
+        workflow must opt in to artifact delivery explicitly.
+        """
+        return self.terminal_outcomes.primary == "artifact" and bool(self.requires_repo)

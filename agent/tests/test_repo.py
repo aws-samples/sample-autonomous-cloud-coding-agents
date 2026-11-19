@@ -5,6 +5,7 @@ seams they use — ``shell.run_cmd`` (logged commands) and ``subprocess.run``
 (detect_default_branch) — recording argv and returning scripted results.
 """
 
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -73,10 +74,15 @@ class TestSetupRepoHappyPath:
         assert "x-access-token" not in remote
         assert "ghp_" not in " ".join(set_url_cmd)
 
-        # And the credential.helper config call is present (token resolved at call time).
+        # And the credential.helper config call is present (token resolved at call time),
+        # after a reset of every inherited helper (#801 review).
         helper_cmd = fake.cmd_for("configure-git-credential-helper")
         assert helper_cmd is not None
         assert "credential.helper" in helper_cmd
+        assert fake.cmd_for("reset-git-credential-helpers")[-2:] == ["credential.helper", ""]
+        assert labels.index("reset-git-credential-helpers") < labels.index(
+            "configure-git-credential-helper"
+        )
 
         # Derived branch slug for a new task.
         assert setup.branch.startswith("bgagent/task-abc/")
@@ -985,6 +991,60 @@ class TestPushCapabilityPreflight:
         for pushing in ("coding/new-task-v1", "coding/pr-iteration-v1", "coding/restack-v1"):
             assert load_workflow(pushing).read_only is False, pushing
 
+    def _artifact_workflow(self):
+        # The real coding workflow with only the two fields that make it deliver a
+        # document, as the pipeline's artifact test builds it.
+        from workflow import load_workflow
+
+        base = load_workflow("coding/new-task-v1")
+        return base.model_copy(
+            update={
+                "id": "synthetic/artifact-repoful-v1",
+                "requires_repo": True,
+                "terminal_outcomes": base.terminal_outcomes.model_copy(
+                    update={"primary": "artifact"}
+                ),
+            }
+        )
+
+    def test_repo_bound_artifact_workflow_is_not_gated(self, monkeypatch):
+        # It clones for context and delivers a document to S3; it never pushes, so
+        # a token that may only read is fit for it (#801 review).
+        artifact_wf = self._artifact_workflow()
+        assert artifact_wf.delivers_repo_artifact
+        fake = _PreflightFake(preflight_rc=128, preflight_stderr=_DENIED_403)
+        self._setup(monkeypatch, fake)
+        monkeypatch.setattr("workflow.load_workflow", lambda workflow_id: artifact_wf)
+
+        repo.setup_repo(
+            _config(resolved_workflow={"id": "synthetic/artifact-repoful-v1", "version": "1"})
+        )
+
+        assert "push-preflight" not in fake.labels()
+        assert "create-branch" in fake.labels()
+
+    def test_repo_optional_artifact_workflow_with_a_repo_is_gated(self, monkeypatch):
+        # default/agent-v1 declares primary: artifact but requires_repo: false; run
+        # with a repository it still opens a PR, so it is checked.
+        from workflow import load_workflow
+
+        assert not load_workflow("default/agent-v1").delivers_repo_artifact
+        self._raises(
+            monkeypatch,
+            _DENIED_403,
+            resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
+        )
+
+    def test_unloadable_workflow_is_gated(self, monkeypatch):
+        # The post-hooks then fall back to opening a PR, which pushes.
+        from workflow import WorkflowValidationError
+
+        def _broken(workflow_id):
+            raise WorkflowValidationError("bad file")
+
+        monkeypatch.setattr("workflow.load_workflow", _broken)
+        self._raises(monkeypatch, _DENIED_403, resolved_workflow={"id": "x/y-v1", "version": "1"})
+
     def test_fine_grained_token_passes_on_the_servers_verdict(self, monkeypatch):
         # GitHub returns no X-OAuth-Scopes header for a fine-grained PAT; the dry
         # run reads no scopes, so it passes on the server's verdict alone.
@@ -1011,7 +1071,10 @@ class TestPushCapabilityPreflight:
         # scopes" (cdk/src/handlers/shared/error-classifier.ts).
         assert message.startswith("Token cannot push to owner/repo")
         assert "classic personal access token" in message
-        assert "`repo` scope" in message
+        # Both cases: public_repo is enough for a public repository, and repo, which
+        # also grants every private repository, only for a private one.
+        assert "`public_repo` scope if owner/repo is public, or `repo` if it is private" in message
+        assert "its owner needs write access to owner/repo" in message
         assert "Repository not found" in message
         assert "agent/README.md" in message
         assert token not in message
@@ -1040,7 +1103,7 @@ class TestPushCapabilityPreflight:
         _, message = self._raises(monkeypatch, _DENIED_403, github_token="")
 
         assert "Contents permission" in message
-        assert "`repo` scope" in message
+        assert "`public_repo` scope" in message
 
     def test_github_app_token_remedy(self):
         remedy = repo._token_remedy("ghs_" + "e" * 36, "owner/repo")
@@ -1063,7 +1126,7 @@ class TestPushCapabilityPreflight:
 
         assert message.startswith("Repository owner/repo is archived on GitHub, so it is read-only")
         assert "Token cannot push" not in message
-        assert "`repo` scope" not in message
+        assert "`public_repo`" not in message
 
     def test_saml_enforcement_names_sso_authorization(self, monkeypatch):
         _, message = self._raises(monkeypatch, _SAML, github_token="ghp_" + "b" * 36)
@@ -1071,7 +1134,7 @@ class TestPushCapabilityPreflight:
         assert message.startswith("GitHub organization policy blocks pushes to owner/repo")
         assert "SAML single sign-on" in message
         assert "Configure SSO" in message
-        assert "`repo` scope" not in message
+        assert "`public_repo`" not in message
 
     def test_ip_allow_list_names_the_allow_list(self, monkeypatch):
         _, message = self._raises(monkeypatch, _IP_ALLOW_LIST)
@@ -1097,7 +1160,7 @@ class TestPushCapabilityPreflight:
                 github_token="ghp_" + "b" * 36,
             )
             assert message.startswith(f"Token cannot push to {repo_url}"), repo_url
-            assert "`repo` scope" in message
+            assert "`public_repo` scope" in message
             assert "SAML" not in message
             assert "is archived on GitHub" not in message
 
@@ -1379,4 +1442,44 @@ class TestPushPreflightAgainstRealGit:
 
         repo._preflight_push_capability(_config(), str(work), progress=None)
 
+        assert not marker.exists()
+
+    def test_only_the_tasks_token_answers_for_github(self, tmp_path, monkeypatch):
+        # A developer machine can have a saved GitHub login (a global helper, also a
+        # URL-scoped one). Git asks helpers in order and takes the first answer, so
+        # without the reset it would answer instead of the task's token (#801 review).
+        _, work = self._remote_and_clone(tmp_path, monkeypatch)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # Stand-ins for gh and for a saved login; the real gh is never called.
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\ncat >/dev/null\necho username=task-token\necho password=x\n"
+        )
+        marker = tmp_path / "saved-login-asked"
+        (bin_dir / "saved-login").write_text(
+            f"#!/bin/sh\ncat >/dev/null\ntouch {marker}\n"
+            "echo username=saved-login\necho password=y\n"
+        )
+        for f in bin_dir.iterdir():
+            f.chmod(0o755)
+        global_cfg = tmp_path / "global.gitconfig"
+        global_cfg.write_text(
+            f"[credential]\n\thelper = !{bin_dir}/saved-login\n"
+            f'[credential "https://github.com"]\n\thelper = !{bin_dir}/saved-login\n'
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_cfg))
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        repo._configure_git_credentials(str(work))
+
+        filled = subprocess.run(
+            ["git", "credential", "fill"],
+            cwd=work,
+            input="protocol=https\nhost=github.com\npath=owner/repo.git\n\n",
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        ).stdout
+        assert "username=task-token" in filled
         assert not marker.exists()

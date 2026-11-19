@@ -1368,11 +1368,9 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # takes THIS path yet still expects a PR (primary: artifact but
             # requires_repo: false). So gate on requires_repo too, or a
             # repo-optional default-agent run would wrongly skip its PR.
-            artifact_workflow = bool(
-                _workflow
-                and getattr(_workflow.terminal_outcomes, "primary", None) == "artifact"
-                and getattr(_workflow, "requires_repo", False)
-            )
+            # The rule is Workflow.delivers_repo_artifact, which the push preflight in
+            # repo.setup_repo applies too, so a task it skips is one that never pushes.
+            artifact_workflow = bool(_workflow and _workflow.delivers_repo_artifact)
             artifact_uri: str | None = None  # set by the artifact branch below
 
             # Clarify-before-spend (UX #4): a writeable, PR-producing task

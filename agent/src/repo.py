@@ -237,15 +237,21 @@ def _token_remedy(token: str, repo_url: str) -> _TokenRemedy:
     """The token type and the permission to add, for a token GitHub refused a push.
 
     Reads only the documented type prefix of the token; the token itself never
-    reaches the message."""
+    reaches the message. A personal access token acts for its owner, so the owner
+    needs write access to the repository as well: the remedies say so."""
+    owner = f"its owner needs write access to {repo_url}"
+    classic = (
+        f"give the token the `public_repo` scope if {repo_url} is public, or `repo` if "
+        "it is private (`repo` grants every private repository its owner can reach)"
+    )
+    fine_grained = (
+        f"include {repo_url} in the token's repository access and give it the Contents "
+        "permission with Read and write access"
+    )
     if token.startswith("github_pat_"):
-        return _TokenRemedy(
-            "fine-grained personal access token",
-            f"include {repo_url} in the token's repository access and give it the "
-            "Contents permission with Read and write access",
-        )
+        return _TokenRemedy("fine-grained personal access token", f"{fine_grained}; {owner}")
     if token.startswith("ghp_"):
-        return _TokenRemedy("classic personal access token", "give the token the `repo` scope")
+        return _TokenRemedy("classic personal access token", f"{classic}; {owner}")
     if token.startswith(("ghs_", "ghu_")):
         return _TokenRemedy(
             "GitHub App token",
@@ -254,9 +260,8 @@ def _token_remedy(token: str, repo_url: str) -> _TokenRemedy:
         )
     return _TokenRemedy(
         "GitHub token",
-        f"use a fine-grained personal access token with access to {repo_url} and the "
-        "Contents permission with Read and write access, or a classic one with the "
-        "`repo` scope",
+        f"for a fine-grained personal access token, {fine_grained}; for a classic one, "
+        f"{classic}; either way, {owner}",
     )
 
 
@@ -406,6 +411,48 @@ def _report_refusal(refusal: PushCapabilityError, config: TaskConfig, progress: 
         )
 
 
+def _configure_git_credentials(repo_dir: str) -> None:
+    """Make the task's token the only credential git uses for this clone.
+
+    Git asks every configured credential helper in turn (system, global, then
+    local config) and takes the first credential one returns. On a developer
+    machine a saved GitHub login (osxkeychain, a credential store, a global ``gh``
+    helper) would answer before a helper added here, so the push preflight, and the
+    final push, would run as that login instead of the task's token. An empty
+    ``credential.helper`` in the local config clears every helper read before it,
+    URL-scoped ones included, so only ``gh``, reading ``GH_TOKEN``/``GITHUB_TOKEN``,
+    answers."""
+    run_cmd(
+        ["git", "config", "--local", "credential.helper", ""],
+        label="reset-git-credential-helpers",
+        cwd=repo_dir,
+    )
+    run_cmd(
+        ["git", "config", "--local", "--add", "credential.helper", "!gh auth git-credential"],
+        label="configure-git-credential-helper",
+        cwd=repo_dir,
+    )
+
+
+def _task_pushes(config: TaskConfig) -> bool:
+    """Whether the task's post-hooks will push, by the rules they apply.
+
+    Read-only workflows never push. A repository-bound workflow whose primary
+    outcome is an artifact clones for context and delivers a document instead of a
+    PR (``Workflow.delivers_repo_artifact``, the rule the pipeline's post-hooks
+    use). When the workflow cannot be loaded the post-hooks fall back to opening a
+    PR, which pushes, so the check runs."""
+    if config.read_only:
+        return False
+    from workflow import WorkflowValidationError, load_workflow
+
+    try:
+        workflow = load_workflow((config.resolved_workflow or {}).get("id", "coding/new-task-v1"))
+    except WorkflowValidationError:
+        return True
+    return not workflow.delivers_repo_artifact
+
+
 def _preflight_push_capability(config: TaskConfig, repo_dir: str, progress: Any) -> None:
     """Fail the task now if GitHub refuses the token a push to the repository (#801).
 
@@ -426,10 +473,11 @@ def _preflight_push_capability(config: TaskConfig, repo_dir: str, progress: Any)
     on the command line. The check covers write access only: branch rules and push
     protection are evaluated on a real push, which a dry run never makes.
 
-    Read-only workflows are not checked: they never push, and a token that may not
+    Tasks that never push are not checked (``_task_pushes``): read-only workflows,
+    and repository-bound workflows that deliver an artifact. A token that may not
     write is fit for them.
     """
-    if config.read_only:
+    if not _task_pushes(config):
         return
 
     log("SETUP", f"Checking that the GitHub token can push to {config.repo_url}...")
@@ -593,11 +641,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         label="set-remote-url",
         cwd=repo_dir,
     )
-    run_cmd(
-        ["git", "config", "--local", "credential.helper", "!gh auth git-credential"],
-        label="configure-git-credential-helper",
-        cwd=repo_dir,
-    )
+    _configure_git_credentials(repo_dir)
 
     # Fail in seconds, not after the agent's whole run, on a token that may not push.
     _preflight_push_capability(config, repo_dir, progress)
