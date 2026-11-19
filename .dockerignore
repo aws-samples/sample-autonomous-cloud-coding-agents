@@ -29,6 +29,13 @@ agent/__pycache__/
 agent/**/__pycache__/
 agent/**/*.pyc
 
+# Deployment profile (ADR-024): infrastructure selection only; editing it must not rebuild the image
+abca.deployment*.json
+
+# Emulator test tooling: never part of the agent image, and bumping its pinned
+# version must not change the image hash
+scripts/aws-emulator/
+
 # Git and tooling
 .git/
 .prek/
@@ -77,6 +84,7 @@ test-reports/
 **/*.tsbuildinfo
 
 # IDE / OS
+.devcontainer/
 .idea/
 .vscode/
 yarn-error.log

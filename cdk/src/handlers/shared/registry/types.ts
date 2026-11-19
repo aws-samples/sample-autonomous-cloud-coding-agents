@@ -64,7 +64,9 @@ export interface McpRuntimePayload {
   readonly command?: string;
   readonly args?: readonly string[];
   readonly headers?: Readonly<Record<string, string>>;
-  /** Tools surface under this prefix (e.g. `mcp__example__`). */
+  /** Not applied. Publish accepts it and resolve echoes it, nothing else reads it:
+   *  the agent writes the server under the key `<namespace>__<name>`, so the tools
+   *  of `acme/pdf-tools` surface as `mcp__acme__pdf-tools__*` whatever this says. */
   readonly tool_prefix?: string;
 }
 
@@ -129,12 +131,6 @@ export interface ResolvedAsset {
   readonly warnings: readonly string[];
 }
 
-/** The bundle threaded into the agent invocation payload after resolving all of a
- *  Blueprint's `registry://` refs. */
-export interface ResolvedAssetBundle {
-  readonly assets: readonly ResolvedAsset[];
-}
-
 export type ResolutionFailureReason =
   | 'NO_MATCHING_VERSION'
   | 'REMOVED'
@@ -185,7 +181,7 @@ export class RegistryRecordMalformedError extends Error {
   constructor(
     readonly reason: MalformedReason,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryRecordMalformedError';
@@ -204,7 +200,7 @@ export class RegistryPublishIncompleteError extends Error {
   constructor(
     readonly recordId: string,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryPublishIncompleteError';
@@ -232,4 +228,6 @@ export interface PublishInput {
 export interface ListFilter {
   readonly kind?: string;
   readonly namespace?: string;
+  /** Asset name: with it, only the records of that asset are fetched. */
+  readonly name?: string;
 }

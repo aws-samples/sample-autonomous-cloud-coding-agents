@@ -75,7 +75,7 @@ interface LinearWebhookEnvelope {
  *
  * Verifies the `Linear-Signature` HMAC over the raw body, rejects stale
  * `webhookTimestamp` values (replay protection), dedups on
- * `(issue_id, action)` with a 60s TTL, and async-invokes the processor
+ * `(data.id, action, webhookTimestamp)` with an 8h TTL, and async-invokes the processor
  * Lambda so we can ack within Linear's 5s timeout.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
@@ -104,9 +104,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
+    // `null` parses, but reading a field of it throws: answer as for unparseable JSON.
+    if (payload === null) {
+      return jsonResponse(400, { error: 'Invalid JSON' });
+    }
 
     // Try the per-workspace secret first. Falls through to the stack-wide
-    // path if (a) registry table not configured, (b) no orgId in body,
+    // path if (a) registry table not configured, (b) no orgId in body
+    // (or one that is not a string: the registry key is a string, and
+    // DynamoDB rejects a lookup by any other type),
     // (c) workspace not in registry, or (d) workspace's stored secret
     // lacks `webhook_signing_secret`. Per-workspace MISMATCH is fatal —
     // do NOT fall back, that would let an attacker bypass per-workspace
@@ -115,7 +121,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // ride the stack-wide fallback (which `setup` mirrored from the
     // first workspace's signing secret) back into a verified state.
     let verified = false;
-    if (WORKSPACE_REGISTRY_TABLE && payload.organizationId) {
+    if (WORKSPACE_REGISTRY_TABLE && typeof payload.organizationId === 'string' && payload.organizationId) {
       const result = await verifyLinearRequestForWorkspace(
         WORKSPACE_REGISTRY_TABLE,
         payload.organizationId,

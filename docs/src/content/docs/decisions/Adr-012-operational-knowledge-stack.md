@@ -1,8 +1,6 @@
 ---
-title: Adr 012 operational knowledge stack
+title: "ADR-012: Operational knowledge as a three-layer stack (Decision → Guide → Skill)"
 ---
-
-# ADR-012: Operational knowledge as a three-layer stack (Decision → Guide → Skill)
 
 **Status:** proposed
 **Date:** 2026-05-19
@@ -155,7 +153,7 @@ Organized by persona:
 ```markdown
 # Contributor Workflow
 
-> Operationalizes [ADR-003](/sample-autonomous-cloud-coding-agents/architecture/adr-003-contribution-governance)
+> Operationalizes [ADR-003](../decisions/ADR-003-contribution-governance.md)
 
 ## For Planners
 - Issue quality bar (what makes an issue "ready")

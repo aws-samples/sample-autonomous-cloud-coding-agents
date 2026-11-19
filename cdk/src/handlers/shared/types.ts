@@ -17,15 +17,15 @@
  *  SOFTWARE.
  */
 
-import { classifyError, type ErrorClassification } from './error-classifier';
-import { logger } from './logger';
-import { coerceNumericOrNull } from './numeric';
-import type { ComputeType } from './repo-config';
 // Cross-language constants — see ``contracts/constants.md``. Imported at
 // TypeScript compile time (resolveJsonModule); esbuild inlines the values
 // into the bundled Lambda artifact, so no runtime FS read is needed.
 import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
+import { classifyError, type ErrorClassification } from './error-classifier';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
+import type { ComputeType } from './repo-config';
 
 /**
  * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
@@ -138,9 +138,6 @@ export type RegistryListEntry = {
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
-/** Delivery mechanism — discriminant for the three upload paths. */
-export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
-
 /**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
@@ -230,8 +227,10 @@ export interface TaskRecord {
   readonly updated_at: string;
   readonly started_at?: string;
   readonly completed_at?: string;
-  readonly cost_usd?: number;
-  readonly duration_s?: number;
+  /** The agent stores these two and the turn counters below as DynamoDB
+   *  Strings; read them through ``coerceNumericOrNull``. */
+  readonly cost_usd?: number | string;
+  readonly duration_s?: number | string;
   readonly build_passed?: boolean;
   /**
    * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
@@ -281,13 +280,15 @@ export interface TaskRecord {
   readonly artifact_uri?: string;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
-  readonly turns_attempted?: number;
+  readonly turns_attempted?: number | string;
   /** Rev-5 DATA-1: turns that actually completed (clamped to
    *  `max_turns` when `agent_status='error_max_turns'`). */
-  readonly turns_completed?: number;
+  readonly turns_completed?: number | string;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
+  /** Approval-wait seconds before MicroVM sleep; 0 keeps it awake. Captured at submission. */
+  readonly microvm_sleep_after_s?: number;
   readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
   /**
@@ -449,6 +450,8 @@ export interface TaskNotificationsConfig {
  * Strips internal fields not exposed in the API.
  */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -718,41 +721,13 @@ export interface ReplayBundle {
 }
 
 /**
- * Query parameters accepted by ``GET /v1/tasks/{task_id}/events``.
- *
- * Pagination is mutually exclusive: prefer ``after`` (a ULID event_id cursor
- * used by CLI polling and webhook replay to resume from a known event id)
- * over ``next_token`` (an opaque DynamoDB pagination token). If both are
- * provided, the handler uses ``after`` and logs a WARN. Neither is required
- * — callers may start from the beginning of the task's event stream.
- *
- * When a page is truncated at ``limit``, the response includes a
- * ``next_token`` so the caller can continue paginating forward regardless
- * of which mode they started with.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  /** ULID event_id cursor. Returns events with ``event_id > after``. */
-  readonly after?: string;
-  /**
-   * When truthy (``"1"`` or ``"true"``), return events in descending
-   * ``event_id`` order (newest first). Used by ``bgagent status`` to
-   * render a recency-biased snapshot without walking the full event
-   * stream. Mutually exclusive with ``after`` — the handler rejects
-   * the combination with 400.
-   */
-  readonly desc?: string;
-}
-
-/**
  * Create task request body.
  *
  * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the contract default). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) is submitted without it.
    *  Required-ness is enforced conditionally in ``createTaskCore`` based on
@@ -963,12 +938,12 @@ export interface AgentAttachmentPayload {
 /**
  * Map a DynamoDB task record to the API detail response shape.
  *
- * All numeric fields sourced from the DDB record are routed through
- * ``coerceNumericOrNull`` — the Document-client deserializes DynamoDB
- * ``Number`` attributes as JavaScript ``string``s in some code paths
- * (see ``shared/numeric.ts`` for rationale), and any downstream caller
- * doing arithmetic (``.toFixed``, comparison, math) on a string-typed
- * "number" crashes at runtime. Coercing uniformly here means no caller
+ * The numeric fields that may be stored as strings are routed through
+ * ``coerceNumericOrNull`` — the agent stores some of them as DynamoDB
+ * String attributes, which arrive as JavaScript ``string``s
+ * (see ``shared/numeric.ts`` for rationale), and a downstream caller
+ * that calls ``.toFixed`` on a string-typed "number" crashes at
+ * runtime, while ``+`` concatenates. Coercing uniformly here means no caller
  * has to guess which TaskDetail numeric fields are safe — do not bypass
  * the helper when adding new numeric fields.
  *
@@ -984,6 +959,9 @@ export function toTaskDetail(
 ): TaskDetail {
   const ctx = { task_id: record.task_id };
   return {
+    ...(typeof record.microvm_sleep_after_s === 'number' && Number.isInteger(record.microvm_sleep_after_s)
+      && record.microvm_sleep_after_s >= MICROVM_SLEEP_AFTER_S_MIN && record.microvm_sleep_after_s <= MICROVM_SLEEP_AFTER_S_MAX
+      && { microvm_sleep_after_s: record.microvm_sleep_after_s }),
     task_id: record.task_id,
     status: record.status,
     repo: record.repo ?? null,
@@ -1329,86 +1307,10 @@ export type ApprovalStatus =
  * Cedar HITL severity, surfaced in the CLI approval prompt and used
  * for severity-gated channel routing (§11.2: high-severity rules
  * skip Slack-button auto-approval). Shared alias so the same literal
- * union is not redefined inline in `ApprovalRecord`,
- * `PendingApprovalSummary`, `PolicyRuleSummary`, etc.
+ * union is not redefined inline in `PendingApprovalSummary`,
+ * `PolicyRuleSummary`, etc.
  */
 export type Severity = 'low' | 'medium' | 'high';
-
-/**
- * Fields shared by every approval row regardless of status. Internal
- * type — callers should consume the discriminated {@link ApprovalRecord}
- * so `status` narrows the optional fields below.
- *
- * PK = `task_id`, SK = `request_id` (ULID minted by the agent). GSI
- * `user_id-status-index` powers `GET /v1/pending` without a Scan.
- *
- * `matching_rule_ids` is a List, not a StringSet — DDB string sets
- * cannot be empty and pathological no-match soft-deny hits would fail
- * to persist (§10.1).
- */
-interface ApprovalRecordBase {
-  readonly task_id: string;
-  readonly request_id: string;
-  readonly tool_name: string;
-  readonly tool_input_preview: string;
-  readonly tool_input_sha256: string;
-  readonly reason: string;
-  readonly severity: Severity;
-  readonly matching_rule_ids: readonly string[];
-  readonly created_at: string;
-  readonly timeout_s: number;
-  readonly ttl: number;
-  readonly user_id: string;
-  readonly repo: string;
-}
-
-/** PENDING approval row — no decision recorded yet. */
-export interface PendingApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'PENDING';
-}
-
-/** APPROVED approval row — decided_at + scope are required. */
-export interface ApprovedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'APPROVED';
-  readonly decided_at: string;
-  readonly scope: ApprovalScope;
-}
-
-/** DENIED approval row — decided_at required, deny_reason optional. */
-export interface DeniedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'DENIED';
-  readonly decided_at: string;
-  readonly deny_reason?: string;
-}
-
-/** TIMED_OUT approval row — decided_at required (server-set). */
-export interface TimedOutApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'TIMED_OUT';
-  readonly decided_at: string;
-}
-
-/** STRANDED approval row — decided_at required (set by the
- *  stranded-task reconciler). No user decision was ever recorded. */
-export interface StrandedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'STRANDED';
-  readonly decided_at: string;
-}
-
-/**
- * Full approval row as stored in `TaskApprovalsTable` (design §10.1).
- *
- * Discriminated union on ``status`` so callers can narrow on the
- * status field and get exhaustiveness checking on the optional
- * decision fields. Pre-S3 this was a single interface with every
- * decision-time field optional, which let illegal combinations
- * type-check (e.g. an APPROVED record without a `scope`).
- */
-export type ApprovalRecord =
-  | PendingApprovalRecord
-  | ApprovedApprovalRecord
-  | DeniedApprovalRecord
-  | TimedOutApprovalRecord
-  | StrandedApprovalRecord;
 
 /**
  * Pending approval summary returned by `GET /v1/pending` (§7.7).
@@ -1549,22 +1451,6 @@ export interface ApprovalDecisionRecordedEvent {
   readonly caller_user_id: string;
 }
 
-/**
- * `CreateTaskRequest` extensions for HITL pre-approvals (§7.3).
- *
- * Old callers continue to work — every field is optional. New callers
- * can pre-approve common scopes (`tool_type:Read`, `bash_pattern:git
- * status*`) to avoid hitting gates for trusted operations, and can
- * raise the per-task default approval timeout above the 300s default
- * within the `[30, min(3600, maxLifetime - 300)]` bound.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface CreateTaskApprovalExtensions {
-  readonly approval_timeout_s?: number;
-  readonly initial_approvals?: readonly ApprovalScope[];
-}
-
 /** Maximum `initial_approvals` entries per §7.3. */
 export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
 
@@ -1580,9 +1466,10 @@ export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
 
-/** Default `approval_timeout_s` when the submit payload omits it.
- *  Sourced from ``contracts/constants.json`` (S9). */
-export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.default;
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = sharedConstants.microvm_sleep_after_s.min;
+export const MICROVM_SLEEP_AFTER_S_MAX = sharedConstants.microvm_sleep_after_s.max;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = sharedConstants.microvm_sleep_after_s.default;
 
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap

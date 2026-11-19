@@ -351,7 +351,8 @@ export async function checkLinearProjectWorkspaces(
     const projectIds = allIds.length > NAMED_LIMIT
       ? `${allIds.slice(0, NAMED_LIMIT).join(', ')} (and ${allIds.length - NAMED_LIMIT} more)`
       : allIds.join(', ');
-    const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo>` for each of them';
+    // --label too: onboard-project rewrites the whole mapping and stores the default label when it is left out.
+    const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo> --label <its trigger label>` for each of them';
     const unbackedSummary = `${unbacked.length} of ${active.length} active Linear project mapping(s) do not `
       + 'record an owning workspace, so a webhook naming them cannot be checked against the workspace that '
       + `signed it: ${projectIds}.`;
@@ -463,7 +464,7 @@ export async function checkJiraAppIdentity(
       status: 'warn',
       detail: `${incomplete.length} of ${active.length} active Jira tenant(s) will write as the OAuth `
         + `setup user or have incomplete Forge metadata: ${tenantIds}. Run \`bgagent jira app-setup `
-        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>\` for each tenant.',
+        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>` for each tenant.',
     };
   } catch (err) {
     return {
@@ -565,7 +566,7 @@ async function checkGithubToken(
     id,
     label,
     status: 'fail',
-    detail: 'GitHub token secret is empty or still the CDK placeholder. Run `bgagent github set-token`.',
+    detail: 'GitHub token secret is empty, still the CDK placeholder, or not in a GitHub token format. Run `bgagent github set-token`.',
   };
 }
 

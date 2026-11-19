@@ -41,7 +41,8 @@ const MAX_TIMESTAMP_AGE_S = MAX_TIMESTAMP_AGE_MINUTES * 60;
  * Fetch a secret from Secrets Manager with in-memory caching.
  * @param secretId - the full Secrets Manager secret ID or ARN.
  * @param forceRefresh - bypass the cache and re-fetch from Secrets Manager.
- * @returns the secret string, or null if not found.
+ * @returns the secret string, or null if not found (for a bot token also
+ *   while it is scheduled for deletion).
  */
 export async function getSlackSecret(secretId: string, forceRefresh = false): Promise<string | null> {
   const now = Date.now();
@@ -67,10 +68,19 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
     return result.SecretString;
   } catch (err) {
     const errorName = (err as Error)?.name;
-    if (errorName === 'ResourceNotFoundException') {
-      logger.error('Slack secret not found in Secrets Manager', { secret_id: secretId });
+    // A bot token that is scheduled for deletion (its workspace removed the
+    // app) cannot be read until its recovery window ends: it is as absent as
+    // one that does not exist. Bot tokens are the secrets read by name under
+    // SLACK_SECRET_PREFIX. Any other secret in that state stays an error (the
+    // signing secret and the OAuth credentials are read by ARN), so that a
+    // signing secret never looks "not populated yet" to its callers.
+    const pendingDeletion = errorName === 'InvalidRequestException'
+      && secretId.startsWith(SLACK_SECRET_PREFIX)
+      && String((err as Error).message).includes('marked for deletion');
+    if (errorName === 'ResourceNotFoundException' || pendingDeletion) {
+      logger.error('Slack secret not found in Secrets Manager', { secret_id: secretId, pending_deletion: pendingDeletion });
       secretCache.delete(secretId);
-      return null; // nosemgrep: ts-silent-success-masking -- missing Slack signing secret means "cannot verify"; ResourceNotFound is expected before setup
+      return null; // missing Slack signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Slack secret from Secrets Manager', {
       secret_id: secretId,

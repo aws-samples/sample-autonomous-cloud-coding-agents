@@ -35,18 +35,11 @@ import { LOOKUP_ABSENT, isLookupFailure, lookupFound } from '../../../src/handle
 import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { channelForSource, registerChannelFactory } from '../../../src/handlers/shared/orchestration-channel-factory';
 import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
-import { ORCH_LOG } from '../../../src/handlers/shared/orchestration-log-events';
 import {
-  renderRollupComment,
-  renderStatusBlock,
   renderEpicPanel,
   buildPanelRows,
-  truncateQuote,
   cascadeNodeLabel,
-  rollupKindFromChildren,
-  postRollup,
   upsertEpicPanel,
-  type RollupChildView,
   type EpicPanelRow,
 } from '../../../src/handlers/shared/orchestration-rollup';
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
@@ -75,155 +68,11 @@ function makeFakeChannel() {
 const parent: IssueRef = { issueId: 'PARENT', credentialsRef: 'WS' };
 let channel: FakeChannel;
 
-const view = (sub: string, status: string, ident?: string, title?: string, pr_url?: string): RollupChildView => ({
-  sub_issue_id: sub,
-  child_status: status,
-  ...(ident && { display_id: ident }),
-  ...(title && { title }),
-  ...(pr_url && { pr_url }),
-});
-
-describe('renderRollupComment', () => {
-  test('complete: all succeeded → completion heading + counts', () => {
-    const body = renderRollupComment('complete', [
-      view('a', 'succeeded', 'ENG-1', 'Step A'),
-      view('b', 'succeeded', 'ENG-2', 'Step B'),
-    ]);
-    expect(body).toContain('orchestration complete');
-    expect(body).toContain('2 succeeded, 0 failed, 0 skipped');
-    expect(body).toContain('✅ ENG-1: Step A');
-  });
-
-  test('partial_failure: shows failed + skipped with icons + summary', () => {
-    const body = renderRollupComment('partial_failure', [
-      view('a', 'failed', 'ENG-1'),
-      view('b', 'skipped', 'ENG-2'),
-      view('c', 'succeeded', 'ENG-3'),
-    ]);
-    expect(body).toContain('finished with failures');
-    expect(body).toContain('1 succeeded, 1 failed, 1 skipped');
-    expect(body).toContain('❌ ENG-1');
-    expect(body).toContain('⏭️ ENG-2');
-  });
-
-  test('cancelled: cancellation heading', () => {
-    const body = renderRollupComment('cancelled', [view('a', 'failed', 'ENG-1')]);
-    expect(body).toContain('cancelled');
-  });
-
-  test('children are sorted by identifier (deterministic comment)', () => {
-    const body = renderRollupComment('complete', [
-      view('z', 'succeeded', 'ENG-9'),
-      view('a', 'succeeded', 'ENG-1'),
-    ]);
-    expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
-  });
-
-  // Per-child PR links + integration-node combined-PR callout.
-  test('renders a PR link on a child line when pr_url is present', () => {
-    const body = renderRollupComment('complete', [
-      view('a', 'succeeded', 'ENG-1', 'Step A', 'https://github.com/o/r/pull/10'),
-      view('b', 'succeeded', 'ENG-2', 'Step B'), // no PR
-    ]);
-    expect(body).toContain('✅ ENG-1: Step A — succeeded — [PR](https://github.com/o/r/pull/10)');
-    // A child without a PR renders no link (no broken markdown).
-    expect(body).toContain('✅ ENG-2: Step B — succeeded');
-    expect(body).not.toContain('ENG-2: Step B — succeeded — [PR]');
-  });
-
-  test('surfaces the integration node combined PR as a prominent callout', () => {
-    const body = renderRollupComment('complete', [
-      view('a', 'succeeded', 'ENG-1', 'Leaf A', 'https://github.com/o/r/pull/1'),
-      view('b', 'succeeded', 'ENG-2', 'Leaf B', 'https://github.com/o/r/pull/2'),
-      view('orch_x__integration', 'succeeded', undefined, 'Integration — combine sub-issue results', 'https://github.com/o/r/pull/9'),
-    ]);
-    expect(body).toContain('🔗 **Combined PR (all sub-issues merged):** [https://github.com/o/r/pull/9](https://github.com/o/r/pull/9)');
-    // The callout appears BEFORE the per-child list.
-    expect(body.indexOf('Combined PR')).toBeLessThan(body.indexOf('ENG-1'));
-  });
-
-  test('no combined-PR callout when the integration node opened no PR', () => {
-    const body = renderRollupComment('partial_failure', [
-      view('a', 'succeeded', 'ENG-1', 'Leaf A', 'https://github.com/o/r/pull/1'),
-      view('orch_x__integration', 'skipped', undefined, 'Integration — combine sub-issue results'), // no PR (skipped)
-    ]);
-    expect(body).not.toContain('Combined PR');
-  });
-
-  test('no combined-PR callout for a plain chain (no integration node)', () => {
-    const body = renderRollupComment('complete', [
-      view('a', 'succeeded', 'ENG-1', 'A', 'https://github.com/o/r/pull/1'),
-      view('b', 'succeeded', 'ENG-2', 'B', 'https://github.com/o/r/pull/2'),
-    ]);
-    expect(body).not.toContain('Combined PR');
-  });
-});
-
-describe('renderStatusBlock — the live status block', () => {
-  test('header shows N/M complete (terminal children only)', () => {
-    const body = renderStatusBlock([
-      view('a', 'succeeded', 'ENG-1', 'Guide'),
-      view('b', 'released', 'ENG-2', 'Cards'),
-      view('c', 'blocked', 'ENG-3', 'Quiz'),
-    ]);
-    expect(body).toContain('1/3 complete');
-    expect(body).toContain('🔄 **ABCA orchestration**');
-  });
-
-  test('maps in-flight statuses to human words (running / blocked)', () => {
-    const body = renderStatusBlock([
-      view('a', 'released', 'ENG-1', 'A'),
-      view('b', 'blocked', 'ENG-2', 'B'),
-    ]);
-    expect(body).toContain('ENG-1: A — running');
-    expect(body).toContain('ENG-2: B — blocked');
-  });
-
-  test('links a child PR in the live block when pr_url is known', () => {
-    const body = renderStatusBlock([
-      view('a', 'released', 'ENG-1', 'A', 'https://github.com/o/r/pull/7'),
-      view('b', 'blocked', 'ENG-2', 'B'),
-    ]);
-    expect(body).toContain('ENG-1: A — running — [PR](https://github.com/o/r/pull/7)');
-    expect(body).toContain('ENG-2: B — blocked');
-    expect(body).not.toContain('ENG-2: B — blocked — [PR]');
-  });
-
-  test('terminal statuses keep their word + icon', () => {
-    const body = renderStatusBlock([
-      view('a', 'succeeded', 'ENG-1'),
-      view('b', 'failed', 'ENG-2'),
-      view('c', 'skipped', 'ENG-3'),
-    ]);
-    expect(body).toContain('✅ ENG-1 — succeeded');
-    expect(body).toContain('❌ ENG-2 — failed');
-    expect(body).toContain('⏭️ ENG-3 — skipped');
-    expect(body).toContain('3/3 complete');
-  });
-
-  test('children sorted by identifier (stable edit-in-place body)', () => {
-    const body = renderStatusBlock([view('z', 'released', 'ENG-9'), view('a', 'released', 'ENG-1')]);
-    expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
-  });
-});
-
-describe('rollupKindFromChildren', () => {
-  test('all succeeded → complete', () => {
-    expect(rollupKindFromChildren([view('a', 'succeeded'), view('b', 'succeeded')])).toBe('complete');
-  });
-  test('any failed → partial_failure', () => {
-    expect(rollupKindFromChildren([view('a', 'succeeded'), view('b', 'failed')])).toBe('partial_failure');
-  });
-  test('any skipped → partial_failure', () => {
-    expect(rollupKindFromChildren([view('a', 'succeeded'), view('b', 'skipped')])).toBe('partial_failure');
-  });
-});
-
 const row = (sub: string, status: string): OrchestrationChildRow => ({
   orchestration_id: 'orch_1',
   sub_issue_id: sub,
-  parent_linear_issue_id: 'PARENT',
-  linear_workspace_id: 'WS',
+  parent_issue_ref: 'PARENT',
+  credentials_ref: 'WS',
   repo: 'o/r',
   depends_on: [],
   child_status: status as never,
@@ -390,166 +239,6 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
       channel, parent, children: [row('a', 'succeeded')], inProgress: false, mirrorParentState: true,
     });
     expect(id).toEqual(lookupFound('cmt-1'));
-  });
-});
-
-describe('postRollup', () => {
-  beforeEach(() => {
-    channel = makeFakeChannel();
-    loggerMock.info.mockReset();
-    loggerMock.warn.mockReset();
-  });
-
-  test('success → posts comment + logs orch.rollup.posted', async () => {
-    const ok = await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-    });
-    expect(ok).toBe(true);
-    expect(channel.postComment).toHaveBeenCalledTimes(1);
-    // The stable log event automated tests grep for.
-    const posted = loggerMock.info.mock.calls.find((c) => c[1]?.event === ORCH_LOG.rollupPosted);
-    expect(posted).toBeDefined();
-    expect(posted![1]).toMatchObject({ orchestration_id: 'orch_1', parent_issue_id: 'PARENT', rollup_kind: 'complete' });
-  });
-
-  test('complete → advances parent to awaiting-review + ✅ reaction (mirrors children)', async () => {
-    await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-    });
-    expect(channel.transitionState).toHaveBeenCalledWith(parent, 'in_review');
-    expect(channel.replaceIssueReaction).toHaveBeenCalledWith(parent, 'succeeded');
-  });
-
-  test('partial_failure → does NOT advance state, swaps to ❌ reaction', async () => {
-    await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'partial_failure',
-      children: [row('a', 'failed')],
-    });
-    expect(channel.transitionState).not.toHaveBeenCalled();
-    expect(channel.replaceIssueReaction).toHaveBeenCalledWith(parent, 'failed');
-  });
-
-  test('comment fails → does NOT transition state or react (state mirrors only on posted rollup)', async () => {
-    channel.postComment.mockResolvedValue(null);
-    await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-    });
-    expect(channel.transitionState).not.toHaveBeenCalled();
-    expect(channel.replaceIssueReaction).not.toHaveBeenCalled();
-  });
-
-  test('post returns false → logs orch.rollup.failed, returns false', async () => {
-    channel.postComment.mockResolvedValue(null);
-    const ok = await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'partial_failure',
-      children: [row('a', 'failed')],
-    });
-    expect(ok).toBe(false);
-    expect(loggerMock.warn.mock.calls.some((c) => c[1]?.event === ORCH_LOG.rollupFailed)).toBe(true);
-  });
-
-  test('a surface without reactions or transitions still posts the rollup', async () => {
-    // The capability guards must skip the mirror rather than throw, so a
-    // comment-only surface gets the rollup comment and nothing else.
-    const commentOnly = makeFakeChannel();
-    delete (commentOnly as Partial<FakeChannel>).transitionState;
-    delete (commentOnly as Partial<FakeChannel>).replaceIssueReaction;
-    const ok = await postRollup({
-      channel: commentOnly,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-    });
-    expect(ok).toBe(true);
-    expect(commentOnly.postComment).toHaveBeenCalledTimes(1);
-  });
-
-  test('with statusCommentId → EDITS the live block in place (no fresh comment)', async () => {
-    const ok = await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-      statusCommentId: 'cmt-1',
-    });
-    expect(ok).toBe(true);
-    // Edited the existing comment; did NOT post a fresh one.
-    expect(channel.upsertComment).toHaveBeenCalledWith(parent, expect.any(String), { commentId: 'cmt-1' });
-    expect(channel.postComment).not.toHaveBeenCalled();
-  });
-
-  test('threads prUrls → rendered comment links child PRs + combined PR', async () => {
-    await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded'), row('orch_1__integration', 'succeeded')],
-      prUrls: {
-        a: 'https://github.com/o/r/pull/3',
-        orch_1__integration: 'https://github.com/o/r/pull/9',
-      },
-    });
-    const body = channel.postComment.mock.calls[0][1] as string;
-    expect(body).toContain('[PR](https://github.com/o/r/pull/3)');
-    expect(body).toContain('🔗 **Combined PR (all sub-issues merged):**');
-    expect(body).toContain('https://github.com/o/r/pull/9');
-  });
-
-  test('without statusCommentId → posts a fresh comment', async () => {
-    await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-    });
-    expect(channel.postComment).toHaveBeenCalledTimes(1);
-    expect(channel.upsertComment).not.toHaveBeenCalled();
-  });
-
-  test('post throws → swallowed, logs orch.rollup.failed, returns false', async () => {
-    channel.postComment.mockRejectedValue(new Error('surface down'));
-    const ok = await postRollup({
-      channel,
-      parent,
-      orchestrationId: 'orch_1',
-      kind: 'complete',
-      children: [row('a', 'succeeded')],
-    });
-    expect(ok).toBe(false);
-    expect(loggerMock.warn.mock.calls.some((c) => c[1]?.event === ORCH_LOG.rollupFailed)).toBe(true);
-  });
-});
-
-describe('truncateQuote', () => {
-  test('short text passes through, trimmed + whitespace-collapsed', () => {
-    expect(truncateQuote('  the button   doesnt work ')).toBe('the button doesnt work');
-  });
-  test('long text is truncated with an ellipsis', () => {
-    const out = truncateQuote('a'.repeat(60), 40);
-    expect(out.length).toBe(40);
-    expect(out.endsWith('…')).toBe(true);
   });
 });
 
@@ -811,14 +500,51 @@ describe('renderEpicPanel — the single maturing panel', () => {
     });
     expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
   });
+
+  /** The row lines of a panel body, in the order they are shown. */
+  const rowLines = (body: string) => body.split('\n').filter((line) => line.startsWith('- '));
+
+  test('identifiers are sorted by their number: ENG-9 comes before ENG-10', () => {
+    const body = renderEpicPanel({
+      inProgress: true,
+      rows: [
+        panelRow('c', 'released', { display_id: 'ENG-11' }),
+        panelRow('b', 'blocked', { display_id: 'ENG-10' }),
+        panelRow('a', 'succeeded', { display_id: 'ENG-9' }),
+      ],
+    });
+    expect(rowLines(body)).toEqual([
+      '- ✅ ENG-9 — succeeded',
+      '- ⏳ ENG-10 — blocked',
+      '- 🔄 ENG-11 — running',
+    ]);
+  });
+
+  test('the integration row is the last one, whatever the team key', () => {
+    // The synthetic node has no identifier, so it was sorted by its id
+    // (orch_<hash>__integration), which comes before WEB-1 and after ENG-1.
+    const body = renderEpicPanel({
+      inProgress: true,
+      rows: [
+        panelRow('orch_abc__integration', 'blocked'),
+        panelRow('b', 'released', { display_id: 'WEB-2' }),
+        panelRow('a', 'succeeded', { display_id: 'WEB-1' }),
+      ],
+    });
+    expect(rowLines(body)).toEqual([
+      '- ✅ WEB-1 — succeeded',
+      '- 🔄 WEB-2 — running',
+      '- ⏳ Integration — combined result — blocked',
+    ]);
+  });
 });
 
 describe('buildPanelRows — the failureReasons map lands on row.failureReason', () => {
   const child = (sub: string, status: string): OrchestrationChildRow => ({
     orchestration_id: 'orch_1',
     sub_issue_id: sub,
-    parent_linear_issue_id: 'parent',
-    linear_workspace_id: 'ws',
+    parent_issue_ref: 'parent',
+    credentials_ref: 'ws',
     repo: 'o/r',
     depends_on: [],
     child_status: status as OrchestrationChildRow['child_status'],

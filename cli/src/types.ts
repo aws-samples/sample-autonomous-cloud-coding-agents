@@ -167,6 +167,8 @@ export interface ErrorClassification {
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -406,25 +408,6 @@ export interface TaskEvent {
   readonly trace_id?: string;
 }
 
-/**
- * Query parameters accepted by GET /v1/tasks/{task_id}/events.
- *
- * ``after`` and ``next_token`` are mutually exclusive — if both are sent the
- * server prefers ``after`` (and logs a warning). ``after`` is a ULID event_id
- * cursor used by the CLI to catch up on the next polling iteration. Keep in
- * sync with ``cdk/src/handlers/shared/types.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  readonly after?: string;
-  /**
-   * When ``"1"``, requests events in descending ``event_id`` order
-   * (newest first). Mutually exclusive with ``after`` on the server.
-   */
-  readonly desc?: string;
-}
-
 /** Wire format — parsed from untrusted JSON. Validate before use. */
 export interface Attachment {
   readonly type: AttachmentType;
@@ -462,6 +445,8 @@ export interface CreateTaskResponse extends TaskDetail {
 
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the platform default). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Optional since #248 Phase 3: repo-less workflows submit without it. */
   readonly repo?: string;
   readonly issue_number?: number;
@@ -702,6 +687,9 @@ export interface CliConfig {
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;
+  /** Stack the config was read from (`bgagent setup`, `configure --stack-name`); lets
+   *  feature guards check a stack when a subcommand takes no `--stack-name`. */
+  readonly stack_name?: string;
 }
 
 /** Cached credentials stored in ~/.bgagent/credentials.json.
@@ -717,7 +705,7 @@ export interface Credentials {
 }
 
 /** Terminal task statuses. */
-export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+export const TERMINAL_STATUSES: readonly TaskStatusType[] = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
 
 /**
  * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``
@@ -747,14 +735,6 @@ export type ApprovalScope =
   | `bash_pattern:${string}`
   | `write_path:${string}`
   | `rule:${string}`;
-
-/** Approval row terminal / pending status. */
-export type ApprovalStatus =
-  | 'PENDING'
-  | 'APPROVED'
-  | 'DENIED'
-  | 'TIMED_OUT'
-  | 'STRANDED';
 
 /** POST /v1/tasks/{task_id}/approve request body. */
 export interface ApprovalRequest {
@@ -849,8 +829,10 @@ export const APPROVAL_TIMEOUT_S_MIN = 30;
 /** Upper bound on approval_timeout_s submission (before maxLifetime clip). */
 export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
-/** Default approval_timeout_s when the submit payload omits it. */
-export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = 0;
+export const MICROVM_SLEEP_AFTER_S_MAX = 3600;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = 60;
 
 /** Minimum allowed max_budget_usd (1 cent).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */

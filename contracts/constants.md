@@ -24,9 +24,12 @@ the contract. This is the neutral location both runtimes read.
 | `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
-| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets` | synth-time `import` |
+| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | synth-time `import` |
+| `agent/src/microvm_http.py` | `SHARED_CONSTANTS["microvm_hook_budgets"]` (lifecycle handler/hook budgets) | import-time |
+| `cdk/src/handlers/shared/microvm/image-capability.ts` | `microvm_lifecycle` (protocol version, image marker) | synth-time `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
+| `agent/tests/test_constants_parity.py` | value each agent constant holds after import | test-time |
 
 The agent reads at runtime via `Path(__file__) / "../../contracts/..."`
 in dev / `/app/contracts/...` in the deployed image (the Dockerfile
@@ -184,6 +187,21 @@ literal re-declaration on **either** side — the Python constants *and*
 `agent/src/server.py` re-checks the same ordering at import time, so a bad contract
 fails the drift check *and* the image build.
 
+- **`microvm_hook_budgets.lifecycle_hook_timeout_seconds` / `lifecycle_handler_budget_seconds`**
+  — the `/suspend` and `/resume` hook timeout declared to the image (30 s) and the
+  agent handler's own budget inside it (20 s). The handler must leave time to send
+  its answer, so `scripts/check-constants-sync.ts` and `microvm_http.py` both require
+  handler < hook.
+- **`microvm_lifecycle`** — the lifecycle protocol version and the image marker
+  environment name (`ABCA_MICROVM_LIFECYCLE_PROTOCOL`) the image declares and
+  `/validate` checks, the hook port, and the 28,800 s `maximumDurationInSeconds`.
+  The coordinator suspends only images whose launched version declares this protocol.
+- **`microvm_sleep_after_s`** — per-task approval-wait delay before MicroVM sleep
+  (`min` 0 = off, `max` 3,600, `default` 60). The default is chosen against
+  `approval_timeout_s.default` (300 s): the supervisor wakes 60 s before the
+  deadline and never suspends for less than 30 s, so a default gate sleeps from
+  60 s to 240 s.
+
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and
 `cli/test/constants-parity.test.ts` makes drift a CI failure. The standalone
@@ -194,12 +212,26 @@ minimum length in `proxy.js`.
 
 1. Add the key + nested object to `constants.json`.
 2. Wire each consumer (Python, TS) to read the same key.
-3. Update `scripts/check-types-sync.ts` (or successor drift check) to
-   assert the new key is consumed where expected.
+3. Register the consumer with the drift checks. For a constant the agent
+   holds: add its name and contract key to `OWNED_PYTHON_NAMES` in
+   `scripts/check-constants-sync.ts` and a row to `_OWNED` in
+   `agent/tests/test_constants_parity.py` (the script fails until the test
+   names it). For a literal the CLI mirrors: add it to
+   `cli/test/constants-parity.test.ts`.
 4. Bump this README's schema section.
 
-Do not introduce new top-level literal declarations of the same
-constant in code; the drift check exists to catch that.
+Do not assign an owned constant anything but a plain read of its contract
+key (`NAME = <contract section>["key"]`, optionally inside one conversion):
+`scripts/check-constants-sync.ts` scans every file under `agent/src` and
+fails on a literal, arithmetic on the contract value or another key, in
+whichever file the assignment stands.
+
+Declare an owned constant once, in the module that owns it, and import it
+elsewhere. The script reads the source text and cannot tell which mapping
+a subscript reads, so a second declaration passes when it is a plain
+subscript read ending in the constant's key, whatever it reads from. The
+value a constant holds is compared with the contract by
+`agent/tests/test_constants_parity.py`, for the owning module only.
 
 ## Lint enforcement (AI007, #258)
 

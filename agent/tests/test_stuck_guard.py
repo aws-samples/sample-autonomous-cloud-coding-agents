@@ -53,6 +53,43 @@ class TestSignature:
         b = _signature("Edit", {"file_path": "src/x.ts"})
         assert a == b
 
+    def test_a_tool_without_command_or_path_keys_on_its_whole_input(self):
+        # WebFetch, Grep, Glob and MCP tools have neither key.
+        a = _signature("WebFetch", {"url": "https://a.example", "prompt": "summarise"})
+        b = _signature("WebFetch", {"url": "https://b.example", "prompt": "summarise"})
+        assert a != b
+        assert a == _signature("WebFetch", {"prompt": "summarise", "url": "https://a.example"})
+
+
+class TestOutcomeGivenByTheCaller:
+    """The hook that knows how a call ended says so; the text is read only
+    where it does not know."""
+
+    SCRIPT = "#!/bin/bash\nif ! command -v yarn; then\n  exit 1\nfi\n"
+
+    def test_a_call_given_as_completed_is_no_failure_whatever_its_output_says(self):
+        g = StuckGuard()
+        for _ in range(WINDOW):
+            g.record_tool_result(
+                "Read", {"file_path": "scripts/build.sh"}, self.SCRIPT, failed=False
+            )
+        assert g.evaluate().kind == "none"
+        assert g.recent_failure_summary() is None
+
+    def test_a_call_given_as_failed_counts_without_a_marker_in_its_text(self):
+        g = StuckGuard()
+        for _ in range(STEER_THRESHOLD):
+            g.record_tool_result(
+                "Read", {"file_path": "a.txt"}, "File does not exist.", failed=True
+            )
+        assert g.evaluate().kind == "steer"
+
+    def test_without_an_outcome_the_text_decides(self):
+        g = StuckGuard()
+        for _ in range(STEER_THRESHOLD):
+            g.record_tool_result("Read", {"file_path": "scripts/build.sh"}, self.SCRIPT)
+        assert g.evaluate().kind == "steer"
+
 
 class TestStuckGuardLifecycle:
     def test_no_action_below_steer_threshold(self):
@@ -110,6 +147,16 @@ class TestStuckGuardLifecycle:
         g.record_tool_result("Bash", {"command": "a"}, OOM)
         g.record_tool_result("Bash", {"command": "b"}, OOM)
         g.record_tool_result("Bash", {"command": "c"}, OOM)
+        assert g.evaluate().kind == "none"
+
+    def test_same_failure_for_different_inputs_of_one_tool_is_not_one_command(self):
+        # Three pages that fail the same way are three operations, not "the
+        # same operation" run three times.
+        g = StuckGuard()
+        for host in ("a", "b", "c"):
+            g.record_tool_result(
+                "WebFetch", {"url": f"https://{host}.example"}, "fatal: unable to fetch"
+            )
         assert g.evaluate().kind == "none"
 
     def test_healthy_varied_work_never_trips(self):

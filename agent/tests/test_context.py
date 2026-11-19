@@ -7,10 +7,13 @@ untrusted-content delimiters.
 """
 
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 import context
 from context import _UNTRUSTED_BEGIN, _UNTRUSTED_END, assemble_prompt, fetch_github_issue
-from models import GitHubIssue, TaskConfig
+from models import GitHubIssue, IssueComment, TaskConfig
 
 
 def _config(issue: GitHubIssue | None = None, task_description: str = "") -> TaskConfig:
@@ -124,6 +127,48 @@ class TestFetchGitHubIssueSanitization:
         assert issue.comments[1].author == "alice"
 
 
+def _github_with_comments(total: int):
+    """Build a fake ``requests`` module that lists issue comments the way GitHub does.
+
+    The comments have the ids 1 to ``total``, oldest first, 30 to a page unless
+    ``per_page`` asks for more (100 at most).
+    """
+
+    def get(url, headers=None, timeout=None):
+        parts = urlsplit(url)
+        if not parts.path.endswith("/comments"):
+            return _FakeResponse({"title": "T", "body": "B", "number": 42, "comments": total})
+        query = parse_qs(parts.query)
+        per_page = min(int(query.get("per_page", ["30"])[0]), 100)
+        start = (int(query.get("page", ["1"])[0]) - 1) * per_page
+        ids = range(1, total + 1)[start : start + per_page]
+        return _FakeResponse(
+            [{"id": i, "user": {"login": "alice"}, "body": f"comment {i}"} for i in ids]
+        )
+
+    return SimpleNamespace(get=get)
+
+
+class TestFetchGitHubIssueCommentPages:
+    """GitHub returns the 30 oldest comments unless asked; the newest are the ones to keep."""
+
+    @pytest.mark.parametrize(
+        ("total", "oldest"),
+        [
+            (45, 1),
+            (150, 1),
+            # Above three pages the oldest pages are left out: 101 to 345 are pages 2 to 4.
+            (345, 101),
+        ],
+    )
+    def test_hydrates_the_newest_comments(self, monkeypatch, total, oldest):
+        monkeypatch.setattr(context, "requests", _github_with_comments(total))
+
+        issue = fetch_github_issue("owner/repo", "42", "tok")
+
+        assert [c.id for c in issue.comments] == list(range(oldest, total + 1))
+
+
 def _fetched_issue(monkeypatch, *, title, body, number, comments=None):
     """Fetch an issue from raw payloads, exercising the source sanitizer.
 
@@ -136,7 +181,7 @@ def _fetched_issue(monkeypatch, *, title, body, number, comments=None):
     monkeypatch.setattr(
         context,
         "requests",
-        _fake_requests(payload, raw_comments if raw_comments else None),
+        _fake_requests(payload, raw_comments or None),
     )
     return fetch_github_issue("owner/repo", str(number), "tok")
 
@@ -245,6 +290,22 @@ class TestAssemblePromptDoesNotDoubleSanitize:
 
 
 class TestAssemblePromptDelimiters:
+    def test_comments_render_one_block_each_in_order_inside_the_delimiters(self):
+        issue = GitHubIssue(
+            number=3,
+            title="T",
+            body="B",
+            comments=[
+                IssueComment(id=1, author="alice", body="first"),
+                IssueComment(id=2, author="bob", body="second"),
+            ],
+        )
+        prompt = assemble_prompt(_config(issue=issue))
+        assert (
+            f"B\n\n### Comments\n\n**@alice**: first\n\n**@bob**: second\n\n{_UNTRUSTED_END}"
+            in prompt
+        )
+
     def test_external_content_is_wrapped_in_delimiters(self):
         issue = GitHubIssue(number=1, title="T", body="B")
         prompt = assemble_prompt(_config(issue=issue))

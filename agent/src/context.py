@@ -19,9 +19,18 @@ path runs only for **local batch mode** (``python src/entrypoint.py``) and
 so it MUST sanitize independently rather than assuming pre-sanitized content.
 """
 
+import math
+
 import requests
 
 from models import GitHubIssue, IssueComment, TaskConfig
+
+# GitHub lists an issue's comments oldest first, 30 to a page unless asked for more.
+# _COMMENT_PAGE_SIZE is its largest page; of a long thread the newest
+# _MAX_COMMENT_PAGES pages are read. The same numbers as fetchGitHubIssue in
+# cdk/src/handlers/shared/context-hydration.ts.
+_COMMENT_PAGE_SIZE = 100
+_MAX_COMMENT_PAGES = 3
 
 
 def fetch_github_issue(repo_url: str, issue_number: str, token: str) -> GitHubIssue:
@@ -49,16 +58,18 @@ def fetch_github_issue(repo_url: str, issue_number: str, token: str) -> GitHubIs
     issue_resp.raise_for_status()
     issue = issue_resp.json()
 
-    # Fetch comments
+    # Fetch comments: the last pages hold the newest
     comments: list[IssueComment] = []
-    if issue.get("comments", 0) > 0:
+    last_page = math.ceil(issue.get("comments", 0) / _COMMENT_PAGE_SIZE)
+    for page in range(max(1, last_page - _MAX_COMMENT_PAGES + 1), last_page + 1):
         comments_resp = requests.get(
-            f"https://api.github.com/repos/{repo_url}/issues/{issue_number}/comments",
+            f"https://api.github.com/repos/{repo_url}/issues/{issue_number}/comments"
+            f"?per_page={_COMMENT_PAGE_SIZE}&page={page}",
             headers=headers,
             timeout=30,
         )
         comments_resp.raise_for_status()
-        comments = [
+        comments.extend(
             IssueComment(
                 id=int(c["id"]),
                 # GitHub returns "user": null for comments whose author
@@ -68,7 +79,7 @@ def fetch_github_issue(repo_url: str, issue_number: str, token: str) -> GitHubIs
                 body=c["body"] or "",
             )
             for c in comments_resp.json()
-        ]
+        )
 
     return GitHubIssue(
         title=issue["title"],
@@ -122,8 +133,7 @@ def assemble_prompt(config: TaskConfig) -> str:
         parts.append(issue.body or "(no description)")
         if issue.comments:
             parts.append("\n### Comments\n")
-            for c in issue.comments:
-                parts.append(f"**@{c.author}**: {c.body}\n")
+            parts.extend(f"**@{c.author}**: {c.body}\n" for c in issue.comments)
         parts.append(_UNTRUSTED_END)
 
     if config.task_description:

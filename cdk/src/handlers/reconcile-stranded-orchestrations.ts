@@ -56,17 +56,17 @@ import {
   GetCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 import { refreshPanelAndSettle } from './orchestration-reconciler';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
-import { readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
+import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import {
   loadOrchestration,
   ORCHESTRATION_META_SK,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
 import { makeDocClient } from './shared/ua';
-import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = makeDocClient();
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;
@@ -80,6 +80,29 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10')
 /** Terminal child-statuses (orchestration-local). */
 const TERMINAL_CHILD = new Set(['succeeded', 'failed', 'skipped']);
 
+/**
+ * How old a ``releasing`` claim must be before the sweep takes it for crashed.
+ * A releaser stamps the claim with a time read inside its own invocation and
+ * creates the task while it holds it, so the claim can be live for as long as
+ * that Lambda may run. Resetting a live one lets a second releaser create a
+ * second task for the same child (task creation deduplicates through an
+ * eventually consistent index, which a create still in flight is not in).
+ * Twice the longest timeout among the Lambdas that release (5 minutes: the
+ * Jira webhook processor and this sweep) — keep it above that timeout.
+ */
+const RELEASING_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * How long after an epic was settled the sweep still settles it again. Rows of
+ * finished epics stay in the table, and each settle renders the panel anew and
+ * edits its comment: with no limit every run would do that for every epic that
+ * ever finished, and a render made after the epic's task records have expired
+ * has no pull request links left to show. The hour leaves the repeat what it
+ * is good for: about six more attempts at a panel edit that failed right after
+ * the stamp was written, or at a link that landed late.
+ */
+const SETTLED_GRACE_MS = 60 * 60 * 1000;
+
 /** A task is success for gating iff COMPLETED with build not-failed. */
 function taskIsSuccess(rec: Record<string, unknown> | undefined): boolean {
   return rec?.status === TaskStatus.COMPLETED && rec?.build_passed !== false;
@@ -89,24 +112,32 @@ function taskIsTerminal(status: TaskStatusType | undefined): boolean {
     || status === TaskStatus.CANCELLED || status === TaskStatus.TIMED_OUT;
 }
 
+/** What the sweep's scan reads of a parent-meta row. */
+interface ScannedMeta {
+  readonly orchestration_id: string;
+  /** When the epic was settled (``claimRollup``); absent until then, and removed
+   *  by whatever re-opens the epic. */
+  readonly rollup_posted_at?: string;
+}
+
 /** Scan the table for parent-meta rows → one per orchestration. */
-async function findOrchestrationIds(): Promise<string[]> {
-  const ids: string[] = [];
+async function findOrchestrations(): Promise<ScannedMeta[]> {
+  const metas: ScannedMeta[] = [];
   let lastKey: Record<string, unknown> | undefined;
   do {
     const resp = await ddb.send(new ScanCommand({
       TableName: ORCHESTRATION_TABLE,
       FilterExpression: 'sub_issue_id = :meta',
       ExpressionAttributeValues: { ':meta': ORCHESTRATION_META_SK },
-      ProjectionExpression: 'orchestration_id',
+      ProjectionExpression: 'orchestration_id, rollup_posted_at',
       ExclusiveStartKey: lastKey as Record<string, never> | undefined,
     }));
     for (const item of resp.Items ?? []) {
-      if (item.orchestration_id) ids.push(item.orchestration_id as string);
+      if (item.orchestration_id) metas.push(item as ScannedMeta);
     }
     lastKey = resp.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (lastKey);
-  return ids;
+  return metas;
 }
 
 /** Fetch a released child's task record (status + build_passed). */
@@ -118,8 +149,10 @@ async function getTaskRecord(taskId: string): Promise<Record<string, unknown> | 
 /**
  * Reconcile one orchestration from persisted truth. Returns the number of
  * children released by this pass (for logging/metrics).
+ *
+ * ``rollupPostedAt`` is the meta row's settle stamp as the scan read it.
  */
-async function reconcileOrchestration(orchestrationId: string): Promise<number> {
+async function reconcileOrchestration(orchestrationId: string, rollupPostedAt?: string): Promise<number> {
   const snap = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
   if (!snap) return 0;
 
@@ -132,6 +165,8 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
   // bare skip that guaranteed the epic never closed on the lossy path.
   const allTerminal = snap.children.every((c) => TERMINAL_CHILD.has(c.child_status));
   if (allTerminal) {
+    // Settled long enough ago: leave it alone (see SETTLED_GRACE_MS).
+    if (rollupPostedAt && Date.now() - Date.parse(rollupPostedAt) > SETTLED_GRACE_MS) return 0;
     try {
       await refreshPanelAndSettle(orchestrationId, snap.children, snap.meta, now);
     } catch (err) {
@@ -146,24 +181,30 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
   //     flip-then-create claim): a releaser won the blocked|ready→releasing claim but
   //     crashed before createTaskCore (or before its rollback). No task exists,
   //     so reset it to ``ready`` — step 2 re-releases it under a fresh claim.
-  //     Guard on still being ``releasing`` so we don't race a live finalize.
+  //     Only a claim older than RELEASING_GRACE_MS is taken for crashed, and the
+  //     reset is conditional on the row still carrying that very claim
+  //     (``updated_at`` is the claim's stamp), so we race neither a live create
+  //     nor a claim that replaced the dead one after we read it.
   for (const child of snap.children) {
     if (child.child_status !== 'releasing') continue;
+    if (Date.now() - Date.parse(child.updated_at) < RELEASING_GRACE_MS) continue;
     try {
       await ddb.send(new UpdateCommand({
         TableName: ORCHESTRATION_TABLE,
         Key: { orchestration_id: orchestrationId, sub_issue_id: child.sub_issue_id },
         UpdateExpression: 'SET child_status = :ready, updated_at = :now',
-        ConditionExpression: 'child_status = :releasing',
-        ExpressionAttributeValues: { ':ready': 'ready', ':releasing': 'releasing', ':now': now },
+        ConditionExpression: 'child_status = :releasing AND updated_at = :seen',
+        ExpressionAttributeValues: {
+          ':ready': 'ready', ':releasing': 'releasing', ':now': now, ':seen': child.updated_at,
+        },
       }));
       logger.info('Recovered orchestration child stuck in releasing → ready (crashed mid-release)', {
         orchestration_id: orchestrationId, sub_issue_id: child.sub_issue_id,
       });
     } catch (err) {
       // ConditionalCheckFailed = the row moved off 'releasing' (a live finalize
-      // won) — fine, nothing to recover. Anything else: log and let the next
-      // sweep retry.
+      // won) or the claim changed hands — fine, nothing to recover. Anything
+      // else: log and let the next sweep retry.
       if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') {
         logger.warn('Failed to recover releasing child (will retry next sweep)', {
           orchestration_id: orchestrationId,
@@ -195,6 +236,7 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
   const statusOf = new Map(fresh.children.map((c) => [c.sub_issue_id, c.child_status]));
 
   // Cascade skips: any child with a failed/skipped predecessor → skipped.
+  let cascaded = false;
   let changed = true;
   while (changed) {
     changed = false;
@@ -212,6 +254,7 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
         await advanceChildStatus(orchestrationId, c.sub_issue_id, 'skipped', now, ['blocked', 'ready']);
         statusOf.set(c.sub_issue_id, 'skipped');
         changed = true;
+        cascaded = true;
       }
     }
   }
@@ -240,7 +283,10 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
     })
     .map((c) => ({ ...c, child_status: 'ready' as const }));
 
-  if (releasableRows.length === 0) {
+  // Settle the parent if the epic has ended. ``reload``: this pass has written
+  // terminal statuses that ``fresh`` does not show, so the rows are read again
+  // (not patched in: a skip is refused when its row has moved on).
+  const settleIfEnded = async (reload: boolean): Promise<void> => {
     // Nothing left to release. If EVERY child is now terminal
     // but the parent was never settled — because the last child's terminal stream
     // event was lost (the exact failure this sweep exists to recover) — the epic
@@ -250,12 +296,12 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
     // rollup + transition the parent. refreshPanelAndSettle is idempotent (body
     // edit is a no-op if unchanged; the parent-state mirror is claimed once), so
     // racing the live reconciler is safe.
-    const freshAllTerminal = fresh.children.every((c) => TERMINAL_CHILD.has(c.child_status));
-    if (freshAllTerminal) {
+    const last = reload ? (await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)) ?? fresh : fresh;
+    if (last.children.every((c) => TERMINAL_CHILD.has(c.child_status))) {
       try {
-        await refreshPanelAndSettle(orchestrationId, fresh.children, fresh.meta, now);
-        logger.warn('Stranded orchestration settled by sweep — parent was never settled (lost terminal event)', {
-          orchestration_id: orchestrationId, parent_linear_issue_id: fresh.meta.parent_issue_ref,
+        await refreshPanelAndSettle(orchestrationId, last.children, last.meta, now);
+        logger.warn('Stranded orchestration settled by sweep — parent was never settled', {
+          orchestration_id: orchestrationId, parent_linear_issue_id: last.meta.parent_issue_ref,
         });
       } catch (err) {
         logger.warn('Sweep settle failed (will retry next sweep)', {
@@ -263,6 +309,9 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
         });
       }
     }
+  };
+  if (releasableRows.length === 0) {
+    await settleIfEnded(cascaded);
     return 0;
   }
 
@@ -284,6 +333,14 @@ async function reconcileOrchestration(orchestrationId: string): Promise<number> 
       released,
       candidates: releasableRows.length,
     });
+  }
+  // A create refused for good (guardrail, validation, budget) left its child
+  // ``failed`` without a task, so no event will ever wake the live reconciler
+  // for it. Skip its dependents now, as the live reconciler and the seed paths
+  // do, and settle if that ended the epic.
+  if (results.some((r) => r.kind === 'create_failed_terminal')) {
+    await applyTerminalCreateFailures(ddb, ORCHESTRATION_TABLE, orchestrationId, fresh.children, results, now);
+    await settleIfEnded(true);
   }
   return released;
 }
@@ -335,12 +392,12 @@ async function advanceChildStatus(
  * one orchestration is logged and does not abort the rest.
  */
 export async function handler(): Promise<void> {
-  const ids = await findOrchestrationIds();
+  const metas = await findOrchestrations();
   let totalReleased = 0;
   let swept = 0;
-  for (const id of ids) {
+  for (const { orchestration_id: id, rollup_posted_at: rollupPostedAt } of metas) {
     try {
-      totalReleased += await reconcileOrchestration(id);
+      totalReleased += await reconcileOrchestration(id, rollupPostedAt);
       swept += 1;
     } catch (err) {
       logger.error('Stranded-orchestration sweep failed for one orchestration (continuing)', {
@@ -351,7 +408,7 @@ export async function handler(): Promise<void> {
   }
   logger.info('Stranded-orchestration sweep complete', {
     orchestrations_swept: swept,
-    orchestrations_found: ids.length,
+    orchestrations_found: metas.length,
     children_released: totalReleased,
   });
 }

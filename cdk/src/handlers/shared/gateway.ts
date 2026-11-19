@@ -20,6 +20,22 @@
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 /**
+ * Read a request header by name, whatever its casing. HTTP header names are
+ * case-insensitive, and API Gateway REST does not normalize them: an edge-optimized
+ * API capitalizes them, a Regional one passes them on as sent.
+ * @param headers - the single-value headers of the event.
+ * @param name - the header name, in any casing.
+ * @returns the header value, or undefined if the header is absent.
+ */
+export function getHeader(headers: Record<string, string | undefined> | null, name: string): string | undefined {
+  const wanted = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    if (key.toLowerCase() === wanted) return value;
+  }
+  return undefined;
+}
+
+/**
  * Extract the authenticated user_id from the API Gateway event.
  *
  * Two authorizer shapes place the identity in different spots:

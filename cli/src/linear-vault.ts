@@ -43,6 +43,7 @@ import {
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import { CliError } from './errors';
 import { LINEAR_AUTHORIZE_ENDPOINT, LINEAR_OAUTH_SCOPES, LINEAR_TOKEN_ENDPOINT } from './linear-oauth';
+import { CALLBACK_URL } from './oauth-callback-server';
 import { makeClient } from './ua';
 
 /** Consent-time parameters. Part of the vault's cache key, so every resolve must
@@ -258,7 +259,6 @@ export async function mintLinearTokenFromVault(args: {
   workloadName: string;
   providerName: string;
   userId: string;
-  returnUrl?: string;
 }): Promise<VaultMintResult> {
   try {
     const dataplane = makeClient(BedrockAgentCoreClient, { region: args.region });
@@ -272,7 +272,7 @@ export async function mintLinearTokenFromVault(args: {
         resourceCredentialProviderName: args.providerName,
         scopes: [...LINEAR_OAUTH_SCOPES],
         oauth2Flow: 'USER_FEDERATION',
-        resourceOauth2ReturnUrl: args.returnUrl ?? 'http://localhost:8080/oauth/callback',
+        resourceOauth2ReturnUrl: CALLBACK_URL,
         // Must match what consent sent: customParameters are part of the vault's
         // cache key, so omitting them reports "needs consent" despite a live grant.
         customParameters: { ...LINEAR_VAULT_CUSTOM_PARAMS },
@@ -315,24 +315,6 @@ export type VaultConsentStep =
     readonly kind: 'consent-required';
     /** URL the operator opens to consent (AgentCore PAR → Linear authorize). */
     readonly authorizationUrl: string;
-    /**
-     * The federation session this consent belongs to
-     * (`urn:ietf:params:oauth:request_uri:…`). AgentCore appends the same value to
-     * the return URL as `?session_id=…` once consent completes, and it must be
-     * handed to {@link finalizeVaultConsent} before a token can be fetched.
-     *
-     * Exposed even though `bgagent linear setup` currently finalizes with the id the
-     * operator pastes from the landing page: dropping it is what made the first
-     * implementation hang, and a non-interactive caller needs it.
-     *
-     * OPTIONAL, and deliberately not enforced. AgentCore models `sessionUri` as
-     * optional on the token response, so an absent value is the service's contract
-     * rather than a fault — throwing would refuse a consent the interactive flow can
-     * still complete from the pasted id. Optionality puts the absence in the type so a
-     * non-interactive caller has to handle it, instead of an empty string that reads
-     * as a session.
-     */
-    readonly sessionUri?: string;
     /** Poll this to check whether the token has been minted yet. */
     readonly poll: () => Promise<string | null>;
   };
@@ -354,9 +336,8 @@ export async function finalizeVaultConsent(args: {
   /** The subject the consent was started under — must match beginVaultConsent. */
   userId: string;
   sessionUri: string;
-  client?: BedrockAgentCoreClient;
 }): Promise<void> {
-  const dataplane = args.client ?? makeClient(BedrockAgentCoreClient, { region: args.region });
+  const dataplane = makeClient(BedrockAgentCoreClient, { region: args.region });
   await dataplane.send(
     new CompleteResourceTokenAuthCommand({
       userIdentifier: { userId: args.userId },
@@ -390,7 +371,7 @@ export async function beginVaultConsent(args: {
 
   async function requestToken(
     forceAuth: boolean,
-  ): Promise<{ token: string | null; authUrl: string | null; sessionUri: string | null }> {
+  ): Promise<{ token: string | null; authUrl: string | null }> {
     const wat = await dataplane.send(
       new GetWorkloadAccessTokenForUserIdCommand({ workloadName: args.workloadName, userId }),
     );
@@ -418,7 +399,6 @@ export async function beginVaultConsent(args: {
     return {
       token: resp.accessToken ?? null,
       authUrl: resp.authorizationUrl ?? null,
-      sessionUri: resp.sessionUri ?? null,
     };
   }
 
@@ -445,7 +425,6 @@ export async function beginVaultConsent(args: {
   return {
     kind: 'consent-required',
     authorizationUrl: first.authUrl,
-    ...(first.sessionUri && { sessionUri: first.sessionUri }),
     poll: async () => (await requestToken(false)).token,
   };
 }

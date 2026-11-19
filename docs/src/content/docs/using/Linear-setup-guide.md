@@ -1,14 +1,12 @@
 ---
-title: Linear setup guide
+title: "Linear integration setup guide"
 ---
-
-# Linear integration setup guide
 
 Set up the ABCA Linear integration so that applying a label to a Linear issue triggers an autonomous task. The agent posts progress comments back on the issue as it works, and opens a pull request.
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction)) with the `linear` feature enabled in its [deployment profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles)
 - A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
 - A Linear workspace where you have **admin** access — `actor=app` installs are workspace-wide and Linear requires an admin to approve them
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
@@ -39,6 +37,8 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
 When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+
+A vault call that fails is not such a death. When the vault answers with an error (a throttle, a missing permission, a deleted credential provider) rather than saying that a new consent is needed, ABCA records and announces nothing. That event uses the Secrets Manager token if the workspace has a usable one and is otherwise dropped, with `Vault token resolution failed` in the function's log. The next event asks the vault again.
 
 #### Using the vault with Lambda MicroVMs
 
@@ -134,7 +134,7 @@ Pass `--label <name>` to use a trigger label other than `bgagent`. Also availabl
 
 `onboard-project` asks Linear which workspace owns the project and records it on the mapping, so a later webhook naming that project can be checked against the workspace whose signature it arrived with. Narrow the search with `--slug <slug>` when you know the workspace. If the Linear API is unreachable, `--workspace-id <uuid>` records an owner without verifying it — a wrong value routes the project's tasks nowhere.
 
-Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace.
+Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace, with the same `--repo` and the same `--label`: the command rewrites the whole mapping, and without `--label` the trigger label goes back to `bgagent`.
 
 ### Signing secrets in a multi-workspace install
 
@@ -180,7 +180,7 @@ The parent issue itself spawns no task — a human-authored sub-issue graph is t
 
 #### Adding a sub-issue to a running epic
 
-The graph is read **at trigger time**, so a sub-issue created afterward isn't picked up automatically. Create it (with its `blocked by` edges), then **re-apply the trigger label to the parent**. ABCA diffs the current graph against what it has, adds only the new nodes, and releases any that are immediately runnable. Re-applying with no new sub-issues is a safe no-op.
+The graph is read **at trigger time**, so a sub-issue created afterward isn't picked up automatically. Create it (with its `blocked by` edges), then **re-apply the trigger label to the parent**. ABCA diffs the current graph against what it has, adds only the new nodes, and releases any that are immediately runnable. Re-applying with no new sub-issues is safe: sub-issues that are running or have succeeded are left alone. It retries the ones that failed or were skipped, and it reads again the title and description of every sub-issue that is not running and has not succeeded, so a reworded sub-issue starts with its new text.
 
 Re-applying the label is deliberately the explicit "execute this" signal — the same consent model as the initial trigger — so newly drafted sub-issues don't start the instant you create them.
 
@@ -226,7 +226,7 @@ Pick the teammate from the list of human members. You get a one-time code (24h T
 
 They need an ABCA account first. If they don't have one:
 
-1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/overview#joining-an-existing-deployment) for the full Cognito-side flow).
+1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/authentication#joining-an-existing-deployment) for the full Cognito-side flow).
 2. **Teammate** pastes the bundle + temp password from the admin into:
 
    ```bash
@@ -322,7 +322,7 @@ A `WARN … Ignoring Linear agent-mode webhook …` line names the offending wor
 - Does the registry row's `oauth_secret_arn` match it, with `status='active'`?
 - Check the webhook-processor logs, not the agent container — token resolution and attachment screening happen there, before the task is dispatched.
 - `WARN linear_reactions: HTTP 401 from Linear` — the refresh token was revoked Linear-side. Re-run `bgagent linear setup <slug>`.
-- `resolve_linear_api_token: invalid_grant` — Linear permanently rejected the refresh token. Re-run setup to issue a new one.
+- `resolve_linear_api_token: stored token is expiring and the agent does not refresh` (agent log) — the agent read the stored token in its last minute or after it expired. The agent never renews the token itself; the next Lambda that needs one does. Until then that task posts no reactions and does not move the issue's state.
 - On the vault path, a "consent required" outcome means the grant is gone; re-run setup.
 
 ## Removing a workspace
@@ -382,7 +382,7 @@ aws dynamodb update-item \
 aws secretsmanager delete-secret --secret-id bgagent-linear-oauth-<slug> --force-delete-without-recovery
 ```
 
-The `--condition-expression` mirrors the handler's, so a second run against an already-revoked row fails with `ConditionalCheckFailedException` instead of silently re-revoking. `remove-workspace` behaves the same way: because it only matches `status='active'` rows, **re-running it on an already-removed workspace returns 404**, not a second success. That 404 does not distinguish "revoked" from "never existed".
+The `--condition-expression` makes a second run against an already-revoked row fail with `ConditionalCheckFailedException` instead of silently re-revoking. `remove-workspace` behaves the same way for a workspace it has removed: it leaves out rows revoked with `admin_removed`, so **re-running it on an already-removed workspace returns 404**, not a second success. That 404 does not distinguish "removed" from "never existed". A workspace that the platform itself marked `revoked` because its Linear grant died (`revoked_reason` `refresh_token_rejected` or `vault_consent_required`) is not removed yet: marking it deleted nothing, so whatever secret it has is still in Secrets Manager, and `remove-workspace` removes it like an active one. A row revoked by hand without a `revoked_reason` is accepted too; if its secret is already gone the command reports `absent`.
 
 Vault-managed workspaces need one more step after these two — see [the credential-provider section](#vault-managed-workspaces-the-credential-provider-outlives-the-stack).
 

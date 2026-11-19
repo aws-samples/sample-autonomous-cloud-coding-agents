@@ -26,28 +26,27 @@ export interface CommentTrigger {
  * Parse a channel-neutral `@bgagent` comment trigger.
  *
  * The token match is case-insensitive and rejects handle/email prefixes such
- * as `@bgagentbot` and `foo@bgagent.io`. All mention occurrences are removed
- * from the instruction. A bare mention remains a valid trigger; callers can
- * supply workflow-specific fallback text.
+ * as `@bgagentbot` and `foo@bgagent.io`; a mention that ends a sentence
+ * (`... onto main, @bgagent.`) is one. All mention occurrences are removed
+ * from the instruction, each with the full stops that only end its sentence
+ * and one space on either side; the rest stays as the reviewer wrote it, line
+ * breaks and indentation included. A bare mention remains a valid trigger;
+ * callers can supply workflow-specific fallback text.
  */
 export function parseCommentTrigger(body: string | undefined | null): CommentTrigger {
   if (!body || isKnownAbcaComment(body)) {
     return { triggered: false, instruction: '' };
   }
 
-  const mention = /(?<![\w.])@bgagent(?![\w.])/gi;
+  // The same mention as the Linear parser (orchestration-comment-trigger.ts),
+  // plus the look-behind that keeps `foo@bgagent` out.
+  const mention = / ?(?<![\w.])@bgagent(?!\w|\.\w)\.* ?/gi;
   if (!mention.test(body)) {
     return { triggered: false, instruction: '' };
   }
 
-  return {
-    triggered: true,
-    instruction: body
-      .replace(/(?<![\w.])@bgagent(?![\w.])/gi, ' ')
-      .replace(/[^\S\r\n]+/g, ' ')
-      .replace(/ *\r?\n */g, '\n')
-      .trim(),
-  };
+  // replace() restarts a global pattern from index 0, whatever test() left.
+  return { triggered: true, instruction: body.replace(mention, ' ').trim() };
 }
 
 /**
@@ -65,8 +64,15 @@ export function isKnownAbcaComment(body: string): boolean {
     '❌ ABCA ',
     '⚠️ Shipped a PR but stopped early',
     '👀 ABCA ',
+    // The orchestration panel: its rows repeat sub-issue titles and its retry
+    // hint spells out the mention.
+    '🔄 ABCA orchestration',
+    '⚠️ ABCA orchestration',
+    '✅ ABCA orchestration',
   ];
-  const trimmed = body.trimStart();
+  // The panel heading is bold after its emoji. An ADF body loses that mark on
+  // the way here; a wiki-text body still has it as an asterisk.
+  const trimmed = body.trimStart().replace(/^(\S+ )\*/, '$1');
   return prefixes.some((prefix) => trimmed.startsWith(prefix));
 }
 

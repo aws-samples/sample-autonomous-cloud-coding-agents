@@ -147,7 +147,7 @@ describe('approval-metrics: buildEmfLine', () => {
     expect(parsed.ClippedApprovalCount).toBe(1);
   });
 
-  test('emits empty dimensions list when no dimensions', () => {
+  test('declares one empty dimension set when the metric has no dimensions', () => {
     const line = buildEmfLine(
       {
         name: 'MetricsPublisherHeartbeat',
@@ -158,8 +158,10 @@ describe('approval-metrics: buildEmfLine', () => {
       1_700_000_000_000,
     );
 
+    // CloudWatch creates one metric per DimensionSet, and the format's JSON
+    // schema requires at least one: `[]` declares no metric at all.
     const parsed = JSON.parse(line);
-    expect(parsed._aws.CloudWatchMetrics[0].Dimensions).toEqual([]);
+    expect(parsed._aws.CloudWatchMetrics[0].Dimensions).toEqual([[]]);
   });
 });
 
@@ -276,13 +278,17 @@ describe('approval-metrics: classifyApprovalEvent', () => {
       },
     });
     expect(result.skipped).toEqual([]);
-    expect(result.specs).toHaveLength(2);
-    const byName = new Map(result.specs.map((s) => [s.name, s]));
-    expect(byName.get('ApprovalDecisionLatencyMs')?.value).toBe(5000);
-    expect(byName.get('ApprovalDecisionLatencyMs')?.dimensions).toEqual({ outcome: 'timed_out' });
-    expect(byName.get('TimedOutEffectiveTimeout')?.value).toBe(30);
-    expect(byName.get('TimedOutEffectiveTimeout')?.unit).toBe('Seconds');
-    expect(byName.get('TimedOutEffectiveTimeout')?.dimensions).toEqual({ rule_id: 'force_push_any' });
+    expect(result.specs).toHaveLength(3);
+    const latency = result.specs.find((s) => s.name === 'ApprovalDecisionLatencyMs');
+    expect(latency?.value).toBe(5000);
+    expect(latency?.dimensions).toEqual({ outcome: 'timed_out' });
+    // The breakdown twice: per rule, and without dimensions for the dashboard's
+    // p50/p90/p99 over all rules. CloudWatch does not aggregate a custom metric
+    // across dimensions, so the roll-up has to be published as its own metric.
+    const breakdown = result.specs.filter((s) => s.name === 'TimedOutEffectiveTimeout');
+    expect(breakdown.map((s) => s.dimensions)).toEqual([{ rule_id: 'force_push_any' }, {}]);
+    expect(breakdown.map((s) => s.value)).toEqual([30, 30]);
+    expect(breakdown.map((s) => s.unit)).toEqual(['Seconds', 'Seconds']);
   });
 
   test('approval_timed_out with unknown rule_id collapses to "other"', () => {
@@ -344,8 +350,7 @@ describe('approval-metrics: classifyApprovalEvent', () => {
         matching_rule_ids: ['force_push_any'],
       },
     });
-    expect(result.specs).toHaveLength(1);
-    expect(result.specs[0].name).toBe('TimedOutEffectiveTimeout');
+    expect(result.specs.map((s) => s.name)).toEqual(['TimedOutEffectiveTimeout', 'TimedOutEffectiveTimeout']);
     expect(result.skipped).toEqual([
       { metric: 'ApprovalDecisionLatencyMs', reason: 'missing_created_at' },
     ]);

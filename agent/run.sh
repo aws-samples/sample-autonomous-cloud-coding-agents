@@ -16,7 +16,7 @@ Modes:
 
 Flags:
   --local-events  Connect to DynamoDB Local (port 8000) for progress events.
-                  Requires: docker compose up -d && ./agent/scripts/create-local-tables.sh
+                  Requires: mise //agent:local:up (starts it and creates the tables)
 
 The second argument (after flags) is auto-detected:
   - If numeric, treated as a GitHub issue number
@@ -31,7 +31,8 @@ Environment variables (required):
 
 Environment variables (optional):
   ANTHROPIC_MODEL   Model to use (unset: defer to the agent runtime default)
-  DRY_RUN           Set to 1 to validate config and print prompt without running the agent
+  DRY_RUN           Set to 1 to validate config and print the length and hash of the
+                    prompts without running the agent
   MAX_TURNS         Max agent turns (default: 100)
 
 AWS credentials — pick one method:
@@ -48,7 +49,7 @@ Examples:
   # Local mode — issue + additional instructions
   ./agent/run.sh "myorg/myrepo" 42 "Focus on the backend validation only"
 
-  # Local mode — dry run (print prompt, don't invoke agent)
+  # Local mode — dry run (print the length and hash of the prompts, don't invoke agent)
   DRY_RUN=1 ./agent/run.sh "myorg/myrepo" 42
 
   # Local mode with progress events to DynamoDB Local
@@ -140,10 +141,12 @@ if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
     RESOLVED_SECRET="${AWS_SECRET_ACCESS_KEY}"
     RESOLVED_TOKEN="${AWS_SESSION_TOKEN:-}"
     echo "  AWS:       using explicit credentials (AWS_ACCESS_KEY_ID)"
-elif command -v aws &>/dev/null; then
+elif command -v aws &>/dev/null && [[ "$(aws --version 2>&1)" != aws-cli/1.* ]]; then
     # Resolve credentials from the AWS CLI (handles SSO, profiles, credential files).
     # This avoids the need to mount ~/.aws and replicate the full credential chain
     # inside the container — SSO tokens in particular don't resolve well there.
+    # Not with AWS CLI v1, which has no `configure export-credentials`: it goes on
+    # to the ~/.aws mount below.
     echo "  AWS:       resolving credentials via AWS CLI${AWS_PROFILE:+ (profile '${AWS_PROFILE}')}..."
     EXPORT_CMD=(aws configure export-credentials --format process)
     [[ -n "${AWS_PROFILE:-}" ]] && EXPORT_CMD+=(--profile "${AWS_PROFILE}")
@@ -177,7 +180,8 @@ fi
 # Build
 # ---------------------------------------------------------------------------
 echo "Building Docker image..."
-docker build --build-arg CACHE_BUST="$(date +%s)" -t bgagent-local "$SCRIPT_DIR"
+# The build context is the repository root: the Dockerfile copies agent/... and contracts/.
+docker build --build-arg CACHE_BUST="$(date +%s)" -f "$SCRIPT_DIR/Dockerfile" -t bgagent-local "$SCRIPT_DIR/.."
 
 # Print image size
 IMAGE_SIZE=$(docker image inspect bgagent-local --format='{{.Size}}')
@@ -214,21 +218,20 @@ DOCKER_ARGS=(
 # unset variable leaves the agent runtime's own default (agent/src/config.py) intact
 # instead of being shadowed by a second default defined here.
 [[ -n "${ANTHROPIC_MODEL:-}" ]] && DOCKER_ARGS+=(-e "ANTHROPIC_MODEL=${ANTHROPIC_MODEL}")
+[[ -n "${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}" ]] && DOCKER_ARGS+=(-e "ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}")
 [[ -n "${ISSUE_NUMBER}" ]] && DOCKER_ARGS+=(-e "ISSUE_NUMBER=${ISSUE_NUMBER}")
 [[ -n "${TASK_DESCRIPTION}" ]] && DOCKER_ARGS+=(-e "TASK_DESCRIPTION=${TASK_DESCRIPTION}")
 [[ -n "${DRY_RUN:-}" ]] && DOCKER_ARGS+=(-e "DRY_RUN=${DRY_RUN}")
 [[ -n "${MAX_TURNS:-}" ]] && DOCKER_ARGS+=(-e "MAX_TURNS=${MAX_TURNS}")
 [[ -n "${MAX_BUDGET_USD:-}" ]] && DOCKER_ARGS+=(-e "MAX_BUDGET_USD=${MAX_BUDGET_USD}")
 [[ -n "${LINEAR_API_TOKEN:-}" ]] && DOCKER_ARGS+=(-e "LINEAR_API_TOKEN=${LINEAR_API_TOKEN}")
-[[ -n "${LINEAR_API_TOKEN_SECRET_ARN:-}" ]] && DOCKER_ARGS+=(-e "LINEAR_API_TOKEN_SECRET_ARN=${LINEAR_API_TOKEN_SECRET_ARN}")
 
 # Local events mode: connect to DynamoDB Local via the agent-local network
 if [[ "$LOCAL_EVENTS" == true ]]; then
     # Verify DynamoDB Local is running
     if ! docker inspect dynamodb-local >/dev/null 2>&1; then
         echo "ERROR: DynamoDB Local is not running." >&2
-        echo "  Start it with: cd agent && docker compose up -d" >&2
-        echo "  Create tables: ./agent/scripts/create-local-tables.sh" >&2
+        echo "  Start it and create the tables with: mise //agent:local:up" >&2
         exit 1
     fi
     DOCKER_ARGS+=(
@@ -271,7 +274,7 @@ echo "  docker logs -f ${CONTAINER_NAME}        # live output"
 echo "  docker stats ${CONTAINER_NAME}          # CPU, memory, disk I/O"
 echo "  docker exec ${CONTAINER_NAME} du -sh /workspace  # disk usage"
 if [[ "$LOCAL_EVENTS" == true ]]; then
-echo "  mise run local:events                   # query progress events"
+echo "  mise //agent:local:events               # query progress events"
 fi
 echo ""
 

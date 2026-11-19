@@ -226,7 +226,17 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
     with _auth_state_lock:
         _consecutive_auth_failures = 0
 
-    body = resp.json() if resp.content else {}
+    # A 200 whose body is not a JSON object (a proxy's HTML page, ``null``, a list)
+    # is one more failure of an advisory call. Raised out of here, the parse error
+    # or the ``.get`` below leaves the pipeline hook and the task is written FAILED.
+    try:
+        body = resp.json() if resp.content else {}
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        log("WARN", "linear_reactions: HTTP 200 from Linear without a JSON object in the body")
+        return None
+
     if body.get("errors"):
         log("WARN", f"linear_reactions: GraphQL errors: {body['errors']}")
         return None
@@ -287,7 +297,7 @@ def _transition_issue_state(issue_id: str, target_type: str, preferred_names: li
         if target:
             break
     if target is None:
-        target = sorted(of_type, key=lambda s: s.get("position", 0))[0]
+        target = min(of_type, key=lambda s: s.get("position", 0))
 
     current = issue.get("state") or {}
     if current.get("id") == target.get("id"):

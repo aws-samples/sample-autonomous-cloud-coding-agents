@@ -24,15 +24,25 @@
  * ``contracts/constants.json`` is the single source of truth for
  * constants shared across Python (agent runtime) and TypeScript (CDK +
  * CLI). This script catches the failure mode that the contract is
- * designed to prevent: someone re-introducing a literal declaration of
- * one of these constants in code.
+ * designed to prevent: someone re-introducing a declaration of one of
+ * these constants in code.
  *
  * The CDK TypeScript side is enforced by the compiler: consumers import
  * the JSON via ``resolveJsonModule``, so a missing or renamed field fails
- * ``tsc``. The Python side has no equivalent, so this script walks the
- * agent consumers and rejects known constants assigned to numeric or
- * string literals instead of reading the JSON. The published CLI's
- * package-safe mirrors are covered by ``cli/test/constants-parity.test.ts``.
+ * ``tsc``. The Python side has no equivalent, so this script walks every
+ * file under ``agent/src`` and rejects an assignment to a known constant
+ * that is anything but a plain read of its contract key: a literal, a
+ * literal inside a conversion, arithmetic on the contract value, another
+ * key. The values the constants hold at import time are covered by
+ * ``agent/tests/test_constants_parity.py``; the published CLI's
+ * package-safe mirrors by ``cli/test/constants-parity.test.ts``.
+ *
+ * This is a check of the source text, line by line. It sees ``NAME = …``,
+ * annotated, augmented, attribute (``module.NAME = …``) and tuple
+ * (``A, B = …``) assignments at any indentation. It does not see a name
+ * bound any other way (``setattr``, ``globals()``, ``:=``, the second
+ * target of ``A = B = …``): for the constants' home modules the parity
+ * test above covers that, whatever the spelling.
  *
  * Run via ``mise run check:constants-sync`` or
  * ``node --experimental-strip-types scripts/check-constants-sync.ts``.
@@ -45,13 +55,12 @@ import * as path from 'node:path';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const CONSTANTS_JSON = path.join(REPO_ROOT, 'contracts/constants.json');
-const POLICY_PY = path.join(REPO_ROOT, 'agent/src/policy.py');
-const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
-const SERVER_PY = path.join(REPO_ROOT, 'agent/src/server.py');
-const CONFIG_PY = path.join(REPO_ROOT, 'agent/src/config.py');
-const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY];
+const AGENT_SRC = path.join(REPO_ROOT, 'agent/src');
+const PARITY_TEST = 'agent/tests/test_constants_parity.py';
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
-const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
+const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/microvm/image-capability.ts');
+const MICROVM_STRATEGY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts');
+const TS_CONSUMERS = [MICROVM_COMPUTE_TS, MICROVM_IMAGE_CAPABILITY_TS, MICROVM_STRATEGY_TS];
 
 /** Env var names must be UPPER_SNAKE — they are installed into a process env. */
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -59,112 +68,158 @@ const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const CONFIG_KEY_PATTERN = /^[a-z][a-z0-9_]*$/;
 
 /**
- * Constant names that ``contracts/constants.json`` owns and the
- * pre-compiled regex that catches their literal assignment in any
- * consumer file.  Each pattern matches ``NAME = 50``, ``NAME: int = 50``
- * and ``NAME: float = 50.0`` styles; the regex literals are hard-coded
- * (not built from string concatenation) so semgrep's
- * ``detect-non-literal-regexp`` rule is satisfied without an exception.
+ * Python constant names that ``contracts/constants.json`` owns, each with
+ * the contract key it must be read from. Every assignment to one of these
+ * names, in any file under ``agent/src``, has to be a plain read of that
+ * key — ``NAME = <contract>["key"]``, optionally inside one conversion —
+ * and each name has to be assigned somewhere, so that renaming a constant
+ * cannot quietly take it out of this check.
  *
- * The annotation group accepts ``float`` as well as ``int`` deliberately. The
- * value half (``-?\d+\b``) already matches a float literal — ``\d+`` takes the
- * integral part and ``\b`` is satisfied by the following ``.`` — so an
- * unannotated ``NAME = 240.0`` was always caught; what a narrower group would
- * have missed is an *annotated* ``NAME: float = 240.0``. Widening costs nothing
- * and removes the only shape that could have slipped through.
- *
- * The two ``MICROVM_PLATFORM_CONFIG_*`` patterns are shaped differently: those
- * constants are a mapping and a set, so the drift they catch is a collection
- * LITERAL (``= {``, ``= [``, ``= frozenset({``) rather than a scalar. A
- * contract-sourced ``= dict(_CONTRACT["env_by_key"])`` does not match.
+ * The names are looked up in this table rather than compiled into
+ * patterns, so no regular expression is built from a variable (semgrep's
+ * ``detect-non-literal-regexp`` rule).
  */
-const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
-  { name: 'DEFAULT_APPROVAL_GATE_CAP', regex: /^\s*DEFAULT_APPROVAL_GATE_CAP\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
-  { name: 'APPROVAL_GATE_CAP_MIN', regex: /^\s*APPROVAL_GATE_CAP_MIN\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
-  { name: 'APPROVAL_GATE_CAP_MAX', regex: /^\s*APPROVAL_GATE_CAP_MAX\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
-  { name: 'FLOOR_TIMEOUT_S', regex: /^\s*FLOOR_TIMEOUT_S\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
-  { name: 'DEFAULT_TASK_TIMEOUT_S', regex: /^\s*DEFAULT_TASK_TIMEOUT_S\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m },
-  { name: 'APP_ACTOR_MIN_SECRET_LENGTH', regex: /^\s*APP_ACTOR_MIN_SECRET_LENGTH\s*(?::\s*(?:int|float))?\s*=\s*\d+\b/m },
-  { name: 'FORGE_WEBTRIGGER_SUFFIX', regex: /^\s*FORGE_WEBTRIGGER_SUFFIX\s*(?::\s*str)?\s*=\s*["']/m },
-  {
-    name: 'MICROVM_PLATFORM_CONFIG_ENV_BY_KEY',
-    regex: /^\s*MICROVM_PLATFORM_CONFIG_ENV_BY_KEY\s*(?::[^=]+)?=\s*(?:dict\()?\s*[[{]/m,
-  },
-  {
-    name: 'MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS',
-    regex: /^\s*MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS\s*(?::[^=]+)?=\s*(?:frozenset\(|set\()?\s*[[{]/m,
-  },
+const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
+  ['DEFAULT_APPROVAL_GATE_CAP', 'default'],
+  ['APPROVAL_GATE_CAP_MIN', 'min'],
+  ['APPROVAL_GATE_CAP_MAX', 'max'],
+  ['FLOOR_TIMEOUT_S', 'min'],
+  ['DEFAULT_TASK_TIMEOUT_S', 'default'],
+  ['APP_ACTOR_MIN_SECRET_LENGTH', 'min_secret_length'],
+  ['FORGE_WEBTRIGGER_SUFFIX', 'forge_webtrigger_suffix'],
+  ['MICROVM_PLATFORM_CONFIG_ENV_BY_KEY', 'env_by_key'],
+  ['MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS', 'required'],
   // ADR-021 P2: the `/ready` warm-up ceiling and the CDK-side `/ready` hook
   // timeout are a RELATIONSHIP (`warmup_total < ready_hook`), and a relationship
-  // cannot be enforced from one side — so neither side may re-declare its half as
-  // a literal. A contract-sourced `= _HOOK_BUDGETS["…"]` does not match.
-  // Collection literals, like the MICROVM_PLATFORM_CONFIG_* pair above: these are the
-  // vault's cache key, and a divergence between any two of the four copies makes every
-  // resolve a cache miss that #812 now reports as consent-required. A contract-sourced
-  // `= list(_LINEAR_VAULT_CONTRACT["scopes"])` does not match.
-  {
-    name: '_LINEAR_VAULT_SCOPES',
-    regex: /^\s*_LINEAR_VAULT_SCOPES\s*(?::[^=]+)?=\s*(?:list\(|tuple\()?\s*[[{]/m,
-  },
-  {
-    name: '_LINEAR_VAULT_CUSTOM_PARAMS',
-    regex: /^\s*_LINEAR_VAULT_CUSTOM_PARAMS\s*(?::[^=]+)?=\s*(?:dict\()?\s*[[{]/m,
-  },
-  {
-    name: '_READY_WARMUP_TOTAL_BUDGET_SECONDS',
-    regex: /^\s*_READY_WARMUP_TOTAL_BUDGET_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
-  },
-  {
-    name: '_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS',
-    regex: /^\s*_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
-  },
-];
+  // cannot be enforced from one side — so neither side may re-declare its half.
+  ['_READY_WARMUP_TOTAL_BUDGET_SECONDS', 'warmup_total_budget_seconds'],
+  ['_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS', 'warmup_required_timeout_seconds'],
+  // The vault's cache key: a divergence between any two of the four copies makes
+  // every resolve a cache miss that #812 now reports as consent-required.
+  ['_LINEAR_VAULT_SCOPES', 'scopes'],
+  ['_LINEAR_VAULT_CUSTOM_PARAMS', 'custom_parameters'],
+  // ADR-021 P3: the agent's pause/wake handler must answer inside the hook timeout
+  // the construct configures, so neither half may be re-declared as a literal.
+  ['LIFECYCLE_HANDLER_BUDGET_S', 'lifecycle_handler_budget_seconds'],
+  ['LIFECYCLE_HOOK_TIMEOUT_S', 'lifecycle_hook_timeout_seconds'],
+]);
 
 /**
- * The TypeScript half of the same no-literal-redeclaration rule.
+ * The TypeScript half of the same rule, with the contract path spelled out.
  *
  * `tsc` already catches a *renamed* contract field, but it cannot catch a
  * construct that stops reading the contract and goes back to
  * `const READY_HOOK_TIMEOUT_SECONDS = 300;` — which is exactly how the budget
  * invariant got asserted against a hardcoded copy in the first place. So the one
  * TypeScript consumer whose value is half of a cross-language invariant is checked
- * the same way the Python ones are.
+ * the same way the Python ones are: every declaration must read the contract, and
+ * the name has to be declared in a consumer, so that renaming or inlining the
+ * constant cannot quietly take it out of this check.
  */
-const OWNED_TS_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
-  {
-    name: 'READY_HOOK_TIMEOUT_SECONDS',
-    regex: /^\s*(?:export\s+)?const\s+READY_HOOK_TIMEOUT_SECONDS\s*(?::\s*number)?\s*=\s*-?\d+\b/m,
-  },
-];
+const OWNED_TS_NAMES: ReadonlyMap<string, string> = new Map([
+  ['READY_HOOK_TIMEOUT_SECONDS', 'microvm_hook_budgets.ready_hook_timeout_seconds'],
+  // ADR-021 P3 lifecycle: the hook port, timeout, protocol marker and duration cap
+  // must match the agent image and the service limit, not a local copy.
+  ['LIFECYCLE_HOOK_TIMEOUT_SECONDS', 'microvm_hook_budgets.lifecycle_hook_timeout_seconds'],
+  ['AGENT_HOOK_PORT', 'microvm_lifecycle.hook_port'],
+  ['MICROVM_LIFECYCLE_PROTOCOL', 'microvm_lifecycle.protocol_version'],
+  ['MICROVM_IMAGE_PROTOCOL_ENV', 'microvm_lifecycle.image_protocol_env'],
+  ['MICROVM_MAX_DURATION_SECONDS', 'microvm_lifecycle.maximum_duration_seconds'],
+]);
+
+/** `NAME = …`, `NAME: T = …`, `module.NAME = …`, `NAME += …` and `A, B = …`, at any indentation. */
+const PY_ASSIGNMENT = /^\s*((?:[A-Za-z_][\w.]*\s*,\s*)*[A-Za-z_][\w.]*)\s*(?::[^=]*)?(?:\*\*|\/\/|>>|<<|[-+*/%@&|^])?=(?!=)(.*)$/;
+/** A plain contract read: `<name>["key"]` (keys may chain), optionally inside one conversion. */
+const PY_CONTRACT_READ = /^(?:(?:int|float|str|bool|dict|list|tuple|set|frozenset)\( ?)?[A-Za-z_]\w*((?:\[(?:"[a-z_]+"|'[a-z_]+')\])+),? ?\)?$/;
+const PY_LAST_KEY = /\[["']([a-z_]+)["']\]$/;
+const PY_COMMENT = /(?:^|\s)#.*$/;
+const TS_DECLARATION = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=(?!=)(.*)$/;
+/** A plain contract read: `<import>.a.b`, optionally inside one conversion. */
+const TS_CONTRACT_READ = /^(?:(?:String|Number)\( ?)?[A-Za-z_$][\w$]*\.([a-z_.]+) ?\)?;?$/;
 
 interface Drift {
   readonly file: string;
+  readonly line: number;
   readonly name: string;
-  readonly line: string;
+  readonly statement: string;
+  readonly expected: string;
 }
 
-function findDriftInPython(filePath: string): Drift[] {
-  return findLiteralDrift(filePath, OWNED_PYTHON_PATTERNS);
+/** Every file under `dir` with the given extension, recursively. */
+function sourceFiles(dir: string, extension: string): string[] {
+  return fs
+    .readdirSync(dir, { recursive: true, encoding: 'utf-8' })
+    .filter((entry) => entry.endsWith(extension))
+    .map((entry) => path.join(dir, entry))
+    .sort();
 }
 
-function findDriftInTypeScript(filePath: string): Drift[] {
-  return findLiteralDrift(filePath, OWNED_TS_PATTERNS);
-}
-
-function findLiteralDrift(
-  filePath: string,
-  patterns: ReadonlyArray<{ name: string; regex: RegExp }>,
-): Drift[] {
-  const source = fs.readFileSync(filePath, 'utf-8');
-  const lines = source.split('\n');
-  const drifts: Drift[] = [];
-  for (const { name, regex } of patterns) {
-    for (const line of lines) {
-      if (regex.test(line)) {
-        drifts.push({ file: filePath, name, line: line.trim() });
-      }
-    }
+/** Depth of the brackets `text` leaves open (a statement continues while it is positive). */
+function openBrackets(text: string): number {
+  let depth = 0;
+  for (const char of text) {
+    if ('([{'.includes(char)) depth++;
+    else if (')]}'.includes(char)) depth--;
   }
+  return depth;
+}
+
+/**
+ * Assignments to owned Python names in one file. `seen` collects every owned
+ * name the file assigns; the returned drifts are the assignments that are not
+ * a plain read of the name's contract key.
+ */
+function findDriftInPython(filePath: string, seen: Set<string>): Drift[] {
+  const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+  const drifts: Drift[] = [];
+  lines.forEach((line, index) => {
+    const assignment = PY_ASSIGNMENT.exec(line);
+    if (!assignment) return;
+    // `module.NAME` assigns NAME; `A, B = …` assigns both.
+    const targets = assignment[1].split(',').map((target) => target.trim().split('.').pop() ?? '');
+    for (const name of targets) {
+      const key = OWNED_PYTHON_NAMES.get(name);
+      if (key === undefined) continue;
+      seen.add(name);
+      // Join a parenthesised value that continues on the following lines.
+      let value = assignment[2].replace(PY_COMMENT, '');
+      for (let next = index + 1; openBrackets(value) > 0 && next < lines.length; next++) {
+        value += ` ${lines[next].replace(PY_COMMENT, '')}`;
+      }
+      const read = PY_CONTRACT_READ.exec(value.replace(/\s+/g, ' ').trim());
+      if (targets.length === 1 && read && PY_LAST_KEY.exec(read[1])?.[1] === key) continue;
+      drifts.push({
+        file: filePath,
+        line: index + 1,
+        name,
+        statement: line.trim(),
+        expected: `${name} = <contract section>["${key}"], optionally inside one conversion such as int(...)`,
+      });
+    }
+  });
+  return drifts;
+}
+
+/** The TypeScript counterpart of `findDriftInPython`: `seen` collects every owned name the file declares. */
+function findDriftInTypeScript(filePath: string, seen: Set<string>): Drift[] {
+  const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+  const drifts: Drift[] = [];
+  lines.forEach((line, index) => {
+    const declaration = TS_DECLARATION.exec(line);
+    const contractPath = declaration ? OWNED_TS_NAMES.get(declaration[1]) : undefined;
+    if (!declaration || contractPath === undefined) return;
+    seen.add(declaration[1]);
+    // The value may sit on the line after the `=`.
+    const value = (declaration[2].trim() || (lines[index + 1] ?? '')).trim();
+    if (TS_CONTRACT_READ.exec(value)?.[1] === contractPath) return;
+    drifts.push({
+      file: filePath,
+      line: index + 1,
+      name: declaration[1],
+      statement: line.trim(),
+      expected: `const ${declaration[1]} = <constants.json import>.${contractPath}`,
+    });
+  });
   return drifts;
 }
 
@@ -184,6 +239,14 @@ function main(): number {
       ready_hook_timeout_seconds: number;
       warmup_total_budget_seconds: number;
       warmup_required_timeout_seconds: number;
+      lifecycle_hook_timeout_seconds: number;
+      lifecycle_handler_budget_seconds: number;
+    };
+    microvm_lifecycle?: {
+      protocol_version: number;
+      image_protocol_env: string;
+      hook_port: number;
+      maximum_duration_seconds: number;
     };
   };
   try {
@@ -287,12 +350,11 @@ function main(): number {
     invariantErrors.push('microvm_platform_config.required contains a duplicate');
   }
 
-  // ARN pinning (ADR-021 P2, review B5). `arn_keys` names the values the agent
-  // pins to its own partition/account before installing them into the env that
-  // resolves credentials and fetches secrets; `account_anchor_key` names the ARN
-  // that supplies the expected partition/account. Both are validated here as well
-  // as at agent import time, because a malformed entry would silently WIDEN what
-  // the agent accepts from a network payload.
+  // ARN consistency (ADR-021 P2, review B5). `arn_keys` names the values checked
+  // against the partition/account supplied by `account_anchor_key`. That anchor
+  // comes from the same payload; agreement does not establish deployment identity.
+  // Validate both here and at agent import time so a new ARN field cannot
+  // silently skip the existing consistency check.
   if (!Array.isArray(mpc.arn_keys) || mpc.arn_keys.length === 0) {
     invariantErrors.push('microvm_platform_config.arn_keys must be a non-empty array');
   } else {
@@ -305,6 +367,14 @@ function main(): number {
     }
     if (new Set(mpc.arn_keys).size !== mpc.arn_keys.length) {
       invariantErrors.push('microvm_platform_config.arn_keys contains a duplicate');
+    }
+    for (const [key, envName] of Object.entries(envByKey)) {
+      if ((key.endsWith('_arn') || (typeof envName === 'string' && envName.endsWith('_ARN')))
+        && !mpc.arn_keys.includes(key)) {
+        invariantErrors.push(
+          `microvm_platform_config: ARN-shaped key "${key}" is missing from arn_keys`,
+        );
+      }
     }
     if (!mpc.arn_keys.includes(mpc.account_anchor_key)) {
       invariantErrors.push(
@@ -327,10 +397,20 @@ function main(): number {
   // for a runtime failure becomes a build failure. Both halves live here precisely
   // so the relationship is checkable; this is the check.
   const mhb = json.microvm_hook_budgets;
+  const lifecycle = json.microvm_lifecycle;
+  if (!lifecycle || !Number.isSafeInteger(lifecycle.protocol_version) || lifecycle.protocol_version <= 0
+    || !Number.isInteger(lifecycle.hook_port) || lifecycle.hook_port < 1 || lifecycle.hook_port > 65535
+    || !Number.isInteger(lifecycle.maximum_duration_seconds)
+    || lifecycle.maximum_duration_seconds <= 0 || lifecycle.maximum_duration_seconds > 28_800
+    || typeof lifecycle.image_protocol_env !== 'string' || !/^ABCA_MICROVM_[A-Z0-9_]+$/.test(lifecycle.image_protocol_env)) {
+    invariantErrors.push('microvm_lifecycle requires a positive protocol version, valid hook port, duration within 1–28800 seconds and ABCA_MICROVM_ marker name');
+  }
   const BUDGET_FIELDS = [
     'ready_hook_timeout_seconds',
     'warmup_total_budget_seconds',
     'warmup_required_timeout_seconds',
+    'lifecycle_hook_timeout_seconds',
+    'lifecycle_handler_budget_seconds',
   ] as const;
   if (!mhb || BUDGET_FIELDS.some(field => !Number.isInteger(mhb[field]))) {
     console.error(
@@ -355,6 +435,13 @@ function main(): number {
       'best-effort ones something to share)',
     );
   }
+  if (mhb.lifecycle_handler_budget_seconds >= mhb.lifecycle_hook_timeout_seconds) {
+    invariantErrors.push(
+      'microvm_hook_budgets.lifecycle_handler_budget_seconds must be < '
+      + 'lifecycle_hook_timeout_seconds (pause/wake must leave time to answer)',
+    );
+  }
+
 
   if (invariantErrors.length > 0) {
     console.error(`Semantic invariant violations in ${CONSTANTS_JSON}:\n`);
@@ -362,32 +449,68 @@ function main(): number {
     return 1;
   }
 
+  const pythonFiles = sourceFiles(AGENT_SRC, '.py');
+  const assigned = new Set<string>();
+  const declared = new Set<string>();
   const drifts = [
-    ...PYTHON_CONSUMERS.flatMap(findDriftInPython),
-    ...TS_CONSUMERS.flatMap(findDriftInTypeScript),
+    ...pythonFiles.flatMap((file) => findDriftInPython(file, assigned)),
+    ...TS_CONSUMERS.flatMap((file) => findDriftInTypeScript(file, declared)),
   ];
+  // A name nothing assigns is a renamed or deleted constant: the check would
+  // otherwise go on reporting OK for a constant it no longer sees.
+  const unassigned = [...OWNED_PYTHON_NAMES.keys()].filter((name) => !assigned.has(name));
+  const undeclared = [...OWNED_TS_NAMES.keys()].filter((name) => !declared.has(name));
+  // This script checks how a constant is written; the parity test checks the
+  // value it holds. A name only one of the two knows is half-checked.
+  const parityTest = fs.readFileSync(path.join(REPO_ROOT, PARITY_TEST), 'utf-8');
+  const untested = [...OWNED_PYTHON_NAMES.keys()].filter((name) => !parityTest.includes(`"${name}"`));
 
-  if (drifts.length > 0) {
+  if (drifts.length > 0 || unassigned.length > 0 || undeclared.length > 0 || untested.length > 0) {
     console.error('Cross-language constants drift detected:\n');
     for (const d of drifts) {
       console.error(
-        `  - ${path.relative(REPO_ROOT, d.file)}: "${d.name}" assigned to a literal:\n` +
-          `      ${d.line}\n` +
-          `    Read from contracts/constants.json instead (see contracts/constants.md).`,
+        `  - ${path.relative(REPO_ROOT, d.file)}:${d.line}: "${d.name}" is not a plain read of its contract value:\n` +
+          `      ${d.statement}\n` +
+          `    Read from contracts/constants.json instead (see contracts/constants.md): ${d.expected}.`,
       );
     }
-    console.error(`\n${drifts.length} drift issue(s) found.`);
+    for (const name of unassigned) {
+      console.error(
+        `  - "${name}" is owned by contracts/constants.json but assigned nowhere under agent/src.\n` +
+          `    If the constant was renamed or removed, update OWNED_PYTHON_NAMES in scripts/check-constants-sync.ts.`,
+      );
+    }
+    for (const name of undeclared) {
+      console.error(
+        `  - "${name}" is owned by contracts/constants.json but declared in none of its TypeScript consumers ` +
+          `(${TS_CONSUMERS.map((file) => path.relative(REPO_ROOT, file)).join(', ')}).\n` +
+          `    Declare it there as a read of its contract value (const ${name} = <constants.json import>.${OWNED_TS_NAMES.get(name)}).\n` +
+          `    If the constant was renamed or removed on purpose, update OWNED_TS_NAMES in scripts/check-constants-sync.ts.`,
+      );
+    }
+    for (const name of untested) {
+      console.error(
+        `  - "${name}" is owned by contracts/constants.json but ${PARITY_TEST} does not compare its value.\n` +
+          `    Add a row for it to _OWNED in that file.`,
+      );
+    }
+    console.error(`\n${drifts.length + unassigned.length + undeclared.length + untested.length} drift issue(s) found.`);
     return 1;
   }
 
   console.log(
     `Constants sync OK: contracts/constants.json validated; ` +
-      `${OWNED_PYTHON_PATTERNS.length} Python names checked across ` +
-      `${PYTHON_CONSUMERS.length} consumers, ` +
-      `${OWNED_TS_PATTERNS.length} TypeScript name(s) across ` +
+      `${OWNED_PYTHON_NAMES.size} Python names checked across ` +
+      `${pythonFiles.length} files under agent/src, ` +
+      `${OWNED_TS_NAMES.size} TypeScript name(s) across ` +
       `${TS_CONSUMERS.length} consumer(s).`,
   );
   return 0;
 }
 
-process.exit(main());
+try {
+  process.exitCode = main();
+} catch (err) {
+  console.error(`check-constants-sync: ${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+}

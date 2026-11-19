@@ -92,6 +92,16 @@ class TestIndividualRules:
         # steps still contain ensure_pr strategy:create from _base()
         assert "rule-4" in validate_workflow(w)
 
+    def test_rule4_read_only_rejects_ensure_pr_without_a_strategy(self):
+        # A step that names no strategy runs as `create` (the default of the
+        # pipeline and of the step handler): it pushes and opens a pull request.
+        w = _base()
+        w["read_only"] = True
+        w["agent_config"]["tier"] = "read-only"
+        w["agent_config"]["allowed_tools"] = ["Bash", "Read"]
+        w["steps"][-1] = {"kind": "ensure_pr"}
+        assert "rule-4" in validate_workflow(w)
+
     def test_rule7_repo_less_rejects_discover_and_provider(self):
         # knowledge default (repo-less); repo_config that discovers / names a
         # provider is invalid, and the schema can't see the domain default.
@@ -174,6 +184,11 @@ class TestIndividualRules:
         w = _base()
         w["agent_config"]["cedar_policy_modules"] = ["builtin/hard_deny", "builtin/soft_deny", ref]
         assert ("rule-8" in validate_workflow(w)) is bad
+
+    def test_rule8_step_kind_without_a_handler_flagged(self):
+        w = _base()
+        w["steps"].insert(1, {"kind": "teleport"})
+        assert "rule-8" in validate_workflow(w)
 
     def test_rule8_unknown_deliver_target_flagged(self):
         # ADR-014 addendum: deliver_artifact.target must name a registered

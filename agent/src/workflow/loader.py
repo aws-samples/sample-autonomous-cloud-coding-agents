@@ -21,6 +21,7 @@ import jsonschema
 import jsonschema.protocols
 import jsonschema.validators
 import yaml
+from pydantic import ValidationError
 
 from .models import Workflow
 
@@ -81,7 +82,15 @@ def parse_workflow(data: dict[str, Any]) -> Workflow:
     ``load_workflow``.
     """
     validate_shape(data)
-    return Workflow.model_validate(data)
+    try:
+        return Workflow.model_validate(data)
+    except ValidationError as e:
+        # The schema let through what the model refuses: the two have drifted,
+        # or the mapping holds what no JSON document can (a non-string key).
+        detail = "; ".join(
+            f"{'/'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()
+        )
+        raise WorkflowValidationError(f"workflow failed model validation: {detail}") from e
 
 
 def load_workflow_file(path: str | Path) -> Workflow:

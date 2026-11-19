@@ -39,11 +39,7 @@
  * ``transitionState`` / ``revertState`` to move. They are absent rather than
  * stubbed to a no-op, so the engine's capability guards skip them: a silent
  * success would claim the platform mirrored a state it never did, and the panel
- * is then the only place the epic's progress is visible. ``sweepNotes`` is also
- * omitted (deleting other messages in a shared channel is a blunt instrument that
- * needs its own product decision, not a quiet default), as is ``fetchChildGraph``
- * — Slack has no dependency model to read a DAG from, so a Slack-triggered
- * orchestration supplies its graph declaratively.
+ * is then the only place the epic's progress is visible.
  */
 
 import { logger } from './logger';
@@ -265,8 +261,5 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
     },
 
     // transitionState / revertState: omitted — Slack has no workflow state.
-    // sweepNotes: omitted — bulk-deleting messages in a shared channel needs its
-    //   own product decision.
-    // fetchChildGraph: omitted — no dependency model; graphs arrive declaratively.
   } satisfies Channel as Channel;
 }

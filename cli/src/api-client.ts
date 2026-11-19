@@ -19,7 +19,7 @@
 
 import { getAuthToken } from './auth';
 import { loadConfig } from './config';
-import { debug, isVerbose, redactSensitive } from './debug';
+import { debug, isVerbose, redactedJson } from './debug';
 import { ApiError, CliError } from './errors';
 import {
   ApiKeyDetail,
@@ -59,6 +59,9 @@ import {
   TraceUrlResponse,
   WebhookDetail,
 } from './types';
+
+/** How many of the newest events ``getStatusSnapshot`` reads for ``bgagent status``. */
+const STATUS_SNAPSHOT_EVENT_LIMIT = 20;
 
 /** Options for constructing an {@link ApiClient}. */
 export interface ApiClientOptions {
@@ -100,8 +103,9 @@ export class ApiClient {
       const config = loadConfig();
       if (!config.registry_api_url) {
         throw new Error(
-          'registry_api_url is not set in your bgagent config. Re-run setup (or add '
-          + 'registry_api_url from the stack\'s RegistryApiUrl output) to use `bgagent registry`.',
+          'registry_api_url is not set in your bgagent config. If the stack deploys the Agent Registry, '
+          + 'run `bgagent configure --stack-name <stack>` (or add registry_api_url from its RegistryApiUrl output); '
+          + 'otherwise run `bgagent setup` and enable AWS Agent Registry (feature \'agentRegistry\').',
         );
       }
       this.registryBaseUrl = config.registry_api_url.replace(/\/+$/, '');
@@ -124,10 +128,10 @@ export class ApiClient {
     const url = `${baseUrl ?? this.getBaseUrl()}${path}`;
 
     debug(`${method} ${url}`);
-    // Redaction + stringification are gated on isVerbose() so the deep copy
-    // doesn't run on every request when verbose is off (watch polls hot).
+    // Redaction + stringification are gated on isVerbose() so they don't
+    // run on every request when verbose is off (watch polls hot).
     if (body && isVerbose()) {
-      debug(`Request body: ${JSON.stringify(redactSensitive(body))}`);
+      debug(`Request body: ${redactedJson(body)}`);
     }
 
     const res = await fetch(url, {
@@ -154,7 +158,7 @@ export class ApiClient {
     if (jsonParseOk && isVerbose()) {
       // Redact secret-bearing fields (e.g. the one-time webhook `secret`) —
       // verbose output ends up in scrollback / CI logs.
-      debug(`Response body: ${JSON.stringify(redactSensitive(json))}`);
+      debug(`Response body: ${redactedJson(json)}`);
     }
 
     if (!res.ok) {
@@ -383,20 +387,16 @@ export class ApiClient {
    *
    * Runs the ``GET /tasks/{id}`` and ``GET /tasks/{id}/events?desc=1&limit=N``
    * calls in parallel so the snapshot is a single round-trip in wall-clock
-   * terms. The event page is intentionally small (default 20) — the
+   * terms. The event page is intentionally small — the
    * formatter only needs the latest tool call, turn, milestone, and cost
    * update, which are always recent in a well-behaved event stream.
    *
    * @param taskId - the task to summarize.
-   * @param recentEventLimit - how many recent events to pull (default 20).
    */
-  async getStatusSnapshot(
-    taskId: string,
-    recentEventLimit = 20,
-  ): Promise<{ task: TaskDetail; recentEvents: TaskEvent[] }> {
+  async getStatusSnapshot(taskId: string): Promise<{ task: TaskDetail; recentEvents: TaskEvent[] }> {
     const [task, eventsPage] = await Promise.all([
       this.getTask(taskId),
-      this.getTaskEvents(taskId, { limit: recentEventLimit, desc: true }),
+      this.getTaskEvents(taskId, { limit: STATUS_SNAPSHOT_EVENT_LIMIT, desc: true }),
     ]);
     return { task, recentEvents: eventsPage.data };
   }
@@ -412,24 +412,23 @@ export class ApiClient {
    * @param taskId - the task whose events to fetch.
    * @param afterEventId - the ULID cursor; events strictly greater than
    *   this id are returned.
-   * @param pageSize - page size passed to the server (default 100, max 100).
    * @returns all events after the cursor, in chronological order.
    */
   async catchUpEvents(
     taskId: string,
     afterEventId: string,
-    pageSize = 100,
     opts?: { signal?: AbortSignal },
   ): Promise<TaskEvent[]> {
     const collected: TaskEvent[] = [];
     const signal = opts?.signal;
     // First page uses ``after``; subsequent pages use the opaque ``next_token``.
-    let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: pageSize, signal });
+    // 100 is the largest page the server returns.
+    let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: 100, signal });
     collected.push(...page.data);
     while (page.pagination.has_more && page.pagination.next_token) {
       page = await this.getTaskEvents(taskId, {
         nextToken: page.pagination.next_token,
-        limit: pageSize,
+        limit: 100,
         signal,
       });
       collected.push(...page.data);

@@ -165,6 +165,9 @@ describe('doctor verdict for Linear project → workspace binding', () => {
     expect(check.detail).toContain('proj-unbacked');
     expect(check.detail).not.toContain('proj-backed');
     expect(check.detail).toContain('bgagent linear onboard-project');
+    // onboard-project rewrites the whole mapping and takes the default trigger label when
+    // --label is left out, so the command to re-run carries the label as well as the repository.
+    expect(check.detail).toMatch(/`bgagent linear onboard-project [^`]* --repo [^`]* --label [^`]*`/);
   });
 
   /** Mapping and registry scans answered separately, by table name. */

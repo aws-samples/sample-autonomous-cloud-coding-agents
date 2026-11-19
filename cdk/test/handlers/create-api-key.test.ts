@@ -140,6 +140,13 @@ describe('create-api-key handler', () => {
     expect(result.statusCode).toBe(400);
   });
 
+  test('returns 400 for a name that is not a string, and stores nothing', async () => {
+    const result = await handler(makeEvent({ body: JSON.stringify({ name: 42 }) }));
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+    expect(mockDdbSend).not.toHaveBeenCalled();
+  });
+
   test('returns 500 when the DynamoDB write fails', async () => {
     mockDdbSend.mockRejectedValueOnce(new Error('DDB error'));
     const result = await handler(makeEvent());

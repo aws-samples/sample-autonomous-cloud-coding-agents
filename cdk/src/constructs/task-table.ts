@@ -22,7 +22,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 import { JIRA_ISSUE_INDEX_NAME, LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
 
-export { JIRA_ISSUE_INDEX_NAME, LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
+export { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /**
  * Properties for TaskTable construct.
@@ -54,7 +54,9 @@ export interface TaskTableProps {
  * (queue processing), by idempotency key (dedup), and by Jira issue.
  *
  * GSIs:
- * - UserStatusIndex (PK: user_id, SK: status_created_at) — "my tasks" queries
+ * - UserStatusIndex (PK: user_id, SK: status_created_at) — a user's tasks by
+ *   status (queue position, active-task counts)
+ * - UserCreatedAtIndex (PK: user_id, SK: created_at) — the task list, newest first
  * - StatusIndex (PK: status, SK: created_at) — queue processing, monitoring
  * - IdempotencyIndex (PK: idempotency_key) — sparse index for dedup
  * - LinearIssueIndex (PK: linear_issue_id, SK: created_at) — sparse; resolve a
@@ -69,6 +71,13 @@ export class TaskTable extends Construct {
    * PK: user_id, SK: status_created_at (composite: `{status}#{created_at}`).
    */
   public static readonly USER_STATUS_INDEX = 'UserStatusIndex';
+
+  /**
+   * GSI name for listing a user's tasks newest first (GET /tasks).
+   * PK: user_id, SK: created_at. UserStatusIndex cannot serve the list: its
+   * sort key begins with the status, so a read comes back grouped by status.
+   */
+  public static readonly USER_CREATED_AT_INDEX = 'UserCreatedAtIndex';
 
   /**
    * GSI name for querying tasks by status.
@@ -181,6 +190,15 @@ export class TaskTable extends Construct {
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.INCLUDE,
       nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
+    });
+
+    // GSI: list a user's tasks newest first (GET /tasks). Declared last so that a
+    // deployed table sees one index appended and no attribute definition moved.
+    this.table.addGlobalSecondaryIndex({
+      indexName: TaskTable.USER_CREATED_AT_INDEX,
+      partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
   }
 }

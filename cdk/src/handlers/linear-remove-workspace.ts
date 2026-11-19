@@ -61,6 +61,23 @@ const SLUG_RE = /^[a-zA-Z0-9_-]{4,50}$/;
 const ADMIN_REMOVED_REVOCATION_REASON: LinearRevocationReason = 'admin_removed';
 
 /**
+ * The registry rows this endpoint tears down, as a DynamoDB condition: an active
+ * one, or one that something else revoked. `:reason` is the reason above.
+ *
+ * The resolver latches a row `revoked` when the Linear grant dies and deletes
+ * nothing: the secret with the OAuth client secret and the signing secret is still
+ * there, and a `vault_consent_required` row turns active again by itself when the
+ * vault next answers. A row revoked by hand with no reason (the guide's procedure
+ * before this endpoint existed, which deleted the secret first) is accepted too:
+ * the delete then finds nothing, and the row can be purged. A row this endpoint
+ * revoked is left out, so a second run is not a second teardown.
+ *
+ * One expression for the scan filter and for the condition of the revoke, so the
+ * read and the write cannot disagree about what may be removed.
+ */
+const REMOVABLE_ROW = '#status = :active OR (#status = :revoked AND (attribute_not_exists(revoked_reason) OR revoked_reason <> :reason))';
+
+/**
  * Prefix of the per-workspace OAuth secret name, so a row that never recorded
  * its `oauth_secret_arn` can still be torn down: the name is deterministic.
  *
@@ -186,10 +203,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // ─── Locate the registry row by slug ─────────────────────────────
     // The registry table is keyed on `linear_workspace_id`, so a slug
-    // lookup is a filtered scan. Only `status='active'` rows are valid
-    // removal targets — an already-revoked (or unknown) slug returns 404,
-    // so the endpoint does not distinguish revoked from missing and the
+    // lookup is a filtered scan. Only `REMOVABLE_ROW` rows are valid
+    // removal targets — an already-removed (or unknown) slug returns 404,
+    // so the endpoint does not distinguish removed from missing and the
     // destructive path is not re-run on a row that's already torn down.
+    // An active row wins over a revoked one with the same slug (a Linear
+    // workspace can give up its urlKey and another take it): the live one
+    // is what the admin means, so the scan goes on until it finds one.
     // The scan is `ConsistentRead` and the revoke below carries a
     // `ConditionExpression`, because a filtered scan alone is a TOCTOU:
     // read-your-writes matters when a removal lands seconds after
@@ -201,8 +221,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // filtered `Limit: 1` scan can return `[]` + a LastEvaluatedKey while
     // the target sits one page deeper (the normal shared-stack state once
     // the registry holds more than one row). We follow the continuation key
-    // until a match or key exhaustion (not to completion — the loop stops on
-    // the first match), matching the paginated small-table scan of this same
+    // until an active match or key exhaustion (the loop stops on the first
+    // active match; for a revoked one it reads on, to be sure no active row
+    // carries the slug), matching the paginated small-table scan of this same
     // registry shape in `shared/jira-tenant-registry.ts:32-46`, which is
     // also where the `ConsistentRead` precedent comes from. The registry
     // holds one row per onboarded workspace and stays small (tens of rows at
@@ -216,16 +237,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     do {
       const page = await ddb.send(new ScanCommand({
         TableName: registryTable,
-        FilterExpression: 'workspace_slug = :slug AND #status = :active',
+        FilterExpression: `workspace_slug = :slug AND (${REMOVABLE_ROW})`,
         ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: { ':slug': slug, ':active': 'active' },
+        ExpressionAttributeValues: { ':slug': slug, ':active': 'active', ':revoked': 'revoked', ':reason': ADMIN_REMOVED_REVOCATION_REASON },
         ExclusiveStartKey: scanKey,
         ConsistentRead: true,
       }));
-      row = page.Items?.[0];
+      row = page.Items?.find((item) => item.status === 'active') ?? row ?? page.Items?.[0];
       scanKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
       pages += 1;
-      if (!row && scanKey && pages >= MAX_SCAN_PAGES) {
+      if (row?.status !== 'active' && scanKey && pages >= MAX_SCAN_PAGES) {
         // Bounded rather than open-ended: without this the only stop is the
         // 10s timeout, which surfaces as a generic 500 with no cause. Not a
         // 404 — the row may well exist further in, and claiming it doesn't
@@ -238,9 +259,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
         return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
       }
-    } while (!row && scanKey);
+    } while (row?.status !== 'active' && scanKey);
     if (!row) {
-      // Collapse "no such row" and "already revoked" into one 404 — the
+      // Collapse "no such row" and "already removed" into one 404 — the
       // caller learns nothing about existence, and there's nothing left
       // to remove either way.
       return errorResponse(404, ErrorCode.WORKSPACE_NOT_FOUND, `Workspace '${slug}' is not an active registration.`, requestId);
@@ -257,6 +278,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const linearWorkspaceId = row.linear_workspace_id as string;
+    // Names the installation that was read: `setup` and `add-workspace` write it
+    // anew each time. Absent only on a row that the CLI did not write.
+    const installedAt = row.installed_at as string | undefined;
     const oauthSecretArn = row.oauth_secret_arn as string | undefined;
     // Present only on rows onboarded through the AgentCore Identity vault. Read
     // (and reported) but never deleted here — see the header note.
@@ -284,15 +308,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // is confirmed gone.
     //
     // The `ConditionExpression` is what closes the scan's TOCTOU: it makes
-    // "the row was active when we decided to remove it" a property of the
-    // write, not of a read that happened earlier. Two concurrent DELETEs now
-    // resolve to one revoke and one 404 instead of both proceeding.
+    // "the row was one to remove when we decided to remove it" a property of
+    // the write, not of a read that happened earlier. Two concurrent DELETEs
+    // now resolve to one revoke and one 404 instead of both proceeding.
+    //
+    // The row also has to be the installation that was read. A `setup` that
+    // lands between the scan and this write puts an active row in its place,
+    // which is a row to remove like any other: without the second clause the
+    // registration just made would be revoked, and the delete below would take
+    // the secret just written for it. Scoped as `markWorkspaceRevoked` in the
+    // resolver is: by `installed_at`, or by its absence on a row that has none.
+    // The parentheses are needed, because DynamoDB evaluates AND before OR.
     try {
       await ddb.send(new UpdateCommand({
         TableName: registryTable,
         Key: { linear_workspace_id: linearWorkspaceId },
         UpdateExpression: 'SET #status = :revoked, revoked_reason = :reason, revoked_at = :now, revoked_by_platform_user_id = :uid, updated_at = :now',
-        ConditionExpression: '#status = :active',
+        ConditionExpression: `(${REMOVABLE_ROW}) AND ${installedAt === undefined ? 'attribute_not_exists(installed_at)' : 'installed_at = :installed'}`,
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: {
           ':revoked': 'revoked',
@@ -300,24 +332,30 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           ':active': 'active',
           ':now': now,
           ':uid': userId,
+          ...(installedAt !== undefined && { ':installed': installedAt }),
         },
       }));
     } catch (err) {
       if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
-      // Someone else moved the row out of `active` between our scan and this
-      // write — a concurrent DELETE, or the resolver latching the row revoked
-      // after Linear rejected its refresh token. Either way this request
-      // changed nothing, so 404 (the same answer a caller gets for an
-      // already-revoked slug) is the truthful one. Log the secret ARN at WARN:
-      // if the winner was the resolver rather than a peer DELETE, nobody
-      // deleted the secret, and this line is what makes that orphan findable.
-      logger.warn('Linear remove-workspace lost a race: the registry row was no longer active at write time', {
+      // The row is no longer the one the scan read: a concurrent DELETE removed
+      // it, or a `setup` registered the workspace anew. (The resolver latching
+      // it revoked in that window does not end here: the condition accepts such
+      // a row, and its secret is deleted below.) This request changed nothing,
+      // so it answers 404 as for an already-removed slug, but does not call the
+      // workspace absent: after a setup it is registered. The secret ARN is
+      // logged at WARN so that whatever the winner left behind is findable.
+      logger.warn('Linear remove-workspace lost a race: the registry row was removed or set up again between the read and the write', {
         request_id: requestId,
         workspace_slug: slug,
         linear_workspace_id: linearWorkspaceId,
         oauth_secret_arn: oauthSecretArn,
       });
-      return errorResponse(404, ErrorCode.WORKSPACE_NOT_FOUND, `Workspace '${slug}' is not an active registration.`, requestId);
+      return errorResponse(
+        404,
+        ErrorCode.WORKSPACE_NOT_FOUND,
+        `Workspace '${slug}' was removed or set up again while this request was running, so it removed nothing.`,
+        requestId,
+      );
     }
 
     // ─── Secrets Manager: delete the per-workspace OAuth secret ───────

@@ -1,8 +1,6 @@
 ---
-title: Readme
+title: "Architecture Decision Records (ADRs)"
 ---
-
-# Architecture Decision Records (ADRs)
 
 This directory captures significant design decisions for the ABCA project. Each ADR explains **why** a decision was made — not just what was decided — so that future contributors (human and AI) can understand the reasoning without excavating git history or PR discussions.
 

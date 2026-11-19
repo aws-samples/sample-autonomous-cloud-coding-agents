@@ -1,8 +1,6 @@
 ---
-title: Observability
+title: "Observability"
 ---
-
-# Observability
 
 For a system where agents run for hours and burn tokens autonomously, observability is load-bearing infrastructure. The platform captures task lifecycle, agent reasoning, tool use, and outcomes so operators can monitor health, debug failures, and improve agent performance over time.
 
@@ -83,6 +81,8 @@ orchestrator log ──task_id──▶ TaskRecord ──otel_trace_id──▶ 
 - **Agent plane** (MicroVM): OTel spans, baggage, and agent-emitted `TaskEvents` carry `{task_id, user_id, repo, trace_id}`, so the event stream is joinable to the X-Ray trace directly.
 - **TaskRecord**: holds `otel_trace_id` and `session_id` (persisted at terminal write, #515), the durable link between the two planes and the basis of the [task replay bundle](#task-replay-bundle).
 
+Where the agent runs under `opentelemetry-instrument`, the auto-instrumentation copies the trace context and the baggage into the headers of requests sent with an instrumented HTTP client. The agent image keeps that for boto3 and the tool gateway client and switches it off for `requests` and `urllib3` (`OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` in `agent/Dockerfile`), so the agent's requests to Linear and Atlassian, which it sends with `requests`, carry neither.
+
 **Coverage notes:**
 
 - The `task_created` event is written at task creation, *before* the correlation envelope exists on the orchestration path; it joins by `task_id` alone. Every event from `hydration_started` onward carries the envelope. Rare safety-net writers (e.g. the stranded-task reconciler) likewise join by `task_id`.
@@ -96,11 +96,11 @@ The platform tracks four categories of signals, each serving different consumers
 
 Every task emits structured events at each state transition, stored in the TaskEvents table:
 
-- State transitions: `task_created`, `admission_rejected`, `uploads_confirmed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
+- State transitions: `task_created`, `admission_queued`, `queue_pickup`, `uploads_confirmed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
 - Blueprint custom step events: `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`
 - Guardrail events: `guardrail_blocked` (content blocked during hydration)
 
-All events carry `task_id` and `user_id` for filtering.
+All events carry `task_id` for filtering; the events the orchestrator and the agent write from `hydration_started` onward also carry `user_id` (see the coverage notes above).
 
 ### Agent execution
 

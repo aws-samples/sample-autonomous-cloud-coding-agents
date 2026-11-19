@@ -18,13 +18,13 @@
  */
 
 import {
-  GetSecretValueCommand,
   PutSecretValueCommand,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import { Command } from 'commander';
 import { loadConfig } from '../config';
 import { CliError } from '../errors';
+import { requireDeployedFeature } from '../feature-guard';
 import {
   isGithubTokenConfigured,
   putGithubToken,
@@ -126,29 +126,12 @@ export function makeGithubCommand(): Command {
 
         const sm = makeClient(SecretsManagerClient, { region });
 
-        // Show whether a secret is already configured so the operator
-        // doesn't accidentally rotate it without realising. Linear's
-        // signing secrets start with `lin_wh_` — GitHub's are
-        // free-form (operator-chosen), so we can't pattern-match.
-        // Just check whether *anything* is there.
-        let alreadyConfigured = false;
-        try {
-          const cur = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn }));
-          if (cur.SecretString && cur.SecretString.length > 0 && !cur.SecretString.startsWith('{')) {
-            // CDK seeds a JSON-blob placeholder; a real GitHub secret
-            // wouldn't start with `{`. Crude but good enough.
-            alreadyConfigured = true;
-          }
-        } catch (err) {
-          if ((err as { name?: string }).name !== 'ResourceNotFoundException') {
-            throw err;
-          }
-        }
-        if (alreadyConfigured) {
-          console.log('  ⚠ A signing secret is already configured. This command will OVERWRITE it.');
-          console.log('  Make sure the new value matches what you pasted into GitHub.');
-          console.log();
-        }
+        // A GitHub signing secret is operator-chosen, and CloudFormation creates
+        // this secret with a random password, so a stored secret cannot be told
+        // from one nobody has set. Say what the command does instead of guessing.
+        console.log('  This replaces the signing secret stored for the stack.');
+        console.log('  Make sure the new value matches what you pasted into GitHub.');
+        console.log();
 
         const secret = (await promptSecret('GitHub webhook signing secret: ')).trim();
         if (!secret) {
@@ -224,5 +207,11 @@ export function makeGithubCommand(): Command {
       }),
   );
 
+  // `set-token` is core; only the screenshot webhook commands need the feature.
+  for (const sub of github.commands) {
+    if (sub.name() === 'webhook-info' || sub.name() === 'set-webhook-secret') {
+      requireDeployedFeature(sub, 'deployPreviewScreenshots');
+    }
+  }
   return github;
 }
