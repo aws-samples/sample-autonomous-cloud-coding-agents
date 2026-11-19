@@ -142,7 +142,10 @@ permit (principal, action, resource);
 // the branch, \`-f\` is matched at the end of the command or of a line and
 // before \`;\`, \`&\`, \`|\`, \`>\` or \` 2>\`, as in
 // \`git push origin feature -f 2>&1 | tail -5\`: followed by other text it
-// is also the flag of a later program (\`&& gh api ... -f ...\`).
+// is also the flag of a later program (\`&& gh api ... -f ...\`). Directly
+// after \`git push\`, \`-f\` is matched whatever follows it, as in
+// \`git push -f;echo ok\` or \`git push -fu origin feature\`: git push has no
+// other option that begins with \`-f\`.
 @tier("soft")
 @rule_id("force_push_any")
 @approval_timeout_s("300")
@@ -150,8 +153,7 @@ permit (principal, action, resource);
 @category("destructive")
 forbid (principal, action == Agent::Action::"execute_bash", resource)
 when { context.command like "*git push --force*"
-    || context.command like "*git push -f *"
-    || context.command like "*git push -f"
+    || context.command like "*git push -f*"
     || context.command like "*git push * --force*"
     || context.command like "*git push * -f"
     || context.command like "*git push * -f\\n*"

@@ -92,6 +92,17 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             Call("Bash", "cd repo && git push --force"),
             Call("Bash", "cd repo && git push -f upstream fix/typo"),
             Call("Bash", "cd repo && git push -f"),
+            # ``-f`` directly after ``git push`` counts whatever follows it: the
+            # shell goes on without a space (a second line, ``;``, ``&``, ``|``,
+            # ``>``, the end of a subshell), or another short option is written
+            # together with it.
+            Call("Bash", "git push -f\ngit status"),
+            Call("Bash", "cd repo && git push -f;echo done"),
+            Call("Bash", "git push -f&& echo ok"),
+            Call("Bash", "cd repo && git push -f|tail -5"),
+            Call("Bash", "git push -f>push.log"),
+            Call("Bash", "(cd repo && git push -f)"),
+            Call("Bash", "git push -fu origin feature/login"),
             # The flag after the remote and branch.
             Call("Bash", "git push origin feature/login --force"),
             Call("Bash", "cd repo && git push upstream fix/typo --force-with-lease && git status"),
@@ -285,5 +296,23 @@ def test_force_push_rule_leaves_the_flag_of_a_later_command_alone(then: str) -> 
 def test_force_push_rule_leaves_a_push_without_the_flag_and_a_second_line_alone() -> None:
     # A line break counts only directly after ``-f``.
     call = Call("Bash", "git push origin feat\ngit status")
+    decision = _decide(call)
+    assert decision.outcome == Outcome.ALLOW, f"not a force push: {call}, got {decision!r}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            "git push --follow-tags origin feature/login", id="a long option that begins with f"
+        ),
+        pytest.param("git push -u origin feature/login", id="another short option"),
+    ],
+)
+def test_force_push_rule_leaves_a_push_with_another_option_alone(command: str) -> None:
+    # Neither is a force push: a long option that begins with ``f`` takes two
+    # dashes, and ``-u`` is another short option, as the new-task prompt
+    # teaches it.
+    call = Call("Bash", command)
     decision = _decide(call)
     assert decision.outcome == Outcome.ALLOW, f"not a force push: {call}, got {decision!r}"
