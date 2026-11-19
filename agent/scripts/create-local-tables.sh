@@ -13,8 +13,9 @@ set -euo pipefail
 ENDPOINT="http://localhost:8000"
 REGION="us-east-1"
 
-# Common args for all commands
-DDB_ARGS=(--endpoint-url "$ENDPOINT" --region "$REGION" --no-cli-pager)
+# Common args for all commands. No --no-cli-pager: AWS CLI v1 rejects that flag, and
+# v2 starts no pager for the calls below, whose output goes to /dev/null.
+DDB_ARGS=(--endpoint-url "$ENDPOINT" --region "$REGION")
 
 echo "Creating local DynamoDB tables..."
 

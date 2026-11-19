@@ -41,7 +41,6 @@ import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
 import type { JiraSubIssueNode } from './shared/jira-subissue-fetch';
 import {
-  prNumberFromTask,
   resolveTaskByJiraIssue,
   type JiraIssueTask,
 } from './shared/jira-task-by-issue';
@@ -66,9 +65,11 @@ import {
   clearRollupClaim,
   deriveOrchestrationId,
   loadOrchestration,
+  refreshUnstartedText,
   setStatusCommentId,
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
+import { prNumberFromTask } from './shared/task-pr-number';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
@@ -140,6 +141,15 @@ async function safeReportIssueFailure(
     });
   }
 }
+
+/**
+ * Feedback for a tenant whose OAuth token could not be resolved or refreshed.
+ * Posting it needs an outbound identity that still works: a site that writes
+ * as the Forge app gets the comment, an unregistered or inactive site none.
+ */
+const JIRA_TOKEN_UNAVAILABLE_MESSAGE =
+  "❌ ABCA couldn't get a Jira access token for this site, so nothing was started. "
+  + 'Try again in a few minutes; if it keeps failing, ask an ABCA admin to re-run `bgagent jira setup`.';
 
 /**
  * Subset of the Jira Cloud `jira:issue_*` webhook payload we depend on.
@@ -219,7 +229,7 @@ interface ProcessorEvent {
  *   agent uses to address the originating issue via the Jira REST v3 API
  *   (`jira_reactions.py`; see ADR-015 for why outbound is REST, not MCP).
  */
-// eslint-disable-next-line complexity -- predates the ceiling (116 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (115, down from 116 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Jira webhook processor invoked without raw_body');
@@ -285,13 +295,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     const commentProjectKey = issue.fields?.project?.key;
-    if (
-      commentProjectKey
-      && !await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)
-    ) {
+    const commentMapping = commentProjectKey
+      ? await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)
+      : undefined;
+    if (commentMapping === null) {
       return;
     }
-    await handleCommentTrigger(payload, issue, cloudId, commentProjectKey);
+    await handleCommentTrigger(payload, issue, cloudId, commentMapping);
     return;
   }
 
@@ -418,6 +428,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         jira_cloud_id: cloudId,
         issue_key: issue.key,
       });
+      await safeReportIssueFailure(issue.key, cloudId, JIRA_TOKEN_UNAVAILABLE_MESSAGE);
       return;
     }
     resolvedJira = resolved;
@@ -432,12 +443,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // subtasks can be appended. The flag also prevents parent attachments from
     // being uploaded again below: the meta row already pins the first seed's S3
     // versions, and replacing them would eventually expire those pinned objects.
+    // The id hashes the bare issue key, so rows that another Jira site left
+    // under the same key are not this issue's graph.
     const existing = await loadOrchestration(
       ddb,
       ORCHESTRATION_TABLE,
       deriveOrchestrationId(issue.key),
     );
-    existingOrchestration = existing !== null;
+    existingOrchestration = existing !== null && existing.meta.credentials_ref === cloudId;
 
     const graphResult = await jiraGraphSource(
       resolvedJira.accessToken,
@@ -586,16 +599,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
 
-    // A concurrent replay can win between the preflight read and the seed
-    // condition. The shared discovery path returns that race as an empty extend;
-    // any attachment objects uploaded by this invocation are duplicates.
-    if (discovery.kind === 'seeded' && discovery.alreadyExisted) {
-      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
-        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
-      }
-      return;
-    }
-
     if (discovery.kind === 'seeded') {
       const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       if (snapshot) {
@@ -675,6 +678,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     if (discovery.kind === 'extended') {
+      // Attachments are stored only when the preflight read found no
+      // orchestration, so having some here means a concurrent replay seeded
+      // between that read and the seed condition. The shared discovery path
+      // returns that race as an extend; this invocation's objects are duplicates.
+      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+      }
       if (discovery.addedSubIssueIds.length === 0) {
         logger.info('Jira orchestration re-trigger added no new subtasks', {
           issue_key: issue.key,
@@ -849,7 +859,7 @@ async function handleCommentTrigger(
   payload: JiraIssueEvent,
   issue: NonNullable<JiraIssueEvent['issue']>,
   cloudId: string,
-  verifiedProjectKey?: string,
+  verifiedMapping?: ProjectMapping,
 ): Promise<void> {
   const comment = payload.comment;
   if (!comment?.id) {
@@ -893,7 +903,9 @@ async function handleCommentTrigger(
       await safeReportIssueFailure(
         issue.key,
         cloudId,
-        'I can only retry an orchestration for a linked ABCA user. '
+        // Starts with a marker parseCommentTrigger rejects: a site that writes
+        // with the OAuth token gets this comment back as a human's, mention and all.
+        '❌ ABCA can only retry an orchestration for a linked ABCA user. '
           + 'Link your Jira account first, then comment `@bgagent retry` again.',
       );
       return;
@@ -909,7 +921,8 @@ async function handleCommentTrigger(
     cloudId,
     issue.key,
   );
-  if (!verifiedProjectKey) {
+  let mapping: ProjectMapping | null | undefined = verifiedMapping;
+  if (!mapping) {
     const priorProjectKey = priorTask?.channel_metadata?.jira_project_key;
     if (!priorProjectKey) {
       logger.info(
@@ -918,7 +931,8 @@ async function handleCommentTrigger(
       );
       return;
     }
-    if (!await getActiveProjectMapping(cloudId, priorProjectKey, issue.key)) {
+    mapping = await getActiveProjectMapping(cloudId, priorProjectKey, issue.key);
+    if (!mapping) {
       return;
     }
     logger.warn('Jira comment issue has no project.key — routing via active prior task project', {
@@ -971,6 +985,7 @@ async function handleCommentTrigger(
       issue_key: issue.key,
       comment_id: comment.id,
     });
+    await safeReportIssueFailure(issue.key, cloudId, JIRA_TOKEN_UNAVAILABLE_MESSAGE);
     return;
   }
 
@@ -981,6 +996,7 @@ async function handleCommentTrigger(
     comment.id,
     resolved.oauthSecretArn,
     resolved.siteUrl,
+    mapping,
   );
   const idempotencyKey = buildCommentIdempotencyKey(cloudId, issue.key, comment.id);
   const requestId = crypto.randomUUID();
@@ -1086,7 +1102,26 @@ async function handleJiraEpicRetry(
   if (!ORCHESTRATION_TABLE) return false;
   const orchestrationId = deriveOrchestrationId(parentIssueKey);
   const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
-  if (!snapshot || snapshot.meta.parent_issue_ref !== parentIssueKey) return false;
+  if (
+    !snapshot
+    || snapshot.meta.parent_issue_ref !== parentIssueKey
+    || snapshot.meta.credentials_ref !== cloudId
+  ) return false;
+
+  // A subtask is started from the summary and description stored on its row.
+  // Read the subtasks again first, as re-applying the trigger label does, so
+  // that one that was refused for its text and then reworded is sent as it is
+  // now. A read that fails does not hold the retry up: it sends the stored text.
+  // In front of the claim, so that a delivery that fails here is tried again.
+  const resolved = WORKSPACE_REGISTRY_TABLE
+    ? await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE)
+    : null;
+  const graph = resolved
+    ? await jiraGraphSource(resolved.accessToken, cloudId, parentIssueKey)()
+    : undefined;
+  if (graph?.kind === 'ok') {
+    await refreshUnstartedText(ddb, ORCHESTRATION_TABLE, snapshot.children, graph.children);
+  }
 
   const now = new Date().toISOString();
   const claimed = await claimCommentAck(
@@ -1166,7 +1201,6 @@ async function handleJiraEpicRetry(
     reset.children,
     'main',
     budget,
-    true,
   );
   await applyTerminalCreateFailures(
     ddb,
@@ -1227,6 +1261,7 @@ function buildIterationChannelMetadata(
   commentId: string,
   oauthSecretArn: string,
   siteUrl: string,
+  mapping: ProjectMapping,
 ): Record<string, string> {
   const previous = priorTask.channel_metadata ?? {};
   const metadata: Record<string, string> = {
@@ -1236,6 +1271,8 @@ function buildIterationChannelMetadata(
     jira_oauth_secret_arn: oauthSecretArn,
     jira_site_url: siteUrl,
     jira_trigger_comment_id: commentId,
+    // The agent tells an iteration from a first run by this key
+    // (transition_task_started in agent/src/jira_reactions.py).
     jira_prior_task_id: priorTask.task_id,
     trigger_comment_id: commentId,
     trigger_comment_issue_id: issue.key,
@@ -1243,16 +1280,24 @@ function buildIterationChannelMetadata(
 
   const projectKey = issue.fields?.project?.key ?? previous.jira_project_key;
   if (projectKey) metadata.jira_project_key = projectKey;
-  if (previous.jira_status_on_start) {
-    metadata.jira_status_on_start = previous.jira_status_on_start;
-  }
-  if (previous.jira_status_on_pr) {
-    metadata.jira_status_on_pr = previous.jira_status_on_pr;
-  }
+  // The status names of the project mapping as it is now, as a task that the
+  // trigger label starts takes them: the earlier task may predate a change.
+  let statusOnStart = mapping.status_on_start;
+  let statusOnPr = mapping.status_on_pr;
   if (previous.orchestration_id && previous.orchestration_sub_issue_id) {
     metadata.orchestration_id = previous.orchestration_id;
     metadata.orchestration_sub_issue_id = previous.orchestration_sub_issue_id;
     metadata.orchestration_iteration = 'true';
+    // A subtask of an orchestration keeps the names recorded with it: the
+    // reconciler moves that issue by them after the iteration.
+    statusOnStart = previous.jira_status_on_start;
+    statusOnPr = previous.jira_status_on_pr;
+  }
+  if (typeof statusOnStart === 'string' && statusOnStart) {
+    metadata.jira_status_on_start = statusOnStart;
+  }
+  if (typeof statusOnPr === 'string' && statusOnPr) {
+    metadata.jira_status_on_pr = statusOnPr;
   }
   return metadata;
 }

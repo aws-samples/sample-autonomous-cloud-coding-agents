@@ -41,6 +41,25 @@ describe('RegistryApi nested stack', () => {
     template.resourceCountIs('AWS::Lambda::Function', 4);
   });
 
+  test('the publish function gets 28 s, the three read functions the standard 15 s', () => {
+    // Publish waits up to 20 s for the new record to leave CREATING (the poll budget
+    // in agent-registry-client.ts) between its other calls. With the standard 15 s the
+    // function is stopped during that wait, and the caller gets a gateway error that
+    // names no record. API Gateway gives an integration 29 s, so 28 is the ceiling.
+    const { template } = synth();
+    const timeouts = Object.fromEntries(
+      Object.entries(template.findResources('AWS::Lambda::Function')).map(
+        ([logicalId, fn]) => [logicalId.replace(/[0-9A-F]{8}$/, ''), fn.Properties.Timeout],
+      ),
+    );
+    expect(timeouts).toEqual({
+      RegistryPublishFn: 28,
+      RegistryResolveFn: 15,
+      RegistryListFn: 15,
+      RegistryShowFn: 15,
+    });
+  });
+
   test('creates its own REST API + Cognito authorizer (not the shared API)', () => {
     const { template } = synth();
     template.resourceCountIs('AWS::ApiGateway::RestApi', 1);

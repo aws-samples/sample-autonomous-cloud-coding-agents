@@ -37,6 +37,7 @@ function createStack(overrides?: {
   bedrockModels?: string[];
   bedrockGeoRegion?: string;
   withMemory?: boolean;
+  withNudgesTable?: boolean;
   withLinearVault?: boolean;
   withApprovals?: boolean;
   taskSizing?: {
@@ -85,6 +86,13 @@ function createStack(overrides?: {
 
   const agentMemory = overrides?.withMemory ? new AgentMemory(stack, 'AgentMemory') : undefined;
 
+  const taskNudgesTable = overrides?.withNudgesTable
+    ? new dynamodb.Table(stack, 'TaskNudgesTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
+    })
+    : undefined;
+
   const linearIdentityVault = overrides?.withLinearVault
     ? new LinearIdentityVault(stack, 'LinearIdentityVault', {
       workloadName: 'abca_linear_oauth',
@@ -102,6 +110,7 @@ function createStack(overrides?: {
     githubTokenSecret,
     memoryId: overrides?.memoryId,
     agentMemory,
+    taskNudgesTable,
     ...(linearIdentityVault && { linearIdentityVault }),
     ...(overrides?.taskSizing && { taskSizing: overrides.taskSizing }),
   });
@@ -1027,6 +1036,52 @@ describe('EcsAgentCluster artifacts bucket (#299 ECS-parity)', () => {
     for (const def of Object.values(taskDefs)) {
       const env = def.Properties.ContainerDefinitions[0].Environment ?? [];
       expect(env.some((e: { Name: string }) => e.Name === 'ARTIFACTS_BUCKET_NAME')).toBe(false);
+    }
+  });
+});
+
+// Without NUDGES_TABLE_NAME the agent's nudge reader is off: the API accepts a
+// nudge for a running ECS task (202) and nothing ever delivers it.
+describe('EcsAgentCluster nudges table', () => {
+  let template: Template;
+  let nudgesTable: string;
+  beforeAll(() => {
+    template = createStack({ withNudgesTable: true }).template;
+    nudgesTable = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskNudgesTable'))!;
+  });
+
+  test('both task definitions name the table', () => {
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'NUDGES_TABLE_NAME',
+        Value: { Ref: nudgesTable },
+      });
+    }
+  });
+
+  test('without a SessionRole the task role gets the two calls the nudge reader makes', () => {
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(policy => policy.Properties.PolicyDocument.Statement)
+      .filter(statement => JSON.stringify(statement.Resource).includes(nudgesTable));
+    expect(statements).toEqual([expect.objectContaining({
+      Effect: 'Allow',
+      Action: ['dynamodb:Query', 'dynamodb:UpdateItem'],
+    })]);
+  });
+
+  test('a build-tool override cannot unset the table name', () => {
+    const node = new Stack(new App({ context: { ecsExtraBuildEnv: { NUDGES_TABLE_NAME: '' } } }), 'S').node;
+    expect(() => resolveEcsTaskSizing(node)).toThrow(/cannot set 'NUDGES_TABLE_NAME'/);
+  });
+
+  test('omits NUDGES_TABLE_NAME when no table is passed', () => {
+    const definitions = Object.values(createStack().template.findResources('AWS::ECS::TaskDefinition'));
+    for (const definition of definitions) {
+      const env = definition.Properties.ContainerDefinitions[0].Environment ?? [];
+      expect(env.some((e: { Name: string }) => e.Name === 'NUDGES_TABLE_NAME')).toBe(false);
     }
   });
 });

@@ -206,6 +206,19 @@ export class SecretUnreadableError extends Error {
   }
 }
 
+/**
+ * The issue or pull request a task is about could not be fetched. It is not optional
+ * context: a task that is only its issue would get a prompt with no task, and a PR task
+ * would get no branch to check out. The hydration catch propagates this so the task
+ * fails in hydration with the reason, instead of later in an agent session.
+ */
+class RequiredContextUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RequiredContextUnavailableError';
+  }
+}
+
 /** Image attachments exceed the token budget available for text context. */
 export class AttachmentBudgetExceededError extends AttachmentError {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -406,6 +419,15 @@ export function clearTokenCache(): void {
 // GitHub issue fetching
 // ---------------------------------------------------------------------------
 
+/** The largest page GitHub returns for a list. Unless asked, it returns 30 items. */
+const GITHUB_PAGE_SIZE = 100;
+/**
+ * The most pages of an issue's comments that are read: the newest ones. Each page is one
+ * more request, a thread can run to thousands of comments, and the oldest are the first
+ * that enforceTokenBudget trims.
+ */
+const MAX_ISSUE_COMMENT_PAGES = 3;
+
 /**
  * Fetch a GitHub issue's title, body, and comments via the REST API.
  * Returns null on any error (logged).
@@ -439,12 +461,13 @@ export async function fetchGitHubIssue(
     }
     const issue = await issueResp.json() as Record<string, unknown>;
 
-    // Fetch comments if any
+    // Fetch comments if any. GitHub lists them oldest first, so the newest are on the last pages
     const comments: IssueComment[] = [];
     const commentCount = issue.comments as number ?? 0;
-    if (commentCount > 0) {
+    const lastPage = Math.ceil(commentCount / GITHUB_PAGE_SIZE);
+    for (let page = Math.max(1, lastPage - MAX_ISSUE_COMMENT_PAGES + 1); page <= lastPage; page++) {
       const commentsResp = await fetch(
-        `https://api.github.com/repos/${repo}/issues/${issueNumber}/comments`,
+        `https://api.github.com/repos/${repo}/issues/${issueNumber}/comments?per_page=${GITHUB_PAGE_SIZE}&page=${page}`,
         { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
       );
       if (commentsResp.ok) {
@@ -484,7 +507,7 @@ export async function fetchGitHubIssue(
     logger.warn('GitHub issue fetch error', {
       repo, issue_number: issueNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null; // nosemgrep: ts-silent-success-masking -- GitHub issue fetch is optional hydration; null skips issue context without failing the task
+    return null; // nosemgrep: ts-silent-success-masking -- the error is logged; on null hydrateContext goes on without the issue, or fails a task that has no description
   }
 }
 
@@ -745,7 +768,7 @@ export async function fetchGitHubPullRequest(
     logger.warn('GitHub PR fetch error', {
       repo, pr_number: prNumber, error: err instanceof Error ? err.message : String(err),
     });
-    return null; // nosemgrep: ts-silent-success-masking -- GitHub PR fetch is optional hydration; null skips PR context without failing the task
+    return null; // nosemgrep: ts-silent-success-masking -- the error is logged; on null hydrateContext fails the task, which cannot run without its PR
   }
 }
 
@@ -816,9 +839,100 @@ export function enforceTokenBudget(
   return { issue, taskDescription, truncated: true };
 }
 
+/**
+ * Group review comments into threads, a root followed by its replies, so that a thread
+ * can be trimmed as a unit. A reply whose root is not in the list is a thread of its own.
+ * @param comments - the review comments, in the order fetched.
+ * @returns the threads, in the order of their first comment.
+ */
+function groupIntoThreads(comments: PullRequestReviewComment[]): PullRequestReviewComment[][] {
+  const threads: PullRequestReviewComment[][] = [];
+  const threadMap = new Map<number, number>(); // root id -> index in threads[]
+  for (const c of comments) {
+    if (c.in_reply_to_id === undefined) {
+      threadMap.set(c.id, threads.length);
+      threads.push([c]);
+    } else {
+      const idx = threadMap.get(c.in_reply_to_id);
+      if (idx !== undefined) {
+        threads[idx].push(c);
+      } else {
+        // Orphan reply — treat as its own "thread"
+        threads.push([c]);
+      }
+    }
+  }
+  return threads;
+}
+
+/**
+ * Enforce a token budget on the PR context by trimming the oldest conversation comments
+ * first, then the oldest review threads (a root with all its replies).
+ * Like enforceTokenBudget, it operates on the raw PR data BEFORE prompt assembly, so a
+ * comment it trims is never sanitized. It counts the text that assembly sanitizes: the
+ * title, the body, the task description, and the author and body of every comment. What
+ * assembly adds to that (diff hunks, the diff summary, markup) is trimmed by
+ * hydrateContext once the prompt is assembled.
+ * @param pr - the PR context.
+ * @param taskDescription - the user task description.
+ * @param budget - the token budget.
+ * @returns the (possibly trimmed) PR context and the truncated flag.
+ */
+function enforcePrTokenBudget(
+  pr: GitHubPullRequestContext,
+  taskDescription: string | undefined,
+  budget: number,
+): { pr: GitHubPullRequestContext; truncated: boolean } {
+  const length = (c: { author: string; body: string }): number => c.author.length + c.body.length;
+  const maxChars = budget * CHARS_PER_TOKEN_ESTIMATE;
+  let chars = pr.title.length + pr.body.length + (taskDescription?.length ?? 0);
+  for (const c of [...pr.issue_comments, ...pr.review_comments]) {
+    chars += length(c);
+  }
+  if (chars <= maxChars) {
+    return { pr, truncated: false };
+  }
+
+  const issueComments = [...pr.issue_comments];
+  while (chars > maxChars && issueComments.length > 0) {
+    chars -= length(issueComments.shift()!);
+  }
+  const threads = groupIntoThreads(pr.review_comments);
+  while (chars > maxChars && threads.length > 0) {
+    for (const c of threads.shift()!) {
+      chars -= length(c);
+    }
+  }
+  return { pr: { ...pr, issue_comments: issueComments, review_comments: threads.flat() }, truncated: true };
+}
+
 // ---------------------------------------------------------------------------
 // User prompt assembly
 // ---------------------------------------------------------------------------
+
+/**
+ * What the sanitizer returned for each text of the hydration in progress. Trimming a pull
+ * request assembles the prompt again for every comment it drops, and the screening text
+ * repeats every text of the prompt, so without this a comment is sanitized many times.
+ * The sanitizer's result depends on the text alone, so a result that is used again is the
+ * one a new call would return. Only hydrateContext empties the map, when it starts: a
+ * caller of the functions below from anywhere else leaves its texts here until then.
+ */
+const sanitizedTexts = new Map<string, string>();
+
+/**
+ * sanitizeExternalContent, called once per distinct text per hydration.
+ * @param text - the external text.
+ * @returns the sanitized text.
+ */
+function sanitizeOnce(text: string): string {
+  let sanitized = sanitizedTexts.get(text);
+  if (sanitized === undefined) {
+    sanitized = sanitizeExternalContent(text);
+    sanitizedTexts.set(text, sanitized);
+  }
+  return sanitized;
+}
 
 /**
  * Assemble the user prompt from issue context and task description.
@@ -844,18 +958,18 @@ export function assembleUserPrompt(
   }
 
   if (issue) {
-    parts.push(`\n## GitHub Issue #${issue.number}: ${sanitizeExternalContent(issue.title)}\n`);
-    parts.push(sanitizeExternalContent(issue.body) || '(no description)');
+    parts.push(`\n## GitHub Issue #${issue.number}: ${sanitizeOnce(issue.title)}\n`);
+    parts.push(sanitizeOnce(issue.body) || '(no description)');
     if (issue.comments.length > 0) {
       parts.push('\n### Comments\n');
       for (const c of issue.comments) {
-        parts.push(`**@${sanitizeExternalContent(c.author)}**: ${sanitizeExternalContent(c.body)}\n`);
+        parts.push(`**@${sanitizeOnce(c.author)}**: ${sanitizeOnce(c.body)}\n`);
       }
     }
   }
 
   if (taskDescription) {
-    parts.push(`\n## Task\n\n${sanitizeExternalContent(taskDescription)}`);
+    parts.push(`\n## Task\n\n${sanitizeOnce(taskDescription)}`);
   } else if (issue) {
     parts.push(
       '\n## Task\n\nResolve the GitHub issue described above. '
@@ -864,6 +978,38 @@ export function assembleUserPrompt(
   }
 
   return parts.join('\n');
+}
+
+/** Group review comments exactly as they are rendered, keeping the first root per ID. */
+function groupReviewComments(comments: PullRequestReviewComment[]) {
+  // Group review comments into threads using in_reply_to_id
+  const rootComments = new Map<number, PullRequestReviewComment>();
+  const replies = new Map<number, PullRequestReviewComment[]>();
+
+  for (const c of comments) {
+    if (c.in_reply_to_id === undefined) {
+      // Top-level comment (thread root)
+      if (rootComments.has(c.id)) {
+        logger.warn('Duplicate root comment id detected — keeping first occurrence', {
+          comment_id: c.id, existing_author: rootComments.get(c.id)!.author, duplicate_author: c.author,
+        });
+        continue;
+      }
+      rootComments.set(c.id, c);
+      if (!replies.has(c.id)) {
+        replies.set(c.id, []);
+      }
+    } else {
+      // Reply to an existing thread
+      const rootId = c.in_reply_to_id;
+      if (!replies.has(rootId)) {
+        replies.set(rootId, []);
+      }
+      replies.get(rootId)!.push(c);
+    }
+  }
+
+  return { rootComments, replies };
 }
 
 /**
@@ -884,46 +1030,21 @@ export function assemblePrIterationPrompt(
 
   parts.push(`Task ID: ${taskId}`);
   parts.push(`Repository: ${repo}`);
-  parts.push(`\n## Pull Request #${pr.number}: ${sanitizeExternalContent(pr.title)}\n`);
-  parts.push(sanitizeExternalContent(pr.body) || '(no description)');
+  parts.push(`\n## Pull Request #${pr.number}: ${sanitizeOnce(pr.title)}\n`);
+  parts.push(sanitizeOnce(pr.body) || '(no description)');
   parts.push(`\nBase branch: ${pr.base_ref}`);
   parts.push(`Head branch: ${pr.head_ref}`);
 
   if (pr.review_comments.length > 0) {
     parts.push('\n### Review Comments\n');
 
-    // Group review comments into threads using in_reply_to_id
-    const rootComments = new Map<number, PullRequestReviewComment>();
-    const replies = new Map<number, PullRequestReviewComment[]>();
-
-    for (const c of pr.review_comments) {
-      if (c.in_reply_to_id === undefined) {
-        // Top-level comment (thread root)
-        if (rootComments.has(c.id)) {
-          logger.warn('Duplicate root comment id detected — keeping first occurrence', {
-            comment_id: c.id, existing_author: rootComments.get(c.id)!.author, duplicate_author: c.author,
-          });
-          continue;
-        }
-        rootComments.set(c.id, c);
-        if (!replies.has(c.id)) {
-          replies.set(c.id, []);
-        }
-      } else {
-        // Reply to an existing thread
-        const rootId = c.in_reply_to_id;
-        if (!replies.has(rootId)) {
-          replies.set(rootId, []);
-        }
-        replies.get(rootId)!.push(c);
-      }
-    }
+    const { rootComments, replies } = groupReviewComments(pr.review_comments);
 
     // Render threads rooted by known top-level comments
     for (const [rootId, root] of rootComments) {
       const location = root.path ? `\`${root.path}${root.line ? `:${root.line}` : ''}\`` : 'general';
       parts.push(`**Thread on ${location}** (reply with comment_id: ${rootId})`);
-      parts.push(`> **@${sanitizeExternalContent(root.author)}**: ${sanitizeExternalContent(root.body)}`);
+      parts.push(`> **@${sanitizeOnce(root.author)}**: ${sanitizeOnce(root.body)}`);
       // diff_hunk and path are not sanitized: they contain code content inside markdown
       // code blocks, and sanitizing them could corrupt legitimate code snippets.
       if (root.diff_hunk) {
@@ -931,7 +1052,7 @@ export function assemblePrIterationPrompt(
       }
       const threadReplies = replies.get(rootId) ?? [];
       for (const r of threadReplies) {
-        parts.push(`\n  - **@${sanitizeExternalContent(r.author)}**: ${sanitizeExternalContent(r.body)}`);
+        parts.push(`\n  - **@${sanitizeOnce(r.author)}**: ${sanitizeOnce(r.body)}`);
       }
       parts.push('');
     }
@@ -943,7 +1064,7 @@ export function assemblePrIterationPrompt(
         const location = r.path ? `\`${r.path}${r.line ? `:${r.line}` : ''}\`` : 'general';
         const replyTarget = r.in_reply_to_id ?? r.id;
         parts.push(`**Comment on ${location}** (reply with comment_id: ${replyTarget})`);
-        parts.push(`> **@${sanitizeExternalContent(r.author)}**: ${sanitizeExternalContent(r.body)}`);
+        parts.push(`> **@${sanitizeOnce(r.author)}**: ${sanitizeOnce(r.body)}`);
         if (r.diff_hunk) {
           parts.push(`> \`\`\`diff\n> ${r.diff_hunk}\n> \`\`\``);
         }
@@ -955,7 +1076,7 @@ export function assemblePrIterationPrompt(
   if (pr.issue_comments.length > 0) {
     parts.push('\n### Conversation Comments\n');
     for (const c of pr.issue_comments) {
-      parts.push(`**@${sanitizeExternalContent(c.author)}** (comment_id: ${c.id}): ${sanitizeExternalContent(c.body)}\n`);
+      parts.push(`**@${sanitizeOnce(c.author)}** (comment_id: ${c.id}): ${sanitizeOnce(c.body)}\n`);
     }
   }
 
@@ -965,7 +1086,7 @@ export function assemblePrIterationPrompt(
   }
 
   if (taskDescription) {
-    parts.push(`\n## Additional Instructions\n\n${sanitizeExternalContent(taskDescription)}`);
+    parts.push(`\n## Additional Instructions\n\n${sanitizeOnce(taskDescription)}`);
   } else {
     parts.push(
       '\n## Task\n\nAddress the review feedback on this pull request. '
@@ -974,6 +1095,58 @@ export function assemblePrIterationPrompt(
   }
 
   return parts.join('\n');
+}
+
+/**
+ * Build the text screened by the guardrail for an issue-based task: the sanitized
+ * issue title, body and comments only. Platform-authored wrapper text (task header,
+ * closing instructions) is excluded so it does not count toward the classifier score.
+ * @param issue - the GitHub issue context.
+ * @returns the external issue content, joined.
+ */
+export function buildIssueScreeningText(issue: GitHubIssueContext): string {
+  const parts: string[] = [sanitizeOnce(issue.title), sanitizeOnce(issue.body)];
+  for (const c of issue.comments) {
+    parts.push(sanitizeOnce(c.author), sanitizeOnce(c.body));
+  }
+  return parts.filter(p => p.length > 0).join('\n\n');
+}
+
+/**
+ * Build the text screened by the guardrail for a PR task: the sanitized PR title, body,
+ * review and conversation comments, plus the diff hunks and diff summary. Platform-authored
+ * wrapper text (task header, branch labels, closing instructions) is excluded.
+ * Branch names, rendered comment paths and authors remain screened.
+ * @param pr - the GitHub PR context (after any token-budget trimming).
+ * @returns the external PR content, joined.
+ */
+export function buildPrScreeningText(pr: GitHubPullRequestContext): string {
+  const parts: string[] = [
+    sanitizeOnce(pr.title), sanitizeOnce(pr.body), pr.base_ref, pr.head_ref,
+  ];
+  const { rootComments, replies } = groupReviewComments(pr.review_comments);
+  const appendComment = (c: PullRequestReviewComment, includeLocation: boolean): void => {
+    parts.push(sanitizeOnce(c.author), sanitizeOnce(c.body));
+    if (includeLocation) {
+      if (c.path) parts.push(c.path);
+      if (c.diff_hunk) parts.push(c.diff_hunk);
+    }
+  };
+  for (const [rootId, root] of rootComments) {
+    appendComment(root, true);
+    for (const reply of replies.get(rootId) ?? []) appendComment(reply, false);
+  }
+  for (const [rootId, orphanReplies] of replies) {
+    if (rootComments.has(rootId)) continue;
+    for (const reply of orphanReplies) appendComment(reply, true);
+  }
+  for (const c of pr.issue_comments) {
+    parts.push(sanitizeOnce(c.author), sanitizeOnce(c.body));
+  }
+  if (pr.diff_summary) {
+    parts.push(pr.diff_summary);
+  }
+  return parts.filter(p => p.length > 0).join('\n\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,9 +1211,13 @@ export interface HydrateContextOptions {
  *          intervened (PR tasks: always screened; new_task: screened when issue content is present).
  * @throws GuardrailScreeningError when the Bedrock Guardrail API call fails
  *         (fail-closed — propagated to prevent unscreened content from reaching the agent).
+ * @throws RequiredContextUnavailableError when the pull request of a PR task, or the issue
+ *         of a task that has no description, cannot be fetched.
  */
 // eslint-disable-next-line complexity -- predates the ceiling (47 when it landed); must not grow
 export async function hydrateContext(task: TaskRecord, options?: HydrateContextOptions): Promise<HydratedContext> {
+  // The sanitizer results of this hydration only, so the map never outgrows one task's context
+  sanitizedTexts.clear();
   const sources: string[] = [];
   let issue: GitHubIssueContext | undefined;
   let memoryContext: MemoryContext | undefined;
@@ -1151,31 +1328,23 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
 
     if (isPrTask) {
       if (!prResult) {
-        // PR fetch failed — log error and return minimal context
+        // PR fetch failed — log error and fail: the PR's head branch is what the agent checks out
         logger.error(`PR context fetch failed for ${workflowId} task`, {
           task_id: task.task_id, pr_number: task.pr_number, resolved_workflow: workflowId,
         });
-        const fallbackPrompt = assembleUserPrompt(task.task_id, repo, undefined, task.task_description);
-        const fallbackSources = task.task_description ? ['task_description'] : [];
-        return {
-          version: 1,
-          user_prompt: fallbackPrompt,
-          sources: fallbackSources,
-          token_estimate: estimateTokens(fallbackPrompt),
-          truncated: false,
-          fallback_error: `Failed to fetch PR #${task.pr_number} context from GitHub`,
-          content_trust: buildContentTrust(fallbackSources),
-        };
+        throw new RequiredContextUnavailableError(`Failed to fetch PR #${task.pr_number} context from GitHub`);
       }
 
-      // Enforce token budget on the assembled PR prompt
-      const budgetResult = enforceTokenBudget(undefined, task.task_description, USER_PROMPT_TOKEN_BUDGET);
-      let effectiveTaskDescription = budgetResult.taskDescription;
+      // Enforce token budget on the PR as fetched, so that only what fits is sanitized and assembled
+      const budgetResult = enforcePrTokenBudget(prResult, task.task_description, USER_PROMPT_TOKEN_BUDGET);
+      const pr = budgetResult.pr;
+      let effectiveTaskDescription = task.task_description;
       if (!effectiveTaskDescription && workflowIsReadOnly(workflowId)) {
         logger.info('Using default task description for read-only PR task', { task_id: task.task_id });
         effectiveTaskDescription = 'Review this pull request. Follow the workflow in your system instructions.';
       }
-      userPrompt = assemblePrIterationPrompt(task.task_id, repo, prResult, effectiveTaskDescription);
+      userPrompt = assemblePrIterationPrompt(task.task_id, repo, pr, effectiveTaskDescription);
+      let screenedPr: GitHubPullRequestContext = pr;
 
       // Trim PR context if the assembled prompt exceeds the token budget
       let truncated = budgetResult.truncated;
@@ -1185,33 +1354,18 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
           task_id: task.task_id, estimate: promptEstimate, budget: USER_PROMPT_TOKEN_BUDGET,
         });
         // Build thread-grouped list so we can trim whole threads at a time
-        const threads: PullRequestReviewComment[][] = [];
-        const threadMap = new Map<number, number>(); // root id -> index in threads[]
-        for (const c of prResult.review_comments) {
-          if (c.in_reply_to_id === undefined) {
-            threadMap.set(c.id, threads.length);
-            threads.push([c]);
-          } else {
-            const idx = threadMap.get(c.in_reply_to_id);
-            if (idx !== undefined) {
-              threads[idx].push(c);
-            } else {
-              // Orphan reply — treat as its own "thread"
-              threads.push([c]);
-            }
-          }
-        }
+        const threads = groupIntoThreads(pr.review_comments);
 
-        const trimmedIssueComments = [...prResult.issue_comments];
-        let trimmedReviewComments = prResult.review_comments;
+        const trimmedIssueComments = [...pr.issue_comments];
+        let trimmedReviewComments = pr.review_comments;
         let trimmedPr = {
-          ...prResult,
+          ...pr,
           review_comments: trimmedReviewComments,
           issue_comments: trimmedIssueComments,
         };
         const estimateTrimmed = (): number =>
           estimateTokens(assemblePrIterationPrompt(
-            task.task_id, repo, trimmedPr, budgetResult.taskDescription,
+            task.task_id, repo, trimmedPr, effectiveTaskDescription,
           ));
 
         // Trim oldest issue comments first
@@ -1232,7 +1386,8 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
           trimmedPr = { ...trimmedPr, review_comments: trimmedReviewComments };
         }
 
-        userPrompt = assemblePrIterationPrompt(task.task_id, repo, trimmedPr, budgetResult.taskDescription);
+        userPrompt = assemblePrIterationPrompt(task.task_id, repo, trimmedPr, effectiveTaskDescription);
+        screenedPr = trimmedPr;
         const finalEstimate = estimateTokens(userPrompt);
         if (finalEstimate > USER_PROMPT_TOKEN_BUDGET) {
           logger.warn('Token budget still exceeded after trimming all comments — non-comment content too large', {
@@ -1247,8 +1402,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       resolvedBranchName = prResult.head_ref;
       resolvedBaseBranch = prResult.base_ref;
 
-      // Screen assembled PR prompt through Bedrock Guardrail for prompt injection
-      const screenResult = await screenWithGuardrail(userPrompt, task.task_id);
+      // Screen the external PR content through Bedrock Guardrail for prompt injection.
+      // The platform's own wrapper text is excluded so it does not push benign content over the threshold.
+      const screenResult = await screenWithGuardrail(buildPrScreeningText(screenedPr), task.task_id);
 
       const guardrailBlocked = formatGuardrailBlocked(screenResult, 'PR context');
 
@@ -1268,17 +1424,21 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       return prContext;
     }
 
-    // Standard task
+    // Standard task. The issue is its only instruction when there is no description
+    if (task.issue_number !== undefined && !issue && !task.task_description) {
+      throw new RequiredContextUnavailableError(`Failed to fetch issue #${task.issue_number} from GitHub`);
+    }
     const budgetResult = enforceTokenBudget(issue, task.task_description, USER_PROMPT_TOKEN_BUDGET);
     issue = budgetResult.issue;
 
     userPrompt = assembleUserPrompt(task.task_id, repo, issue, budgetResult.taskDescription);
     const tokenEstimate = estimateTokens(userPrompt);
 
-    // Screen assembled prompt when it includes GitHub issue content (attacker-controlled input).
-    // Skipped when no issue is present — task_description is already screened at submission time.
+    // Screen GitHub issue content (attacker-controlled input) when present. Only the issue
+    // itself is screened, not the platform's wrapper text. Skipped when no issue is present —
+    // task_description is already screened at submission time.
     const screenResult = issue
-      ? await screenWithGuardrail(userPrompt, task.task_id)
+      ? await screenWithGuardrail(buildIssueScreeningText(issue), task.task_id)
       : undefined;
 
     const guardrailBlocked = formatGuardrailBlocked(screenResult, 'Task context');
@@ -1315,6 +1475,11 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     // throttling). Degrading strands the task with no token, same as a missing
     // secret; the canonical BLOCKED[auth_failure] reason routes to the remedy.
     if (err instanceof SecretUnreadableError) {
+      throw err;
+    }
+    // A task without the issue or pull request it is about must fail too: the fallback
+    // below would hand the agent a prompt with no task, or no branch to check out.
+    if (err instanceof RequiredContextUnavailableError) {
       throw err;
     }
     // Programming errors (bugs) should fail the task, not silently degrade context

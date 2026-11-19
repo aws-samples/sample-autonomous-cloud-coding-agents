@@ -61,10 +61,9 @@ program
   .description('Background Agent CLI — submit and manage coding tasks')
   .version('0.0.0')
   .option('--verbose', 'Enable debug output')
-  .hook('preAction', (_thisCommand, actionCommand) => {
-    // Resolve --verbose from the root program, not the subcommand
-    const rootOpts = actionCommand.parent?.opts() ?? actionCommand.opts();
-    if (rootOpts.verbose) {
+  .hook('preAction', (thisCommand) => {
+    // thisCommand is the root program, which owns --verbose, whatever subcommand runs
+    if (thisCommand.opts().verbose) {
       setVerbose(true);
     }
   });
@@ -100,6 +99,25 @@ program.addCommand(makeApiKeyCommand());
 program.addCommand(makeAdminCommand());
 program.addCommand(makeRegistryCommand());
 
+/**
+ * Parse ``argv`` and run the command it names. A failure is reported on
+ * stderr and sets ``process.exitCode``; the returned promise never rejects.
+ */
+export async function run(argv: string[]): Promise<void> {
+  await program
+    .parseAsync(argv)
+    .catch((err: unknown) => {
+      if (err instanceof Error) {
+        console.error(`Error: ${err.message}`);
+      } else {
+        console.error('An unexpected error occurred.');
+      }
+      // CliError carries a per-failure-class exit code (e.g. 2 for
+      // wait-timeout) so scripts can branch on it; everything else is 1.
+      process.exitCode = err instanceof CliError ? err.exitCode : 1;
+    });
+}
+
 // Execute the CLI only when run directly. Importing this module (e.g.
 // from a test harness or a wrapper) must not parse the importer's
 // ``process.argv`` nor schedule a ``process.exit`` on the importer's
@@ -112,18 +130,7 @@ if (require.main === module) {
   // any AWS SDK client is constructed. Only sets it when unset, so an operator
   // exporting AWS_SDK_UA_APP_ID='' (or any value) keeps full control.
   applyDefaultAppId();
-  program
-    .parseAsync(process.argv)
-    .catch((err: unknown) => {
-      if (err instanceof Error) {
-        console.error(`Error: ${err.message}`);
-      } else {
-        console.error('An unexpected error occurred.');
-      }
-      // CliError carries a per-failure-class exit code (e.g. 2 for
-      // wait-timeout) so scripts can branch on it; everything else is 1.
-      process.exitCode = err instanceof CliError ? err.exitCode : 1;
-    })
+  void run(process.argv)
     .finally(() => {
       // Node's global ``fetch`` (undici) keeps TCP sockets alive in a
       // connection pool by default. After a long-running command like

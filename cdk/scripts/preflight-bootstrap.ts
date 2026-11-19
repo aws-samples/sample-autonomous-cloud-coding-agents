@@ -80,7 +80,7 @@ function readToolkitOutputs(argv: readonly string[]): CfnOutput[] | null {
   } catch (err) {
     const stderr = String((err as { stderr?: unknown }).stderr || err);
     if (/does not exist/.test(stderr)) return null;
-    throw new Error(`could not read the ${toolkitStackName(argv)} stack: ${stderr.trim()}`);
+    throw new Error(`could not read the ${toolkitStackName(argv)} stack: ${stderr.trim()}`, { cause: err });
   }
 }
 

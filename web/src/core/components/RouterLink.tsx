@@ -30,7 +30,7 @@ export function RouterLink({ href, children, ...rest }: Omit<LinkProps, 'onFollo
       href={href}
       onFollow={(event) => {
         event.preventDefault();
-        navigate(href);
+        void navigate(href);
       }}
     >
       {children}

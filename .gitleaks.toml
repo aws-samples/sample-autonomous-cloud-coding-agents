@@ -12,10 +12,6 @@ paths = [
 ]
 
 [[allowlists]]
-description = "Mock workload access token in CDK handler tests (not a real credential)."
-stopwords = ["wat-opaque-123"]
-
-[[allowlists]]
 description = "Test fixture signing secret in Slack verification unit test (not a real credential)."
 stopwords = ["test-signing-secret-abc123"]
 
@@ -69,10 +65,7 @@ paths = [
 # Per-line opt-out for a 12-digit number that is not an account id: end the
 # line with a comment `gitleaks:allow -- <reason>`. Use it only on a line that
 # holds no identifier, key or token: the marker is built into gitleaks and
-# exempts the whole line from every rule, not only from this one. The stopword
-# below has no part in it: gitleaks compares a stopword with the reported
-# value, here the twelve digits, so this one never matches.
-stopwords = ["gitleaks:allow account-id"]
+# exempts the whole line from every rule, not only from this one.
 
 [[rules.allowlists]]
 # Retired fixture value from PR #733 (#645). On that branch

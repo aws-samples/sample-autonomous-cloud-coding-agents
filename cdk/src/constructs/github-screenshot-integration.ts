@@ -70,8 +70,9 @@ export interface GitHubScreenshotIntegrationProps {
 
   /**
    * Optional — when provided, the processor also tries to post the
-   * screenshot to a linked Linear issue. Resolved from the GitHub PR
-   * title/body via a Linear-identifier regex (e.g. `ENG-42`), then
+   * screenshot to a linked Linear issue: the issue of the task that
+   * opened the PR, else the one resolved from the GitHub PR
+   * branch/title/body via a Linear-identifier regex (e.g. `ENG-42`) and
    * looked up across all `status='active'` workspaces in the registry
    * via Linear's `issueVcsBranchSearch` GraphQL.
    */
@@ -245,13 +246,6 @@ export class GitHubScreenshotIntegration extends Construct {
       bundling: commonBundling,
     });
 
-    NagSuppressions.addResourceSuppressions(processorDlq, [
-      {
-        id: 'AwsSolutions-SQS3',
-        reason: 'This queue IS the async-invoke DLQ for the processor Lambda — a DLQ for the DLQ would be infinite recursion',
-      },
-    ]);
-
     // Alarm on any record landing in the DLQ. The processor handler
     // swallows its own errors, so only init-time crashes reach this queue
     // — rare, but each one is a screenshot pipeline silently down. Same
@@ -363,6 +357,10 @@ export class GitHubScreenshotIntegration extends Construct {
       // preview is captured + posted to the PR but never appended to the Linear
       // iteration reply (observed in practice — the head_sha refinement was
       // added without extending its IAM grant).
+      // The same GetItem grant serves the read that precedes every write:
+      // persistScreenshotUrl reads the repository of the task named by the
+      // branch and writes only onto a task of the deployment's repository.
+      // Without it no screenshot is stored and no tracker gets the preview.
       // Each tracker's index only when that tracker is wired (ADR-024).
       const issueIndexes = [
         ...(props.linearWorkspaceRegistryTable ? ['LinearIssueIndex'] : []),

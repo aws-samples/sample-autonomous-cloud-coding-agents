@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Guards the semgrep suppression comments in source files (#790, #257).
+// Guards the semgrep suppression comments of the repository (#790, #257).
 //
 // A suppression comment is the documented escape hatch of the semgrep gates, and
 // an unchecked one is an unreviewed off switch. This check holds every one of
-// them, in every tracked ts/js/py file and in any other tracked file semgrep
+// them, in every tracked file that is not Markdown and in any file semgrep
 // reads for the masking rules, to two rules:
 //
 //  1. FORM. The suppression word is followed by `: <rule-id> -- <reason>` (the
@@ -36,10 +36,12 @@
 // not run (it never passes on what it could not read).
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 
 const RULES = '.semgrep/silent-success-masking.yaml';
 const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs|py)$/;
+// Not read, unless semgrep read it: the guides have to be able to spell the word.
+const MARKDOWN = /\.(md|mdx)$/;
 
 // This file is scanned like any other, so no line of it may hold the word: it is
 // assembled from two halves, and the patterns spell it with a character class.
@@ -103,9 +105,14 @@ const candidates = tracked.split('\0').filter((f) => f && !f.startsWith('.semgre
 if (!candidates.some((f) => SOURCE_EXT.test(f))) cannotRun('git lists no tracked source file here. Run from the repository root.');
 
 const { found, scanned } = scan();
-// Source files by name, where suppressions of any rule live, and whatever else
-// semgrep read for the masking rules: it picks its files by more than the name.
-const files = candidates.filter((f) => SOURCE_EXT.test(f) || scanned.has(f));
+// Every tracked file but Markdown: the registry scan (`security:sast`) also reads
+// workflows, Dockerfiles, shell scripts and configuration, and semgrep honours a
+// suppression in each of them. And whatever semgrep read for the masking rules,
+// Markdown by name or not: it picks its files by more than the name. No file is
+// left out for its content: semgrep reads a source file that holds a NUL byte.
+// A symbolic link and a submodule are left out: neither is a file, and semgrep
+// does not read through a link.
+const files = candidates.filter((f) => (!MARKDOWN.test(f) || scanned.has(f)) && lstatSync(f).isFile());
 const malformed = [];
 const unbound = [];
 let suppressions = 0;
@@ -155,6 +162,6 @@ if (unbound.length > 0) {
 if (malformed.length > 0 || unbound.length > 0) process.exit(1);
 
 console.log(
-  `✓ ${suppressions} semgrep suppressions in ${files.length} source files name a rule and a reason; ` +
+  `✓ ${suppressions} semgrep suppressions in ${files.length} files name a rule and a reason; ` +
     `all ${masking} silent-success-masking suppressions bind to one of ${found.size} findings`,
 );

@@ -236,7 +236,7 @@ Blueprints can configure per-repository settings that override platform defaults
 | `github_token_secret_arn` | Per-repo GitHub token (Secrets Manager ARN) | Platform default |
 | `poll_interval_ms` | Poll interval for awaiting completion (5000–300000) | 30000 |
 
-> `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.6.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs` — see the [Deployment guide](./DEPLOYMENT_GUIDE.md#lambda-microvms-backend-experimental).
+> `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.9.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs` — see the [Deployment guide](./DEPLOYMENT_GUIDE.md#lambda-microvms-backend-experimental).
 
 When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) is used. The same override pattern applies to `--max-budget` / `max_budget_usd`, except there is no platform default  - if neither the task nor the Blueprint specifies a budget, no cost limit is applied.
 
@@ -319,7 +319,7 @@ Administrative overhead is one budget command per controlled scope. A single `Ev
 
 ## Workflows
 
-Every task runs a **workflow** — a named, versioned recipe that decides whether to clone a repo, which tools the agent may use, and how the result is delivered. You select one with `workflow_ref` (REST/webhook) or `--workflow` (CLI); the `--pr`/`--review-pr` flags select the coding PR workflows for you. If you specify nothing, the platform resolves a default (your repo's Blueprint default, or the conservative `default/agent-v1`). Workflows replace the old `task_type` field — see [Workflows](../design/WORKFLOWS.md) for the full design and how to author your own.
+Every task runs a **workflow** — a named, versioned recipe that decides whether to clone a repo, which tools the agent may use, and how the result is delivered. You select one with `workflow_ref` (REST/webhook) or `--workflow` (CLI); the `--pr`/`--review-pr` flags select the coding PR workflows for you. A REST or webhook request without `workflow_ref` falls back to the conservative `default/agent-v1`; `bgagent submit` with `--repo` and none of these flags sends `coding/new-task-v1`. Workflows replace the old `task_type` field — see [Workflows](../design/WORKFLOWS.md) for the full design and how to author your own.
 
 The shipped workflows that cover the full lifecycle of a code change:
 
@@ -380,6 +380,7 @@ curl -X POST "$API_URL/tasks" \
   -H "Content-Type: application/json" \
   -d '{
     "repo": "owner/repo",
+    "workflow_ref": "coding/new-task-v1",
     "task_description": "Add input validation to the /users POST endpoint"
   }'
 ```
@@ -390,7 +391,7 @@ curl -X POST "$API_URL/tasks" \
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "awslabs/agent-plugins", "task_description": "add codeowners field to RFC issue template"}'
+  -d '{"repo": "awslabs/agent-plugins", "workflow_ref": "coding/new-task-v1", "task_description": "add codeowners field to RFC issue template"}'
 ```
 
 ```json
@@ -403,7 +404,7 @@ To create a task from a GitHub issue:
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "issue_number": 42}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "issue_number": 42}'
 ```
 
 To iterate on an existing pull request (address review feedback):
@@ -442,7 +443,7 @@ curl -X POST "$API_URL/tasks" \
   -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
 ```
 
-> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](../design/WORKFLOWS.md)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
+> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](../design/WORKFLOWS.md)). Omit it and the platform falls back to the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
 
 **Request body fields:**
 
@@ -452,11 +453,11 @@ curl -X POST "$API_URL/tasks" \
 | `issue_number` | number | One of these | GitHub issue number |
 | `task_description` | string | is required | Free-text task description |
 | `pr_number` | number | | PR number to iterate on or review (required for `coding/pr-iteration-v1` and `coding/pr-review-v1`) |
-| `workflow_ref` | string | No | Workflow selector `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Replaces the retired `task_type`. Omitted ⇒ the platform resolves a default (`default/agent-v1`). |
+| `workflow_ref` | string | No | Workflow selector `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Replaces the retired `task_type`. Omitted ⇒ `default/agent-v1`, which requires `task_description` (an `issue_number` alone is answered `400`). For a task that changes the repository and opens a pull request, send `coding/new-task-v1`. |
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
-**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 VALIDATION_ERROR` ("Task description was blocked by content policy.")  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR workflows (`coding/pr-iteration-v1`, `coding/pr-review-v1`), the assembled prompt (including PR body and review comments) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
+**Content screening:** Task descriptions are automatically screened by Amazon Bedrock Guardrails for prompt injection before the task is created. If content is blocked, you receive a `400 VALIDATION_ERROR` ("Task description was blocked by content policy.")  - revise the description and retry. If the screening service is temporarily unavailable, you receive a `503` error  - retry after a short delay. For PR workflows (`coding/pr-iteration-v1`, `coding/pr-review-v1`), the PR content (title, body, branch names, comment authors and bodies, rendered review paths, and diff) is also screened during context hydration; if blocked, the task transitions to `FAILED`.
 
 **Idempotency:** Include an `Idempotency-Key` header (alphanumeric, dashes, underscores, max 128 chars) to prevent duplicate task creation on retries:
 
@@ -465,7 +466,7 @@ curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: my-unique-key-123" \
-  -d '{"repo": "owner/repo", "task_description": "Fix bug"}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "task_description": "Fix bug"}'
 ```
 
 ### List tasks
@@ -505,7 +506,7 @@ curl "$API_URL/tasks/01KN36YGQV6BEPDD7CVMKP1PF3" -H "Authorization: $TOKEN"
 ```
 
 ```json
-{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"awslabs/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/awslabs/agent-plugins/pull/42","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:26:35.350Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":125.9,"cost_usd":0.15938219999999997,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
+{"data":{"task_id":"01KN36YGQV6BEPDD7CVMKP1PF3","status":"COMPLETED","repo":"awslabs/agent-plugins","issue_number":null,"task_description":"add codeowners field to RFC issue template","branch_name":"bgagent/01KN36YGQV6BEPDD7CVMKP1PF3/add-codeowners-field-to-rfc-issue-template","session_id":"3eb8f3fb-808d-47d6-8557-309fb9369ea7","pr_url":"https://github.com/awslabs/agent-plugins/pull/42","error_message":null,"error_classification":null,"created_at":"2026-04-01T00:26:30.011Z","updated_at":"2026-04-01T00:30:32Z","started_at":"2026-04-01T00:26:35.350Z","completed_at":"2026-04-01T00:30:32Z","duration_s":125.9,"cost_usd":0.15938219999999997,"build_passed":null,"max_turns":null,"max_budget_usd":null,"prompt_version":"1c9c10e027a2"}}
 ```
 
 ### Cancel a task
@@ -632,14 +633,15 @@ Created:     2026-04-01T00:39:51.271Z
 | `--task` | Task description text. |
 | `--pr` | PR number to iterate on. Selects the `coding/pr-iteration-v1` workflow. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--review-pr` | PR number to review. Selects the `coding/pr-review-v1` workflow. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
-| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; omit to let the server resolve a default. |
-| `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
+| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; without any of the three flags the CLI sends `coding/new-task-v1`. |
+| `--attachment` | Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline, up to 3 MB in total; the other files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
 | `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
-| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
+| `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
+| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Scope forms: `all_session`, `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>`, `rule:<rule_id>`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
@@ -668,7 +670,7 @@ Attachments let you provide non-text context to the agent — screenshots of bug
 **Usage:**
 
 ```bash
-# Local file (auto-detects MIME type from content)
+# Local file (the MIME type comes from the file extension)
 node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this layout" \
   --attachment screenshot.png
 
@@ -684,8 +686,8 @@ node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" 
 
 The CLI automatically routes attachments through the optimal upload path:
 
-- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body).
-- **Files > 500 KB** use presigned upload (uploaded directly to S3, then confirmed).
+- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body), up to 3 MB in total.
+- **Files > 500 KB**, and smaller files once 3 MB are sent inline, use presigned upload (uploaded directly to S3, then confirmed).
 - **URLs** are validated at submission and fetched during context hydration with SSRF protection.
 
 **Security screening:**
@@ -775,7 +777,7 @@ node lib/bin/bgagent.js watch <TASK_ID>
 node lib/bin/bgagent.js watch <TASK_ID> --output json
 ```
 
-Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`. Press Ctrl+C to exit early without affecting the task.
+Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`, `2` when the CLI gives up because the API kept failing (the task may still be running: run the command again to resume). Press Ctrl+C to exit early without affecting the task.
 
 ### Steering a running task (nudge)
 
@@ -802,7 +804,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace
 node lib/bin/bgagent.js trace download <TASK_ID>
 
 # Pipe to jq for analysis
-node lib/bin/bgagent.js trace download <TASK_ID> | gunzip | jq -s .
+node lib/bin/bgagent.js trace download <TASK_ID> | jq -s .
 
 # Save raw gzip to a file
 node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz
@@ -885,7 +887,7 @@ The `--scope` flag controls how long the approval carries forward within the run
 | `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
 | `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
 | `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
-| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). |
+| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`tool_group:file_write` covers `Edit` and `Write`). For a tool that is in no group, `tool_group_session` covers that call only. |
 | `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
 | `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
 | `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
@@ -922,15 +924,27 @@ If you trust a task to make a certain class of changes without interactive confi
 ```bash
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
-  --pre-approve write_path:tests/**
+  --pre-approve 'write_path:tests/**'
 
 # Per-task timeout override (platform default is 300s)
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
-`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+`--pre-approve` can be repeated up to 20 times. Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+
+For Lambda MicroVM tasks, a waiting approval can put the worker to sleep so it
+stops billing compute. With the defaults (a 300-second approval window and a
+60-second sleep delay) the worker sleeps after one minute and wakes when you
+answer, or 60 seconds before the deadline so a timeout is still recorded
+normally. `--microvm-sleep-after 120` selects two minutes and
+`--microvm-sleep-after off` keeps the worker awake. The delay starts when each
+approval request is created; sleep never extends the approval deadline. The API
+equivalent is `microvm_sleep_after_s` (zero means off), and task details return
+the saved setting. Automatic sleep is disabled by default for new deployments.
+An operator enables it after [verifying the deployed image and
+coordinator](../verification/README.md#live-acceptance-for-an-installation).
 
 ## Webhook integration
 
@@ -1008,7 +1022,7 @@ Use the webhook endpoint with HMAC-SHA256 authentication instead of a JWT:
 ```bash
 WEBHOOK_ID="01HYX..."
 WEBHOOK_SECRET="a1b2c3d4..."
-BODY='{"repo": "owner/repo", "task_description": "Fix the login bug"}'
+BODY='{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "task_description": "Fix the login bug"}'
 
 # Compute HMAC-SHA256 signature
 SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | cut -d' ' -f2)
@@ -1065,6 +1079,9 @@ flowchart LR
     H --> X
     S --> F
     S --> X
+    S <--> Q[QUEUED]
+    Q --> F
+    Q --> X
 ```
 
 The orchestrator uses Lambda Durable Functions to manage the lifecycle durably - long-running tasks (up to 9 hours) survive transient failures and Lambda timeouts. The agent commits work regularly, so partial progress is never lost.
@@ -1073,12 +1090,13 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably -
 |---|---|
 | `PENDING_UPLOADS` | Initial state while presigned attachment uploads are pending confirmation |
 | `SUBMITTED` | Task accepted; orchestrator invoked asynchronously |
+| `QUEUED` | You are at your concurrency limit; the task waits for a free slot and starts automatically. See [Concurrency limits](#concurrency-limits). |
 | `HYDRATING` | Orchestrator passed admission control; assembling the agent payload |
 | `RUNNING` | Agent session started and actively working on the task |
 | `AWAITING_APPROVAL` | Agent paused at a Cedar HITL gate; waiting for your `approve` or `deny` decision. See [Approval gates](#approval-gates-cedar-hitl). |
 | `FINALIZING` | Agent session ended; task is wrapping up (post-session hooks / PR finalization) before reaching a terminal state |
 | `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
-| `FAILED` | Something went wrong - pre-flight check failed, concurrency limit reached, guardrail blocked the content, or the agent encountered an error |
+| `FAILED` | Something went wrong - pre-flight check failed, guardrail blocked the content, the task stayed queued for more than 24 hours, or the agent encountered an error |
 | `CANCELLED` | Task was cancelled by the user |
 | `TIMED_OUT` | Task exceeded the maximum allowed duration (~8 hours, the AgentCore max session duration; the orchestrator safety-net timer is slightly longer) |
 
@@ -1088,7 +1106,7 @@ Task records in terminal states are automatically deleted after 90 days (configu
 
 ### Concurrency limits
 
-Each user can run up to 3 tasks concurrently by default (configurable via `maxConcurrentTasksPerUser` on the `TaskOrchestrator` CDK construct). If you exceed the limit, the task fails with a concurrency message. Wait for an active task to complete, or cancel one, then retry.
+Each user can run up to 10 tasks concurrently. If you exceed the limit, the task is queued (`QUEUED`) instead of failing: it starts automatically, oldest first, as your active tasks finish or are cancelled, and fails only if it is still queued 24 hours after submission. A task with an uploaded file attachment (a file over 500 KB, or a smaller one once 3 MB are sent inline) is checked when you confirm its uploads: if your slots are all in use at that moment, the confirmation is refused with `429 RATE_LIMIT_EXCEEDED`. Through the API, confirm again once a slot is free, within 30 minutes of submitting; after that the unconfirmed task is cancelled. `bgagent submit` does not retry the confirmation: submit the task again.
 
 There is no system-wide cap - the theoretical maximum is `number_of_users * per_user_limit`. The hard ceiling is the AgentCore concurrent sessions quota for your AWS account (check the [AWS Service Quotas console](https://console.aws.amazon.com/servicequotas/) for Bedrock AgentCore in your region).
 
@@ -1103,7 +1121,7 @@ curl "$API_URL/tasks/<TASK_ID>/events" -H "Authorization: $TOKEN"
 Available events:
 
 - **Lifecycle** - `task_created`, `session_started`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
-- **Orchestration** - `admission_rejected`, `hydration_started`, `hydration_complete`
+- **Orchestration** - `admission_queued`, `queue_pickup`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
 - **Interactive** - `nudge_acknowledged`, `agent_milestone`
 - **Approvals (Cedar HITL)** - `approval_requested`, `approval_recorded`, `approval_timed_out`
@@ -1127,14 +1145,13 @@ If a task fails with a `preflight_failed` event, the platform rejected the run b
 - `REPO_NOT_FOUND_OR_NO_ACCESS` - The GitHub PAT does not have access to the target repository, or the repo does not exist.
 - `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` - The PAT lacks the required permissions for the workflow. For `coding/new-task-v1` and `coding/pr-iteration-v1`, you need Contents (read/write) and Pull requests (read/write). For `coding/pr-review-v1`, Triage or higher is enough.
 - `PR_NOT_FOUND_OR_CLOSED` - The specified PR does not exist or is already closed.
+- `PR_FROM_FORK` - The specified PR comes from a fork. The agent works on branches of the onboarded repository, and the branch of this PR is in the fork. Push the branch to the repository itself, open the PR from there, and submit the task for that PR.
 
 To fix permission issues, update the GitHub PAT in AWS Secrets Manager and submit a new task. See [Developer guide - Repository preparation](./DEVELOPER_GUIDE.md#repository-preparation) for the full permissions table.
 
 ### Viewing logs
 
-Each task record includes a `logs_url` field with a direct link to filtered CloudWatch logs. You can get this URL from the task status output or from the `GET /tasks/{task_id}` API response.
-
-Alternatively, the application logs are in the CloudWatch log group:
+The application logs are in the CloudWatch log group:
 
 ```
 /aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/jean_cloude
@@ -1211,4 +1228,4 @@ Every task consumes model tokens, compute time, and GitHub API calls. Setting li
 
 - **Content screening** - Task descriptions and PR context are screened by Bedrock Guardrails for prompt injection. If your task is unexpectedly blocked, check the task events for a `guardrail_blocked` entry and revise your description.
 - **Idempotency** - If you're creating tasks via the API and might retry on network errors, include an `Idempotency-Key` header to prevent duplicate tasks.
-- **Concurrency** - You share a per-user concurrency limit (default: 3 tasks). If you hit the limit, wait for a task to finish or cancel one you no longer need before submitting more.
+- **Concurrency** - You share a per-user concurrency limit (default: 10 tasks). If you hit the limit, new tasks are queued and start as active ones finish; cancel one you no longer need to free a slot.

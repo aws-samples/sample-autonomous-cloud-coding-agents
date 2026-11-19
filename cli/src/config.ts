@@ -28,7 +28,7 @@ const CONFIG_FILE = 'config.json';
 const CREDENTIALS_FILE = 'credentials.json';
 
 /** Owner-only read/write — credentials must never be group/world readable. */
-export const SECRET_FILE_MODE = 0o600;
+const SECRET_FILE_MODE = 0o600;
 
 /** Returns the config directory path (~/.bgagent or BGAGENT_CONFIG_DIR). */
 export function getConfigDir(): string {
@@ -43,20 +43,32 @@ function credentialsPath(): string {
   return path.join(getConfigDir(), CREDENTIALS_FILE);
 }
 
-function ensureConfigDir(): void {
+/** Create the config directory, owner-only, unless it exists. */
+export function ensureConfigDir(): void {
   const dir = getConfigDir();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
 }
 
-/** Load CLI configuration. Throws if not configured. */
+/**
+ * Load CLI configuration. Throws if not configured: there is no config file. A file that
+ * cannot be read or parsed is reported with its path and the reason, not as missing:
+ * `bgagent configure` would replace a file that may only need a repair.
+ */
 export function loadConfig(): CliConfig {
   const p = configPath();
   if (!fs.existsSync(p)) {
     throw new CliError('Not configured. Run `bgagent configure` first.');
   }
-  return JSON.parse(fs.readFileSync(p, 'utf-8')) as CliConfig;
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf-8')) as CliConfig;
+  } catch (err) {
+    throw new CliError(
+      `Cannot read the config file ${p}: ${(err as Error).message}. `
+      + 'Fix or remove the file, or run `bgagent configure` to replace it.',
+    );
+  }
 }
 
 /** Save CLI configuration. */
@@ -98,13 +110,20 @@ export function clearCredentials(): void {
   fs.rmSync(credentialsPath(), { force: true });
 }
 
+/** Write a file that only its owner may read, whether it is new or already there. */
+export function writeSecretFile(file: string, content: string): void {
+  fs.writeFileSync(file, content, { mode: SECRET_FILE_MODE });
+  // writeFileSync only honors `mode` when CREATING the file; overwriting a
+  // pre-existing loose-permissions file leaves its bits untouched. chmod
+  // makes the 0600 intent durable across rewrites. Regular files only: a
+  // path the user chose may be a device such as /dev/null.
+  if (fs.statSync(file).isFile()) {
+    fs.chmodSync(file, SECRET_FILE_MODE);
+  }
+}
+
 /** Save credentials with restricted permissions. */
 export function saveCredentials(creds: Credentials): void {
   ensureConfigDir();
-  const p = credentialsPath();
-  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: SECRET_FILE_MODE });
-  // writeFileSync only honors `mode` when CREATING the file; overwriting a
-  // pre-existing loose-permissions file leaves its bits untouched. chmod
-  // makes the 0600 intent durable across re-logins.
-  fs.chmodSync(p, SECRET_FILE_MODE);
+  writeSecretFile(credentialsPath(), JSON.stringify(creds, null, 2) + '\n');
 }

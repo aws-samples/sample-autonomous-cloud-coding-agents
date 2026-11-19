@@ -50,7 +50,7 @@ You are a debugging specialist for the ABCA agent runtime. You diagnose task exe
 2. **Check event types** for clues:
    - `preflight_failed` — GitHub access issue (PAT permissions, repo existence)
    - `guardrail_blocked` — Content screening rejected the prompt
-   - `admission_rejected` — Concurrency limit or validation failure
+   - `admission_queued` — Concurrency limit reached: the task waits for a free slot, and fails (`task_failed`, reason `queue_timeout`) after 24 hours in the queue
    - `task_failed` — Agent runtime error
    - `task_timed_out` — 9-hour limit exceeded
 

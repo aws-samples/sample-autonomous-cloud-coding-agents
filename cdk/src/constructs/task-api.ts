@@ -48,8 +48,15 @@ const API_HANDLER_TIMEOUT_SECONDS = 15;
 
 /**
  * Confirm-uploads Lambda timeout (seconds). Downloads + screens up to
- * five attachments (Guardrail image scan, PDF text extraction) in one
+ * ten attachments (Guardrail image scan, PDF text extraction) in one
  * invocation, so it gets a much larger budget than the standard handlers.
+ *
+ * After a gateway timeout `bgagent submit` waits before it confirms again,
+ * and derives that wait from this value (`CONFIRM_MAX_POLLS` in
+ * `cli/src/commands/submit.ts`: this long, less the gateway's 29 s, plus room
+ * for a cold start). Change the two together: with a longer timeout here and
+ * the same wait there, the second confirmation can run beside the first and
+ * screen every upload again.
  */
 const CONFIRM_UPLOADS_TIMEOUT_SECONDS = 180;
 
@@ -155,7 +162,8 @@ export interface TaskApiProps {
   /**
    * Maximum concurrent tasks per user (#441). Threaded to the get-task
    * handler so the queue-wait ETA heuristic agrees with the
-   * orchestrator's admission cap. Must match
+   * orchestrator's admission cap, and to the confirm-uploads handler,
+   * which admits against it. Must match
    * ``TaskOrchestrator.maxConcurrentTasksPerUser``.
    * @default 10
    */
@@ -217,10 +225,8 @@ export interface TaskApiProps {
 
   /**
    * IAM resource ARN of the MicroVM image this deployment provisioned (ADR-021
-   * sub-decision 4). When provided, the cancel Lambda gets
-   * `lambda:TerminateMicrovm` **scoped to that one image**, so a cancelled
-   * MicroVM-backed task actually stops billing — mirroring the conditional
-   * AgentCore `RUNTIME_ARN` / `ecsClusterArn` wiring above.
+   * sub-decision 4). When provided, cancel gets TerminateMicrovm and the approval
+   * decision handlers get GetMicrovm/ResumeMicrovm, scoped to that one image.
    *
    * An ARN rather than an on/off boolean so the grant is exactly scoped. `TaskApi`
    * is constructed before `LambdaMicrovmCompute` (the cancel Lambda's ARN is
@@ -304,7 +310,7 @@ export class TaskApi extends Construct {
    */
   public readonly appClientId: string;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (53 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (55; 53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -337,8 +343,7 @@ export class TaskApi extends Construct {
     // Suppress Cognito rules not applicable for dev environment
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
-      { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
-      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment (advanced security)' },
     ]);
 
     // --- REST API ---
@@ -376,6 +381,18 @@ export class TaskApi extends Construct {
         cloudWatchMetricsEnabled: true,
         metricName: 'TaskApiWebAcl',
         sampledRequestsEnabled: true,
+      },
+      // Sampling keeps the name and value of every header of a sampled request
+      // for three hours, readable with wafv2:GetSampledRequests. Two headers are
+      // a complete credential: `Authorization` (the Cognito token) and
+      // `X-API-Key` (the platform stores only the hash of that key). WAF writes
+      // REDACTED in their place; the rules still inspect the real request, and
+      // the header names match in any letter case.
+      dataProtectionConfig: {
+        dataProtections: [{
+          action: 'SUBSTITUTION',
+          field: { fieldType: 'SINGLE_HEADER', fieldKeys: ['authorization', 'x-api-key'] },
+        }],
       },
       rules: [
         {
@@ -566,6 +583,10 @@ export class TaskApi extends Construct {
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
     });
 
+    // The per-user cap for the handlers here that read it. It has to match the
+    // orchestrator's (see the prop).
+    const maxConcurrentTasksPerUser = String(props.maxConcurrentTasksPerUser ?? 10);
+
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
       entry: path.join(handlersDir, 'get-task.ts'),
       handler: 'handler',
@@ -575,7 +596,7 @@ export class TaskApi extends Construct {
         ...commonEnv,
         // #441: queue-position ETA heuristic must agree with the
         // orchestrator's per-user admission cap.
-        MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+        MAX_CONCURRENT_TASKS_PER_USER: maxConcurrentTasksPerUser,
       },
       bundling: commonBundling,
     });
@@ -591,6 +612,10 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: listTasksEnv,
       bundling: commonBundling,
+      // Task rows are large and a filtered list pages through up to 10 Queries of up to
+      // 1 MB each, so this gets the API-handler settings, not the 3s / 128MB defaults.
+      timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+      memorySize: API_HANDLER_MEMORY_MB,
     });
 
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
@@ -680,8 +705,7 @@ export class TaskApi extends Construct {
     // ONLY `lambda:TerminateMicrovm`. `cancel-task.ts` sends
     // `TerminateMicrovmCommand` and nothing else — it does not read MicroVM
     // state first — so `lambda:GetMicrovm` would be a permission with no caller.
-    // (The approve/deny Lambdas get `ResumeMicrovm` + `GetMicrovm` in P3, where
-    // a state read is genuinely needed for the resume reconciliation.)
+    // The approve/deny Lambdas separately get ResumeMicrovm + GetMicrovm below.
     //
     // Resource is the MicroVM *image*, not the running instance: every MicroVM
     // lifecycle action authorizes against `microvm-image:<name>` (Service
@@ -752,6 +776,8 @@ export class TaskApi extends Construct {
       const confirmUploadsEnv: Record<string, string> = { ...commonEnv };
       confirmUploadsEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
       confirmUploadsEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      // Without it the handler admits against its own fallback of 3.
+      confirmUploadsEnv.MAX_CONCURRENT_TASKS_PER_USER = maxConcurrentTasksPerUser;
       if (props.orchestratorFunctionArn) {
         confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
       }
@@ -969,6 +995,14 @@ export class TaskApi extends Construct {
       props.taskTable.grantReadWriteData(denyTaskFn);
       props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
       props.taskEventsTable.grantReadWriteData(denyTaskFn);
+      if (props.lambdaMicrovmImageArn) {
+        for (const decisionFn of [approveTaskFn, denyTaskFn]) {
+          decisionFn.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+            resources: [props.lambdaMicrovmImageArn, `${props.lambdaMicrovmImageArn}:*`],
+          }));
+        }
+      }
 
       // GetPendingFn — GET /pending
       const getPendingFn = new lambda.NodejsFunction(this, 'GetPendingFn', {
@@ -1368,7 +1402,7 @@ export class TaskApi extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; ecs:StopTask is conditioned on the cluster ARN; lambda:TerminateMicrovm is scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (delivered as a Lazy.string because TaskApi is built before the MicroVM construct) — ADR-021',
+          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; ecs:StopTask is conditioned on the cluster ARN; Lambda MicroVM cancel/wake actions (TerminateMicrovm/GetMicrovm/ResumeMicrovm) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (delivered as a Lazy.string because TaskApi is built before the MicroVM construct) — ADR-021',
         },
       ], true);
     }

@@ -77,6 +77,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // Over-fetch one extra so we can tell whether a further page exists without
     // returning a short page that still advertises `has_more`.
     let startKey = decodePaginationToken(event.queryStringParameters?.next_token);
+    if (startKey === null) {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid next_token.', requestId);
+    }
     const items: ApiKeyRecord[] = [];
 
     for (let page = 0; page < MAX_QUERY_PAGES; page += 1) {

@@ -37,11 +37,12 @@ forbid (
 )
 when { context.read_only == true };
 
-// Reject `rm -rf /` and similar absolute-root destructive commands.
+// Reject `rm -rf /`, `rm -fr /` and similar absolute-root destructive commands.
 @tier("hard")
 @rule_id("rm_slash")
 forbid (principal, action == Agent::Action::"execute_bash", resource)
-when { context.command like "*rm -rf /*" };
+when { context.command like "*rm -rf /*"
+    || context.command like "*rm -fr /*" };
 
 // Reject writes into `.git/` at the repo root (breaks local git state).
 @tier("hard")

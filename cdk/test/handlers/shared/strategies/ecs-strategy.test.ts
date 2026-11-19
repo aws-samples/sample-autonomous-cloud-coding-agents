@@ -278,15 +278,13 @@ describe('EcsComputeStrategy', () => {
       });
     });
 
-    test('returns failed when task not found', async () => {
-      mockSend.mockResolvedValueOnce({ tasks: [] });
+    test('throws when DescribeTasks does not return the task: a poll that failed, not a failed task', async () => {
+      // DescribeTasks reports a task it cannot see as a MISSING failure. Right after
+      // RunTask that can be a task that is starting normally.
+      mockSend.mockResolvedValueOnce({ tasks: [], failures: [{ arn: TASK_ARN, reason: 'MISSING' }] });
 
       const strategy = new EcsComputeStrategy();
-      const result = await strategy.pollSession(makeHandle());
-      expect(result).toEqual({
-        status: 'failed',
-        error: `ECS task ${TASK_ARN} not found`,
-      });
+      await expect(strategy.pollSession(makeHandle())).rejects.toThrow(`ECS task ${TASK_ARN} not found`);
     });
 
     test('throws when handle is not ecs type', async () => {

@@ -19,6 +19,7 @@
 
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayRequestAuthorizerEvent, APIGatewayAuthorizerResult } from 'aws-lambda';
+import { getHeader } from './shared/gateway';
 import { logger } from './shared/logger';
 import type { WebhookRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
@@ -54,8 +55,8 @@ function generatePolicy(
  * does NOT pass the request body to REQUEST authorizers.
  */
 export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<APIGatewayAuthorizerResult> {
-  const webhookId = event.headers?.['X-Webhook-Id'] ?? event.headers?.['x-webhook-id'];
-  const signature = event.headers?.['X-Webhook-Signature'] ?? event.headers?.['x-webhook-signature'];
+  const webhookId = getHeader(event.headers, 'X-Webhook-Id');
+  const signature = getHeader(event.headers, 'X-Webhook-Signature');
   const methodArn = event.methodArn;
 
   try {
@@ -64,10 +65,12 @@ export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<
       return generatePolicy('anonymous', 'Deny', methodArn);
     }
 
-    // 1. Look up webhook record
+    // 1. Look up webhook record (strongly consistent — a revoked webhook stops
+    // authenticating as soon as the revocation has returned)
     const result = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { webhook_id: webhookId },
+      ConsistentRead: true,
     }));
 
     const record = result.Item as WebhookRecord | undefined;

@@ -13,20 +13,23 @@
   },
   "workspaces": {
     ".": {
-      "entry": ["scripts/*.{js,mjs,ts}"]
+      "entry": ["scripts/*.{js,mjs,ts}", "scripts/aws-emulator/jest-global-setup.js", "scripts/aws-emulator/loopback-only.cjs"]
     },
     "cdk": {
-      "entry": ["src/main.ts!", "src/handlers/*.ts!", "scripts/*.ts", "test/integ/integ.*.ts"],
-      "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"],
-      "ignoreDependencies": ["tsx", "@aws-cdk/integ-runner"]
+      "entry": [
+        "src/{main,handlers/*}.ts!", "scripts/*.ts", "test/integ/integ.*.ts",
+        "jest.emulator.config.js", "test/emulator/*.emulator.ts", "test/emulator/trace-api-shim.ts"
+      ],
+      "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"]
     },
     "cli": {
+      "entry": ["jest.emulator.config.js", "test/emulator/*.emulator.ts"],
       "project": ["src/**/*.ts!", "test/**/*.ts"]
     },
     "docs": {
       "entry": ["src/components/**/*.astro", "scripts/*.mjs"],
-      "project": ["src/**/*.{astro,ts,tsx}", "scripts/**/*.mjs", "plugins/**/*.mjs"],
-      "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui", "jest"]
+      "project": ["src/**/*.{astro,mdx,ts,tsx}", "scripts/**/*.mjs", "plugins/**/*.mjs"],
+      "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui"]
     },
     "integrations/jira-forge-app": {
       "entry": ["src/index.js!", "test/**/*.test.js"],

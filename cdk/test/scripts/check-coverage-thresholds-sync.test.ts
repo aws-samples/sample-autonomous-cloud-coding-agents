@@ -254,6 +254,14 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${PYPROJECT} [tool.coverage.run] omit: ["src/runner.py"]`);
     });
 
+    // The two lists replace defaults of coverage.py that honour `# pragma: no cover` and `# pragma: no branch`.
+    // Without its line a default is in force again, and a comment takes code out of what the floor measures.
+    test.each(['exclude_lines', 'partial_branches'])('a list that replaces a default of coverage.py removed: %s', (setting) => {
+      expectDrift((root) => {
+        edit(root, PYPROJECT, text => text.replace(new RegExp(`^${setting} = .*\\n`, 'm'), ''));
+      }, `${PYPROJECT} [tool.coverage.report] ${setting}: not set`);
+    });
+
     test('coverage switched off in the test task', () => {
       expectDrift((root) => {
         edit(root, AGENT_MISE, text => text.replace('run = "uv run pytest ', 'run = "uv run pytest --no-cov '));
@@ -277,6 +285,44 @@ describe('check-coverage-thresholds-sync', () => {
       expectDrift((root) => {
         edit(root, PYPROJECT, text => `${text.replace('[tool.pytest.ini_options]', '[tool.pytest]')}\n[tool.pytest.ini_options]\n`);
       }, `cannot read tool.pytest.ini_options.addopts from ${PYPROJECT}`);
+    });
+
+    // pytest runs the tests these settings let it collect, and a suite that lost test modules still meets the floor.
+    // testpaths is pinned to the value in the contract; the others are not in the contract, so they must not be set.
+    test.each([
+      ['testpaths', '["tests/test_config.py"]', '["tests"]'],
+      ['python_files', '["test_[!c]*.py"]', 'not set'],
+      ['python_classes', '["Check*"]', 'not set'],
+      ['python_functions', '["check_*"]', 'not set'],
+      ['norecursedirs', '["test*"]', 'not set'],
+      ['collect_imported_tests', 'false', 'not set'],
+    ])('a pytest setting that decides which tests are collected: %s = %s', (setting, value, pinned) => {
+      expectDrift((root) => {
+        edit(root, PYPROJECT, text => (setting === 'testpaths'
+          ? text.replace('testpaths = ["tests"]', `testpaths = ${value}`)
+          : text.replace('[tool.pytest.ini_options]\n', `[tool.pytest.ini_options]\n${setting} = ${value}\n`)));
+      }, `${PYPROJECT} [tool.pytest.ini_options] ${setting}: ${value} does not match ${CONTRACT} pytest.agent.${setting}: ${pinned}`);
+    });
+
+    // Those settings are read one by one. Their table also holds the warning filters, and mise prints a pattern
+    // with a backslash in a form this check cannot read: such a filter must not stop it.
+    test('a warning filter with a backslash in its pattern, in the table of the collection settings', () => {
+      const result = runInMutatedRepo((root) => {
+        edit(root, PYPROJECT, text => text.replace('    "error",\n', '    "error",\n    "ignore:the method run\\\\(\\\\) is deprecated:DeprecationWarning",\n'));
+      });
+
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+    });
+
+    // Without the flag coverage.py reads the file that a COVERAGE_RCFILE variable names, and the source and omit
+    // lists of that file decide what the floor measures. The task line is pinned verbatim as well, so the flag is
+    // taken off both copies here: the check has to ask for it by itself.
+    test('--cov-config taken off the test task and off the copy of its line in the contract', () => {
+      expectDrift((root) => {
+        edit(root, AGENT_MISE, text => text.replace(' --cov-config=pyproject.toml', ''));
+        edit(root, CONTRACT, text => text.replace(' --cov-config=pyproject.toml', ''));
+      }, `${AGENT_MISE} tasks.test.run coverage flags`, '"--cov-config=pyproject.toml"');
     });
 
     // Each of these is read before pyproject.toml (pytest 9.1 findpaths.py, coverage 7.15 config.py): with an omit list

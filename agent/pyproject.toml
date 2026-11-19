@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3==1.43.78", #https://pypi.org/project/boto3/
+    "boto3==1.44.0", #https://pypi.org/project/boto3/ (botocore 1.44.0 makes "standard" the default retry mode; src/aws_session.py names "legacy", the mode every client ran with before)
     # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
     # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
     # Secrets Manager because AgentCore Identity's USER_FEDERATION
@@ -15,13 +15,21 @@ dependencies = [
     # try/except (ImportError, AttributeError), so removing this dep
     # would degrade gracefully — but for now we keep the dep to
     # preserve the clean code path.
-    "bedrock-agentcore==1.18.1", #https://pypi.org/project/bedrock-agentcore/
-    "claude-agent-sdk==0.2.168", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.168 (bundles claude CLI 2.1.301; kept in lockstep with the npm CLI pin in the Dockerfile, #215. Claude 5.5 models need CLI >= 2.1.280, #953)
+    "bedrock-agentcore==1.26.0", #https://pypi.org/project/bedrock-agentcore/
+    # Held at 0.2.179, one release below the newest that is past the 7-day
+    # cooldown. 0.2.180 bundles claude CLI 2.1.321, whose changelog says: "Changed
+    # mods Claude writes to turn on without asking in auto and bypass modes".
+    # Every task runs in bypassPermissions (runner.py) and is held to the Cedar
+    # policy by PreToolUse hooks (hooks.py). Up to 2.1.319 the CLI asks before it
+    # turns such a mod on, and a task gives it nobody to ask. Move on once it is
+    # shown that a mod written in a session cannot act outside those hooks, or
+    # that the CLI can be told not to load one.
+    "claude-agent-sdk==0.2.179", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.179 (bundles claude CLI 2.1.319; kept in lockstep with the npm CLI pin in the Dockerfile, #215. Claude 5.5 models need CLI >= 2.1.280, #953)
     "requests==2.34.2", #https://pypi.org/project/requests/
-    "fastapi==0.139.0", #https://pypi.org/project/fastapi/
-    "uvicorn==0.50.0", #https://pypi.org/project/uvicorn/
-    "aws-opentelemetry-distro==0.18.0", #https://pypi.org/project/aws-opentelemetry-distro/
-    "mcp==1.30.0", #https://pypi.org/project/mcp/ (1.30.0 clears GHSA-84m7-p3x7-pcfv)
+    "fastapi==0.162.4", #https://pypi.org/project/fastapi/
+    "uvicorn==0.54.0", #https://pypi.org/project/uvicorn/
+    "aws-opentelemetry-distro==0.22.0", #https://pypi.org/project/aws-opentelemetry-distro/ (0.22.0 clears GHSA-xcq7-p3pf-p88h and GHSA-f5m9-jfrj-jjj7)
+    "mcp==2.3.0", #https://pypi.org/project/mcp/ (GHSA-84m7-p3x7-pcfv is fixed since 1.30.0; 2.x replaces httpx with httpx2, which src/gateway_tools.py imports)
     # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
     # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
     # CDK Lambdas) are two language bindings over the same Cedar Rust core.
@@ -60,8 +68,7 @@ dependencies = [
 # nosemgrep: uv-missing-dependency-cooldown -- deps are exact-pinned and lock-reviewed; a global cooldown makes `uv sync` unsatisfiable on fresh pins (#532)
 [tool.uv]
 constraint-dependencies = [
-    "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
-    "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j — transitive via mcp; remove when mcp bumps floor
+    "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp, which still accepts pyjwt>=2.10.1 in 2.3.0; remove when mcp bumps floor (#267)
 ]
 
 # Dead-code detection (#282, cairn MVG gate #6), part of `mise run quality`.
@@ -77,22 +84,15 @@ min_confidence = 80
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
-skips = [
-    "B101",  # assert_used — tests use assert, ruff S101 handles per-file
-    "B602",  # subprocess shell=True — needed for shell tool execution
-    "B603",  # subprocess calls — needed for shell tool execution
-    "B607",  # partial executable paths — sh -c pattern is safe
-    "B701",  # jinja2_autoescape_false — templates are LLM prompts, not web HTML
-]
 
 
 [dependency-groups]
 dev = [
     "bandit==1.9.4",  # security:bandit task — exact pin: the scan runs this version, on the project's Python
-    "ruff==0.17.3",  # lint and format tasks — exact pin: the rules and the formatting change only with a reviewed bump
-    "ty",
-    "pytest",
-    "pygments==2.20.0",
+    "ruff==0.17.4",  # lint and format tasks — exact pin: the rules and the formatting change only with a reviewed bump
+    "ty==0.0.100",  # typecheck task — exact pin: each ty release changes what it reports (0.0.100 found 39 errors that 0.0.56 did not), so that changes only with a reviewed bump
+    "pytest==9.2.0",  # test task — exact pin: strict mode and filterwarnings = error turn a new pytest's deprecations into failures, so it moves only with a reviewed bump
+    "pygments==2.21.0",
     "pytest-cov==7.1.0",
     "pytest-timeout==2.4.0",  # per-test wall-clock cap: a single hung test (network/subprocess/Bedrock without its own timeout) must fail LOUDLY with a traceback, not silently burn the whole build-verify budget (ABCA-684/686: one hang stalled the baseline build past its 3600s ceiling)
     "vulture==2.16",  # dead code (#282): unreachable code and unused imports and arguments, at min_confidence 80 (see [tool.vulture])
@@ -158,14 +158,16 @@ ignore = [
     "S607",  # partial executable path — agent relies on PATH for git, gh, mise
 ]
 
-# A function with more than 15 independent paths fails the lint. The ten functions
+# A function with more than 15 independent paths fails the lint. Nine functions
 # that were above it when the ceiling was set carry `# noqa: C901` with the value
-# they had: that value must not grow, and the comment goes when the function is
-# split. Do not raise the number to make a new function fit.
+# they had (after a newer value, where the comment gives one): the first value
+# must not grow, and the comment goes when the function is split. Do not raise the
+# number to make a new function fit.
 [tool.ruff.lint.mccabe]
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
+"tests_emulator/**" = ["S101", "PLR2004", "ARG", "TID251"]  # emulator-backed tests (mise run test:integration): assert; literal assertions; fixtures taken for their effect; their own boto3 session
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 # aws_session.py is the one module that builds boto3 clients, resources and sessions:
 # it attaches the solution User-Agent (#319). TID251 is one rule for the whole
@@ -208,9 +210,6 @@ empty_parameter_set_mark = "fail_at_collect"
 # An entry below "error" lets one named warning through and says why.
 filterwarnings = [
     "error",
-    # starlette's TestClient asks for httpx2. The agent stays on httpx until it moves to
-    # mcp 2.x, which requires httpx2; drop this line with that change.
-    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
 ]
 # Non-TTY output ergonomics. In a captured/piped context (the ECS build gate, CI,
 # an agent's Bash tool) pytest's default is a wall of featureless progress dots
@@ -252,14 +251,17 @@ source = ["src"]
 relative_files = true
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 89
 precision = 2
 show_missing = true
 skip_covered = true
-
-[tool.ty.rules]
-# asyncio.get_event_loop_policy() is deprecated in 3.14+; still valid on 3.13.
-deprecated = "ignore"
+# These two lists replace coverage.py's defaults, which honour `# pragma: no cover` and
+# `# pragma: no branch`: one such comment took a whole function or class out of what
+# fail_under measures. No comment does that now. What stays out is code that cannot
+# run: the imports under `if TYPE_CHECKING:` and a `...` that is the body of a stub.
+# Each pattern matches a whole line, so neither can be appended to a line as a comment.
+exclude_lines = ["^ *if TYPE_CHECKING:$", "^ *[.][.][.]$"]
+partial_branches = []
 
 [tool.ty.environment]
 python-version = "3.13"

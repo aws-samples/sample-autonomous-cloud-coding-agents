@@ -30,11 +30,9 @@
 /**
  * Prefix that marks a comment as one of the bot's own notes.
  *
- * Two things depend on it. The self-trigger guard (``isBotAuthoredComment``)
- * skips comments starting with it, which matters because several of these notes
- * embed a literal ``@bgagent`` — without the prefix, posting one would trigger
- * the bot on its own comment. The thread sweep also treats it as "transient",
- * so a note can be tidied away later without tracking its comment id.
+ * The self-trigger guard (``isBotAuthoredComment``) skips comments starting with
+ * it, which matters because several of these notes embed a literal ``@bgagent``
+ * — without the prefix, posting one would trigger the bot on its own comment.
  */
 export const BOT_NOTE_PREFIX = '🗂️';
 

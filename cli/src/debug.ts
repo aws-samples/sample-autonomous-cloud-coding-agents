@@ -57,19 +57,9 @@ const SENSITIVE_FIELDS = new Set([
 ]);
 
 /**
- * Deep-copy a JSON-shaped value with sensitive field values replaced by
+ * The JSON text of a value with sensitive field values replaced by
  * `[REDACTED]`, for safe debug logging of request/response bodies.
  */
-export function redactSensitive(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(redactSensitive);
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = SENSITIVE_FIELDS.has(key.toLowerCase()) ? '[REDACTED]' : redactSensitive(val);
-    }
-    return out;
-  }
-  return value;
+export function redactedJson(value: unknown): string {
+  return JSON.stringify(value, (key, val: unknown) => (SENSITIVE_FIELDS.has(key.toLowerCase()) ? '[REDACTED]' : val));
 }

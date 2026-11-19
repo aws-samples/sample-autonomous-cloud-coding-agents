@@ -172,3 +172,46 @@ def test_a_request_from_a_deleted_working_directory_is_recorded_too(tmp_path, mo
 
     assert len(recorded) == 1, recorded
     assert f"{Path(__file__).name}:" in recorded[0], "the report must name the line that sent"
+
+
+def test_only_the_configured_dynamodb_local_origin_is_let_through(monkeypatch):
+    # CI names a loopback DynamoDB Local in ABCA_DDB_LOCAL_ENDPOINT for the MicroVM
+    # checkpoint transaction tests. That exact origin reaches the real transport;
+    # the same host on another port is still refused and recorded.
+    recorded: list[str] = []
+    monkeypatch.setattr(conftest, "_blocked_aws_requests", recorded)
+    sent: list[str] = []
+    monkeypatch.setattr(conftest, "_real_send", lambda _self, request: sent.append(request.url))
+    monkeypatch.setattr(conftest, "_DYNAMODB_LOCAL_ORIGIN", "http://127.0.0.1:8000")
+
+    allowed = SimpleNamespace(method="POST", url="http://127.0.0.1:8000/")
+    conftest._refuse_aws_request(None, allowed)
+    assert sent == ["http://127.0.0.1:8000/"]
+
+    for url in ("http://127.0.0.1:8001/", "https://127.0.0.1:8000/", "http://localhost:8000/"):
+        with pytest.raises(RuntimeError, match="unit tests must not reach AWS"):
+            conftest._refuse_aws_request(None, SimpleNamespace(method="POST", url=url))
+    assert len(recorded) == 3, recorded
+    assert sent == ["http://127.0.0.1:8000/"]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "http://localhost:8000",
+        "https://127.0.0.1:8000",
+        "http://127.0.0.1",
+        "http://10.0.0.1:8000",
+        "http://127.0.0.1:8000/path",
+        "http://user@127.0.0.1:8000",
+        "http://127.0.0.1:notaport",
+    ],
+)
+def test_no_other_endpoint_value_creates_an_exemption(endpoint):
+    assert conftest._loopback_origin(endpoint) is None
+
+
+def test_the_loopback_dynamodb_local_endpoint_is_recognised():
+    assert conftest._loopback_origin("http://127.0.0.1:8000") == "http://127.0.0.1:8000"
+    assert conftest._loopback_origin("http://127.0.0.1:32768/") == "http://127.0.0.1:32768"

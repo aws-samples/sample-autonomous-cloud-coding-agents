@@ -244,18 +244,8 @@ async function refreshToken(creds: Credentials): Promise<void> {
         REFRESH_TOKEN: creds.refresh_token,
       },
     }));
-
-    const auth = result.AuthenticationResult;
-    if (!auth?.IdToken || !auth.ExpiresIn) {
-      throw new CliError('Unexpected refresh response from Cognito.');
-    }
-
-    const expiry = new Date(Date.now() + auth.ExpiresIn * 1000).toISOString();
-    saveCredentials({
-      id_token: auth.IdToken,
-      refresh_token: creds.refresh_token,
-      token_expiry: expiry,
-    });
+    // A refresh renews the ID token only: the cached refresh token stays.
+    persistAuthResult({ ...result.AuthenticationResult, RefreshToken: creds.refresh_token });
   } catch (err) {
     if (err instanceof CliError) throw err;
     // Distinguish a genuinely rejected/expired refresh token from a
@@ -316,33 +306,53 @@ export async function changePassword(
 }
 
 /**
- * Read the signed-in user's Cognito username from the cached ID token.
- *
- * Requires a ``bgagent login`` session. The username lives in the ``email``
- * claim (the pool's sign-in alias); older tokens may only carry
- * ``cognito:username``. Never logs the token or its claims.
+ * Decode the claims of the cached ID token. Requires a ``bgagent login``
+ * session. Never logs the token or its claims.
  */
-function usernameFromSession(): string {
+function sessionClaims(): { 'sub'?: string; 'email'?: string; 'cognito:username'?: string } {
   const creds = loadCredentials();
-  if (!creds) {
+  if (!creds?.id_token) {
     throw new CliError('Not authenticated. Run `bgagent login` first.');
   }
   const JWT_SEGMENTS = 3; // header.payload.signature
-  const parts = creds.id_token.split('.');
+  // String(): a file edited by hand can hold a token that is not a string.
+  const parts = String(creds.id_token).split('.');
   if (parts.length !== JWT_SEGMENTS) {
     throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
   }
-  let payload: { 'email'?: string; 'cognito:username'?: string };
   try {
-    payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    // `?? {}`: a payload of JSON null reads as a token without claims, not as a TypeError.
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) ?? {};
   } catch {
     throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
   }
-  const username = payload.email ?? payload['cognito:username'];
+}
+
+/**
+ * Read the signed-in user's Cognito username from the cached ID token.
+ *
+ * The username lives in the ``email`` claim (the pool's sign-in alias);
+ * older tokens may only carry ``cognito:username``.
+ */
+function usernameFromSession(): string {
+  const claims = sessionClaims();
+  const username = claims.email ?? claims['cognito:username'];
   if (!username) {
     throw new CliError('Could not read your account identity. Run `bgagent login` to re-authenticate.');
   }
   return username;
+}
+
+/**
+ * Read the signed-in user's Cognito ``sub``, the platform user id, from the
+ * cached ID token.
+ */
+export function cognitoSubFromSession(): string {
+  const { sub } = sessionClaims();
+  if (!sub) {
+    throw new CliError('Could not read your account identity. Run `bgagent login` to re-authenticate.');
+  }
+  return sub;
 }
 
 /**

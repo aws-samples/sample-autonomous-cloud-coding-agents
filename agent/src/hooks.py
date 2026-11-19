@@ -1,11 +1,14 @@
-"""PreToolUse, PostToolUse, and Stop hook callbacks.
+"""PreToolUse, PostToolUse, PostToolUseFailure, and Stop hook callbacks.
 
 - PreToolUse: three-outcome Cedar policy enforcement (ALLOW / DENY /
-  REQUIRE_APPROVAL). The REQUIRE_APPROVAL path writes a pending approval
-  row + transitions the task to AWAITING_APPROVAL atomically, polls for a
+  REQUIRE_APPROVAL). The REQUIRE_APPROVAL path asks the trusted approval
+  service to create a pending row and atomically transition the task to
+  AWAITING_APPROVAL, polls for a
   human decision, then resumes / denies per the user's input. See
   ``docs/design/CEDAR_HITL_GATES.md``.
 - PostToolUse: output scanner for secrets/PII.
+- PostToolUse and PostToolUseFailure: the egress-denial detector and the
+  stuck guard, which see every tool result, of a call that completed or failed.
 - Stop: between-turns hook dispatcher. Cancel → nudge → denial injection
   in that order (cancel-wins semantics). Each producer appends synthetic
   user-message strings that get reinjected via the SDK's
@@ -24,16 +27,26 @@ import os
 import re
 import time
 from collections.abc import Callable
-from datetime import UTC
+from contextlib import nullcontext
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
 import task_state
+from microvm_lifecycle import ApprovalRecord, get_context
 from nudge_reader import _xml_escape
-from output_scanner import scan_tool_output
-from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
+from output_scanner import _PATTERNS, scan_tool_output
+from policy import (
+    APPROVAL_RATE_LIMIT,
+    FLOOR_TIMEOUT_S,
+    Outcome,
+    _sha256_tool_input,
+    approval_deadline_epoch,
+)
 from progress_writer import _generate_ulid
-from shell import log, log_error_cw
+from shared_constants import SHARED_CONSTANTS
+from shell import log, log_error_cw, redact_secrets
 from stuck_guard import StuckGuard
 
 if TYPE_CHECKING:
@@ -56,6 +69,33 @@ POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this many consecu
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this many consecutive failures
 TOOL_INPUT_PREVIEW_MAX: int = 256  # cap for the strip-ANSI, truncated input preview
 ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
+
+
+@dataclass(frozen=True)
+class _ApprovalDeadline:
+    """One gate's deadline, retained across polling and a possible VM sleep.
+
+    UTC counts elapsed time even if the guest's monotonic clock freezes. The monotonic
+    cap prevents a backward UTC correction from extending the original window.
+    Create this with the approval row, before database writes or notifications;
+    never recreate it on resume.
+    """
+
+    wall_deadline: float
+    monotonic_deadline: float
+
+    @classmethod
+    def from_recorded(cls, created_at: str, timeout_s: int) -> _ApprovalDeadline:
+        wall_deadline = float(approval_deadline_epoch(created_at, timeout_s))
+        remaining = max(0.0, min(timeout_s, wall_deadline - time.time()))
+        return cls(wall_deadline, time.monotonic() + remaining)
+
+    def remaining_s(self) -> float:
+        return max(
+            0.0,
+            min(self.monotonic_deadline - time.monotonic(), self.wall_deadline - time.time()),
+        )
+
 
 # ANSI CSI / OSC escape sequence stripper for ``tool_input_preview`` +
 # ``permissionDecisionReason`` fields, so persisted/logged reasons can't carry
@@ -84,20 +124,13 @@ def _truncate(text: str | None, max_len: int) -> str:
     return text[: max_len - ELLIPSIS_LEN] + "..."
 
 
-def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) -> str:
+def _tool_input_preview(tool_input: dict) -> str:
     """Return an ANSI-stripped, truncated preview of ``tool_input`` for DDB.
 
-    Uses ``json.dumps`` so dict/list inputs render as stable JSON rather
-    than Python repr (avoids leaking ``OrderedDict(...)`` wrappers etc.).
-    Falls back to ``str()`` on any serialization error; never raises.
+    Uses ``json.dumps`` so the input renders as stable JSON rather than
+    Python repr (avoids leaking ``OrderedDict(...)`` wrappers etc.).
     """
-    try:
-        rendered = (
-            tool_input if isinstance(tool_input, str) else json.dumps(tool_input, default=str)
-        )
-    except (TypeError, ValueError):
-        rendered = str(tool_input)
-    return _truncate(_strip_ansi(rendered), max_len)
+    return _truncate(_strip_ansi(json.dumps(tool_input, default=str)), TOOL_INPUT_PREVIEW_MAX)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +164,11 @@ _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"|NameResolutionError|Failed to establish a new connection",
     ),
 )
+
+# The machine itself, in the spellings a failed connection names it by: any
+# 127.x.x.x address, and the all-zero address that a dev server prints as the
+# one it listens on.
+_LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNORECASE)
 
 
 # The most recent agent-detected blocker, as a canonical ``BLOCKED[<kind>]: …``
@@ -169,12 +207,8 @@ def reset_blocker_reason() -> None:
     _LAST_BLOCKER_REASON = None
 
 
-# Back-compat alias for test fixtures that import the old name.
-_reset_blocker_reason_for_tests = reset_blocker_reason
-
-
-# Latch of the stuck-guard's "why it's spinning" summary, refreshed by the
-# between-turns hook. Read by the pipeline's terminal path so a max_turns
+# Latch of the stuck-guard's "why it's spinning" summary, refreshed with every
+# tool result. Read by the pipeline's terminal path so a max_turns
 # failure can say WHY it capped ("Exceeded max turns — spinning on failing tool
 # calls: git push → invalid credentials") vs. a task that genuinely used its
 # turns. Process-lifetime (one task), last-writer-wins (the most recent window
@@ -183,9 +217,26 @@ _reset_blocker_reason_for_tests = reset_blocker_reason
 _LAST_STUCK_SUMMARY: str | None = None
 
 
+def _screened(text: str) -> str:
+    """Return *text* as it may be quoted outside the tool call it belongs to.
+
+    What the scanner of tool output hides is replaced, and what the redaction
+    of the log lines hides. Both know most credentials only whole: screen a
+    text before cutting it.
+    """
+    return redact_secrets(scan_tool_output(text).redacted_content)
+
+
 def last_stuck_summary() -> str | None:
-    """Return the latched stuck-guard summary for the max_turns terminal reason."""
-    return _LAST_STUCK_SUMMARY
+    """Return the latched stuck-guard summary for the max_turns terminal reason.
+
+    The summary quotes a command and a piece of its output and ends up in the
+    task's error message. Both were screened before the guard cut them (see
+    ``_observe_tool_result``); the summary is screened once more here.
+    """
+    if not _LAST_STUCK_SUMMARY:
+        return _LAST_STUCK_SUMMARY
+    return _screened(_LAST_STUCK_SUMMARY)
 
 
 def reset_stuck_summary() -> None:
@@ -289,11 +340,27 @@ _CLONE_CMD_RE = re.compile(
 # quoted text routinely contains a clone command as documentation. Splitting on
 # ``\n`` put that quoted line in its own segment with no preceding free-text
 # flag, so the guard blocked a legitimate ``gh pr create`` — the exact
-# false-positive the free-text list exists to prevent.
+# false-positive the free-text list exists to prevent. A line break that ENDS a
+# command does separate: see ``_command_lines``.
 # A backslash at end-of-line continues the SAME command onto the next line.
 _LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*\r?\n[ \t]*")
 
 _SHELL_SEPARATOR_RE = re.compile(r"(?:&&|\|\||[;&|])")
+
+# The operator of a here-document and its word: ``<<EOF``, ``<<-'EOF'``.
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1")
+
+# What one line holds that opens no string: taken out of the line, a quote that
+# is left opens a string that goes on in the next line.
+_CLOSED_TEXT_RE = re.compile(
+    r"""
+    \\.                    # an escaped character
+    | (?<!\S)\#.*          # a comment, to the end of the line
+    | '[^']*'              # a string in single quotes
+    | "(?:[^"\\]|\\.)*"    # a string in double quotes
+    """,
+    re.VERBOSE,
+)
 
 _FREE_TEXT_ARG_RE = re.compile(
     r"(?:^|\s)(?:-m|--message|--body|--body-file|-b|--title|-t|-F|--field|--raw-field)\b",
@@ -313,6 +380,39 @@ def _repo_slug_variants(repo_url: str) -> list[str]:
     if not slug:
         return []
     return [slug, f"{slug}.git"]
+
+
+def _command_lines(command: str) -> list[str]:
+    """Split *command* at the line breaks that end a command.
+
+    A line break inside quotes belongs to the string (a ``--body`` or ``-m``
+    value written over several lines). The lines below ``<<EOF``, up to and with
+    the line that is ``EOF``, belong to the command that reads them, whatever
+    quotes they hold; an operator whose word is no line further down begins no
+    such text (a shift in an arithmetic expression, ``<<`` in a quoted body).
+    """
+    lines = command.split("\n")
+    last = {line.strip(): number for number, line in enumerate(lines)}
+    commands: list[list[str]] = []
+    quote = ""  # the quote of a string that the lines so far leave open
+    word = None  # the word that ends the here-document the line stands in
+    for number, line in enumerate(lines):
+        if quote or word is not None:
+            commands[-1].append(line)
+        else:
+            commands.append([line])
+        if word is not None:
+            if line.strip() == word:
+                word = None
+            continue
+        # Also in a line that stands inside a string: ``"$(cat <<'EOF'``.
+        operator = _HEREDOC_RE.search(line)
+        if operator and last.get(operator[2], -1) > number:
+            word = operator[2]
+        # With the quote of an open string in front, the line closes it or not.
+        opener = re.search("['\"]", _CLOSED_TEXT_RE.sub("", quote + line))
+        quote = opener[0] if opener else ""
+    return ["\n".join(one) for one in commands]
 
 
 def _is_self_reclone(command: str, repo_url: str) -> bool:
@@ -345,6 +445,9 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
     # the slug was never found in the verb's segment — a wrapped self re-clone
     # walked straight through.
     normalized = _LINE_CONTINUATION_RE.sub(" ", command)
+    # A line break that ends a command separates like ``;``: the ``-b`` of a
+    # ``git checkout -b`` on the line above does not make a clone prose.
+    normalized = ";".join(_command_lines(normalized))
     for segment in _SHELL_SEPARATOR_RE.split(normalized):
         clone = _CLONE_CMD_RE.search(segment)
         if clone is None:
@@ -357,14 +460,88 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
         # punctuation to the bare slug space so `.../owner/repo.git` and
         # `git@github.com:owner/repo` both reduce to text carrying `owner/repo`.
         haystack = segment[clone.start() :].lower().replace("git@github.com:", "github.com/")
-        if any(v in haystack for v in variants):
+        # The slug has to stand alone: `owner/repo-docs` and `bigowner/repo`
+        # are other repositories.
+        if any(re.search(rf"(?<![\w.-]){re.escape(v)}(?![\w.-])", haystack) for v in variants):
             return True
     return False
 
 
+# What the screening of tool output puts in place of what it hides from the
+# model: ``[REDACTED-<LABEL>]`` from the scanner, and the two fail-closed texts.
+_REDACTION_MARKER_RE = re.compile(
+    r"\[REDACTED-(?:" + "|".join(re.escape(label) for label, _ in _PATTERNS) + r")\]"
+    r"|\[Output redacted: [^\]\n]*\]"
+)
+
+# How much of a file is read to see which markers it holds already. The
+# screening looks at the first 5 MB of an output as well.
+_MARKER_FILE_LIMIT = 5_000_000
+
+
+def _introduced_marker(tool_name: Any, tool_input: dict, cwd: Any) -> str | None:
+    """Return a redaction marker that a Write or an Edit would add to a file.
+
+    The model is shown a marker where a file holds a value that the screening
+    hides. Written back, the marker would take the place of that value. A marker
+    that the file holds already (a test of the scanner, its documentation) may
+    stay: only one that the call adds is returned. A file that cannot be read
+    counts as empty.
+    """
+    if tool_name == "Write":
+        new = tool_input.get("content")
+    elif tool_name == "Edit":
+        new = tool_input.get("new_string")
+    else:
+        return None
+    if not isinstance(new, str):
+        return None
+    markers = _REDACTION_MARKER_RE.findall(new)
+    if not markers:
+        return None
+    old = tool_input.get("old_string")
+    if tool_name == "Write":
+        old = ""
+        path = os.path.join(str(cwd or ""), str(tool_input.get("file_path") or ""))
+        # A regular file only: a pipe or a device would not return.
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    old = fh.read(_MARKER_FILE_LIMIT)
+            except OSError as exc:
+                log("WARN", f"redaction-marker guard cannot read {path}: {type(exc).__name__}")
+    if not isinstance(old, str):
+        old = ""
+    # Counted per marker text, not aligned line by line: a call that drops one
+    # marker the file holds and adds one for a hidden value passes. Comparing
+    # with the screened text of the file, line by line, would close that.
+    return next((m for m in markers if new.count(m) > old.count(m)), None)
+
+
+def _redaction_marker_denial(
+    tool_name: Any, tool_input: dict, cwd: Any, trajectory: _TrajectoryWriter | None
+) -> dict | None:
+    """Return the DENY for a Write or an Edit that would add a redaction marker to a file."""
+    marker = _introduced_marker(tool_name, tool_input, cwd)
+    if marker is None:
+        return None
+    path = _truncate(str(tool_input.get("file_path") or ""), 160)
+    log("POLICY", f"DENIED {tool_name} of {path}: it would write the redaction marker {marker}")
+    if trajectory:
+        trajectory.write_policy_decision(tool_name, False, "redaction_marker_blocked", 0)
+    return _deny_response(
+        f"This {tool_name} would write the redaction marker '{marker}' into the file. "
+        "The marker is not content of the file: in the output you were shown it "
+        "stands for a value that is hidden from you, and the real value is still "
+        "in the file on disk. Do not write the marker and do not guess the value. "
+        "Leave that line as it is and change the file around it, with an Edit "
+        "whose old_string and new_string do not include the line."
+    )
+
+
 async def pre_tool_use_hook(
     hook_input: Any,
-    _tool_use_id: str | None,
+    tool_use_id: str | None,
     _hook_context: Any,
     *,
     engine: PolicyEngine,
@@ -381,8 +558,9 @@ async def pre_tool_use_hook(
     - permissionDecision: "allow" or "deny"
     - permissionDecisionReason: explanation string
 
-    The REQUIRE_APPROVAL path pauses here: writes a pending approval row
-    + transitions the task to AWAITING_APPROVAL atomically, polls for a
+    The REQUIRE_APPROVAL path pauses here: the trusted service creates a pending
+    approval row and atomically transitions the task to AWAITING_APPROVAL, then
+    the worker polls for a
     human decision with 2s→5s backoff, then returns allow / deny based on
     the decision. On TIMED_OUT a ConditionCheckFailed from the best-effort
     status write triggers a re-read — if the user's decision landed between
@@ -438,10 +616,18 @@ async def pre_tool_use_hook(
                 "Remove the clone command and work in place (edit, commit, and push "
                 "from where you already are)."
             )
-            log("POLICY", f"DENIED self-reclone of {repo_url}: {command[:160]}")
+            log("POLICY", f"DENIED self-reclone of {repo_url}: {_screened(command)[:160]}")
             if trajectory:
                 trajectory.write_policy_decision("Bash", False, "self_reclone_blocked", 0)
             return _deny_response(reason)
+
+    # A redaction marker that a Write or an Edit would add to a file takes the
+    # place of the value that the screening hid from the model, in the repository
+    # and in the pull request. Refused before the policy is asked, like the
+    # re-clone above, and under bypassPermissions as well.
+    denial = _redaction_marker_denial(tool_name, tool_input, hook_input.get("cwd"), trajectory)
+    if denial:
+        return denial
 
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
@@ -464,7 +650,7 @@ async def pre_tool_use_hook(
         # cache-driven denies are visible in the live stream + retained audit
         # record. No new approval row is written and the gate counter is NOT
         # bumped — the original gate already accounted for the decision.
-        if progress is not None and decision.cache_hit_metadata is not None:
+        if decision.cache_hit_metadata is not None:
             _try_progress(
                 progress,
                 "write_policy_decision_cached",
@@ -480,20 +666,19 @@ async def pre_tool_use_hook(
         # observability without altering the outcome.
         if getattr(decision, "fail_closed", False):
             _record_blocker_reason("policy_fail_closed", decision.reason)
-            if progress is not None:
-                _try_progress(
-                    progress,
-                    "write_agent_blocked",
-                    kind="policy_fail_closed",
-                    detail=decision.reason,
-                    remediation_hint=(
-                        "The Cedar policy engine errored or was unavailable "
-                        "(fail-closed). Check the agent policy-engine logs and the "
-                        "policy bundle; this is a misconfiguration, not an "
-                        "intentional deny."
-                    ),
-                    retryable=False,
-                )
+            _try_progress(
+                progress,
+                "write_agent_blocked",
+                kind="policy_fail_closed",
+                detail=decision.reason,
+                remediation_hint=(
+                    "The Cedar policy engine errored or was unavailable "
+                    "(fail-closed). Check the agent policy-engine logs and the "
+                    "policy bundle; this is a misconfiguration, not an "
+                    "intentional deny."
+                ),
+                retryable=False,
+            )
         log("POLICY", f"DENIED: {tool_name} — {decision.reason}")
         return _deny_response(decision.reason)
 
@@ -507,10 +692,11 @@ async def pre_tool_use_hook(
         user_id=user_id,
         progress=progress,
         ts=ts_module,
+        tool_use_id=tool_use_id,
     )
 
 
-async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 was set; must not grow
+async def _handle_require_approval(  # noqa: C901 -- 24, down from 35 when the ceiling of 15 was set; must not grow
     *,
     decision: Any,
     tool_name: str,
@@ -520,6 +706,7 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     user_id: str | None,
     progress: Any,
     ts: Any,
+    tool_use_id: str | None = None,
 ) -> dict:
     """REQUIRE_APPROVAL branch of ``pre_tool_use_hook``.
 
@@ -538,28 +725,26 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     # cap_exceeded milestone carries the configured cap so dashboards
     # reflect the blueprint override.
     if engine.approval_gate_count >= engine.approval_gate_cap:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_cap_exceeded",
-                request_id=request_id,
-                count=engine.approval_gate_count,
-                cap=engine.approval_gate_cap,
-            )
+        _try_progress(
+            progress,
+            "write_approval_cap_exceeded",
+            request_id=request_id,
+            count=engine.approval_gate_count,
+            cap=engine.approval_gate_cap,
+        )
         return _deny_response(f"approval-gate cap exceeded ({engine.approval_gate_cap}/task)")
 
     # Step 2 — per-minute rate limit. ``approvals_in_last_minute`` prunes
     # on read so the comparison is against the current sliding window.
     rate = engine.approvals_in_last_minute
     if rate >= APPROVAL_RATE_LIMIT:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_rate_limit_exceeded",
-                request_id=request_id,
-                rate=rate,
-                limit=APPROVAL_RATE_LIMIT,
-            )
+        _try_progress(
+            progress,
+            "write_approval_rate_limit_exceeded",
+            request_id=request_id,
+            rate=rate,
+            limit=APPROVAL_RATE_LIMIT,
+        )
         return _deny_response(f"approval-gate rate limit exceeded ({APPROVAL_RATE_LIMIT}/min)")
 
     # Step 3 — effective timeout with floor/ceiling math. Emit
@@ -571,7 +756,7 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         task_default_timeout_s=engine.task_default_timeout_s,
         remaining_lifetime_s=remaining_lifetime,
     )
-    if clip_reason is not None and progress is not None:
+    if clip_reason is not None:
         _try_progress(
             progress,
             "write_approval_timeout_capped",
@@ -590,7 +775,6 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         remaining_lifetime is not None
         and remaining_lifetime - CLEANUP_MARGIN_120S < 2 * engine.task_default_timeout_s
         and engine.mark_ceiling_shrinking_emitted()
-        and progress is not None
     ):
         _try_progress(
             progress,
@@ -610,7 +794,7 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         )
 
     # Step 5 — build the approval row.
-    tool_input_sha256 = _sha256_tool_input_for_row(tool_input)
+    tool_input_sha256 = _sha256_tool_input(tool_input)
     row = {
         "task_id": task_id,
         "request_id": request_id,
@@ -623,10 +807,14 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         "status": "PENDING",
         "created_at": _iso_now(),
         "timeout_s": effective_timeout,
-        "ttl": int(time.time()) + effective_timeout + CLEANUP_MARGIN_120S,
         "user_id": user_id or "",
         "repo": engine.repo,
     }
+    row["deadline_epoch"] = approval_deadline_epoch(row["created_at"], effective_timeout)
+    # DynamoDB expiry for the row and its tool-input preview: the retention main
+    # always had (deadline plus the cleanup margin), on every backend.
+    row["ttl"] = row["deadline_epoch"] + CLEANUP_MARGIN_120S
+    deadline = _ApprovalDeadline.from_recorded(row["created_at"], effective_timeout)
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on
     # subsequent gates reflect the attempt even if the DDB write itself
@@ -643,67 +831,86 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     # another ``approval_gate_cap`` worth of gates. Failure is best-effort —
     # the counter is a safety bound, not a correctness bound — so we keep
     # going on error and accept the (bounded) restart-retry amplification.
-    if task_id:
-        await asyncio.to_thread(ts.increment_approval_gate_count_in_ddb, task_id)
+    await asyncio.to_thread(ts.increment_approval_gate_count_in_ddb, task_id)
 
     # Step 7 — cross-table atomic transition.
     try:
         await asyncio.to_thread(ts.transact_write_approval_request, task_id, request_id, row)
     except ts.ApprovalWriteError as exc:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_write_failed",
-                request_id=request_id,
-                error=f"cancelled: {exc.cancellation_reasons}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_write_failed",
+            request_id=request_id,
+            error=f"cancelled: {exc.cancellation_reasons}",
+        )
         return _deny_response("approval system unavailable (write cancelled)")
     except ts.ApprovalTablesUnavailable as exc:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_write_failed",
-                request_id=request_id,
-                error=f"tables unavailable: {exc}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_write_failed",
+            request_id=request_id,
+            error=f"tables unavailable: {exc}",
+        )
         return _deny_response("approval system unavailable (tables unconfigured)")
     except Exception as exc:
         log(
             "ERROR",
             f"approval request write failed: {type(exc).__name__}: {exc}",
         )
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_write_failed",
-                request_id=request_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_write_failed",
+            request_id=request_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return _deny_response("approval system unavailable")
 
     # Step 8 — ``approval_requested`` milestone so the user's stream
     # shows the gate immediately.
-    if progress is not None:
-        _try_progress(
-            progress,
-            "write_approval_requested",
-            request_id=request_id,
-            tool_name=tool_name,
-            input_preview=row["tool_input_preview"],
-            reason=decision.reason,
-            severity=row["severity"],
-            timeout_s=effective_timeout,
-            matching_rule_ids=list(decision.matching_rule_ids),
-        )
-
-    # Step 9 — poll for a decision.
-    outcome = await _poll_for_decision(
-        task_id=task_id,
+    _try_progress(
+        progress,
+        "write_approval_requested",
         request_id=request_id,
+        tool_name=tool_name,
+        input_preview=row["tool_input_preview"],
+        reason=decision.reason,
+        severity=row["severity"],
         timeout_s=effective_timeout,
-        progress=progress,
-        ts=ts,
+        matching_rule_ids=list(decision.matching_rule_ids),
     )
+
+    # Step 9 — register the exact persisted gate and its ORIGINAL deadline.
+    # The SDK wrapper already tracks this tool; direct/legacy callers without a
+    # lifecycle context keep their existing approval behavior.
+    lifecycle = get_context(task_id)
+    park = (
+        lifecycle.park_approval(
+            request_id,
+            tool_use_id,
+            deadline,
+            record=ApprovalRecord(
+                user_id=row["user_id"],
+                repo=row["repo"],
+                created_at=row["created_at"],
+                timeout_s=effective_timeout,
+            ),
+        )
+        if lifecycle
+        else None
+    )
+    try:
+        outcome = await _poll_for_decision(
+            task_id=task_id,
+            request_id=request_id,
+            deadline=deadline,
+            progress=progress,
+            ts=ts,
+        )
+    finally:
+        if lifecycle and park:
+            # Clear the safe point before ANY approval/task-state mutation or
+            # hook return. A concurrent suspend owns the barrier until resume.
+            await lifecycle.leave_approval(park)
 
     # Step 10 — VM-throttle + late-approval race. Best-effort flip to
     # TIMED_OUT; if ConditionCheckFailed, the user beat us — read and honor.
@@ -747,47 +954,44 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     try:
         await asyncio.to_thread(ts.transact_resume_from_approval, task_id, request_id)
     except ts.ApprovalResumeError as exc:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_resume_failed",
-                request_id=request_id,
-                error=f"cancelled: {exc.cancellation_reasons}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_resume_failed",
+            request_id=request_id,
+            error=f"cancelled: {exc.cancellation_reasons}",
+        )
         return _deny_response("task no longer awaiting approval")
     except Exception as exc:
         log("WARN", f"approval resume raised: {type(exc).__name__}: {exc}")
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_resume_failed",
-                request_id=request_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_resume_failed",
+            request_id=request_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return _deny_response("approval resume failed")
 
     # Step 12 — terminal branches.
     status = outcome.get("status")
     if status == "APPROVED":
         scope = outcome.get("scope") or "this_call"
-        if scope != "this_call":
+        for grant in _allowlist_scopes(scope, tool_name):
             try:
-                engine.allowlist.add(scope)
+                engine.allowlist.add(grant)
             except ValueError as exc:
                 # Malformed scope from the API — log loudly but still
                 # allow this one call (the user did approve it).
                 log("WARN", f"invalid approved scope {scope!r}: {exc}")
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_granted",
-                request_id=request_id,
-                scope=scope,
-                decided_at=outcome.get("decided_at"),
-                # Propagate the row's ``created_at`` so the
-                # ApprovalMetricsPublisher can compute decision latency.
-                created_at=row.get("created_at"),
-            )
+        _try_progress(
+            progress,
+            "write_approval_granted",
+            request_id=request_id,
+            scope=scope,
+            decided_at=outcome.get("decided_at"),
+            # Propagate the row's ``created_at`` so the
+            # ApprovalMetricsPublisher can compute decision latency.
+            created_at=row.get("created_at"),
+        )
         return _allow_response(f"User approved ({scope})")
 
     # DENIED or TIMED_OUT — cache + queue injection.
@@ -827,18 +1031,17 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
             reason=outcome.get("reason", ""),
             decided_at=outcome.get("decided_at"),
         )
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_denied",
-                request_id=request_id,
-                reason=outcome.get("reason", ""),
-                decided_at=outcome.get("decided_at"),
-                # Propagate the row's ``created_at`` so the
-                # ApprovalMetricsPublisher can compute decision latency.
-                created_at=row.get("created_at"),
-            )
-    elif progress is not None:
+        _try_progress(
+            progress,
+            "write_approval_denied",
+            request_id=request_id,
+            reason=outcome.get("reason", ""),
+            decided_at=outcome.get("decided_at"),
+            # Propagate the row's ``created_at`` so the
+            # ApprovalMetricsPublisher can compute decision latency.
+            created_at=row.get("created_at"),
+        )
+    else:
         _try_progress(
             progress,
             "write_approval_timed_out",
@@ -882,6 +1085,27 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     return _deny_response(reason_text)
 
 
+def _allowlist_scopes(scope: str, tool_name: str) -> list[str]:
+    """Return what an approval given with *scope* adds to the allowlist.
+
+    ``tool_type_session`` and ``tool_group_session`` name no tool: they stand
+    for the tool of the call that was approved and for the groups that tool is
+    in. A tool in no group gets nothing beyond the call itself.
+    """
+    from policy import TOOL_GROUPS
+
+    if scope == "this_call":
+        return []
+    if scope == "tool_type_session":
+        return [f"tool_type:{tool_name}"]
+    if scope == "tool_group_session":
+        groups = [group for group, tools in TOOL_GROUPS.items() if tool_name in tools]
+        if not groups:
+            log("WARN", f"tool_group_session approved for {tool_name}, which is in no tool group")
+        return [f"tool_group:{group}" for group in groups]
+    return [scope]
+
+
 def _reconcile_late_decision(
     outcome: dict,
     row: dict | None,
@@ -892,6 +1116,7 @@ def _reconcile_late_decision(
 
     - ``row["status"] == "APPROVED"`` → rebuild as APPROVED (allow flow).
     - ``row["status"] == "DENIED"`` → rebuild as DENIED (deny flow).
+    - ``row["status"] == "CANCELLED"`` → close the wait without resuming the task.
     - Anything else (row gone, still PENDING) → fall through with the
       original TIMED_OUT (the fail-closed branch).
 
@@ -902,29 +1127,29 @@ def _reconcile_late_decision(
         return outcome
     status = row.get("status")
     if status == "APPROVED":
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_late_win",
-                request_id=request_id,
-                outcome="APPROVED",
-                reason="user decision landed during TIMED_OUT write",
-            )
+        _try_progress(
+            progress,
+            "write_approval_late_win",
+            request_id=request_id,
+            outcome="APPROVED",
+            reason="user decision landed during TIMED_OUT write",
+        )
         return {
             "status": "APPROVED",
             "scope": row.get("scope"),
             "decided_at": row.get("decided_at"),
             "decided_by": row.get("user_id"),
         }
+    if status == "CANCELLED":
+        return {"status": "CANCELLED", "reason": row.get("cancellation_reason")}
     if status == "DENIED":
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_late_win",
-                request_id=request_id,
-                outcome="DENIED",
-                reason="user decision landed during TIMED_OUT write",
-            )
+        _try_progress(
+            progress,
+            "write_approval_late_win",
+            request_id=request_id,
+            outcome="DENIED",
+            reason="user decision landed during TIMED_OUT write",
+        )
         return {
             "status": "DENIED",
             "reason": row.get("deny_reason") or "denied",
@@ -937,7 +1162,7 @@ async def _poll_for_decision(
     *,
     task_id: str,
     request_id: str,
-    timeout_s: int,
+    deadline: _ApprovalDeadline,
     progress: Any,
     ts: Any,
 ) -> dict:
@@ -949,70 +1174,77 @@ async def _poll_for_decision(
     ``approval_poll_degraded``; at ``POLL_MAX_CONSECUTIVE_FAILS`` we
     fall through as TIMED_OUT with a distinct reason.
 
-    Returns an outcome dict mirroring the approval row's terminal fields.
+    Uses the deadline captured with the original approval row, including time
+    spent writing/notifying or suspended. Returns an outcome dict mirroring
+    the approval row's terminal fields.
     """
-    deadline = time.monotonic() + timeout_s
     start = time.monotonic()
     consecutive_fails = 0
     degraded_emitted = False
 
+    lifecycle = get_context(task_id)
     while True:
-        now = time.monotonic()
-        if now >= deadline:
-            return {"status": "TIMED_OUT", "reason": None}
+        async with lifecycle.approval_poll() if lifecycle else nullcontext():
+            if deadline.remaining_s() <= 0:
+                return {"status": "TIMED_OUT", "reason": None}
 
-        try:
-            row = await asyncio.to_thread(
-                ts.get_approval_row,
-                task_id,
-                request_id,
-                consistent_read=True,
-            )
-            consecutive_fails = 0
-        except Exception as exc:
-            consecutive_fails += 1
-            log(
-                "WARN",
-                f"approval poll get_item raised ({consecutive_fails}/"
-                f"{POLL_MAX_CONSECUTIVE_FAILS}): {type(exc).__name__}: {exc}",
-            )
-            if consecutive_fails >= POLL_DEGRADED_FAILS and not degraded_emitted:
-                if progress is not None:
-                    _try_progress(
-                        progress,
-                        "write_approval_poll_degraded",
-                        request_id=request_id,
-                        consecutive_failures=consecutive_fails,
-                    )
-                degraded_emitted = True
-            if consecutive_fails >= POLL_MAX_CONSECUTIVE_FAILS:
-                return {
-                    "status": "TIMED_OUT",
-                    "reason": f"poll failed {consecutive_fails} consecutive times",
-                }
-            row = None  # force sleep below
+            try:
+                row = await asyncio.to_thread(
+                    ts.get_approval_row,
+                    task_id,
+                    request_id,
+                    consistent_read=True,
+                )
+                consecutive_fails = 0
+            except Exception as exc:
+                consecutive_fails += 1
+                log(
+                    "WARN",
+                    f"approval poll get_item raised ({consecutive_fails}/"
+                    f"{POLL_MAX_CONSECUTIVE_FAILS}): {type(exc).__name__}: {exc}",
+                )
+                if consecutive_fails >= POLL_DEGRADED_FAILS and not degraded_emitted:
+                    if progress is not None:
+                        _try_progress(
+                            progress,
+                            "write_approval_poll_degraded",
+                            request_id=request_id,
+                            consecutive_failures=consecutive_fails,
+                        )
+                    degraded_emitted = True
+                if consecutive_fails >= POLL_MAX_CONSECUTIVE_FAILS:
+                    return {
+                        "status": "TIMED_OUT",
+                        "reason": f"poll failed {consecutive_fails} consecutive times",
+                    }
+                row = None  # force sleep below
 
-        if row is not None:
-            status = row.get("status")
-            if status == "APPROVED":
-                return {
-                    "status": "APPROVED",
-                    "scope": row.get("scope"),
-                    "decided_at": row.get("decided_at"),
-                    "decided_by": row.get("user_id"),
-                }
-            if status == "DENIED":
-                return {
-                    "status": "DENIED",
-                    "reason": row.get("deny_reason") or "denied",
-                    "decided_at": row.get("decided_at"),
-                }
+            if row is not None:
+                status = row.get("status")
+                if status == "APPROVED":
+                    return {
+                        "status": "APPROVED",
+                        "scope": row.get("scope"),
+                        "decided_at": row.get("decided_at"),
+                        "decided_by": row.get("user_id"),
+                    }
+                if status == "DENIED":
+                    return {
+                        "status": "DENIED",
+                        "reason": row.get("deny_reason") or "denied",
+                        "decided_at": row.get("decided_at"),
+                    }
+                if status == "CANCELLED":
+                    return {
+                        "status": "CANCELLED",
+                        "reason": row.get("cancellation_reason"),
+                    }
 
         # Compute sleep interval based on elapsed since poll started.
         elapsed = time.monotonic() - start
         interval = POLL_FAST_INTERVAL_S if elapsed < POLL_FAST_DURATION_S else POLL_SLOW_INTERVAL_S
         # Clamp sleep against remaining deadline so we don't oversleep.
-        sleep_for = min(interval, max(0.0, deadline - time.monotonic()))
+        sleep_for = min(interval, deadline.remaining_s())
         if sleep_for <= 0:
             return {"status": "TIMED_OUT", "reason": None}
         await asyncio.sleep(sleep_for)
@@ -1096,39 +1328,20 @@ def _remaining_maxlifetime_s() -> int | None:
         if started_at.isdigit():
             started_epoch = int(started_at)
         else:
-            from datetime import datetime
-
-            # The trailing Z means UTC; strptime returns a naive datetime whose
-            # .timestamp() would otherwise be interpreted in the container's
-            # local TZ, skewing remaining-lifetime math by the UTC offset.
-            started_epoch = int(
-                datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
-            )
+            # The orchestrator sends Date.toISOString(), which has milliseconds
+            # ("2026-11-16T10:00:00.123Z"). A stamp without a zone is UTC too:
+            # .timestamp() would otherwise read it in the container's local
+            # TZ, skewing remaining-lifetime math by the UTC offset.
+            started = datetime.fromisoformat(started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            started_epoch = int(started.timestamp())
     except (ValueError, AttributeError):
+        # nosemgrep: py-silent-success-masking -- start unknown: the gate gets no lifetime ceiling
         return None
     elapsed = int(time.time()) - started_epoch
     remaining = max_lifetime - elapsed
     return max(0, remaining)
-
-
-def _sha256_tool_input_for_row(tool_input: Any) -> str:
-    """Stable SHA-256 of ``tool_input`` for the approval row + cache key.
-
-    Re-derives hashing here (rather than importing ``policy._sha256_tool_input``)
-    so the hook's failure-mode is independent of the engine's internals and
-    to keep import graphs shallow. The engine's own cache uses the same
-    algorithm; the approval row and ``RecentDecisionCache`` need the same
-    key shape.
-    """
-    import hashlib
-
-    try:
-        serialized = (
-            tool_input if isinstance(tool_input, str) else json.dumps(tool_input, sort_keys=True)
-        )
-    except (TypeError, ValueError):
-        serialized = str(tool_input)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _iso_now() -> str:
@@ -1154,14 +1367,19 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
     """Call a progress-writer method, swallowing errors.
 
     Progress is best-effort observability; a throttled DDB write must not
-    break the approval flow. ``_emit_nudge_milestone`` uses a similar
-    pattern for nudges.
+    break the approval flow, and a milestone that cannot be written must not
+    hold back the nudge, the denial or the advisory that it reports.
+    ``progress`` may be ``None`` (a hook that runs without a writer): it has
+    no such method, so the event is skipped with a DEBUG line.
 
     Escalation: repeated consecutive failures of the same ``method_name``
     are tracked per-process and escalated to ERROR after
     ``_TRY_PROGRESS_ESCALATE_AFTER`` so a silent live-stream outage
     becomes operator-visible.
     """
+    # Only skip when ``_disabled`` is explicitly True on a real ProgressWriter.
+    # ``getattr(..., False)`` is not safe — ``MagicMock`` returns an auto-mock
+    # attribute for any access, which evaluates truthy.
     if getattr(progress, "_disabled", False) is True:
         log("WARN", f"progress {method_name!r} skipped: circuit breaker open")
         return
@@ -1171,7 +1389,7 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
         return
     try:
         method(**kwargs)
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # defensive, writers never raise
         prev = _try_progress_consecutive_failures.get(method_name, 0)
         count = prev + 1
         if count >= _TRY_PROGRESS_ESCALATE_AFTER:
@@ -1201,27 +1419,23 @@ async def post_tool_use_hook(
     """PostToolUse hook: screen tool output for secrets/PII.
 
     Returns a dict with hookSpecificOutput.  When sensitive content is
-    detected the response includes ``updatedMCPToolOutput`` containing the
-    redacted version (steered enforcement — content is sanitized, not
-    blocked).
+    detected the response includes ``updatedToolOutput``: the tool response
+    in its own shape, with the secrets in its strings redacted (steered
+    enforcement — content is sanitized, not blocked). A response in which
+    the scanner fails on a string is blanked as a whole (fail-closed, see
+    ``_fail_closed_output``).
 
     ``progress`` is optional (preserves the older test call shape). When
     present, an egress-denial signature in the tool output emits an
     ``egress_denied`` blocker event — best-effort observability, never
     alters the screening decision.
 
-    When a ``stuck_guard`` is supplied, every tool result is recorded so a
-    between-turns hook can detect a repeating failing command (a spin
-    loop) and steer / bail. Recording is best-effort and never alters the
+    When a ``stuck_guard`` is supplied, every tool result is recorded, and
+    its one-time advisory about a repeating failing command (a spin loop) is
+    returned as ``additionalContext``. Best-effort; it never alters the
     screening outcome.
     """
     _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
-    _FAIL_CLOSED: dict = {
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "updatedMCPToolOutput": "[Output redacted: screening error — fail-closed]",
-        }
-    }
 
     if not isinstance(hook_input, dict):
         log("WARN", "PostToolUse hook received non-dict input — passing through")
@@ -1234,17 +1448,131 @@ async def post_tool_use_hook(
         return _PASS_THROUGH
 
     tool_response = hook_input["tool_response"]
+    output: dict = {"hookEventName": "PostToolUse"}
 
-    # Normalise non-string responses
-    if not isinstance(tool_response, str):
-        tool_response = str(tool_response)
+    steer = _observe_tool_result(
+        tool_name,
+        hook_input.get("tool_input"),
+        tool_response,
+        progress=progress,
+        stuck_guard=stuck_guard,
+        # A call that completed has not failed. Only a Bash command can hide
+        # a failure behind its exit status (``yarn build | tail``).
+        failed=None if tool_name == "Bash" else False,
+    )
+    if steer:
+        output["additionalContext"] = steer
+
+    findings: list[str] = []
+    marker = "[Output redacted: screening error — fail-closed]"
+
+    def _screen(text: str) -> str:
+        try:
+            result = scan_tool_output(text)
+        except Exception as exc:
+            finding = f"SCANNER_ERROR: {type(exc).__name__}"
+            if finding not in findings:
+                log("ERROR", f"Output scanner failed for {tool_name}: {type(exc).__name__}: {exc}")
+                findings.append(finding)
+            return marker
+        findings.extend(found for found in result.findings if found not in findings)
+        return result.redacted_content if result.has_sensitive_content else text
+
+    started = time.monotonic()
+    screened = _map_strings(tool_response, _screen)
+    redacted = True
+    if any(found.startswith("SCANNER_ERROR") for found in findings):
+        # Fail closed: a response that could not be screened in full is blanked
+        # in full. That the CLI takes the answer is known for an MCP tool and
+        # for the tools that _SCHEMA_FIXED names; for any other tool no
+        # redaction is claimed.
+        screened = _fail_closed_output(tool_name, tool_response, marker)
+        redacted = str(tool_name).startswith("mcp__") or str(tool_name) in _SCHEMA_FIXED
+    if findings:
+        if trajectory:
+            trajectory.write_output_screening_decision(
+                tool_name,
+                findings,
+                redacted=redacted,
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+        outcome = "OUTPUT REDACTED" if redacted else "OUTPUT NOT SCREENED"
+        log("POLICY", f"{outcome}: {tool_name} — {', '.join(findings)}")
+        output["updatedToolOutput"] = screened
+
+    return {"hookSpecificOutput": output}
+
+
+async def post_tool_use_failure_hook(
+    hook_input: Any,
+    _tool_use_id: str | None,
+    _hook_context: Any,
+    *,
+    stuck_guard: StuckGuard | None = None,
+    progress: Any = None,
+) -> dict:
+    """PostToolUseFailure hook: show a failed tool call to the observers.
+
+    The CLI fires this event, and no PostToolUse, for a tool call that fails —
+    for Bash, a command that exits non-zero, unless the CLI reads that status
+    as an answer (1 from ``grep`` without a match) — with the text of the
+    failure under ``error``. A blocked host and a repeating failing command
+    show up here. Returns the stuck guard's advisory as ``additionalContext``
+    when there is one, else an empty answer.
+    """
+    if not isinstance(hook_input, dict):
+        log("WARN", "PostToolUseFailure hook received non-dict input — ignoring")
+        return {}
+
+    steer = _observe_tool_result(
+        hook_input.get("tool_name", "unknown"),
+        hook_input.get("tool_input"),
+        str(hook_input.get("error", "")),
+        progress=progress,
+        stuck_guard=stuck_guard,
+    )
+    if not steer:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUseFailure",
+            "additionalContext": steer,
+        }
+    }
+
+
+def _observe_tool_result(
+    tool_name: str,
+    tool_input: Any,
+    response: Any,
+    *,
+    progress: Any,
+    stuck_guard: StuckGuard | None,
+    failed: bool | None = None,
+) -> str | None:
+    """Show one tool result to the egress detector and the stuck guard.
+
+    *response* is the response of a call that completed (PostToolUse) or the
+    error of a call that failed (PostToolUseFailure, which is what a failing
+    Bash command fires instead of PostToolUse). Best-effort observability.
+    *failed* tells the stuck guard how the call ended where the caller knows;
+    with ``None`` the guard reads the response for the signs of a failure.
+
+    Returns the stuck guard's advisory when this result completes a spin, for
+    the caller to hand to the model as ``additionalContext`` with the result:
+    an agent that keeps calling tools never reaches the Stop hook.
+    """
+    global _LAST_STUCK_SUMMARY
+
+    # The observers read the response as one text.
+    text = response if isinstance(response, str) else str(response)
 
     # Best-effort egress-denial detection. A blocked outbound connection
     # (non-allowlisted host hitting the DNS Firewall, refused connection, name
     # resolution failure) surfaces in the tool's stderr here. Emit an
     # ``egress_denied`` blocker naming the host to allowlist. Observability
-    # only — never changes the pass-through / redaction decision below.
-    egress_detected, host = detect_egress_denial(tool_response)
+    # only — never changes what the caller answers.
+    egress_detected, host = detect_egress_denial(text)
     if egress_detected:
         detail = (
             f"A connection to {host!r} was blocked"
@@ -1258,56 +1586,133 @@ async def post_tool_use_hook(
         # not an egress denial — must not masquerade as the terminal cause. The
         # observability event below still fires unconditionally (it never blocks
         # and is clearly a heuristic signal in the live stream).
-        if host:
+        # A loopback host is the same localhost race with a name on it (curl:
+        # "Failed to connect to localhost port 3000"): no latch either.
+        if host and not _LOOPBACK_HOST_RE.fullmatch(host):
             _record_blocker_reason("egress_denied", detail, host)
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_agent_blocked",
-                kind="egress_denied",
-                detail=detail,
-                remediation_hint=(
-                    f"Allowlist {host!r} in the DNS Firewall rule group"
-                    if host
-                    else "Allowlist the required host in the DNS Firewall rule group"
-                )
-                + " if it is a legitimate dependency. The agent never widens egress itself.",
-                retryable=False,
-                resource=host,
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind="egress_denied",
+            detail=detail,
+            remediation_hint=(
+                f"Allowlist {host!r} in the DNS Firewall rule group"
+                if host
+                else "Allowlist the required host in the DNS Firewall rule group"
             )
+            + " if it is a legitimate dependency. The agent never widens egress itself.",
+            retryable=False,
+            resource=host,
+        )
 
-    # Feed the stuck-guard (best-effort — a tracking error must never block
-    # the screening path that follows).
-    if stuck_guard is not None:
-        try:
-            stuck_guard.record_tool_result(tool_name, hook_input.get("tool_input"), tool_response)
-        except Exception as exc:
-            log("WARN", f"stuck-guard record raised (ignored): {type(exc).__name__}: {exc}")
-
+    if stuck_guard is None:
+        return None
+    # Feed the stuck-guard and ask it at once (best-effort — a tracking error
+    # must never block the caller).
+    action = None
     try:
-        result = scan_tool_output(tool_response)
+        # The guard quotes the command and the output of a failing call, each
+        # cut to a preview: in its advisory, in the summary for a turn-limit
+        # error, and through them in the stuck_steer milestone and a log line.
+        # They are screened here, while a credential in them is still whole:
+        # each string by itself, before the response becomes one text. In that
+        # text a line break of the output is a backslash and an "n", which the
+        # scanner reads as part of the word or of the URL beside it.
+        # The guard never reads the output of a call that it is told completed.
+        stuck_guard.record_tool_result(
+            tool_name,
+            _map_strings(tool_input, _screened),
+            text if failed is False else str(_map_strings(response, _screened)),
+            failed,
+        )
+        action = stuck_guard.evaluate()
+        # Refresh the "why it's spinning" latch with every result. When the
+        # trailing window is failure-dominated this is a one-liner; otherwise
+        # None (which clears the latch — a task that recovered isn't "stuck").
+        # Read by the terminal path so a later max_turns cap explains itself.
+        _LAST_STUCK_SUMMARY = stuck_guard.recent_failure_summary()
     except Exception as exc:
-        log("ERROR", f"Output scanner failed for {tool_name}: {type(exc).__name__}: {exc}")
-        if trajectory:
-            trajectory.write_output_screening_decision(
-                tool_name, [f"SCANNER_ERROR: {type(exc).__name__}"], redacted=True, duration_ms=0.0
-            )
-        return _FAIL_CLOSED
+        log("WARN", f"stuck-guard raised (ignored): {type(exc).__name__}: {exc}")
+    if action is None or action.kind != "steer":
+        return None
+    _try_progress(
+        progress,
+        "write_agent_milestone",
+        milestone="stuck_steer",
+        details=action.message[:_NUDGE_PREVIEW_LEN],
+    )
+    # Screened as one text here: the guard was handed the strings of the input
+    # screened one by one.
+    log("NUDGE", f"stuck-guard STEER injected: {_screened(action.signature)}")
+    return action.message
 
-    if result.has_sensitive_content:
-        if trajectory:
-            trajectory.write_output_screening_decision(
-                tool_name, result.findings, redacted=True, duration_ms=result.duration_ms
-            )
-        log("POLICY", f"OUTPUT REDACTED: {tool_name} — {', '.join(result.findings)}")
+
+# Strings that the output schema of a built-in tool fixes to one of a few
+# values, by the key they stand under. A fail-closed answer leaves them alone:
+# the CLI checks a rewritten response against the schema of the tool and passes
+# the ORIGINAL output on when it does not fit. Each tool named here was checked
+# against the pinned CLI; for a tool that is not named the hook cannot tell
+# whether its answer is taken.
+_SCHEMA_FIXED: dict[str, tuple[str, ...]] = {
+    # "gitOperation", which the CLI adds to the result of a command it takes
+    # for a commit, a merge, a rebase or a pull request.
+    "Bash": ("kind", "action"),
+    "Edit": ("status",),
+    "Glob": (),
+    "Grep": ("mode",),
+    "Read": ("type",),
+    "WebFetch": (),
+    "Write": ("type", "status"),
+}
+
+
+def _fail_closed_output(tool_name: Any, tool_response: Any, marker: str) -> Any:
+    """Return what replaces a tool response that could not be screened.
+
+    Every string that carries content becomes *marker*, in a form the CLI takes
+    for the tool.
+    """
+    name = str(tool_name)
+    if name.startswith("mcp__"):
+        # The result of an MCP tool is a list of content blocks. A blanked
+        # "type" is no block type, and the Messages API refuses a request that
+        # holds one, for the rest of the task. The marker alone is taken.
+        return marker
+    if name == "Read" and isinstance(tool_response, dict) and tool_response.get("type") != "text":
+        # An image, a PDF or a notebook: their blocks do not take blanked data.
+        # The text form of a Read result instead.
         return {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "updatedMCPToolOutput": result.redacted_content,
-            }
+            "type": "text",
+            "file": {
+                "filePath": marker,
+                "content": marker,
+                "numLines": 1,
+                "startLine": 1,
+                "totalLines": 1,
+            },
         }
+    return _map_strings(tool_response, lambda _text: marker, _SCHEMA_FIXED.get(name, ()))
 
-    return _PASS_THROUGH
+
+def _map_strings(value: Any, fn: Callable[[str], str], keep: tuple[str, ...] = ()) -> Any:
+    """Return *value* with *fn* applied to every string in it.
+
+    A tool response is a string, or dicts and lists around strings. The CLI
+    takes a rewritten response of a built-in tool only in the tool's own shape
+    (``{"stdout": ..., "stderr": ...}`` for Bash) and otherwise keeps the
+    original, so keys, nesting and non-string values stay as they are. What
+    stands under a key named in *keep* is left alone as well.
+    """
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        return {
+            key: item if key in keep else _map_strings(item, fn, keep)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_map_strings(item, fn, keep) for item in value]
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -1338,43 +1743,6 @@ def _reset_injected_nudges_for_tests() -> None:
     """Test-only helper to clear the in-process injected-nudge dedup set."""
     global _INJECTED_NUDGES
     _INJECTED_NUDGES = {}
-
-
-def _emit_nudge_milestone(ctx: dict, milestone: str, details: str) -> None:
-    """Emit ``agent_milestone`` to the progress writer.
-
-    Best-effort — swallow errors so stream visibility failures never block
-    nudge injection itself.  ``ctx`` may carry a ``progress`` ref stamped by
-    :func:`stop_hook`.  Skips (with a log line in each case) when:
-
-    - no ``progress`` ref is stamped on ``ctx`` (tests, early-boot, or a
-      hook invoked outside :func:`stop_hook`'s dispatch)
-    - the progress writer's circuit breaker has tripped after repeated
-      DDB write failures (``ProgressWriter._disabled``)
-    - the underlying ``write_agent_milestone`` raises despite the writer's
-      own fail-open contract
-
-    Surfacing these as log lines (instead of silent drops) lets
-    ``--trace`` mode and CloudWatch Logs show when an ack could not be
-    delivered to the durable event stream.
-    """
-    progress = ctx.get("progress")
-    if progress is None:
-        log("DEBUG", f"nudge milestone {milestone!r} skipped: no progress writer in ctx")
-        return
-    # Only skip when ``_disabled`` is explicitly True on a real ProgressWriter.
-    # ``getattr(..., False)`` is not safe — ``MagicMock`` returns an auto-mock
-    # attribute for any access, which evaluates truthy.
-    if getattr(progress, "_disabled", False) is True:
-        log(
-            "WARN",
-            f"nudge milestone {milestone!r} skipped: progress writer circuit breaker open",
-        )
-        return
-    try:
-        progress.write_agent_milestone(milestone=milestone, details=details)
-    except Exception as exc:  # pragma: no cover — defensive, writers never raise
-        log("WARN", f"nudge milestone {milestone!r} progress write failed: {exc}")
 
 
 def _nudge_between_turns_hook(ctx: dict) -> list[str]:
@@ -1418,12 +1786,9 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     if ctx.get("_cancel_requested"):
         return []
 
-    try:
-        pending = nudge_reader.read_pending(task_id)
-    except Exception as exc:
-        log("WARN", f"nudge read_pending raised: {type(exc).__name__}: {exc}")
-        # nosemgrep: py-silent-success-masking -- fail-open hook; DDB blip must not block agent
-        return []
+    # The reader is fail-open: a DynamoDB error is logged there and comes back
+    # as no pending nudges, so it cannot block the agent.
+    pending = nudge_reader.read_pending(task_id)
 
     # Filter out any nudges already injected in this process (regardless of
     # whether mark_consumed succeeded previously).
@@ -1433,12 +1798,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     if not pending:
         return []
 
-    try:
-        formatted = nudge_reader.format_as_user_message(pending)
-    except Exception as exc:
-        log("WARN", f"nudge format failed: {type(exc).__name__}: {exc}")
-        # nosemgrep: py-silent-success-masking -- fail-open hook; bad nudge must not block agent
-        return []
+    formatted = nudge_reader.format_as_user_message(pending)
 
     # Record injection BEFORE mark_consumed so a persistent mark_consumed
     # failure cannot cause re-injection on a later turn.
@@ -1448,12 +1808,10 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         if nid:
             task_set.add(nid)
 
-    # Mark-consumed is best-effort; log failures but do not block injection.
+    # Mark-consumed is best-effort: it logs a failure and returns False, and
+    # the injection goes ahead.
     for n in pending:
-        try:
-            nudge_reader.mark_consumed(task_id, n["nudge_id"])
-        except Exception as exc:
-            log("WARN", f"nudge mark_consumed raised: {type(exc).__name__}: {exc}")
+        nudge_reader.mark_consumed(task_id, n["nudge_id"])
 
     count = len(pending)
     log("NUDGE", f"Injecting {count} nudge(s) for task {task_id}")
@@ -1467,7 +1825,12 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         "…" if count > 1 or len(first_msg) == _NUDGE_PREVIEW_LEN else ""
     )
     # Emit the ack BEFORE returning the injection list.
-    _emit_nudge_milestone(ctx, "nudge_acknowledged", details)
+    _try_progress(
+        ctx.get("progress"),
+        "write_agent_milestone",
+        milestone="nudge_acknowledged",
+        details=details,
+    )
 
     return [formatted] if formatted else []
 
@@ -1494,12 +1857,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     # ``drain_denial_injections`` clears the queue; this is deliberate
     # so a transient SDK failure that drops the injection does not
     # re-inject the same denial on every subsequent Stop seam.
-    try:
-        pending = engine.drain_denial_injections()
-    except Exception as exc:  # pragma: no cover — defensive
-        log("WARN", f"denial drain raised: {type(exc).__name__}: {exc}")
-        # nosemgrep: py-silent-success-masking -- fail-open hook; denial injection is best-effort
-        return []
+    pending = engine.drain_denial_injections()
     if not pending:
         return []
 
@@ -1522,10 +1880,11 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     # ``nudge_acknowledged``; this is an additive milestone not in the
     # enumerated milestone list, so keep the name distinct from the
     # enumerated ``approval_*`` prefix.
-    _emit_nudge_milestone(
-        ctx,
-        "user_denial_injected",
-        f"{count} denial(s) injected (ids={','.join(request_ids)})",
+    _try_progress(
+        ctx.get("progress"),
+        "write_agent_milestone",
+        milestone="user_denial_injected",
+        details=f"{count} denial(s) injected (ids={','.join(request_ids)})",
     )
     return ["\n".join(blocks)] if blocks else []
 
@@ -1557,54 +1916,12 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
         return []
     if record and record.get("status") == "CANCELLED":
         ctx["_cancel_requested"] = True
-        _emit_nudge_milestone(
-            ctx,
-            "cancel_detected",
-            "Task cancelled by user; stopping agent after this turn.",
+        _try_progress(
+            ctx.get("progress"),
+            "write_agent_milestone",
+            milestone="cancel_detected",
+            details="Task cancelled by user; stopping agent after this turn.",
         )
-    return []
-
-
-def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
-    """Nudge the agent when it repeats the SAME failing command.
-
-    Reads the per-task :class:`StuckGuard` stamped on ``ctx`` (by
-    :func:`stop_hook`). When the same command has failed with identical output
-    enough times in a row, the guard returns a ``steer`` action — a ONE-TIME
-    advisory message telling the agent to stop retrying and either work around
-    the failure or finish with what it has. Returned as injected text, so the
-    SDK continues the turn with the steer as the next user message.
-
-    ADVISORY ONLY: the guard never kills the task (the bail path was removed —
-    distinguishing a true spin from a legitimately-iterating agent is too
-    fragile to justify an auto-kill; the ``max_turns`` cap is the real
-    backstop). A false positive here costs exactly one extra advisory comment.
-
-    Runs AFTER cancel (cancel wins — never steer a dying agent) but its own
-    no-op-when-cancelled guard makes ordering robust. Fail-open: any error is
-    swallowed so a guard bug can never wedge a healthy agent.
-    """
-    if ctx.get("_cancel_requested"):
-        return []
-    guard = ctx.get("stuck_guard")
-    if guard is None:
-        return []
-    try:
-        action = guard.evaluate()
-        # Refresh the "why it's spinning" latch every turn. When the trailing
-        # window is failure-dominated this returns a one-liner; otherwise None
-        # (which clears the latch — a task that recovered isn't "stuck"). Read by
-        # the terminal path so a later max_turns cap explains itself.
-        global _LAST_STUCK_SUMMARY
-        _LAST_STUCK_SUMMARY = guard.recent_failure_summary()
-    except Exception as exc:
-        log("WARN", f"stuck-guard evaluate raised (ignored): {type(exc).__name__}: {exc}")
-        return []  # nosemgrep: py-silent-success-masking -- stuck guard is ADVISORY ONLY (see docstring); a guard bug must never wedge a healthy agent, max_turns is the real backstop. [] means "no steer this turn", not a masked failure (#756 Category 3)  # noqa: E501
-
-    if action.kind == "steer":
-        _emit_nudge_milestone(ctx, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN])
-        log("NUDGE", f"stuck-guard STEER injected: {action.signature}")
-        return [action.message]
     return []
 
 
@@ -1619,10 +1936,6 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
 # nudge reader to preserve cancel-wins semantics.
 between_turns_hooks: list[BetweenTurnsHook] = [
     _cancel_between_turns_hook,
-    # Stuck-guard (advisory): injects a one-time "stop retrying X" nudge when
-    # the same command keeps failing identically. Runs after cancel (never steer
-    # a dying agent); order vs nudge/denial is cosmetic since it never bails.
-    _stuck_guard_between_turns_hook,
     _nudge_between_turns_hook,
     # Denial injection runs LAST so both cancel and nudge short-circuits
     # pre-empt it. The hook explicitly re-checks ``_cancel_requested`` so
@@ -1640,7 +1953,6 @@ async def stop_hook(
     task_id: str,
     progress: Any = None,
     engine: Any = None,
-    stuck_guard: Any = None,
 ) -> dict:
     """Stop hook: run registered between-turns hooks; block if they produce text.
 
@@ -1664,7 +1976,6 @@ async def stop_hook(
         "task_id": task_id,
         "progress": progress,
         "engine": engine,
-        "stuck_guard": stuck_guard,
     }
 
     # Cancel-before-nudge short-circuit.
@@ -1717,6 +2028,32 @@ async def stop_hook(
     return {"decision": "block", "reason": reason}
 
 
+async def _lifecycle_tool_started(lifecycle: Any, hook_input: Any, tool_use_id: str | None) -> None:
+    """Register a tool with the MicroVM lifecycle barrier before its policy check."""
+    await lifecycle.tool_started(tool_use_id)
+    if isinstance(hook_input, dict):
+        tool_input = hook_input.get("tool_input")
+        # Legacy serialized inputs are normalized deeper in the policy hook.
+        # Keep their tool behavior, but do not infer a safe foreground-only
+        # execution from an opaque value here.
+        if not isinstance(tool_input, dict) or tool_input.get("run_in_background"):
+            lifecycle.disable_suspend()
+
+
+def _lifecycle_tool_finished(lifecycle: Any, hook_input: Any, tool_use_id: str | None) -> None:
+    """Release a tool from the MicroVM lifecycle barrier after it returns."""
+    # Background Bash may be promoted after invocation. A returned background
+    # identifier means the tool's post hook is not a reliable indication that
+    # its child stopped.
+    if isinstance(hook_input, dict):
+        response = hook_input.get("tool_response")
+        if isinstance(response, dict) and (
+            response.get("backgroundTaskId") or response.get("background_task_id")
+        ):
+            lifecycle.disable_suspend()
+    lifecycle.tool_finished(tool_use_id)
+
+
 def build_hook_matchers(
     engine: PolicyEngine,
     trajectory: _TrajectoryWriter | None = None,
@@ -1730,8 +2067,9 @@ def build_hook_matchers(
     Returns a dict mapping HookEvent strings to lists of HookMatcher
     instances, ready to pass as ``hooks=...`` to ClaudeAgentOptions.
 
-    The SDK expects ``dict[HookEvent, list[HookMatcher]]`` where HookMatcher
-    has ``matcher: str | None`` and ``hooks: list[HookCallback]``.
+    The SDK expects ``dict[HookEvent, list[HookMatcher]]``. PreToolUse also needs
+    an explicit callback timeout: the CLI can otherwise cancel a live approval
+    wait and return a generic denial without completing its approval record.
 
     ``progress`` is forwarded to both the PreToolUse hook (approval gate
     milestones) and the Stop hook (nudge/denial acks). ``user_id`` is
@@ -1748,9 +2086,12 @@ def build_hook_matchers(
     )
 
     # One stuck-guard per task (== per build_hook_matchers call). The
-    # PostToolUse closure feeds it every tool result; the Stop closure reads it
-    # between turns to steer / bail on a repeating failing command.
+    # PostToolUse and PostToolUseFailure closures feed it every tool result and
+    # hand its advisory about a repeating failing command to the model.
     _stuck_guard = StuckGuard()
+    # Retain the controller even after registry removal. A late callback must
+    # see its CLOSED barrier, not fall back to the non-MicroVM path.
+    lifecycle = get_context(task_id)
 
     # Closure-based wrapper matches the HookCallback signature exactly:
     # (HookInput, str | None, HookContext) -> Awaitable[HookJSONOutput]
@@ -1758,13 +2099,17 @@ def build_hook_matchers(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
         # Fail-closed wrapper (mirrors _post and _stop). If the inner hook
-        # or its dispatch path raises an unexpected exception (asyncio
-        # cancellation, TypeError from a malformed payload, etc.), the
+        # or its dispatch path raises an unexpected exception (for example,
+        # TypeError from a malformed payload), the
         # SDK's default behaviour for an unhandled hook exception is
         # undefined — we MUST NOT trust it to fail closed. Mapping every
         # uncaught exception to a DENY here makes the security posture
-        # explicit at the SDK boundary.
+        # explicit at the SDK boundary. SDK cancellation propagates and still
+        # releases the tool registration in finally.
+        allowed = False
         try:
+            if lifecycle:
+                await _lifecycle_tool_started(lifecycle, hook_input, tool_use_id)
             result = await pre_tool_use_hook(
                 hook_input,
                 tool_use_id,
@@ -1776,6 +2121,10 @@ def build_hook_matchers(
                 progress=progress,
                 repo_url=repo_url or None,
             )
+            if result.get("hookSpecificOutput", {}).get("permissionDecision") == "allow":
+                if lifecycle:
+                    await lifecycle.wait_until_open()
+                allowed = True
         except Exception as exc:
             log(
                 "ERROR",
@@ -1788,6 +2137,9 @@ def build_hook_matchers(
             return SyncHookJSONOutput(
                 **_deny_response("Hook error — fail-closed deny"),
             )
+        finally:
+            if lifecycle and not allowed:
+                lifecycle.tool_finished(tool_use_id)
         return SyncHookJSONOutput(**result)
 
     async def _post(
@@ -1805,11 +2157,39 @@ def build_hook_matchers(
             return SyncHookJSONOutput(**result)
         except Exception as exc:
             log("ERROR", f"PostToolUse wrapper crashed: {type(exc).__name__}: {exc}")
+            marker = "[Output redacted: hook error — fail-closed]"
             fail_closed: PostToolUseHookSpecificOutput = {
                 "hookEventName": "PostToolUse",
-                "updatedMCPToolOutput": "[Output redacted: hook error — fail-closed]",
+                # The response with its content blanked, in a form the CLI
+                # takes for the tool (see ``_fail_closed_output``).
+                "updatedToolOutput": _fail_closed_output(
+                    hook_input.get("tool_name"), hook_input.get("tool_response", marker), marker
+                ),
             }
             return SyncHookJSONOutput(hookSpecificOutput=fail_closed)
+        finally:
+            if lifecycle:
+                _lifecycle_tool_finished(lifecycle, hook_input, tool_use_id)
+
+    async def _post_failure(
+        hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
+    ) -> HookJSONOutput:
+        try:
+            result = await post_tool_use_failure_hook(
+                hook_input,
+                tool_use_id,
+                ctx,
+                progress=progress,
+                stuck_guard=_stuck_guard,
+            )
+            return SyncHookJSONOutput(**result)
+        except Exception as exc:
+            log("ERROR", f"PostToolUseFailure wrapper crashed: {type(exc).__name__}: {exc}")
+            return SyncHookJSONOutput()
+        finally:
+            # A failed tool has left the MicroVM lifecycle barrier too.
+            if lifecycle:
+                lifecycle.tool_finished(tool_use_id)
 
     async def _stop(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
@@ -1825,7 +2205,6 @@ def build_hook_matchers(
                 task_id=stop_task_id,
                 progress=progress,
                 engine=engine,
-                stuck_guard=_stuck_guard,
             )
         except Exception as exc:
             log(
@@ -1836,8 +2215,19 @@ def build_hook_matchers(
         # Empty dict == allow stop.  SyncHookJSONOutput(**{}) is fine.
         return SyncHookJSONOutput(**result)
 
+    # The SDK callback window must outlast the longest approval gate (the
+    # contract's approval ceiling) plus cleanup. A frozen MicroVM's CLI timer
+    # does not advance while suspended, so suspension cannot shorten it.
+    callback_window_s = SHARED_CONSTANTS["approval_timeout_s"]["max"]
     return {
-        "PreToolUse": [HookMatcher(matcher=None, hooks=[_pre])],
+        "PreToolUse": [
+            HookMatcher(
+                matcher=None,
+                hooks=[_pre],
+                timeout=callback_window_s + CLEANUP_MARGIN_120S,
+            )
+        ],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[_post])],
+        "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[_post_failure])],
         "Stop": [HookMatcher(matcher=None, hooks=[_stop])],
     }

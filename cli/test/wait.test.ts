@@ -109,6 +109,29 @@ describe('waitForTask', () => {
     expect(mockGetTask).toHaveBeenCalledTimes(3);
   });
 
+  test('a successful poll resets the transient-failure budget', async () => {
+    // Six failures in total, but never more than three in a row: the budget
+    // of five counts consecutive failures, so the wait must not give up.
+    const networkErr = new TypeError('fetch failed');
+    mockGetTask
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockResolvedValueOnce(makeTask('RUNNING'))
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockResolvedValueOnce(makeTask('COMPLETED'));
+    const client = new ApiClient();
+
+    const promise = waitForTask(client, 'task-1');
+    await flushPolls(16);
+    const task = await promise;
+
+    expect(task.status).toBe('COMPLETED');
+    expect(mockGetTask).toHaveBeenCalledTimes(8);
+  });
+
   test('gives up after exceeding the transient-failure budget', async () => {
     const networkErr = new TypeError('fetch failed');
     mockGetTask.mockRejectedValue(networkErr);

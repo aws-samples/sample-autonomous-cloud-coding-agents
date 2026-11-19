@@ -22,7 +22,13 @@ import {
   awaitOauthCallback,
   CALLBACK_PORT,
   CALLBACK_URL,
+  openBrowser,
+  randomState,
 } from '../src/oauth-callback-server';
+
+// child_process.execFile: `openBrowser` shells out to the OS opener.
+const execFileMock = jest.fn();
+jest.mock('child_process', () => ({ execFile: (...args: unknown[]) => execFileMock(...args) }));
 
 /**
  * Make a plain HTTP GET request to localhost. Returns the response
@@ -148,5 +154,43 @@ describe('awaitOauthCallback', () => {
     // RFC 8252 §7.3: http://localhost is the right shape for native-app OAuth
     // callbacks (no TLS required, no cert warnings). Port 8080 is conventional.
     expect(CALLBACK_URL).toBe('http://localhost:8080/oauth/callback');
+  });
+});
+
+describe('openBrowser', () => {
+  beforeEach(() => execFileMock.mockReset());
+
+  test('resolves true when the OS opener succeeds', async () => {
+    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(null));
+    await expect(openBrowser('https://example.test')).resolves.toBe(true);
+  });
+
+  test('resolves false when the OS opener errors', async () => {
+    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(new Error('no opener')));
+    await expect(openBrowser('https://example.test')).resolves.toBe(false);
+  });
+
+  test.each([
+    ['darwin', 'open', ['https://example.test']],
+    ['win32', 'cmd', ['/c', 'start', '""', 'https://example.test']],
+    ['linux', 'xdg-open', ['https://example.test']],
+  ] as const)('on %s, runs `%s` with the URL', async (platform, expectedCmd, expectedArgs) => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { configurable: true, value: platform });
+    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(null));
+    try {
+      await openBrowser('https://example.test');
+      expect(execFileMock.mock.calls[0]?.slice(0, 2)).toEqual([expectedCmd, expectedArgs]);
+    } finally {
+      if (original) Object.defineProperty(process, 'platform', original);
+    }
+  });
+});
+
+describe('randomState', () => {
+  test('is 32 random bytes in base64url, new on every call', () => {
+    const first = randomState();
+    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(randomState()).not.toBe(first);
   });
 });

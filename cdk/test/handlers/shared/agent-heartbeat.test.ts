@@ -17,6 +17,20 @@
  *  SOFTWARE.
  */
 
-export { ApiClient } from './api-client';
-export { ApiError, CliError } from './errors';
-export * from './types';
+// SPDX-License-Identifier: MIT-0
+
+import { evaluateAgentHeartbeat } from '../../../src/handlers/shared/agent-heartbeat';
+
+test.each([
+  [undefined, undefined, 1_000_000, undefined],
+  [NaN, undefined, 1_000_000, undefined],
+  [0, undefined, 360_000, undefined],
+  [0, undefined, 360_001, 'missing'],
+  [0, -200_000, 120_000, undefined],
+  [0, -200_000, 120_001, 'stale'],
+  [0, 120_000, 360_000, undefined],
+  [0, 120_000, 360_001, 'stale'],
+  [0, 400_000, 360_001, undefined],
+] as const)('heartbeat boundary: start=%s heartbeat=%s now=%s yields %s', (start, heartbeat, now, expected) => {
+  expect(evaluateAgentHeartbeat(start, heartbeat, now)).toBe(expected);
+});

@@ -37,6 +37,13 @@ const DEFAULT_PAGE_LIMIT = 20;
 const MAX_PAGE_LIMIT = 100;
 
 /**
+ * Cap on DynamoDB `Query` round-trips per request. `Limit` is applied to items read,
+ * before `FilterExpression`, so filtering out revoked webhooks can leave a page short;
+ * we page until it is full. The cap bounds what one request reads; the token still advances.
+ */
+const MAX_QUERY_PAGES = 10;
+
+/**
  * GET /v1/webhooks — List webhooks for the authenticated user.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
@@ -49,7 +56,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const limit = parseLimit(event.queryStringParameters?.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
-    const startKey = decodePaginationToken(event.queryStringParameters?.next_token);
+    let startKey = decodePaginationToken(event.queryStringParameters?.next_token);
+    if (startKey === null) {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid next_token.', requestId);
+    }
     const includeRevoked = event.queryStringParameters?.include_revoked === 'true';
 
     let filterExpression: string | undefined;
@@ -60,24 +70,38 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       expressionAttributeValues[':active'] = 'active';
     }
 
-    const result = await ddb.send(new QueryCommand({
-      TableName: TABLE_NAME,
-      IndexName: 'UserIndex',
-      KeyConditionExpression: 'user_id = :uid',
-      ...(filterExpression && {
-        FilterExpression: filterExpression,
-        ExpressionAttributeNames: { '#s': 'status' },
-      }),
-      ExpressionAttributeValues: expressionAttributeValues,
-      Limit: limit,
-      ScanIndexForward: false,
-      ...(startKey && { ExclusiveStartKey: startKey }),
-    }));
+    // Accumulate until the page is full or the index is exhausted; over-fetch one
+    // so a full page can tell whether another webhook follows.
+    const items: WebhookRecord[] = [];
+    for (let page = 0; page < MAX_QUERY_PAGES; page += 1) {
+      const result = await ddb.send(new QueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: 'UserIndex',
+        KeyConditionExpression: 'user_id = :uid',
+        ...(filterExpression && {
+          FilterExpression: filterExpression,
+          ExpressionAttributeNames: { '#s': 'status' },
+        }),
+        ExpressionAttributeValues: expressionAttributeValues,
+        Limit: limit + 1,
+        ScanIndexForward: false,
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      items.push(...((result.Items ?? []) as WebhookRecord[]));
+      startKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+      if (items.length > limit || !startKey) break;
+    }
+    const pageItems = items.slice(0, limit);
 
-    const items = (result.Items ?? []) as WebhookRecord[];
-    const nextToken = encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);
+    // Trimmed: resume after the last webhook returned (LastEvaluatedKey lies past the
+    // over-fetched one). Otherwise the raw cursor, which is only set when the page cap
+    // stopped the loop.
+    const last = pageItems[pageItems.length - 1];
+    const nextToken = items.length > limit
+      ? encodePaginationToken({ webhook_id: last.webhook_id, user_id: last.user_id, created_at: last.created_at })
+      : encodePaginationToken(startKey);
 
-    return paginatedResponse(items.map(toWebhookDetail), nextToken, requestId);
+    return paginatedResponse(pageItems.map(toWebhookDetail), nextToken, requestId);
   } catch (err) {
     logger.error('Failed to list webhooks', { error: String(err), request_id: requestId });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
