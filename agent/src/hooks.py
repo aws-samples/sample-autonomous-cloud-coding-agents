@@ -1006,7 +1006,8 @@ async def _handle_require_approval(  # noqa: C901 -- 24, down from 35 when the c
         tool_name,
         tool_input_sha256,
         decision=cache_decision,
-        reason=outcome.get("reason", ""),
+        # A timed-out row carries ``reason: None``; never let it reach a message.
+        reason=outcome.get("reason") or "",
         original_decision_ts=outcome.get("decided_at"),
     )
 
