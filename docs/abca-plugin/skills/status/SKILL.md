@@ -10,7 +10,7 @@ allowed-tools:
 
 Check the current state of the ABCA platform and report a concise status summary.
 
-> **Running the CLI:** the `node cli/lib/bin/bgagent.js …` checks below need `node` on `PATH`; in a non-interactive or mise-managed shell, prefix with `mise exec --`.
+> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, run `mise run cli:install` from the repo root, or call `node cli/lib/bin/bgagent.js …` there instead (in a non-interactive or mise-managed shell, prefix it with `mise exec --`).
 
 ## Checks to Run
 
@@ -24,12 +24,12 @@ Run these in parallel where possible:
 
 2. **Running tasks:**
    ```bash
-   node cli/lib/bin/bgagent.js list --status RUNNING,SUBMITTED,HYDRATING --output json 2>&1 || echo "CLI not configured"
+   bgagent list --status RUNNING,SUBMITTED,HYDRATING --output json 2>&1 || echo "CLI not configured"
    ```
 
 3. **Recent completed tasks:**
    ```bash
-   node cli/lib/bin/bgagent.js list --limit 5 --output json 2>&1 || echo "CLI not configured"
+   bgagent list --limit 5 --output json 2>&1 || echo "CLI not configured"
    ```
 
 4. **Local build health:**

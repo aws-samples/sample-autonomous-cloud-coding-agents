@@ -74,7 +74,8 @@ Common commands:
 
 | Command | What it does |
 |---|---|
-| `mise run install` | Install all dependencies (Yarn workspaces + Python) |
+| `mise run install` | Install all dependencies (Yarn workspaces + Python) and the `bgagent` command |
+| `mise run cli:install` | Compile the CLI and install the `bgagent` command into `~/.local/bin` (`--force` makes this checkout the fallback) |
 | `mise run build` | Full build: agent quality, the cdk, cli, web and docs builds, the Jira Forge app tests, and the drift and file-hygiene checks (`mise run drift-prevention`) |
 | `mise //cdk:build` | CDK only: compile + lint + type-check + test + synth |
 | `mise //agent:quality` | Agent only: lint + format + type check + dead code + tests |

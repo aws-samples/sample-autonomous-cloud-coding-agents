@@ -990,11 +990,17 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
 }
 
 /**
- * The command an operator types to run this CLI again: `bgagent` for an installed binary,
- * otherwise `node <script>` relative to the working directory (absolute when it is outside it).
- * The Quick Start runs `node lib/bin/bgagent.js` from `cli/`, where a bare `bgagent` is not found.
+ * The command an operator types to run this CLI again: `bgagent` for an installed binary or
+ * the `bgagent` command `mise run cli:install` writes (it sets `BGAGENT_INVOKED_AS`, since it
+ * runs `node <checkout>/cli/lib/bin/bgagent.js`), otherwise `node <script>` relative to the
+ * working directory (absolute when it is outside it): `node lib/bin/bgagent.js` from `cli/`.
  */
-export function cliInvocation(script: string | undefined, cwd: string): string {
+export function cliInvocation(
+  script: string | undefined,
+  cwd: string,
+  invokedAs: string | undefined = process.env.BGAGENT_INVOKED_AS,
+): string {
+  if (invokedAs) return invokedAs;
   if (!script || path.basename(script) === 'bgagent') return 'bgagent';
   const relative = path.relative(cwd, script);
   return `node ${relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : script}`;

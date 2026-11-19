@@ -25,7 +25,7 @@
       "ignoreDependencies": ["tsx", "@aws-cdk/integ-runner"]
     },
     "cli": {
-      "entry": ["jest.emulator.config.js", "test/emulator/*.emulator.ts"],
+      "entry": ["jest.emulator.config.js", "test/emulator/*.emulator.ts", "scripts/*.mjs"],
       "project": ["src/**/*.ts!", "test/**/*.ts"]
     },
     "docs": {

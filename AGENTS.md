@@ -13,7 +13,7 @@ Deeper design: [Developer guide](./docs/guides/DEVELOPER_GUIDE.md), [Architectur
 ## Commands (run these)
 
 ```bash
-mise run install          # yarn workspaces + agent Python (uv)
+mise run install          # yarn workspaces + agent Python (uv) + the bgagent command (~/.local/bin)
 mise run build            # agent quality + cdk, cli, web and docs builds + Forge tests + drift and file-hygiene checks (parallel)
 mise run lint             # lint + type checks of agent, cdk, cli and web, plus the agent's dead-code check; rewrites nothing (what ABCA agents run by default)
 mise run check:fast       # lint + drift-prevention (drift and file-hygiene checks), no test run; not check-only: it fixes trailing whitespace and final newlines and regenerates the command stubs

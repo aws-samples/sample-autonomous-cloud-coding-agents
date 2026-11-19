@@ -1,18 +1,31 @@
-# @backgroundagent/cli
+# bgagent CLI (`@abca/cli`)
 
 Command-line interface for the ABCA platform. Submit coding tasks, monitor their status, and manage results — all through the deployed REST API with Cognito authentication.
 
 ## Installation
 
-```bash
-npm install -g @backgroundagent/cli
-```
+The CLI is not published to npm, by design: it belongs to the checkout you deploy the stack from (it checks the bootstrap version, reads the stack's `DeploymentFeatures` output, and shares API shapes with the handlers). Run it from your checkout.
 
-Or run directly from the monorepo:
+From the repository root:
 
 ```bash
-node cli/lib/bin/bgagent.js
+mise run install       # dependencies; also writes the bgagent command
+mise run cli:install   # compiles the CLI and writes the bgagent command
 ```
+
+`mise run cli:install` writes `~/.local/bin/bgagent` (`BGAGENT_BIN_DIR` sets another directory) and prints the line to add to your shell profile when that directory is not on your `PATH`. `mise run install` writes it too, without compiling: `mise run build` or `mise //cli:compile` compiles the CLI.
+
+**Which checkout runs.** Inside any ABCA checkout or worktree, at its root or below, `bgagent` runs that checkout's CLI and prints one line on stderr naming it (`BGAGENT_SHIM_QUIET=1` turns the line off). Anywhere else it runs the checkout that installed it. To make another checkout that fallback, run `mise run cli:install --force` there; without `--force` the task never replaces a `bgagent` it did not write or one that another checkout installed, and `mise run install` only reports it.
+
+**Configuration is per user, not per checkout.** `~/.bgagent/` (stack, API URL, tokens) is shared by every checkout, so changing directory changes the CLI code that runs, not the stack it talks to. Use `bgagent configure` or `--stack-name` to switch stacks, or set `BGAGENT_CONFIG_DIR` per worktree.
+
+Without the command, run the entrypoint directly once it is compiled:
+
+```bash
+node cli/lib/bin/bgagent.js <command>
+```
+
+`bgagent --version` prints the package version and the commit the CLI was compiled from (`-dirty` when the checkout had uncommitted changes).
 
 ## Quick start
 

@@ -77,26 +77,25 @@ Deploy with `bgagent setup`, not `mise //cdk:deploy`. Setup chooses the minimal 
    - optional features: none (recommended for a first deployment) or any of `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`;
    - compute: `agentcore` (recommended), `ecs` or `agentcore,ecs`.
 2. Confirm the account with `aws sts get-caller-identity` and show it to the user before deploying.
-3. Run setup from `cli/`. Your shell has no terminal, so pass `--features` and `--yes`. Deploying takes about 10 minutes; run it in the background and report progress from the log under `~/.bgagent/logs/<stack>/`.
+3. Run setup with `bgagent`. If it is not found, run `mise run cli:install` from the repo root, or call `node cli/lib/bin/bgagent.js …` there instead, prefixed with `mise exec --` in a non-interactive or mise-managed shell. Your shell has no terminal, so pass `--features` and `--yes`. Deploying takes about 10 minutes; run it in the background and report progress from the log under `~/.bgagent/logs/<stack>/`.
    ```bash
-   cd cli
-   node lib/bin/bgagent.js setup --region <region> --features none --compute agentcore --yes
+   bgagent setup --region <region> --features none --compute agentcore --yes
    ```
    - Use `--features none` for the minimal profile, or a comma-separated list.
-   - **Never pass `--accept-data-loss`.** If setup refuses because the change would delete state-bearing resources, stop. Tell the user what it would remove and ask them to run `node lib/bin/bgagent.js setup` themselves in a terminal, where they confirm by typing the stack name.
+   - **Never pass `--accept-data-loss`.** If setup refuses because the change would delete state-bearing resources, stop. Tell the user what it would remove and ask them to run `bgagent setup` themselves in a terminal, where they confirm by typing the stack name.
    - If the deploy rolls back and the stack lands in `ROLLBACK_COMPLETE`, it can't be updated: `mise //cdk:destroy`, then run setup again. Teardown can stall in `DELETE_FAILED` for ~20–40 min while AgentCore's service-managed (Hyperplane) ENIs are reclaimed; wait, then retry destroy. Never force-delete past stuck VPC resources (orphans the VPC; VPCs are quota-capped per Region).
-4. Setup prints next steps. Follow them in order, from `cli/`:
-   - store the GitHub PAT: `node lib/bin/bgagent.js github set-token --region <region>` (interactive, so ask the user to run it, or use `aws secretsmanager put-secret-value` on the `GitHubTokenSecretArn` output);
-   - create a user: `node lib/bin/bgagent.js admin invite-user <email> --region <region>` (the password is in `~/.bgagent/invites/<email>.txt`);
-   - sign in: `node lib/bin/bgagent.js login --username <email>`;
-   - onboard a repository: `node lib/bin/bgagent.js repo onboard <owner/repo> --region <region>` (see the `onboard-repo` skill).
+4. Setup prints next steps. Follow them in order:
+   - store the GitHub PAT: `bgagent github set-token --region <region>` (interactive, so ask the user to run it, or use `aws secretsmanager put-secret-value` on the `GitHubTokenSecretArn` output);
+   - create a user: `bgagent admin invite-user <email> --region <region>` (the password is in `~/.bgagent/invites/<email>.txt`);
+   - sign in: `bgagent login --username <email>`;
+   - onboard a repository: `bgagent repo onboard <owner/repo> --region <region>` (see the `onboard-repo` skill).
 
 For a stack other than `backgroundagent-dev`, add `--stack-name <name>` to each command. ABCA's bootstrap only deploys `backgroundagent-dev` and `backgroundagent-dev-<suffix>`.
 
 ## Phase 5: Smoke Test
 
-1. `node lib/bin/bgagent.js platform doctor --region <region>` from `cli/`: checks the API, Cognito, GitHub token, Bedrock model access and onboarded repositories.
-2. `node lib/bin/bgagent.js list` should return an empty task list.
+1. `bgagent platform doctor --region <region>`: checks the API, Cognito, GitHub token, Bedrock model access and onboarded repositories.
+2. `bgagent list` should return an empty task list.
 
 ## Completion
 

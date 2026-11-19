@@ -12,7 +12,7 @@ description: >-
 
 You are diagnosing an issue with the ABCA platform. Follow a systematic approach: gather symptoms, check the most common causes, and apply targeted fixes.
 
-> **Running the CLI:** commands below call `node cli/lib/bin/bgagent.js …`. In a non-interactive or mise-managed shell `node` may not be on `PATH` — prefix with `mise exec --`. Ironically, `node: command not found` is itself a common symptom (the shell hasn't activated mise); that's a missing prefix, not a broken install.
+> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, run `mise run cli:install` from the repo root, or call `node cli/lib/bin/bgagent.js …` there instead (in a non-interactive or mise-managed shell, prefix it with `mise exec --`).
 
 ## Step 1: Identify the Problem Category
 
@@ -90,7 +90,7 @@ aws cognito-idp admin-get-user \
 
 ```bash
 # Check task events for details
-node cli/lib/bin/bgagent.js events <TASK_ID> --output json
+bgagent events <TASK_ID> --output json
 ```
 
 **`preflight_failed`:**
@@ -190,17 +190,17 @@ aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Sta
 aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table
 
 # Task status (use --verbose for HTTP-level debug output)
-node cli/lib/bin/bgagent.js --verbose status <TASK_ID>
-node cli/lib/bin/bgagent.js events <TASK_ID> --output json
+bgagent --verbose status <TASK_ID>
+bgagent events <TASK_ID> --output json
 
 # Watch task progress in real time
-node cli/lib/bin/bgagent.js watch <TASK_ID>
+bgagent watch <TASK_ID>
 
 # Download full execution trace (task must have been submitted with --trace)
-node cli/lib/bin/bgagent.js trace download <TASK_ID>
+bgagent trace download <TASK_ID>
 
 # List running tasks
-node cli/lib/bin/bgagent.js list --status RUNNING
+bgagent list --status RUNNING
 
 # Build health
 mise run build
