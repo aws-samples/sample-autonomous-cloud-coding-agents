@@ -840,6 +840,20 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       expect(writes()).toEqual(expect.arrayContaining(['PutSecretValueCommand', 'PutCommand']));
     });
 
+    test('and not the workspace that is registered with the slug, read after the row of one whose grant died', async () => {
+      // A dead row and an active one under one slug: the state the removal endpoint resolves
+      // for the active one. `demo` is the URL key of org-demo and the bundle is its own.
+      stubSecrets(priorWorkspaceBundle());
+      stubRegistry(() => Promise.resolve({
+        Items: [{ ...DEMO_ROW, linear_workspace_id: 'org-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' }, DEMO_ROW],
+      }));
+      authorize({ id: 'org-demo', urlKey: 'demo' });
+
+      await runSetup('');
+
+      expect(writes()).toEqual(expect.arrayContaining(['PutSecretValueCommand', 'PutCommand']));
+    });
+
     test('and not on the Identity vault, where a refusal would repeat on every later run', async () => {
       // A known gap, pinned so that it is not closed by half. On the vault path AgentCore has
       // stored the consent under this slug before the workspace can be known, and `setup`

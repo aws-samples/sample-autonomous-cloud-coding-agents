@@ -608,8 +608,10 @@ export async function findReusableOauthAppCredentials(
  * and correct. Exported for tests.
  *
  * A slug can carry two rows: `remove-workspace` keeps the row of the registration it
- * ends, and another workspace can be registered with the slug afterwards. The one that
- * is still a registration is returned then, whichever the scan reads first.
+ * ends, a workspace whose grant died keeps its row, and another workspace can be
+ * registered with the slug afterwards. An active row is returned then, the one the
+ * removal endpoint takes; without one, a row that is still a registration; whichever
+ * the scan reads first.
  */
 export async function findWorkspaceRowBySlug(
   ddb: DynamoDBDocumentClient,
@@ -622,7 +624,9 @@ export async function findWorkspaceRowBySlug(
     ExpressionAttributeValues: { ':s': slug },
   }));
   const rows = (result.Items ?? []).filter((item) => item.workspace_slug === slug);
-  return rows.find((row) => row.revoked_reason !== 'admin_removed') ?? rows[0];
+  return rows.find((row) => row.status === 'active')
+    ?? rows.find((row) => row.revoked_reason !== 'admin_removed')
+    ?? rows[0];
 }
 
 /**

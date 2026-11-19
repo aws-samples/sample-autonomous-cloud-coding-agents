@@ -465,6 +465,19 @@ describe('findWorkspaceRowBySlug', () => {
     expect(row?.linear_workspace_id).toBe('ws-now');
   });
 
+  const dead = { workspace_slug: 'acme', linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' };
+
+  // The rule of the removal endpoint: an active row is the registration the slug names. Then
+  // one whose grant died, which still has its bundle, before the record of a removed one.
+  test.each([
+    ['the active workspace, behind the row of one whose grant died', [dead, { workspace_slug: 'acme', linear_workspace_id: 'ws-now', status: 'active' }], 'ws-now'],
+    ['a workspace whose grant died, behind the row of one that was removed', [removed, dead], 'ws-dead'],
+  ])('finds %s', async (_which, Items, found) => {
+    ddbSend.mockResolvedValueOnce({ Items });
+    const row = await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'acme');
+    expect(row?.linear_workspace_id).toBe(found);
+  });
+
   test('still returns the row of a removed workspace when no other carries the slug', async () => {
     // `setup` reads from it the vault binding of a workspace that is set up again.
     ddbSend.mockResolvedValueOnce({ Items: [removed] });
