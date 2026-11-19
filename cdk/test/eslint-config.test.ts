@@ -115,7 +115,8 @@ test.each(['cdk', 'cli', 'web'])('the eslint tasks of %s name eslint.config.mjs'
 /**
  * A function that was above the complexity ceiling when the ceiling landed carries a
  * directive, and the first number in its parenthesis is the record: the value the function
- * had then, lowered whenever a change made the function smaller. The directive switches
+ * had then, lowered whenever a change made the function smaller (four were raised once, to
+ * what #904 had made of their functions before this test existed). The directive switches
  * the rule off for that function, so nothing else compares the two numbers: this lints
  * src with the directives ignored and holds each function above the ceiling to the record
  * on the line above it.

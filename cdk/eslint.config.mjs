@@ -173,7 +173,9 @@ export default [
       // A function above it is split, not exempted. The eslint-disable-next-line
       // directives in src mark the functions that were above it when it landed. The
       // first number in the parenthesis of a directive is the record: the value the
-      // function had then, lowered whenever a change makes the function smaller. They
+      // function had then, lowered whenever a change makes the function smaller. Four
+      // records were raised once, to what #904 had made of their functions before
+      // anything held a record; those name the earlier value second. Records
       // must not grow, and test/eslint-config.test.ts holds each to its record. When a
       // directive stops applying, as when its function comes to fit, the eslint task
       // (--fix) deletes it and eslint:check reports it as unused.

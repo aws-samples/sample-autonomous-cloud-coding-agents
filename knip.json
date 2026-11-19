@@ -5,7 +5,6 @@
   ],
   "ignoreBinaries": [
     "mise",
-    "python3",
     "semgrep"
   ],
   "ignoreExportsUsedInFile": {
