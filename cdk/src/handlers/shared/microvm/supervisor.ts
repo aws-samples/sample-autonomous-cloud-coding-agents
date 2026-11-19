@@ -93,7 +93,7 @@ export type MicrovmSupervisorResult = {
   readonly heartbeatUnhealthy: boolean;
 } & SupervisorOutcome;
 
-function permanent(error: unknown): boolean {
+export function permanent(error: unknown): boolean {
   return ['AccessDeniedException', 'ValidationException', 'UnrecognizedClientException', 'InvalidSignatureException']
     .includes(microvmErrorIdentity(error).error_type);
 }

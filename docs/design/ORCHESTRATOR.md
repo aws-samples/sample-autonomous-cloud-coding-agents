@@ -282,6 +282,8 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 
 **ECS task status polling (ECS only).** The orchestrator calls `computeStrategy.pollSession` (ECS `DescribeTasks`) on each poll cycle. Three failure modes are detected: container failure (immediate `FAILED`), container exit without DynamoDB terminal write (fail after 5 consecutive completed polls), and repeated API failures (fail after 3 consecutive errors). ECS does not have heartbeat-based hung-process detection; a hung but alive container polls for the full `MAX_POLL_ATTEMPTS` window (~8.5h) before timing out.
 
+**Task status reads that fail (AgentCore and ECS).** Each poll reads the task row. A read that is refused (`AccessDeniedException`, `ValidationException`, `UnrecognizedClientException`, `InvalidSignatureException`) ends the orchestration at that poll with the error. Finalization would have to read the same row, so the task row is left as it is: the agent's own terminal write, or a cancel, still ends the task. Any other failed read (a throttle, a 5xx, a timeout) is one missed poll: the wait goes on with the last known status, however many reads fail in a row, and the missed polls count toward the poll window. Lambda MicroVM tasks do not go through this poll. Their supervisor ends the wait at the first refused read of the task row or of `GetMicrovm`, or at the third failed read in a row; finalization then stops the MicroVM and, when it can read the task row, fails the task with `MicroVM supervisor: <stage>-failed`.
+
 **Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
 
 - `suspended` is healthy only while the task is `AWAITING_APPROVAL` and the supervisor recorded a suspend intent for that exact gate; any other suspension is woken.
@@ -296,7 +298,7 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 - **Resume** when the decision is recorded (inline from `ApproveTaskFn`/`DenyTaskFn`, with the supervisor as backstop), when the gate's original deadline is 60 s away, when a suspension does not match a recorded intent, or when the gate cannot be read. A failed inline wake records `microvm_resume_orphan`; the supervisor retries.
 - **Fail** the task, conditionally on its own worker ID, when the substrate is terminal before the agent wrote a result, the session deadline passes, or wake requests keep failing.
 
-At finalization the supervisor's worker is always stopped and confirmed, even if the database update fails.
+At finalization the supervisor's worker is always asked to stop, even if the database update fails. A stop that is not acknowledged is logged and recorded as a `microvm_cleanup_unconfirmed` event.
 
 **`/ping` health endpoint (AgentCore only).** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
 

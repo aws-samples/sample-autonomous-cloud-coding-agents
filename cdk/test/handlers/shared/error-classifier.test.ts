@@ -585,11 +585,14 @@ describe('classifyError', () => {
 
     test.each([
       'Orchestrator poll timeout exceeded',
+      // On records written before the approval wait got its own message.
       'Orchestrator poll timeout exceeded while awaiting approval',
+      // What finalizeTask writes now when the window closes on an approval wait.
+      'Task execution limit reached while waiting for approval. The task has closed; submit a new task to continue.',
     ])('does not answer "%s" with "temporary infrastructure issue, reply to retry"', (message) => {
       // The task used the whole polling window (about 8.5 hours), or its approval
-      // never came. The entry is not retryable and its remedy says the task may
-      // be too large, so the next-step line must not invite a plain retry.
+      // never came. Neither answer is retryable, so the next-step line must not
+      // invite a plain retry.
       const result = classifyError(message)!;
       expect(result.retryable).toBe(false);
       expect(result.errorClass).toBe(ErrorClass.USER);

@@ -599,41 +599,43 @@ describe('pollTaskStatus', () => {
     // would stay RUNNING with nothing left to finalize it.
     mockDdbSend.mockRejectedValueOnce(new Error('ProvisionedThroughputExceededException'));
     const result = await pollTaskStatus('TASK001', { attempts: 360, lastStatus: 'RUNNING' }, 'agentcore');
-    expect(result).toEqual({
-      attempts: 361, lastStatus: 'RUNNING', consecutiveStatusReadFailures: 1, statusUnreadable: false,
-    });
+    expect(result).toEqual({ attempts: 361, lastStatus: 'RUNNING' });
   });
 
-  test('reports the task row unreadable after three failed reads in a row', async () => {
-    // A read that fails for good (a denied table) must not keep the task
-    // RUNNING, and its concurrency seat taken, for the whole poll window.
-    mockDdbSend.mockRejectedValue(Object.assign(new Error('not authorized to perform: dynamodb:GetItem'), {
+  test('goes on counting missed polls however many reads fail in a row', async () => {
+    // Reads throttled across several polls, with a healthy agent behind them:
+    // the state must carry nothing that ends the wait before the reads work again.
+    const throttled = Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' });
+    for (let read = 0; read < 9; read++) mockDdbSend.mockRejectedValueOnce(throttled);
+    let state = await pollTaskStatus('TASK001', { attempts: 7, lastStatus: 'RUNNING' }, 'ecs');
+    for (let poll = 1; poll < 9; poll++) {
+      state = await pollTaskStatus('TASK001', state, 'ecs');
+    }
+    expect(state).toEqual({ attempts: 16, lastStatus: 'RUNNING' });
+  });
+
+  test('throws a read error that cannot clear instead of counting a missed poll', async () => {
+    // A denied read is refused the same way at every poll: counted as missed
+    // polls it would keep the orchestrator waiting on a row it cannot read
+    // until the poll window closes.
+    mockDdbSend.mockRejectedValueOnce(Object.assign(new Error('not authorized to perform: dynamodb:GetItem'), {
       name: 'AccessDeniedException',
     }));
-    const first = await pollTaskStatus('TASK001', { attempts: 7, lastStatus: 'RUNNING' }, 'ecs');
-    const second = await pollTaskStatus('TASK001', first, 'ecs');
-    const third = await pollTaskStatus('TASK001', second, 'ecs');
+    const stderr = jest.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const [outcome] = await Promise.allSettled([
+      pollTaskStatus('TASK001', { attempts: 7, lastStatus: 'RUNNING' }, 'ecs'),
+    ]);
+    const logged = stderr.mock.calls.map(([line]) => JSON.parse(String(line)));
+    stderr.mockRestore();
 
-    expect([first, second, third].map(state => state.statusUnreadable)).toEqual([false, false, true]);
-    expect(third).toEqual({
-      attempts: 10, lastStatus: 'RUNNING', consecutiveStatusReadFailures: 3, statusUnreadable: true,
-    });
-  });
-
-  test('starts the count of failed reads again after a read that works', async () => {
-    const throttled = new Error('ProvisionedThroughputExceededException');
-    mockDdbSend
-      .mockRejectedValueOnce(throttled)
-      .mockRejectedValueOnce(throttled)
-      .mockResolvedValueOnce({ Item: { status: 'RUNNING' } })
-      .mockRejectedValueOnce(throttled);
-    let state = await pollTaskStatus('TASK001', { attempts: 0, lastStatus: 'RUNNING' }, 'ecs');
-    state = await pollTaskStatus('TASK001', state, 'ecs');
-    const afterGoodRead = await pollTaskStatus('TASK001', state, 'ecs');
-    const afterNextFailure = await pollTaskStatus('TASK001', afterGoodRead, 'ecs');
-
-    expect(afterGoodRead).toEqual({ attempts: 3, lastStatus: 'RUNNING', sessionUnhealthy: false });
-    expect(afterNextFailure).toMatchObject({ consecutiveStatusReadFailures: 1, statusUnreadable: false });
+    expect(outcome).toMatchObject({ status: 'rejected', reason: { name: 'AccessDeniedException' } });
+    // The durable SDK does not log why an execution failed: this line is what
+    // ties the failure to the task.
+    expect(logged).toEqual([expect.objectContaining({
+      level: 'ERROR',
+      task_id: 'TASK001',
+      error: 'AccessDeniedException: not authorized to perform: dynamodb:GetItem',
+    })]);
   });
 
   // The gate `finalizeTask`'s defensive FINALIZING arm depends on. That arm is
@@ -1479,84 +1481,6 @@ describe('finalizeTask', () => {
       .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
     await finalizeTask('TASK001', { attempts: 1020, lastStatus: 'RUNNING' }, 'user-123');
     expect(mockDdbSend).toHaveBeenCalled();
-  });
-
-  // --- the wait ended because the task row could not be read (pollTaskStatus) ---
-
-  const unreadable = { attempts: 9, lastStatus: 'RUNNING' as const, consecutiveStatusReadFailures: 3, statusUnreadable: true };
-  const taskEvents = () => mockDdbSend.mock.calls
-    .filter(([command]) => command._type === 'Put')
-    .map(([command]) => command.input.Item.event_type);
-
-  test.each(['RUNNING', 'FINALIZING', 'AWAITING_APPROVAL'])(
-    'fails a %s task whose status could not be read, and says so',
-    async (status) => {
-      mockDdbSend
-        .mockResolvedValueOnce({ Item: { ...baseTask, status } }) // loadTask
-        .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
-      await finalizeTask('TASK001', unreadable, 'user-123');
-
-      expect(mockDdbSend.mock.calls[0][0].input.ConsistentRead).toBe(true);
-      expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues).toMatchObject({
-        ':fromStatus': status,
-        ':toStatus': 'FAILED',
-        ':attr_error_message':
-          'Task status read failed 3 consecutive times: the orchestrator stopped waiting for the agent',
-      });
-      expect(taskEvents()).toEqual(['task_failed']);
-      expect(mockDdbSend.mock.calls[2][0].input.Item.metadata).toEqual({ reason: 'status_read_failed', poll_attempts: 9 });
-      expect(concurrencyDecrements()).toHaveLength(1);
-    },
-  );
-
-  test('finalizes a task as it ended when it finished while its status could not be read', async () => {
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } }) // loadTask
-      .mockResolvedValue({}); // TTL stamp + emitTaskEvent + decrementConcurrency
-    await finalizeTask('TASK001', unreadable, 'user-123');
-
-    expect(mockDdbSend.mock.calls.some(([command]) => command.input.ExpressionAttributeValues?.[':toStatus'])).toBe(false);
-    expect(taskEvents()).toEqual(['task_completed']);
-    expect(concurrencyDecrements()).toHaveLength(1);
-  });
-
-  test('throws when the task ended between the read and the write, and the next run of the step finalizes it', async () => {
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING' } }) // loadTask
-      .mockRejectedValueOnce(Object.assign(new Error('The conditional request failed'), {
-        name: 'ConditionalCheckFailedException',
-      })); // transitionTask: the agent wrote COMPLETED first
-    await expect(finalizeTask('TASK001', unreadable, 'user-123')).rejects.toThrow('The conditional request failed');
-
-    // Nothing is reported or released for a failure that is not on the row...
-    expect(taskEvents()).toEqual([]);
-    expect(concurrencyDecrements()).toHaveLength(0);
-
-    // ...and the run the durable SDK starts next finalizes what the agent wrote.
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } }) // loadTask
-      .mockResolvedValue({}); // TTL stamp + emitTaskEvent + decrementConcurrency
-    await finalizeTask('TASK001', unreadable, 'user-123');
-
-    expect(taskEvents()).toEqual(['task_completed']);
-    expect(concurrencyDecrements()).toHaveLength(1);
-  });
-
-  test('still reports a poll timeout when the window closes on a read that failed once', async () => {
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING' } }) // loadTask
-      .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
-    await finalizeTask(
-      'TASK001',
-      { attempts: 1020, lastStatus: 'RUNNING', consecutiveStatusReadFailures: 1, statusUnreadable: false },
-      'user-123',
-    );
-
-    expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues).toMatchObject({
-      ':toStatus': 'TIMED_OUT',
-      ':attr_error_message': 'Orchestrator poll timeout exceeded',
-    });
-    expect(taskEvents()).toEqual(['task_timed_out']);
   });
 
   test('transitions HYDRATING to FAILED when session never started', async () => {

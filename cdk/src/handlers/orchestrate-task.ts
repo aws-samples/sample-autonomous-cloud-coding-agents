@@ -208,14 +208,19 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
     let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
-      // Re-read status, as the admission and pre-flight steps do. It detects a
-      // cancel that landed during hydration, and a failure this step recorded
-      // itself: the catch below fails the task and rethrows, and Durable
-      // Execution then runs the step again. A session started now would run
-      // for a task that is already over.
-      const beforeStart = await loadTask(taskId);
-      if (TERMINAL_STATUSES.includes(beforeStart.status)) {
-        throw new Error(`Task is ${beforeStart.status}, no session started`);
+      // Re-read status with a strongly consistent read, as the admission and
+      // pre-flight steps do. It detects a cancel that landed during hydration,
+      // and a failure this step recorded itself: the catch below fails the task
+      // and rethrows, and Durable Execution then runs the step again. A session
+      // started now would run for a task that is already over. Not for a
+      // MicroVM: its strategy makes this check when it claims the start
+      // (`claimMicrovmStart`) and then also stops a computer that an interrupted
+      // run of this step saved, which a throw from here would skip.
+      if (blueprintConfig.compute_type !== 'lambda-microvm') {
+        const beforeStart = await loadTask(taskId, true);
+        if (TERMINAL_STATUSES.includes(beforeStart.status)) {
+          throw new Error(`Task is ${beforeStart.status}, no session started`);
+        }
       }
       strategy = resolveComputeStrategy(blueprintConfig);
       const startInput = {
@@ -535,9 +540,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         if (state.lastStatus && TERMINAL_STATUSES.includes(state.lastStatus)) {
           return { shouldContinue: false };
         }
-        // A lost session, or a task row that several polls in a row could not
-        // read: finalization reads the row itself and ends the task.
-        if (state.sessionUnhealthy || state.statusUnreadable) {
+        if (state.sessionUnhealthy) {
           return { shouldContinue: false };
         }
         if (state.microvmSupervisor) {

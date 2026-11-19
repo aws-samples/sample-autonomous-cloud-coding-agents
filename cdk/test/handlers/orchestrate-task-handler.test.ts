@@ -21,7 +21,8 @@
  * Drives the orchestrate-task durable handler with a fake durable-execution context
  * and a fake compute strategy, for the step logic that is the same on every backend:
  * what the admission step tells the channel, what the start-session step does when
- * the durable SDK runs it again, and how long the poll loop waits.
+ * the durable SDK runs it again, and how long the poll loop waits. The last describe
+ * puts the real status poll behind the handler, for the two backends that use it.
  */
 
 // `withDurableExecution` wraps the handler at import time; unwrap it so the raw
@@ -39,6 +40,15 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 const mockReportJiraFailure = jest.fn();
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   reportIssueFailure: (...a: unknown[]) => mockReportJiraFailure(...a),
+}));
+
+// The table behind the real `pollTaskStatus`, which the last describe puts in place
+// of its stub. `from` is a plain function: `resetAllMocks` would empty a jest.fn().
+const mockDdbSend = jest.fn();
+jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn() }));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: () => ({ send: (...a: unknown[]) => mockDdbSend(...a) }) },
+  GetCommand: jest.fn(),
 }));
 
 const mockAdmissionControl = jest.fn();
@@ -141,7 +151,8 @@ function fakeContext() {
 
 /**
  * The same context, but `waitForCondition` polls as the SDK does: the handler's check
- * runs until its wait strategy says stop. Delays are not waited for.
+ * runs until its wait strategy says stop, and an error it throws fails the wait, which
+ * fails the execution. Delays are not waited for.
  */
 function pollingContext() {
   return {
@@ -272,6 +283,26 @@ describe('start-session step', () => {
     expect(taskStatus).toBe(TaskStatus.CANCELLED);
   });
 
+  test('starts no session when only a strongly consistent read shows the cancel', async () => {
+    // The cancel committed just before the step: a read that is not strongly
+    // consistent may still answer HYDRATING.
+    mockHydrateAndTransition.mockImplementation(async () => {
+      taskStatus = TaskStatus.CANCELLED;
+      return { repo_url: 'org/repo', task_id: 'TASK001' };
+    });
+    mockLoadTask.mockImplementation(async (_id: string, consistentRead?: boolean) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? taskStatus : TaskStatus.HYDRATING,
+    }));
+
+    const [outcome] = await Promise.allSettled([handler({ task_id: 'TASK001' }, fakeContext().ctx as never)]);
+
+    expect(mockStartSession).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: 'rejected', reason: { message: 'Task is CANCELLED, no session started' } });
+  });
+
   test.each([
     ['agentcore', HANDLE],
     ['ecs', ECS_HANDLE],
@@ -335,52 +366,58 @@ describe('poll window', () => {
 });
 
 describe('status reads that fail during the wait', () => {
-  /** What pollTaskStatus answers for a read that failed: the last status, and the failures in a row. */
-  const failedRead = (attempts: number, failures: number): PollState => ({
-    attempts,
-    lastStatus: TaskStatus.RUNNING,
-    consecutiveStatusReadFailures: failures,
-    statusUnreadable: failures >= 3,
+  // The real poll, over a table whose reads the test decides.
+  const { pollTaskStatus } = jest.requireActual<typeof import('../../src/handlers/shared/orchestrator')>(
+    '../../src/handlers/shared/orchestrator',
+  );
+  const throttled = Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' });
+
+  beforeEach(() => {
+    mockPollTaskStatus.mockImplementation(pollTaskStatus);
+    mockPollSession.mockResolvedValue({ status: 'running' });
   });
 
-  test.each([
+  describe.each([
     ['agentcore', HANDLE],
     ['ecs', ECS_HANDLE],
-  ])('stops waiting for an %s task once its row is reported unreadable', async (computeType, handle) => {
-    // A read that fails for good: without an end, the task stays RUNNING and
-    // keeps its concurrency seat for the whole poll window.
-    mockLoadBlueprintConfig.mockResolvedValue({ compute_type: computeType, runtime_arn: RUNTIME_ARN });
-    mockStartSession.mockResolvedValue(handle);
-    mockPollSession.mockResolvedValue({ status: 'running' });
-    mockPollTaskStatus
-      .mockResolvedValueOnce(failedRead(1, 1))
-      .mockResolvedValueOnce(failedRead(2, 2))
-      .mockResolvedValue(failedRead(3, 3));
+  ])('of an %s task', (computeType, handle) => {
+    beforeEach(() => {
+      mockLoadBlueprintConfig.mockResolvedValue({ compute_type: computeType, runtime_arn: RUNTIME_ARN });
+      mockStartSession.mockResolvedValue(handle);
+    });
 
-    await handler({ task_id: 'TASK001' }, pollingContext() as never);
+    // Three polls are a minute at the default interval, nine are four and a half.
+    test.each([3, 9])('waits out %i failed reads in a row and finalizes the task as it ended', async (failedReads) => {
+      for (let read = 0; read < failedReads; read++) mockDdbSend.mockRejectedValueOnce(throttled);
+      mockDdbSend.mockResolvedValueOnce({ Item: { status: TaskStatus.COMPLETED } });
 
-    expect(mockPollTaskStatus).toHaveBeenCalledTimes(3);
-    // Finalization reads the row itself; it needs to know why the wait ended.
-    expect(mockFinalizeTask).toHaveBeenCalledWith(
-      'TASK001',
-      expect.objectContaining({ consecutiveStatusReadFailures: 3, statusUnreadable: true }),
-      'user-1',
-    );
-    expect(mockFailTask).not.toHaveBeenCalled();
-  });
+      await handler({ task_id: 'TASK001' }, pollingContext() as never);
 
-  test('keeps waiting after a read that failed once', async () => {
-    mockPollTaskStatus
-      .mockResolvedValueOnce(failedRead(1, 1))
-      .mockResolvedValueOnce({ attempts: 2, lastStatus: TaskStatus.COMPLETED, sessionUnhealthy: false });
+      expect(mockDdbSend).toHaveBeenCalledTimes(failedReads + 1);
+      expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+      expect(mockFinalizeTask).toHaveBeenCalledWith(
+        'TASK001',
+        expect.objectContaining({ attempts: failedReads + 1, lastStatus: TaskStatus.COMPLETED }),
+        'user-1',
+      );
+      expect(mockFailTask).not.toHaveBeenCalled();
+    });
 
-    await handler({ task_id: 'TASK001' }, pollingContext() as never);
+    test('ends the orchestration on a read error that cannot clear, and leaves the task as it is', async () => {
+      mockDdbSend
+        .mockResolvedValueOnce({ Item: { status: TaskStatus.RUNNING } })
+        .mockRejectedValue(Object.assign(new Error('not authorized to perform: dynamodb:GetItem'), {
+          name: 'AccessDeniedException',
+        }));
 
-    expect(mockPollTaskStatus).toHaveBeenCalledTimes(2);
-    expect(mockFinalizeTask).toHaveBeenCalledWith(
-      'TASK001',
-      expect.objectContaining({ attempts: 2, lastStatus: TaskStatus.COMPLETED }),
-      'user-1',
-    );
+      await expect(handler({ task_id: 'TASK001' }, pollingContext() as never))
+        .rejects.toThrow('not authorized to perform: dynamodb:GetItem');
+
+      // The denied read is the last one: it is not waited out as a missed poll.
+      expect(mockDdbSend).toHaveBeenCalledTimes(2);
+      expect(mockFinalizeTask).not.toHaveBeenCalled();
+      expect(mockFailTask).not.toHaveBeenCalled();
+      expect(taskStatus).toBe(TaskStatus.RUNNING);
+    });
   });
 });
