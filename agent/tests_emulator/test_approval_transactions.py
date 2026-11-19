@@ -87,13 +87,19 @@ class TestApprovalRequest:
 
 
 class TestResumeAndTimeout:
-    def test_resume_returns_the_task_to_running(self, running_task, pending_request):
+    def test_resume_returns_the_task_to_running(self, running_task, pending_request, monkeypatch):
+        # The clock is held for the resume: the approval request stamped updated_at
+        # moments earlier, so only a held clock shows that the resume moves it.
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2031-01-01T00:00:00Z")
+
         task_state.transact_resume_from_approval(running_task, pending_request)
 
         task = _task(running_task)
         assert task["status"] == "RUNNING"
         assert "awaiting_approval_request_id" not in task
         assert task["status_created_at"].startswith("RUNNING#")
+        # updated_at moves with the status.
+        assert task["updated_at"] == "2031-01-01T00:00:00Z"
 
     def test_resume_for_a_different_request_is_refused(self, running_task, pending_request):
         with pytest.raises(task_state.ApprovalResumeError):
