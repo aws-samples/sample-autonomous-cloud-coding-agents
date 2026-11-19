@@ -154,7 +154,7 @@ function fakeContext() {
  * runs until its wait strategy says stop, and an error it throws fails the wait, which
  * fails the execution. Delays are not waited for.
  */
-function pollingContext() {
+function pollingContext(maxPolls = 10) {
   return {
     ...fakeContext().ctx,
     waitForCondition: async (
@@ -163,7 +163,7 @@ function pollingContext() {
       cfg: { initialState: PollState; waitStrategy: WaitStrategy },
     ) => {
       let state = cfg.initialState;
-      for (let polls = 0; polls < 10; polls++) {
+      for (let polls = 0; polls < maxPolls; polls++) {
         state = await check(state);
         if (!cfg.waitStrategy(state).shouldContinue) return state;
       }
@@ -401,6 +401,24 @@ describe('status reads that fail during the wait', () => {
         'user-1',
       );
       expect(mockFailTask).not.toHaveBeenCalled();
+    });
+
+    // The first poll can read the row before the start step's RUNNING write is visible.
+    // Missed polls keep that status, and it must not end the wait: the task is running.
+    test('waits out failed reads that follow a stale first read of the status', async () => {
+      mockDdbSend.mockResolvedValueOnce({ Item: { status: TaskStatus.HYDRATING } });
+      for (let read = 0; read < 9; read++) mockDdbSend.mockRejectedValueOnce(throttled);
+      mockDdbSend.mockResolvedValueOnce({ Item: { status: TaskStatus.COMPLETED } });
+
+      await handler({ task_id: 'TASK001' }, pollingContext(11) as never);
+
+      expect(mockDdbSend).toHaveBeenCalledTimes(11);
+      expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+      expect(mockFinalizeTask).toHaveBeenCalledWith(
+        'TASK001',
+        expect.objectContaining({ attempts: 11, lastStatus: TaskStatus.COMPLETED }),
+        'user-1',
+      );
     });
 
     test('ends the orchestration on a read error that cannot clear, and leaves the task as it is', async () => {

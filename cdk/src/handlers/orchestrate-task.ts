@@ -75,7 +75,6 @@ function isMicrovmStartFailure(result: StartSessionResult): result is MicrovmSta
 }
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
-const MAX_NON_RUNNING_POLLS = 10; // ~5min grace period for session to start
 const MAX_CONSECUTIVE_ECS_POLL_FAILURES = 3;
 const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
 /** Poll cadence when the blueprint doesn't override ``poll_interval_ms`` (seconds). */
@@ -463,7 +462,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // While RUNNING, the runtime updates `agent_heartbeat_at`; if that timestamp
   // goes stale, `pollTaskStatus` sets `sessionUnhealthy` so we fail fast instead
   // of waiting the full MAX_POLL_ATTEMPTS window (~8.5h) after a silent crash.
-  // ECS/AgentCore retain their poll-count startup/total bounds. MicroVM uses
+  // ECS/AgentCore retain their poll-count bound. MicroVM uses
   // persisted wall-clock deadlines so faster transition polls cannot shorten a session.
 
   const finalPollState = await context.waitForCondition<PollState>(
@@ -551,15 +550,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
           };
         }
         if (state.attempts >= maxPollAttempts) {
-          return { shouldContinue: false };
-        }
-        // If the task is still HYDRATING after a grace period, the session never
-        // started (e.g. container crash). Stop polling early so finalizeTask can
-        // transition to FAILED instead of waiting 8.5h. Unlike the window above,
-        // this stays a count: start-session has already moved the row to RUNNING,
-        // so a HYDRATING read here is a stale one, and a grace scaled to the
-        // interval (one poll at 300s) would let a single stale read end the task.
-        if (state.attempts >= MAX_NON_RUNNING_POLLS && state.lastStatus === TaskStatus.HYDRATING) {
           return { shouldContinue: false };
         }
         return { shouldContinue: true, delay: { seconds: pollSeconds } };
