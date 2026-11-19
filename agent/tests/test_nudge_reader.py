@@ -174,48 +174,31 @@ class TestMarkConsumed:
             f"Raw 'consumed' keyword in ConditionExpression: {cond_expr!r}"
         )
 
-    def test_conditional_check_failure_returns_false(self):
-        table = MagicMock()
-        # Simulate via name-based detection path (ConditionalCheckFailedException).
-        exc_cls = type("ConditionalCheckFailedException", (Exception,), {})
-        table.update_item.side_effect = exc_cls("already consumed")
-        assert mark_consumed("t1", "01A", table=table) is False
-
-    def test_generic_error_returns_false(self):
+    def test_generic_error_returns_false(self, capfd):
         table = MagicMock()
         table.update_item.side_effect = Exception("network down")
         assert mark_consumed("t1", "01A", table=table) is False
+        logged = capfd.readouterr().out
+        assert "WARN Nudge mark_consumed failed for 01A: Exception: network down" in logged
 
     def test_no_table_returns_false(self, monkeypatch):
         monkeypatch.delenv("NUDGES_TABLE_NAME", raising=False)
         assert mark_consumed("t1", "01A") is False
 
-    def test_already_consumed_returns_false_via_client_error(self):
+    def test_already_consumed_returns_false_via_client_error(self, capfd):
         """boto3 ClientError path — ``response['Error']['Code']`` carries the code."""
+        from botocore.exceptions import ClientError
+
         table = MagicMock()
-
-        # Use a real botocore ClientError when available so the clean
-        # isinstance-based detection path is exercised.  Fall back to a
-        # duck-typed shim with a ``response`` attribute if boto3/botocore
-        # is not installed in the test env.
-        try:
-            from botocore.exceptions import ClientError
-
-            err: Exception = ClientError(
-                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "x"}},
-                "UpdateItem",
-            )
-        except Exception:  # pragma: no cover
-
-            class FakeClientError(Exception):
-                def __init__(self) -> None:
-                    super().__init__("boom")
-                    self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
-
-            err = FakeClientError()
-
-        table.update_item.side_effect = err
+        table.update_item.side_effect = ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "x"}},
+            "UpdateItem",
+        )
         assert mark_consumed("t1", "01A", table=table) is False
+        # Losing the race for a nudge is expected, so it is not logged as a warning.
+        logged = capfd.readouterr().out
+        assert "DEBUG Nudge 01A already consumed" in logged
+        assert "WARN" not in logged
 
 
 # ---------------------------------------------------------------------------

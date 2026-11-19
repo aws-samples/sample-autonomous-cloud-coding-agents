@@ -3,7 +3,7 @@ min_version = "2026.7.11"
 [tools]
 python = "3.13"
 uv = "0.13.7"
-"aqua:aquasecurity/trivy" = "v0.70.0"
+"aqua:aquasecurity/trivy" = "v0.76.2"
 
 [env]
 _.python.venv = { path = ".venv", create = true }
@@ -61,9 +61,12 @@ run = "uv run --locked ty check"
 description = "Dead code with vulture at min_confidence 80 (#282, cairn MVG gate #6): unreachable code, and imports and function arguments it is sure are unused. Unused functions, classes, methods and variables are rated 60 and are NOT reported. Settings in pyproject.toml, intentional keeps in .vulture_allowlist.py."
 run = "uv run --locked vulture"
 
+# --cov-config names the file that holds the coverage settings. Without it coverage.py
+# reads the file a COVERAGE_RCFILE variable names, when one is set, and that file's
+# source and omit lists would decide what the floor measures.
 [tasks.test]
 description = "Run tests with pytest (coverage floor enforced; use `uv run pytest --no-cov` for focused runs)"
-run = "uv run pytest --junit-xml=test-reports/junit.xml --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
+run = "uv run pytest --junit-xml=test-reports/junit.xml --cov=src --cov-config=pyproject.toml --cov-branch --cov-fail-under=89 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
 
 # SECURITY
 
@@ -112,24 +115,25 @@ run = [
 description = "Stop DynamoDB Local (all data is ephemeral)"
 run = "docker compose down"
 
+# The two scans switch the pager of AWS CLI v2 off with an empty AWS_PAGER, not with
+# --no-cli-pager: AWS CLI v1 rejects that flag, and the tasks then reported no events.
+
 [tasks."local:events"]
 description = "Query progress events from DynamoDB Local"
 run = """
-aws dynamodb scan \
+AWS_PAGER='' aws dynamodb scan \
   --table-name TaskEventsTable \
   --endpoint-url http://localhost:8000 \
   --region us-east-1 \
-  --no-cli-pager \
   --output table 2>/dev/null || echo "No events found (is DynamoDB Local running?)"
 """
 
 [tasks."local:events:json"]
 description = "Query progress events from DynamoDB Local (JSON)"
 run = """
-aws dynamodb scan \
+AWS_PAGER='' aws dynamodb scan \
   --table-name TaskEventsTable \
   --endpoint-url http://localhost:8000 \
   --region us-east-1 \
-  --no-cli-pager \
   --output json 2>/dev/null || echo "{}"
 """

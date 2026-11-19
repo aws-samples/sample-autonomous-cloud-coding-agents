@@ -208,7 +208,11 @@ export type LinearAgentState =
   | { readonly kind: 'available' }
   /** Labeled for the agent, task not created yet (the Linear webhook is on its way). */
   | { readonly kind: 'starting' }
-  /** `task_id` is null when the task belongs to someone else. */
+  /**
+   * `task_id` is null when the task belongs to someone else. `task_id`, `status` and `pr_url`
+   * are all null for a labeled issue that is no longer starting and has no task of its own:
+   * an epic, whose sub-issues get the tasks, or an issue whose start was refused.
+   */
   | { readonly kind: 'task'; readonly task_id: string | null; readonly status: TaskStatusType | null; readonly pr_url: string | null; readonly mine: boolean };
 
 export interface LinearIssueSummary {

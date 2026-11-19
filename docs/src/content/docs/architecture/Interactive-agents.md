@@ -375,7 +375,7 @@ Flow:
 4. Hook returns `{"decision": "block", "reason": <formatted_nudge_text>}`. The SDK treats this as the start of the next user turn; the agent incorporates the nudge on its response.
 5. Nudge row is marked consumed via conditional update (`consumed_at` set only if currently null).
 
-**Cost model — honest:** the nudge burns one turn from the task's `max_turns` budget. The acknowledgment rides in the same turn (the combined-turn ack pattern). This is the only mechanism the Claude Agent SDK exposes for injecting user-visible text mid-run; there is no "append to system prompt mid-conversation" API (see Appendix A).
+**Cost model — honest:** the nudge burns one turn from the task's `max_turns` budget. The acknowledgment rides in the same turn (the combined-turn ack pattern). This is the mechanism a nudge uses to inject its text mid-run; there is no "append to system prompt mid-conversation" API (see Appendix A; A.2 describes the one other way, text that a hook attaches to a tool result).
 
 ### 5.5 `bgagent ask` (Phase 2)
 
@@ -658,7 +658,7 @@ FanOutConsumer routes events per-channel with sensible defaults shipping in v1.
 
 The between-turns hook emits a `nudge_acknowledged` milestone to `ProgressWriter` **before** returning `decision: "block"` with the nudge text. One turn burned (same as today); acknowledgment visible immediately.
 
-*Why:* The Claude Agent SDK does not expose a mechanism to append to system context mid-conversation. The `HookEvent` enum is fixed; `ClaudeAgentOptions.system_prompt` is construction-time only; `hookSpecificOutput.additionalContext` is user-visible-only (confirmed `not-planned` by Anthropic). One-turn-per-nudge is an architectural constraint of the SDK; we surface it honestly rather than pretending it's free.
+*Why:* The Claude Agent SDK does not expose a mechanism to append to system context mid-conversation. The `HookEvent` enum is fixed; `ClaudeAgentOptions.system_prompt` is construction-time only. `hookSpecificOutput.additionalContext` was recorded here as user-visible-only; with the pinned SDK a `PostToolUse` or `PostToolUseFailure` hook can hand text to the model through it, attached to the tool result (Appendix A.2). The stuck guard uses that; a nudge still arrives through the Stop hook. One-turn-per-nudge is the cost of that path; we surface it honestly rather than pretending it's free.
 
 ### AD-6. `bgagent status` is deterministic; `bgagent ask` is the agent
 
@@ -768,12 +768,12 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ## Appendix A — Claude Agent SDK reference
 
-Pinned version: `claude-agent-sdk==0.2.168` (Python; see `agent/pyproject.toml`).
+Pinned version: `claude-agent-sdk==0.2.179` (Python; see `agent/pyproject.toml`).
 
 > **Caution — re-verify against 0.2.x.** The hook-surface details in this
 > appendix (the `HookEvent` enum members, `PostToolUseFailure`, the Stop-hook
 > return-value contract, etc.) were originally written against
-> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.168`, and the
+> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.179`, and the
 > SDK's hook API may have changed across that range. Before relying on any
 > specific enum member or hook signature below, verify it against the installed
 > 0.2.x SDK and the actual usage in `agent/src/hooks.py`.
@@ -783,9 +783,10 @@ Pinned version: `claude-agent-sdk==0.2.168` (Python; see `agent/pyproject.toml`)
 `HookEvent` enum: `PreToolUse | PostToolUse | PostToolUseFailure | UserPromptSubmit | Stop | SubagentStart | SubagentStop | PreCompact | PermissionRequest | Notification`.
 
 Our usage:
-- `PreToolUse` → Cedar policy evaluation (Phase 3), `can_use_tool`-style allow/deny.
-- `PostToolUse` → output scanner (secret/PII redaction).
-- `Stop` (between-turns) → `_cancel_between_turns_hook`, `_nudge_between_turns_hook`, Phase 2 ask hook, Phase 3 approval poll.
+- `PreToolUse` → Cedar policy evaluation (Phase 3), `can_use_tool`-style allow/deny. A call that needs an approval waits here for the decision.
+- `PostToolUse` → output scanner (secret/PII redaction); the egress-denial detector and the stuck guard see every tool call that completed.
+- `PostToolUseFailure` → egress-denial detector and stuck guard for a tool call that failed. The CLI fires this event, and no `PostToolUse`, for such a call (for Bash: a command that exits non-zero, unless the CLI reads that status as an answer, such as 1 from `grep` without a match).
+- `Stop` (between-turns) → `_cancel_between_turns_hook`, `_nudge_between_turns_hook`, `_denial_between_turns_hook` (deny-with-steering), in this order.
 
 ### A.2 Between-turns injection mechanism
 
@@ -793,10 +794,11 @@ Stop hook return values:
 - `{}` → no-op, SDK proceeds to stop or loop.
 - `{"decision": "block", "reason": "<text>"}` → SDK emits `reason` as a synthetic user turn; agent responds on its next iteration.
 
-This is the **only** SDK-supported mechanism to inject agent-visible text mid-conversation. Implications:
+This is the mechanism that nudges and deny-with-steering use to inject agent-visible text mid-conversation. Implications:
 - Every nudge, ask, and deny-with-steering burns one turn from `max_turns`.
 - No "append to system prompt mid-run" primitive exists. `ClaudeAgentOptions.system_prompt` is set at construction.
-- `hookSpecificOutput.additionalContext` on PostToolUse appears in docs but does not reach the model's context; Anthropic has confirmed this as `not-planned` (GitHub issues `claude-code#18427`, `claude-code#19643`).
+
+A hook that runs after a tool call can hand text to the model as well. With the pinned SDK (0.2.179, CLI 2.1.319), `hookSpecificOutput.additionalContext` returned by a `PostToolUse` or `PostToolUseFailure` hook reaches the model: the CLI sends it with the tool result, in the same request, as a system reminder, so it burns no turn. The stuck guard's advisory about a failing command that the agent keeps repeating is delivered this way (`_observe_tool_result` in `agent/src/hooks.py`), because an agent that keeps calling tools never reaches the Stop hook. This appendix used to say that such text does not reach the model's context (GitHub issues `claude-code#18427`, `claude-code#19643`); that does not hold for the pinned version.
 
 ### A.3 Mid-run cancellation
 

@@ -27,12 +27,12 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 // Shared hook budgets and Region constants prevent cross-package drift.
-import { AgentMemory } from './agent-memory';
-import { AgentSessionRole } from './agent-session-role';
-import { inferenceProfileId, resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import sharedConstants from '../../../contracts/constants.json';
 import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from '../handlers/shared/microvm-regions';
+import { AgentMemory } from './agent-memory';
+import { AgentSessionRole } from './agent-session-role';
+import { inferenceProfileId, resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 
 /**
  * Fallback expiry for /run payloads and private launch references. Finalization

@@ -246,9 +246,11 @@ def _app_actor_request(
         )
         if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
             proxy_error = _proxy_error_code(response.text)
-            non_retryable = (
+            # The rule of jira-app-actor.ts: a 429 (Jira's rate limit, which the proxy
+            # passes through) and a 5xx are transient, the rest is refused for good.
+            non_retryable = proxy_error == "proxy_not_configured" or (
                 response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
-                or proxy_error == "proxy_not_configured"
+                and response.status_code != HTTPStatus.TOO_MANY_REQUESTS
             )
             level = "ERROR" if non_retryable else "WARN"
             error_id = (
@@ -277,6 +279,7 @@ def _proxy_error_code(raw_body: str) -> str | None:
     try:
         payload = json.loads(raw_body)
     except (json.JSONDecodeError, TypeError):
+        # nosemgrep: py-silent-success-masking -- not JSON: the caller logs it as unclassified
         return None
     if not isinstance(payload, dict):
         return None
@@ -612,7 +615,8 @@ def _transition(
 
     Resolves ``(cloud_id, issue_key)``, fetches the current status + valid
     transitions, skips if the card is already at/past the target band
-    (``max_source_rank``), selects a transition via the resolution ladder, and
+    (``max_source_rank``), selects a transition via the resolution ladder (cut
+    at the card's own status when that is one of its names), and
     POSTs it. Every failure mode — disabled, open circuit, missing token, empty
     transition list, no match, network / HTTP error — is logged and swallowed
     so the pipeline is never affected.
@@ -663,6 +667,14 @@ def _transition(
         )
         return
 
+    # A status that is itself a rung of the ladder ends the ladder there: the
+    # rungs below it and the category fallback would move the card backward or
+    # sideways (In Review to In Progress, In Progress to On Hold).
+    current_name = str(current_status.get("name") or "").strip().lower()
+    if current_name in prefer_names:
+        prefer_names = prefer_names[: prefer_names.index(current_name)]
+        fallback_category = None
+
     chosen = _select_transition(
         transitions,
         override=override,
@@ -694,10 +706,17 @@ def transition_task_started(
 
     Resolution: ``jira_status_on_start`` override → a destination named
     ``In Progress`` → any ``indeterminate``-category destination. Skips if the
-    issue is already In Progress or later (won't move a card backward).
+    issue is already In Progress or later (won't move a card backward); an
+    override lifts that skip, except for an ``@bgagent`` iteration.
     Best-effort; no-op for non-Jira tasks.
     """
-    override = (channel_metadata or {}).get("jira_status_on_start")
+    metadata = channel_metadata or {}
+    override = metadata.get("jira_status_on_start")
+    # An override is a deliberate instruction, so honor it regardless of current
+    # status. Not for an ``@bgagent`` iteration (``jira_prior_task_id``): the
+    # earlier task has moved the card already, and every comment would pull an
+    # In Review card back to the override status.
+    from_any_status = bool(override) and not metadata.get("jira_prior_task_id")
     _transition(
         channel_source,
         channel_metadata,
@@ -705,9 +724,8 @@ def transition_task_started(
         override=override,
         prefer_names=() if override else (_START_STATUS_NAME,),
         fallback_category=None if override else _IN_PROGRESS_CATEGORY,
-        # Skip if already In Progress (indeterminate) or Done. An override is a
-        # deliberate instruction, so honor it regardless of current status.
-        max_source_rank=None if override else _CATEGORY_RANK[_IN_PROGRESS_CATEGORY],
+        # Skip if already In Progress (indeterminate) or Done.
+        max_source_rank=None if from_any_status else _CATEGORY_RANK[_IN_PROGRESS_CATEGORY],
     )
 
 
@@ -720,8 +738,9 @@ def transition_pr_opened(
     Resolution: ``jira_status_on_pr`` override → a destination named
     ``In Review`` (or a common review-column synonym) → any
     ``indeterminate``-category destination (Linear's In Review→In Progress
-    fallback, so a stock board isn't silently skipped, #605). Skips only if the
-    issue is already Done. Best-effort; no-op for non-Jira tasks.
+    fallback, so a stock board isn't silently skipped, #605). Skips if the
+    issue is already Done; an issue that is on one of these names only moves to
+    a name that comes before it. Best-effort; no-op for non-Jira tasks.
     """
     override = (channel_metadata or {}).get("jira_status_on_pr")
     _transition(

@@ -20,6 +20,7 @@
 import { CliError } from '../src/errors';
 import {
   fetchConfigureBundleFromStack,
+  findStackOutput,
   getStackOutput,
   resolveConfigureBundleFromStack,
   resolveOperatorRegion,
@@ -164,5 +165,46 @@ describe('getStackOutput', () => {
     );
     await expect(getStackOutput('us-east-1', 'dev', 'ApiUrl'))
       .rejects.toThrow(/Could not describe stack 'dev' in us-east-1/);
+  });
+});
+
+describe('findStackOutput', () => {
+  beforeEach(() => {
+    cfSend.mockReset();
+  });
+
+  test('returns a single output value by key', async () => {
+    mockStackWithOutputs({ LinearVaultConsentUrl: 'https://consent.example/' });
+    await expect(findStackOutput('us-east-1', 'dev', 'LinearVaultConsentUrl'))
+      .resolves.toBe('https://consent.example/');
+  });
+
+  test('returns null when the output key is absent', async () => {
+    mockStackWithOutputs({ ApiUrl: 'https://api.example/v1/' });
+    await expect(findStackOutput('us-east-1', 'dev', 'LinearVaultConsentUrl'))
+      .resolves.toBeNull();
+  });
+
+  test('returns null when the stack does not exist: not deployed is an answer here', async () => {
+    cfSend.mockRejectedValueOnce(
+      Object.assign(new Error('Stack with id missing does not exist'), { name: 'ValidationError' }),
+    );
+    await expect(findStackOutput('us-east-1', 'missing', 'LinearVaultConsentUrl'))
+      .resolves.toBeNull();
+  });
+
+  test('returns null when the answer lists no stack, where getStackOutput throws', async () => {
+    cfSend.mockResolvedValueOnce({ Stacks: [] });
+    await expect(findStackOutput('us-east-1', 'missing', 'LinearVaultConsentUrl'))
+      .resolves.toBeNull();
+  });
+
+  test.each([
+    ['a denied read', Object.assign(new Error('User is not authorized'), { name: 'AccessDeniedException' })],
+    ['another validation error', Object.assign(new Error('1 validation error detected'), { name: 'ValidationError' })],
+    ['a rejection that is not an Error', 'socket hang up'],
+  ])('rethrows %s as it was raised, so that it does not pass for "not deployed"', async (_what, err) => {
+    cfSend.mockRejectedValueOnce(err);
+    await expect(findStackOutput('us-east-1', 'dev', 'LinearVaultConsentUrl')).rejects.toBe(err);
   });
 });

@@ -43,7 +43,7 @@ unrequested features.
 
 3. **Test your changes**
    This step is MANDATORY — do NOT skip it.
-   - Run the project build: `mise run build`
+   - Run the project build: `{build_command}`
    - Run linters and type-checkers if available.
    - If the project has tests, run them (e.g., `npm test`, `pytest`, `make test`).
 

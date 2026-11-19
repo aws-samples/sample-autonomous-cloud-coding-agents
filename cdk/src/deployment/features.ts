@@ -158,7 +158,7 @@ export function readDeploymentProfile(node: Node, repoRoot: string = REPO_ROOT):
     } catch (err) {
       // Only the implicit repository profiles are optional; an explicit path must exist.
       if (configured === undefined && (err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw new Error(`Cannot read deployment profile ${file}: ${(err as Error).message}`);
+      throw new Error(`Cannot read deployment profile ${file}: ${(err as Error).message}`, { cause: err });
     }
   }
   if (text === undefined) return undefined;
@@ -166,7 +166,7 @@ export function readDeploymentProfile(node: Node, repoRoot: string = REPO_ROOT):
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    throw new Error(`Invalid deployment profile ${file}: ${(err as Error).message}`);
+    throw new Error(`Invalid deployment profile ${file}: ${(err as Error).message}`, { cause: err });
   }
   return parseDeploymentProfile(parsed, file);
 }

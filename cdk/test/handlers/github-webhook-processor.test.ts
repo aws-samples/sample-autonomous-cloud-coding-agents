@@ -49,8 +49,10 @@ jest.mock('../../src/handlers/shared/github-comment', () => ({
 }));
 
 const postIssueCommentMock = jest.fn();
+const appendOnceToCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
+  appendOnceToComment: (...args: unknown[]) => appendOnceToCommentMock(...args),
 }));
 
 const findLinearIssueMock = jest.fn();
@@ -84,6 +86,10 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 import { handler } from '../../src/handlers/github-webhook-processor';
 import { normalizeAmplifyPreviewCheck } from '../../src/handlers/shared/github-deployment-status';
 import { logger } from '../../src/handlers/shared/logger';
+import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
+
+/** `head.repo` of a pull request whose branch is in the repository itself, as the GitHub API returns it. */
+const OWN_REPO = { full_name: 'owner/repo' };
 
 function payload(overrides: Record<string, unknown> = {}): { raw_body: string } {
   const body = {
@@ -100,12 +106,26 @@ function payload(overrides: Record<string, unknown> = {}): { raw_body: string } 
 }
 
 function fetchOk(jsonValue: unknown, status = 200): jest.SpyInstance {
+  // A list is the answer of the lookup by commit. Each pull request in it lives
+  // in owner/repo (`base.repo`, as the GitHub API returns it) unless the test
+  // gives it another base, or none.
+  const body = Array.isArray(jsonValue)
+    ? jsonValue.map((pr: Record<string, unknown>) => ({ base: { repo: OWN_REPO }, ...pr }))
+    : jsonValue;
   return jest.spyOn(global, 'fetch').mockResolvedValueOnce({
     ok: status >= 200 && status < 300,
     status,
     headers: new Headers(),
-    json: async () => jsonValue,
+    json: async () => body,
   } as unknown as Response);
+}
+
+/** The inputs of the task-table commands of one kind (Get, Update, Query), in the order sent. */
+function sentToTable(type: string): Array<Record<string, unknown>> {
+  return ddbSend.mock.calls
+    .map((c) => c[0] as { _type: string; input: Record<string, unknown> })
+    .filter((c) => c._type === type)
+    .map((c) => c.input);
 }
 
 describe('github-webhook-processor handler', () => {
@@ -118,13 +138,16 @@ describe('github-webhook-processor handler', () => {
     resolveGitHubTokenMock.mockReset();
     upsertTaskCommentMock.mockReset();
     postIssueCommentMock.mockReset();
+    appendOnceToCommentMock.mockReset();
     findLinearIssueMock.mockReset();
     extractLinearIdentifierMock.mockReset();
     extractFromBranchMock.mockReset();
     // Default: persistScreenshotUrl's UpdateItem succeeds with a NON-integration
     // task record (no orchestration_sub_issue_id) → standalone Linear comment
-    // still posts, as the pre-existing tests expect.
-    ddbSend.mockReset().mockResolvedValue({ Attributes: { channel_metadata: {} } });
+    // still posts, as the pre-existing tests expect. One answer serves both of its
+    // commands: the GetItem reads `Item` (the repository of the branch's task),
+    // the UpdateItem reads `Attributes` (the task before the write).
+    ddbSend.mockReset().mockResolvedValue({ Item: { repo: 'owner/repo' }, Attributes: { channel_metadata: {} } });
   });
 
   test('returns silently when raw_body is empty', async () => {
@@ -190,15 +213,15 @@ describe('github-webhook-processor handler', () => {
     // the SHA must win, so the screenshot routes to 73's branch.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([
-      { number: 73, state: 'open', title: 't73', body: 'b73', head: { ref: 'bgagent/01T/abca-152-x', sha: 'abc1234' } },
-      { number: 74, state: 'open', title: 't74', body: 'b74', head: { ref: 'bgagent/01T/abca-153-y', sha: 'def5678' } },
-      { number: 75, state: 'open', title: 't75', body: 'b75', head: { ref: 'bgagent/01T/abca-154-z', sha: 'aaa9999' } },
+      { number: 73, state: 'open', title: 't73', body: 'b73', head: { ref: 'bgagent/01T/abca-152-x', sha: 'abc1234', repo: OWN_REPO } },
+      { number: 74, state: 'open', title: 't74', body: 'b74', head: { ref: 'bgagent/01T/abca-153-y', sha: 'def5678', repo: OWN_REPO } },
+      { number: 75, state: 'open', title: 't75', body: 'b75', head: { ref: 'bgagent/01T/abca-154-z', sha: 'aaa9999', repo: OWN_REPO } },
     ]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     extractFromBranchMock.mockReturnValueOnce('ABCA-152');
-    findLinearIssueMock.mockResolvedValueOnce({ issueId: 'issue-152', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' });
+    findLinearIssueMock.mockResolvedValueOnce(lookupFound({ issueId: 'issue-152', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' }));
     postIssueCommentMock.mockResolvedValueOnce(true);
 
     await handler(payload());
@@ -207,6 +230,134 @@ describe('github-webhook-processor handler', () => {
     expect(commentArg.issueOrPrNumber).toBe(73);
     expect(extractFromBranchMock).toHaveBeenCalledWith('bgagent/01T/abca-152-x');
     expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-152');
+  });
+
+  test('the pull request whose head is the deployed commit wins over a lower number that only contains it', async () => {
+    // Pull request 75 is older than 80 but was rebased on top of 80's branch:
+    // its history contains the deployed commit, 80's branch ends with it.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([
+      { number: 75, state: 'open', title: 't75', body: '', head: { ref: 'feature-on-top', sha: 'def5678', repo: OWN_REPO } },
+      { number: 80, state: 'open', title: 't80', body: '', head: { ref: 'feature-below', sha: 'abc1234', repo: OWN_REPO } },
+    ]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+
+    await handler(payload());
+
+    expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ issueOrPrNumber: 80 }));
+  });
+
+  test('a pull request that lives in another repository is not taken for the deployment\'s own', async () => {
+    // GitHub lists the open pull requests of a commit by the repository of their
+    // HEAD branch. Somebody opened, in a repository of their own, pull request 3 from
+    // the branch of owner/repo's pull request 10: both are in the answer, and
+    // the other one may come first.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    const head = { ref: 'bgagent/01TASKID/tidy-up-the-footer', sha: 'abc1234', repo: OWN_REPO };
+    fetchOk([
+      { number: 3, state: 'open', title: 'GLX-7', body: '', head, base: { repo: { full_name: 'mallory/repo' } } },
+      { number: 10, state: 'open', title: 'Tidy up the footer', body: '', head, base: { repo: OWN_REPO } },
+    ]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractLinearIdentifierMock.mockImplementation((text: string) => (text === 'GLX-7' ? 'GLX-7' : null));
+    findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-glx-7', linearWorkspaceId: 'ws-globex', workspaceSlug: 'globex' }));
+    postIssueCommentMock.mockResolvedValue({ ok: true });
+
+    await handler(payload());
+
+    // Number 3 is a number of the other repository: the comment goes to the
+    // deployment's own pull request, and the title the other author wrote is
+    // not searched for an issue.
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 10 }));
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['lives in another repository', { repo: { full_name: 'mallory/repo' } }],
+    ['names no base repository', { repo: null }],
+    ['has no base', undefined],
+  ])('a commit whose only pull request %s has no pull request of the deployment', async (_label, base) => {
+    jest.useFakeTimers();
+    try {
+      resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+      const answer = [{ number: 3, state: 'open', title: 'GLX-7', body: '', head: { ref: 'bgagent/01TASKID/x', sha: 'abc1234', repo: OWN_REPO }, base }];
+      // Four calls (delays = [0, 5s, 10s, 20s]), the same answer each time.
+      fetchOk(answer);
+      fetchOk(answer);
+      fetchOk(answer);
+      fetchOk(answer);
+      const error = jest.spyOn(logger, 'error');
+      const promise = handler(payload());
+      await jest.runAllTimersAsync();
+      await promise;
+      expect(captureScreenshotMock).not.toHaveBeenCalled();
+      expect(upsertTaskCommentMock).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+        error_id: 'SCREENSHOT_PR_LOOKUP_EXHAUSTED', reason: 'pr_not_linked',
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each([
+    ['first', true],
+    ['second', false],
+  ])('a second pull request from the branch of an ABCA pull request does not take its place, listed %s', async (_label, listedFirst) => {
+    // In a public repository anyone can open a pull request from an existing
+    // branch into another branch of the repository itself. Number 23 is one,
+    // from the branch of ABCA's pull request 10, with a title of its author's
+    // choice. Which of the two GitHub lists first must not matter.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    const head = { ref: 'bgagent/01TASKID/tidy-up-the-footer', sha: 'abc1234', repo: OWN_REPO };
+    const own = { number: 10, state: 'open', title: 'Tidy up the footer', body: '', head };
+    const other = { number: 23, state: 'open', title: 'GLX-7', body: '', head, base: { ref: 'release', repo: OWN_REPO } };
+    fetchOk(listedFirst ? [other, own] : [own, other]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractLinearIdentifierMock.mockImplementation((text: string) => (text === 'GLX-7' ? 'GLX-7' : null));
+    findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-glx-7', linearWorkspaceId: 'ws-globex', workspaceSlug: 'globex' }));
+    postIssueCommentMock.mockResolvedValue({ ok: true });
+
+    await handler(payload());
+
+    // The comment goes to the pull request that was opened first, and the
+    // other author's title is not searched for an issue.
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 10 }));
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    // Two pull requests from one ordinary branch, both with the deployed commit as head.
+    ['from an ordinary branch', 'abc1234', true],
+    ['from an ordinary branch', 'abc1234', false],
+    // The deployed commit is the head of neither (a commit further down in both).
+    ['when the deployed commit is no pull request\'s head', 'fff0000', true],
+    ['when the deployed commit is no pull request\'s head', 'fff0000', false],
+  ])('of two pull requests %s the lower number is taken (head %s, higher number listed first: %s)', async (_label, headSha, higherFirst) => {
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    const head = { ref: 'feature-x', sha: headSha, repo: OWN_REPO };
+    const lower = { number: 5, state: 'open', title: 'Add x', body: '', head };
+    const higher = { number: 9, state: 'open', title: 'Backport x', body: '', head, base: { ref: 'release', repo: OWN_REPO } };
+    fetchOk(higherFirst ? [higher, lower] : [lower, higher]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+
+    await handler(payload());
+
+    expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ issueOrPrNumber: 5 }));
+    expect(extractLinearIdentifierMock).toHaveBeenCalledWith('Add x');
+    expect(extractLinearIdentifierMock).not.toHaveBeenCalledWith('Backport x');
   });
 
   test('happy path: PR found → screenshot → S3 → PR comment posted', async () => {
@@ -278,11 +429,11 @@ describe('github-webhook-processor handler', () => {
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     extractFromBranchMock.mockReturnValueOnce(null);
     extractLinearIdentifierMock.mockReturnValueOnce('ABCA-42');
-    findLinearIssueMock.mockResolvedValueOnce({
+    findLinearIssueMock.mockResolvedValueOnce(lookupFound({
       issueId: 'issue-uuid',
       linearWorkspaceId: 'ws-1',
       workspaceSlug: 'abca',
-    });
+    }));
     postIssueCommentMock.mockResolvedValueOnce({ ok: true });
 
     await handler(payload());
@@ -293,6 +444,229 @@ describe('github-webhook-processor handler', () => {
     const linearArg = postIssueCommentMock.mock.calls[0];
     expect(linearArg[1]).toBe('issue-uuid');
     expect(linearArg[2]).toMatch(/https:\/\/d1\.cloudfront\.net\/screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png/);
+  });
+
+  test('a Linear task\'s preview goes to the issue and workspace on its own record, not to an identifier lookup', async () => {
+    // Two workspaces on one stack, acme and globex, each with a team ENG and an
+    // issue ENG-7. The identifier in the branch cannot tell them apart; the task
+    // that opened the pull request names globex's issue.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-7 fix login', body: '', head: { ref: 'bgagent/01TASKID/eng-7-fix-login', sha: 'abc1234', repo: OWN_REPO } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    ddbSend.mockReset().mockResolvedValue({
+      Item: { repo: 'owner/repo' },
+      Attributes: {
+        repo: 'owner/repo',
+        channel_source: 'linear',
+        channel_metadata: { linear_issue_id: 'issue-globex', linear_workspace_id: 'ws-globex', linear_workspace_slug: 'globex' },
+      },
+    });
+    extractFromBranchMock.mockReturnValueOnce('ENG-7');
+    // What a lookup by identifier answers here: the workspace it happens to ask first.
+    findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-acme', linearWorkspaceId: 'ws-acme', workspaceSlug: 'acme' }));
+    postIssueCommentMock.mockResolvedValueOnce({ ok: true });
+
+    await handler(payload());
+
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'ws-globex', registryTableName: 'LinearWorkspaceRegistry' },
+      'issue-globex',
+      expect.stringContaining('https://d1.cloudfront.net/screenshots/'),
+    );
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+  });
+
+  test('a task started from a Linear comment gets its preview although nothing in the pull request names the issue', async () => {
+    // Such a task is described by the comment alone ("add a dark mode toggle"),
+    // so neither its branch nor the title or body of its pull request carries
+    // the identifier. Its record names the issue, the workspace and the reply.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 7, state: 'open', title: 'Add a dark mode toggle', body: '', head: { ref: 'bgagent/01TASKID/add-a-dark-mode-toggle', sha: 'abc1234', repo: OWN_REPO } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    const channelMetadata = {
+      trigger_comment_id: 'comment-1',
+      linear_issue_id: 'issue-42',
+      linear_workspace_id: 'ws-1',
+      iteration_reply_comment_id: 'reply-R',
+    };
+    ddbSend.mockReset().mockImplementation(async (cmd: { _type: string }) => {
+      if (cmd._type === 'Query') return { Items: [{ task_id: '01TASKID', repo: 'owner/repo', channel_metadata: channelMetadata }] };
+      if (cmd._type === 'Get') return { Item: { repo: 'owner/repo', head_sha: 'abc1234' } };
+      return { Attributes: { repo: 'owner/repo', channel_source: 'linear', channel_metadata: channelMetadata } };
+    });
+    extractFromBranchMock.mockReturnValue(null);
+    extractLinearIdentifierMock.mockReturnValue(null);
+    appendOnceToCommentMock.mockResolvedValueOnce(true);
+
+    await handler(payload());
+
+    expect(appendOnceToCommentMock).toHaveBeenCalledTimes(1);
+    expect(appendOnceToCommentMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'ws-1', registryTableName: 'LinearWorkspaceRegistry' },
+      'reply-R',
+      expect.stringContaining('https://d1.cloudfront.net/screenshots/'),
+      '[preview]',
+    );
+    expect(sentToTable('Query')).toEqual([expect.objectContaining({ ExpressionAttributeValues: { ':iid': 'issue-42' } })]);
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+  });
+
+  test('a pull request whose branch names a task of another repository writes nothing onto that task', async () => {
+    // Whoever opens a pull request chooses its branch name, and a task id is no
+    // secret: it is in the branch name of every ABCA pull request. Here a pull
+    // request in owner/repo names a task of other/repo.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-7', body: '', head: { ref: 'bgagent/01OTHERSTASK/eng-7-x', sha: 'abc1234', repo: OWN_REPO } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    ddbSend.mockReset().mockResolvedValue({
+      Item: { repo: 'other/repo' },
+      Attributes: {
+        repo: 'other/repo',
+        channel_source: 'linear',
+        channel_metadata: { linear_issue_id: 'issue-of-other-repo', linear_workspace_id: 'ws-globex' },
+      },
+    });
+    extractFromBranchMock.mockReturnValue('ENG-7');
+    // The one workspace that has ENG-7 is the other repository's.
+    findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-of-other-repo', linearWorkspaceId: 'ws-globex', workspaceSlug: 'globex' }));
+    postIssueCommentMock.mockResolvedValue({ ok: true });
+    const warn = jest.spyOn(logger, 'warn');
+
+    await handler(payload());
+
+    // The pull request gets its own comment ...
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    // ... the other repository's task is left as it was, so its own first
+    // deployment is still its first, and nothing goes to its tracker.
+    expect(sentToTable('Update')).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      event: 'screenshot.persist_failed', task_id: '01OTHERSTASK',
+    }));
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+    expect(deliverJiraMock).not.toHaveBeenCalled();
+  });
+
+  test('after such a pull request the task\'s own first deployment still posts its headline comment', async () => {
+    // A write onto the other repository's task left a screenshot on it, so that
+    // task's own first deployment was taken for a later push and posted nothing.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    captureScreenshotMock.mockResolvedValue(new Uint8Array([1]));
+    s3Send.mockResolvedValue({});
+    upsertTaskCommentMock.mockResolvedValue({ commentId: 'cmt-1' });
+    postIssueCommentMock.mockResolvedValue({ ok: true });
+    // The task row of other/repo, kept across the two deployments.
+    const row: Record<string, unknown> = {
+      repo: 'other/repo',
+      channel_source: 'linear',
+      channel_metadata: { linear_issue_id: 'issue-of-other-repo', linear_workspace_id: 'ws-globex' },
+    };
+    ddbSend.mockReset().mockImplementation(async (cmd: { _type: string; input: { ExpressionAttributeValues?: Record<string, string> } }) => {
+      if (cmd._type === 'Get') return { Item: { repo: row.repo } };
+      if (cmd._type === 'Query') return { Items: [] };
+      const before = { ...row };
+      row.screenshot_url = cmd.input.ExpressionAttributeValues![':u'];
+      return { Attributes: before };
+    });
+    const ref = 'bgagent/01OTHERSTASK/eng-7-x';
+    extractFromBranchMock.mockReturnValue('ENG-7');
+
+    // First a pull request in owner/repo that names the task, then the task's own.
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-7', body: '', head: { ref, sha: 'abc1234', repo: OWN_REPO } }]);
+    await handler(payload());
+    const otherRepo = { full_name: 'other/repo' };
+    fetchOk([{ number: 3, state: 'open', title: 'ENG-7', body: '', head: { ref, sha: 'abc1234', repo: otherRepo }, base: { repo: otherRepo } }]);
+    await handler(payload({ repository: { full_name: 'other/repo' } }));
+
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'ws-globex', registryTableName: 'LinearWorkspaceRegistry' },
+      'issue-of-other-repo',
+      expect.stringContaining('https://d1.cloudfront.net/screenshots/other_repo/'),
+    );
+    expect(appendOnceToCommentMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a fork', { full_name: 'evil/repo' }, 'screenshot.persist_failed'],
+    ['a fork that was deleted', null, 'screenshot.head_repo_missing'],
+    ['a branch whose repository GitHub does not name', undefined, 'screenshot.head_repo_missing'],
+  ])('a pull request from %s cannot name a task of this repository by its branch', async (_label, headRepo, event) => {
+    // The task ids of owner/repo are in the branch names of its own pull
+    // requests, and a fork can give its branch any of those names. Only a branch
+    // of the repository itself may name a task.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-7', body: '', head: { ref: 'bgagent/01TASKID/eng-7-x', sha: 'abc1234', repo: headRepo } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    ddbSend.mockReset().mockResolvedValue({
+      Item: { repo: 'owner/repo' },
+      Attributes: {
+        repo: 'owner/repo',
+        channel_source: 'linear',
+        channel_metadata: { linear_issue_id: 'issue-7', linear_workspace_id: 'ws-1' },
+      },
+    });
+    extractFromBranchMock.mockReturnValue('ENG-7');
+    findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-7', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' }));
+    postIssueCommentMock.mockResolvedValue({ ok: true });
+    const warn = jest.spyOn(logger, 'warn');
+
+    await handler(payload());
+
+    // The pull request gets its comment; the task is neither read nor written,
+    // and nothing goes to its tracker.
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ event, task_id: '01TASKID' }));
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+    expect(deliverJiraMock).not.toHaveBeenCalled();
+  });
+
+  test('a task whose blueprint spells the repository in another letter case is this repository\'s task', async () => {
+    // GitHub reports its own spelling of a repository name and answers to any
+    // other; the task record has the spelling of the blueprint.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    const asGitHubSpellsIt = { full_name: 'Owner/Repo' };
+    fetchOk([{
+      number: 17,
+      state: 'open',
+      title: 'ENG-7 fix login',
+      body: '',
+      head: { ref: 'bgagent/01TASKID/eng-7-fix-login', sha: 'abc1234', repo: asGitHubSpellsIt },
+      base: { repo: asGitHubSpellsIt },
+    }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    ddbSend.mockReset().mockResolvedValue({
+      Item: { repo: 'owner/repo' },
+      Attributes: {
+        repo: 'owner/repo',
+        channel_source: 'linear',
+        channel_metadata: { linear_issue_id: 'issue-globex', linear_workspace_id: 'ws-globex' },
+      },
+    });
+    extractFromBranchMock.mockReturnValue('ENG-7');
+    findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-acme', linearWorkspaceId: 'ws-acme', workspaceSlug: 'acme' }));
+    postIssueCommentMock.mockResolvedValueOnce({ ok: true });
+
+    await handler(payload({ repository: { full_name: 'Owner/Repo' } }));
+
+    expect(sentToTable('Get')).toEqual([expect.objectContaining({ Key: { task_id: '01TASKID' } })]);
+    expect(sentToTable('Update')).toEqual([expect.objectContaining({ Key: { task_id: '01TASKID' } })]);
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-globex');
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
   });
 
   test('branch-name identifier wins over a predecessor named in the PR body (stacked PR)', async () => {
@@ -306,28 +680,79 @@ describe('github-webhook-processor handler', () => {
       state: 'open',
       title: 'feat(destinations): add Lisbon destination card',
       body: 'cherry-picked from predecessor branch ABCA-151 ... Closes ABCA-152',
-      head: { ref: 'bgagent/01TASK/abca-152-link-lisbon-from-destinationsht', sha: 'abc1234' },
+      head: { ref: 'bgagent/01TASK/abca-152-link-lisbon-from-destinationsht', sha: 'abc1234', repo: OWN_REPO },
     }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
-    // Real branch extractor behaviour: pulls ABCA-152 from the branch.
+    // Real extractor behaviour: ABCA-152 from the branch, nothing from the
+    // title, and from the body the predecessor ABCA-151, which it names first.
     extractFromBranchMock.mockReturnValueOnce('ABCA-152');
-    findLinearIssueMock.mockResolvedValueOnce({
-      issueId: 'issue-152',
+    extractLinearIdentifierMock.mockReturnValueOnce(null).mockReturnValueOnce('ABCA-151');
+    findLinearIssueMock.mockImplementation(async (identifier: string) => lookupFound({
+      issueId: identifier === 'ABCA-152' ? 'issue-152' : 'issue-151',
       linearWorkspaceId: 'ws-1',
       workspaceSlug: 'abca',
-    });
+    }));
     postIssueCommentMock.mockResolvedValueOnce(true);
 
     await handler(payload());
 
-    // Routed to ABCA-152 from the branch; title/body extractor never consulted.
+    // Routed to ABCA-152 from the branch; the predecessor is never looked up.
     expect(extractFromBranchMock).toHaveBeenCalledWith('bgagent/01TASK/abca-152-link-lisbon-from-destinationsht');
-    expect(findLinearIssueMock).toHaveBeenCalledWith('ABCA-152', 'LinearWorkspaceRegistry');
-    expect(extractLinearIdentifierMock).not.toHaveBeenCalled();
+    expect(findLinearIssueMock.mock.calls).toEqual([['ABCA-152', 'LinearWorkspaceRegistry']]);
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
     expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-152');
+  });
+
+  test('a word and a number in the branch name do not hide the identifier in the title', async () => {
+    // Upper-cased, `feature/upgrade-node-22` reads as the identifier NODE-22. No
+    // workspace has such an issue; the title names the real one.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-42: Upgrade to Node 22', body: '', head: { ref: 'feature/upgrade-node-22', sha: 'abc1234' } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce('NODE-22');
+    extractLinearIdentifierMock.mockReturnValueOnce('ENG-42').mockReturnValueOnce(null);
+    // Every workspace answers that it has no NODE-22.
+    findLinearIssueMock.mockImplementation(async (identifier: string) => identifier === 'ENG-42'
+      ? lookupFound({ issueId: 'issue-42', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' })
+      : LOOKUP_ABSENT);
+    postIssueCommentMock.mockResolvedValueOnce({ ok: true });
+
+    await handler(payload());
+
+    expect(findLinearIssueMock.mock.calls.map((c) => c[0])).toEqual(['NODE-22', 'ENG-42']);
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock.mock.calls[0][1]).toBe('issue-42');
+  });
+
+  test('an identifier that could not be looked up is not replaced by one further down', async () => {
+    // The branch names the pull request's own issue; its body names a predecessor
+    // first. While Linear cannot be asked about the first, the second must not
+    // get the preview: it is an issue this pull request only mentions.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{
+      number: 73,
+      state: 'open',
+      title: 'feat(destinations): add Lisbon destination card',
+      body: 'cherry-picked from predecessor branch ABCA-151 ... Closes ABCA-152',
+      head: { ref: 'abca-152-link-lisbon-from-destinations', sha: 'abc1234' },
+    }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    extractFromBranchMock.mockReturnValueOnce('ABCA-152');
+    extractLinearIdentifierMock.mockReturnValueOnce(null).mockReturnValueOnce('ABCA-151');
+    findLinearIssueMock.mockImplementation(async (identifier: string) => identifier === 'ABCA-152'
+      ? lookupFailed(new Error('Not every workspace could be asked'))
+      : lookupFound({ issueId: 'issue-151', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' }));
+
+    await handler(payload());
+
+    expect(findLinearIssueMock.mock.calls.map((c) => c[0])).toEqual(['ABCA-152']);
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
 
   test('falls back to title then body when branch yields no identifier', async () => {
@@ -340,11 +765,11 @@ describe('github-webhook-processor handler', () => {
     extractLinearIdentifierMock
       .mockReturnValueOnce(null) // title produces no match
       .mockReturnValueOnce('ABCA-42'); // body does
-    findLinearIssueMock.mockResolvedValueOnce({
+    findLinearIssueMock.mockResolvedValueOnce(lookupFound({
       issueId: 'issue-uuid',
       linearWorkspaceId: 'ws-1',
       workspaceSlug: 'abca',
-    });
+    }));
     postIssueCommentMock.mockResolvedValueOnce({ ok: true });
 
     await handler(payload());
@@ -375,11 +800,16 @@ describe('github-webhook-processor handler', () => {
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     extractLinearIdentifierMock.mockReturnValueOnce('ABCA-42');
-    findLinearIssueMock.mockResolvedValueOnce(null);
+    findLinearIssueMock.mockResolvedValueOnce(LOOKUP_ABSENT);
+    const info = jest.spyOn(logger, 'info');
 
     await handler(payload());
 
     expect(postIssueCommentMock).not.toHaveBeenCalled();
+    // The line the troubleshooting guide tells operators to look for.
+    expect(info).toHaveBeenCalledWith('Linear identifier did not resolve to an issue — skipping Linear post', {
+      identifiers: ['ABCA-42'], repo: 'owner/repo', pr_number: 17,
+    });
   });
 
   test('Linear comment failure does not propagate (best-effort)', async () => {
@@ -389,11 +819,11 @@ describe('github-webhook-processor handler', () => {
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     extractLinearIdentifierMock.mockReturnValueOnce('ABCA-42');
-    findLinearIssueMock.mockResolvedValueOnce({
+    findLinearIssueMock.mockResolvedValueOnce(lookupFound({
       issueId: 'issue-uuid',
       linearWorkspaceId: 'ws-1',
       workspaceSlug: 'abca',
-    });
+    }));
     postIssueCommentMock.mockResolvedValueOnce({ ok: false, retryable: false });
 
     // No throw — postIssueComment returning false is just logged.
@@ -402,7 +832,7 @@ describe('github-webhook-processor handler', () => {
 
   test('persists BOTH screenshot_url and screenshot_preview_url on the task record', async () => {
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-    fetchOk([{ number: 17, state: 'open', title: 't', body: '', head: { ref: 'bgagent/01TASKID/abca-42-x', sha: 'abc1234' } }]);
+    fetchOk([{ number: 17, state: 'open', title: 't', body: '', head: { ref: 'bgagent/01TASKID/abca-42-x', sha: 'abc1234', repo: OWN_REPO } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
@@ -428,13 +858,14 @@ describe('github-webhook-processor handler', () => {
       state: 'open',
       title: 'feat(pages): integrate FAQ + Reviews (ABCA-301 combined result)',
       body: 'combined',
-      head: { ref: 'bgagent/01INTEGRATION/integrate-the-sub-issues', sha: 'abc1234' },
+      head: { ref: 'bgagent/01INTEGRATION/integrate-the-sub-issues', sha: 'abc1234', repo: OWN_REPO },
     }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     // The persisted task record marks this as the synthetic integration node.
     ddbSend.mockReset().mockResolvedValue({
+      Item: { repo: 'owner/repo' },
       Attributes: { channel_metadata: { orchestration_sub_issue_id: 'orch_1__integration' } },
     });
     extractFromBranchMock.mockReturnValue(null);
@@ -450,6 +881,132 @@ describe('github-webhook-processor handler', () => {
     expect(findLinearIssueMock).not.toHaveBeenCalled();
     expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
+
+  describe('re-deploy on a Linear issue that has iteration replies', () => {
+    // The task of the branch already has a screenshot, so this deployment is a
+    // later push. The issue has two iteration tasks, newest first as the index
+    // returns them with the repository it projects; each reply waits for the
+    // preview of its own commit. `repos` names the repository of an iteration
+    // task that is not owner/repo's; `asGitHubSpellsIt` is the repository as the
+    // pull request carries it.
+    function reDeploy(headShas: Record<string, string>, repos: Record<string, string> = {}, asGitHubSpellsIt = OWN_REPO): void {
+      resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+      fetchOk([{
+        number: 17,
+        state: 'open',
+        title: 't',
+        body: '',
+        head: { ref: 'bgagent/01ORIG/eng-42-x', sha: 'abc1234', repo: asGitHubSpellsIt },
+        base: { repo: asGitHubSpellsIt },
+      }]);
+      captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+      s3Send.mockResolvedValueOnce({});
+      upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+      extractFromBranchMock.mockReturnValueOnce('ENG-42');
+      findLinearIssueMock.mockResolvedValueOnce(lookupFound({ issueId: 'issue-42', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' }));
+      appendOnceToCommentMock.mockResolvedValueOnce(true);
+      ddbSend.mockReset().mockImplementation(async (cmd: { _type: string; input: { Key?: { task_id: string } } }) => {
+        if (cmd._type === 'Query') {
+          return {
+            Items: ['iter-2', 'iter-1'].map((id) => ({
+              task_id: id,
+              repo: repos[id] ?? 'owner/repo',
+              channel_metadata: { iteration_reply_comment_id: id.replace('iter', 'reply') },
+            })),
+          };
+        }
+        // The repository of the branch's task, or the commit of an iteration task.
+        if (cmd._type === 'Get') return { Item: { repo: 'owner/repo', head_sha: headShas[cmd.input.Key!.task_id] } };
+        return { Attributes: { screenshot_url: 'https://d1.cloudfront.net/old.png', channel_metadata: {} } };
+      });
+    }
+
+    test('stores the screenshot on the iteration that pushed the commit and appends the preview to its reply', async () => {
+      // The deployed commit belongs to the OLDER iteration, not the newest one.
+      reDeploy({ 'iter-2': 'fff0000', 'iter-1': 'abc1234' });
+
+      await handler(payload());
+
+      expect(sentToTable('Query')).toEqual([expect.objectContaining({
+        IndexName: 'LinearIssueIndex',
+        ExpressionAttributeValues: { ':iid': 'issue-42' },
+        ScanIndexForward: false,
+      })]);
+      expect(sentToTable('Update')).toEqual([
+        expect.objectContaining({ Key: { task_id: '01ORIG' } }),
+        expect.objectContaining({
+          Key: { task_id: 'iter-1' },
+          ConditionExpression: 'attribute_exists(task_id)',
+          ExpressionAttributeValues: {
+            ':u': expect.stringMatching(/^https:\/\/d1\.cloudfront\.net\/screenshots\//),
+            ':p': 'https://preview.example.com',
+          },
+        }),
+      ]);
+      expect(appendOnceToCommentMock).toHaveBeenCalledTimes(1);
+      // The marker is part of the appended text: a redelivery finds it and appends nothing.
+      expect(appendOnceToCommentMock).toHaveBeenCalledWith(
+        { linearWorkspaceId: 'ws-1', registryTableName: 'LinearWorkspaceRegistry' },
+        'reply-1',
+        expect.stringMatching(/^\n\n\[!\[preview\]\(https:\/\/d1\.cloudfront\.net\/screenshots\/[^)]+\)\]\(https:\/\/preview\.example\.com\)$/),
+        '[preview]',
+      );
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
+    });
+
+    test('appends to the newest reply when no iteration recorded the deployed commit', async () => {
+      reDeploy({ 'iter-2': 'fff0000', 'iter-1': 'eee1111' });
+
+      await handler(payload());
+
+      expect(sentToTable('Update')[1]).toMatchObject({ Key: { task_id: 'iter-2' } });
+      expect(appendOnceToCommentMock).toHaveBeenCalledTimes(1);
+      expect(appendOnceToCommentMock).toHaveBeenCalledWith(expect.anything(), 'reply-2', expect.any(String), '[preview]');
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
+    });
+
+    test('a pull request that names an issue of another repository writes nothing onto that issue\'s iteration task', async () => {
+      // The issue of this deployment came from an identifier in the pull request,
+      // which whoever writes its title chooses. Both iteration tasks of that
+      // issue belong to globex/site.
+      reDeploy({ 'iter-2': 'fff0000', 'iter-1': 'eee1111' }, { 'iter-2': 'globex/site', 'iter-1': 'globex/site' });
+
+      await handler(payload());
+
+      // The task of the branch gets its screenshot; the other repository's
+      // iteration task and its reply get nothing.
+      expect(sentToTable('Update')).toEqual([expect.objectContaining({ Key: { task_id: '01ORIG' } })]);
+      expect(appendOnceToCommentMock).not.toHaveBeenCalled();
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['by its commit', { 'iter-2': 'fff0000', 'iter-1': 'abc1234' }],
+      // A fork has the commits of its parent: a task of another repository can have recorded the deployed commit.
+      ['as the newest of this repository, although the other one recorded the deployed commit', { 'iter-2': 'abc1234', 'iter-1': 'eee1111' }],
+    ])('an iteration of this repository is found %s when the newest iteration is another repository\'s', async (_label, headShas) => {
+      reDeploy(headShas, { 'iter-2': 'globex/site' });
+
+      await handler(payload());
+
+      expect(sentToTable('Update')).toEqual([
+        expect.objectContaining({ Key: { task_id: '01ORIG' } }),
+        expect.objectContaining({ Key: { task_id: 'iter-1' } }),
+      ]);
+      expect(appendOnceToCommentMock).toHaveBeenCalledTimes(1);
+      expect(appendOnceToCommentMock).toHaveBeenCalledWith(expect.anything(), 'reply-1', expect.any(String), '[preview]');
+    });
+
+    test('an iteration is found when GitHub spells the repository in another letter case than its blueprint', async () => {
+      // The iteration tasks have the blueprint's spelling, owner/repo.
+      reDeploy({ 'iter-2': 'fff0000', 'iter-1': 'abc1234' }, {}, { full_name: 'Owner/Repo' });
+
+      await handler(payload({ repository: { full_name: 'Owner/Repo' } }));
+
+      expect(sentToTable('Update')[1]).toMatchObject({ Key: { task_id: 'iter-1' } });
+      expect(appendOnceToCommentMock).toHaveBeenCalledWith(expect.anything(), 'reply-1', expect.any(String), '[preview]');
+    });
+  });
 });
 
 describe('authoritative Jira deployment routing', () => {
@@ -464,8 +1021,8 @@ describe('authoritative Jira deployment routing', () => {
     findLinearIssueMock.mockReset();
   });
   test.each(['jira', 'linear'])('routes a %s task by the record even when the branch contains a Jira key', async (source) => {
-    fetchOk([{ number: 12, state: 'open', title: 'ENG-42', body: '', head: { ref: 'bgagent/task-1/ENG-42', sha: 'abc1234' } }]);
-    ddbSend.mockResolvedValue({ Attributes: { task_id: 'task-1', repo: 'owner/repo', channel_source: source, channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'ACTUAL-7' } } });
+    fetchOk([{ number: 12, state: 'open', title: 'ENG-42', body: '', head: { ref: 'bgagent/task-1/ENG-42', sha: 'abc1234', repo: OWN_REPO } }]);
+    ddbSend.mockResolvedValue({ Item: { repo: 'owner/repo' }, Attributes: { task_id: 'task-1', repo: 'owner/repo', channel_source: source, channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'ACTUAL-7' } } });
     await handler(payload());
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     if (source === 'jira') {
@@ -477,7 +1034,7 @@ describe('authoritative Jira deployment routing', () => {
   });
 
   test('a failed task lookup cannot route a Jira-like branch to Linear', async () => {
-    fetchOk([{ number: 17, state: 'open', title: 'ENG-42', head: { ref: 'bgagent/01JXABCDEF1234567890ABCDEF/eng-42' } }]);
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-42', head: { ref: 'bgagent/01JXABCDEF1234567890ABCDEF/eng-42', repo: OWN_REPO } }]);
     ddbSend.mockRejectedValueOnce(new Error('DDB unavailable'));
     await handler(payload());
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
@@ -488,8 +1045,8 @@ describe('authoritative Jira deployment routing', () => {
   test('missing Jira registry is observable and never falls through to Linear', async () => {
     const warn = jest.spyOn(logger, 'warn');
     delete process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
-    fetchOk([{ number: 17, state: 'open', head: { ref: 'bgagent/01JXABCDEF1234567890ABCDEF/eng-42' } }]);
-    ddbSend.mockResolvedValue({ Attributes: { channel_source: 'jira' } });
+    fetchOk([{ number: 17, state: 'open', head: { ref: 'bgagent/01JXABCDEF1234567890ABCDEF/eng-42', repo: OWN_REPO } }]);
+    ddbSend.mockResolvedValue({ Item: { repo: 'owner/repo' }, Attributes: { channel_source: 'jira' } });
     await handler(payload());
     expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ event: 'screenshot.jira_missing_registry' }));
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
@@ -502,8 +1059,8 @@ describe('validated Amplify PR routing', () => {
   const sha = 'a'.repeat(40);
   const taskId = '01JXABCDEF1234567890ABCDEF';
   const branch = `bgagent/${taskId}/eng-42`;
-  const pr41 = { number: 41, state: 'open', title: 'ENG-41', head: { ref: 'bgagent/wrong-task/eng-41', sha } };
-  const pr42 = { number: 42, state: 'open', title: 'ENG-42', head: { ref: branch, sha } };
+  const pr41 = { number: 41, state: 'open', title: 'ENG-41', head: { ref: 'bgagent/wrong-task/eng-41', sha, repo: OWN_REPO } };
+  const pr42 = { number: 42, state: 'open', title: 'ENG-42', head: { ref: branch, sha, repo: OWN_REPO } };
 
   function amplifyEvent() {
     const result = normalizeAmplifyPreviewCheck({
@@ -534,7 +1091,7 @@ describe('validated Amplify PR routing', () => {
     ddbSend.mockReset();
     upsertTaskCommentMock.mockReset().mockResolvedValue({ commentId: 12 });
     postIssueCommentMock.mockReset().mockResolvedValue(true);
-    findLinearIssueMock.mockReset().mockResolvedValue({ issueId: 'issue-42', linearWorkspaceId: 'ws' });
+    findLinearIssueMock.mockReset().mockResolvedValue(lookupFound({ issueId: 'issue-42', linearWorkspaceId: 'ws' }));
     extractFromBranchMock.mockReset().mockImplementation((ref) => ref === branch ? 'ENG-42' : 'ENG-41');
   });
 
@@ -547,7 +1104,7 @@ describe('validated Amplify PR routing', () => {
       json: async () => String(url).endsWith('/pulls/42') ? pr42 : [pr41, pr42],
     } as Response));
     const task = { task_id: taskId, repo: 'owner/repo', head_sha: sha, channel_source: source, channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'TG-42' } };
-    ddbSend.mockResolvedValue({ Attributes: task });
+    ddbSend.mockResolvedValue({ Item: { repo: task.repo }, Attributes: task });
 
     await handler(amplifyEvent());
 
@@ -555,6 +1112,8 @@ describe('validated Amplify PR routing', () => {
     expect(captureScreenshotMock).toHaveBeenCalledWith('https://pr-42.app123.amplifyapp.com', expect.anything());
     expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 42 }));
     expect(ddbSend.mock.calls[0][0].input.Key).toEqual({ task_id: taskId });
+    // The branch of the validated pull request is in owner/repo itself, so it names the task.
+    expect(sentToTable('Update')).toEqual([expect.objectContaining({ Key: { task_id: taskId } })]);
     if (source === 'jira') {
       expect(deliverJiraMock).toHaveBeenCalledWith(expect.anything(), 'TaskTable', 'JiraRegistry', task,
         'owner/repo', sha, expect.stringContaining('https://d1.cloudfront.net/'),
@@ -565,6 +1124,24 @@ describe('validated Amplify PR routing', () => {
       expect(postIssueCommentMock).toHaveBeenCalledWith(expect.anything(), 'issue-42', expect.stringContaining('https://pr-42.app123.amplifyapp.com'));
       expect(deliverJiraMock).not.toHaveBeenCalled();
     }
+  });
+
+  test.each([
+    ['a fork', { full_name: 'evil/repo' }],
+    ['a fork that was deleted', null],
+  ])('a validated pull request from %s cannot name a task by its branch', async (_label, headRepo) => {
+    fetchOk({ ...pr42, head: { ...pr42.head, repo: headRepo } });
+    ddbSend.mockResolvedValue({
+      Item: { repo: 'owner/repo' },
+      Attributes: { task_id: taskId, repo: 'owner/repo', head_sha: sha, channel_source: 'jira', channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'TG-42' } },
+    });
+
+    await handler(amplifyEvent());
+
+    expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 42 }));
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(deliverJiraMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -692,7 +1269,7 @@ describe('validated Amplify PR routing', () => {
 
   test('coerces non-string PR title/body before Linear identifier lookup', async () => {
     fetchOk({ ...pr42, title: {}, body: 42 });
-    ddbSend.mockResolvedValue({ Attributes: {} });
+    ddbSend.mockResolvedValue({ Item: { repo: 'owner/repo' }, Attributes: {} });
     extractLinearIdentifierMock.mockReset().mockReturnValue(null);
     extractFromBranchMock.mockReturnValue(null);
     await handler(amplifyEvent());

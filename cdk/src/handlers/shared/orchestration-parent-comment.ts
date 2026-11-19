@@ -36,6 +36,7 @@
 
 import { KNOWN_EPIC_COMMANDS } from './orchestration-comment-trigger';
 import { isIntegrationNode } from './orchestration-integration-node';
+import { DEFAULT_LABEL_FILTER } from './trigger-label';
 
 /** Minimal view of a sub-issue row this matcher needs. */
 export interface ParentCommentNode {
@@ -300,8 +301,17 @@ export function renderParentDisambiguationReply(
    * correct as commands are added.
    */
   hasFailures = false,
+  /**
+   * The label this project triggers on. It is set per project, so the reply
+   * names the one stored on the epic: a label the webhook does not filter on
+   * starts nothing. New work is folded in by re-applying it on the EPIC; on the
+   * new sub-issue alone it would start a separate task.
+   */
+  triggerLabel = DEFAULT_LABEL_FILTER,
 ): string {
   const real = nodes.filter((n) => !isIntegrationNode(n.sub_issue_id));
+  const newWorkPath = 'create a new sub-issue under this epic, then remove and re-apply the '
+    + `\`${triggerLabel}\` label on this epic — I'll fold it into the orchestration.`;
   // The "what you can type here" footer — always present so an unrecognised
   // comment is never a dead-end. `retry` is only meaningful when something
   // failed, so it's listed only then (with the equivalent re-label path, so the
@@ -325,8 +335,7 @@ export function renderParentDisambiguationReply(
       '👋 That looks like **new work** rather than a change to one of the '
         + 'existing sub-issues.',
       '',
-      'To have me build it, create a new sub-issue under this epic and add the '
-        + '`abca` label — I\'ll fold it into the orchestration. (If you actually '
+      `To have me build it, ${newWorkPath} (If you actually `
         + 'meant one of the existing sub-issues, name it — e.g. '
         + '`@bgagent ENG-123: <what to change>`.)',
       '',
@@ -360,8 +369,7 @@ export function renderParentDisambiguationReply(
     ...real.map((n) => `- ${nodeLabel(n)}`),
     ...integrationHint(nodes),
     '',
-    "If it's **new work** (not a change to one of these), create a new sub-issue " +
-      'under this epic and add the `abca` label — I\'ll fold it into the orchestration.',
+    `If it's **new work** (not a change to one of these), ${newWorkPath}`,
     ...commandsFooter,
   );
   return out.join('\n');

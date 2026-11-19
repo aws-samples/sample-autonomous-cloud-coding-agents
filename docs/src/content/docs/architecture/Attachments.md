@@ -200,6 +200,7 @@ The `<attachment_id>` segment ensures uniqueness even if multiple attachments sh
 | Allowed file MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log` | Useful for code/data context; no executables |
 | Max URL fetch size | 10 MB | Same per-attachment limit for fetched content |
 | URL fetch timeout | 10 seconds | Prevent SSRF-style long-poll attacks |
+| URL attachments, total time per task | 30 seconds | No request for a URL attachment starts or runs after this time; name lookups and screening are counted but not cut off. The orchestrator function has 60 seconds for its whole invocation |
 | URL scheme | `https` only | No `http`, `file`, `ftp`, or custom schemes |
 
 **Payload limit note:** The binding constraint for the inline path is **not** the API Gateway 10 MB body limit — it is the **Lambda synchronous invocation payload limit of 6 MB**. API Gateway REST API forwards the request body to Lambda as part of the invocation payload, which includes the body plus API Gateway metadata. The limits above are set conservatively to ensure the full payload stays under 6 MB.
@@ -291,20 +292,19 @@ try {
 
 ### Idempotency key interaction with PENDING_UPLOADS
 
-When a client retries a task creation with the same idempotency key, the existing task may be in `PENDING_UPLOADS` with expired presigned POST policies. The idempotency check is special-cased:
+When a client retries a task creation with the same idempotency key, the existing task may be in `PENDING_UPLOADS`, and the answer to the creating request held the only copy of the upload instructions. The idempotency check is special-cased:
 
-| Existing task status | Presigned URLs expired? | Behaviour |
-|---|---|---|
-| `PENDING_UPLOADS` | No (< 10 min old) | Return existing response with original upload instructions (true idempotency) |
-| `PENDING_UPLOADS` | Yes (> 10 min old) | Generate new attachment IDs + new S3 keys, generate new presigned POST policies, update AttachmentRecords in DynamoDB (conditional write: `ConditionExpression: 'status = PENDING_UPLOADS'` — prevents clobbering a concurrent `confirm-uploads` that transitioned to `SUBMITTED`), return updated response. If the conditional write fails, re-read the task and return current status. |
-| `SUBMITTED` or later | N/A | Return existing task (standard idempotency) |
-| `FAILED` / `CANCELLED` | N/A | Return existing task (standard idempotency) |
+| Existing task status | Behaviour |
+|---|---|
+| `PENDING_UPLOADS` | Return the existing task (`200`, `Idempotent-Replay: true`) with new presigned POST policies for the uploads that are still pending, under the same attachment IDs and S3 keys. Nothing is written. |
+| `SUBMITTED` or later | Return existing task (standard idempotency) |
+| `FAILED` / `CANCELLED` | Return existing task (standard idempotency) |
 
 This prevents the deadlock where a client crash leaves an unreachable `PENDING_UPLOADS` task blocking retries for 30 minutes.
 
 **Presigned POST policy expiry and clock skew:** The 10-minute policy expiry uses the server's clock (AWS SigV4 signing time). Clients with clock skew > 5 minutes may find policies expire earlier than expected. The 10-minute window provides ~5 minutes of effective skew tolerance. Clients that consistently fail uploads should check their system clock (AWS SDK requests also fail with > 15 minutes skew). The CLI should log the server's `Date` header on upload failure to help users diagnose clock issues.
 
-**Why new S3 keys on retry:** Regenerating presigned POST policies for the same S3 keys creates a collision risk if the first client instance is still alive (e.g., network partition, not a crash). Both instances would upload to the same key, with one overwriting the other. Using new attachment IDs (and therefore new S3 key paths) ensures concurrent client instances cannot interfere. The orphaned objects from the original attempt are cleaned up by the auto-cancel rule or the 90-day lifecycle.
+**Why the same S3 keys on retry:** The attachment records stay as they are, so a first client instance that is still alive (e.g., network partition, not a crash) and the retrying one can both finish: `confirm-uploads` looks each upload up under the key of its record. The bucket is versioned and `confirm-uploads` stores the version it screened on the record, which is the version the agent downloads, so an upload that arrives later under the same key is a new version that nothing reads. New attachment IDs would need a conditional write of the records and would strand the uploads of the first instance. A policy issued late in the 30-minute window can outlive the task by up to 10 minutes; an upload made after the auto-cancel rule has cleaned up stays until the 90-day lifecycle removes it.
 
 ### Convenience path: Inline base64 (small attachments)
 
@@ -384,7 +384,7 @@ sequenceDiagram
 1. **URL scheme:** Only `https` is allowed. No `http`, `file`, `ftp`, or custom schemes. Validated synchronously at submission time.
 2. **DNS resolution pinning (prevents DNS rebinding):** The fetch implementation must: (a) resolve DNS manually (e.g., via `dns.resolve4`/`dns.resolve6`), (b) validate the resolved IP against private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `127.0.0.0/8`, `::1`, `fd00::/8`), (c) connect to the validated IP directly using `undici`'s `connect` option or equivalent — **pinning** the connection to the resolved IP and preventing the HTTP library from doing a second DNS lookup that could return a different (malicious) IP. This technique is called "DNS resolution pinning" and it mitigates the DNS rebinding attack, where an attacker's DNS server returns a public IP on the first lookup (passing validation) then a private IP on the second lookup (reaching internal services).
 3. **Redirect limits:** Follow at most 2 redirects. Re-validate the target URL and resolved IP after each redirect.
-4. **Timeout and size:** 10-second timeout, 10 MB max response body. Stream the response and abort if the size limit is exceeded.
+4. **Timeout and size:** 10-second timeout per request, 30 seconds for all URL attachments of a task, 10 MB max response body. No request for a URL attachment starts or runs after the 30 seconds; name lookups and screening are counted but not cut off. Stream the response and abort if the size limit is exceeded.
 5. **No auth headers to non-GitHub URLs:** Only GitHub URLs (matching the repo's installation) receive the GitHub token. All other URLs are fetched without credentials.
 
 **URL fetch policy (open fetch with SSRF protection):** The default policy allows fetching from any public HTTPS URL that passes SSRF validation. This supports real-world use cases (Figma exports, Google Docs, Confluence, etc.) without requiring per-deployment configuration. Repos can optionally restrict to a URL allowlist via blueprint config:
@@ -463,8 +463,8 @@ flowchart TD
 | MIME type | Expected magic bytes |
 |---|---|
 | `application/pdf` | `%PDF-` |
-| `application/json` | Starts with `{`, `[`, or UTF-8 BOM + `{`/`[` |
-| `text/*` | Valid UTF-8, no null bytes in first 8 KB |
+| `application/json` | Same rule as `text/*` (the first byte, `{` or `[`, is only used to guess the type of an inline attachment that declares none) |
+| `text/*` | Valid UTF-8 and no null byte anywhere in the file |
 | `image/png` | `\x89PNG\r\n\x1a\n` |
 | `image/jpeg` | `\xFF\xD8\xFF` |
 
@@ -822,7 +822,7 @@ async def prepare_attachments(
 
 **Error handling:** `AttachmentDownloadError` and `AttachmentIntegrityError` are fatal — the task fails with a clear error. The agent does not proceed with missing or corrupted attachments.
 
-Attachments are downloaded to `.attachments/` in the workspace root. This directory is `.gitignore`d by the agent to prevent accidentally committing binary attachments.
+Attachments are downloaded to `.attachments/` in the workspace root. For a task with a repository, the agent lists this directory in the clone's `.git/info/exclude`, a local file that is never committed, so git ignores it; that prevents accidentally committing binary attachments.
 
 **No presigned URL expiry problem:** Because the agent downloads via IAM role credentials (which auto-rotate via the instance metadata service or ECS task role), there is no expiry window. Whether the task starts immediately or after a 4-hour approval wait (Change Manifest `AWAITING_APPROVAL` state), the download works identically.
 
@@ -944,8 +944,8 @@ bgagent submit --repo org/app --task "Implement this design" \
 ```
 
 The CLI detects whether the argument is a local file path or URL:
-- **Local file <= 500 KB:** Read, base64-encode, detect MIME type from extension/magic bytes, send inline as `{ type: 'image'|'file', data: '...', content_type: '...', filename: '...' }`
-- **Local file > 500 KB:** Send metadata only (with `expected_size_bytes`) in task creation, receive presigned POST policy (URL + form fields), upload directly to S3 via multipart form POST, call confirm-uploads.
+- **Local file <= 500 KB, while the inline files of the request stay within 3 MB in total:** Read, base64-encode, take the MIME type from the file extension, send inline as `{ type: 'image'|'file', data: '...', content_type: '...', filename: '...' }`
+- **Any other local file (> 500 KB, or one that would take the inline total over 3 MB):** Send metadata only (with `expected_size_bytes`) in task creation, receive presigned POST policy (URL + form fields), upload directly to S3 via multipart form POST, call confirm-uploads.
 - **URL:** Send as `{ type: 'url', url: '...' }`
 
 The CLI enforces size limits client-side (fail fast with a clear error rather than uploading 10 MB only to get a rejection). Progress bars show upload status for large files.
@@ -960,23 +960,24 @@ Same `attachments` array in the JSON body. For attachments > 500 KB, webhook cal
 
 When a user mentions `@Shoof` in a message that contains file uploads or image attachments:
 
-1. The `slack-events.ts` handler extracts `event.files[]` from the Slack event.
-2. For each file, it calls the Slack API (`files.info` or uses the `url_private_download`) to get the file content.
-3. Files are validated against size limits (10 MB per file). Oversized files are rejected with a Slack reply: "Attachment `{filename}` is too large (max 10 MB). Please reduce the file size or link to it instead."
-4. Files are uploaded to S3 directly (the Slack handler Lambda has `grantPut`), screened, and converted to `AttachmentRecord` entries.
-5. The records are passed to `createTaskCore()`.
+1. The `slack-events.ts` handler extracts `event.files[]` from the Slack event and passes the file references on with the mention.
+2. `slack-command-processor.ts` refuses a message with more than 10 files, then takes the files one by one and checks each before it downloads it: the size Slack declares against the inline limits (500 KB per file, 3 MB for the files of one message), the MIME type against the allowed image and file types, and that the download URL is on a Slack domain.
+3. It downloads each file that passed from its `url_private_download` with the workspace's bot token, and checks the downloaded size against the same two limits (the size Slack declares can differ from what arrives).
+4. The files are passed to `createTaskCore()` as inline attachments (`data` in base64), the shape a client sends on the [inline path](#convenience-path-inline-base64-small-attachments), and are validated there like any other inline attachment.
 
-**Slack error surface — atomic failure (consistent with design principle 3):** If any attachment fails validation, screening, or upload, the **entire task is rejected** — no partial attachment submission. This matches the behaviour of all other channels (CLI, webhook, API). The Slack reply lists all failures so the user can fix them in one re-submission:
+**Slack error surface — atomic failure (consistent with design principle 3):** If any file fails a check or its download, the **entire task is rejected** — no partial attachment submission. This matches the behaviour of all other channels (CLI, webhook, API). The Slack reply lists every file that failed so the user can fix them in one re-submission:
 
 | Failure | Slack reply |
 |---|---|
-| File too large | "Task not created. `{filename}` is too large ({size} MB, max 10 MB). Please reduce the file size or remove it and try again." |
-| Screening blocked | "Task not created. `{filename}` was blocked by content screening ({categories}). Please remove this file and try again." |
-| Unsupported MIME type | "Task not created. `{filename}` has unsupported type `{mime}`. Supported: images (png, jpeg) and text files (txt, csv, json, md, pdf, log)." |
-| S3 upload failure | "Task not created. Failed to process `{filename}`. Please try again." |
-| Multiple failures | "Task not created. 2 attachment errors: `{file1}` (blocked by content screening), `{file2}` (too large, 15 MB > 10 MB limit). Fix or remove these files and try again." |
+| File too large | ":x: Task not created. `{filename}` (too large, {size} KB > 500 KB limit). Fix or remove these files and try again." |
+| Files too large together | ":x: Task not created. `{filename}` (more than 3 MB of attachments in total). Fix or remove these files and try again." The file named is the one that takes the message over the limit. |
+| Unsupported MIME type | ":x: Task not created. `{filename}` has unsupported type `{mime}`. Fix or remove these files and try again." |
+| Download failed | ":x: Task not created. `{filename}` (download failed: HTTP {status}). Fix or remove these files and try again." |
+| Too many files | ":x: Task not created. Too many attachments ({count}, max 10)." |
+| Multiple failures | ":x: Task not created. 2 attachment errors: `{file1}` (too large, 600 KB > 500 KB limit), `{file2}` has unsupported type `{mime}`. Fix or remove these files and try again." |
+| Refused by `createTaskCore()` (for example blocked by content screening) | ":x: Failed to create task: {error message}" |
 
-**Note:** Slack files bypass the inline base64 path (they go directly from Slack's CDN to our S3 via the Lambda). This avoids the 500 KB inline limit.
+**Note:** Slack files take the inline path, not the presigned one: the processor hands their bytes to `createTaskCore()`, so the inline limits apply (500 KB per file, 3 MB per message), not the 10 MB of an uploaded attachment.
 
 ### Linear
 
@@ -1613,7 +1614,7 @@ The implementation is ordered to deliver value incrementally while maintaining s
 26. Add `POST /v1/tasks/{task_id}/confirm-uploads` API endpoint with concurrent-call safety (early short-circuit, conditional DynamoDB write for both success and failure paths)
 27. Move concurrency increment from create-task to confirm-uploads for presigned-upload tasks
 28. Add presigned POST policy generation in create-task handler (with `content-length-range` enforcement, `expected_size_bytes` validation, S3 versioning)
-29. Add idempotency key special-casing for `PENDING_UPLOADS` (new S3 keys + new attachment IDs on retry to prevent collision, conditional DynamoDB write)
+29. Add idempotency key special-casing for `PENDING_UPLOADS` (new presigned POST policies on retry, for the same attachment IDs and S3 keys)
 30. Add `PendingUploadCleanupRule` EventBridge rule (5-minute schedule, conditional DynamoDB write for race safety, prefix-level S3 cleanup)
 31. Add CLI two-phase upload flow for files > 500 KB (with progress bar, multipart form POST)
 32. Update `ORCHESTRATOR.md` state diagram

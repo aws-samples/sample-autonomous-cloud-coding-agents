@@ -31,7 +31,6 @@
 
 import { randomUUID } from 'node:crypto';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { apiEvent, emulatorTables } from './harness';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
 import { TaskStatus } from '../../src/constructs/task-status';
 import { TaskTable } from '../../src/constructs/task-table';
@@ -53,6 +52,7 @@ import { handler as reconcileConcurrency } from '../../src/handlers/reconcile-co
 import { admissionControl, finalizeTask, loadTask, queueTask, transitionTask } from '../../src/handlers/shared/orchestrator';
 import type { TaskRecord } from '../../src/handlers/shared/types';
 import { makeDocClient } from '../../src/handlers/shared/ua';
+import { apiEvent, emulatorTables } from './harness';
 
 const ddb = makeDocClient();
 

@@ -62,15 +62,19 @@ type Finding = readonly [file: string, line: number, rule: string];
 interface Options {
   /** `missing`: no semgrep on PATH. `fails`: it exits 2. `scans-nothing`: it reports no scanned file. */
   readonly semgrep?: 'missing' | 'fails' | 'scans-nothing';
+  /** The files semgrep reports as scanned; every file of the case unless given. */
+  readonly scanned?: readonly string[];
   /** Leave the root without a git repository. */
   readonly noGit?: boolean;
+  /** Symbolic links to make before `git add`: path of the link -> its target. */
+  readonly links?: Record<string, string>;
 }
 
 /** Run the script in a temp repo holding `files`, with a fake semgrep that reports `findings`. */
 function run(files: Record<string, string>, findings: readonly Finding[], options: Options = {}): RunResult {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-masking-guard-'));
   // The repo holds the case's files and nothing else: the script reads every
-  // tracked source file, so it runs from its real location, and the fake
+  // tracked file, so it runs from its real location, and the fake
   // semgrep lives beside the repo, not in it.
   const root = path.join(work, 'repo');
   const bin = path.join(work, 'bin');
@@ -81,9 +85,13 @@ function run(files: Record<string, string>, findings: readonly Finding[], option
       fs.writeFileSync(path.join(root, rel), contents);
     }
 
+    for (const [rel, target] of Object.entries(options.links ?? {})) {
+      fs.symlinkSync(target, path.join(root, rel));
+    }
+
     const report = {
       results: findings.map(([file, line, rule]) => ({ path: file, start: { line }, check_id: `semgrep.${rule}` })),
-      paths: { scanned: options.semgrep === 'scans-nothing' ? [] : Object.keys(files) },
+      paths: { scanned: options.semgrep === 'scans-nothing' ? [] : options.scanned ?? Object.keys(files) },
     };
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, 'args.json'), '[]');
@@ -167,7 +175,7 @@ describe('check-masking-suppression-placement', () => {
 
     expect(result.status).toBe(0);
     // The counts are the anti-vacuity assertion: a guard that read nothing also exits 0.
-    expect(result.stdout).toContain('3 semgrep suppressions in 4 source files name a rule and a reason');
+    expect(result.stdout).toContain('3 semgrep suppressions in 4 files name a rule and a reason');
     expect(result.stdout).toContain('all 2 silent-success-masking suppressions bind to one of 2 findings');
   });
 
@@ -217,6 +225,83 @@ describe('check-masking-suppression-placement', () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('bin/tool:6 (semgrep reads ');
+    });
+
+    describe('reads the tracked files that the masking rules do not', () => {
+      // The registry scan reads workflows, Dockerfiles, shell scripts and configuration
+      // as well, and semgrep honours a suppression in each of them (measured against
+      // the pinned one). The masking rules read none of these: only src/a.ts is scanned.
+      const names = ['.github/workflows/build.yml', 'agent/Dockerfile', 'scripts/ci-build.sh', 'agent/pyproject.toml', 'docs/src/components/Search.astro'];
+      const files = {
+        'src/a.ts': 'export const x = 1;\n',
+        // The bare word, on line 2 of each.
+        ...Object.fromEntries(names.map((name) => [name, `# what follows is not for review\n# ${WORD}\n`])),
+      };
+      let result: RunResult;
+      beforeAll(() => {
+        result = run(files, [], { scanned: ['src/a.ts'] });
+      });
+
+      test('exits 1 and reports every one of them', () => {
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${names.length} semgrep suppression(s) not in the form`);
+      });
+
+      test.each(names)('rejects the bare suppression in %s', (name) => {
+        expect(result.stderr).toContain(`${name}:2 (semgrep reads `);
+      });
+    });
+
+    test('leaves Markdown alone, where the guides have to spell the word', () => {
+      const result = run(
+        {
+          'src/a.ts': 'export const x = 1;\n',
+          'src/b.ts': 'export const y = 2;\n',
+          'AGENTS.md': `A line that holds the word \`${WORD}\` must be one suppression.\n`,
+          'docs/guide.mdx': `Use \`${WORD}\` with a rule id and a reason.\n`,
+        },
+        [],
+        { scanned: ['src/a.ts', 'src/b.ts'] },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('0 semgrep suppressions in 2 files name a rule and a reason');
+    });
+
+    test('reads a Markdown file that semgrep scanned', () => {
+      // The pinned semgrep reads an executable file that starts with a script line
+      // for the masking rules, whatever its name, and honours the suppression in it.
+      const tool = `#!/usr/bin/env node\n${tsCatch(` // ${WORD}`)}`;
+      const result = run(
+        { 'src/a.ts': 'export const x = 1;\n', 'tools/release.md': tool },
+        [['tools/release.md', 6, TS_RULE]],
+        { scanned: ['src/a.ts', 'tools/release.md'] },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('tools/release.md:6 (semgrep reads ');
+    });
+
+    test('passes over a tracked link to a directory, which semgrep does not read through', () => {
+      const result = run(
+        { 'src/a.ts': 'export const x = 1;\n', 'docs/imgs/a.txt': 'x\n' },
+        [],
+        { scanned: ['src/a.ts'], links: { latest: 'docs/imgs' } },
+      );
+
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('0 semgrep suppressions in 2 files name a rule and a reason');
+    });
+
+    test('reads a file that holds a NUL byte', () => {
+      // The pinned semgrep reads a source file that holds one and honours the
+      // suppression in it, so no file is taken for a binary one and left out.
+      const source = ['def f():', '    try:', '        return g()', '    except KeyError:', `        return None  # ${WORD}`, `BLOB = "${String.fromCharCode(0)}"`, ''].join('\n');
+      const result = run({ 'src/a.py': source }, [['src/a.py', 5, PY_RULE]]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('src/a.py:5 (semgrep reads ');
     });
 
     describe('finds the word the way semgrep does', () => {

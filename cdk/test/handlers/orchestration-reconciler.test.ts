@@ -103,6 +103,8 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   postIssueCommentAdf: (...args: unknown[]) => jiraPostIssueCommentAdfMock(...args),
   updateIssueCommentAdf: (...args: unknown[]) => jiraUpdateIssueCommentAdfMock(...args),
   buildAdfDocument: (...args: Parameters<typeof jiraBuildAdfDocumentMock>) => jiraBuildAdfDocumentMock(...args),
+  // The agent's own text goes through the real parser: it is pure.
+  parseMarkdownBlocks: jest.requireActual('../../src/handlers/shared/jira-feedback').parseMarkdownBlocks,
   transitionIssueState: (...args: unknown[]) => jiraTransitionIssueStateMock(...args),
 }));
 
@@ -119,7 +121,7 @@ process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
 process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
 import { TERMINAL_STATUSES } from '../../src/constructs/task-status';
-import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
+import { handler, parseTerminalTaskRecord, refreshPanelAndSettle } from '../../src/handlers/orchestration-reconciler';
 
 beforeEach(() => {
   rollupTaskCostMock.mockReset().mockResolvedValue(false);
@@ -144,6 +146,8 @@ function taskRecord(fields: {
   error_message?: string;
   // Whether the agent actually edited code; false marks a question/answer run.
   code_changed?: boolean;
+  // What the agent said in a run without a commit.
+  answer_text?: string;
   iteration_reply_comment_id?: string;
   cost_usd?: number;
   duration_s?: number;
@@ -157,6 +161,7 @@ function taskRecord(fields: {
   if (fields.status) img.status = { S: fields.status };
   if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
   if (fields.code_changed !== undefined) img.code_changed = { BOOL: fields.code_changed };
+  if (fields.answer_text) img.answer_text = { S: fields.answer_text };
   if (fields.cost_usd !== undefined) img.cost_usd = { N: String(fields.cost_usd) };
   if (fields.duration_s !== undefined) img.duration_s = { N: String(fields.duration_s) };
   if (fields.turns_attempted !== undefined) img.turns_attempted = { N: String(fields.turns_attempted) };
@@ -340,6 +345,26 @@ describe('orchestration-reconciler handler', () => {
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
     const ctx = createTaskCoreMock.mock.calls[0][1];
     expect(ctx.idempotencyKey).toBe('orch_1_B');
+  });
+
+  test('the panel shows a dependent it has just started as running, not as blocked', async () => {
+    // The rows are read before the release. Rendered as read, B would say
+    // "blocked" while its agent runs, until the next event of this epic.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'released' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      ],
+    });
+    await handler({ Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })] } as never);
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toContain('- ✅ A — succeeded');
+    expect(body).toContain('- 🔄 B — running');
+    expect(body).not.toContain('blocked');
   });
 
   test('rolls up a terminal task even when it does not belong to an orchestration', async () => {
@@ -774,6 +799,7 @@ function mockCascade(children: Array<{
   child_task_id?: string;
   child_branch_name?: string;
   linear_identifier?: string;
+  channel_metadata?: Record<string, string>;
 }>, metaOverrides: Record<string, unknown> = {}): void {
   const meta = {
     sub_issue_id: '#meta',
@@ -798,6 +824,7 @@ function mockCascade(children: Array<{
     ...(c.child_task_id && { child_task_id: c.child_task_id }),
     ...(c.child_branch_name && { child_branch_name: c.child_branch_name }),
     ...(c.linear_identifier && { linear_identifier: c.linear_identifier }),
+    ...(c.channel_metadata && { channel_metadata: c.channel_metadata }),
   }));
   ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
     if (cmd._type === 'Query') return { Items: [meta, ...rows] }; // loadOrchestration
@@ -963,6 +990,60 @@ describe('orchestration-reconciler handler — cascading onto dependents', () =>
       })],
     } as never);
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('an iteration that only answered a question re-stacks nothing and does not re-open the epic', async () => {
+    // code_changed=false: the branch of A is where it was, so B has nothing new
+    // to merge. A re-stack would be a whole agent session on B for no change.
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-question',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'A',
+        orchestration_iteration: true,
+        code_changed: false,
+      })],
+    } as never);
+
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    const reopened = ddbSend.mock.calls
+      .map((c) => c[0] as { _type?: string; input?: { UpdateExpression?: string } })
+      .filter((cmd) => cmd._type === 'Update' && /REMOVE rollup_posted_at/.test(cmd.input?.UpdateExpression ?? ''));
+    expect(reopened).toHaveLength(0);
+    // The panel is still refreshed, and reads as the finished epic it is.
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).toMatch(/complete/i);
+    expect(body).not.toMatch(/updating/i);
+  });
+
+  test('a re-stack that had nothing to merge does not re-stack the next dependent', async () => {
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-cmt-1');
+    mockCascade([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'succeeded', child_task_id: 'task-B', child_branch_name: 'branch-B' },
+      { sub_issue_id: 'C', depends_on: ['B'], child_status: 'succeeded', child_task_id: 'task-C', child_branch_name: 'branch-C' },
+    ]);
+    await handler({
+      Records: [taskRecord({
+        task_id: 'restack-B',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'B',
+        restack_predecessor_sub_issue_id: 'A',
+        code_changed: false,
+      })],
+    } as never);
+
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    // B's own "updating" row still has to go: the panel is refreshed.
+    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    expect(body).not.toMatch(/updating/i);
   });
 
   test('cascade source with no started dependents → no restack', async () => {
@@ -1345,6 +1426,139 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
       href: expect.stringContaining('/pull/'),
     }));
     expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+  });
+
+  test('a Jira orchestration iteration that answered a question posts the answer in its result', async () => {
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+        code_changed: false,
+        answer_text: 'Because the queue already retries.',
+      })],
+    } as never);
+
+    // The status comment points at the answer ...
+    const pointer = jiraUpdateIssueCommentAdfMock.mock.calls.find(
+      (([, , commentId]) => commentId === 'jira-status-1'),
+    );
+    expect(pointer![3]).toEqual({
+      _adf: [[{ text: '💬 Finished — answer posted below.', strong: true }]],
+    });
+    // ... so the result posted below it has to carry it, right after the header.
+    expect(jiraPostIssueCommentAdfMock).toHaveBeenCalledTimes(1);
+    const [, issueKey, result] = jiraPostIssueCommentAdfMock.mock.calls[0];
+    expect(issueKey).toBe('KAN-2');
+    const lines = (result._adf as Array<Array<{ text: string }>>)
+      .map((runs) => runs.map((run) => run.text).join(''));
+    expect(lines.slice(0, 2)).toEqual(['✅ Task completed', 'Because the queue already retries.']);
+  });
+
+  test('a Jira orchestration iteration that completes with a red build names the reason in its result', async () => {
+    // The gate counts regressions only: a build that was red before the
+    // iteration leaves the task COMPLETED with build_passed=false, and no
+    // error message that a reason could be read from.
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        build_passed: false,
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+      })],
+    } as never);
+
+    const pointer = jiraUpdateIssueCommentAdfMock.mock.calls.find(
+      (([, , commentId]) => commentId === 'jira-status-1'),
+    );
+    expect(pointer![3]).toEqual({
+      _adf: [[{ text: '❌ Finished — details posted below.', strong: true }]],
+    });
+    expect(jiraPostIssueCommentAdfMock).toHaveBeenCalledTimes(1);
+    const [, , result] = jiraPostIssueCommentAdfMock.mock.calls[0];
+    const header = (result._adf as Array<Array<{ text: string }>>)[0].map((run) => run.text).join('');
+    expect(header).toBe(
+      '⚠️ Shipped a PR but stopped early — Build or tests did not pass — review and decide if more work is needed',
+    );
+  });
+
+  test('a Jira iteration advances the sub-issue with the review status of its own project mapping', async () => {
+    // The agent moved KAN-2 to the mapped status when it pushed. Without that
+    // name the adapter falls back to its name heuristic, which can take the
+    // rework transition from the mapped status back to In Progress.
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+        channel_metadata: { jira_issue_key: 'KAN-2', jira_status_on_pr: 'QA Review' },
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+      })],
+    } as never);
+
+    expect(jiraTransitionIssueStateMock).toHaveBeenCalledWith(
+      { cloudId: 'cloud-1', registryTableName: 'JiraWorkspaceRegistry' },
+      'KAN-2',
+      'in_review',
+      { inReview: 'QA Review' },
+      undefined,
+    );
   });
 
   test('a failed Jira terminal update releases the claim for redelivery', async () => {
@@ -1833,5 +2047,672 @@ describe('the panel preview on a CHAIN (no integration node)', () => {
     // NOT presented as a combined result — nothing was merged on a chain.
     expect(panel).toContain('🖼️ **Preview**');
     expect(panel).not.toContain('Combined preview');
+  });
+});
+
+type StoreRow = Record<string, unknown>;
+type StoreCommand = { _type: string; input: Record<string, unknown> };
+
+/** Whether a row satisfies a ConditionExpression of the kind the orchestration
+ *  code writes: alternatives joined by OR, each a list of clauses joined by AND,
+ *  or one such list followed by ``AND (b OR c)``. */
+function conditionHolds(row: StoreRow, expression: unknown, vals: StoreRow): boolean {
+  if (expression === undefined) return true;
+  const nested = /^(.+) AND \((.+)\)$/.exec(String(expression));
+  if (nested) return conditionHolds(row, nested[1], vals) && conditionHolds(row, nested[2], vals);
+  return String(expression).split(' OR ').some((alternative) => alternative.split(' AND ').every((clause) => {
+    const absent = /^attribute_not_exists\((\w+)\)$/.exec(clause);
+    if (absent) return row[absent[1]] === undefined;
+    const [, attr, op, rhs] = /^(\w+) (=|<>|IN) (.+)$/.exec(clause)!;
+    if (op === 'IN') return rhs.slice(1, -1).split(', ').some((v) => row[attr] === vals[v]);
+    return (row[attr] === vals[rhs]) === (op === '=');
+  }));
+}
+
+/**
+ * A stateful OrchestrationTable for the tests in which the ORDER of two writers
+ * decides what is stored. Unlike {@link mockOrchestration} it refuses an Update
+ * whose condition does not hold, as DynamoDB does. ``before`` runs a second
+ * writer at a chosen point of the handler: between its read and its write, or
+ * between two of its writes.
+ */
+function orchestrationStore(
+  children: Array<{
+    sub_issue_id: string;
+    depends_on?: string[];
+    child_status: string;
+    child_task_id?: string;
+    child_branch_name?: string;
+    failure_reason?: string;
+  }>,
+  meta: StoreRow = {},
+) {
+  const rows = new Map<string, StoreRow>([['#meta', {
+    sub_issue_id: '#meta',
+    orchestration_id: 'orch_1',
+    parent_linear_issue_id: 'PARENT',
+    linear_workspace_id: 'WS',
+    repo: 'o/r',
+    child_count: children.length,
+    platform_user_id: 'user-1',
+    status_comment_id: 'panel-1',
+    ...meta,
+  }]]);
+  for (const c of children) {
+    rows.set(c.sub_issue_id, {
+      orchestration_id: 'orch_1',
+      repo: 'o/r',
+      parent_linear_issue_id: 'PARENT',
+      linear_workspace_id: 'WS',
+      depends_on: [],
+      ...c,
+    });
+  }
+  /** TaskTable records, by task id: what the panel reads of a failed child's task. */
+  const tasks = new Map<string, StoreRow>();
+  let pending: { when: (cmd: StoreCommand) => boolean; run: () => unknown } | undefined;
+
+  ddbSend.mockImplementation(async (cmd: StoreCommand) => {
+    if (pending?.when(cmd)) {
+      const { run } = pending;
+      pending = undefined;
+      await run();
+    }
+    const { _type, input } = cmd;
+    if (_type === 'BatchGet') {
+      const [[table, { Keys }]] = Object.entries(input.RequestItems as Record<string, { Keys: Array<{ task_id: string }> }>);
+      return { Responses: { [table]: Keys.flatMap((k) => tasks.get(k.task_id) ?? []) } };
+    }
+    // Any other read of the task table finds nothing.
+    if (input.TableName !== 'OrchestrationTable') return {};
+    if (_type === 'Query') {
+      const taskId = (input.ExpressionAttributeValues as StoreRow)[':tid'];
+      const items = [...rows.values()].filter((r) => input.IndexName === undefined || r.child_task_id === taskId);
+      return { Items: items.map((r) => ({ ...r })) };
+    }
+    // Update: applied only when its condition holds.
+    const row = rows.get((input.Key as { sub_issue_id: string }).sub_issue_id)!;
+    const vals = (input.ExpressionAttributeValues ?? {}) as StoreRow;
+    if (!conditionHolds(row, input.ConditionExpression, vals)) {
+      throw Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' });
+    }
+    const expression = String(input.UpdateExpression);
+    for (const assignment of /SET (.+?)(?= REMOVE |$)/.exec(expression)?.[1].split(', ') ?? []) {
+      const [attr, value] = assignment.split(' = ');
+      row[attr] = vals[value];
+    }
+    for (const attr of /REMOVE (.+?)(?= SET |$)/.exec(expression)?.[1].split(', ') ?? []) delete row[attr];
+    return {};
+  });
+
+  return {
+    row: (subIssueId: string) => rows.get(subIssueId)!,
+    status: (subIssueId: string) => rows.get(subIssueId)?.child_status,
+    meta: rows.get('#meta')!,
+    tasks,
+    /** Run ``run`` once, just before the first command that ``when`` accepts. */
+    before(when: (cmd: StoreCommand) => boolean, run: () => unknown): void {
+      pending = { when, run };
+    },
+  };
+}
+
+describe('orchestration-reconciler handler — an event of a task that no longer decides its row', () => {
+  // A terminal task record is written again long after its status was set: the
+  // preview screenshot of a later push is stamped on the task that opened the
+  // branch, and that MODIFY still carries the old terminal status. By then the
+  // row may have been moved on (a comment repaired the child, a retry reset it),
+  // and it keeps the old task id until it is released again, so the late event
+  // still resolves to it.
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({
+      statusCode: 201, body: JSON.stringify({ data: { task_id: 'T-new', branch_name: 'branch-new' } }),
+    });
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+  });
+
+  /** A later write to A's first task, which ended FAILED. */
+  const lateFailure = () => ({
+    Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })],
+  }) as never;
+  /** The iteration that a reviewer's comment started on A, and that fixed it. */
+  const repair = () => ({
+    Records: [taskRecord({
+      task_id: 'TI',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A',
+      orchestration_iteration: true,
+      code_changed: true,
+    })],
+  }) as never;
+
+  test('after a comment repaired the child, it stays succeeded and its issue is not reverted', async () => {
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+    ]);
+    await handler(lateFailure());
+
+    expect(store.status('A')).toBe('succeeded');
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+    expect(swapIssueReactionMock).not.toHaveBeenCalledWith(expect.anything(), 'A', 'x');
+    // B was left waiting when A was repaired (no free slot): the event is still
+    // a wake-up, and B starts because A is succeeded.
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(store.status('B')).toBe('released');
+  });
+
+  test('the repair is processed between the read and the write of the late event: it still stands', async () => {
+    // The same two events, interleaved. The late event reads the rows while A is
+    // failed; the repair is then processed completely; only then the late event
+    // writes.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'failed', child_task_id: 'TA', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'skipped' },
+    ]);
+    store.before((cmd) => cmd._type === 'Update', () => handler(repair()));
+
+    await handler(lateFailure());
+
+    expect(store.status('A')).toBe('succeeded');
+    expect(store.status('B')).toBe('released');
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+  });
+
+  test('the late event is processed before the repair: the repair still stands', async () => {
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'failed', child_task_id: 'TA', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'skipped' },
+    ]);
+    await handler(lateFailure());
+    await handler(repair());
+
+    expect(store.status('A')).toBe('succeeded');
+    expect(store.status('B')).toBe('released');
+  });
+
+  test.each(['blocked', 'releasing', 'skipped'])('after a retry reset the child to %s, the old failure is not written back', async (status) => {
+    // P runs again, so A is not releasable: the late event has to leave it as it is.
+    const store = orchestrationStore([
+      { sub_issue_id: 'P', child_status: 'released', child_task_id: 'TP' },
+      { sub_issue_id: 'A', depends_on: ['P'], child_status: status, child_task_id: 'TA' },
+    ]);
+    await handler(lateFailure());
+
+    expect(store.status('A')).toBe(status);
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+  });
+
+  test('after the child was released again, an event of its earlier task is not applied to the new run', async () => {
+    // The index that maps a task to its row lags behind the row: for a moment
+    // after the new release it still resolves the earlier task to the row, which
+    // by then is `released` again, for the new task.
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'ready', child_task_id: 'TA' }]);
+    store.before(
+      (cmd) => cmd._type === 'Query' && cmd.input.IndexName === undefined,
+      () => Object.assign(store.row('A'), { child_status: 'released', child_task_id: 'T2' }),
+    );
+    await handler(lateFailure());
+
+    expect(store.row('A')).toMatchObject({ child_status: 'released', child_task_id: 'T2' });
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+  });
+
+  test('a child that a retry left ready is started by the late event, not failed again', async () => {
+    // The retry found no free slot and left A ready, with the id of its failed task.
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'ready', child_task_id: 'TA' }]);
+    await handler(lateFailure());
+
+    expect(store.status('A')).toBe('released');
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['the first delivery', 'released'],
+    ['a redelivery, after the first one died before it skipped the dependents,', 'failed'],
+  ])('%s of a failure fails the child, skips its dependents and reverts its issue', async (_name, status) => {
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: status, child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+    ]);
+    await handler(lateFailure());
+
+    expect(store.status('A')).toBe('failed');
+    expect(store.status('B')).toBe('skipped');
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('a dependent that was released since the rows were read is not skipped; the rest of the failure still applies', async () => {
+    // A refused skip is not a stale event: only that one dependent is left alone.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      { sub_issue_id: 'C', depends_on: ['A'], child_status: 'blocked' },
+    ]);
+    store.before(
+      (cmd) => cmd._type === 'Update' && (cmd.input.Key as { sub_issue_id: string }).sub_issue_id === 'B',
+      () => { store.row('B').child_status = 'released'; },
+    );
+    await handler(lateFailure());
+
+    expect(store.status('A')).toBe('failed');
+    expect(store.status('B')).toBe('released');
+    expect(store.status('C')).toBe('skipped');
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+  });
+});
+
+describe('orchestration-reconciler handler — an iteration on a failed sub-issue', () => {
+  const SETTLED_AT = '2026-01-01T00:00:00.000Z';
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({
+      statusCode: 201, body: JSON.stringify({ data: { task_id: 'T-new', branch_name: 'branch-new' } }),
+    });
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+  });
+
+  /** A failed with a pull request open, so B was skipped and the epic settled. */
+  const settledWithFailure = () => orchestrationStore([
+    { sub_issue_id: 'A', child_status: 'failed', child_task_id: 'TA', child_branch_name: 'branch-A' },
+    { sub_issue_id: 'B', depends_on: ['A'], child_status: 'skipped' },
+  ], { rollup_posted_at: SETTLED_AT });
+  const iteration = (codeChanged?: boolean) => ({
+    Records: [taskRecord({
+      task_id: 'TI',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      orchestration_sub_issue_id: 'A',
+      orchestration_iteration: true,
+      ...(codeChanged !== undefined && { code_changed: codeChanged }),
+    })],
+  }) as never;
+
+  test.each([
+    ['pushed a commit', true],
+    ['comes from an agent that does not say whether it pushed', undefined],
+  ])('one that %s recovers the node, starts its skipped dependent and re-opens the epic', async (_name, codeChanged) => {
+    const store = settledWithFailure();
+    await handler(iteration(codeChanged));
+
+    expect(store.status('A')).toBe('succeeded');
+    expect(store.status('B')).toBe('released');
+    expect(store.meta.rollup_posted_at).toBeUndefined();
+  });
+
+  test('one that only answered a question leaves the node failed, its dependent skipped and the epic settled', async () => {
+    // Nothing was fixed: the branch is where the failed run left it.
+    const store = settledWithFailure();
+    await handler(iteration(false));
+
+    expect(store.status('A')).toBe('failed');
+    expect(store.status('B')).toBe('skipped');
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(store.meta.rollup_posted_at).toBe(SETTLED_AT);
+  });
+});
+
+describe('orchestration-reconciler handler — the once-only claim of the final status', () => {
+  // The first settle of a finished epic stamps rollup_posted_at on the meta row
+  // BEFORE it edits the panel; every later settle (a redelivery, the sweep) that
+  // finds the stamp leaves the parent's state and reaction alone.
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset();
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    swapCommentReactionMock.mockReset().mockResolvedValue(true);
+  });
+
+  /** The last running child of the epic ends: every child is terminal. */
+  const lastChildCompleted = () => ({
+    Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1' })],
+  }) as never;
+  const lastChild = [{ sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' }];
+  const parentSettled = () => [
+    transitionIssueStateMock.mock.calls.some((c) => c[1] === 'PARENT'),
+    swapIssueReactionMock.mock.calls.some((c) => c[1] === 'PARENT' && c[2] === 'white_check_mark'),
+  ];
+
+  test('a final panel edit that fails gives the claim back, and the next settle posts the final status', async () => {
+    const store = orchestrationStore(lastChild);
+    // Linear is down or the workspace token cannot be read: nothing lands.
+    upsertStatusCommentMock.mockResolvedValueOnce(null);
+    transitionIssueStateMock.mockResolvedValueOnce(false);
+    swapIssueReactionMock.mockResolvedValueOnce(false);
+
+    await handler(lastChildCompleted());
+    expect(store.meta.rollup_posted_at).toBeUndefined();
+
+    // The next delivery of the record (or the next sweep run) is the settle that lands.
+    transitionIssueStateMock.mockClear();
+    swapIssueReactionMock.mockClear();
+    await handler(lastChildCompleted());
+    expect(store.meta.rollup_posted_at).toEqual(expect.any(String));
+    expect(upsertStatusCommentMock.mock.calls.at(-1)![2]).toContain('✅ **ABCA orchestration complete**');
+    expect(parentSettled()).toEqual([true, true]);
+  });
+
+  test('a final panel edit that lands keeps the claim: a later settle leaves the parent alone', async () => {
+    const store = orchestrationStore(lastChild);
+    await handler(lastChildCompleted());
+    const stamp = store.meta.rollup_posted_at;
+    expect(stamp).toEqual(expect.any(String));
+    expect(parentSettled()).toEqual([true, true]);
+
+    transitionIssueStateMock.mockClear();
+    swapIssueReactionMock.mockClear();
+    await handler(lastChildCompleted());
+    expect(store.meta.rollup_posted_at).toBe(stamp);
+    expect(parentSettled()).toEqual([false, false]);
+  });
+
+  test('a settle that arrives while the failing one holds the claim leaves the parent to the next one', async () => {
+    const store = orchestrationStore(lastChild);
+    // The first settle's edit fails slowly; a second delivery is processed meanwhile.
+    let secondSettledTheParent: boolean[] = [];
+    upsertStatusCommentMock.mockImplementationOnce(async () => {
+      await handler(lastChildCompleted());
+      secondSettledTheParent = parentSettled();
+      return null;
+    });
+    transitionIssueStateMock.mockResolvedValueOnce(false);
+    swapIssueReactionMock.mockResolvedValueOnce(false);
+
+    await handler(lastChildCompleted());
+    // The second lost the claim and left the parent alone; the first gave the claim back.
+    expect(secondSettledTheParent).toEqual([false, false]);
+    expect(store.meta.rollup_posted_at).toBeUndefined();
+
+    transitionIssueStateMock.mockClear();
+    swapIssueReactionMock.mockClear();
+    await handler(lastChildCompleted());
+    expect(store.meta.rollup_posted_at).toEqual(expect.any(String));
+    expect(parentSettled()).toEqual([true, true]);
+  });
+
+  test('a claim that another settle has taken since is not given back', async () => {
+    // The edit takes seconds to fail. Meanwhile the epic is re-opened (which
+    // removes the stamp), ends again, and that settle lands: the stamp is now
+    // its own, and removing it would settle the parent once more.
+    const store = orchestrationStore(lastChild);
+    upsertStatusCommentMock.mockResolvedValueOnce(null);
+    store.before(
+      (cmd) => cmd._type === 'Update' && String(cmd.input.UpdateExpression).includes('REMOVE rollup_posted_at'),
+      () => { store.meta.rollup_posted_at = 'stamp-of-the-later-settle'; },
+    );
+
+    await handler(lastChildCompleted());
+    expect(store.meta.rollup_posted_at).toBe('stamp-of-the-later-settle');
+  });
+
+  test('a settle that lost the claim leaves it alone, even when it carries the timestamp of the winner', async () => {
+    // The sweep calls this settle too, and can do so in the millisecond in which
+    // the reconciler does. The two stamps are then equal, and only having won
+    // the claim says whose it is.
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' }]);
+    const now = '2026-06-09T12:00:00.000Z';
+    const settle = () => refreshPanelAndSettle(
+      'orch_1',
+      [{
+        orchestration_id: 'orch_1',
+        sub_issue_id: 'A',
+        parent_issue_ref: 'PARENT',
+        credentials_ref: 'WS',
+        repo: 'o/r',
+        depends_on: [],
+        child_status: 'succeeded',
+        child_task_id: 'TA',
+        created_at: now,
+        updated_at: now,
+      }],
+      { credentials_ref: 'WS', parent_issue_ref: 'PARENT', status_comment_id: 'panel-1' },
+      now,
+    );
+
+    await settle(); // wins the claim, and its edit lands
+    upsertStatusCommentMock.mockResolvedValueOnce(null);
+    await settle(); // loses the claim, and its edit fails
+
+    expect(store.meta.rollup_posted_at).toBe(now);
+  });
+
+  test('an epic whose panel has no comment yet keeps the claim', async () => {
+    // No id came back, and there was none to edit: that is a failed post, but it
+    // is also what a surface that hands back no ids reports for a comment it did
+    // post. Giving the claim back there would post the final status again on
+    // every settle.
+    const store = orchestrationStore(lastChild, { status_comment_id: undefined });
+    upsertStatusCommentMock.mockResolvedValueOnce(null);
+
+    await handler(lastChildCompleted());
+    expect(store.meta.rollup_posted_at).toEqual(expect.any(String));
+  });
+
+  test('a claim that cannot be given back does not fail the record', async () => {
+    const store = orchestrationStore(lastChild);
+    upsertStatusCommentMock.mockResolvedValueOnce(null);
+    store.before(
+      (cmd) => cmd._type === 'Update' && String(cmd.input.UpdateExpression).includes('REMOVE rollup_posted_at'),
+      () => { throw new Error('throttled'); },
+    );
+
+    const result = await handler({
+      Records: [taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1', sequenceNumber: 'seq-1' })],
+    } as never);
+    expect(result.batchItemFailures).toEqual([]);
+    expect(store.meta.rollup_posted_at).toEqual(expect.any(String));
+  });
+
+  test('the retry comment gets its outcome from the settle that lands, not from the one that failed', async () => {
+    const store = orchestrationStore(lastChild, { retry_comment_id: 'retry-cmt-1' });
+    upsertStatusCommentMock.mockResolvedValueOnce(null);
+
+    await handler(lastChildCompleted());
+    expect(swapCommentReactionMock).not.toHaveBeenCalled();
+    expect(store.meta.retry_comment_id).toBe('retry-cmt-1');
+
+    await handler(lastChildCompleted());
+    expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'retry-cmt-1', 'white_check_mark');
+    expect(store.meta.retry_comment_id).toBeUndefined();
+  });
+
+  describe('for one day after the epic ended', () => {
+    // An edit that can never land: the panel comment was deleted (by a person, or
+    // by a retry whose new panel could not be posted), or its issue is gone.
+    // Giving the claim back for such an epic on every sweep run, for as long as
+    // its rows exist, repeats the parent's state and reaction calls each time and
+    // never answers the retry comment.
+    const ENDED = Date.parse('2026-06-08T12:00:00.000Z');
+    /**
+     * A settle of the finished epic, as the sweep makes one, this long after its last sub-issue ended.
+     * `reopenedAt` is the stamp of the meta row of an epic that was re-opened since.
+     */
+    const settleAfter = (store: ReturnType<typeof orchestrationStore>, minutes: number, reopenedAt?: string) => {
+      const now = new Date(ENDED + minutes * 60_000).toISOString();
+      return refreshPanelAndSettle(
+        'orch_1',
+        [{
+          orchestration_id: 'orch_1',
+          sub_issue_id: 'A',
+          parent_issue_ref: 'PARENT',
+          credentials_ref: 'WS',
+          repo: 'o/r',
+          depends_on: [],
+          child_status: 'succeeded',
+          child_task_id: 'TA',
+          created_at: new Date(ENDED).toISOString(),
+          updated_at: new Date(ENDED).toISOString(),
+        }],
+        {
+          credentials_ref: 'WS',
+          parent_issue_ref: 'PARENT',
+          status_comment_id: 'panel-1',
+          ...(typeof store.meta.retry_comment_id === 'string' && { retry_comment_id: store.meta.retry_comment_id }),
+          ...(reopenedAt !== undefined && { updated_at: reopenedAt }),
+        },
+        now,
+      ).then(() => now);
+    };
+    const finished = () => orchestrationStore(
+      [{ sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' }],
+      { retry_comment_id: 'retry-cmt-1' },
+    );
+
+    test('a final edit that fails 25 hours after the end keeps the claim and answers the retry comment', async () => {
+      const store = finished();
+      upsertStatusCommentMock.mockResolvedValue(null);
+
+      const now = await settleAfter(store, 25 * 60);
+
+      expect(store.meta.rollup_posted_at).toBe(now);
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'retry-cmt-1', 'white_check_mark');
+      expect(store.meta.retry_comment_id).toBeUndefined();
+    });
+
+    test('the sweep stops trying an edit that never lands', async () => {
+      const store = finished();
+      upsertStatusCommentMock.mockResolvedValue(null);
+
+      // Inside the day every run claims, fails and gives the claim back.
+      for (const minutes of [10, 20, 23 * 60 + 50]) {
+        await settleAfter(store, minutes);
+        expect(store.meta.rollup_posted_at).toBeUndefined();
+      }
+      expect(swapCommentReactionMock).not.toHaveBeenCalled();
+
+      // The first run after it keeps the claim and answers the retry comment.
+      const kept = await settleAfter(store, 24 * 60 + 10);
+      expect(store.meta.rollup_posted_at).toBe(kept);
+      expect(swapCommentReactionMock).toHaveBeenCalledTimes(1);
+
+      // The runs after that find the claim taken and leave the parent alone.
+      transitionIssueStateMock.mockClear();
+      swapIssueReactionMock.mockClear();
+      await settleAfter(store, 24 * 60 + 20);
+      expect(store.meta.rollup_posted_at).toBe(kept);
+      expect(parentSettled()).toEqual([false, false]);
+      expect(swapCommentReactionMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('an epic that was re-opened since gets its claim back for a day after the re-open', async () => {
+      // A comment on a sub-issue two days after the epic ended: its change is
+      // re-stacked onto the dependents, which writes no child row. When the
+      // re-stack ends the rows are two days old, and the epic ended a minute ago.
+      // Every re-open stamps the meta row.
+      const store = finished();
+      upsertStatusCommentMock.mockResolvedValue(null);
+      const reopened = new Date(ENDED + (48 * 60 - 10) * 60_000).toISOString();
+
+      await settleAfter(store, 48 * 60, reopened);
+      expect(store.meta.rollup_posted_at).toBeUndefined();
+      expect(swapCommentReactionMock).not.toHaveBeenCalled();
+
+      // A day after the re-open, an edit that still fails is given up as well.
+      const kept = await settleAfter(store, 72 * 60, reopened);
+      expect(store.meta.rollup_posted_at).toBe(kept);
+      expect(swapCommentReactionMock).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe('orchestration-reconciler handler — the reason shown for a failed sub-issue', () => {
+  // A retry keeps the id of the task that failed before. When the retry itself
+  // is refused (budget used up, repository not onboarded), the row is failed
+  // again and carries the reason of the refusal, next to that old task id.
+  const REFUSED = "Couldn't start — a monthly budget is exhausted. Adjust the budget or wait for the next UTC "
+    + 'month, then reply `@bgagent retry` on the epic to re-run.';
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({
+      statusCode: 201, body: JSON.stringify({ data: { task_id: 'T2', branch_name: 'branch-2' } }),
+    });
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+  });
+
+  const event = (taskId: string, status: string) => ({
+    Records: [taskRecord({ task_id: taskId, status, orchestration_id: 'orch_1' })],
+  }) as never;
+  const lastPanel = () => upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+
+  test('after a retry that could not start, the panel says why, not how the earlier run failed', async () => {
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'failed', child_task_id: 'T1', failure_reason: REFUSED },
+    ]);
+    store.tasks.set('T1', { task_id: 'T1', build_passed: false });
+
+    await handler(event('TA', 'COMPLETED')); // any settle of the finished epic: a late write, the sweep
+
+    expect(lastPanel()).toContain('a monthly budget is exhausted');
+    expect(lastPanel()).not.toContain('Build/tests failed');
+  });
+
+  test('a start that is refused in the pass that renders the panel is reported by that pass', async () => {
+    // A ends and B, which a retry reset and which still names its earlier task,
+    // is started by the same invocation. The budget is used up.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked', child_task_id: 'T1' },
+    ]);
+    store.tasks.set('T1', { task_id: 'T1', build_passed: false });
+    createTaskCoreMock.mockResolvedValue({ statusCode: 429, body: '{"error":{"code":"BUDGET_EXCEEDED"}}' });
+
+    await handler(event('TA', 'COMPLETED'));
+
+    expect(store.row('B')).toMatchObject({ child_status: 'failed', child_task_id: 'T1', failure_reason: REFUSED });
+    expect(lastPanel()).toContain('a monthly budget is exhausted');
+    expect(lastPanel()).not.toContain('Build/tests failed');
+  });
+
+  test('a late event of the earlier task, processed while the retry is refused, shows the refusal', async () => {
+    // The two events interleaved: the event of T1 reads the rows while B is
+    // failed by T1; the retry then resets B, tries to start it and is refused;
+    // only then the event writes its (unchanged) verdict and renders the panel.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'failed', child_task_id: 'T1' },
+    ]);
+    store.tasks.set('T1', { task_id: 'T1', build_passed: false });
+    store.before((cmd) => cmd._type === 'Update', () => { store.row('B').failure_reason = REFUSED; });
+
+    await handler(event('T1', 'FAILED'));
+
+    expect(store.row('B')).toMatchObject({ child_status: 'failed', child_task_id: 'T1', failure_reason: REFUSED });
+    expect(lastPanel()).toContain('a monthly budget is exhausted');
+    expect(lastPanel()).not.toContain('Build/tests failed');
+  });
+
+  test('after a later retry that did start and then failed, the panel says how that run failed', async () => {
+    // The other order. B is waiting again (a second retry reset it) and still
+    // carries the reason of the refused one. A ends, B starts as T2 and its
+    // build fails: the reason of the refusal must not be what the panel shows.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked', child_task_id: 'T1', failure_reason: REFUSED },
+    ]);
+    store.tasks.set('T2', { task_id: 'T2', build_passed: false });
+
+    await handler(event('TA', 'COMPLETED'));
+    // The start took the reason of the refusal off the row.
+    expect(store.row('B')).toMatchObject({ child_status: 'released', child_task_id: 'T2' });
+    expect(store.row('B').failure_reason).toBeUndefined();
+    await handler(event('T2', 'FAILED'));
+
+    expect(store.status('B')).toBe('failed');
+    expect(lastPanel()).toContain('Build/tests failed — see the build log in CloudWatch for task `T2`');
+    expect(lastPanel()).not.toContain('a monthly budget is exhausted');
   });
 });

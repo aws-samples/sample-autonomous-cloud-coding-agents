@@ -52,7 +52,6 @@ jest.mock('../../src/handlers/shared/prompt-version', () => ({
 const mockLoadRepoConfig = jest.fn();
 jest.mock('../../src/handlers/shared/repo-config', () => ({
   loadRepoConfig: mockLoadRepoConfig,
-  checkRepoOnboarded: jest.fn(),
 }));
 
 // Registry client (#246): the orchestrator resolves Blueprint registry:// refs
@@ -593,6 +592,50 @@ describe('pollTaskStatus', () => {
     const result = await pollTaskStatus('TASK001', { attempts: 0 }, 'agentcore');
     expect(result.attempts).toBe(1);
     expect(result.lastStatus).toBeUndefined();
+  });
+
+  test('counts a failed read as one missed poll and keeps the last known status', async () => {
+    // An error thrown from the poll would fail the durable execution: the task
+    // would stay RUNNING with nothing left to finalize it.
+    mockDdbSend.mockRejectedValueOnce(new Error('ProvisionedThroughputExceededException'));
+    const result = await pollTaskStatus('TASK001', { attempts: 360, lastStatus: 'RUNNING' }, 'agentcore');
+    expect(result).toEqual({ attempts: 361, lastStatus: 'RUNNING' });
+  });
+
+  test('goes on counting missed polls however many reads fail in a row', async () => {
+    // Reads throttled across several polls, with a healthy agent behind them:
+    // the state must carry nothing that ends the wait before the reads work again.
+    const throttled = Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' });
+    for (let read = 0; read < 9; read++) mockDdbSend.mockRejectedValueOnce(throttled);
+    let state = await pollTaskStatus('TASK001', { attempts: 7, lastStatus: 'RUNNING' }, 'ecs');
+    for (let poll = 1; poll < 9; poll++) {
+      state = await pollTaskStatus('TASK001', state, 'ecs');
+    }
+    expect(state).toEqual({ attempts: 16, lastStatus: 'RUNNING' });
+  });
+
+  test('throws a read error that cannot clear instead of counting a missed poll', async () => {
+    // A denied read is refused the same way at every poll: counted as missed
+    // polls it would keep the orchestrator waiting on a row it cannot read
+    // until the poll window closes.
+    mockDdbSend.mockRejectedValueOnce(Object.assign(new Error('not authorized to perform: dynamodb:GetItem'), {
+      name: 'AccessDeniedException',
+    }));
+    const stderr = jest.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const [outcome] = await Promise.allSettled([
+      pollTaskStatus('TASK001', { attempts: 7, lastStatus: 'RUNNING' }, 'ecs'),
+    ]);
+    const logged = stderr.mock.calls.map(([line]) => JSON.parse(String(line)));
+    stderr.mockRestore();
+
+    expect(outcome).toMatchObject({ status: 'rejected', reason: { name: 'AccessDeniedException' } });
+    // The durable SDK does not log why an execution failed: this line is what
+    // ties the failure to the task.
+    expect(logged).toEqual([expect.objectContaining({
+      level: 'ERROR',
+      task_id: 'TASK001',
+      error: 'AccessDeniedException: not authorized to perform: dynamodb:GetItem',
+    })]);
   });
 
   // The gate `finalizeTask`'s defensive FINALIZING arm depends on. That arm is

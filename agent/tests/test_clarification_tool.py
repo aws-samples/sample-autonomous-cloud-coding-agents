@@ -1,5 +1,9 @@
 """Tests for the request_clarification in-process SDK tool (clarify-before-spend)."""
 
+import asyncio
+
+import claude_agent_sdk
+
 from clarification_tool import (
     CLARIFICATION_SERVER_NAME,
     CLARIFICATION_TOOL_NAME,
@@ -20,14 +24,23 @@ class TestClarificationTool:
         assert server["name"] == CLARIFICATION_SERVER_NAME
         assert "instance" in server
 
-    def test_registered_tool_exposes_the_question_param(self):
-        # The registered tool must accept a ``question`` arg — that's what the
-        # runner reads off the ToolUseBlock as the clarifying question.
-        from claude_agent_sdk import tool
+    def test_registered_tool_is_the_one_the_runner_reads(self, monkeypatch):
+        # The runner compares a ToolUseBlock's name with CLARIFICATION_TOOL_NAME
+        # and takes the question from its ``question`` argument. Capture the
+        # tool that build_clarification_server() really registers.
+        registered = {}
 
-        @tool("request_clarification", "ask", {"question": str})
-        async def rc(args):  # pragma: no cover - handler body not exercised here
-            return {"content": [{"type": "text", "text": "ok"}]}
+        def capture(name, tools):
+            registered["server"] = name
+            (registered["tool"],) = tools
 
-        assert rc.name == "request_clarification"
-        assert "question" in rc.input_schema
+        monkeypatch.setattr(claude_agent_sdk, "create_sdk_mcp_server", capture)
+        build_clarification_server()
+
+        tool = registered["tool"]
+        assert f"mcp__{registered['server']}__{tool.name}" == CLARIFICATION_TOOL_NAME
+        assert tool.input_schema == {"question": str}
+        reply = asyncio.run(tool.handler({"question": " Which page is slow? "}))
+        (block,) = reply["content"]
+        assert "end your turn" in block["text"]
+        assert "(question: Which page is slow?)" in block["text"]

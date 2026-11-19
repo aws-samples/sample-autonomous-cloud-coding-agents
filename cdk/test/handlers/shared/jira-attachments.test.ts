@@ -39,6 +39,7 @@ import {
   fetchRecentHumanComments,
   JiraAttachmentError,
 } from '../../../src/handlers/shared/jira-attachments';
+import { logger } from '../../../src/handlers/shared/logger';
 import { MAX_ATTACHMENT_SIZE_BYTES } from '../../../src/handlers/shared/validation';
 
 // Plain text validates on absence of null bytes; a leading PNG signature for
@@ -290,6 +291,40 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
     )).rejects.toThrow(/blocked by content policy/);
   });
 
+  describe('the error text is posted on the Jira issue, so it carries no internal error message', () => {
+    const oneLog = [{ id: 'att-1', filename: 'error.log', mimeType: 'text/plain', size: TEXT_BYTES.length }];
+
+    test('a failed screening call: the SDK error stays in the log', async () => {
+      // ApplyGuardrail denied. The SDK's text names the role and the account.
+      const sdkText = 'User: arn:aws:sts::123456789012:assumed-role/Stack-JiraWebhookProcessorRole/fn is not authorized to perform: bedrock:ApplyGuardrail';
+      (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(TEXT_BYTES));
+      screenTextFileMock.mockRejectedValueOnce(Object.assign(new Error(sdkText), { name: 'AccessDeniedException' }));
+      const logged = jest.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+      const err = await downloadScreenAndStoreJiraAttachments(oneLog, 10, storageCtx()).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(JiraAttachmentError);
+      expect((err as Error).message).toContain('could not be screened');
+      expect((err as Error).message).not.toContain('arn:aws');
+      expect((err as Error).message).not.toContain('not authorized');
+      expect(JSON.stringify(logged.mock.calls)).toContain(sdkText);
+      expect(putSendMock).not.toHaveBeenCalled();
+    });
+
+    test('a failed download: the network error stays in the log', async () => {
+      const networkText = 'connect ECONNREFUSED 10.1.2.3:443';
+      (global.fetch as jest.Mock).mockRejectedValueOnce(new Error(networkText));
+      const logged = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+      const err = await downloadScreenAndStoreJiraAttachments(oneLog, 10, storageCtx()).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(JiraAttachmentError);
+      expect((err as Error).message).toContain('could not be downloaded');
+      expect((err as Error).message).not.toContain(networkText);
+      expect(JSON.stringify(logged.mock.calls)).toContain(networkText);
+    });
+  });
+
   test('401 on download forces token refresh and retries once', async () => {
     (global.fetch as jest.Mock)
       .mockResolvedValueOnce(bytesResponse(Buffer.alloc(0), 401))
@@ -407,10 +442,70 @@ describe('fetchRecentHumanComments', () => {
     expect(comments[0].author).toBe('Ada');
     expect(comments[0].markdown).toBe('First human note');
     expect(comments[1].author).toBe('Grace');
-    // URL requests newest-first, capped by maxResults.
+    // URL requests newest-first, one full page: the cap of ten is applied to
+    // the human comments, after the filter.
     const url = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(url).toContain('orderBy=-created');
-    expect(url).toContain('maxResults=10');
+    expect(url).toContain('maxResults=100');
+  });
+
+  /** Answers as Jira does: the newest `maxResults` comments of the thread. */
+  function serveThread(newestFirst: readonly unknown[]): void {
+    (global.fetch as jest.Mock).mockImplementationOnce((url: string) => {
+      const maxResults = Number(new URL(url).searchParams.get('maxResults'));
+      return Promise.resolve(jsonResponse({ comments: newestFirst.slice(0, maxResults) }));
+    });
+  }
+  const humanNote = (n: number) => ({
+    author: { displayName: 'Ada', accountType: 'atlassian' },
+    body: adf(`note ${n}`),
+    created: `2026-07-${String(n).padStart(2, '0')}T00:00:00Z`,
+  });
+
+  test('keeps the newest human comments when ABCA has commented more often since', async () => {
+    // Six human comments, then seven comments of the app (a start, a result, a
+    // preview and two iterations): a window of ten comments holds three humans.
+    const appComment = (n: number) => ({
+      author: { displayName: 'bgagent', accountType: 'app' },
+      body: adf(`✅ Task completed ${n}`),
+      created: `2026-07-${n + 10}T00:00:00Z`,
+    });
+    serveThread([...[7, 6, 5, 4, 3, 2, 1].map(appComment), ...[6, 5, 4, 3, 2, 1].map(humanNote)]);
+
+    const comments = await fetchRecentHumanComments(ctx, 'ENG-42');
+
+    expect(comments.map((c) => c.markdown)).toEqual(['note 1', 'note 2', 'note 3', 'note 4', 'note 5', 'note 6']);
+  });
+
+  test('caps the context at the ten newest human comments, oldest first', async () => {
+    serveThread([12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map(humanNote));
+
+    const comments = await fetchRecentHumanComments(ctx, 'ENG-42');
+
+    expect(comments.map((c) => c.markdown)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((n) => `note ${n}`));
+  });
+
+  test('drops the comments ABCA posted as the setup user', async () => {
+    // A site without the Forge app: ABCA writes with the setup user's OAuth
+    // token, so Jira shows its comments under that user's name and accountType.
+    const jane = { displayName: 'Jane', accountType: 'atlassian' };
+    serveThread([
+      { author: jane, body: adf('Please cover the CSV export too.'), created: '2026-07-04T00:00:00Z' },
+      { author: jane, body: adf('❌ Task failed: Build failed'), created: '2026-07-03T00:00:00Z' },
+      {
+        author: jane,
+        body: adf('🤖 ABCA picked up this issue and started working on it. I\'ll comment again when the pull request is ready.'),
+        created: '2026-07-02T00:00:00Z',
+      },
+      { author: { displayName: 'Ada', accountType: 'atlassian' }, body: adf('The export is slow.'), created: '2026-07-01T00:00:00Z' },
+    ]);
+
+    const comments = await fetchRecentHumanComments(ctx, 'ENG-42');
+
+    expect(comments.map((c) => `${c.author}: ${c.markdown}`)).toEqual([
+      'Ada: The export is slow.',
+      'Jane: Please cover the CSV export too.',
+    ]);
   });
 
   test('skips comments with empty rendered body', async () => {

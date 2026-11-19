@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hooks import pre_tool_use_hook
+from policy import PolicyEngine
 from progress_writer import (
     BLOCKER_KINDS,
     _classify_ddb_error,
@@ -1157,6 +1160,8 @@ class TestApprovalMilestoneHelpers:
         assert metadata["cached_decision"] == "DENIED"
         assert metadata["cached_reason"] == "user said force-push is too risky"
         assert metadata["original_decision_ts"] == "2026-05-07T12:00:00Z"
+        # A hit on the exact input was not denied for a rule: no such key.
+        assert "matched_rule_id" not in metadata
 
     def test_policy_decision_cached_truncates_long_reason(self, writer):
         writer.write_policy_decision_cached(
@@ -1169,6 +1174,36 @@ class TestApprovalMilestoneHelpers:
         _, metadata = self._last_event(writer)
         # Default preview cap is 200 chars; preserve DDB budget under adversarial reasons.
         assert len(metadata["cached_reason"]) <= 210
+
+    def test_rule_level_cache_hit_reaches_the_event_stream(self, writer):
+        # The user denied a force push and the agent retries it on another
+        # branch within the minute. The engine denies the retry from its
+        # rule-level cache and names the rule in the metadata the PreToolUse
+        # hook hands to this writer. IMPL-23: every cache hit emits an event.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        engine.recent_decisions.record_rule_decision(
+            "Bash",
+            "force_push_any",
+            "DENIED",
+            "no force pushes",
+            original_decision_ts="2026-05-12T19:00:00Z",
+        )
+        result = asyncio.run(
+            pre_tool_use_hook(
+                {"tool_name": "Bash", "tool_input": {"command": "git push --force origin b"}},
+                "tu-1",
+                {},
+                engine=engine,
+                progress=writer,
+            )
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        _, metadata = self._last_event(writer)
+        assert metadata["milestone"] == "policy_decision"
+        assert metadata["decision_source"] == "recent_decision_cache"
+        assert metadata["matched_rule_id"] == "force_push_any"
+        assert metadata["cached_reason"] == "no force pushes"
+        assert metadata["original_decision_ts"] == "2026-05-12T19:00:00Z"
 
 
 class TestFormatBlockerReason:

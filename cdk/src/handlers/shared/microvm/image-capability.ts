@@ -37,6 +37,7 @@ export interface MicrovmImageMetadata {
 
 function nonblank(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_IMAGE_IDENTITY_LENGTH
+    // eslint-disable-next-line no-control-regex -- an image identity holds no control character, so the pattern names them
     && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
 }
 

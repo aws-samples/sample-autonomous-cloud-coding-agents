@@ -159,7 +159,7 @@ export function TaskListPage() {
           empty={<Box textAlign="center" color="inherit">No tasks match this view.</Box>}
           hasMore={query.hasNextPage}
           loadingMore={query.isFetchingNextPage}
-          onLoadMore={() => query.fetchNextPage()}
+          onLoadMore={() => void query.fetchNextPage()}
         />
       )}
     </ContentLayout>

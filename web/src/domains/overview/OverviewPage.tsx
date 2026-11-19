@@ -111,7 +111,7 @@ export function OverviewPage() {
                   ariaLabel={`${counter.label}: ${tasksQuery.isPending ? 'loading' : counter.value}`}
                   onFollow={(event) => {
                     event.preventDefault();
-                    navigate(counter.href);
+                    void navigate(counter.href);
                   }}
                 >
                   {tasksQuery.isPending ? '-' : counter.value}

@@ -17,9 +17,10 @@
  *  SOFTWARE.
  */
 
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
+import { writeSecretFile } from '../config';
 import { CliError } from '../errors';
 import { formatJson, formatReplay } from '../format';
 
@@ -49,7 +50,7 @@ export function makeReplayCommand(): Command {
       // persisted); --json toggles stdout format. Writing to a file emits the
       // confirmation on stderr so stdout stays clean for piping.
       if (opts.output) {
-        writeFileSync(opts.output, formatJson(bundle), { mode: 0o600 });
+        writeSecretFile(opts.output, formatJson(bundle));
         console.error(`Wrote replay bundle to ${opts.output}`);
         return;
       }

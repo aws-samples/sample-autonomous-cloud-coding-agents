@@ -23,6 +23,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBRecord } from 'aws-lambda';
+import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 import {
   BUDGET_EXCEEDED_PERCENT,
   BUDGET_ROLLUP_RETENTION_DAYS,
@@ -37,7 +38,6 @@ import {
 } from './shared/budgets';
 import { logger } from './shared/logger';
 import { makeDocClient } from './shared/ua';
-import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const BUDGET_TABLE_NAME = process.env.BUDGET_TABLE_NAME;
 const BUDGET_METRIC_NAMESPACE = 'ABCA/Budgets';

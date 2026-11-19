@@ -17,15 +17,15 @@
  *  SOFTWARE.
  */
 
-import { classifyError, type ErrorClassification } from './error-classifier';
-import { logger } from './logger';
-import { coerceNumericOrNull } from './numeric';
-import type { ComputeType } from './repo-config';
 // Cross-language constants — see ``contracts/constants.md``. Imported at
 // TypeScript compile time (resolveJsonModule); esbuild inlines the values
 // into the bundled Lambda artifact, so no runtime FS read is needed.
 import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
+import { classifyError, type ErrorClassification } from './error-classifier';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
+import type { ComputeType } from './repo-config';
 
 /**
  * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift

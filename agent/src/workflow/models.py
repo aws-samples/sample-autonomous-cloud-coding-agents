@@ -222,6 +222,9 @@ class Workflow(BaseModel):
     repo_config: RepoConfig | None = None
     required_inputs: RequiredInputs | None = None
     steps: list[Step]
+    # Reserved: the schema allows the key and pins it to empty, and nothing
+    # reads it. Post-agent gates are steps.
+    post_hooks: list[str] = Field(default_factory=list, max_length=0)
     terminal_outcomes: TerminalOutcomes
     convergence: Convergence | None = None
     limits: Limits | None = None

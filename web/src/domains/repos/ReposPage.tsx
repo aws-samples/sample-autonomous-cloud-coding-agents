@@ -61,7 +61,7 @@ export function ReposPage() {
           loadingText="Loading repositories"
           items={repos}
           trackBy="repo"
-          onRowClick={({ detail }) => navigate(repoHref(detail.item.repo))}
+          onRowClick={({ detail }) => void navigate(repoHref(detail.item.repo))}
           header={<Header counter={query.data ? `(${repos.length})` : undefined}>Repositories</Header>}
           columnDefinitions={[
             { id: 'repo', header: 'Repository', cell: (r) => <RouterLink href={repoHref(r.repo)}>{r.repo}</RouterLink>, isRowHeader: true },

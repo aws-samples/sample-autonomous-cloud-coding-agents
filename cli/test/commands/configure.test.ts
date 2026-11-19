@@ -173,6 +173,19 @@ describe('configure command', () => {
     expect(JSON.parse(fs.readFileSync(configFile, 'utf-8')).stack_name).toBeUndefined();
   });
 
+  test('drops cached tokens when the CLI is pointed at another user pool, and keeps them otherwise', async () => {
+    const credentials = path.join(tmpDir, 'credentials.json');
+    fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({
+      api_url: 'https://a.example.com/v1/', region: 'us-east-1', user_pool_id: 'p', client_id: 'c',
+    }));
+    fs.writeFileSync(credentials, '{}');
+    await makeConfigureCommand().parseAsync(['node', 'test', '--region', 'us-west-2']);
+    expect(fs.existsSync(credentials)).toBe(true);
+    // The next command would send the first pool's token to the API of the other one.
+    await makeConfigureCommand().parseAsync(['node', 'test', '--user-pool-id', 'other-pool']);
+    expect(fs.existsSync(credentials)).toBe(false);
+  });
+
   test('--stack-name allows explicit overrides for individual fields', async () => {
     fetchConfigureBundleFromStackMock.mockResolvedValue({
       api_url: 'https://api.example.com/v1/',

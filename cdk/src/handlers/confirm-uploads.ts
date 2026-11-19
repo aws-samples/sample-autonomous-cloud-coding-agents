@@ -26,7 +26,7 @@ import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, S3Client } f
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { TaskStatus } from '../constructs/task-status';
+import { ACTIVE_STATUSES, TaskStatus } from '../constructs/task-status';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './shared/attachment-screening';
 import { extractUserId } from './shared/gateway';
 import { estimateImageTokensFromBuffer } from './shared/image-tokens';
@@ -35,7 +35,7 @@ import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from './shared/storage-names';
 import { type AttachmentRecord, createAttachmentRecord, type TaskRecord, toTaskDetail } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
-import { computeTtlEpoch, MAX_TOTAL_ATTACHMENT_SIZE_BYTES } from './shared/validation';
+import { computeTtlEpoch, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateMagicBytes } from './shared/validation';
 
 const ddb = makeDocClient();
 const s3Client = makeClient(S3Client);
@@ -113,8 +113,7 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
 
     // 4. Short-circuit: if not PENDING_UPLOADS, return current state (idempotent)
     if (task.status !== TaskStatus.PENDING_UPLOADS) {
-      if (task.status === TaskStatus.SUBMITTED || task.status === TaskStatus.HYDRATING ||
-          task.status === TaskStatus.RUNNING) {
+      if (task.status === TaskStatus.QUEUED || ACTIVE_STATUSES.includes(task.status)) {
         return successResponse(200, toTaskDetail(task), requestId);
       }
       return errorResponse(409, ErrorCode.UPLOADS_NOT_PENDING,
@@ -128,11 +127,8 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
         'Task has no attachments to confirm.', requestId);
     }
 
-    const pendingAttachments = attachments.filter(a => a.screening.status === 'pending');
-    if (pendingAttachments.length === 0) {
-      // All already screened — transition (handles retry case)
-      return await transitionToSubmitted(task, attachments, requestId);
-    }
+    // A pending URL attachment is not an upload: hydration fetches and screens it.
+    const pendingAttachments = attachments.filter(a => a.screening.status === 'pending' && a.type !== 'url');
 
     // 6. HeadObject per pending attachment — verify uploads exist
     const s3Meta = new Map<string, S3ObjectMeta>();
@@ -232,7 +228,7 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
             // Fail the entire task
             const transitioned = await failTaskOnScreening(task, taskId, att.filename, err.message, requestId);
             if (transitioned) {
-              await cleanupAllAttachments(task, taskId);
+              await cleanupAllAttachments(task, taskId, s3Meta);
             }
             return errorResponse(400, ErrorCode.ATTACHMENT_BLOCKED,
               `Attachment '${att.filename}' was rejected: ${err.message}`, requestId);
@@ -254,27 +250,32 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
         // Screening passed — record the result
         screenedAttachments.push(result.value);
       }
+
+      // One blocked attachment fails the whole task: screen no further batch, and
+      // never reach the deadline branch above with a blocked record to persist.
+      if (screenedAttachments.some(a => a.screening.status === 'blocked')) break;
     }
 
-    // If any attachment was blocked via the result (not error), handle that
-    const blockedAtt = screenedAttachments.find(a => a.screening.status === 'blocked');
+    // 8. Merge screened records with any already-screened ones
+    const finalAttachments = attachments.map(existing => {
+      const screened = screenedAttachments.find(s => s.attachment_id === existing.attachment_id);
+      return screened ?? existing;
+    });
+
+    // If any attachment was blocked via the result (not error), in this call or in
+    // an earlier one that stored it, handle that
+    const blockedAtt = finalAttachments.find(a => a.screening.status === 'blocked');
     if (blockedAtt) {
       const categories = blockedAtt.screening.status === 'blocked'
         ? blockedAtt.screening.categories.join(', ')
         : 'content_policy_violation';
       const transitioned = await failTaskOnScreening(task, taskId, blockedAtt.filename, categories, requestId);
       if (transitioned) {
-        await cleanupAllAttachments(task, taskId);
+        await cleanupAllAttachments(task, taskId, s3Meta);
       }
       return errorResponse(400, ErrorCode.ATTACHMENT_BLOCKED,
         `Attachment '${blockedAtt.filename}' was blocked by content policy (${categories}).`, requestId);
     }
-
-    // 8. All passed — merge screened records with any already-screened ones
-    const finalAttachments = attachments.map(existing => {
-      const screened = screenedAttachments.find(s => s.attachment_id === existing.attachment_id);
-      return screened ?? existing;
-    });
 
     // 8b. Aggregate-size ceiling ACROSS the fully-resolved set.
     // At create-task time the presigned uploads were still `pending` with no known
@@ -292,12 +293,14 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
         request_id: requestId,
         metric_type: 'attachment_total_size_exceeded',
       });
-      await cleanupAllAttachments(task, taskId);
-      return errorResponse(
-        400, ErrorCode.VALIDATION_ERROR,
-        `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`,
-        requestId,
-      );
+      // Without its uploads the task can never be confirmed: fail it now, with the
+      // reason, instead of leaving it to expire as PENDING_UPLOADS.
+      const message = `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`;
+      const transitioned = await failTaskOnScreening(task, taskId, undefined, message, requestId);
+      if (transitioned) {
+        await cleanupAllAttachments(task, taskId, s3Meta);
+      }
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, message, requestId);
     }
 
     // 9. Transition to SUBMITTED
@@ -326,11 +329,24 @@ async function screenSingleAttachment(
   const { s3Key, versionId, sizeBytes } = meta;
 
   // Download the object content for screening
-  const getResult = await s3Client.send(new GetObjectCommand({
-    Bucket: ATTACHMENTS_BUCKET,
-    Key: s3Key,
-    ...(versionId && { VersionId: versionId }),
-  }));
+  let getResult;
+  try {
+    getResult = await s3Client.send(new GetObjectCommand({
+      Bucket: ATTACHMENTS_BUCKET,
+      Key: s3Key,
+      ...(versionId && { VersionId: versionId }),
+    }));
+  } catch (err: any) {
+    if (err?.$metadata?.httpStatusCode !== 404) throw err;
+    // HeadObject found this upload a moment ago, and uploads are deleted only once their
+    // task has failed or expired: the task has ended in the meantime (another confirmation
+    // failed it, or the cleanup cancelled it). Say that, rather than report the screening
+    // as unavailable.
+    throw new AttachmentScreeningError(
+      `Upload for '${att.filename}' is no longer in storage. The uploads of a task are deleted ` +
+      'when the task fails or its upload window expires; check the status of the task.',
+    );
+  }
 
   if (!getResult.Body) {
     throw new AttachmentScreeningError(
@@ -343,6 +359,15 @@ async function screenSingleAttachment(
     throw new AttachmentScreeningError(
       `Upload for '${att.filename}' size mismatch (expected ${sizeBytes} bytes, read ${content.length}). ` +
       'Please re-upload the file and try again.',
+    );
+  }
+
+  // The declared type is the client's claim: hold the bytes to it before screening,
+  // as the inline, URL, Linear and Jira paths do.
+  if (!validateMagicBytes(content, att.content_type)) {
+    throw new AttachmentScreeningError(
+      `Upload for '${att.filename}' does not match its declared type '${att.content_type}'. ` +
+      'The file may be corrupt or masquerading as a different type.',
     );
   }
 
@@ -553,10 +578,15 @@ async function transitionToSubmitted(
 // Fail task on screening failure (conditional write)
 // ---------------------------------------------------------------------------
 
+/**
+ * `filename` is the attachment that was rejected. Without one the uploads were
+ * rejected as a set (the size limit): `reason` is then the whole error message
+ * and no attachment_blocked event is written.
+ */
 async function failTaskOnScreening(
   _task: TaskRecord,
   taskId: string,
-  filename: string,
+  filename: string | undefined,
   reason: string,
   requestId: string,
 ): Promise<boolean> {
@@ -576,7 +606,7 @@ async function failTaskOnScreening(
         ':failed': TaskStatus.FAILED,
         ':pending_uploads': TaskStatus.PENDING_UPLOADS,
         ':status_created_at': `${TaskStatus.FAILED}#${now}`,
-        ':err': `Attachment '${filename}' blocked: ${reason}`,
+        ':err': filename ? `Attachment '${filename}' blocked: ${reason}` : reason,
         ':now': now,
         ':ttl': computeTtlEpoch(TASK_RETENTION_DAYS),
       },
@@ -592,6 +622,8 @@ async function failTaskOnScreening(
     }
     throw err;
   }
+
+  if (!filename) return true;
 
   // Write event (best-effort)
   try {
@@ -622,7 +654,7 @@ async function failTaskOnScreening(
 // Cleanup all S3 attachments for a task
 // ---------------------------------------------------------------------------
 
-async function cleanupAllAttachments(task: TaskRecord, taskId: string): Promise<void> {
+async function cleanupAllAttachments(task: TaskRecord, taskId: string, s3Meta: Map<string, S3ObjectMeta>): Promise<void> {
   if (!task.attachments || task.attachments.length === 0) return;
 
   // Include VersionId when available — in a versioned bucket, DeleteObjects
@@ -632,6 +664,12 @@ async function cleanupAllAttachments(task: TaskRecord, taskId: string): Promise<
     Key: `${ATTACHMENT_OBJECT_KEY_PREFIX}${task.user_id}/${taskId}/${att.attachment_id}/${att.filename}`,
     ...(att.s3_version_id && att.s3_version_id !== 'unversioned' && { VersionId: att.s3_version_id }),
   }));
+  // The uploads this call looked at have no stored version id yet, so the entries above
+  // only add a delete marker for them. Name the version HeadObject reported as well: the
+  // bytes go now, and the marker still hides any other version posted to the same key.
+  for (const { s3Key, versionId } of s3Meta.values()) {
+    if (versionId) objects.push({ Key: s3Key, VersionId: versionId });
+  }
 
   try {
     const result = await s3Client.send(new DeleteObjectsCommand({
@@ -824,6 +862,7 @@ async function decrementConcurrency(userId: string): Promise<void> {
       throw new Error(
         `Concurrency counter decrement failed for user ${userId} after ${maxAttempts} attempts. ` +
         'Manual intervention may be required to reset the counter.',
+        { cause: err },
       );
     }
   }

@@ -153,6 +153,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const startKey = afterValid ? undefined : decodePaginationToken(nextTokenRaw ?? undefined);
+    if (startKey === null) {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid next_token.', requestId);
+    }
 
     const queryMode: QueryMode = afterValid
       ? 'after'

@@ -432,6 +432,19 @@ describe('TaskApi construct', () => {
     ]));
   });
 
+  test('WAF replaces the two credential headers in the request samples it keeps', () => {
+    // WAF keeps the headers of sampled requests for three hours. The L1 types
+    // both enumerations as string: these are the values CloudFormation accepts
+    // for AWS::WAFv2::WebACL DataProtect.Action and FieldToProtect.FieldType.
+    const [webAcl] = Object.values(baseTemplate.findResources('AWS::WAFv2::WebACL'));
+    expect(webAcl.Properties.DataProtectionConfig).toEqual({
+      DataProtections: [{
+        Action: 'SUBSTITUTION',
+        Field: { FieldType: 'SINGLE_HEADER', FieldKeys: ['authorization', 'x-api-key'] },
+      }],
+    });
+  });
+
   test('associates WAF with the API Gateway stage', () => {
     baseTemplate.resourceCountIs('AWS::WAFv2::WebACLAssociation', 1);
   });

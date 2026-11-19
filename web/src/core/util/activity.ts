@@ -136,7 +136,13 @@ function milestone(meta: Record<string, unknown>): Pick<ActivityLine, 'text' | '
     if (phase === 'start') {
       if (area === 'working') return { kind: 'step', text: 'Started on the change' };
       if (area === 'checking') return { kind: 'step', text: 'Checking that it builds and the tests pass' };
-      if (area === 'pull-request') return { kind: 'step', text: 'Opening a pull request' };
+      if (area === 'pull-request') {
+        // By the name of the step: a task without a repository delivers its result (`deliver`), and
+        // an iteration, a review or a restack ends on a pull request that exists (`resolve_pr`).
+        if (/deliver/i.test(key)) return { kind: 'step', text: 'Delivering the result' };
+        if (/resolve/i.test(key)) return { kind: 'step', text: 'Finishing up on the pull request' };
+        return { kind: 'step', text: 'Opening a pull request' };
+      }
       return null;
     }
     if (phase === 'failed') return { kind: 'problem', text: area === 'checking' ? 'The build or tests failed' : `Step "${key}" failed` };

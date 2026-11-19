@@ -17,13 +17,17 @@
  *  SOFTWARE.
  */
 
+import * as readline from 'readline';
+import { Readable } from 'stream';
+
 /** Buffered bytes not yet split into a line (non-TTY piped stdin). */
 let pipedBuffer = '';
-/** Lines read from stdin, not yet consumed by a `promptSecret` call. */
+/** Lines read from stdin, not yet consumed by a prompt. */
 const pipedLineQueue: string[] = [];
-/** Pending `promptSecret` calls waiting for the next line. */
-const pipedLineWaiters: Array<(line: string) => void> = [];
-let pipedListenerAttached = false;
+/** Pending prompts waiting for the next line; `null` tells them that the input ended first. */
+const pipedLineWaiters: Array<(line: string | null) => void> = [];
+/** The stdin the listener is on: what is kept above was read from it. */
+let pipedStdin: NodeJS.ReadStream | undefined;
 let pipedEnded = false;
 
 function deliverPipedLine(line: string): void {
@@ -46,14 +50,22 @@ function drainPipedBuffer(): void {
 }
 
 function ensurePipedListener(): void {
-  if (pipedListenerAttached || process.stdin.isTTY) {
+  if (pipedStdin === process.stdin || process.stdin.isTTY) {
     return;
   }
-  pipedListenerAttached = true;
+  // Another stdin than the one read so far, which only a test brings: nothing that was read
+  // from the earlier one answers a prompt on this one.
+  __resetPipedSecretStateForTest();
+  pipedStdin = process.stdin;
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk: string) => {
     pipedBuffer += chunk;
     drainPipedBuffer();
+    // No prompt is waiting: stop reading until the next one asks. An input without end,
+    // `yes | bgagent linear link <code>`, is otherwise read into memory while the command works.
+    if (pipedLineWaiters.length === 0) {
+      process.stdin.pause();
+    }
   });
   process.stdin.on('end', () => {
     pipedEnded = true;
@@ -62,25 +74,31 @@ function ensurePipedListener(): void {
       pipedBuffer = '';
     }
     while (pipedLineWaiters.length > 0) {
-      deliverPipedLine('');
+      pipedLineWaiters.shift()!(null);
     }
   });
   process.stdin.on('error', () => {
     pipedEnded = true;
     while (pipedLineWaiters.length > 0) {
-      deliverPipedLine('');
+      pipedLineWaiters.shift()!(null);
     }
   });
 }
 
-function readPipedLine(): Promise<string> {
+/** The next line of piped stdin, or `null` when the input ends before one. */
+function readPipedLine(): Promise<string | null> {
   ensurePipedListener();
+  // The listener above pauses stdin when no prompt is waiting, and so does another reader, a
+  // readline that was closed. A listener put on a paused stream does not start it again.
+  process.stdin.resume();
   drainPipedBuffer();
   if (pipedLineQueue.length > 0) {
     return Promise.resolve(pipedLineQueue.shift()!.trim());
   }
-  if (pipedEnded) {
-    return Promise.resolve('');
+  // `readableEnded`: node announces the end of a pipe when it arrives, also while no prompt
+  // is listening, and never again.
+  if (pipedEnded || process.stdin.readableEnded) {
+    return Promise.resolve(null);
   }
   return new Promise((resolve) => {
     pipedLineWaiters.push(resolve);
@@ -92,20 +110,24 @@ export function __resetPipedSecretStateForTest(): void {
   pipedBuffer = '';
   pipedLineQueue.length = 0;
   pipedLineWaiters.length = 0;
-  pipedListenerAttached = false;
+  pipedStdin = undefined;
   pipedEnded = false;
 }
 
-/** Masked stdin prompt for secrets (TTY) or piped stdin (non-TTY, one line per call). */
-export function promptSecret(label: string): Promise<string> {
+/** The next line of piped stdin as a stream of its own: empty when the input has ended. */
+async function* nextPipedLine(): AsyncGenerator<string> {
+  const line = await readPipedLine();
+  if (line !== null) {
+    yield `${line}\n`;
+  }
+}
+
+/**
+ * Read one line from a terminal in raw mode. Echoes `mask` for each character typed, or the
+ * character itself when no mask is given. Ctrl-C rejects.
+ */
+function readRawLine(mask?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    process.stderr.write(label);
-
-    if (!process.stdin.isTTY) {
-      readPipedLine().then((line) => resolve(line.trim())).catch(reject);
-      return;
-    }
-
     process.stdin.setRawMode(true);
     process.stdin.resume();
     let value = '';
@@ -129,7 +151,7 @@ export function promptSecret(label: string): Promise<string> {
           }
         } else {
           value += char;
-          process.stderr.write('*');
+          process.stderr.write(mask ?? char);
         }
       }
     };
@@ -140,4 +162,46 @@ export function promptSecret(label: string): Promise<string> {
     };
     process.stdin.on('data', onData);
   });
+}
+
+/**
+ * Masked stdin prompt for secrets (TTY) or piped stdin (non-TTY, one line per call).
+ * At the end of piped input it answers with an empty string.
+ */
+export function promptSecret(label: string): Promise<string> {
+  process.stderr.write(label);
+  if (!process.stdin.isTTY) {
+    return readPipedLine().then((line) => (line ?? '').trim());
+  }
+  return readRawLine('*');
+}
+
+/**
+ * Visible stdin prompt for one line, with an optional default that is taken on
+ * empty input (Enter without typing). For values that are not secret: use
+ * `promptSecret` for those.
+ *
+ * On a terminal it reads in raw mode, as `promptSecret` does. Without a
+ * terminal it reads one line and rejects when the input ends before a line:
+ * an answer that was not given must not count as Enter.
+ */
+export function promptLine(label: string, defaultValue?: string): Promise<string> {
+  process.stderr.write(defaultValue ? `${label} [${defaultValue}]: ` : `${label}: `);
+  if (!process.stdin.isTTY) {
+    return new Promise((resolve, reject) => {
+      // The readline is given one line of the reader that the secret prompt uses, not stdin
+      // itself. A readline on stdin takes every line of a write and keeps the first, pauses
+      // stdin when it closes, and beside the other reader gets the same lines a second time.
+      // It still shows the answer after the label when stderr is a terminal.
+      const rl = readline.createInterface({ input: Readable.from(nextPipedLine()), output: process.stderr });
+      // Resolve before closing: close() emits 'close' at once, and the handler below
+      // would reject the line that was just read.
+      rl.once('line', (line) => {
+        resolve(line.trim() || defaultValue || '');
+        rl.close();
+      });
+      rl.once('close', () => reject(new Error('No input provided.')));
+    });
+  }
+  return readRawLine().then((value) => value || defaultValue || '');
 }

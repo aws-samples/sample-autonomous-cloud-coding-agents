@@ -1001,6 +1001,33 @@ describe('AgentStack', () => {
     expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
+  test('every function that reads the per-user concurrency cap gets the one the orchestrator admits against', () => {
+    // The stack declares the cap once. A construct it does not pass the cap to falls
+    // back to a default of its own, and that shows only on the day the stack's value
+    // changes: the orchestrator then admits against one number while the admission-queue
+    // pickup and the task API count against another.
+    // The scheduled jobs, the pickup among them, are in a nested stack with a template of its own.
+    const functions = {
+      ...template.findResources('AWS::Lambda::Function'),
+      ...concurrencyMaintenance.findResources('AWS::Lambda::Function'),
+    };
+    const caps = Object.entries(functions)
+      .map(([id, fn]) => [id, fn.Properties.Environment?.Variables?.MAX_CONCURRENT_TASKS_PER_USER] as const)
+      .filter(([, cap]) => cap !== undefined);
+    const admissionCap = caps.find(([id]) => id.startsWith('TaskOrchestratorOrchestratorFn'))?.[1];
+
+    expect(admissionCap).toBeDefined();
+    expect(caps.filter(([, cap]) => cap !== admissionCap)).toEqual([]);
+    // The functions this is here for. One that stops carrying the variable, or that
+    // moves into another nested stack (whose template then has to be read here as
+    // well), would otherwise drop out of the comparison above without being noticed.
+    expect(caps.map(([id]) => id)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^TaskApiGetTaskFn/),
+      expect.stringMatching(/^TaskApiConfirmUploadsFn/),
+      expect.stringMatching(/^AdmissionQueuePickupPickupFn/),
+    ]));
+  });
+
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',
@@ -1249,6 +1276,29 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
       Cpu: '4096',
       Memory: '16384',
     });
+  });
+
+  test('both ECS task definitions name the nudges table, so a nudge reaches an ECS agent', () => {
+    // Without NUDGES_TABLE_NAME the agent's nudge reader switches itself off:
+    // `bgagent nudge` answers 202, the row is written, and nothing reads it.
+    const nudgesTable = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskNudgesTable'));
+    expect(nudgesTable).toBeDefined();
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'NUDGES_TABLE_NAME',
+        Value: { Ref: nudgesTable },
+      });
+    }
+    // The agent reads the table with the per-task SessionRole, as it does the
+    // other task tables: the task role itself gets no statement on it.
+    const rolesGrantedTheTable = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([, policy]) => JSON.stringify(policy).includes(nudgesTable!))
+      .map(([id]) => id.replace(/DefaultPolicy.*$/, ''));
+    expect(rolesGrantedTheTable).toContain('AgentSessionRole');
+    expect(rolesGrantedTheTable).not.toContain('EcsAgentClusterTaskRole');
   });
 });
 

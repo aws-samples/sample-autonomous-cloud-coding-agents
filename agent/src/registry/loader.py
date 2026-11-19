@@ -16,11 +16,13 @@ project-scoped scan picks up both.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 from typing import Any
 
+from channel_mcp import read_existing_mcp_config
 from shell import log
 
 # Seconds to allow each git plumbing call when protecting .mcp.json from commit.
@@ -45,6 +47,20 @@ def _server_key(asset: dict[str, Any]) -> str:
     return f"{namespace}__{name}"
 
 
+# The shapes the Claude Code CLI requires of the connection fields it reads.
+_STRING = "a string"
+_STRING_LIST = "a list of strings"
+_STRING_MAP = "an object with string values"
+
+
+def _has_shape(value: Any, shape: str) -> bool:
+    if shape == _STRING:
+        return isinstance(value, str)
+    if shape == _STRING_LIST:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    return isinstance(value, dict) and all(isinstance(item, str) for item in value.values())
+
+
 def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     """Normalize a registry mcp_server runtime payload into the ``.mcp.json``
     entry shape the Claude Agent SDK actually consumes.
@@ -57,11 +73,12 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     Map ``transport`` → ``type`` and pass the rest through untouched.
 
     Fail-closed: a structurally invalid payload (http/sse without ``url``, stdio
-    without ``command``, or an unknown transport) raises
-    :class:`RegistryAssetLoadError`. Writing a broken ``.mcp.json`` entry would
-    let the task run with the pinned tool surface silently missing while the
-    audit bundle claims the asset loaded — exactly the fail-open the resolve-side
-    validation also guards against (#246 review).
+    without ``command``, an unknown transport, or a field the transport uses in
+    another shape than the CLI accepts) raises :class:`RegistryAssetLoadError`.
+    Writing a broken ``.mcp.json`` entry would let the task run with the pinned
+    tool surface silently missing while the audit bundle claims the asset loaded
+    — exactly the fail-open the resolve-side validation also guards against
+    (#246 review).
     """
     transport = runtime.get("transport") or runtime.get("type")
     if transport in ("http", "sse"):
@@ -69,16 +86,27 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
             raise RegistryAssetLoadError(
                 f"{server_key}: {transport} mcp_server runtime is missing 'url'"
             )
+        shapes = {"url": _STRING, "headers": _STRING_MAP}
     elif transport == "stdio":
         if not runtime.get("command"):
             raise RegistryAssetLoadError(
                 f"{server_key}: stdio mcp_server runtime is missing 'command'"
             )
+        shapes = {"command": _STRING, "args": _STRING_LIST, "env": _STRING_MAP}
     else:
         raise RegistryAssetLoadError(
             f"{server_key}: unknown mcp_server transport {transport!r} "
             f"(expected http, sse, or stdio)"
         )
+    # The CLI validates these fields of an entry of this transport. When one has
+    # another shape it skips the entry, and the session starts without the server.
+    # It does not read a field of the other transport (``args`` of an http server),
+    # so that one is not checked.
+    for field, shape in shapes.items():
+        if field in runtime and not _has_shape(runtime[field], shape):
+            raise RegistryAssetLoadError(
+                f"{server_key}: {transport} mcp_server runtime '{field}' must be {shape}"
+            )
     if "transport" not in runtime:
         return runtime  # already in SDK shape
     mapped = {k: v for k, v in runtime.items() if k != "transport"}
@@ -86,37 +114,19 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     return mapped
 
 
-def _read_existing_mcp_config(path: str) -> dict[str, Any]:
-    """Return the parsed .mcp.json at ``path``, or {} if absent/invalid.
-
-    Mirrors ``channel_mcp._read_existing_mcp_config`` — a malformed file is
-    logged and treated as absent rather than crashing the agent.
-    """
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            parsed = json.load(f)
-        if isinstance(parsed, dict):
-            return parsed
-        log("WARN", f"Ignoring non-object .mcp.json at {path} (got {type(parsed).__name__})")
-    except (OSError, json.JSONDecodeError) as e:
-        log("WARN", f"Failed to read existing .mcp.json at {path}: {type(e).__name__}: {e}")
-    return {}
-
-
 class RegistryAssetLoadError(RuntimeError):
     """A resolved asset could not be applied. Raised so the task fails-closed
     rather than running with an audit record claiming an asset that was never
     actually loaded (#246 Option C). This covers every condition that would leave
     a pinned asset unloaded — missing repo dir, empty/invalid runtime, structurally
-    invalid connection config, or a write error (see :func:`apply_mcp_assets`). The
+    invalid connection config, or a write error (see :func:`apply_mcp_assets`), and
+    a server that the Linear scrub removes behind the merge (``pipeline.run_task``). The
     only warn-and-continue case is a pre-existing malformed ``.mcp.json`` on disk
-    (:func:`_read_existing_mcp_config`), which is replaced, not fatal."""
+    (:func:`channel_mcp.read_existing_mcp_config`), which is replaced, not fatal."""
 
 
 def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
-    """Mark ``.mcp.json`` skip-worktree so the safety-net commit can't push it.
+    """Keep the ``.mcp.json`` we just wrote out of the commits made in the clone.
 
     The resolved runtime we just wrote may carry secret-bearing fields (bearer
     ``headers``, a ``url`` with a token query string, ``args`` like
@@ -124,13 +134,23 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
     post-hook safety net (``git add -u`` → commit → ``git push``) will exfiltrate
     it into the PR whenever the target repo *tracks* ``.mcp.json`` (#246 review
     B4). Setting ``skip-worktree`` blocks both ``git add -u`` and an explicit
-    ``git add .mcp.json``; for an untracked file we first ``--intent-to-add`` so
-    the flag has an index entry to attach to. Mechanical enforcement, mirroring
-    the ADR-016 Linear-strip posture — a prompt is not a security boundary.
+    ``git add .mcp.json``. Mechanical enforcement, mirroring the ADR-016
+    Linear-strip posture — a prompt is not a security boundary.
+
+    A file the repo does not track is listed in the clone's own exclude file
+    instead (``.git/info/exclude``, never committed, as ``attachments`` does for
+    its directory): ``git add -A``, ``git add .`` and ``git add .mcp.json`` leave
+    it alone, and the advice git prints when it refuses the last of them is
+    switched off in the clone. Giving the file an index entry for the flag
+    (``--intent-to-add``) is an uncommitted change to git: ``git stash``,
+    ``rebase``, ``cherry-pick``, ``merge`` and ``reset --hard`` then fail for the
+    agent. That entry is only the fallback where the file is not ignored
+    afterwards: the repo's own ``.gitignore`` re-includes it, which outranks the
+    exclude file, or the exclude file could not be written.
 
     Best-effort: git plumbing failures here are logged, not fatal. The SDK still
-    reads the on-disk file (skip-worktree only affects the index, not the
-    working tree), so loading is unaffected either way.
+    reads the on-disk file (neither mechanism touches the working tree), so
+    loading is unaffected either way.
     """
 
     def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -145,7 +165,18 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
     try:
         tracked = _git("ls-files", "--error-unmatch", ".mcp.json").returncode == 0
         if not tracked:
-            # Give the untracked file an index entry so skip-worktree can attach.
+            exclude = os.path.join(repo_dir, ".git", "info", "exclude")
+            # The leading newline is for an exclude file whose last line has none.
+            with contextlib.suppress(OSError), open(exclude, "a", encoding="utf-8") as f:
+                f.write("\n/.mcp.json\n")
+            if _git("check-ignore", "-q", ".mcp.json").returncode == 0:
+                # git refuses an add that names the ignored file. The refusal
+                # stays; the advice git prints with it is off for this clone.
+                _git("config", "advice.addIgnoredFile", "false")
+                return
+            # Not ignored after all (the repo's .gitignore re-includes it, or the
+            # exclude file could not be written): give the untracked file an
+            # index entry so skip-worktree can attach.
             _git("add", "--intent-to-add", ".mcp.json")
         result = _git("update-index", "--skip-worktree", ".mcp.json")
         if result.returncode != 0:
@@ -155,7 +186,7 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
                 f"(exit {result.returncode}): {result.stderr.strip()}",
             )
     except (OSError, subprocess.SubprocessError) as e:
-        log("WARN", f"Registry: skip-worktree guard for {mcp_path} failed: {type(e).__name__}: {e}")
+        log("WARN", f"Registry: commit guard for {mcp_path} failed: {type(e).__name__}: {e}")
 
 
 def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> list[str]:
@@ -171,6 +202,8 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
       * ``.mcp.json`` write error (OSError).
       * an empty / non-dict runtime payload for a pinned asset.
       * a structurally invalid connection config (see :func:`_to_mcp_config`).
+      * two pins of one asset whose resolved connection configs differ: they
+        share one ``.mcp.json`` key, so only one of them could be loaded.
 
     A pinned asset is one the operator explicitly referenced in the Blueprint, so
     "load it or fail the task" keeps the stamped ``resolved_assets`` audit record
@@ -188,7 +221,7 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
         )
 
     mcp_path = os.path.join(repo_dir, ".mcp.json")
-    config = _read_existing_mcp_config(mcp_path)
+    config = read_existing_mcp_config(mcp_path)
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):
         servers = {}
@@ -201,7 +234,15 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
             # Fail closed: a pinned asset with no runtime cannot be honored, and
             # skipping it would make the stamped audit bundle lie about what ran.
             raise RegistryAssetLoadError(f"{key}: resolved mcp_server has an empty runtime payload")
-        servers[key] = _to_mcp_config(runtime, key)
+        entry = _to_mcp_config(runtime, key)
+        if key in written and servers[key] != entry:
+            # Two pins of one asset that resolved to different versions: the key
+            # holds one of them, and the audit bundle would name both as loaded.
+            raise RegistryAssetLoadError(
+                f"{key}: pinned more than once, and version {asset.get('version')} "
+                f"resolved to a different connection config than the earlier pin"
+            )
+        servers[key] = entry
         written.append(key)
 
     config["mcpServers"] = servers

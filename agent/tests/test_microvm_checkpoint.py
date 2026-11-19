@@ -378,7 +378,7 @@ class TestDynamoLocalCheckpoint:
 
     @pytest.mark.parametrize("wake", ["approved", "expired_pending", "cancelled", "changed_intent"])
     def test_http_hooks_use_real_transactions_and_preserve_original_gate(self, local_tables, wake):
-        import httpx
+        import httpx2
 
         import server
         from microvm_lifecycle import register_task, unregister_task
@@ -396,8 +396,8 @@ class TestDynamoLocalCheckpoint:
                 original.request_id, original.tool_use_id, original.deadline, record=original.record
             )
             assert park is not None
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=server.app), base_url="http://test"
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=server.app), base_url="http://test"
             ) as http:
                 prefix = server.MICROVM_HOOK_PREFIX
                 for _ in range(2):

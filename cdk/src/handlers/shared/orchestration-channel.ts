@@ -21,18 +21,17 @@
  * Surface-agnostic channel abstraction for sub-issue orchestration.
  *
  * The orchestration engine (discovery, release, reconcile, rollup) drives issue
- * feedback — panel comments, reactions, state transitions, failure notices — and
- * reads the sub-issue graph. Historically it called the Linear API directly, so
- * the engine was Linear-only. This interface lets the engine speak to ANY
+ * feedback — panel comments, reactions, state transitions, failure notices.
+ * Historically it called the Linear API directly, so the engine was
+ * Linear-only. This interface lets the engine speak to ANY
  * issue-tracking surface (Linear today, Jira next — a Jira comment-back path
  * already exists) without naming one: the engine holds a `Channel` and calls
  * these methods; each surface ships an adapter that implements them.
  *
+ * The sub-issue graph does not come through a `Channel`: it is read from a
+ * graph source (`orchestration-graph-source.ts`), one per tracker.
+ *
  * Design boundary — what stays surface-SPECIFIC (behind the adapter):
- *  - **Dependency/blocking relations.** Linear models a sub-issue DAG with native
- *    `blocks` relations; another surface may have no equivalent and derive the
- *    graph differently. So `fetchChildGraph` is the adapter's job — the engine
- *    only consumes the resulting DAG.
  *  - **Comment formatting.** One surface takes markdown, another a structured
  *    document format. The adapter renders; the engine passes a plain-text body.
  *  - **Reaction vocabulary.** Each surface has its own reaction set; the engine
@@ -144,16 +143,6 @@ export interface ThreadedReplyOptions {
   readonly repairIfOverwritten?: boolean;
 }
 
-/** A node in the sub-issue graph, as the adapter surfaces it to the engine. */
-export interface ChannelSubIssueNode {
-  readonly issueId: string;
-  readonly displayId?: string;
-  readonly title?: string;
-  /** issueIds this node depends on (blocked-by). How the adapter derives this
-   *  is surface-specific (Linear: `blocks` relations); the engine just reads it. */
-  readonly dependsOn: readonly string[];
-}
-
 /**
  * A surface adapter. The orchestration engine holds one of these and never names
  * a concrete surface. Implementations: {@link makeLinearChannel} today; a Jira
@@ -255,22 +244,4 @@ export interface Channel {
     existing?: CommentRef,
     options?: ThreadedReplyOptions,
   ): Promise<CommentRef | null>;
-
-  /**
-   * Delete the engine's own transient planning notes from an issue thread,
-   * keeping ``keep`` if given. Interim notes are posted fire-and-forget from
-   * many places, so once a plan settles the thread needs collapsing to just the
-   * outcome. Adapters must scope deletion to the bot's own notes — never a
-   * human's comment, and never the durable status panel. Returns how many were
-   * removed.
-   */
-  sweepNotes?(issue: IssueRef, keep?: CommentRef): Promise<number>;
-
-  // --- graph (surface-specific derivation, uniform result) ---
-
-  /** Read the sub-issue graph rooted at a parent, with dependency edges resolved
-   *  however the surface expresses them. Optional — a surface with no native
-   *  sub-issue/dependency model omits this and the engine falls back to a
-   *  declarative graph source. */
-  fetchChildGraph?(parent: IssueRef): Promise<readonly ChannelSubIssueNode[]>;
 }

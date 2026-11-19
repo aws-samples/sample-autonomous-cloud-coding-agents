@@ -222,7 +222,7 @@ Fetch failures, timeouts, non-JSON bodies, 5xx responses, HTTP 408/429, and all 
 | `http_error` | GitHub returned non-2xx responses; inspect the preceding logged HTTP statuses, token permissions, and rate limits. |
 | `non_json_response` | GitHub's response could not be parsed as JSON. |
 | `malformed_pr_response` | The deployment-status commit-pulls endpoint returned a non-array body. |
-| `pr_not_linked` | No open PR is associated with the deployment SHA yet. |
+| `pr_not_linked` | No open PR of this repository is associated with the deployment SHA yet. A pull request that lives in another repository and was opened from a branch of this one does not count. |
 | `budget_exhausted` | Earlier processing consumed the PR lookup budget before the first request. |
 
 After resolving a failure, rebuild the preview or wait for the one-hour dedup window before replaying the same check.
@@ -258,10 +258,14 @@ The message body is the original async-invoke event; the `RequestContext`/error 
 
 ### Screenshot lands on GitHub PR but not on Linear
 
-The GitHub-side post is the primary path; Linear is opt-in and best-effort. Skipping the Linear post is normal if you don't have Linear configured. If you do, look for the processor log line `Linear identifier did not resolve to an issue` — usually means:
+The GitHub-side post is the primary path; Linear is opt-in and best-effort. Skipping the Linear post is normal if you don't have Linear configured. If you do: a pull request opened by a Linear task needs no identifier, because its issue comes from the task record. For a pull request that was not opened by a Linear task, the branch name, the title and the body are searched for a Linear-style identifier (e.g. `ABCA-42`), in that order; a later one is used only when no workspace has the earlier one. If none of them names the issue, nothing is posted. Look for the processor log line `Linear identifier did not resolve to an issue`, whose field `identifiers` lists the ones that were tried — usually means:
 
-- The PR title and body don't contain a Linear-style identifier (e.g. `ABCA-42`). The agent's task description includes the identifier by default; if you opened the PR manually it might not.
+- No workspace has an issue under any of the identifiers that were found. Any word followed by a number in the branch name reads as one (`feature/upgrade-node-22` gives `NODE-22`), so check that the title or the body names the issue.
 - The identifier's workspace isn't OAuth-installed. Run `bgagent linear list-projects` to confirm the issue's project is in the registry.
+- The identifier exists in two workspaces (warning `Linear issue lookup: identifier exists in more than one workspace`). Nothing says which of the two is meant, so nothing is posted.
+- A workspace could not be asked (its token did not resolve, or warnings `Linear issue lookup: graphql ...`). The search ends there: an identifier further down is not taken in place of one that could not be checked.
+
+A pull request whose branch has the form `bgagent/<id>/...` but names a task of another repository gets the screenshot comment on GitHub only. The processor logs `Failed to persist screenshot_url` with the error `The branch names no task of this repository`. A task counts as one of another repository when its blueprint is registered under another name than the one GitHub reports (letter case aside), for example the old name of a repository that was renamed: register the blueprint under the current name.
 
 ### CloudFront serves a 403
 

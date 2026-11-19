@@ -6,9 +6,15 @@ import glob
 import os
 from typing import TYPE_CHECKING
 
-from config import AGENT_WORKSPACE, NEEDS_INPUT_MARKER
+from config import (
+    AGENT_WORKSPACE,
+    DEFAULT_WORKFLOW_ID,
+    NEEDS_INPUT_MARKER,
+    REPO_LESS_DEFAULT_WORKFLOW_ID,
+)
+from post_hooks import DEFAULT_BUILD_COMMAND, DEFAULT_LINT_COMMAND
 from prompts import get_system_prompt
-from sanitization import sanitize_external_content as sanitize_memory_content
+from sanitization import sanitize_external_content
 from shell import log
 
 if TYPE_CHECKING:
@@ -22,7 +28,7 @@ def build_system_prompt(
     overrides: str,
 ) -> str:
     """Assemble the system prompt with task-specific values and memory context."""
-    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+    workflow_id = (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
     system_prompt = get_system_prompt(workflow_id)
     system_prompt = system_prompt.replace("{repo_url}", config.repo_url)
     system_prompt = system_prompt.replace("{task_id}", config.task_id)
@@ -30,6 +36,12 @@ def build_system_prompt(
     system_prompt = system_prompt.replace("{branch_name}", setup.branch)
     system_prompt = system_prompt.replace("{default_branch}", setup.default_branch)
     system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
+    # The commands setup_repo and the post-agent gate run: the Blueprint's, else
+    # the mise defaults (blank counts as unset, as in resolve_verify_argv).
+    build_command = config.build_command.strip() or DEFAULT_BUILD_COMMAND
+    lint_command = config.lint_command.strip() or DEFAULT_LINT_COMMAND
+    system_prompt = system_prompt.replace("{build_command}", build_command)
+    system_prompt = system_prompt.replace("{lint_command}", lint_command)
     # Clarify-before-spend (UX #4): the new_task workflow references this marker
     # in its "ask instead of guess" branch. Harmless no-op for prompts that don't
     # contain the placeholder.
@@ -42,18 +54,11 @@ def build_system_prompt(
     system_prompt = system_prompt.replace("{setup_notes}", setup_notes)
 
     # Inject memory context from orchestrator hydration
-    memory_context_text = "(No previous knowledge available for this repository.)"
-    if hydrated_context and hydrated_context.memory_context:
-        mc = hydrated_context.memory_context
-        mc_parts: list[str] = []
-        if mc.repo_knowledge:
-            mc_parts.append("**Repository knowledge:**")
-            mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.repo_knowledge)
-        if mc.past_episodes:
-            mc_parts.append("\n**Past task episodes:**")
-            mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.past_episodes)
-        if mc_parts:
-            memory_context_text = "\n".join(mc_parts)
+    memory_context_text = _render_memory_context(
+        hydrated_context,
+        heading="Repository knowledge",
+        empty="(No previous knowledge available for this repository.)",
+    )
     system_prompt = system_prompt.replace("{memory_context}", memory_context_text)
 
     # Substitute PR-specific placeholders
@@ -64,13 +69,41 @@ def build_system_prompt(
         log("WARN", "System prompt contains {pr_number} placeholder but no pr_number in config")
         system_prompt = system_prompt.replace("{pr_number}", "(unknown)")
 
+    return _append_task_sections(system_prompt, config, overrides)
+
+
+def build_repoless_system_prompt(
+    config: TaskConfig,
+    hydrated_context: HydratedContext | None,
+    overrides: str,
+) -> str:
+    """Assemble the system prompt for a repo-less workflow (#248 Phase 3).
+
+    The repo-bound :func:`build_system_prompt` requires a ``RepoSetup`` (branch,
+    default_branch, setup notes); a repo-less task has none. This builds the
+    repo-less template (no git/branch/PR placeholders), substituting only
+    task_id/workspace/max_turns and the rendered memory context, then appends the
+    same Blueprint overrides + channel guidance as the repo-bound path.
+    """
+    workflow_id = (config.resolved_workflow or {}).get("id", REPO_LESS_DEFAULT_WORKFLOW_ID)
+    system_prompt = get_system_prompt(workflow_id, repo_less=True)
+    system_prompt = system_prompt.replace("{task_id}", config.task_id)
+    system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
+    system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
+    system_prompt = system_prompt.replace(
+        "{memory_context}", _render_memory_context(hydrated_context)
+    )
+    return _append_task_sections(system_prompt, config, overrides)
+
+
+def _append_task_sections(system_prompt: str, config: TaskConfig, overrides: str) -> str:
+    """Append what follows the template in both prompts: overrides, channel, skills."""
     # Append Blueprint system_prompt_overrides after all placeholder
     # substitutions (avoids double-substitution if overrides contain
     # template placeholders like {repo_url}).
     if overrides:
         system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
-        n = len(overrides)
-        log("TASK", f"Applied system prompt overrides ({n} chars)")
+        log("TASK", f"Applied system prompt overrides ({len(overrides)} chars)")
 
     # Channel-specific guidance (appended last so channel instructions sit
     # close to the end of the prompt, where the model weights recency).
@@ -88,57 +121,24 @@ def build_system_prompt(
     return system_prompt
 
 
-def build_repoless_system_prompt(
-    config: TaskConfig,
+def _render_memory_context(
     hydrated_context: HydratedContext | None,
-    overrides: str,
+    *,
+    heading: str = "Prior knowledge",
+    empty: str = "(No previous knowledge available.)",
 ) -> str:
-    """Assemble the system prompt for a repo-less workflow (#248 Phase 3).
-
-    The repo-bound :func:`build_system_prompt` requires a ``RepoSetup`` (branch,
-    default_branch, setup notes); a repo-less task has none. This builds the
-    repo-less template (no git/branch/PR placeholders), substituting only
-    task_id/workspace/max_turns and the rendered memory context, then appends the
-    same Blueprint overrides + channel guidance as the repo-bound path.
-    """
-    workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
-    system_prompt = get_system_prompt(workflow_id, repo_less=True)
-    system_prompt = system_prompt.replace("{task_id}", config.task_id)
-    system_prompt = system_prompt.replace("{workspace}", AGENT_WORKSPACE)
-    system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
-    system_prompt = system_prompt.replace(
-        "{memory_context}", _render_memory_context(hydrated_context)
-    )
-
-    if overrides:
-        system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
-        log("TASK", f"Applied system prompt overrides ({len(overrides)} chars)")
-
-    channel_addendum = _channel_prompt_addendum(config)
-    if channel_addendum:
-        system_prompt += channel_addendum
-
-    if config.resolved_assets:
-        from registry.loader import build_skill_prompt_fragment
-
-        system_prompt += build_skill_prompt_fragment(config.resolved_assets)
-
-    return system_prompt
-
-
-def _render_memory_context(hydrated_context: HydratedContext | None) -> str:
     """Render the memory-context block shared by repo-bound and repo-less prompts."""
     if not (hydrated_context and hydrated_context.memory_context):
-        return "(No previous knowledge available.)"
+        return empty
     mc = hydrated_context.memory_context
     mc_parts: list[str] = []
     if mc.repo_knowledge:
-        mc_parts.append("**Prior knowledge:**")
-        mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.repo_knowledge)
+        mc_parts.append(f"**{heading}:**")
+        mc_parts.extend(f"- {sanitize_external_content(item)}" for item in mc.repo_knowledge)
     if mc.past_episodes:
         mc_parts.append("\n**Past task episodes:**")
-        mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.past_episodes)
-    return "\n".join(mc_parts) if mc_parts else "(No previous knowledge available.)"
+        mc_parts.extend(f"- {sanitize_external_content(item)}" for item in mc.past_episodes)
+    return "\n".join(mc_parts) if mc_parts else empty
 
 
 def _channel_prompt_addendum(config: TaskConfig) -> str:

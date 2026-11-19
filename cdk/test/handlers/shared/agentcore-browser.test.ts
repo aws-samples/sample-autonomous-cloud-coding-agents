@@ -390,4 +390,17 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
     const png = await captureScreenshot('https://preview.example.com');
     expect(Buffer.from(png).toString()).toBe('PNG');
   });
+
+  test('a command that gets no answer reports the time it was given, not what is left when the timer fires', async () => {
+    // The browser never answers the first command; the capture has 200 ms.
+    FakeWebSocket.reactions = [() => null];
+
+    const error = await captureScreenshot('https://preview.example.com', { timeoutMs: 200 }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    const given = /^CDP Target\.getTargets timed out after (\d+)ms$/.exec((error as Error).message);
+    expect(given).not.toBeNull();
+    expect(Number(given![1])).toBeGreaterThan(0);
+    expect(Number(given![1])).toBeLessThanOrEqual(200);
+  });
 });

@@ -126,7 +126,7 @@ describe('wire-capture: emitted User-Agent header', () => {
 describe('makeClient (cli)', () => {
   it('spreads md/ UA into client config', () => {
     const c = makeClient(CloudFormationClient, { region: 'us-east-1' });
-    expect((c.config as any).customUserAgent).toEqual(abcaUserAgent().customUserAgent);
+    expect(c.config.customUserAgent).toEqual(abcaUserAgent().customUserAgent);
   });
   it('makeDocClient is attributed', () => {
     expect(() => makeDocClient({ region: 'us-east-1' })).not.toThrow();
@@ -136,7 +136,7 @@ describe('makeClient (cli)', () => {
       region: 'us-east-1',
       customUserAgent: [['caller/1.0', 'x']],
     });
-    expect((c.config as any).customUserAgent).toEqual([
+    expect(c.config.customUserAgent).toEqual([
       ['caller/1.0', 'x'],
       ...abcaUserAgent().customUserAgent,
     ]);
