@@ -53,7 +53,7 @@ const ANSWER = [
 ].join('\n');
 
 describe('renderJiraFinalStatusComment: the answer of the agent', () => {
-  test('inline code, bold, a link and a fenced block reach Jira as ADF, not as literal Markdown', () => {
+  test('inline code, bold and a fenced block reach Jira as ADF, not as literal Markdown', () => {
     const doc = buildAdfDocument(renderJiraFinalStatusComment({ ...COMPLETED, answerText: ANSWER }));
 
     expect(doc.content).toEqual([
@@ -83,17 +83,44 @@ describe('renderJiraFinalStatusComment: the answer of the agent', () => {
         type: 'codeBlock',
         content: [{ type: 'text', text: 'for (const job of jobs) {\n  await queue.retry(job);\n}' }],
       },
-      {
-        type: 'paragraph',
-        content: [
-          { type: 'text', text: 'See ' },
-          { type: 'text', text: 'the runbook', marks: [{ type: 'link', attrs: { href: 'https://example.com/runbook' } }] },
-          { type: 'text', text: '.' },
-        ],
-      },
+      // The link stays as typed: see the next test.
+      { type: 'paragraph', content: [{ type: 'text', text: 'See [the runbook](https://example.com/runbook).' }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'cost: $0.50 • turns: 3 / 100 • duration: 1m' }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'task t', marks: [{ type: 'em' }] }] },
     ]);
+  });
+
+  test('a link or an image in the answer stays as typed, with its URL: the text is the agent\'s own', () => {
+    const doc = buildAdfDocument(renderJiraFinalStatusComment({
+      ...COMPLETED,
+      prUrl: 'https://github.com/o/r/pull/7',
+      answerText: [
+        '[Open live preview](https://example.org/x)',
+        '![x](https://example.org/y.png)',
+        '[![x](https://example.org/y.png)](https://example.org/x) and **[bold](https://example.org/z)**',
+      ].join('\n'),
+    }));
+    const content = doc.content as Array<{ content: Array<{ marks?: Array<{ type: string }> }> }>;
+
+    // Between the header and the metrics, the pull request and the footer.
+    expect(content.slice(1, -3)).toEqual([
+      { type: 'paragraph', content: [{ type: 'text', text: '[Open live preview](https://example.org/x)' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: '![x](https://example.org/y.png)' }] },
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: '[![x](https://example.org/y.png)](https://example.org/x) and ' },
+          { type: 'text', text: '[bold](https://example.org/z)', marks: [{ type: 'strong' }] },
+        ],
+      },
+    ]);
+    // The one link of the comment is ABCA's own, to the pull request.
+    expect(content.flatMap((node) => node.content).filter((run) => run.marks?.some((mark) => mark.type === 'link')))
+      .toEqual([{
+        type: 'text',
+        text: 'https://github.com/o/r/pull/7',
+        marks: [{ type: 'link', attrs: { href: 'https://github.com/o/r/pull/7' } }],
+      }]);
   });
 
   test('the plain-text form keeps the block fenced and the link as Markdown', () => {

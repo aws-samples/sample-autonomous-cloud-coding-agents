@@ -112,11 +112,22 @@ export type AdfBlock = AdfParagraph | { readonly code: string };
  * input harmless as plain text.
  */
 export function parseMarkdownRuns(line: string): AdfParagraph {
+  return parseRuns(line, true);
+}
+
+/** What Markdown counts as punctuation: the Unicode punctuation and symbol characters. */
+const PUNCTUATION = /[\p{P}\p{S}]/u;
+
+/**
+ * The parser behind {@link parseMarkdownRuns}. Without ``links`` a link or an
+ * image stays as typed, with its URL: that is for text the agent wrote.
+ */
+function parseRuns(line: string, links: boolean): AdfParagraph {
   // `_…_` around the whole line: the heartbeat's liveness line and the panel
   // footer. ADF allows `code` only together with `link`, so a code run inside
   // the line stays without emphasis.
   if (line.length > 2 && line.startsWith('_') && line.endsWith('_')) {
-    return parseMarkdownRuns(line.slice(1, -1)).map((run) => (run.code ? run : { ...run, em: true }));
+    return parseRuns(line.slice(1, -1), links).map((run) => (run.code ? run : { ...run, em: true }));
   }
   const runs: AdfTextRun[] = [];
   let cursor = 0;
@@ -141,7 +152,7 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
     // links instead. Constant labels match jiraPreviewDocument and avoid using
     // arbitrary image alt text as operator guidance. The token boundary below
     // includes ! so embedded images reach this branch.
-    const image = line.slice(cursor).match(/^\[?!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)(?:\]\((https?:\/\/[^)\s]+)\))?/);
+    const image = links && line.slice(cursor).match(/^\[?!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)(?:\]\((https?:\/\/[^)\s]+)\))?/);
     if (image) {
       append({ text: 'Open screenshot', href: image[2] });
       if (image[3]) {
@@ -154,8 +165,16 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
 
     if (line.startsWith('**', cursor)) {
       const end = line.indexOf('**', cursor + 2);
-      if (end !== -1) {
-        for (const run of parseMarkdownRuns(line.slice(cursor + 2, end))) {
+      // Bold as Markdown has it: text right after the opening pair and right
+      // before the closing one. A pair with a word on its outer side and
+      // punctuation on its inner side is an operator: `2**(n-1) + 2**(m-1)`
+      // and `f(**a) + g(**b)` stay as typed, like `a ** b ** c`.
+      if (
+        end !== -1 && /\S/.test(line.charAt(cursor + 2)) && /\S/.test(line.charAt(end - 1))
+        && !(/\w/.test(line.charAt(cursor - 1)) && PUNCTUATION.test(line.charAt(cursor + 2)))
+        && !(PUNCTUATION.test(line.charAt(end - 1)) && /\w/.test(line.charAt(end + 2)))
+      ) {
+        for (const run of parseRuns(line.slice(cursor + 2, end), links)) {
           // As for italics above: a code run takes no other emphasis.
           append(run.code ? run : { ...run, strong: true });
         }
@@ -173,7 +192,7 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
       }
     }
 
-    if (line[cursor] === '[') {
+    if (links && line[cursor] === '[') {
       const match = line.slice(cursor).match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/);
       if (match) {
         append({ text: match[1], href: match[2] });
@@ -201,8 +220,9 @@ const CODE_FENCE = /^\s*```[^`]*$/;
 /**
  * Parse Markdown the agent wrote (an answer, a question) into blocks: the
  * lines between two fences are one code block, every other line is a paragraph
- * of {@link parseMarkdownRuns}. What that subset does not know (a heading, a
- * list marker) stays as typed.
+ * of {@link parseMarkdownRuns}, except that a link or an image stays as typed,
+ * with its URL: the text is the agent's own. What that subset does not know
+ * (a heading, a list marker) stays as typed too.
  */
 export function parseMarkdownBlocks(text: string): AdfBlock[] {
   const blocks: AdfBlock[] = [];
@@ -217,7 +237,7 @@ export function parseMarkdownBlocks(text: string): AdfBlock[] {
     if (!CODE_FENCE.test(line)) {
       // Inside a block nothing is Markdown.
       if (open) open.push(line);
-      else blocks.push(parseMarkdownRuns(line));
+      else blocks.push(parseRuns(line, false));
     } else if (open) {
       closeBlock(open);
       open = undefined;

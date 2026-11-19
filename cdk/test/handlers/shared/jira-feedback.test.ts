@@ -498,6 +498,30 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
     ]);
   });
 
+  test.each([
+    // The agent quotes code outside backticks: an operator, not emphasis.
+    'x ** 2 + y ** 2 is the squared distance.',
+    'Pass **kwargs and **options through to the constructor.',
+    'Call f(**a) and then g(**b).',
+    'The delay is 2**(attempt-1) seconds, at most 2**(max-1).',
+  ])('leaves as typed the asterisk pairs that Markdown does not read as bold: %s', (line) => {
+    expect(parseMarkdownRuns(line)).toEqual([{ text: line }]);
+  });
+
+  test('keeps bold at both ends of a line, beside punctuation, inside a word and beside another script', () => {
+    expect(parseMarkdownRuns('**Note:** the queue (**already**) retries **twice**')).toEqual([
+      { text: 'Note:', strong: true },
+      { text: ' the queue (' },
+      { text: 'already', strong: true },
+      { text: ') retries ' },
+      { text: 'twice', strong: true },
+    ]);
+    // Three pairs: the first two are bold, the third has nothing to close it.
+    expect(parseMarkdownRuns('**a**b and **c')).toEqual([{ text: 'a', strong: true }, { text: 'b and **c' }]);
+    // A letter that is not ASCII is not punctuation: a word may follow the pair.
+    expect(parseMarkdownRuns('**変更**3件')).toEqual([{ text: '変更', strong: true }, { text: '3件' }]);
+  });
+
   test('leaves underscores that do not wrap the whole line alone', () => {
     expect(parseMarkdownRuns('fix user_id and task_id')).toEqual([{ text: 'fix user_id and task_id' }]);
     expect(parseMarkdownRuns('_private stays as typed')).toEqual([{ text: '_private stays as typed' }]);
@@ -607,6 +631,19 @@ describe('jira-feedback: parseMarkdownBlocks (Markdown the agent wrote)', () => 
     expect(parseMarkdownBlocks('```npm test```\nand more')).toEqual([
       [{ text: 'npm test', code: true }],
       [{ text: 'and more' }],
+    ]);
+  });
+
+  test('leaves a link or an image as typed, also inside bold and in an italic line', () => {
+    // parseMarkdownRuns makes Jira links of these: that is for ABCA's own text.
+    expect(parseMarkdownBlocks([
+      'See [the runbook](https://example.com/runbook) and ![shot](https://example.com/s.png).',
+      '**[docs](https://example.com/a)**',
+      '_see [docs](https://example.com/a)_',
+    ].join('\n'))).toEqual([
+      [{ text: 'See [the runbook](https://example.com/runbook) and ![shot](https://example.com/s.png).' }],
+      [{ text: '[docs](https://example.com/a)', strong: true }],
+      [{ text: 'see [docs](https://example.com/a)', em: true }],
     ]);
   });
 });

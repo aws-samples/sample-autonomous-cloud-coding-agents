@@ -1725,9 +1725,11 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
 
   // A completed iteration whose build is red is not a clean success: it gets
   // the failure pointer and frame, with the reason, as it does on Linear, in
-  // the reconciler and when ``jira-preview.ts`` re-renders the comment. The
-  // first run of an issue is rendered from the event alone.
-  const { eventType, errorTitle } = isIteration
+  // the reconciler and when ``jira-preview.ts`` re-renders the comment. Not
+  // here when it changed no code: it answered a question, the build was red
+  // before it, and the failure frame would leave its answer out. The first
+  // run of an issue is rendered from the event alone.
+  const { eventType, errorTitle } = isIteration && task.code_changed !== false
     ? jiraIterationFrame(event.event_type, task.build_passed, classifiedTitle)
     : { eventType: event.event_type, errorTitle: classifiedTitle };
 

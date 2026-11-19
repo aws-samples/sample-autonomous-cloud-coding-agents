@@ -2691,6 +2691,52 @@ describe('fanout-task-events: Jira dispatcher', () => {
     );
   });
 
+  test('standalone iteration that only answers, on a pull request whose build is red, posts its answer', async () => {
+    // "Why does the build fail?": the run changes no code, so the red build is
+    // not its outcome, and the failure frame would leave the answer out.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      build_passed: false,
+      code_changed: false,
+      answer_text: 'The lint step fails: worker.ts has an unused import.',
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2])).toBe([
+      '✅ Task completed',
+      'The lint step fails: worker.ts has an unused import.',
+      'cost: $0.55 • turns: 27 / 100 • duration: 3m 41s',
+      'PR: https://github.com/owner/repo/pull/13',
+      'task t-jira',
+    ].join('\n'));
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[0][3])).toBe('💬 Finished — answer posted below.');
+  });
+
+  test('standalone iteration that changed code and completes with a red build is still a failure', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      build_passed: false,
+      code_changed: true,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[0][3])).toBe('❌ Finished — details posted below.');
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2]))
+      .toMatch(/^⚠️ Shipped a PR but stopped early — Build or tests did not pass/);
+  });
+
   test('a run that stopped to ask a question posts the question, not a completion', async () => {
     // Clarify-and-hold: the agent asked instead of guessing, so nothing shipped
     // (no PR, code_changed=false, answer_text = the question). "✅ Task completed"
@@ -2739,6 +2785,17 @@ describe('fanout-task-events: Jira dispatcher', () => {
       ],
       { code: 'src/login.tsx\nsrc/admin/login.tsx' },
     ]);
+  });
+
+  test('a link or an image in the question of a held run stays as typed: the text is the agent\'s own', async () => {
+    const question = 'Which one: [Open live preview](https://example.org/x) or ![x](https://example.org/y.png)?';
+    mockGet({ ...TASK_RECORD_JIRA, pr_url: undefined, code_changed: false, answer_text: question });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const body = mockPostIssueCommentAdf.mock.calls[0][2] as { _adf: ReadonlyArray<unknown> };
+    // One run without an href: no link mark, the URLs in view.
+    expect(body._adf[1]).toEqual([{ text: question }]);
   });
 
   test('a held run without a stored question still asks for detail', async () => {
