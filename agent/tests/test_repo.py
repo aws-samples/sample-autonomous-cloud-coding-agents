@@ -76,14 +76,23 @@ def _origin(tmp_path, default: str, *branches: str) -> str:
 
 
 def _setup_with_real_git(
-    monkeypatch, tmp_path, config, *, default="main", branches=(), offline=False, ran=None
+    monkeypatch,
+    tmp_path,
+    config,
+    *,
+    default="main",
+    branches=(),
+    offline=False,
+    ran=None,
+    from_fork=False,
 ):
     """Run ``setup_repo`` with real git against an ``_origin`` under ``tmp_path``.
 
     ``gh repo clone`` becomes ``git clone <origin>``. The other git commands run
     as written, except the two that would leave ``tmp_path`` (the global
     ``safe.directory`` entry and the remote URL on github.com). ``gh`` and
-    ``mise`` answer 0 without running. With *offline*, every ``git fetch`` fails
+    ``mise`` answer 0 without running; asked whether the pull request comes from
+    a fork, ``gh`` says *from_fork*. With *offline*, every ``git fetch`` fails
     the way a dropped connection does. The label of each command is appended to
     *ran*.
     """
@@ -94,6 +103,9 @@ def _setup_with_real_git(
             ran.append(label)
         if label == "clone":
             cmd = ["git", "clone", "-q", origin, cmd[-1]]
+        elif label == "check-pr-fork":
+            answer = "true\n" if from_fork else "false\n"
+            return SimpleNamespace(returncode=0, stdout=answer, stderr="")
         elif cmd[0] != "git" or label in ("safe-directory", "set-remote-url"):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         elif offline and cmd[1] == "fetch":
@@ -205,11 +217,7 @@ class TestSetupRepoHappyPath:
 
 
 class TestPullRequestBranch:
-    """Checking out the branch of an existing pull request.
-
-    Where the commands are faked, each of them answers 0, so the clone "has" a
-    local branch with the name of the pull request's branch: the case of a pull
-    request whose branch is named like the default branch."""
+    """Checking out the branch of an existing pull request."""
 
     @staticmethod
     def _pr_task(head: str):
@@ -237,10 +245,9 @@ class TestPullRequestBranch:
         )
         assert setup.head_sha_before == _git("rev-parse", f"origin/{head}", cwd=clone)
         assert (setup.branch, setup.default_branch) == (head, "main")
-        # GitHub is asked whether the pull request comes from a fork only where
-        # the clone already has a branch of that name: nowhere else can the
-        # answer change what is checked out, so no other task pays for the call.
-        assert ("check-pr-fork" in ran) == (head == "develop")
+        # GitHub is asked about every pull request whether it comes from a fork:
+        # this repository can have a branch of the fork's name whatever the name.
+        assert "check-pr-fork" in ran
 
     def test_pr_from_a_fork_is_refused_before_its_branch_name_is_fetched(self, monkeypatch):
         # The head ref of a pull request from a fork names a branch of the fork.
@@ -254,6 +261,27 @@ class TestPullRequestBranch:
             repo.setup_repo(self._pr_task("main"))
 
         assert "fetch-pr-branch" not in fake.labels()
+
+    def test_pr_from_a_fork_is_refused_when_its_branch_name_is_another_branch_here(
+        self, tmp_path, monkeypatch
+    ):
+        # The fork's branch is `feature/x`, and this repository has a branch of
+        # that name as well. It is not the default branch, so the clone has no
+        # local branch of that name, and the fetch of `feature/x` from origin
+        # succeeds: with real git, setup would check out this repository's branch.
+        ran: list[str] = []
+
+        with pytest.raises(RuntimeError, match="#40 of owner/repo comes from another repository"):
+            _setup_with_real_git(
+                monkeypatch,
+                tmp_path,
+                self._pr_task("feature/x"),
+                branches=("feature/x",),
+                ran=ran,
+                from_fork=True,
+            )
+
+        assert "fetch-pr-branch" not in ran
 
     def test_fork_check_without_an_answer_stops_setup_like_a_failed_fetch(self, monkeypatch):
         # No answer is not "not a fork": setup stops. GitHub is reported as

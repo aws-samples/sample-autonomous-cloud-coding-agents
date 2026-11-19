@@ -77,7 +77,7 @@ class TestRepoConfigImpl:
 
         monkeypatch.setattr(gw, "_call_gateway", _boom)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {}))
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert "repo" in result["content"][0]["text"].lower()
         assert called is False
 
@@ -105,7 +105,7 @@ class TestRepoConfigImpl:
         assert captured["arguments"] == {"repo": "aws-samples/x"}
         assert captured["tool_suffix"] == gw.REMOTE_REPO_CONFIG_TOOL
         assert captured["region"] == "us-west-2"
-        assert result["isError"] is False
+        assert result["is_error"] is False
         payload = json.loads(result["content"][0]["text"])
         assert payload["onboarded"] is True
         assert payload["compute_type"] == "agentcore"
@@ -116,7 +116,7 @@ class TestRepoConfigImpl:
 
         monkeypatch.setattr(gw, "_call_gateway", _fail)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert "gateway unreachable" in result["content"][0]["text"]
 
     def test_expected_transport_error_logs_warn_not_error(self, monkeypatch, capfd):
@@ -130,7 +130,7 @@ class TestRepoConfigImpl:
 
         monkeypatch.setattr(gw, "_call_gateway", _timeout)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert loud == []  # expected error must not page operators
         assert "WARN" in capfd.readouterr().out
 
@@ -145,7 +145,7 @@ class TestRepoConfigImpl:
 
         monkeypatch.setattr(gw, "_call_gateway", _bug)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert len(loud) == 1
         assert "UNEXPECTED" in loud[0]
         assert "unexpected shape" in result["content"][0]["text"]
@@ -164,7 +164,7 @@ class TestRepoConfigImpl:
 
         monkeypatch.setattr(gw, "_call_gateway", _timeout)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert result["content"][0]["text"] == (
             "Error calling repo_config: TimeoutError: slow gateway"
         )
@@ -182,7 +182,7 @@ class TestRepoConfigImpl:
 
         monkeypatch.setattr(gw, "_call_gateway", _no_tool)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert result["content"][0]["text"] == f"Error calling repo_config: RuntimeError: {cause}"
         assert len(loud) == 1
         assert "UNEXPECTED" in loud[0]
@@ -198,7 +198,7 @@ class TestRepoConfigImpl:
 
         monkeypatch.setattr(gw, "_call_gateway", _err_result)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert result["content"][0]["text"] == "tool blew up"
 
 
@@ -387,7 +387,7 @@ class TestRealMcpTypes:
         monkeypatch.setattr(gw, "_call_gateway", _real_result)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
 
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert json.loads(result["content"][0]["text"]) == {"onboarded": False}
 
     def test_falls_back_to_the_text_of_a_real_result(self):
@@ -488,7 +488,7 @@ class TestRealMcpTypes:
 
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "o/r"}))
 
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert result["content"][0]["text"] == (
             "Error calling repo_config: ConnectError: connection refused"
         )
@@ -508,5 +508,78 @@ class TestRealMcpTypes:
 
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "o/r"}))
 
-        assert result["isError"] is True
+        assert result["is_error"] is True
         assert "'initialize' timed out" in result["content"][0]["text"]
+
+
+class TestThroughTheSdk:
+    """``repo_config`` as the SDK serves it to the CLI, not ``_repo_config_impl`` alone.
+
+    The SDK reads the error flag of a handler's result under ``is_error``. A result
+    that carries it under another name reaches the CLI, and so the model, as a success.
+    """
+
+    @pytest.mark.parametrize(
+        ("arguments", "gateway", "is_error", "text"),
+        [
+            pytest.param(
+                {"repo": " "},
+                AssertionError("no call for a blank repo"),
+                True,
+                "Error: 'repo' argument is required.",
+                id="blank-repo",
+            ),
+            pytest.param(
+                {"repo": "org/repo"},
+                TimeoutError("slow gateway"),
+                True,
+                "Error calling repo_config: TimeoutError: slow gateway",
+                id="gateway-fails",
+            ),
+            pytest.param(
+                {"repo": "org/repo"},
+                SimpleNamespace(
+                    structured_content=None,
+                    content=[SimpleNamespace(type="text", text="tool blew up")],
+                    is_error=True,
+                ),
+                True,
+                "tool blew up",
+                id="remote-tool-fails",
+            ),
+            pytest.param(
+                {"repo": "org/repo"},
+                SimpleNamespace(
+                    structured_content=None,
+                    content=[SimpleNamespace(type="text", text="plain answer")],
+                    is_error=False,
+                ),
+                False,
+                "plain answer",
+                id="remote-tool-answers",
+            ),
+        ],
+    )
+    def test_error_flag_reaches_the_cli(self, monkeypatch, arguments, gateway, is_error, text):
+        from mcp import Client
+
+        async def _call_gateway(*a, **k):
+            if isinstance(gateway, Exception):
+                raise gateway
+            return gateway
+
+        monkeypatch.setattr(gw, "_call_gateway", _call_gateway)
+        monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        server = gw.build_gateway_server()
+
+        async def _call_tool():
+            # The server that the SDK connects the CLI to, over mcp's own client
+            # and the handshake the SDK's bridge performs.
+            async with Client(server["instance"], mode="legacy") as client:
+                return await client.call_tool("repo_config", arguments)
+
+        result = _run(_call_tool())
+
+        assert result.is_error is is_error
+        assert [block.text for block in result.content] == [text]

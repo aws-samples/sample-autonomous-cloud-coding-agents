@@ -42,8 +42,10 @@ def download_attachments(
 
     Args:
         attachments: List of AttachmentConfig models from TaskConfig.
-        workspace: The directory the agent runs in: the repository clone, or the
-            agent workspace (e.g., /workspace) of a task without a repository.
+        workspace: The task's own directory (e.g., /workspace/<task_id>): the
+            repository clone, or a directory of that name for a task without a
+            repository. Never one that tasks share: a failed download removes
+            its whole ``.attachments`` directory.
 
     Returns:
         List of PreparedAttachment with local file paths.

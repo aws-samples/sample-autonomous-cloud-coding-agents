@@ -228,7 +228,7 @@ async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any])
     Extracted from the registered closure so it can be unit-tested directly
     (the SDK server wraps the closure in machinery that is awkward to invoke).
     Always returns an SDK tool-result dict; a federation failure is surfaced as
-    ``isError`` rather than raised, so a Gateway hiccup never aborts the task.
+    ``is_error`` rather than raised, so a Gateway hiccup never aborts the task.
 
     A failure is classified: an EXPECTED transport/gateway error is logged at
     WARN (a routine hiccup), while any other exception — an ``AttributeError``
@@ -243,7 +243,7 @@ async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any])
     if not repo:
         return {
             "content": [{"type": "text", "text": "Error: 'repo' argument is required."}],
-            "isError": True,
+            "is_error": True,
         }
     try:
         result = await _call_gateway(gateway_url, region, REMOTE_REPO_CONFIG_TOOL, {"repo": repo})
@@ -266,11 +266,11 @@ async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any])
             log_error_cw(f"gateway repo_config UNEXPECTED failure for {repo!r}: {detail}")
         return {
             "content": [{"type": "text", "text": f"Error calling repo_config: {detail}"}],
-            "isError": True,
+            "is_error": True,
         }
     return {
         "content": [{"type": "text", "text": _result_to_text(result)}],
-        "isError": bool(getattr(result, "is_error", False)),
+        "is_error": bool(getattr(result, "is_error", False)),
     }
 
 
@@ -315,8 +315,7 @@ def build_gateway_server() -> Any:
         )
         return None
 
-    # Thin SDK closure over _repo_config_impl (tested directly, so the wrapper
-    # itself is not exercised by unit tests).
+    # Thin SDK closure over _repo_config_impl.
     @tool("repo_config", _REPO_CONFIG_DESCRIPTION, {"repo": str})
     async def repo_config(args: dict[str, Any]) -> dict[str, Any]:
         return await _repo_config_impl(gateway_url, region, args)

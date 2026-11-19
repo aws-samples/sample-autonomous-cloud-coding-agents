@@ -482,6 +482,9 @@ class TestRepoLessPipeline:
         assert run.prompt.startswith("Summarise the attached report")
         assert run.read == run.report
         assert run.named_path.is_relative_to(run.cwd)
+        # In a directory of this task alone: clearing up after a failed download
+        # removes the whole attachments directory, which no two tasks may share.
+        assert run.named_path.is_relative_to(tmp_path / "repoless-att")
         # Read at the object version that admission screened.
         run.s3.get_object.assert_called_once_with(
             Bucket="attachments-bkt", Key="attachments/u-1/t-1/att-1/report.txt", VersionId="v1"

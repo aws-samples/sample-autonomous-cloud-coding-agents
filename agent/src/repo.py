@@ -187,22 +187,12 @@ def _refuse_pr_from_fork(config: TaskConfig, repo_dir: str, progress: Any) -> No
     """Stop before a fork's pull request is taken for a branch of this repository.
 
     ``config.branch_name`` is the head ref of the pull request, and setup fetches
-    that name from ``origin``. Where the clone already has a local branch of that
-    name (the repository's default branch), ``git checkout -B`` resets it and
-    goes on. That is right for a pull request from that branch (a release PR from
-    ``develop``). A pull request from a fork whose branch has the same name (a
-    fork's ``main``) has its branch in the fork: setup would check out, and an
-    iteration would push to, this repository's own branch. GitHub is asked only
-    in that case, with the retries and the failure report of the fetch beside it.
+    that name from ``origin``. A pull request from a fork has its branch in the
+    fork. Where this repository has a branch of the same name (a fork's ``main``,
+    or any other name the two share), setup would check out, and an iteration
+    would push to, this repository's own branch. GitHub is asked about every
+    pull request, with the retries and the failure report of the fetch beside it.
     """
-    local = run_cmd(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{config.branch_name}"],
-        label="find-local-branch",
-        cwd=repo_dir,
-        check=False,
-    )
-    if local.returncode != 0:
-        return
     view = run_cmd_with_backoff(
         [
             "gh",

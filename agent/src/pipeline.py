@@ -105,8 +105,9 @@ def _download_task_attachments(config: TaskConfig, workspace: str, progress) -> 
     """Download the task's attachments from S3 (version-pinned, integrity-verified).
 
     The files land in ``<workspace>/.attachments/``, where ``workspace`` is the
-    directory the agent runs in: the clone of a task with a repository, the
-    agent workspace of one without. Returns them for
+    task's own directory ``<AGENT_WORKSPACE>/<task_id>``: the clone of a task
+    with a repository, a directory below the one the agent runs in for a task
+    without. Returns them for
     :func:`_inject_attachment_context`; an empty list when the task has none.
     Raises when a file cannot be fetched or fails its check: the user attached
     it, so the task does not run without it.
@@ -430,10 +431,15 @@ def _run_repoless_task(
     wf = load_workflow(workflow_id)
     system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
 
-    # Attachments, as on the repo lane: downloaded into the directory the agent
-    # runs in and named in its prompt. For a task without a repository the
-    # orchestrator leaves them to the agent (its prompt is the description only).
-    prepared_attachments = _download_task_attachments(config, AGENT_WORKSPACE, progress)
+    # Attachments, as on the repo lane: downloaded into the task's own directory
+    # under the agent workspace and named in its prompt. Not into the workspace
+    # itself: that is one directory for every task without a repository a server
+    # runs, and a failed download removes its whole attachments directory. For a
+    # task without a repository the orchestrator leaves the attachments to the
+    # agent (its prompt is the description only).
+    prepared_attachments = _download_task_attachments(
+        config, f"{AGENT_WORKSPACE}/{config.task_id}", progress
+    )
     if prepared_attachments:
         prompt = _inject_attachment_context(prompt, prepared_attachments)
 
