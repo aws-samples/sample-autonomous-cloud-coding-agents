@@ -18,7 +18,7 @@
  */
 
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig } from '../config';
@@ -171,13 +171,22 @@ export function makeSlackCommand(): Command {
 
         const now = new Date().toISOString();
         const ddb = makeDocClient({ region });
+        const key = { channel_id: `${teamId}#${channelId}` };
+        // The put replaces the row, so read the date the channel was first
+        // mapped and write it back. A read that fails stops the command:
+        // taking the row for new would date the mapping from today.
+        const existing = await ddb.send(new GetCommand({
+          TableName: tableName,
+          Key: key,
+          ConsistentRead: true,
+        }));
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
-            channel_id: `${teamId}#${channelId}`,
+            ...key,
             repo: opts.repo,
             status: 'active',
-            onboarded_at: now,
+            onboarded_at: existing.Item?.onboarded_at ?? now,
             updated_at: now,
           },
         }));

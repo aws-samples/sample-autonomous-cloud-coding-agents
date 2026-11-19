@@ -19,6 +19,7 @@
 
 import { PassThrough } from 'stream';
 import { PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { ApiClient } from '../../src/api-client';
 import { makeSlackCommand, resolveSlackTeamId } from '../../src/commands/slack';
 import * as config from '../../src/config';
@@ -166,6 +167,96 @@ describe('slack command', () => {
     test('exits when the installation table name is unavailable', async () => {
       await expect(resolveSlackTeamId('us-east-1', null, undefined)).rejects.toThrow('process.exit');
       expect(ddbSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('slack onboard-channel', () => {
+    let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+
+    beforeEach(() => {
+      cfnSend.mockReset().mockResolvedValue({
+        Stacks: [{
+          Outputs: [
+            { OutputKey: 'SlackChannelMappingTableName', OutputValue: 'channel-mapping-table' },
+            { OutputKey: 'SlackInstallationTableName', OutputValue: 'installation-table' },
+          ],
+        }],
+      });
+      ddbSend.mockReset();
+      loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
+    });
+
+    afterEach(() => {
+      loadConfigSpy.mockRestore();
+    });
+
+    // With --team-id the installation table is not scanned: the mapping table is all that
+    // DynamoDB is asked about.
+    const run = (repo: string) => makeSlackCommand().parseAsync([
+      'node', 'test', 'onboard-channel', 'C0123ABCD', '--repo', repo, '--team-id', 'T0123ABC',
+    ]);
+
+    test('a second run keeps the first onboarded_at and moves updated_at', async () => {
+      // The mapping table, one row of it: a put stores the item, a get returns it.
+      let row: Record<string, unknown> | undefined;
+      ddbSend.mockImplementation(async (command: unknown) => {
+        if (command instanceof PutCommand) {
+          row = command.input.Item;
+          return {};
+        }
+        return { Item: row };
+      });
+      // Only the clock is faked, so that the two runs are a month apart.
+      jest.useFakeTimers({
+        now: new Date('2026-01-02T03:04:05.000Z'),
+        doNotFake: [
+          'nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+          'setInterval', 'clearInterval', 'hrtime', 'performance',
+        ],
+      });
+      try {
+        await run('acme/widgets');
+        expect(row).toEqual({
+          channel_id: 'T0123ABC#C0123ABCD',
+          repo: 'acme/widgets',
+          status: 'active',
+          onboarded_at: '2026-01-02T03:04:05.000Z',
+          updated_at: '2026-01-02T03:04:05.000Z',
+        });
+
+        jest.setSystemTime(new Date('2026-02-03T04:05:06.000Z'));
+        await run('acme/gadgets');
+      } finally {
+        jest.useRealTimers();
+      }
+
+      expect(row).toEqual({
+        channel_id: 'T0123ABC#C0123ABCD',
+        repo: 'acme/gadgets',
+        status: 'active',
+        onboarded_at: '2026-01-02T03:04:05.000Z',
+        updated_at: '2026-02-03T04:05:06.000Z',
+      });
+      // Each run reads the row it is about to replace: by its key, and not from a stale copy.
+      const reads = ddbSend.mock.calls
+        .map(([command]) => command as unknown)
+        .filter((command): command is GetCommand => command instanceof GetCommand)
+        .map((command) => command.input);
+      const read = { TableName: 'channel-mapping-table', Key: { channel_id: 'T0123ABC#C0123ABCD' }, ConsistentRead: true };
+      expect(reads).toEqual([read, read]);
+    });
+
+    test('stops with the AWS error, before writing, when the mapping row cannot be read', async () => {
+      // Not a reason to take the row for new: the put would date the mapping from today.
+      ddbSend.mockRejectedValueOnce(Object.assign(
+        new Error('User is not authorized to perform: dynamodb:GetItem'),
+        { name: 'AccessDeniedException' },
+      ));
+
+      await expect(run('acme/widgets')).rejects.toThrow('not authorized to perform: dynamodb:GetItem');
+
+      expect(ddbSend).toHaveBeenCalledTimes(1);
+      expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
     });
   });
 

@@ -25,7 +25,7 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { cognitoSubFromSession } from '../auth';
@@ -2529,6 +2529,14 @@ export function makeLinearCommand(): Command {
           console.log(' ✓');
         }
 
+        // The put replaces the row, so read the date the project was first
+        // mapped and write it back. A read that fails stops the command:
+        // taking the row for new would date the mapping from today.
+        const existing = await ddb.send(new GetCommand({
+          TableName: tableName,
+          Key: { linear_project_id: projectId },
+          ConsistentRead: true,
+        }));
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
@@ -2538,7 +2546,7 @@ export function makeLinearCommand(): Command {
             label_filter: opts.label,
             ...(opts.teamId && { team_id: opts.teamId }),
             status: 'active',
-            onboarded_at: now,
+            onboarded_at: existing.Item?.onboarded_at ?? now,
             updated_at: now,
           },
         }));

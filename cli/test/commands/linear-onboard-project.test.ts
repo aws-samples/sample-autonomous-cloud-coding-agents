@@ -21,7 +21,7 @@
 // value that matters in that row is the owning workspace: the webhook path checks the project
 // of a delivery against it, and lets a mapping without one through with a warning only.
 import { GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { makeLinearCommand } from '../../src/commands/linear';
 import * as config from '../../src/config';
 
@@ -39,7 +39,8 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   SecretsManagerClient: jest.fn(() => ({ send: smSend })),
 }));
 
-// DynamoDB — the registry is scanned for workspaces, the mapping is written with a Put.
+// DynamoDB — the registry is scanned for workspaces, the mapping is read with a Get and
+// written with a Put.
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   ...jest.requireActual('@aws-sdk/lib-dynamodb'),
@@ -163,6 +164,73 @@ describe('linear onboard-project command', () => {
     }]);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(printed()).toContain(`Owning workspace: ${ORG_GIVEN} (from --workspace-id, not verified with Linear)`);
+  });
+
+  test('a second run keeps the first onboarded_at and moves updated_at', async () => {
+    // The mapping table, one row of it: a put stores the item, a get returns it. A scan is
+    // of the registry, answered as in the other tests.
+    let row: Record<string, unknown> | undefined;
+    ddbSend.mockImplementation(async (command: unknown) => {
+      if (command instanceof PutCommand) {
+        row = command.input.Item;
+        return {};
+      }
+      return command instanceof ScanCommand
+        ? { Items: [{ workspace_slug: 'acme', linear_workspace_id: ORG_ACME, status: 'active' }] }
+        : { Item: row };
+    });
+    // Only the clock is faked, so that the two runs are a month apart.
+    jest.useFakeTimers({
+      now: new Date('2026-01-02T03:04:05.000Z'),
+      doNotFake: [
+        'nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+        'setInterval', 'clearInterval', 'hrtime', 'performance',
+      ],
+    });
+    try {
+      await run(PROJECT, '--repo', 'acme/widgets');
+      expect(row).toMatchObject({
+        onboarded_at: '2026-01-02T03:04:05.000Z',
+        updated_at: '2026-01-02T03:04:05.000Z',
+      });
+
+      jest.setSystemTime(new Date('2026-02-03T04:05:06.000Z'));
+      await run(PROJECT, '--repo', 'acme/gadgets', '--label', 'abca');
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(row).toEqual({
+      linear_project_id: PROJECT,
+      linear_workspace_id: ORG_ACME,
+      repo: 'acme/gadgets',
+      label_filter: 'abca',
+      status: 'active',
+      onboarded_at: '2026-01-02T03:04:05.000Z',
+      updated_at: '2026-02-03T04:05:06.000Z',
+    });
+    // Each run reads the row it is about to replace: by its key, and not from a stale copy.
+    const reads = ddbSend.mock.calls
+      .map(([command]) => command as unknown)
+      .filter((command): command is GetCommand => command instanceof GetCommand)
+      .map((command) => command.input);
+    const read = { TableName: 'project-mapping-table', Key: { linear_project_id: PROJECT }, ConsistentRead: true };
+    expect(reads).toEqual([read, read]);
+  });
+
+  test('stops with the AWS error, before writing, when the mapping row cannot be read', async () => {
+    // Not a reason to take the row for new: the put would date the mapping from today.
+    // With --workspace-id nothing else is read from DynamoDB, so this is the first request.
+    ddbSend.mockRejectedValueOnce(Object.assign(
+      new Error('User is not authorized to perform: dynamodb:GetItem'),
+      { name: 'AccessDeniedException' },
+    ));
+
+    await expect(run(PROJECT, '--repo', 'acme/widgets', '--workspace-id', ORG_GIVEN))
+      .rejects.toThrow('not authorized to perform: dynamodb:GetItem');
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
   });
 
   test.each([
