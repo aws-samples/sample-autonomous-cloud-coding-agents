@@ -119,27 +119,6 @@ export function linearOauthSecretName(workspaceSlug: string): string {
 }
 
 /**
- * Compute when an access token should be considered "stale and needs
- * refresh." We refresh if there's <60s left on the access token —
- * gives Lambda invocations a clean buffer to make the upstream call
- * without racing the actual expiry.
- */
-const REFRESH_THRESHOLD_SECONDS = 60;
-
-export function isAccessTokenExpiring(
-  expiresAt: string,
-  thresholdSeconds: number = REFRESH_THRESHOLD_SECONDS,
-): boolean {
-  const expiry = new Date(expiresAt).getTime();
-  if (Number.isNaN(expiry)) {
-    // Treat malformed expires_at as expired — better to over-refresh than
-    // proceed with a token that may have rotated under us.
-    return true;
-  }
-  return Date.now() + thresholdSeconds * 1000 >= expiry;
-}
-
-/**
  * PKCE pair: a random `code_verifier` and the SHA-256 base64url digest
  * (`code_challenge`). Linear supports both `S256` and `plain`; we always
  * use `S256` because the wire-format cost is identical and stronger.
@@ -173,7 +152,6 @@ export function buildAuthorizationUrl(opts: {
   redirectUri: string;
   state: string;
   codeChallenge: string;
-  scopes?: readonly string[];
   actorApp?: boolean;
   forceConsent?: boolean;
 }): string {
@@ -184,7 +162,7 @@ export function buildAuthorizationUrl(opts: {
     // RFC 6749 §3.3: scope is a space-separated list. Linear rejects
     // comma-separated scopes with "Invalid redirect_uri" — the error
     // is misleading; verified by 2.0b smoke test 2026-05-19.
-    scope: (opts.scopes ?? LINEAR_OAUTH_SCOPES).join(' '),
+    scope: LINEAR_OAUTH_SCOPES.join(' '),
     state: opts.state,
     code_challenge: opts.codeChallenge,
     code_challenge_method: 'S256',
@@ -300,7 +278,7 @@ async function parseTokenResponse(
  * what must not be shown. Reporting which required field is wrong is also more useful
  * than a truncated blob, so this is not a redaction that costs debuggability.
  */
-function describeTokenShape(value: unknown): string {
+export function describeTokenShape(value: unknown): string {
   if (typeof value !== 'object' || value === null) {
     return `not a JSON object (got ${value === null ? 'null' : typeof value})`;
   }
@@ -337,85 +315,28 @@ export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date(
   return new Date(now.getTime() + expiresInSeconds * 1000).toISOString();
 }
 
-/** What `bgagent linear setup` should do about the webhook signing secret. */
-export type WebhookSecretAction =
-  /** This workspace already has its own signing secret — keep it (re-run). */
-  | { readonly kind: 'preserve'; readonly secret: string }
-  /**
-   * The stored secret is byte-identical to the stack-wide one, so it was inherited
-   * by an earlier mirror rather than taken from this workspace's own webhook. Keep
-   * it — it may well be correct for the FIRST workspace — but say so, because for
-   * any additional workspace it is the wrong secret and every delivery 401s.
-   */
-  | { readonly kind: 'preserve-inherited'; readonly secret: string }
-  /** No per-workspace secret; mirror the stack-wide one (safe for the first
-   *  workspace, ambiguous for an additional one — caller should warn). */
-  | { readonly kind: 'mirror-stackwide' }
-  /** No secret anywhere — prompt the operator for it (first install). */
-  | { readonly kind: 'prompt' };
-
-/**
- * Decide which webhook signing secret `setup` should use, WITHOUT clobbering a
- * working per-workspace secret.
- *
- * The bug this fixes: re-running `setup` on an already-installed workspace used
- * to lift the *stack-wide* signing secret into the per-workspace bundle. That's
- * correct only for the FIRST workspace — the stack-wide secret belongs to
- * whichever workspace installed first, so for any additional workspace it
- * overwrites the correct per-workspace secret with the wrong one, silently
- * breaking signature verification (webhook 401 "Invalid signature").
- *
- * Rule: an existing valid per-workspace secret always wins (rotation is
- * `update-webhook-secret`'s job); else mirror the stack-wide secret if present;
- * else prompt. Pure — the caller supplies what it read from Secrets Manager.
- *
- * @param existingPerWorkspaceSecret the `webhook_signing_secret` on this
- *        workspace's OAuth bundle BEFORE the setup rewrite (undefined if none).
- * @param stackWideConfigured whether the stack-wide fallback secret is set.
- */
-export function resolveWebhookSecretAction(
-  existingPerWorkspaceSecret: string | undefined,
-  stackWideConfigured: boolean,
-  stackWideSecret?: string,
-): WebhookSecretAction {
-  if (existingPerWorkspaceSecret?.startsWith('lin_wh_')) {
-    // A stored value equal to the stack-wide secret is NOT evidence this workspace
-    // has its own: an earlier run mirrored it. Treating it as owned silences the
-    // mirror warning forever, so a workspace that inherited the wrong secret can
-    // never be told about it again — it just 401s on every delivery. Seen live.
-    if (stackWideSecret && existingPerWorkspaceSecret === stackWideSecret) {
-      return { kind: 'preserve-inherited', secret: existingPerWorkspaceSecret };
-    }
-    return { kind: 'preserve', secret: existingPerWorkspaceSecret };
-  }
-  if (stackWideConfigured) {
-    return { kind: 'mirror-stackwide' };
-  }
-  return { kind: 'prompt' };
-}
-
 /**
  * Read this workspace's EXISTING `webhook_signing_secret` before `setup`
  * overwrites the OAuth bundle — FAIL CLOSED (#612 review B1).
  *
  * `fetchSecretString` fetches the prior per-workspace OAuth `SecretString`
  * (typically a `SecretsManagerClient.send(GetSecretValueCommand)` wrapper). The
- * value fed to {@link resolveWebhookSecretAction} decides whether the existing
- * secret is preserved or the stack-wide one is mirrored over it — so a wrong
- * `undefined` here re-arms the #611 clobber. Therefore:
+ * value decides whether `setup` keeps the stored secret or has to be given one
+ * — so a wrong `undefined` here makes a workspace with a working secret look
+ * like one that stores none. Therefore:
  *
  *   • secret missing (`ResourceNotFoundException`) → genuine first install,
  *     return undefined (nothing to preserve).
  *   • secret present with a valid `lin_wh_…` `webhook_signing_secret` → return it.
  *   • secret present but no/malformed secret → return undefined (nothing valid
- *     to preserve; the caller mirrors/prompts).
+ *     to preserve; the caller asks for one).
  *   • ANY OTHER error (AccessDenied, KMSAccessDenied, Throttling, network, or a
- *     corrupt-JSON bundle) → THROW. Swallowing it would leave undefined and
- *     silently clobber a working secret behind a green "Setup complete".
+ *     corrupt-JSON bundle) → THROW. Swallowing it would leave undefined, and a
+ *     bundle that could not be read would pass for one without a secret.
  *
  * `isNotFound` classifies the fetch error; callers pass an
  * `name === 'ResourceNotFoundException'` check. On a throw the caller re-raises
- * a CliError with an IAM/KMS hint (mirroring `isWebhookSecretConfigured`).
+ * a CliError with an IAM/KMS hint (mirroring `readStackWideWebhookSecret`).
  */
 export async function readExistingWebhookSecret(
   fetchSecretString: () => Promise<string | undefined>,
@@ -430,7 +351,7 @@ export async function readExistingWebhookSecret(
   }
   if (!raw) return undefined;
   // A corrupt-but-present bundle must surface (JSON.parse throws → propagates),
-  // NOT silently become "nothing to preserve" → mirror-stackwide.
+  // NOT silently become "nothing to preserve".
   const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
   return bundle.webhook_signing_secret?.startsWith('lin_wh_')
     ? bundle.webhook_signing_secret

@@ -2,7 +2,7 @@
 
 Parent guide: [../AGENTS.md](../AGENTS.md) · Human guide: [README.md](./README.md)
 
-You maintain the **operator console** (`@abca/web`): React 19, Vite, React Router 7, Cloudscape, TanStack Query, Vitest + Testing Library, MSW.
+You maintain the **operator console** (`@abca/web`): React 19, Vite, React Router 8, Cloudscape, TanStack Query, Vitest + Testing Library, MSW.
 
 ## Commands (run these)
 

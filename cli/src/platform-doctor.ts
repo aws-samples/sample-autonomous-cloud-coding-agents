@@ -351,7 +351,8 @@ export async function checkLinearProjectWorkspaces(
     const projectIds = allIds.length > NAMED_LIMIT
       ? `${allIds.slice(0, NAMED_LIMIT).join(', ')} (and ${allIds.length - NAMED_LIMIT} more)`
       : allIds.join(', ');
-    const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo>` for each of them';
+    // --label too: onboard-project rewrites the whole mapping and stores the default label when it is left out.
+    const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo> --label <its trigger label>` for each of them';
     const unbackedSummary = `${unbacked.length} of ${active.length} active Linear project mapping(s) do not `
       + 'record an owning workspace, so a webhook naming them cannot be checked against the workspace that '
       + `signed it: ${projectIds}.`;

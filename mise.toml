@@ -19,7 +19,7 @@ monorepo_root = true
 experimental = true
 
 [tools]
-# An exact Node, here and in the cdk, cli, web and docs mise.toml: astro 7.4.7
+# An exact Node, here and in the cdk, cli, web and docs mise.toml: astro 7.4.10
 # declares node >=22.23.4 and yarn refuses to install on less, while `node = "22"`
 # keeps any older 22.x that is already installed. Bump the five by PR, like the
 # pins below.
@@ -29,7 +29,7 @@ node = "22.23.4"
 # no mise ecosystem): bump by PR to a release at least 7 days old (the cooldown
 # in .github/dependabot.yml) and keep `uv` equal to agent/mise.toml and to the
 # uv image in agent/Dockerfile.
-prek = "0.5.9"
+prek = "0.5.10"
 gitleaks = "8.30.1"
 # uv must be declared so it is on PATH before semgrep installs: mise's
 # `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
@@ -37,9 +37,9 @@ gitleaks = "8.30.1"
 # that breaks under the mise 2026.6.x default `minimum_release_age`
 # (jdx/mise#10279; see #320).
 uv = "0.13.7"
-semgrep = "1.183.0"
-osv-scanner = "2.7.0"
-"grype" = "0.121.1"
+semgrep = "1.185.0"
+osv-scanner = "2.7.1"
+"grype" = "0.121.3"
 "aqua:zizmorcore/zizmor" = "1.32.0"
 
 [monorepo]
@@ -142,6 +142,10 @@ run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 description = "Drift check: contracts/coverage-thresholds.json ↔ coverage settings, test scripts and mise test tasks of cdk, cli, web, agent and the Jira Forge app"
 run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts"
 
+[tasks."check:mise-version-sync"]
+description = "Check that GitHub Actions and the contributor image pin the same mise release"
+run = "node --experimental-strip-types cdk/scripts/check-mise-version-sync.ts"
+
 [tasks."test:jira-forge-app"]
 description = "Test the standalone Jira Forge app-actor proxy"
 run = "npm test --prefix integrations/jira-forge-app"
@@ -197,6 +201,7 @@ run = [
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "check:mise-version-sync" },
   { task = "check:transitive-pin-sync" },
   { task = "check:deadcode" },
   { task = "//docs:link-check" },
@@ -299,7 +304,13 @@ run = "gitleaks git . --config .gitleaks.toml --staged --no-banner --redact --ve
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
-run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
+# No --quiet, and a last command that fails when semgrep loaded no rule: the
+# comment of security:sast:range below says why.
+run = [
+  "mkdir -p test-reports && rm -f test-reports/semgrep-sast.sarif",
+  "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --sarif-output=test-reports/semgrep-sast.sarif --error .",
+  '''node -e 'const sarif = JSON.parse(require("fs").readFileSync("test-reports/semgrep-sast.sarif", "utf8")); if (!sarif.runs[0].tool.driver.rules.length) { console.error("security:sast: semgrep loaded 0 rules, so nothing was checked (did semgrep.dev answer with empty rule packs?). Rerun the task; do not treat this run as a pass."); process.exit(1); }' ''',
+]
 
 [tasks."security:sast:range"]
 description = "Registry SAST ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_SAST_BASELINE, e.g. origin/main."
@@ -323,7 +334,7 @@ run = [
 ]
 
 [tasks."security:sast:masking"]
-description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
+description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use an inline, justified suppression comment on the return line."
 # `semgrep test` validates the rules against their .semgrep/ fixtures first.
 # The scan excludes those fixtures (they trigger by design) and writes SARIF
 # to test-reports/ (gitignored) so findings stay agent-routable (CA-06).
@@ -446,6 +457,8 @@ depends = [
   ":drift-prevention"
 ]
 
+# A `run` list, not `depends`: mise starts dependencies together, and the build must
+# not begin before the install has finished.
 [tasks.default]
 description = "Install + build"
-depends = [":install", ":build"]
+run = [{ task = "install" }, { task = "build" }]

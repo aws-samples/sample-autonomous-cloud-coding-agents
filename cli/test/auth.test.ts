@@ -21,8 +21,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
-import { changePassword, getAuthToken, login } from '../src/auth';
+import { changePassword, cognitoSubFromSession, getAuthToken, login } from '../src/auth';
 import { saveConfig, saveCredentials } from '../src/config';
+import { CliError } from '../src/errors';
 
 // Mock the Cognito SDK. Each command constructor tags its params with a
 // ``__command`` discriminator so tests can drive ``mockSend`` per command type
@@ -76,14 +77,19 @@ describe('auth', () => {
         },
       });
 
+      const before = Date.now();
       await login('user@example.com', 'password123');
+      const after = Date.now();
 
       const creds = JSON.parse(
         fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'),
       );
       expect(creds.id_token).toBe('id-token-123');
       expect(creds.refresh_token).toBe('refresh-token-123');
-      expect(creds.token_expiry).toBeDefined();
+      // ExpiresIn counts seconds: 3600 is one hour after the login.
+      const expiry = Date.parse(creds.token_expiry);
+      expect(expiry).toBeGreaterThanOrEqual(before + 3_600_000);
+      expect(expiry).toBeLessThanOrEqual(after + 3_600_000);
     });
 
     test('constructs the Cognito client with the ABCA solution User-Agent (#319)', async () => {
@@ -271,6 +277,82 @@ describe('auth', () => {
       await expect(changePassword('OldPass1!', 'N3w$trongPass!')).rejects.toThrow('Not authenticated');
       expect(mockSend).not.toHaveBeenCalled();
     });
+
+    test('signs in with cognito:username when the ID token carries no email claim', async () => {
+      saveCredentials({
+        id_token: fakeIdToken({ 'cognito:username': 'legacy-user', 'sub': 'uuid-1' }),
+        refresh_token: 'refresh-token',
+        token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      mockSend.mockResolvedValue({ AuthenticationResult: { AccessToken: 'acc-token' } });
+
+      await changePassword('OldPass1!', 'N3w$trongPass!');
+
+      expect(mockSend.mock.calls[0][0]).toMatchObject({ __command: 'InitiateAuth', AuthParameters: { USERNAME: 'legacy-user' } });
+    });
+
+    test('an ID token that names no user yields a clear error before any call to Cognito', async () => {
+      saveCredentials({
+        id_token: fakeIdToken({ sub: 'uuid-1' }),
+        refresh_token: 'refresh-token',
+        token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+      });
+
+      await expect(changePassword('OldPass1!', 'N3w$trongPass!')).rejects.toThrow(
+        'Could not read your account identity. Run `bgagent login` to re-authenticate.',
+      );
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cognitoSubFromSession', () => {
+    /** A credentials file as `bgagent login` writes it, around the given ID token. */
+    function session(idToken?: unknown): void {
+      fs.writeFileSync(path.join(tmpDir, 'credentials.json'), JSON.stringify({
+        id_token: idToken,
+        refresh_token: 'refresh-token',
+        token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+      }));
+    }
+
+    test('reads the sub claim of the cached ID token', () => {
+      session(fakeIdToken({ email: 'user@example.com', sub: 'uuid-1' }));
+      expect(cognitoSubFromSession()).toBe('uuid-1');
+    });
+
+    test.each([
+      ['there is no credentials file', undefined, 'Not authenticated. Run `bgagent login` first.'],
+      ['the credentials file holds no ID token', () => session(), 'Not authenticated. Run `bgagent login` first.'],
+      [
+        'the ID token has two segments, though the second carries a sub claim',
+        () => session(fakeIdToken({ sub: 'uuid-1' }).split('.').slice(0, 2).join('.')),
+        'Credentials file is corrupt. Run `bgagent login` to re-authenticate.',
+      ],
+      [
+        'the payload of the ID token is not JSON',
+        () => session(`header.${Buffer.from('not json').toString('base64url')}.sig`),
+        'Credentials file is corrupt. Run `bgagent login` to re-authenticate.',
+      ],
+      [
+        'the ID token is a number, in a file edited by hand',
+        () => session(12345),
+        'Credentials file is corrupt. Run `bgagent login` to re-authenticate.',
+      ],
+      [
+        'the payload of the ID token is the JSON null',
+        () => session(`header.${Buffer.from('null').toString('base64url')}.sig`),
+        'Could not read your account identity. Run `bgagent login` to re-authenticate.',
+      ],
+      [
+        'the ID token carries no sub claim',
+        () => session(fakeIdToken({ email: 'user@example.com' })),
+        'Could not read your account identity. Run `bgagent login` to re-authenticate.',
+      ],
+    ])('fails with a CliError that names `bgagent login` when %s', (_when, arrange, message) => {
+      arrange?.();
+      expect(cognitoSubFromSession).toThrow(new CliError(message));
+      expect(cognitoSubFromSession).toThrow(CliError);
+    });
   });
 
   describe('getAuthToken', () => {
@@ -338,8 +420,31 @@ describe('auth', () => {
         },
       });
 
+      const before = Date.now();
       const token = await getAuthToken();
+      const after = Date.now();
       expect(token).toBe('new-id');
+
+      const creds = JSON.parse(fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'));
+      // The answer above carries no refresh token: the cached one is kept.
+      expect(creds.refresh_token).toBe('refresh-token');
+      // ExpiresIn counts seconds: 3600 is one hour after the refresh.
+      const expiry = Date.parse(creds.token_expiry);
+      expect(expiry).toBeGreaterThanOrEqual(before + 3_600_000);
+      expect(expiry).toBeLessThanOrEqual(after + 3_600_000);
+    });
+
+    test('rejects a refresh answer without an ID token, as login does', async () => {
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      saveCredentials({
+        id_token: 'old-id',
+        refresh_token: 'refresh-token',
+        token_expiry: pastExpiry,
+      });
+
+      mockSend.mockResolvedValue({ AuthenticationResult: { ExpiresIn: 3600 } });
+
+      await expect(getAuthToken()).rejects.toThrow('Unexpected authentication response from Cognito.');
     });
 
     test('treats an unparseable token_expiry as expired (refreshes, not 401s)', async () => {

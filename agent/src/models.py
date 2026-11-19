@@ -361,8 +361,6 @@ class AgentResult(BaseModel):
     turns: int = 0
     num_turns: int = 0
     cost_usd: float | None = None
-    duration_ms: int = 0
-    duration_api_ms: int = 0
     session_id: str = ""
     error: str | None = None
     usage: TokenUsage | None = None

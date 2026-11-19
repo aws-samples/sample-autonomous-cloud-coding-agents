@@ -1,0 +1,15 @@
+{
+  "name": "soft-deny-force-push-before-operator",
+  "description": "A force push with -f after the branch, then a line break (to the shell an operator that ends the command, like `;`) and a second command. Only one of the rule's patterns matches the command, the one ending in ` -f\\n*`: both engines must read that escape in a like pattern as a line break.",
+  "policies": "@rule_id(\"base_permit\")\npermit (principal, action, resource);\n@tier(\"soft\") @rule_id(\"force_push_any\") @approval_timeout_s(\"300\") @severity(\"medium\") @category(\"destructive\")\nforbid (principal, action == Agent::Action::\"execute_bash\", resource) when { context.command like \"*git push --force*\" || context.command like \"*git push -f *\" || context.command like \"*git push -f\" || context.command like \"*git push * --force*\" || context.command like \"*git push * -f\" || context.command like \"*git push * -f\\n*\" || context.command like \"*git push * -f;*\" || context.command like \"*git push * -f ;*\" || context.command like \"*git push * -f&*\" || context.command like \"*git push * -f &*\" || context.command like \"*git push * -f|*\" || context.command like \"*git push * -f |*\" || context.command like \"*git push * -f>*\" || context.command like \"*git push * -f >*\" || context.command like \"*git push * -f 2>*\" };",
+  "input": {
+    "principal": { "type": "Agent::TaskAgent", "id": "new_task" },
+    "action":    { "type": "Agent::Action",    "id": "execute_bash" },
+    "resource":  { "type": "Agent::BashCommand", "id": "command" },
+    "context":   { "command": "git push origin feat -f\ngit status" }
+  },
+  "expected": {
+    "decision": "deny",
+    "matching_rule_ids": ["force_push_any"]
+  }
+}

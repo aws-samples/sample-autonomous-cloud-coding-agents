@@ -4,7 +4,31 @@ title: "Installation"
 
 Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
 
-This section covers what the Quick Start does not: troubleshooting, local testing, and the development workflow.
+### Open the contributor dev container
+
+- **Local VS Code.** Start Docker and install the **Dev Containers** extension. Open a fresh clone of ABCA in VS Code, then choose **Dev Containers: Reopen in Container** from the Command Palette.
+- **GitHub Codespaces.** On the repository page, select your branch, open **Code → Codespaces**, and create a codespace on that branch. GitHub opens the editor in your browser.
+
+If you already have a **linked issue worktree** on your machine, its `.git` file points outside the folder VS Code mounts. From that worktree, create a standalone copy of the issue branch for the container. Choose an unused sibling directory and open it in VS Code. The clone includes committed work only.
+
+```bash
+branch=$(git branch --show-current)
+git clone --no-local --branch "$branch" . ../abca-dev
+git -C ../abca-dev remote set-url origin "$(git remote get-url origin)"
+```
+
+The post-create hook installs the tools declared in the repo’s mise configs, enables Yarn Classic, and runs `mise run install` for the workspace dependencies, the agent’s Python environment, and Git hooks. Once setup finishes, run `mise run build` in the container terminal from the repository root. The build can run without AWS credentials.
+
+After changing `.devcontainer/`, choose **Dev Containers: Rebuild Container** in local VS Code or **Codespaces: Rebuild Container** in a codespace.
+
+#### Push commits from the dev container
+
+The default container has no Docker engine connection. The pre-push hook needs Docker to build and scan the worker image during `mise run security`. The optional `mise run test:integration` suite also needs Docker. Commit your changes in the container, then push from a **separate host worktree** with Docker running and the [Quick Start toolchain](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) installed. This keeps Linux `node_modules` and `agent/.venv` in the container checkout. See the [emulator guide](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/scripts/aws-emulator/README.md) for integration tests.
+
+- **Local VS Code.** From your host checkout, run `git fetch ../abca-dev <issue-branch>`, substituting your branch name and the path to the container checkout.
+- **Codespaces.** On the issue branch in the codespace, run `git bundle create abca-issue.bundle HEAD`. Right-click `abca-issue.bundle` in the browser editor’s Explorer, select **Download**, then delete the untracked bundle from the codespace. From your host checkout, run `git fetch ~/Downloads/abca-issue.bundle HEAD`, adjusting the path to the downloaded file.
+
+If you fetched from a host worktree already on the issue branch, run `git merge --ff-only FETCH_HEAD` there. If the issue branch exists only in the container, run `git worktree add -b <issue-branch> ../abca-host FETCH_HEAD` and `cd ../abca-host` to create its host worktree. Run `mise run install` in the host worktree to install native dependencies and Git hooks, then `git push -u origin HEAD` to run the pre-push checks and publish the commits.
 
 ### Troubleshooting mise
 
@@ -61,7 +85,7 @@ export AWS_REGION="us-east-1"     # Region where Bedrock models are enabled
 The script resolves AWS credentials in priority order:
 
 1. **Environment variables** - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN` for temporary credentials.
-2. **AWS CLI** - Runs `aws configure export-credentials` from your active profile or SSO session. Set `AWS_PROFILE` to target a specific profile.
+2. **AWS CLI v2** - Runs `aws configure export-credentials` from your active profile or SSO session. Set `AWS_PROFILE` to target a specific profile. AWS CLI v1 has no such command, so with v1 the script goes on to the mount.
 3. **`~/.aws` mount** - Bind-mounts the directory read-only. Works for static credentials but not SSO tokens.
 
 If none succeeds, the container starts without AWS credentials and any AWS API call will fail at runtime.
@@ -78,7 +102,7 @@ If none succeeds, the container starts without AWS credentials and any AWS API c
 # Issue + additional instructions
 ./agent/run.sh "owner/repo" 42 "Focus on the backend validation only"
 
-# Dry run - validate config, fetch issue, print prompt, then exit
+# Dry run - validate config, fetch issue, print the length and hash of the prompts, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 ```
 
@@ -138,7 +162,7 @@ The `--local-events` flag connects the agent container to DynamoDB Local on the 
 | `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock inference-profile ID for the main coding model |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | | Cost ceiling for local batch runs only (production uses the API field) |
-| `DRY_RUN` | | Set to `1` to validate and print prompt without running the agent |
+| `DRY_RUN` | | Set to `1` to validate and print the length and hash of the prompts without running the agent |
 
 For the full list, see `agent/README.md`. For how the model default is layered, overridden, and priced, see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).
 

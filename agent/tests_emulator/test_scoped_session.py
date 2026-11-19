@@ -159,6 +159,8 @@ class TestScopedCredentials:
         record = task_state.get_task(task_id)
         assert record is not None
         assert (record["status"], record["trace_s3_uri"]) == ("COMPLETED", uri)
+        # The terminal write moves updated_at with the status.
+        assert record["updated_at"] == record["completed_at"]
 
     def test_approval_gate_transaction_spans_both_of_the_tasks_tables(self, scoped, task_id):
         scoped.table(scoped.task_table).put_item(Item={"task_id": task_id, "status": "RUNNING"})

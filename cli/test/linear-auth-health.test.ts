@@ -236,6 +236,17 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     expect(health[0].state).toBe('revoked');
   });
 
+  test('a revoked workspace is sent to `setup`, the command that takes a registered workspace', async () => {
+    // Every workspace reported here has a registry row, and `add-workspace` refuses those —
+    // after the browser consent, which can replace the grant the workspace still holds.
+    ddbSend.mockResolvedValueOnce({ Items: [row({ status: 'revoked', revoked_reason: 'refresh_token_rejected' })] });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1', registryTableName: 'Reg', probe: async () => 'accepted',
+    });
+    expect(health[0].detail).toMatch(/Re-authorize with `bgagent linear setup`/);
+    expect(health[0].detail).not.toMatch(/add-workspace/);
+  });
+
   describe('a vault-managed workspace must not be judged by an empty bundle', () => {
     // A fresh vault onboarding deliberately stores NO access token — the vault holds
     // the grant. Reading only the Secrets Manager bundle therefore reported every

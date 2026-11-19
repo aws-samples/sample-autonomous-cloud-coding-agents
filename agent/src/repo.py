@@ -96,19 +96,18 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
     if egress_detected and host:
         detail = f"{label} could not reach {host!r} (host not allowlisted)"
         _record_blocker_reason("egress_denied", detail, host)
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_agent_blocked",
-                kind="egress_denied",
-                detail=detail,
-                remediation_hint=(
-                    f"Allowlist {host!r} in the DNS Firewall rule group if it is a "
-                    "legitimate dependency, then resubmit. The agent never widens egress itself."
-                ),
-                retryable=False,
-                resource=host,
-            )
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind="egress_denied",
+            detail=detail,
+            remediation_hint=(
+                f"Allowlist {host!r} in the DNS Firewall rule group if it is a "
+                "legitimate dependency, then resubmit. The agent never widens egress itself."
+            ),
+            retryable=False,
+            resource=host,
+        )
         from progress_writer import format_blocker_reason
 
         raise DependencyUnreachableError(format_blocker_reason("egress_denied", detail, host))
@@ -126,19 +125,18 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
 
     detail = f"{label} failed after bounded retries"
     _record_blocker_reason("dependency_unreachable", detail, resource)
-    if progress is not None:
-        _try_progress(
-            progress,
-            "write_agent_blocked",
-            kind="dependency_unreachable",
-            detail=detail,
-            remediation_hint=(
-                "The dependency/registry stayed unreachable after retries. "
-                "Check network/DNS reachability from the agent VPC, then retry the task."
-            ),
-            retryable=True,
-            resource=resource,
-        )
+    _try_progress(
+        progress,
+        "write_agent_blocked",
+        kind="dependency_unreachable",
+        detail=detail,
+        remediation_hint=(
+            "The dependency/registry stayed unreachable after retries. "
+            "Check network/DNS reachability from the agent VPC, then retry the task."
+        ),
+        retryable=True,
+        resource=resource,
+    )
     raise DependencyUnreachableError(
         format_blocker_reason("dependency_unreachable", detail, resource)
     )
@@ -561,6 +559,70 @@ def _assert_clone_root(repo_dir: str) -> None:
         )
 
 
+def _refuse_pr_from_fork(config: TaskConfig, repo_dir: str, progress: Any) -> None:
+    """Stop before a fork's pull request is taken for a branch of this repository.
+
+    ``config.branch_name`` is the head ref of the pull request, and setup fetches
+    that name from ``origin``. A pull request from a fork has its branch in the
+    fork. Where this repository has a branch of the same name (a fork's ``main``,
+    or any other name the two share), setup would check out, and an iteration
+    would push to, this repository's own branch. GitHub is asked about every
+    pull request, with the retries and the failure report of the fetch beside it.
+    """
+    view = run_cmd_with_backoff(
+        [
+            "gh",
+            "pr",
+            "view",
+            config.pr_number,
+            "--repo",
+            config.repo_url,
+            "--json",
+            "isCrossRepository",
+            "-q",
+            ".isCrossRepository",
+        ],
+        label="check-pr-fork",
+        cwd=repo_dir,
+        on_retry=_clone_backoff_reporter(progress, "check-pr-fork"),
+    )
+    if view.returncode != 0:
+        _fail_setup_command("check-pr-fork", config.repo_url, view.stderr, progress)
+    if view.stdout.strip() == "true":
+        raise RuntimeError(
+            f"pull request #{config.pr_number} of {config.repo_url} comes from another "
+            "repository (a fork): its branch is in that repository, not in "
+            f"{config.repo_url}, so it cannot be checked out or pushed to here"
+        )
+
+
+def _run_baseline(argv: list[str], label: str, repo_dir: str) -> subprocess.CompletedProcess:
+    """Run a baseline build or lint command the way the post-agent gate runs it.
+
+    The exec of a command without shell operators fails when its program is not
+    installed or not executable. That comes back as exit 127 with the error as
+    the output, what a shell reports for it, so the baseline is one that could
+    not run, as for the same command inside ``bash -lc``, and the ``OSError``
+    does not end the task before the agent starts. A timeout still raises.
+    """
+    from post_hooks import BUILD_VERIFY_TIMEOUT_S, SHELL_COMMAND_NOT_FOUND
+
+    try:
+        return run_cmd(
+            argv,
+            label=label,
+            cwd=repo_dir,
+            check=False,
+            timeout=BUILD_VERIFY_TIMEOUT_S,
+            # Stream live → the full baseline log reaches CloudWatch verbatim
+            # (buffered capture would hide the failing sub-task).
+            stream=True,
+        )
+    except OSError as exc:
+        log("WARN", f"{label}: the command could not be started: {exc}")
+        return subprocess.CompletedProcess(argv, SHELL_COMMAND_NOT_FOUND, "", str(exc))
+
+
 def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: C901 -- 28 when the ceiling of 15 was set; must not grow
     """Clone repo, create branch, configure git auth, run mise install.
 
@@ -580,8 +642,8 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
     # child as its base. If the agent re-derives the slug here it produces a
     # DIFFERENT string (shell.py slugify strips dots vs gateway's dash, and
     # truncates at 40 vs 50) — e.g. ``...guide.html`` → agent ``guidehtml`` vs
-    # platform ``guide-html``. That divergence means a stacked child's
-    # ``git fetch origin <predecessor-branch>`` 404s and it silently falls back
+    # platform ``guide-html``. That divergence means a stacked child does not
+    # find ``origin/<predecessor-branch>`` and silently falls back
     # to branching off main (breaking the stack). Use config.branch_name as-is.
     if config.branch_name:
         branch = config.branch_name
@@ -610,9 +672,12 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
     )
 
     # Clone — bounded retry on transient network/registry failures.
+    # ``--no-upstream``: for a fork, gh would add the parent as the remote
+    # ``upstream`` and make it the repository of every later ``gh`` command that
+    # has no ``--repo`` — the agent would act on the parent's pull requests.
     log("SETUP", f"Cloning {config.repo_url}...")
     clone_result = run_cmd_with_backoff(
-        ["gh", "repo", "clone", config.repo_url, repo_dir],
+        ["gh", "repo", "clone", "--no-upstream", config.repo_url, repo_dir],
         label="clone",
         on_retry=_clone_backoff_reporter(progress, "clone"),
     )
@@ -660,8 +725,14 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
     # Only a diamond overrides; a LINEAR child's base_branch is its predecessor
     # branch (correct — the PR stacks on it) and must be left untouched.
     resolved_diamond_base: str | None = None
+    # The pull request base the orchestrator named: the base of an existing PR,
+    # or a linear child's predecessor branch. Cleared below when a stacked child
+    # finds that branch gone from origin. (A diamond's PR base is
+    # resolved_diamond_base, whatever this holds.)
+    pr_base = config.base_branch
     if config.is_pr_workflow and config.branch_name:
         log("SETUP", f"Checking out existing PR branch: {branch}")
+        _refuse_pr_from_fork(config, repo_dir, progress)
         fetch_result = run_cmd_with_backoff(
             ["git", "fetch", "origin", branch],
             label="fetch-pr-branch",
@@ -670,8 +741,12 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         )
         if fetch_result.returncode != 0:
             _fail_setup_command("fetch-pr-branch", branch, fetch_result.stderr, progress)
+        # ``-B``, not ``-b``: when the pull request's head is the repository's
+        # default branch (a release PR from ``develop``), the clone has already
+        # created that branch, and ``-b`` refuses to create it again. The check
+        # above has made sure that it is the pull request's branch.
         run_cmd(
-            ["git", "checkout", "-b", branch, f"origin/{branch}"],
+            ["git", "checkout", "-B", branch, f"origin/{branch}"],
             label="checkout-pr-branch",
             cwd=repo_dir,
         )
@@ -700,11 +775,12 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
     elif config.base_branch:
         # Stacked child. Branch from the predecessor's branch (linear) or from
         # the repo default (diamond) so the child sees predecessor code without
-        # waiting for a human merge. fetch the base first — it is an unmerged
-        # sibling branch that the fresh clone may not have locally.
+        # waiting for a human merge. The base is looked up in the clone, which
+        # holds every branch of origin: fetching it again can only add a way
+        # to fail, and a failed fetch would read as "branch gone".
         base_branch = config.base_branch
         # A diamond rewrites the orchestrator's 'main' literal to the real
-        # default before fetch/checkout (see the block comment above); a linear
+        # default before the checkout (see the block comment above); a linear
         # child (no merge_branches) keeps its predecessor base untouched.
         if config.merge_branches:
             detected = detect_default_branch(config.repo_url, repo_dir)
@@ -717,27 +793,29 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
                 base_branch = detected
             resolved_diamond_base = base_branch
         log("SETUP", f"Creating branch {branch} from base {base_branch}")
-        fetch_res = run_cmd(
-            ["git", "fetch", "origin", base_branch],
-            label="fetch-base-branch",
+        base_res = run_cmd(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{base_branch}"],
+            label="find-base-branch",
             cwd=repo_dir,
             check=False,
         )
-        if fetch_res.returncode == 0:
+        if base_res.returncode == 0:
             run_cmd(
                 ["git", "checkout", "-b", branch, f"origin/{base_branch}"],
                 label="create-branch-from-base",
                 cwd=repo_dir,
             )
         else:
-            # Base branch not found on origin (e.g. predecessor PR already
-            # merged + branch deleted, or a transient fetch error). Fall
-            # back to a normal branch off the current HEAD so the child
-            # still runs rather than failing setup; the predecessor's code
-            # is likely in the default branch by now anyway.
-            notes.append(f"base branch '{base_branch}' not fetchable; branched off default instead")
+            # Base branch not found on origin (predecessor PR already merged
+            # + branch deleted). Fall back to a normal branch off the current
+            # HEAD so the child still runs rather than failing setup; the
+            # predecessor's code is likely in the default branch by now anyway.
+            # The pull request targets the default branch too: it cannot be
+            # compared with, or opened against, a branch that is gone.
+            notes.append(f"base branch '{base_branch}' not on origin; branched off default instead")
             log("SETUP", f"Base branch not found; creating {branch} off HEAD")
             run_cmd(["git", "checkout", "-b", branch], label="create-branch", cwd=repo_dir)
+            pr_base = None
 
         # Diamond: merge each predecessor branch into this child's branch
         # so it sees ALL predecessors' code (the base only gave it one).
@@ -830,16 +908,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         # and let the run proceed. The post-agent gate re-runs the build with the
         # same ceiling and surfaces an honest "timed out" if it's genuinely too slow.
         try:
-            result = run_cmd(
-                build_argv,
-                label="verify-build-pre",
-                cwd=repo_dir,
-                check=False,
-                timeout=BUILD_VERIFY_TIMEOUT_S,
-                # Stream live → the full baseline-build log reaches CloudWatch
-                # verbatim (buffered capture would hide the failing sub-task).
-                stream=True,
-            )
+            result = _run_baseline(build_argv, "verify-build-pre", repo_dir)
         except subprocess.TimeoutExpired:
             log(
                 "WARN",
@@ -911,14 +980,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         # slow lint must not crash the task before the agent runs). A timeout →
         # no usable lint baseline → treat as not-a-regression.
         try:
-            result = run_cmd(
-                lint_argv,
-                label="verify-lint-pre",
-                cwd=repo_dir,
-                check=False,
-                timeout=BUILD_VERIFY_TIMEOUT_S,
-                stream=True,  # full lint output → CloudWatch verbatim
-            )
+            result = _run_baseline(lint_argv, "verify-lint-pre", repo_dir)
         except subprocess.TimeoutExpired:
             log(
                 "WARN",
@@ -964,11 +1026,10 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
     # - Diamond children: base_branch was the orchestrator's 'main' literal; we
     #   resolved the REAL repo default above (resolved_diamond_base) so the PR
     #   targets it, not stale main.
-    # - Otherwise: detect the repo default (main/master).
+    # - Otherwise, and for a linear child whose predecessor branch is gone from
+    #   origin (pr_base cleared above): detect the repo default (main/master).
     default_branch = (
-        resolved_diamond_base
-        or config.base_branch
-        or detect_default_branch(config.repo_url, repo_dir)
+        resolved_diamond_base or pr_base or detect_default_branch(config.repo_url, repo_dir)
     )
 
     # Install prepare-commit-msg hook for code attribution
@@ -1006,24 +1067,24 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
 def _merge_predecessor_branch(repo_dir: str, pred_branch: str, notes: list[str]) -> None:
     """Merge a predecessor branch into the current child branch (diamond stack).
 
-    Fetches the predecessor branch and merges it so the child sees its
+    Merges the predecessor branch as the clone holds it so the child sees its
     code. On a clean merge: done. On a CONFLICT: abort the merge (leaving
     the working tree clean) and record a note. We deliberately do NOT leave
     the repo in a conflicted state — the agent runs AFTER setup and a
     half-merged tree would break its build/lint baseline. Instead the
-    predecessor branch remains fetched (``origin/<pred_branch>``) and the
+    predecessor branch stays in the clone (``origin/<pred_branch>``) and the
     note tells the agent to integrate it as part of its task. This keeps
     conflict resolution agent-driven without corrupting the deterministic
     setup phase.
     """
-    fetch_res = run_cmd(
-        ["git", "fetch", "origin", pred_branch],
-        label="fetch-predecessor",
+    pred_res = run_cmd(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{pred_branch}"],
+        label="find-predecessor",
         cwd=repo_dir,
         check=False,
     )
-    if fetch_res.returncode != 0:
-        notes.append(f"predecessor branch '{pred_branch}' not fetchable; skipped merge")
+    if pred_res.returncode != 0:
+        notes.append(f"predecessor branch '{pred_branch}' not on origin; skipped merge")
         log("SETUP", f"Predecessor branch not found, skipping merge: {pred_branch}")
         return
 
@@ -1073,10 +1134,36 @@ def _install_commit_hook(repo_dir: str) -> None:
         log("WARN", f"Commit hook install failed: {type(e).__name__}: {e}")
 
 
+def _default_branch_of_clone(repo_dir: str) -> str:
+    """The default branch ``git clone`` recorded as ``origin/HEAD``, or 'main'.
+
+    What :func:`detect_default_branch` answers when GitHub does not: the clone
+    knows the remote's default branch, and reading it needs no network.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("WARN", f"Could not read origin/HEAD ({type(exc).__name__}) — defaulting to 'main'")
+        return "main"
+    branch = result.stdout.strip().removeprefix("refs/remotes/origin/")
+    if result.returncode != 0 or not branch:
+        log("WARN", "The clone has no origin/HEAD — defaulting to 'main'")
+        return "main"
+    log("SETUP", f"Default branch of the clone (origin/HEAD): {branch}")
+    return branch
+
+
 def detect_default_branch(repo_url: str, repo_dir: str) -> str:
     """Detect the repository's default branch via gh CLI.
 
-    Falls back to 'main' if detection fails (timeout, auth error, etc.).
+    If detection fails (timeout, auth error, etc.), falls back to the default
+    branch the clone recorded, and to 'main' only when that is unknown too.
     """
     try:
         result = subprocess.run(
@@ -1096,19 +1183,20 @@ def detect_default_branch(repo_url: str, repo_dir: str) -> str:
             timeout=30,
         )
     except subprocess.TimeoutExpired:
-        log("WARN", "Default branch detection timed out — defaulting to 'main'")
-        return "main"
+        log("WARN", "Default branch detection timed out — using the clone's origin/HEAD")
+        return _default_branch_of_clone(repo_dir)
     except (OSError, subprocess.SubprocessError) as exc:
         # gh missing from PATH (FileNotFoundError is an OSError), a permission
         # error spawning it, or any other subprocess failure. The docstring
-        # promises a fallback to 'main'; without this the exception would
+        # promises a fallback; without this the exception would
         # escape and fail the whole task. (TimeoutExpired is a
         # SubprocessError too but is handled above for its distinct message.)
         log(
             "WARN",
-            f"Default branch detection failed ({type(exc).__name__}) — defaulting to 'main'",
+            f"Default branch detection failed ({type(exc).__name__}) — "
+            "using the clone's origin/HEAD",
         )
-        return "main"
+        return _default_branch_of_clone(repo_dir)
 
     if result.returncode == 0 and result.stdout.strip():
         branch = result.stdout.strip()
@@ -1119,6 +1207,6 @@ def detect_default_branch(repo_url: str, repo_dir: str) -> str:
     log(
         "WARN",
         f"Could not detect default branch (exit {result.returncode}): "
-        f"{stderr} — defaulting to 'main'",
+        f"{stderr} — using the clone's origin/HEAD",
     )
-    return "main"
+    return _default_branch_of_clone(repo_dir)

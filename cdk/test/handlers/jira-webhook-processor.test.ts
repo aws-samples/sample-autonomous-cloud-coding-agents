@@ -246,6 +246,12 @@ describe('jira-webhook-processor handler', () => {
       mockCommentDdb({
         platform_user_id: 'linked-reviewer',
         status: 'active',
+      }, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_start: 'Doing',
+        status_on_pr: 'Code Review',
       });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
 
@@ -524,6 +530,72 @@ describe('jira-webhook-processor handler', () => {
       );
     });
 
+    test('an iteration takes the status names the project mapping has now, not those of the earlier task', async () => {
+      // The earlier task was created while the mapping said Doing / Code Review.
+      // Since then the start status was renamed and the review override removed.
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      mockCommentDdb(undefined, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_start: 'In Development',
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      const metadata = createTaskCoreMock.mock.calls[0][1].channelMetadata;
+      expect(metadata.jira_status_on_start).toBe('In Development');
+      expect(metadata).not.toHaveProperty('jira_status_on_pr');
+    });
+
+    test('an iteration routed through the prior task project takes the status names of that mapping', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      mockCommentDdb(undefined, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_pr: 'Peer Review',
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      const payload = comment();
+      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+
+      await handler(eventWith(payload));
+
+      const metadata = createTaskCoreMock.mock.calls[0][1].channelMetadata;
+      expect(metadata.jira_status_on_pr).toBe('Peer Review');
+      expect(metadata).not.toHaveProperty('jira_status_on_start');
+    });
+
+    test('an orchestrated child iteration keeps the status names recorded with its orchestration', async () => {
+      // The reconciler moves the child's issue by the names on the orchestration
+      // row, which are the ones the child's earlier task carries.
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        channel_metadata: {
+          ...priorTask.channel_metadata,
+          orchestration_id: 'orch-1',
+          orchestration_sub_issue_id: 'ENG-42',
+        },
+      });
+      mockCommentDdb(undefined, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_start: 'In Development',
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        orchestration_iteration: 'true',
+        jira_status_on_start: 'Doing',
+        jira_status_on_pr: 'Code Review',
+      });
+    });
+
     test('keeps @bgagent comments without a project key or prior task silent', async () => {
       const payload = comment();
       delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
@@ -572,6 +644,26 @@ describe('jira-webhook-processor handler', () => {
 
       expect(resolveTaskByJiraIssueMock).not.toHaveBeenCalled();
       expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+
+    test('does not take its own refusal of an unlinked retry for an instruction', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValue(priorTask);
+      createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
+      const retry = comment();
+      (retry.comment as Record<string, unknown>).body = '@bgagent retry';
+      await handler(eventWith(retry));
+      const refusal = reportIssueFailureMock.mock.calls[0][2] as string;
+      expect(refusal).toContain('`@bgagent retry`');
+
+      // A site that still writes with the OAuth token gets the refusal back as
+      // a new comment by the person who ran setup, not by an app.
+      const echo = comment();
+      (echo.comment as Record<string, unknown>).id = 'comment-2';
+      (echo.comment as Record<string, unknown>).body = refusal;
+      await handler(eventWith(echo));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     });
 
     test('posts clear feedback when no prior PR-producing task exists', async () => {
@@ -644,6 +736,21 @@ describe('jira-webhook-processor handler', () => {
       expect(message).toContain('temporarily unavailable');
       expect(message).toContain('add a new `@bgagent` comment');
       expect(message).not.toContain('re-apply the trigger label');
+    });
+
+    test('says so on the issue when no Jira access token resolves for the iteration', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      resolveJiraOauthTokenMock.mockResolvedValueOnce(null);
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'ENG-42',
+        expect.stringContaining('bgagent jira setup'),
+      );
     });
   });
 
@@ -980,7 +1087,7 @@ describe('jira-webhook-processor handler', () => {
     expect(userGetCall[0].input.ConsistentRead).toBe(true);
   });
 
-  test('drops event when tenant resolves to null (registry miss / inactive / unreadable secret)', async () => {
+  test('drops the event and says so on the issue when no Jira access token resolves', async () => {
     ddbSend
       .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
       .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
@@ -989,7 +1096,15 @@ describe('jira-webhook-processor handler', () => {
     await handler(eventWith(issue()));
 
     expect(createTaskCoreMock).not.toHaveBeenCalled();
-    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    // A dead grant on a site that writes as the Forge app can still be told.
+    // An unregistered or inactive site, or one with an unreadable secret, gives
+    // reportIssueFailure no identity to write with, so nothing is posted there.
+    expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+    expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'ENG-42',
+      expect.stringContaining('bgagent jira setup'),
+    );
   });
 
   describe('user-visible feedback on silent-failure paths', () => {

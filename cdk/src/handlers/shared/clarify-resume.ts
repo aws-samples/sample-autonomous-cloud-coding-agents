@@ -36,8 +36,24 @@
  * unit-testable; the processor does the DDB read + ``createTaskCore`` dispatch.
  */
 
+import { MAX_TASK_DESCRIPTION_LENGTH } from './validation';
+
 /** The workflow a clarify-HOLD can only originate from (a brand-new task run). */
 const NEW_TASK_WORKFLOW_ID = 'coding/new-task-v1';
+
+/** The two lines every clarifying exchange in a resume description starts with. */
+const EXCHANGE_HEADER = '---\nThis continues an earlier run that paused to ask a clarifying question.';
+
+/**
+ * Where the reviewer's later words start in a description: the first block that
+ * a comment appended. A clarifying exchange (above), or the follow-up request of
+ * buildFollowUpDescription in linear-webhook-processor.ts, which cuts in front
+ * of the first block in the same way.
+ */
+export const APPENDED_BLOCK = /(?:^|\n\n)---\n(?:This continues an earlier run that paused to ask a clarifying question\.|An earlier run on this issue ended without a pull request\.)/;
+
+/** Half of a character at the end of a text: what a cut between the two code units of an emoji leaves. */
+const LONE_SURROGATE_AT_END = /\p{Surrogate}$/u;
 
 /**
  * The subset of a persisted TaskRecord needed to recognise a clarify-HOLD and
@@ -94,27 +110,37 @@ export function isClarifyHold(row: ClarifyHoldRow | null | undefined): row is Cl
  * ``question`` is the held ``answer_text``; ``answer`` is the user's reply
  * (already stripped of the ``@bgagent`` mention by the comment parser). A blank
  * original (older rows) degrades to just the exchange.
+ *
+ * What a reviewer wrote after the issue survives whole: the new exchange, and
+ * the blocks an earlier description ends with (the exchanges of earlier rounds,
+ * the request of a follow-up comment). An original that fills the description
+ * limit (the label path fills it exactly when project documents or comments
+ * overflow) gives way at the end of the ask in front of those blocks, where the
+ * advisory sections are: ``createTaskCore`` refuses a longer description, and
+ * the answer would start nothing. When the blocks alone exceed the limit,
+ * nothing is cut and that refusal stands: an answer is never shortened.
  */
 export function buildClarifyResumeDescription(
   originalDescription: string | undefined,
   question: string | undefined,
   answer: string,
 ): string {
-  const parts: string[] = [];
-  const orig = (originalDescription ?? '').trim();
-  if (orig) parts.push(orig);
   const q = (question ?? '').trim();
   const a = answer.trim();
   const exchange: string[] = [];
   if (q) exchange.push(`You asked: ${q}`);
   exchange.push(`The reviewer answered: ${a}`);
-  parts.push(
-    [
-      '---',
-      'This continues an earlier run that paused to ask a clarifying question.',
-      ...exchange,
-      'Proceed with the original request using this answer.',
-    ].join('\n'),
-  );
-  return parts.join('\n\n');
+  const block = [EXCHANGE_HEADER, ...exchange, 'Proceed with the original request using this answer.'].join('\n');
+
+  const original = (originalDescription ?? '').trim();
+  const earlierAt = original.search(APPENDED_BLOCK);
+  const ask = earlierAt === -1 ? original : original.slice(0, earlierAt);
+  const earlier = original.slice(ask.length);
+  // 2: the blank line between the original and the new exchange.
+  const room = Math.max(0, MAX_TASK_DESCRIPTION_LENGTH - earlier.length - block.length - 2);
+  // Only an ask that does not fit is touched: cut, then freed of half a
+  // character and of white space at the cut.
+  const fitted = ask.length > room ? ask.slice(0, room).replace(LONE_SURROGATE_AT_END, '').trimEnd() : ask;
+  const kept = (fitted + earlier).trim();
+  return kept ? `${kept}\n\n${block}` : block;
 }

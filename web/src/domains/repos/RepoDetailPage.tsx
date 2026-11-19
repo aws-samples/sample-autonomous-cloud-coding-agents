@@ -44,7 +44,7 @@ export function RepoDetailPage() {
           items={[{ text: 'Repositories', href: '/repos' }, { text: repo, href: repoHref(repo) }]}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(event.detail.href);
+            void navigate(event.detail.href);
           }}
         />
       }
@@ -83,7 +83,7 @@ export function RepoDetailPage() {
           )}
           hasMore={query.hasNextPage}
           loadingMore={query.isFetchingNextPage}
-          onLoadMore={() => query.fetchNextPage()}
+          onLoadMore={() => void query.fetchNextPage()}
         />
       )}
       </SpaceBetween>

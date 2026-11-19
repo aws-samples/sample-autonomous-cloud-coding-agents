@@ -222,6 +222,9 @@ class Workflow(BaseModel):
     repo_config: RepoConfig | None = None
     required_inputs: RequiredInputs | None = None
     steps: list[Step]
+    # Reserved: the schema allows the key and pins it to empty, and nothing
+    # reads it. Post-agent gates are steps.
+    post_hooks: list[str] = Field(default_factory=list, max_length=0)
     terminal_outcomes: TerminalOutcomes
     convergence: Convergence | None = None
     limits: Limits | None = None
@@ -248,7 +251,7 @@ class Workflow(BaseModel):
         delivers the agent's result as an artifact, so it never pushes. Both
         conditions matter: ``default/agent-v1`` declares ``primary: artifact`` but
         ``requires_repo: false``, and run with a repository it still opens a PR.
-        Reads the declared ``requires_repo``, not ``resolved_requires_repo``: a
-        workflow must opt in to artifact delivery explicitly.
+        Uses ``resolved_requires_repo``, as ``build_config`` does: a ``coding``
+        workflow may leave ``requires_repo`` out, and the raw field is then None.
         """
-        return self.terminal_outcomes.primary == "artifact" and bool(self.requires_repo)
+        return self.terminal_outcomes.primary == "artifact" and self.resolved_requires_repo

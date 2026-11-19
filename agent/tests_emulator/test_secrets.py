@@ -79,8 +79,8 @@ class TestGithubTokenFromSecretsManager:
 class TestLinearTokenFromSecretsManager:
     @staticmethod
     def _oauth_secret(**overrides) -> str:
-        # expires_at is far enough ahead that the resolver never attempts a
-        # refresh, which would call Linear's real OAuth endpoint.
+        # expires_at is far enough ahead that the resolver takes the token as
+        # valid (an expiring one yields no token).
         expires_at = (datetime.now(UTC) + timedelta(days=1)).isoformat().replace("+00:00", "Z")
         return json.dumps(
             {

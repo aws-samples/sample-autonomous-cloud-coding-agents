@@ -682,7 +682,7 @@ describe('formatStatusSnapshot', () => {
   test('still shows the Blocker line on a FAILED task (#251 review — guard is COMPLETED-only)', () => {
     // The suppression is narrow: on a failure state the blocker is the
     // actionable cause and must stay visible. Guards against a mistaken
-    // broadening to isTerminalStatus().
+    // broadening to every terminal status.
     const task = buildTask({ status: 'FAILED' });
     const events: TaskEvent[] = [
       mkEvent({

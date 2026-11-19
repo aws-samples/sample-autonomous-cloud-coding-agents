@@ -69,15 +69,6 @@ export const ORCH_LOG = {
    *  skipped. Fields: orchestration_id, sub_issue_id, skipped_ids. */
   reconcileFailurePropagated: 'orch.reconcile.failure_propagated',
 
-  // ── Rollup (parent comment via this plane) ──────────────────────
-  /** A parent rollup comment was posted. Fields: orchestration_id,
-   *  parent_linear_issue_id, rollup_kind ('progress' | 'complete' |
-   *  'partial_failure' | 'cancelled'). */
-  rollupPosted: 'orch.rollup.posted',
-  /** Posting the parent rollup comment failed (best-effort). Fields:
-   *  orchestration_id, parent_linear_issue_id, rollup_kind. */
-  rollupFailed: 'orch.rollup.failed',
-
   // ── Completion / cancel ─────────────────────────────────────────
   /** Every child reached a terminal orchestration state. Fields:
    *  orchestration_id, parent_linear_issue_id, succeeded, failed, skipped. */

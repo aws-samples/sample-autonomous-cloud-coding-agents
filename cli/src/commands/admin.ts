@@ -29,7 +29,7 @@ import {
   listCognitoUsers,
   resolveCognitoAdminContext,
 } from '../cognito-admin';
-import { getConfigDir, SECRET_FILE_MODE } from '../config';
+import { getConfigDir, writeSecretFile } from '../config';
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME } from '../operator-context';
 import { CliConfig } from '../types';
@@ -292,7 +292,6 @@ function writeCredentialsFile(
     lines.push('', 'On first login you will be prompted to set a permanent password.');
   }
   lines.push('');
-  fs.writeFileSync(invitePath, lines.join('\n'), { mode: SECRET_FILE_MODE });
-  fs.chmodSync(invitePath, SECRET_FILE_MODE);
+  writeSecretFile(invitePath, lines.join('\n'));
   return invitePath;
 }

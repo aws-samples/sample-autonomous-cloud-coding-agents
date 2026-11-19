@@ -95,7 +95,7 @@ export function abcaUserAgent(): { customUserAgent: [string, string][] } {
  * factory composable instead of clobbering. (#319)
  */
 export function makeClient<C>(
-  Ctor: new (cfg: any) => C,
+  Ctor: new (cfg: { customUserAgent: [string, string][] }) => C,
   cfg: Record<string, unknown> = {},
 ): C {
   const callerUa = (cfg.customUserAgent as [string, string][] | undefined) ?? [];

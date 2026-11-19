@@ -178,6 +178,9 @@ describe('budget admission', () => {
     expect(stdout).toHaveBeenCalledWith(expect.stringContaining(
       '"BudgetTeamMembershipUnresolved":1',
     ));
+    // CloudWatch creates one metric per DimensionSet, so a metric without
+    // dimensions needs one empty set: with none, no datapoint reaches the alarm.
+    expect(stdout).toHaveBeenCalledWith(expect.stringContaining('"Dimensions":[[]]'));
   });
 
   test('fails closed with a distinct metric on transient Cognito errors', async () => {
@@ -341,8 +344,12 @@ describe('budget admission', () => {
     const budgets = await loadBudgets();
     const teamIds = Array.from({ length: 99 }, (_, index) => `Team-${index}`);
 
-    await expect(budgets.checkBudgetAdmission('user-1', teamIds))
+    const admission = budgets.checkBudgetAdmission('user-1', teamIds);
+    await expect(admission)
       .rejects.toThrow('belongs to 99 teams; budget rollup supports at most 98');
+    // The text is shown to whoever asked for the task, who is not always the
+    // billed user (a comment on someone else's Linear issue): no user id in it.
+    await expect(admission).rejects.not.toThrow('user-1');
     expect(ddbSend).not.toHaveBeenCalled();
     expect(cognitoSend).not.toHaveBeenCalled();
   });

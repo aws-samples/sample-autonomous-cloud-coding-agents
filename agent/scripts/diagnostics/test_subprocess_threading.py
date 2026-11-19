@@ -148,14 +148,12 @@ def _print_result(label: str, result: dict) -> int:
     return count
 
 
-async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version: str):
+async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version: str) -> bool:
     loop = asyncio.get_running_loop()
 
     print(f"Python:     {sys.version}")
     print(f"Platform:   {sys.platform}")
     print(f"Loop:       {type(loop).__name__}")
-    policy = asyncio.get_event_loop_policy()
-    print(f"Policy:     {type(policy).__module__}.{type(policy).__name__}")
     if node_cmd:
         print(f"Node.js:    {node_version}")
     else:
@@ -210,6 +208,7 @@ async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version
         else:
             print("Mixed results — see details above.")
     print("=" * 60)
+    return all_pass
 
 
 if __name__ == "__main__":
@@ -246,4 +245,5 @@ if __name__ == "__main__":
             text=True,
             timeout=5,
         ).stdout.strip()
-    asyncio.run(_run_tests(py_cmd, node_cmd, node_version))
+    # A threaded test that printed FAIL must fail the script, as the baselines above do.
+    sys.exit(0 if asyncio.run(_run_tests(py_cmd, node_cmd, node_version)) else 1)

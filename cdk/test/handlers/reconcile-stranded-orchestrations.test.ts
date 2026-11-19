@@ -27,13 +27,32 @@ interface Row { [k: string]: unknown }
 const orch = new Map<string, Row>(); // OrchestrationTable, key = `${oid} ${sk}`
 const tasksTbl = new Map<string, Row>(); // TaskTable, key = task_id
 
+/** Runs once, after the next Query has read its rows: lets a test change a row
+ *  between the sweep's read and the write that follows it. */
+let afterNextQuery: (() => void) | undefined;
+
+/** The condition syntax the sweep and the release path use: clauses joined by
+ *  AND, each ``attr = :v``, ``attr <> :v`` or ``attr IN (:a, :b)``. */
+function conditionHolds(row: Row, expression: unknown, vals: Row): boolean {
+  if (expression === undefined) return true;
+  return String(expression).split(' AND ').every((clause) => {
+    const [, attr, op, rhs] = /^(\w+) (=|<>|IN) (.+)$/.exec(clause)!;
+    if (op === 'IN') return rhs.slice(1, -1).split(', ').some((v) => row[attr] === vals[v]);
+    return (row[attr] === vals[rhs]) === (op === '=');
+  });
+}
+
 const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unknown> }) => {
   const { _type, input } = cmd;
   const tn = input.TableName as string;
   if (_type === 'Scan') {
-    // meta-row scan on OrchestrationTable
-    const items = [...orch.values()].filter((r) => r.sub_issue_id === '#meta');
-    return { Items: items };
+    // meta-row scan on OrchestrationTable: only the projected attributes come back
+    const attrs = String(input.ProjectionExpression).split(', ');
+    return {
+      Items: [...orch.values()]
+        .filter((r) => r.sub_issue_id === '#meta')
+        .map((r) => Object.fromEntries(attrs.filter((a) => a in r).map((a) => [a, r[a]]))),
+    };
   }
   if (_type === 'Get') {
     const k = input.Key as Row;
@@ -41,20 +60,29 @@ const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unkn
   }
   if (_type === 'Query') {
     const oid = (input.ExpressionAttributeValues as Row)[':oid'];
-    return { Items: [...orch.values()].filter((r) => r.orchestration_id === oid) };
+    const items = [...orch.values()].filter((r) => r.orchestration_id === oid).map((r) => ({ ...r }));
+    const hook = afterNextQuery;
+    afterNextQuery = undefined;
+    hook?.();
+    return { Items: items };
   }
   if (_type === 'Update') {
+    // Applies the ``SET attr = :value`` and the ``REMOVE attr`` clause when the
+    // condition holds, as DynamoDB does.
     const k = input.Key as Row;
     const key = `${k.orchestration_id} ${k.sub_issue_id}`;
     const vals = input.ExpressionAttributeValues as Row;
-    const row = orch.get(key);
-    if (row && input.ConditionExpression?.toString().includes('child_status <> :s') && row.child_status === vals[':s']) {
+    const row = orch.get(key) ?? { ...k };
+    if (!conditionHolds(row, input.ConditionExpression, vals)) {
       const e = new Error('c'); e.name = 'ConditionalCheckFailedException'; throw e;
     }
-    if (row) {
-      if (vals[':s'] !== undefined) row.child_status = vals[':s'];
-      if (vals[':released'] !== undefined) { row.child_status = 'released'; row.child_task_id = vals[':tid']; }
+    const expression = String(input.UpdateExpression);
+    for (const assignment of /SET (.+?)(?= REMOVE |$)/.exec(expression)?.[1].split(', ') ?? []) {
+      const [attr, value] = assignment.split(' = ');
+      row[attr] = vals[value];
     }
+    for (const attr of /REMOVE (.+?)(?= SET |$)/.exec(expression)?.[1].split(', ') ?? []) delete row[attr];
+    orch.set(key, row);
     return {};
   }
   throw new Error(`fake: unhandled ${_type}`);
@@ -90,7 +118,13 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 
 import { handler } from '../../src/handlers/reconcile-stranded-orchestrations';
 
-function seed(oid: string, children: Array<{ sk: string; deps?: string[]; status: string; taskId?: string }>): void {
+const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000).toISOString();
+
+function seed(
+  oid: string,
+  children: Array<{ sk: string; deps?: string[]; status: string; taskId?: string; updatedAt?: string }>,
+  meta: Row = {},
+): void {
   orch.set(`${oid} #meta`, {
     orchestration_id: oid,
     sub_issue_id: '#meta',
@@ -99,6 +133,7 @@ function seed(oid: string, children: Array<{ sk: string; deps?: string[]; status
     repo: 'o/r',
     child_count: children.length,
     platform_user_id: 'user-1',
+    ...meta,
   });
   for (const c of children) {
     orch.set(`${oid} ${c.sk}`, {
@@ -109,6 +144,7 @@ function seed(oid: string, children: Array<{ sk: string; deps?: string[]; status
       repo: 'o/r',
       parent_linear_issue_id: 'P',
       linear_workspace_id: 'WS',
+      updated_at: c.updatedAt ?? minutesAgo(0),
       ...(c.taskId && { child_task_id: c.taskId }),
     });
   }
@@ -116,7 +152,7 @@ function seed(oid: string, children: Array<{ sk: string; deps?: string[]; status
 const statusOf = (oid: string, sk: string) => orch.get(`${oid} ${sk}`)?.child_status;
 
 beforeEach(() => {
-  orch.clear(); tasksTbl.clear(); fakeSend.mockClear();
+  orch.clear(); tasksTbl.clear(); fakeSend.mockClear(); afterNextQuery = undefined;
   createTaskCoreMock.mockReset();
   createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'new-task' } }) });
   refreshPanelAndSettleMock.mockReset();
@@ -132,6 +168,18 @@ describe('stranded-orchestration backstop', () => {
     await handler();
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
     expect(statusOf('o1', 'B')).toBe('released');
+  });
+
+  test('a child the sweep starts is stamped, and loses the reason of an earlier start that was refused', async () => {
+    // A retry put the child back to ready and the sweep is the one to start it.
+    seed('o-reason', [{ sk: 'A', status: 'ready', updatedAt: minutesAgo(30) }]);
+    orch.get('o-reason A')!.failure_reason = 'Blocked by content policy — reword this sub-issue, then reply `@bgagent retry` on the epic to re-run.';
+    await handler();
+    const started = orch.get('o-reason A')!;
+    expect(started.child_status).toBe('released');
+    expect(started.child_task_id).toBe('new-task');
+    expect(started).not.toHaveProperty('failure_reason');
+    expect(Date.parse(String(started.updated_at))).toBeGreaterThan(Date.parse(minutesAgo(1)));
   });
 
   test('lost TERMINAL event: A released + its task COMPLETED but row stuck → sweep advances A and releases B', async () => {
@@ -245,5 +293,129 @@ describe('stranded-orchestration backstop', () => {
     createTaskCoreMock.mockClear();
     await handler(); // B is now 'released' → no further release
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  // The sweep settles the parent in the run that ends the epic, not one or two
+  // runs (10 or 20 minutes) later. What it hands to the settle are the rows as
+  // they are after its own writes.
+  describe('an epic that this run brings to its end', () => {
+    const settledWith = () => {
+      expect(refreshPanelAndSettleMock).toHaveBeenCalledTimes(1);
+      const children = refreshPanelAndSettleMock.mock.calls[0][1] as Row[];
+      return children.map((c) => [c.sub_issue_id, c.child_status]);
+    };
+    const refusedForGood = {
+      statusCode: 400,
+      body: JSON.stringify({ error: { code: 'VALIDATION_ERROR', message: 'Task description was blocked by content policy.' } }),
+    };
+
+    test('a failed child whose dependents the sweep skips → settled with the skips', async () => {
+      seed('o-ends', [
+        { sk: 'A', status: 'released', taskId: 'task-A' },
+        { sk: 'B', deps: ['A'], status: 'blocked' },
+      ]);
+      tasksTbl.set('task-A', { task_id: 'task-A', status: 'COMPLETED', build_passed: false });
+      await handler();
+      expect(settledWith()).toEqual([['A', 'failed'], ['B', 'skipped']]);
+    });
+
+    test('a release that is refused for good → dependents skipped and the parent settled', async () => {
+      // R was left ``ready`` by the concurrency throttle; the guardrail rejects its text.
+      seed('o-refused', [
+        { sk: 'R', status: 'ready' },
+        { sk: 'D', deps: ['R'], status: 'blocked' },
+      ]);
+      createTaskCoreMock.mockResolvedValue(refusedForGood);
+      await handler();
+      expect(settledWith()).toEqual([['R', 'failed'], ['D', 'skipped']]);
+      // The reason the panel shows for R comes with the rows.
+      expect(orch.get('o-refused R')?.failure_reason).toMatch(/content policy/);
+    });
+
+    test('a refused release beside one that started → dependents skipped, no settle while a child runs', async () => {
+      seed('o-mixed', [
+        { sk: 'R1', status: 'ready' },
+        { sk: 'R2', status: 'ready' },
+        { sk: 'D', deps: ['R1'], status: 'blocked' },
+      ]);
+      createTaskCoreMock.mockResolvedValueOnce(refusedForGood);
+      await handler();
+      expect(statusOf('o-mixed', 'R1')).toBe('failed');
+      expect(statusOf('o-mixed', 'R2')).toBe('released');
+      expect(statusOf('o-mixed', 'D')).toBe('skipped');
+      expect(refreshPanelAndSettleMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // ``rollup_posted_at`` on the meta row is the stamp of the settle. Finished
+  // epics stay in the table, so settling each of them again on every run would
+  // edit every panel ever posted, every 10 minutes.
+  describe('an epic whose rollup is already posted', () => {
+    const done = [
+      { sk: 'A', status: 'succeeded' },
+      { sk: 'B', deps: ['A'], status: 'succeeded' },
+    ];
+
+    test('posted hours ago → left alone: the panel is not rendered again', async () => {
+      seed('o-settled', done, { rollup_posted_at: minutesAgo(120) });
+      await handler();
+      expect(refreshPanelAndSettleMock).not.toHaveBeenCalled();
+    });
+
+    test('posted minutes ago → still refreshed, so a panel edit that failed after the stamp is repaired', async () => {
+      seed('o-just-settled', done, { rollup_posted_at: minutesAgo(5) });
+      await handler();
+      expect(refreshPanelAndSettleMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('an old stamp on an epic that is running again does not stop the recovery', async () => {
+      // Re-opened (a sub-issue added, a retry) by a writer whose removal of the
+      // stamp failed; the last child then lost its terminal event.
+      seed('o-reopened', [
+        { sk: 'A', status: 'succeeded' },
+        { sk: 'B', deps: ['A'], status: 'released', taskId: 'task-B' },
+      ], { rollup_posted_at: minutesAgo(120) });
+      tasksTbl.set('task-B', { task_id: 'task-B', status: 'COMPLETED', build_passed: true });
+      await handler();
+      expect(statusOf('o-reopened', 'B')).toBe('succeeded');
+      expect(refreshPanelAndSettleMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ``releasing`` is the claim a releaser holds while it creates the task. Taking
+  // it from a releaser that is still running starts a second task for the child.
+  describe('a child found in releasing', () => {
+    test('claimed moments ago → left to its releaser: not reset, not released a second time', async () => {
+      seed('o-live', [
+        { sk: 'A', status: 'succeeded' },
+        { sk: 'B', deps: ['A'], status: 'releasing', updatedAt: minutesAgo(0) },
+      ]);
+      await handler();
+      expect(statusOf('o-live', 'B')).toBe('releasing');
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+
+    test('claimed longer ago than any releaser can run → reset and released again', async () => {
+      seed('o-dead', [
+        { sk: 'A', status: 'succeeded' },
+        { sk: 'B', deps: ['A'], status: 'releasing', updatedAt: minutesAgo(20) },
+      ]);
+      await handler();
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(statusOf('o-dead', 'B')).toBe('released');
+    });
+
+    test('an old claim that a new releaser took over after the sweep read it → left alone', async () => {
+      seed('o-retaken', [
+        { sk: 'A', status: 'succeeded' },
+        { sk: 'B', deps: ['A'], status: 'releasing', updatedAt: minutesAgo(20) },
+      ]);
+      // Between the sweep's read and its reset another sweep run resets the dead
+      // claim and takes it itself: the row reads ``releasing`` again, claimed now.
+      afterNextQuery = () => { orch.get('o-retaken B')!.updated_at = minutesAgo(0); };
+      await handler();
+      expect(statusOf('o-retaken', 'B')).toBe('releasing');
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
   });
 });

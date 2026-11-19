@@ -38,6 +38,7 @@ jest.mock('../../../src/handlers/shared/memory', () => ({
 }));
 
 import { clearTokenCache } from '../../../src/handlers/shared/context-hydration';
+import { classifyError } from '../../../src/handlers/shared/error-classifier';
 import {
   PreflightFailureReason,
   runPreflightChecks,
@@ -60,6 +61,15 @@ function githubRepoOk(permissions: { push?: boolean; pull?: boolean } = { push: 
     ok: true,
     status: 200,
     json: async () => ({ permissions }),
+  };
+}
+
+/** Successful GET /repos/.../pulls/{n}: an open pull request from a branch of `owner/repo` itself. */
+function githubOpenPrOk() {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ state: 'open', head: { repo: { full_name: 'owner/repo' } }, base: { repo: { full_name: 'owner/repo' } } }),
   };
 }
 
@@ -190,13 +200,30 @@ describe('runPreflightChecks', () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
-      .mockResolvedValueOnce({ ok: false, status: 403 });
+      .mockResolvedValueOnce({ ok: false, status: 403, headers: new Headers({ 'x-ratelimit-remaining': '4999' }) });
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
     expect(result.passed).toBe(false);
     expect(result.failureReason).toBe(PreflightFailureReason.REPO_NOT_FOUND_OR_NO_ACCESS);
     expect(result.failureDetail).toContain('403');
+  });
+
+  // GitHub answers 403 to a rate-limited token as well, and /rate_limit keeps answering 200.
+  test.each([
+    ['primary limit: x-ratelimit-remaining is 0', { 'x-ratelimit-remaining': '0' }],
+    ['secondary limit: retry-after is present', { 'x-ratelimit-remaining': '4200', 'retry-after': '60' }],
+  ])('fails GITHUB_UNREACHABLE on a rate-limited repo 403 (%s)', async (_form, headers) => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: false, status: 403, headers: new Headers(headers) });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
+    expect(result.failureDetail).toBe('GitHub API returned HTTP 403 for owner/repo (rate limited)');
   });
 
   test('reports GITHUB_UNREACHABLE as primary reason when both checks fail', async () => {
@@ -337,7 +364,7 @@ describe('runPreflightChecks', () => {
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 }) // reachability
       .mockResolvedValueOnce(githubRepoOk()) // repo access
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) }); // PR
+      .mockResolvedValueOnce(githubOpenPrOk()); // PR
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
 
@@ -360,6 +387,34 @@ describe('runPreflightChecks', () => {
     expect(result.failureReason).toBe(PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED);
   });
 
+  test('fails PR_NOT_FOUND_OR_CLOSED when PR returns 403', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
+      .mockResolvedValueOnce({ ok: false, status: 403 });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED);
+  });
+
+  test('fails GITHUB_UNREACHABLE on PR 5xx', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
+      .mockResolvedValueOnce({ ok: false, status: 502 });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
+    expect(result.failureDetail).toContain('502');
+    expect(result.failureDetail).toContain('PR #42');
+  });
+
   test('fails when PR is closed', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
@@ -371,6 +426,50 @@ describe('runPreflightChecks', () => {
 
     expect(result.passed).toBe(false);
     expect(result.failureReason).toBe(PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED);
+  });
+
+  // The agent fetches the branch of the pull request by its name from the task's
+  // repository, and an iteration pushes to it there. The branch of a pull request
+  // from a fork is in the fork. GET /repos/{repo}/pulls/{n} says so: `head.repo`
+  // is another repository than `base.repo`, or null once the fork is deleted.
+  test.each([
+    ['comes from a fork', { repo: { full_name: 'contributor/repo' } }],
+    ['comes from a fork that was deleted since', { repo: null }],
+    ['has no head repository in the answer of GitHub', undefined],
+  ])('fails PR_FROM_FORK when the pull request %s', async (_what, head) => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ state: 'open', head, base: { repo: { full_name: 'owner/repo' } } }),
+      });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.PR_FROM_FORK);
+    expect(result.failureDetail).toBe(
+      'PR #42 in owner/repo comes from another repository (a fork): its branch is not in owner/repo, so it cannot be checked out or pushed to',
+    );
+    // The error classifier finds the reason in the task's error message.
+    expect(classifyError(`Pre-flight check failed: ${result.failureReason} — ${result.failureDetail}`)?.title).toBe('Pull request from a fork');
+  });
+
+  test('passes a pull request of the repository itself when the task spells the repository in another letter case', async () => {
+    // GitHub answers to any spelling of a name and reports its own: the head is
+    // compared with the base of the answer, not with the spelling of the task.
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
+      .mockResolvedValueOnce(githubOpenPrOk());
+
+    const result = await runPreflightChecks('Owner/Repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(true);
   });
 
   test('uses per-repo github_token_secret_arn from blueprint config', async () => {
@@ -426,12 +525,40 @@ describe('runPreflightChecks', () => {
     expect(result.checks.filter(c => c.check === 'repo_access' && c.passed)).toHaveLength(1);
   });
 
+  test('fails GITHUB_UNREACHABLE, not a permission failure, when the GraphQL permission lookup times out', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_fine_grained' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk({}))
+      .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'));
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
+    expect(result.failureDetail).toContain('timeout');
+  });
+
+  test.each([502, 429])('fails GITHUB_UNREACHABLE when the GraphQL permission lookup answers HTTP %i', async (status) => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_fine_grained' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk({}))
+      .mockResolvedValueOnce({ ok: false, status });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_UNREACHABLE);
+    expect(result.failureDetail).toContain(`GraphQL API returned HTTP ${status}`);
+  });
+
   test('passes pr_review when token has TRIAGE but not push (GraphQL)', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_triage' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
       .mockResolvedValueOnce(githubRepoOk({ push: false, pull: true }))
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) })
+      .mockResolvedValueOnce(githubOpenPrOk())
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -448,7 +575,7 @@ describe('runPreflightChecks', () => {
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
       .mockResolvedValueOnce(githubRepoOk({ push: false, pull: true }))
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) })
+      .mockResolvedValueOnce(githubOpenPrOk())
       .mockResolvedValueOnce({
         ok: true,
         status: 200,

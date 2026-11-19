@@ -32,14 +32,9 @@ CLARIFICATION_TOOL_NAME = f"mcp__{CLARIFICATION_SERVER_NAME}__request_clarificat
 def build_clarification_server() -> Any:
     """Build the in-process SDK MCP server exposing ``request_clarification``.
 
-    Returns the SDK server config dict for ``ClaudeAgentOptions(mcp_servers=...)``,
-    or ``None`` if the SDK is unavailable (defensive — the runner then simply
-    doesn't register it and the marker-based fallback still works).
+    Returns the SDK server config dict for ``ClaudeAgentOptions(mcp_servers=...)``.
     """
-    try:
-        from claude_agent_sdk import create_sdk_mcp_server, tool
-    except ImportError:  # pragma: no cover - SDK always present in the container
-        return None  # nosemgrep: py-silent-success-masking -- optional-dependency feature detect; None is the documented "server not registered" signal and the runner's marker-based fallback covers it (#756 Category 3)  # noqa: E501
+    from claude_agent_sdk import create_sdk_mcp_server, tool
 
     @tool(
         "request_clarification",

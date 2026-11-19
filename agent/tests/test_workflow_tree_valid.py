@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from workflow import validate_workflow
+from workflow import load_workflow_file, validate_workflow
 
 _WORKFLOWS_ROOT = (Path(os.path.dirname(__file__)) / ".." / "workflows").resolve()
 
@@ -43,6 +43,9 @@ def test_first_party_workflow_validates(path: Path) -> None:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     violations = validate_workflow(data)
     assert violations == [], f"committed workflow {path} fails validation: {violations}"
+    # The validator reads the raw mapping. A task reads the file through the
+    # loader, which also builds the typed model: that has to succeed as well.
+    load_workflow_file(path)
 
 
 def test_first_party_workflow_path_matches_id() -> None:

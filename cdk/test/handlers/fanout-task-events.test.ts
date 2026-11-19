@@ -105,6 +105,9 @@ const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true }
 // the human's @bgagent comment, on top of the metrics comment. replyToComment
 // returns the new reply's comment-id string (or null), NOT a LinearPostResult.
 const mockReplyToComment: jest.Mock = jest.fn().mockResolvedValue('reply-id');
+// The settle of a standalone iteration ends by swapping the trigger comment's
+// 👀 for the outcome emoji: swapCommentReaction(ctx, commentId, emoji).
+const mockSwapCommentReaction: jest.Mock = jest.fn().mockResolvedValue(true);
 // The standalone iteration MATURES a threaded reply (edit in
 // place) via upsertThreadedReply(ctx, issueId, parentCommentId, body, existingId?)
 // rather than posting a fresh replyToComment.
@@ -133,6 +136,13 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
     existingReplyId?: string,
     options?: Record<string, unknown>,
   ) => mockUpsertThreadedReply(ctx, issueId, parentCommentId, body, existingReplyId, options),
+  // Without this entry the dispatcher died on the swap that ends a settle, so no
+  // test could tell a settled record from one that is reported for retry.
+  swapCommentReaction: (ctx: unknown, commentId: string, emoji: string) =>
+    mockSwapCommentReaction(ctx, commentId, emoji),
+  EMOJI_SUCCESS: 'white_check_mark',
+  EMOJI_FAILURE: 'x',
+  EMOJI_NEEDS_INPUT: 'question',
 }));
 
 // Jira dispatcher posts via `postIssueCommentAdf` in `jira-feedback.ts`.
@@ -176,6 +186,8 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   ) => mockUpdateIssueCommentAdf(ctx, issueKey, commentId, body),
   buildAdfDocument: (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) =>
     mockBuildAdfDocument(paragraphs),
+  // The agent's own text goes through the real parser: it is pure.
+  parseMarkdownBlocks: jest.requireActual('../../src/handlers/shared/jira-feedback').parseMarkdownBlocks,
 }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
@@ -203,6 +215,9 @@ import {
   type FanOutEvent,
   type TaskNotificationsConfig,
 } from '../../src/handlers/fanout-task-events';
+import { parseCommentTrigger } from '../../src/handlers/shared/comment-trigger';
+import { MAX_REPLY_ATTEMPTS } from '../../src/handlers/shared/iteration-reply-claim';
+import type { AdfBlock, AdfParagraph } from '../../src/handlers/shared/jira-feedback';
 import {
   renderJiraFinalStatusText,
   renderJiraFinishedPointer,
@@ -212,11 +227,14 @@ function mkRecord(
   eventName: 'INSERT' | 'MODIFY' | 'REMOVE',
   newImage: Record<string, { S?: string; N?: string; BOOL?: boolean; M?: Record<string, { S?: string }> }> | undefined,
 ): DynamoDBRecord {
+  const id = Math.random().toString(36).slice(2);
   return {
-    eventID: `evt-${Math.random().toString(36).slice(2)}`,
+    eventID: `evt-${id}`,
     eventName,
     eventSource: 'aws:dynamodb',
-    dynamodb: newImage ? { NewImage: newImage as never } : {},
+    // Every stream record carries its position in the shard. It is what the
+    // handler reports for a failed record, so the tests read it back from here.
+    dynamodb: { SequenceNumber: `seq-${id}`, ...(newImage && { NewImage: newImage as never }) },
   } as unknown as DynamoDBRecord;
 }
 
@@ -232,14 +250,15 @@ function mkEvent(type: string, taskId = 't-1'): DynamoDBRecord {
 
 /** An ``agent_milestone`` event carrying ``metadata.milestone`` — the real
  *  shape the agent emits for pr_created (progress_writer.write_agent_milestone),
- *  which ``effectiveEventType`` unwraps for routing. */
-function mkMilestone(milestone: string, taskId = 't-1'): DynamoDBRecord {
+ *  which ``effectiveEventType`` unwraps for routing. ``details`` is the
+ *  milestone's free-form text: for pr_created the agent puts the PR URL there. */
+function mkMilestone(milestone: string, taskId = 't-1', details?: string): DynamoDBRecord {
   return mkRecord('INSERT', {
     task_id: { S: taskId },
     event_id: { S: `01ABC${milestone}` },
     event_type: { S: 'agent_milestone' },
     timestamp: { S: '2026-04-22T04:00:00Z' },
-    metadata: { M: { milestone: { S: milestone } } },
+    metadata: { M: { milestone: { S: milestone }, ...(details !== undefined && { details: { S: details } }) } },
   });
 }
 
@@ -906,7 +925,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     const event = { Records: [mkEvent('task_completed', 't-gh')] } as DynamoDBStreamEvent;
     const result = await handler(event);
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].eventID);
+    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].dynamodb?.SequenceNumber);
     // No UpdateCommand fires (no id to persist from a failed upsert).
     const updateCalls = mockDdbSend.mock.calls.filter(
       c => (c[0] as { _type?: string })._type === 'Update',
@@ -1071,7 +1090,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       // Record IS in batchItemFailures — Lambda will replay until
       // the rate-limit window opens. Critical: the swallow-as-terminal
       // path would have produced an empty array (silent drop).
-      expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb?.SequenceNumber }]);
     },
   );
 
@@ -1209,6 +1228,56 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     expect(mockUpsertTaskComment.mock.calls[1][0].token).toBe('ghp_fresh');
   });
 
+  test('a 401 that persists after the token refresh is swallowed, not retried', async () => {
+    // The token is expired or revoked: the freshly read secret is refused too,
+    // and redelivering the record cannot change that. Leaving it retryable costs
+    // three more invocations (each dispatching every other channel again) and a
+    // DLQ entry per event until an operator replaces the token.
+    const { GitHubCommentError } = jest.requireMock<typeof import('../../src/handlers/shared/github-comment')>(
+      '../../src/handlers/shared/github-comment',
+    );
+    const loggerModule = await import('../../src/handlers/shared/logger');
+    const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      mockDdbSend.mockResolvedValueOnce({ Item: TASK_RECORD_BASE });
+      mockUpsertTaskComment
+        .mockRejectedValueOnce(new GitHubCommentError('unauthorized', 401))
+        .mockRejectedValueOnce(new GitHubCommentError('unauthorized', 401));
+
+      const event: DynamoDBStreamEvent = { Records: [mkEvent('task_completed', 't-gh')] };
+      await expect(handler(event)).resolves.toEqual({ batchItemFailures: [] });
+
+      // One refresh, one retry — then it stops.
+      expect(mockClearTokenCache).toHaveBeenCalledTimes(1);
+      expect(mockUpsertTaskComment).toHaveBeenCalledTimes(2);
+      const warns = warnSpy.mock.calls.map(c => c[1] as Record<string, unknown> | undefined);
+      expect(warns.find(meta => meta?.event === 'fanout.github.api_error')).toMatchObject({
+        task_id: 't-gh',
+        http_status: 401,
+      });
+      expect(warns.find(meta => meta?.event === 'fanout.dispatcher.rejected')).toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('a retryable failure of the retry after a 401 still escalates to partial-batch retry', async () => {
+    // Only the repeated 401 is final. A 5xx answered to the fresh token is as
+    // transient as on a first attempt.
+    const { GitHubCommentError } = jest.requireMock<typeof import('../../src/handlers/shared/github-comment')>(
+      '../../src/handlers/shared/github-comment',
+    );
+    mockDdbSend.mockResolvedValueOnce({ Item: TASK_RECORD_BASE });
+    mockUpsertTaskComment
+      .mockRejectedValueOnce(new GitHubCommentError('unauthorized', 401))
+      .mockRejectedValueOnce(new GitHubCommentError('bad gateway', 502));
+
+    const record = mkEvent('task_completed', 't-gh');
+    const result = await handler({ Records: [record] });
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb?.SequenceNumber }]);
+  });
+
   test('per-repo github_token_secret_arn override takes precedence over platform default', async () => {
     mockLoadRepoConfig.mockResolvedValueOnce({
       repo: 'owner/repo',
@@ -1226,6 +1295,54 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     await handler(event);
 
     expect(mockResolveGitHubToken).toHaveBeenCalledWith('arn:repo-specific');
+  });
+
+  // ---- PR link at pr_created: the task record gets pr_url only at the end ----
+
+  test('pr_created shows the PR link from the milestone when the task record has no pr_url yet', async () => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...TASK_RECORD_BASE, status: 'RUNNING' } })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
+
+    await handler({
+      Records: [mkMilestone('pr_created', 't-gh', 'https://github.com/owner/repo/pull/42')],
+    });
+
+    const renderArg = mockRenderCommentBody.mock.calls[0][0];
+    expect(renderArg.latestEventType).toBe('pr_created');
+    expect(renderArg.prUrl).toBe('https://github.com/owner/repo/pull/42');
+  });
+
+  test('the pr_url of the task record wins over the milestone text', async () => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Item: { ...TASK_RECORD_BASE, pr_url: 'https://github.com/owner/repo/pull/42' } })
+      .mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
+
+    await handler({
+      Records: [mkMilestone('pr_created', 't-gh', 'https://github.com/owner/repo/pull/99')],
+    });
+
+    expect(mockRenderCommentBody.mock.calls[0][0].prUrl).toBe('https://github.com/owner/repo/pull/42');
+  });
+
+  test('a terminal event takes no PR link from its own metadata', async () => {
+    // Only the pr_created milestone is known to carry the PR URL as its text.
+    mockDdbSend.mockResolvedValueOnce({ Item: TASK_RECORD_BASE }).mockResolvedValueOnce({});
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 1, created: true });
+
+    await handler({
+      Records: [mkRecord('INSERT', {
+        task_id: { S: 't-gh' },
+        event_id: { S: '01ABCtask_failed' },
+        event_type: { S: 'task_failed' },
+        timestamp: { S: '2026-04-22T04:00:00Z' },
+        metadata: { M: { details: { S: 'https://example.com/not-a-pull-request' } } },
+      })],
+    });
+
+    expect(mockRenderCommentBody.mock.calls[0][0].prUrl).toBeNull();
   });
 
   // ---- Number-coercion regression (found in deploy validation) ----
@@ -1399,7 +1516,7 @@ describe('fanout-task-events: Slack dispatcher', () => {
 
     const record = mkEvent('task_completed', 't-slack-fail');
     const result = await handler({ Records: [record] });
-    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb?.SequenceNumber }]);
   });
 
   test('Slack dispatcher SlackApiError swallow does NOT escalate to retry', async () => {
@@ -1476,6 +1593,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
     mockReplyToComment.mockReset().mockResolvedValue('reply-id');
     mockUpsertThreadedReply.mockReset().mockResolvedValue('reply-id');
+    mockSwapCommentReaction.mockReset().mockResolvedValue(true);
     // Slack/GitHub mocks aren't asserted here but leaving them
     // un-reset would let prior-test rejections bleed in.
     mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
@@ -1610,6 +1728,35 @@ describe('fanout-task-events: Linear dispatcher', () => {
     expect(mockPostIssueComment).not.toHaveBeenCalled();
   });
 
+  test('pr_created links the PR from the milestone when the task record has no pr_url yet', async () => {
+    // The agent stores pr_url on the task with its terminal status, after it
+    // has written this milestone (and then memory, reactions, the trace). A
+    // task read made for the milestone therefore often comes too early, and
+    // nothing delivers the milestone again. The milestone carries the URL.
+    mockGet({ ...TASK_RECORD_LINEAR, pr_url: undefined });
+
+    const event: DynamoDBStreamEvent = {
+      Records: [mkMilestone('pr_created', 't-lin', 'https://github.com/owner/repo/pull/13')],
+    };
+    await handler(event);
+
+    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
+    const [, issueId, body] = mockPostIssueComment.mock.calls[0];
+    expect(issueId).toBe('issue-uuid-42');
+    expect(body).toBe('🔗 Opened a pull request: https://github.com/owner/repo/pull/13');
+  });
+
+  test.each(['', 'PR opened on branch bgagent/t-lin/fix', 'http://github.com/owner/repo/pull/13'])(
+    'pr_created whose milestone text is not an https URL (%j) posts nothing',
+    async (details) => {
+      mockGet({ ...TASK_RECORD_LINEAR, pr_url: undefined });
+
+      await handler({ Records: [mkMilestone('pr_created', 't-lin', details)] });
+
+      expect(mockPostIssueComment).not.toHaveBeenCalled();
+    },
+  );
+
   test('pr_created is post-once — already-posted marker skips the comment', async () => {
     mockGet({ ...TASK_RECORD_LINEAR, pr_number: 13, linear_pr_comment_event_id: 'prior-event' });
 
@@ -1628,7 +1775,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
 
     // Transient failure → record enters batchItemFailures so Lambda retries.
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].eventID);
+    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].dynamodb?.SequenceNumber);
     // Marker NOT persisted — the retry will re-post.
     const updateCalls = mockDdbSend.mock.calls.filter((c) => (c[0] as { _type?: string })._type === 'Update');
     expect(updateCalls).toHaveLength(0);
@@ -1733,7 +1880,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
 
     expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].eventID });
+    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].dynamodb?.SequenceNumber });
 
     // And no marker write: the retry must be allowed to post.
     const updates = mockDdbSend.mock.calls
@@ -1978,6 +2125,83 @@ describe('fanout-task-events: Linear dispatcher', () => {
         .toBe(updates[0].input?.ExpressionAttributeValues?.[':now']);
     });
 
+    test('a terminal reply that fails reports its record, so the event is delivered again', async () => {
+      // Handing the claim back does not bring the event back by itself: the
+      // release is a write to the task table, and this Lambda reads only the
+      // stream of the task EVENTS table. Unless the record is reported as failed,
+      // the reply stays on "On it" and the trigger comment keeps its 👀 for good.
+      mockGet(STANDALONE);
+      mockUpsertThreadedReply.mockReset().mockResolvedValue(null);
+      const record = mkEvent('task_completed', 't-lin');
+
+      const result = await handler({ Records: [record] });
+
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb?.SequenceNumber }]);
+      // Not settled yet: no ✅ beside a reply that still says "On it".
+      expect(mockSwapCommentReaction).not.toHaveBeenCalled();
+    });
+
+    test('a reply that keeps failing is retried on three redeliveries, then settled by the reaction alone', async () => {
+      // The event source retries a failed record three times (four deliveries,
+      // ``retryAttempts`` in fanout-consumer.ts) and the claim may be handed back
+      // MAX_REPLY_ATTEMPTS = 3 times. The fourth delivery therefore finds the
+      // budget spent, keeps the claim, lets the reaction carry the outcome and
+      // reports success: nothing reaches the DLQ.
+      let attempts = 0;
+      mockDdbSend.mockReset().mockImplementation((cmd: {
+        _type?: string;
+        input?: { ProjectionExpression?: string; UpdateExpression?: string };
+      }) => {
+        if (cmd?._type === 'Get' && cmd.input?.ProjectionExpression === 'ack_reply_attempts') {
+          return Promise.resolve({ Item: { ack_reply_attempts: attempts } });
+        }
+        if (cmd?._type === 'Get') return Promise.resolve({ Item: STANDALONE });
+        if (cmd?._type === 'Update' && /REMOVE ack_replied_at/.test(cmd.input?.UpdateExpression ?? '')) {
+          if (attempts >= MAX_REPLY_ATTEMPTS) {
+            return Promise.reject(Object.assign(new Error('spent'), { name: 'ConditionalCheckFailedException' }));
+          }
+          attempts += 1;
+        }
+        return Promise.resolve({});
+      });
+      mockUpsertThreadedReply.mockReset().mockResolvedValue(null);
+      const record = mkEvent('task_failed', 't-lin');
+
+      const reported: number[] = [];
+      for (let delivery = 1; delivery <= 4; delivery += 1) {
+        reported.push((await handler({ Records: [record] })).batchItemFailures.length);
+      }
+
+      expect(reported).toEqual([1, 1, 1, 0]);
+      expect(mockUpsertThreadedReply).toHaveBeenCalledTimes(4);
+      expect(mockSwapCommentReaction).toHaveBeenCalledTimes(1);
+      expect(mockSwapCommentReaction).toHaveBeenCalledWith(expect.anything(), 'human-cmt-7', 'x');
+    });
+
+    test('a failed reply whose claim another delivery has taken is left to that delivery', async () => {
+      // The release is refused although attempts remain: the claim is no longer
+      // this delivery's, so there is nothing to retry and nothing to settle.
+      mockDdbSend.mockReset().mockImplementation((cmd: {
+        _type?: string;
+        input?: { ProjectionExpression?: string; UpdateExpression?: string };
+      }) => {
+        if (cmd?._type === 'Get' && cmd.input?.ProjectionExpression === 'ack_reply_attempts') {
+          return Promise.resolve({ Item: { ack_reply_attempts: 1 } });
+        }
+        if (cmd?._type === 'Get') return Promise.resolve({ Item: STANDALONE });
+        if (cmd?._type === 'Update' && /REMOVE ack_replied_at/.test(cmd.input?.UpdateExpression ?? '')) {
+          return Promise.reject(Object.assign(new Error('not ours'), { name: 'ConditionalCheckFailedException' }));
+        }
+        return Promise.resolve({});
+      });
+      mockUpsertThreadedReply.mockReset().mockResolvedValue(null);
+
+      const result = await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+      expect(result.batchItemFailures).toEqual([]);
+      expect(mockSwapCommentReaction).not.toHaveBeenCalled();
+    });
+
     test('a SUCCESSFUL reply keeps its claim — the once-only guarantee still holds', async () => {
       mockGet(STANDALONE);
       await handler({ Records: [mkEvent('task_completed', 't-lin')] });
@@ -2164,6 +2388,22 @@ describe('renderLinearFinalStatusComment', () => {
     expect(body).toContain('❌');
     expect(body).toContain('cancelled');
     expect(body).not.toMatch(/cancelled:\s/);
+  });
+
+  test('❌ task_timed_out reads "Task timed out", not the raw subtype "timed_out"', () => {
+    // The only subscribed subtype with an underscore in it. The Jira renderer
+    // of the same comment prints it in words.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_timed_out',
+      prUrl: null,
+      costUsd: 0.1,
+      turns: 5,
+      maxTurns: 5,
+      durationS: 3600,
+      taskId: 't-timeout',
+      errorTitle: null,
+    });
+    expect(body.split('\n')[0]).toBe('❌ **Task timed out**');
   });
 
   describe('clarify-before-spend — needsInput hold', () => {
@@ -2362,6 +2602,269 @@ describe('fanout-task-events: Jira dispatcher', () => {
     }));
   });
 
+  test('standalone iteration that answered a question posts the answer in its result', async () => {
+    // The reviewer asked a question and the agent replied without a commit:
+    // the pointer says "answer posted below", so the result has to carry it.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      code_changed: false,
+      answer_text: 'Because the queue already retries.\n\nSee worker.ts.',
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[0][3])).toBe('💬 Finished — answer posted below.');
+    // The header stays first (it is the marker the webhook processor knows
+    // ABCA's own comments by); each line of the answer is its own paragraph.
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2])).toBe([
+      '✅ Task completed',
+      'Because the queue already retries.',
+      '',
+      'See worker.ts.',
+      'cost: $0.55 • turns: 27 / 100 • duration: 3m 41s',
+      'PR: https://github.com/owner/repo/pull/13',
+      'task t-jira',
+    ].join('\n'));
+  });
+
+  test('the answer comment is never read as a trigger, even when the answer spells out the mention', async () => {
+    // As for the question of a held run below: on a site without the Forge app
+    // Jira attributes this comment to the setup user, and it now carries the
+    // agent's own text. The webhook processor tells it by its leading marker.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      code_changed: false,
+      answer_text: 'Nothing to change. For the other layout, comment "@bgagent use layout B".',
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const body = mockPostIssueCommentAdf.mock.calls[0][2] as {
+      _adf: ReadonlyArray<ReadonlyArray<{ text: string; strong?: boolean }>>;
+    };
+    // As the processor reads the comment back: from an ADF body (marks are lost) ...
+    const fromAdf = adfText(body);
+    // ... and from a wiki-text body, where bold is an asterisk.
+    const fromWiki = body._adf
+      .map((runs) => runs.map((run) => (run.strong ? `*${run.text}*` : run.text)).join(''))
+      .join('\n\n');
+    for (const readBack of [fromAdf, fromWiki]) {
+      expect(readBack).toContain('@bgagent');
+      expect(parseCommentTrigger(readBack).triggered).toBe(false);
+    }
+  });
+
+  test('standalone iteration that completes with a red build is reported as a failure', async () => {
+    // A build that was already red before the iteration does not fail the task
+    // (the gate counts regressions only), so it ends COMPLETED with
+    // build_passed=false. That is not a clean success: Linear, the reconciler
+    // and the re-render in jira-preview.ts all give it the failure rendering.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      build_passed: false,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[0][3])).toBe('❌ Finished — details posted below.');
+    const result = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
+    expect(result).toMatch(/^⚠️ Shipped a PR but stopped early/);
+    expect(result).not.toContain('✅');
+    // Such a run stores no error message, so the frame names the reason itself.
+    expect(result.split('\n')[0]).toBe(
+      '⚠️ Shipped a PR but stopped early — Build or tests did not pass — review and decide if more work is needed',
+    );
+  });
+
+  test('standalone iteration that only answers, on a pull request whose build is red, posts its answer', async () => {
+    // "Why does the build fail?": the run changes no code, so the red build is
+    // not its outcome, and the failure frame would leave the answer out.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      build_passed: false,
+      code_changed: false,
+      answer_text: 'The lint step fails: worker.ts has an unused import.',
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2])).toBe([
+      '✅ Task completed',
+      'The lint step fails: worker.ts has an unused import.',
+      'cost: $0.55 • turns: 27 / 100 • duration: 3m 41s',
+      'PR: https://github.com/owner/repo/pull/13',
+      'task t-jira',
+    ].join('\n'));
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[0][3])).toBe('💬 Finished — answer posted below.');
+  });
+
+  test('standalone iteration that changed code and completes with a red build is still a failure', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      build_passed: false,
+      code_changed: true,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[0][3])).toBe('❌ Finished — details posted below.');
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2]))
+      .toMatch(/^⚠️ Shipped a PR but stopped early — Build or tests did not pass/);
+  });
+
+  test('a run that stopped to ask a question posts the question, not a completion', async () => {
+    // Clarify-and-hold: the agent asked instead of guessing, so nothing shipped
+    // (no PR, code_changed=false, answer_text = the question). "✅ Task completed"
+    // would read as done and the question would appear nowhere on the issue.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      pr_url: undefined,
+      code_changed: false,
+      answer_text: 'Which login page do you mean?\nThe admin one or the customer one?',
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
+    const text = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
+    expect(text).toMatch(/^🤖 ABCA has a question before it starts\n/);
+    // Each line of the question is its own paragraph: ADF text does not honor newlines.
+    expect(text).toContain('Which login page do you mean?\nThe admin one or the customer one?');
+    expect(text).not.toContain('Task completed');
+    expect(text).not.toContain('✅');
+    // Jira has no reply-to-resume path, so the comment says how to run again.
+    expect(text).toMatch(/re-apply the trigger label/);
+    expect(text).toContain('task t-jira');
+  });
+
+  test('the question of a held run is rendered from its Markdown, not posted as literal text', async () => {
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      pr_url: undefined,
+      code_changed: false,
+      answer_text: 'Do you mean `login.tsx` or **the admin page**?\n```\nsrc/login.tsx\nsrc/admin/login.tsx\n```',
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const body = mockPostIssueCommentAdf.mock.calls[0][2] as { _adf: ReadonlyArray<unknown> };
+    expect(body._adf.slice(0, 3)).toEqual([
+      // The marker of ABCA's own comments stays the first run.
+      [{ text: '🤖 ' }, { text: 'ABCA has a question before it starts', strong: true }],
+      [
+        { text: 'Do you mean ' },
+        { text: 'login.tsx', code: true },
+        { text: ' or ' },
+        { text: 'the admin page', strong: true },
+        { text: '?' },
+      ],
+      { code: 'src/login.tsx\nsrc/admin/login.tsx' },
+    ]);
+  });
+
+  test('a link or an image in the question of a held run stays as typed: the text is the agent\'s own', async () => {
+    const question = 'Which one: [Open live preview](https://example.org/x) or ![x](https://example.org/y.png)?';
+    mockGet({ ...TASK_RECORD_JIRA, pr_url: undefined, code_changed: false, answer_text: question });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const body = mockPostIssueCommentAdf.mock.calls[0][2] as { _adf: ReadonlyArray<unknown> };
+    // One run without an href: no link mark, the URLs in view.
+    expect(body._adf[1]).toEqual([{ text: question }]);
+  });
+
+  test('a held run without a stored question still asks for detail', async () => {
+    mockGet({ ...TASK_RECORD_JIRA, pr_url: undefined, code_changed: false });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const text = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
+    expect(text).toContain('ABCA has a question');
+    expect(text).toMatch(/more detail/i);
+    expect(text).not.toContain('Task completed');
+  });
+
+  test('the question comment is never read as a trigger, even when the question spells out the mention', async () => {
+    // Jira attributes ABCA's comments to the user who authorized the app, so the
+    // webhook processor can tell them from a human's only by their leading
+    // marker. This is the one platform comment that carries the agent's own text.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      pr_url: undefined,
+      code_changed: false,
+      answer_text: 'Should @bgagent change the login page or the signup page?',
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const body = mockPostIssueCommentAdf.mock.calls[0][2] as {
+      _adf: ReadonlyArray<ReadonlyArray<{ text: string; strong?: boolean }>>;
+    };
+    // As the processor reads the comment back: from an ADF body (marks are lost) ...
+    const fromAdf = adfText(body);
+    // ... and from a wiki-text body, where bold is an asterisk.
+    const fromWiki = body._adf
+      .map((runs) => runs.map((run) => (run.strong ? `*${run.text}*` : run.text)).join(''))
+      .join('\n\n');
+    for (const readBack of [fromAdf, fromWiki]) {
+      expect(readBack).toContain('@bgagent');
+      expect(parseCommentTrigger(readBack).triggered).toBe(false);
+    }
+    // The guard is the leading marker: the same question on its own does trigger.
+    expect(parseCommentTrigger('Should @bgagent change the login page or the signup page?').triggered).toBe(true);
+  });
+
+  test.each([
+    ['a failed run', 'task_failed', {}, '❌'],
+    ['a completed run that opened a PR', 'task_completed', { pr_url: 'https://github.com/owner/repo/pull/13' }, '✅ Task completed'],
+    ['an iteration that answered without a change', 'task_completed', {
+      channel_metadata: { ...TASK_RECORD_JIRA.channel_metadata, trigger_comment_id: 'human-comment-1' },
+    }, '✅ Task completed'],
+  ] as const)('%s is not rendered as a question', async (_name, eventType, overrides, expected) => {
+    mockGet({ ...TASK_RECORD_JIRA, pr_url: undefined, code_changed: false, answer_text: 'A question?', ...overrides });
+
+    await handler({ Records: [mkEvent(eventType, 't-jira')] });
+
+    const text = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
+    expect(text).toContain(expected);
+    expect(text).not.toContain('has a question');
+  });
+
+  test('a first-run task with a red build keeps its ordinary completion comment', async () => {
+    // The red-build rule above is the iteration rule; the first run of an issue
+    // is rendered from the event alone, as on Linear.
+    mockGet({ ...TASK_RECORD_JIRA, build_passed: false });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2])).toContain('✅ Task completed');
+  });
+
   test('orchestrated iteration leaves terminal maturation to the reconciler', async () => {
     mockGet({
       ...TASK_RECORD_JIRA,
@@ -2419,7 +2922,10 @@ describe('fanout-task-events: Jira dispatcher', () => {
     expect(mockPostIssueCommentAdf).not.toHaveBeenCalled();
   });
 
-  test('failed standalone iteration update releases its terminal claim', async () => {
+  test('standalone iteration whose status comment cannot be edited still posts its result', async () => {
+    // The status comment was deleted while the task ran (Jira answers the edit
+    // with a 404, which no retry changes). The outcome must not go with it: it
+    // is posted as its own comment, as for an iteration that has no status comment.
     const task = {
       ...TASK_RECORD_JIRA,
       channel_metadata: {
@@ -2439,22 +2945,58 @@ describe('fanout-task-events: Jira dispatcher', () => {
     });
 
     expect(result).toEqual({ batchItemFailures: [] });
+    expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
+    const posted = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
+    expect(posted).toContain('✅ Task completed');
+    expect(posted).toContain('task t-jira');
+    // The claim stays: the outcome has landed, so a redelivery must not post it again.
     const claims = mockDdbSend.mock.calls
       .map(([command]) => command as {
         _type?: string;
-        input?: {
-          UpdateExpression?: string;
-          ExpressionAttributeValues?: Record<string, unknown>;
-        };
+        input?: { UpdateExpression?: string };
       })
       .filter(command =>
         command._type === 'Update'
         && /ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
       );
-    expect(claims[0].input?.UpdateExpression).toBe('SET ack_replied_at = :now');
-    expect(claims[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
-    expect(claims[1].input?.ExpressionAttributeValues?.[':ours'])
-      .toBe(claims[0].input?.ExpressionAttributeValues?.[':now']);
+    expect(claims.map(command => command.input?.UpdateExpression)).toEqual(['SET ack_replied_at = :now']);
+  });
+
+  test('standalone iteration whose status comment stays uneditable after its retries still posts its result', async () => {
+    const task = {
+      ...TASK_RECORD_JIRA,
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    };
+    // The retry budget of the claim is spent: the release is refused.
+    mockDdbSend.mockReset().mockImplementation((cmd: {
+      _type?: string;
+      input?: { ProjectionExpression?: string; UpdateExpression?: string };
+    }) => {
+      if (cmd?._type === 'Get' && cmd.input?.ProjectionExpression === 'ack_reply_attempts') {
+        return Promise.resolve({ Item: { ack_reply_attempts: 3 } });
+      }
+      if (cmd?._type === 'Get') return Promise.resolve({ Item: task });
+      if (cmd?._type === 'Update' && /REMOVE ack_replied_at/.test(cmd.input?.UpdateExpression ?? '')) {
+        return Promise.reject(Object.assign(new Error('spent'), { name: 'ConditionalCheckFailedException' }));
+      }
+      return Promise.resolve({});
+    });
+    mockUpdateIssueCommentAdf.mockResolvedValue({
+      ok: false,
+      retryable: true,
+    });
+
+    const result = await handler({
+      Records: [mkEvent('task_completed', 't-jira')],
+    });
+
+    expect(result).toEqual({ batchItemFailures: [] });
+    expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2])).toContain('task t-jira');
   });
 
   test('transient standalone iteration update failure releases the claim and retries the record', async () => {
@@ -2476,18 +3018,28 @@ describe('fanout-task-events: Jira dispatcher', () => {
     const result = await handler({ Records: [record] });
 
     expect(result.batchItemFailures).toEqual([
-      { itemIdentifier: record.eventID },
+      { itemIdentifier: record.dynamodb?.SequenceNumber },
     ]);
-    const releases = mockDdbSend.mock.calls
+    const claims = mockDdbSend.mock.calls
       .map(([command]) => command as {
         _type?: string;
-        input?: { UpdateExpression?: string };
+        input?: {
+          UpdateExpression?: string;
+          ExpressionAttributeValues?: Record<string, unknown>;
+        };
       })
       .filter(command =>
         command._type === 'Update'
-        && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
+        && /ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
       );
-    expect(releases).toHaveLength(1);
+    expect(claims).toHaveLength(2);
+    expect(claims[0].input?.UpdateExpression).toBe('SET ack_replied_at = :now');
+    expect(claims[1].input?.UpdateExpression).toContain('REMOVE ack_replied_at');
+    // The release is conditional on the stamp this run wrote.
+    expect(claims[1].input?.ExpressionAttributeValues?.[':ours'])
+      .toBe(claims[0].input?.ExpressionAttributeValues?.[':now']);
+    // Nothing is posted before the retry: the pointer comes first.
+    expect(mockPostIssueCommentAdf).not.toHaveBeenCalled();
   });
 
   test('terminal separate-result failure folds the full outcome into the status comment', async () => {
@@ -2541,7 +3093,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
 
     const result = await handler({ Records: [record] });
 
-    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb?.SequenceNumber }]);
     expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(1);
     const releases = mockDdbSend.mock.calls
       .map(([command]) => command as {
@@ -2635,7 +3187,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
 
     expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].eventID });
+    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].dynamodb?.SequenceNumber });
 
     // No marker write — the retry must be allowed to post.
     const updates = mockDdbSend.mock.calls
@@ -2726,9 +3278,13 @@ describe('fanout-task-events: Jira dispatcher', () => {
 // ---------------------------------------------------------------------------
 
 describe('renderJiraFinalStatusComment', () => {
+  // No case here has a fenced block of the agent's answer (those are in
+  // shared/jira-status-comment.test.ts): every block is a paragraph.
+  type Paragraphs = ReadonlyArray<AdfParagraph>;
+
   /** Flatten the renderer's ADF-paragraph output to a single string. */
-  const flatten = (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) =>
-    paragraphs.map((runs) => runs.map((r) => r.text).join('')).join('\n');
+  const flatten = (paragraphs: ReadonlyArray<AdfBlock>) =>
+    (paragraphs as Paragraphs).map((runs) => runs.map((r) => r.text).join('')).join('\n');
 
   test('all metrics null → renders em-dash placeholders', () => {
     const text = flatten(renderJiraFinalStatusComment({
@@ -2754,12 +3310,14 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 60,
       taskId: 't',
       errorTitle: null,
-    });
+    }) as Paragraphs;
     const text = flatten(paragraphs);
     expect(text).toContain('✅');
     expect(text).toContain('PR: https://github.com/o/r/pull/7');
-    // The header run is bold (ADF strong mark) — the serializer maps this.
-    expect(paragraphs[0][0]).toEqual({ text: '✅ Task completed', strong: true });
+    // The header is bold (ADF strong mark) — the serializer maps this. The
+    // emoji stays outside the bold run: read back as wiki text the comment
+    // then still starts with the marker ABCA knows its own comments by.
+    expect(paragraphs[0]).toEqual([{ text: '✅ ' }, { text: 'Task completed', strong: true }]);
     // The URL run carries an href so buildAdfDocument emits a clickable
     // link mark — a bare URL in ADF text is NOT auto-linked.
     // Find the run whose text is the URL and assert its href.
@@ -2809,7 +3367,7 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 1272,
       taskId: 't-abca-91',
       errorTitle: 'Hit max-turns cap',
-    });
+    }) as Paragraphs;
     const text = flatten(paragraphs);
     expect(text).toContain('⚠️');
     expect(text).toContain('Shipped a PR but stopped early');
@@ -2837,7 +3395,7 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 3600,
       taskId: 't-timeout',
       errorTitle: null,
-    });
+    }) as Paragraphs;
     expect(paragraphs[0][0]).toEqual({ text: '❌ Task timed out', strong: true });
     expect(flatten(paragraphs)).not.toContain('timed_out');
   });
@@ -2873,6 +3431,29 @@ describe('renderJiraFinalStatusComment', () => {
     expect(text).not.toContain('27 /');
   });
 
+  test('shows the answer of a completed run between the header and the metrics', () => {
+    const input = {
+      prUrl: null,
+      costUsd: 0.5,
+      turns: 3,
+      maxTurns: 100,
+      durationS: 60,
+      taskId: 't',
+      errorTitle: null,
+      answerText: '  Because the queue already retries.  ',
+    };
+    expect(flatten(renderJiraFinalStatusComment({ ...input, eventType: 'task_completed' }))).toBe([
+      '✅ Task completed',
+      'Because the queue already retries.',
+      'cost: $0.50 • turns: 3 / 100 • duration: 1m',
+      'task t',
+    ].join('\n'));
+    // The agent stores its last message for every run without a commit. On a
+    // failed run that is not an answer, and the failure frame stays as it is.
+    expect(flatten(renderJiraFinalStatusComment({ ...input, eventType: 'task_failed' })))
+      .not.toContain('queue');
+  });
+
   test('task-id footer run is italic (ADF em mark)', () => {
     const paragraphs = renderJiraFinalStatusComment({
       eventType: 'task_completed',
@@ -2883,7 +3464,7 @@ describe('renderJiraFinalStatusComment', () => {
       durationS: 60,
       taskId: 't-foot',
       errorTitle: null,
-    });
+    }) as Paragraphs;
     expect(paragraphs[paragraphs.length - 1][0]).toEqual({ text: 'task t-foot', em: true });
   });
 });
@@ -3039,13 +3620,21 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
  * assert which record surfaces in ``batchItemFailures``. ``mkEvent``
  * uses ``Math.random()`` for the id which is fine for parse tests but
  * useless when we need to cross-reference the failure identifier.
+ * The record's sequence number, which is that identifier, is derived
+ * from the ``eventID`` unless the test gives one.
  */
-function mkEventWithId(type: string, eventID: string, taskId = 't-fail'): DynamoDBRecord {
+function mkEventWithId(
+  type: string,
+  eventID: string,
+  taskId = 't-fail',
+  sequenceNumber = `seq-${eventID}`,
+): DynamoDBRecord {
   return {
     eventID,
     eventName: 'INSERT',
     eventSource: 'aws:dynamodb',
     dynamodb: {
+      SequenceNumber: sequenceNumber,
       NewImage: {
         task_id: { S: taskId },
         event_id: { S: `01ABC${type}` },
@@ -3084,6 +3673,35 @@ describe('fanout-task-events: partial-batch response', () => {
     mockLoadRepoConfig.mockReset().mockResolvedValue(null);
     mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
     mockClearTokenCache.mockReset();
+  });
+
+  test('a failed record is reported by its stream sequence number, not by its eventID', async () => {
+    // Lambda checkpoints a DynamoDB stream on a sequence number: the handler
+    // returns "the sequence number of the first failed record in the batch" and
+    // Lambda "retries all records starting from that checkpoint"
+    // (https://docs.aws.amazon.com/lambda/latest/dg/services-ddb-batchfailurereporting.html).
+    // An eventID is not a position in the shard, so Lambda cannot resume from it.
+    mockDdbSend.mockResolvedValueOnce({
+      Item: {
+        task_id: 't-seq',
+        user_id: 'u-1',
+        status: 'COMPLETED',
+        repo: 'owner/repo',
+        pr_number: 42,
+        branch_name: 'bgagent/t-seq/fix',
+        channel_source: 'api',
+        status_created_at: 'COMPLETED#2026-05-05T00:00:00Z',
+        created_at: '2026-05-05T00:00:00Z',
+        updated_at: '2026-05-05T00:00:00Z',
+      },
+    });
+    mockUpsertTaskComment.mockRejectedValueOnce(new Error('github 502'));
+
+    const result = await handler({
+      Records: [mkEventWithId('task_completed', 'e-1', 't-seq', '4900')],
+    });
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: '4900' }]);
   });
 
   test('AccessDeniedException from resolveTokenSecretArn lands in infraRejections and flags the record for retry', async () => {
@@ -3125,8 +3743,8 @@ describe('fanout-task-events: partial-batch response', () => {
       const result = await handler(event);
 
       // Record is flagged for partial-batch retry — Lambda will replay
-      // this single eventID, leaving siblings alone.
-      expect(result.batchItemFailures).toEqual([{ itemIdentifier: poisonId }]);
+      // from this record's sequence number, leaving earlier siblings alone.
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: `seq-${poisonId}` }]);
 
       // The rejection is observable through the dispatcher-rejected
       // warn so operators can alarm distinctly from the generic
@@ -3147,8 +3765,8 @@ describe('fanout-task-events: partial-batch response', () => {
     // loop throws past ``routeEvent``'s containment (simulated here by
     // making ``logger.warn`` throw on the rate-limit path — the
     // closest real non-``routeEvent`` code path), the handler's
-    // per-record try/catch must push the record's ``eventID`` into
-    // ``batchItemFailures`` so Lambda retries ONLY that record. A handler
+    // per-record try/catch must push the record's sequence number into
+    // ``batchItemFailures`` so Lambda retries from that record. A handler
     // that returned void would make Lambda retry the ENTIRE
     // batch, replaying every sibling event and defeating per-task
     // ordering.
@@ -3191,7 +3809,7 @@ describe('fanout-task-events: partial-batch response', () => {
       // from the handler's perspective (``routeEvent`` short-circuits
       // on "task not found" since the shared DDB mock returns no Item).
       expect(result.batchItemFailures).toEqual([
-        { itemIdentifier: 'evt-20' },
+        { itemIdentifier: 'seq-evt-20' },
       ]);
     } finally {
       warnSpy.mockRestore();
@@ -3202,7 +3820,7 @@ describe('fanout-task-events: partial-batch response', () => {
     // Mixed batch: one record throws past routeEvent (via the same
     // rate-limit-warn trick as above but in a simpler shape — we make
     // the second record specifically trigger the throw), the other
-    // routes cleanly. The response must list ONLY the failing eventID.
+    // routes cleanly. The response must list ONLY the failing record.
     const loggerModule = await import('../../src/handlers/shared/logger');
     const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(
       (_msg: string, meta?: Record<string, unknown>) => {
@@ -3222,9 +3840,9 @@ describe('fanout-task-events: partial-batch response', () => {
       const result = await handler({ Records: records });
 
       expect(result.batchItemFailures).toHaveLength(1);
-      expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: 'evt-chatty-20' });
+      expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: 'seq-evt-chatty-20' });
       // Specifically NOT the successful record.
-      expect(result.batchItemFailures.map(f => f.itemIdentifier)).not.toContain('evt-ok');
+      expect(result.batchItemFailures.map(f => f.itemIdentifier)).not.toContain('seq-evt-ok');
     } finally {
       warnSpy.mockRestore();
     }

@@ -133,6 +133,9 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // neither of which the CLI ever sees (CLI uses ApiKeyDetail).
   'ApiKeyRecord',
   'ApprovalDecisionRecordedEvent',
+  // TaskApprovalsTable row status: read by the task-status construct and the
+  // MicroVM lifecycle supervisor; the CLI only sees decided approval summaries.
+  'ApprovalStatus',
   // Console-API-only (GET /repos/{repo_id}/issues on the operator console stack's
   // own API, consumed by web/, never by the CLI; mirrored in web/src/core/api/types.ts):
   'RepoIssueSummary',

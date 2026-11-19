@@ -32,7 +32,7 @@ A **registry asset** is a versioned, immutable-per-version runtime artifact that
 
 | Kind | MVP status | Runtime payload | Applied by |
 |------|-----------|----------------|-----------|
-| `mcp_server` | **implemented E2E** | `.mcp.json` connection config (transport/url/headers/tool_prefix) | agent → merged into `.mcp.json` |
+| `mcp_server` | **implemented E2E** | `.mcp.json` connection config (transport/url/headers). `tool_prefix` is accepted but not applied: the server is keyed `<namespace>__<name>`, so the tools of `acme/pdf-tools` surface as `mcp__acme__pdf-tools__*` | agent → merged into `.mcp.json` |
 | `cedar_policy_module` | **implemented E2E** | `cedar_text` (Cedar policy source) | orchestrator → merged into the `cedar_policies` payload (byte-identical to inline blueprint policies) → agent `PolicyEngine` |
 | `skill` | **implemented E2E** | `prompt_fragment` (+ `tool_hints`) | agent → appended to the system prompt |
 | `plugin`, `subagent`, `prompt_fragment`, `capability` | **reserved** | — | — (grammar accepts them; publish rejects until a loader ships) |
@@ -66,7 +66,7 @@ Agent Registry has no namespace concept, so ABCA folds `kind/namespace/name` int
 
 ## 5. Provisioning
 
-The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because standalone `CreateRegistry` and `DeleteRegistry` are asynchronous and there is no CDK L1/L2 construct yet. `onEvent` starts the operation; `isComplete` polls `GetRegistry` until `READY` or until deletion returns not found. Standalone deletion removes the registry and its records, so the custom resource no longer drains records first. The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs.
+The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because standalone `CreateRegistry` and `DeleteRegistry` are asynchronous and there is no CDK L1/L2 construct yet. `onEvent` starts the operation; `isComplete` polls `GetRegistry` until `READY` or until deletion returns not found. AWS refuses `DeleteRegistry` while the registry holds a record, so on deletion both handlers first delete the records, for a bounded time per invocation, and then the registry. The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs.
 
 The namespace migration is a **fresh-registry cutover** for ABCA. The custom-resource type changes from `Custom::AgentCoreRegistry` to `Custom::AgentRegistry`, forcing CloudFormation replacement because a registry id from the former namespace cannot be updated through the standalone API. Existing assets are not copied by this deployment: re-publish them into the new registry, or use AWS's migration tooling outside ABCA before switching workloads.
 
@@ -120,6 +120,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 
 - Auth: `RegistryPublisher`. `auto_approve` additionally requires `RegistryApprover`.
 - Validates kind ∈ MVP kinds (reserved kinds rejected), namespace/name shape, exact semver.
+- For `mcp_server` the runtime is validated as well: `transport` is `http`, `sse` or `stdio`; `url` (http, sse) or `command` (stdio) is a non-empty string; `headers`, when present, is an object with string values and `args` a list of strings; a field other than `transport`, `url`, `command`, `args`, `headers` and `tool_prefix` is refused. A runtime that fails one of these is answered `400`.
 - **Immutability:** an existing `(kind, namespace, name, version)` → `409 REGISTRY_VERSION_EXISTS`.
 - Response `201`: `{ kind, namespace, name, version, status, storage_mode }`.
 
@@ -189,7 +190,7 @@ The strict grammar is implemented by `parseRef` (TS) and `parse_ref` (Python), k
 
 **PR 1 (this work)** ships the resolver library, port, adapter, provisioning, API, and CLI — purely additive; nothing in the orchestrator/agent calls it yet.
 
-**PR 2** wired the resolve step in the orchestrator (not create-task — see note below): it collects `registry://` refs from the Blueprint, resolves them via the `RegistryClient` (fail-closed — an unresolved ref fails the task), stamps `resolved_assets: [{kind, id, version}]` on the `TaskRecord`, threads the bundle into the agent payload, and loads `mcp_server` assets (merge into `.mcp.json`).
+**PR 2** wired the resolve step in the orchestrator (not create-task — see note below): it collects `registry://` refs from the Blueprint, resolves them via the `RegistryClient` (fail-closed — an unresolved ref fails the task), stamps `resolved_assets: [{kind, id, version}]` on the `TaskRecord`, threads the bundle into the agent payload, and loads `mcp_server` assets (merge into `.mcp.json`). An `mcp_server` asset whose key (`<namespace>__<name>`) or connection config contains `linear`, in any letter case, cannot be loaded: the agent runtime removes every such server from `.mcp.json` ([ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth): the agent must have no Linear tools), and the task fails with `RegistryAssetLoadError` before the agent starts.
 
 **PR 3** added the `cedar_policy_module` and `skill` loaders: resolved Cedar text is concatenated into the **same** `cedar_policies` payload field as inline blueprint policies (byte-identical from the `PolicyEngine`'s view — cedar-parity holds by construction), and resolved skill `prompt_fragment`s are appended to the system prompt (`prompt_builder.py`, after channel guidance).
 

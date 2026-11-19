@@ -109,6 +109,40 @@ describe('create-webhook handler', () => {
     expect(mockDdbSend).toHaveBeenCalledTimes(1);
   });
 
+  describe('the "Webhook created" log line', () => {
+    async function createdLine(event: APIGatewayProxyEvent): Promise<Record<string, unknown>> {
+      const stdout = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+      await handler(event);
+      const lines = stdout.mock.calls.map(([line]) => JSON.parse(String(line)));
+      stdout.mockRestore();
+      return lines.find((line) => line.message === 'Webhook created');
+    }
+
+    test('names the API key when the request was authorized by one', async () => {
+      // The unified authorizer puts the key id into the request context.
+      const event = makeEvent();
+      event.requestContext.authorizer = { userId: 'user-123', keyId: 'K1', scopes: 'webhooks:manage' };
+      expect(await createdLine(event)).toEqual({
+        level: 'INFO',
+        message: 'Webhook created',
+        webhook_id: 'ULID1',
+        user_id: 'user-123',
+        key_id: 'K1',
+        request_id: 'ULID0',
+      });
+    });
+
+    test('has no key for a request authorized by a Cognito token', async () => {
+      expect(await createdLine(makeEvent())).toEqual({
+        level: 'INFO',
+        message: 'Webhook created',
+        webhook_id: 'ULID1',
+        user_id: 'user-123',
+        request_id: 'ULID0',
+      });
+    });
+  });
+
   test('returns 401 when not authenticated', async () => {
     const event = makeEvent();
     event.requestContext.authorizer = null;
@@ -133,6 +167,15 @@ describe('create-webhook handler', () => {
     const event = makeEvent({ body: JSON.stringify({}) });
     const result = await handler(event);
     expect(result.statusCode).toBe(400);
+  });
+
+  test('returns 400 for a name that is not a string, and stores nothing', async () => {
+    const event = makeEvent({ body: JSON.stringify({ name: 42 }) });
+    const result = await handler(event);
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+    expect(mockSmSend).not.toHaveBeenCalled();
+    expect(mockDdbSend).not.toHaveBeenCalled();
   });
 
   test('returns 500 when Secrets Manager fails', async () => {

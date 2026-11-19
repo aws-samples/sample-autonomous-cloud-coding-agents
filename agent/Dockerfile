@@ -12,21 +12,24 @@ ARG GH_VERSION=2.103.3
 #
 # `mise:latest` was the worst case: a tag with no version at all, republished
 # whenever upstream feels like it. Pinning is what makes a rebuild depend on OUR
-# changes rather than on upstream's release schedule.
+# changes rather than on upstream's release schedule. The mise stage names a
+# release for the same reason: `latest` beside a digest does not say which
+# release the digest is, and its age cannot be checked against the cooldown.
 #
 # Each digest is a multi-platform index, so `--platform=$TARGETPLATFORM` still
 # selects the right architecture — verified to include linux/arm64.
 #
 # To bump: `docker buildx imagetools inspect <image>:<tag>` and copy the Digest.
 # Keep the tag alongside the digest; it documents what the digest is meant to be.
-FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:df5adf538c92d86f9807e738c7c7a9b32a1ae06edf441ede141333e3fe6a2cd9 AS mise
+FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.6@sha256:d4de1845114f6d73e90e15f7642885f74f3ca93074491038a2b9c43e4b897f21 AS mise
 
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
 FROM --platform=$TARGETPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS gh-builder
 ARG GH_VERSION
-RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
+# The Go module proxy retains pinned dependencies whose Git repositories become unavailable.
+RUN GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
-FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:dc1546eefcbe8caaa1f004f16ab76b204b5e1dbd58ff81b899f21cd40541232f
+FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
@@ -71,9 +74,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
 # Node 24; ``enable`` installs the yarn/pnpm shims onto PATH.
 RUN corepack enable && corepack prepare yarn@stable --activate || corepack enable
 
+# pip of the base image (26.2.2) vendors urllib3 2.7.0 and msgpack 1.1.2, which
+# the image scan reports as HIGH (CVE-2026-97687, CVE-2026-97689,
+# CVE-2026-114613, GHSA-6v7p-g79w-8964); pip 26.3 vendors the fixed releases.
+# Delete this line when the base image ships pip 26.3 or later.
+RUN python -m pip install --no-cache-dir --root-user-action=ignore pip==26.3
+
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
-# Pinned 2.1.301 to match the CLI bundled by claude-agent-sdk 0.2.168 (see
+# Pinned 2.1.319 to match the CLI bundled by claude-agent-sdk 0.2.179 (see
 # agent/pyproject.toml) — the SDK and the on-PATH CLI must agree on the control
 # protocol. The Claude 5.5 models the platform defaults to (#953) are rejected
 # by CLI builds older than 2.1.280 ("does not support this model"), so this pin
@@ -90,7 +99,7 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 # after the install so the native binary is placed at build time, and hard-verify
 # it exec's (``claude --version`` fails the build if the shim is still on PATH).
 RUN npm install -g npm@latest && \
-    npm install -g @anthropic-ai/claude-code@2.1.301 && \
+    npm install -g @anthropic-ai/claude-code@2.1.319 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch && \
     node "${CLAUDE_NPM_ROOT}/install.cjs" && \
@@ -133,7 +142,9 @@ COPY agent/prepare-commit-msg.sh /app/
 # Claude Code managed settings (#215). The highest-precedence settings layer —
 # loaded regardless of setting_sources and unoverridable by the untrusted cloned
 # repo's project .claude/settings.json. Carries awsCredentialExport so Bedrock
-# calls use session-tagged, refreshable credentials for cost attribution.
+# calls use session-tagged credentials for cost attribution. For MicroVM workers,
+# the helper returns no exported keys: the parent's scoped container provider
+# handles renewal without Claude's stale awsCredentialExport cache.
 # Placing awsCredentialExport (an arbitrary command) anywhere the target repo
 # can influence would be RCE with the compute role, so it lives ONLY here.
 COPY agent/managed-settings.json /etc/claude-code/managed-settings.json
@@ -147,6 +158,23 @@ USER agent
 ENV PATH="/app/.venv/bin:/home/agent/.local/share/mise/shims:/home/agent/.local/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     MISE_YES=1
+
+# The server starts under `opentelemetry-instrument` (CMD below), which loads every
+# installed OpenTelemetry instrumentation. Those of `requests` and `urllib3` copy
+# the trace context and the task's correlation baggage (session id, user id,
+# repository) into the headers of every request they send, also to hosts outside
+# the platform: the agent calls Linear and Atlassian with `requests`. The AWS
+# distro switches the two off only in its agent observability mode
+# (AGENT_OBSERVABILITY_ENABLED=true). No backend of this repository sets that flag,
+# so without this line the Lambda MicroVM backend and a local `run.sh --server` load
+# both, and AgentCore does unless the service sets the flag itself.
+#
+# An explicit value replaces the list the distro applies in that mode, so this is
+# that list, whole: a runtime that sets the flag loads what it loaded before.
+# boto3 and the tool gateway client are not in it and stay instrumented.
+# agent/tests/test_image_instrumentation.py fails when the list loses `requests`
+# or `urllib3`, or is no longer the list of the pinned aws-opentelemetry-distro.
+ENV OTEL_PYTHON_DISABLED_INSTRUMENTATIONS="http,sqlalchemy,psycopg2,pymysql,sqlite3,aiopg,asyncpg,mysql_connector,urllib3,requests,system_metrics,google-genai,jinja2"
 
 WORKDIR /workspace
 

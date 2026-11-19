@@ -63,11 +63,12 @@ export function summarizeEvent(event: TaskEvent): string {
       return output ? `${prefix}${oneLine(output)}` : `${prefix}(no output)`;
     }
     case 'agent_turn': {
-      // The agent numbers messages; a turn (what the turn limit counts) is usually two of them.
-      const message = num(meta, 'turn');
+      // The agent numbers the model's answers, which is what the turn limit counts. An answer
+      // can arrive as several messages, each an event of its own that carries the same number.
+      const turn = num(meta, 'turn');
       const said = str(meta, 'text_preview');
       if (said) return `Said: ${oneLine(said)}`;
-      return message === null ? '' : `Message ${message}`;
+      return turn === null ? '' : `Turn ${turn}`;
     }
     case 'agent_cost_update': {
       const cost = num(meta, 'cost_usd');

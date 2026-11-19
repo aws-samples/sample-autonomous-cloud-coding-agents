@@ -131,10 +131,6 @@ export class LinearVaultConsentPage extends Construct {
         id: 'AwsSolutions-CFR4',
         reason: 'Uses the default *.cloudfront.net certificate (TLSv1+ enforced by AWS); no custom domain, so no minimum-TLS-version override applies.',
       },
-      {
-        id: 'AwsSolutions-CFR7',
-        reason: 'OAC is in use (`S3BucketOrigin.withOriginAccessControl`); cdk-nag misclassifies the L2 helper as an OAI deployment.',
-      },
     ], true);
 
     // BucketDeployment's handler is a CDK-managed SINGLETON created at STACK

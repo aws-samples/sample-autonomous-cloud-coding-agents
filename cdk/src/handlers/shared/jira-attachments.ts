@@ -49,6 +49,7 @@ import { estimateImageTokensFromBuffer } from './image-tokens';
 import { extractDescriptionMarkdown } from './jira-adf';
 import { resolveJiraOauthToken } from './jira-oauth-resolver';
 import { logger } from './logger';
+import { isBotAuthoredComment } from './orchestration-comment-trigger';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
 import { isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
@@ -78,6 +79,13 @@ const COMMENT_FETCH_TIMEOUT_MS = 5_000;
 
 /** Default cap on recent comments folded into the task context. */
 const DEFAULT_MAX_COMMENTS = 10;
+
+/**
+ * Comments read per fetch: one page of Jira's default size. The cap above
+ * applies to the human comments found in it, so the comments ABCA posted
+ * since the last human one do not use it up.
+ */
+const COMMENT_PAGE_SIZE = 100;
 
 /**
  * Tenant-scoped context for a Jira REST call, resolved once per task by the
@@ -299,8 +307,13 @@ async function fetchAttachmentBytes(
     }
     return { kind: 'ok', content: Buffer.concat(chunks) };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { kind: 'error', message };
+    // The outcome's message is posted on the Jira issue: the cause goes to the log.
+    logger.warn('Jira attachment download: request failed', {
+      jira_cloud_id: cloudId,
+      attachment_id: attachmentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { kind: 'error', message: 'the request failed or timed out' };
   } finally {
     clearTimeout(timer);
   }
@@ -361,7 +374,7 @@ export async function downloadScreenAndStoreJiraAttachments(
       let outcome = await fetchAttachmentBytes(token.accessToken, ctx.cloudId, att.id);
 
       // Reactive refresh-and-retry-once on auth rejection, mirroring
-      // jira-feedback.postCommentWithResult: the stored token may be dead
+      // jira-feedback.writeCommentWithRefresh: the stored token may be dead
       // despite a not-yet-reached expiry (server-side revocation).
       if (outcome.kind === 'auth') {
         logger.info('Jira attachment download got auth rejection — forcing token refresh and retrying once', {
@@ -431,8 +444,16 @@ export async function downloadScreenAndStoreJiraAttachments(
             { cause: err },
           );
         }
+        // Not a verdict on the file: the screening call itself failed (throttled,
+        // denied). The SDK's text can name the role and the account, and this
+        // error's message is posted on the Jira issue, so it stays in the log.
+        logger.error('Screening call failed for Jira attachment', {
+          jira_cloud_id: ctx.cloudId,
+          attachment_filename: att.filename,
+          error: err instanceof Error ? err.message : String(err),
+        });
         throw new JiraAttachmentError(
-          `Attachment '${att.filename}' could not be screened: ${err instanceof Error ? err.message : String(err)}`,
+          `Attachment '${att.filename}' could not be screened: the content screening service is unavailable.`,
           { cause: err },
         );
       }
@@ -566,10 +587,12 @@ interface JiraCommentPage {
  * error, malformed body) logs a WARN and returns `[]` so the task still
  * proceeds — comments are advisory context, not a gate.
  *
- * "Human" = author `accountType === 'atlassian'`. Atlassian marks app/bot
- * authors with `accountType: 'app'`, so this drops ABCA's own REST-posted
- * progress/failure comments (and other bots) without needing to know the app's
- * own accountId.
+ * "Human" = author `accountType === 'atlassian'` and a text that does not
+ * start with one of ABCA's own comment markers. Atlassian marks app/bot
+ * authors with `accountType: 'app'`, which drops what ABCA posts through the
+ * Forge app (and other bots) without needing to know the app's own accountId.
+ * What ABCA posts through OAuth belongs to the setup user, so those comments
+ * are told by their marker ({@link isBotAuthoredComment}), as on Linear.
  */
 export async function fetchRecentHumanComments(
   ctx: JiraTenantContext,
@@ -586,12 +609,12 @@ export async function fetchRecentHumanComments(
       return [];
     }
 
-    // Newest-first so `maxResults` keeps the most recent; we reverse to
+    // Newest-first so the page holds the most recent; we reverse to
     // oldest-first for rendering.
     const url =
       `${JIRA_API_BASE}/${encodeURIComponent(ctx.cloudId)}` +
       `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment` +
-      `?orderBy=-created&maxResults=${encodeURIComponent(String(maxComments))}`;
+      `?orderBy=-created&maxResults=${COMMENT_PAGE_SIZE}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), COMMENT_FETCH_TIMEOUT_MS);
     let page: JiraCommentPage;
@@ -620,11 +643,13 @@ export async function fetchRecentHumanComments(
     const comments = Array.isArray(page.comments) ? page.comments : [];
     const rendered: RenderedComment[] = [];
     for (const c of comments) {
+      // The page is newest-first, so the first `maxComments` are the newest.
+      if (rendered.length >= maxComments) break;
       // Human authors only. Missing accountType is treated as non-human
       // (conservative: better to omit an ambiguous author than surface a bot).
       if (c.author?.accountType !== 'atlassian') continue;
       const markdown = extractDescriptionMarkdown(c.body);
-      if (!markdown.trim()) continue;
+      if (!markdown.trim() || isBotAuthoredComment(markdown)) continue;
       rendered.push({
         author: c.author?.displayName?.trim() || 'Unknown',
         createdAt: typeof c.created === 'string' ? c.created : '',

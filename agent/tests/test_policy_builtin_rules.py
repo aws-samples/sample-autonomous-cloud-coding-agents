@@ -60,7 +60,12 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
     ),
     "rm_slash": (
         "hard",
-        [Call("Bash", "rm -rf /"), Call("Bash", "sudo rm -rf /var/lib/app")],
+        [
+            Call("Bash", "rm -rf /"),
+            Call("Bash", "sudo rm -rf /var/lib/app"),
+            Call("Bash", "rm -fr /"),
+            Call("Bash", "sudo rm -fr /var/lib/app"),
+        ],
         Call("Bash", "rm -rf ./build"),
     ),
     "write_git_internals": (
@@ -87,6 +92,45 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             Call("Bash", "cd repo && git push --force"),
             Call("Bash", "cd repo && git push -f upstream fix/typo"),
             Call("Bash", "cd repo && git push -f"),
+            # ``-f`` directly after ``git push`` counts whatever follows it: the
+            # shell goes on without a space (a second line, ``;``, ``&``, ``|``,
+            # ``>``, the end of a subshell), or another short option is written
+            # together with it.
+            Call("Bash", "git push -f\ngit status"),
+            Call("Bash", "cd repo && git push -f;echo done"),
+            Call("Bash", "git push -f&& echo ok"),
+            Call("Bash", "cd repo && git push -f|tail -5"),
+            Call("Bash", "git push -f>push.log"),
+            Call("Bash", "(cd repo && git push -f)"),
+            Call("Bash", "git push -fu origin feature/login"),
+            # The flag after the remote and branch.
+            Call("Bash", "git push origin feature/login --force"),
+            Call("Bash", "cd repo && git push upstream fix/typo --force-with-lease && git status"),
+            Call("Bash", "git push origin feature/login -f"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f"),
+            # ``-f`` after the branch and the shell goes on: on a second line, or
+            # after ``;``, ``&``, ``|`` and ``>`` (each directly after the flag
+            # and after a space) and after `` 2>``.
+            Call("Bash", "git push origin feature/login -f\ngit status"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f\necho done"),
+            Call("Bash", "git push origin feature/login -f; git status"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f;echo done"),
+            Call("Bash", "git push origin feature/login -f ; git status"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f ; echo done"),
+            Call("Bash", "git push origin feature/login -f&& echo ok"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f&"),
+            Call("Bash", "git push origin feat -f && echo ok"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f &"),
+            Call("Bash", "git push origin feature/login -f|tail -5"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f|| true"),
+            Call("Bash", "git push origin feature/login -f | tail -5"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f || true"),
+            Call("Bash", "git push origin feature/login -f>push.log"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f>>push.log"),
+            Call("Bash", "git push origin feature/login -f > push.log"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f >/dev/null"),
+            Call("Bash", "git push origin feat -f 2>&1 | tail -5"),
+            Call("Bash", "cd repo && git push upstream fix/typo -f 2>/dev/null"),
         ],
         Call("Bash", "git push origin feature/login"),
     ),
@@ -222,3 +266,53 @@ def test_rule_leaves_a_similar_call_alone(rule_id: str, call: Call) -> None:
         f"{decision!r}. The rule now matches more than the calls listed for it in "
         f"BUILTIN_RULES, so that table no longer describes it. {_ON_PURPOSE}"
     )
+
+
+@pytest.mark.parametrize(
+    "then",
+    [
+        pytest.param("", id="the reply ends the command"),
+        pytest.param(" && echo done", id="the reply and then another command"),
+        pytest.param("; git status", id="the reply and a command after a semicolon"),
+        pytest.param("\ngit status", id="the reply and a command on a second line"),
+        pytest.param(" 2>&1 | tail -5", id="the reply with its output cut short"),
+    ],
+)
+def test_force_push_rule_leaves_the_flag_of_a_later_command_alone(then: str) -> None:
+    # After the branch, ``-f`` counts at the end of the command or of a line and
+    # before one of the operators the rule lists. Followed by other text it is
+    # the flag of another tool: here the reply to a review comment that the
+    # PR-iteration prompt teaches, chained after its push, also when the shell
+    # goes on after the reply.
+    call = Call(
+        "Bash",
+        "git push origin fix/typo && "
+        'gh api repos/owner/repo/pulls/7/comments/123/replies -f body="Fixed in abc1234"' + then,
+    )
+    decision = _decide(call)
+    assert decision.outcome == Outcome.ALLOW, f"not a force push: {call}, got {decision!r}"
+
+
+def test_force_push_rule_leaves_a_push_without_the_flag_and_a_second_line_alone() -> None:
+    # A line break counts only directly after ``-f``.
+    call = Call("Bash", "git push origin feat\ngit status")
+    decision = _decide(call)
+    assert decision.outcome == Outcome.ALLOW, f"not a force push: {call}, got {decision!r}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            "git push --follow-tags origin feature/login", id="a long option that begins with f"
+        ),
+        pytest.param("git push -u origin feature/login", id="another short option"),
+    ],
+)
+def test_force_push_rule_leaves_a_push_with_another_option_alone(command: str) -> None:
+    # Neither is a force push: a long option that begins with ``f`` takes two
+    # dashes, and ``-u`` is another short option, as the new-task prompt
+    # teaches it.
+    call = Call("Bash", command)
+    decision = _decide(call)
+    assert decision.outcome == Outcome.ALLOW, f"not a force push: {call}, got {decision!r}"

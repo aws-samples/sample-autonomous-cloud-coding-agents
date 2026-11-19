@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { PassThrough } from 'stream';
 import { ApiClient } from '../../src/api-client';
 import { makeLinearCommand } from '../../src/commands/linear';
 import { CliError } from '../../src/errors';
@@ -39,14 +40,20 @@ async function runRemove(args: string[]): Promise<void> {
 
 describe('linear remove-workspace command', () => {
   let logSpy: jest.SpiedFunction<typeof console.log>;
+  // The confirmation is read through readline only when stdin is not a terminal, which it is
+  // when this file is run from a shell. Pinned, so that the tests do not wait for keys.
+  const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 
   beforeEach(() => {
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
     mockRemove.mockReset();
     installMockClient();
     logSpy = jest.spyOn(console, 'log').mockImplementation();
   });
 
   afterEach(() => {
+    if (stdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+    else Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
     logSpy.mockRestore();
   });
 
@@ -208,5 +215,57 @@ describe('linear remove-workspace command', () => {
     } finally {
       rlSpy.mockRestore();
     }
+  });
+
+  describe('with the confirmation read from a pipe, through the real readline', () => {
+    // `printf 'acme\n' | bgagent linear remove-workspace acme`. The prompt closed its reader
+    // before it kept the line it had read, and closing rejects a prompt that has no answer
+    // yet: every answer that did not come from a terminal ended in "No input provided.".
+    // The double of the two tests above has a close() that emits nothing, so it hid that.
+    let stdin: PassThrough;
+    let restore: () => void;
+
+    beforeEach(() => {
+      stdin = new PassThrough();
+      const original = Object.getOwnPropertyDescriptor(process, 'stdin');
+      Object.defineProperty(process, 'stdin', { value: stdin, configurable: true });
+      const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      restore = () => {
+        stderrSpy.mockRestore();
+        if (original) Object.defineProperty(process, 'stdin', original);
+      };
+    });
+
+    afterEach(() => restore());
+
+    test('removes the workspace when the line is the slug', async () => {
+      mockRemove.mockResolvedValue({
+        workspace_slug: 'acme',
+        linear_workspace_id: 'ws-uuid-1',
+        status: 'revoked',
+        secret: 'deleted',
+      });
+      stdin.end('acme\n');
+
+      await runRemove(['acme']);
+
+      expect(mockRemove).toHaveBeenCalledWith('acme', { purge: false });
+    });
+
+    test('aborts when the line is not the slug', async () => {
+      stdin.end('not-the-slug\n');
+
+      await runRemove(['acme']);
+
+      expect(mockRemove).not.toHaveBeenCalled();
+      expect(logSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('Aborted');
+    });
+
+    test('fails, and removes nothing, when the input ends before a line', async () => {
+      stdin.end();
+
+      await expect(runRemove(['acme'])).rejects.toThrow('No input provided.');
+      expect(mockRemove).not.toHaveBeenCalled();
+    });
   });
 });

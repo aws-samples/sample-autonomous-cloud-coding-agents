@@ -147,6 +147,16 @@ describe('webhook-create-task handler', () => {
     expect(JSON.parse(result.body).error.message).toContain('X-Webhook-Signature');
   });
 
+  // The webhook authorizer finds the two webhook headers in any casing; this
+  // handler has to find the signature the same way, or a request that passed
+  // the authorizer is refused here.
+  test.each(['x-webhook-signature', 'X-WEBHOOK-SIGNATURE'])('reads the signature header case-insensitively (%s)', async (name) => {
+    const event = makeEvent();
+    event.headers = { [name]: event.headers['X-Webhook-Signature'] };
+    const result = await handler(event);
+    expect(result.statusCode).toBe(201);
+  });
+
   test('returns 401 for invalid signature', async () => {
     const event = makeEvent({
       headers: {
@@ -275,6 +285,23 @@ describe('webhook-create-task handler', () => {
     const respBody = JSON.parse(result.body);
     expect(respBody.data.task_id).toBe('existing-task');
     expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('reads the Idempotency-Key header case-insensitively', async () => {
+    const body = JSON.stringify({ repo: 'org/repo', task_description: 'Fix the bug' });
+    const event = makeEvent({
+      body,
+      headers: {
+        'X-Webhook-Signature': sign(body, TEST_SECRET),
+        'IDEMPOTENCY-KEY': 'wh-key-456',
+      },
+    });
+    const result = await handler(event);
+
+    expect(result.statusCode).toBe(201);
+    // The key reaches the lookup for an earlier task with the same key.
+    const lookup = mockSend.mock.calls.map(([command]) => command).find((command) => command.input?.IndexName === 'IdempotencyIndex');
+    expect(lookup?.input.ExpressionAttributeValues).toEqual({ ':key': 'wh-key-456' });
   });
 
   test('returns 409 for webhook replay with different user', async () => {

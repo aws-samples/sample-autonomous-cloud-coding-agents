@@ -238,6 +238,18 @@ describe('list-tasks handler', () => {
     expect(queryInput.ExclusiveStartKey).toEqual(key);
   });
 
+  test('returns 400 for a next_token that cannot be decoded', async () => {
+    // A token that lost its end. Taken for no token, it restarted the list at the
+    // first page with status 200, and the client took that page for the next one.
+    const cut = Buffer.from('{"task_id":"01K').toString('base64');
+    const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Invalid next_token.' });
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockDescribeTable).not.toHaveBeenCalled();
+  });
+
   test('applies status filter', async () => {
     const event = makeEvent({ queryStringParameters: { status: 'RUNNING' } });
     await handler(event);
