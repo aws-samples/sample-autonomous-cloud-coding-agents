@@ -31,9 +31,26 @@ def _fake_run_cmd(
 _config = make_task_config
 
 
+def _answer_push_url(run):
+    """``run``, answering ``git remote get-url --push`` with the URL that
+    ``set-url --push`` set, as git does when no insteadOf rule rewrites it. Every
+    other command, and the query itself, still reach ``run``."""
+    pushed: dict[str, str] = {}
+
+    def wrapped(cmd, label, **kwargs):
+        if label == "set-remote-push-url":
+            pushed["url"] = cmd[-1]
+        result = run(cmd, label, **kwargs)
+        if label == "get-remote-push-url":
+            return SimpleNamespace(returncode=0, stdout=f"{pushed.get('url', '')}\n", stderr="")
+        return result
+
+    return wrapped
+
+
 def _patch_common(monkeypatch, fake: FakeRunCmd):
     """Patch run_cmd everywhere repo.py reaches it, plus the commit-hook install."""
-    monkeypatch.setattr(repo, "run_cmd", fake)
+    monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
     # #251 Phase 2: clone/fetch now go through run_cmd_with_backoff. Route it to
     # the same fake so scripted returncodes drive both — the fake ignores the
     # extra retry kwargs (max_attempts/base_delay_s/on_retry/sleep) via **kwargs.
@@ -113,14 +130,18 @@ def _setup_with_real_git(
         elif label == "check-pr-fork":
             answer = "true\n" if from_fork else "false\n"
             return SimpleNamespace(returncode=0, stdout=answer, stderr="")
-        elif cmd[0] != "git" or label in ("safe-directory", "set-remote-url"):
+        elif cmd[0] != "git" or label in (
+            "safe-directory",
+            "set-remote-url",
+            "set-remote-push-url",
+        ):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         elif offline and cmd[1] == "fetch":
             return SimpleNamespace(returncode=1, stdout="", stderr="fatal: connection reset")
         return shell.run_cmd(cmd, label, cwd=cwd, check=check)
 
     monkeypatch.setattr(repo, "AGENT_WORKSPACE", str(tmp_path / "workspace"))
-    monkeypatch.setattr(repo, "run_cmd", run)
+    monkeypatch.setattr(repo, "run_cmd", _answer_push_url(run))
     monkeypatch.setattr(repo, "run_cmd_with_backoff", functools.partial(run, check=False))
     monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
     monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: default)
@@ -157,8 +178,11 @@ class TestSetupRepoHappyPath:
         # after a reset of every inherited helper (#801 review).
         helper_cmd = fake.cmd_for("configure-git-credential-helper")
         assert helper_cmd is not None
-        assert "credential.helper" in helper_cmd
-        assert fake.cmd_for("reset-git-credential-helpers")[-2:] == ["credential.helper", ""]
+        assert "credential.https://github.com.helper" in helper_cmd
+        assert fake.cmd_for("reset-git-credential-helpers")[-2:] == [
+            "credential.https://github.com.helper",
+            "",
+        ]
         assert labels.index("reset-git-credential-helpers") < labels.index(
             "configure-git-credential-helper"
         )
@@ -555,7 +579,7 @@ class TestBaselineBuildTimeout:
         from post_hooks import BUILD_VERIFY_TIMEOUT_S
 
         fake = self._RecordingFake()
-        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
@@ -577,7 +601,7 @@ class TestBaselineBuildTimeout:
         # (which crashed the task pre-agent); it degrades to "no baseline" and the
         # run proceeds with build_before=True (a timeout is not a regression).
         fake = self._RecordingFake(timeout_on="verify-build-pre")
-        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
@@ -596,7 +620,7 @@ class TestBaselineBuildTimeout:
 
     def test_baseline_lint_timeout_is_guarded(self, monkeypatch):
         fake = self._RecordingFake(timeout_on="verify-lint-pre")
-        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
@@ -622,7 +646,7 @@ class TestBaselineBuildTimeout:
         # "red-before → red-after isn't the agent's fault → ✅" while the absolute
         # orchestration gate fails the node — a task GitHub built green.
         fake = self._RecordingFake(rc_on=("verify-build-pre", 137, "Killed"))
-        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
@@ -645,7 +669,7 @@ class TestBaselineBuildTimeout:
         # Guard the other side: a REAL red build (exit 1, not an infra signal) must
         # still record build_before=False so genuine regressions are gated.
         fake = self._RecordingFake(rc_on=("verify-build-pre", 1, "TS2345: type error"))
-        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
         monkeypatch.setattr(repo, "run_cmd_with_backoff", fake)
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
@@ -677,7 +701,7 @@ class TestBaselineCommandThatCannotStart:
             return fake(cmd, label, **kwargs)
 
         _patch_common(monkeypatch, fake)
-        monkeypatch.setattr(repo, "run_cmd", run_cmd)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(run_cmd))
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
 
         setup = repo.setup_repo(
@@ -887,7 +911,7 @@ class TestSetupRepoDependencyUnreachable:
     def _patch_backoff_to_fail(self, monkeypatch, fake, *, transient_stderr):
         """Wire run_cmd_with_backoff to a real bounded loop over the fake so the
         report/raise path fires, while run_cmd (non-clone commands) stays faked."""
-        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
@@ -930,7 +954,7 @@ class TestSetupRepoDependencyUnreachable:
         # repo.run_cmd (the non-clone setup commands). run_cmd_with_backoff itself
         # is NOT patched — the real DNS-bail logic runs.
         monkeypatch.setattr("shell.run_cmd", fake_run_cmd)
-        monkeypatch.setattr(repo, "run_cmd", fake_run_cmd)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake_run_cmd))
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
@@ -1057,7 +1081,7 @@ class TestSetupRepoDependencyUnreachable:
         transient fetch failure exhausts retries → dependency_unreachable naming
         the branch."""
         fake = _fake_run_cmd()
-        monkeypatch.setattr(repo, "run_cmd", fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(fake))
         monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
         # The clone is faked here, so the real workspace never gets a
         # `.git`. Stub the pre-clean + git-root backstop (tested directly in
@@ -1351,6 +1375,63 @@ class TestPushCapabilityPreflight:
         assert "push-preflight" not in fake.labels()
         assert "create-branch" in fake.labels()
 
+    def test_resolve_strategy_workflow_is_not_gated(self, monkeypatch):
+        # A custom workflow may be writeable yet only look up its PR (ensure_pr
+        # strategy resolve): its final step never pushes, so neither does setup check
+        # (#801 review).
+        from workflow import load_workflow
+
+        base = load_workflow("coding/new-task-v1")
+        steps = [
+            step.model_copy(update={"strategy": "resolve"}) if step.kind == "ensure_pr" else step
+            for step in base.steps
+        ]
+        resolve_wf = base.model_copy(update={"id": "synthetic/resolve-v1", "steps": steps})
+        assert resolve_wf.read_only is False and resolve_wf.ensure_pr_strategy == "resolve"
+        fake = _PreflightFake(preflight_rc=128, preflight_stderr=_DENIED_403)
+        self._setup(monkeypatch, fake)
+        monkeypatch.setattr("workflow.load_workflow", lambda workflow_id: resolve_wf)
+
+        repo.setup_repo(_config(resolved_workflow={"id": "synthetic/resolve-v1", "version": "1"}))
+
+        assert "push-preflight" not in fake.labels()
+
+    def test_push_url_is_pinned_to_https_before_the_check(self, monkeypatch):
+        fake = _PreflightFake()
+        self._setup(monkeypatch, fake)
+
+        repo.setup_repo(_config())
+
+        assert fake.cmd_for("set-remote-push-url")[-1] == "https://github.com/owner/repo.git"
+        labels = fake.labels()
+        assert labels.index("set-remote-push-url") < labels.index("push-preflight")
+        assert fake.cmd_for("reset-git-credential-helpers")[-2:] == [
+            "credential.https://github.com.helper",
+            "",
+        ]
+
+    def test_rewritten_push_url_stops_setup(self, monkeypatch):
+        import pytest
+
+        fake = _PreflightFake()
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        def rewritten(cmd, label, **kwargs):
+            result = fake(cmd, label, **kwargs)
+            if label == "get-remote-push-url":
+                return SimpleNamespace(
+                    returncode=0, stdout="git@github.com:owner/repo.git\n", stderr=""
+                )
+            return result
+
+        monkeypatch.setattr(repo, "run_cmd", rewritten)
+
+        with pytest.raises(RuntimeError, match="rewrites the push URL"):
+            repo.setup_repo(_config())
+
+        assert "push-preflight" not in fake.labels()
+
     def test_repo_optional_artifact_workflow_with_a_repo_is_gated(self, monkeypatch):
         # default/agent-v1 declares primary: artifact but requires_repo: false; run
         # with a repository it still opens a PR, so it is checked.
@@ -1401,8 +1482,8 @@ class TestPushCapabilityPreflight:
         assert "classic personal access token" in message
         # Both cases: public_repo is enough for a public repository, and repo, which
         # also grants every private repository, only for a private one.
-        assert "`public_repo` scope if owner/repo is public, or `repo` if it is private" in message
-        assert "its owner needs write access to owner/repo" in message
+        assert "`public_repo` scope for a public repository, or `repo` for a private one" in message
+        assert "its owner needs write access to the repository" in message
         assert "Repository not found" in message
         assert "agent/README.md" in message
         assert token not in message
@@ -1422,7 +1503,7 @@ class TestPushCapabilityPreflight:
         )
 
         assert "fine-grained personal access token" in message
-        assert "include owner/repo in the token's repository access" in message
+        assert "include the repository in the token's repository access" in message
         assert "Contents permission with Read and write access" in message
         assert "Write access to repository not granted" in message
 
@@ -1434,10 +1515,10 @@ class TestPushCapabilityPreflight:
         assert "`public_repo` scope" in message
 
     def test_github_app_token_remedy(self):
-        remedy = repo._token_remedy("ghs_" + "e" * 36, "owner/repo")
+        remedy = repo._token_remedy("ghs_" + "e" * 36)
 
         assert remedy.label == "GitHub App token"
-        assert "install it on owner/repo" in remedy.remedy
+        assert "install it on the repository" in remedy.remedy
 
     def test_rejected_credential_is_an_auth_failure_not_a_scope_problem(self, monkeypatch):
         # A token revoked or expired after the clone: GitHub rejects it at the push.
@@ -1630,6 +1711,66 @@ class TestPushCapabilityPreflight:
         assert "fetch-base-branch" not in fake.labels()
 
 
+class TestPushPreflightRedaction:
+    """#801 review: git's output is redacted before it is shortened. A cut can remove
+    the prefix the redactor recognizes a token by, and leave the rest in the clear."""
+
+    def test_timeout_warning_redacts_before_keeping_the_tail(self, monkeypatch, capfd):
+        import pytest
+
+        token = "ghs_" + "Q" * 515  # 519 characters: the last 500 hold no ghs_ prefix
+        fake = _PreflightFake()
+        _patch_common(monkeypatch, fake)
+
+        def timing_out(cmd, label, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, 120, stderr=f"remote: {token}".encode())
+
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", timing_out)
+        with pytest.raises(repo.DependencyUnreachableError):
+            repo._preflight_push_capability(_config(), "/nonexistent", progress=None)
+
+        # log() writes with os.write, so only capfd sees it.
+        assert "Q" * 20 not in capfd.readouterr().out
+
+    def test_refusal_excerpt_redacts_before_cutting(self):
+        # Keeping the head keeps a token's prefix, so this order guards the excerpt
+        # rather than closing a leak: the timeout tail above is the case that leaked.
+        token = "ghs_" + "R" * 300
+        line = repo._quoted_line(
+            [f"remote: Permission to owner/repo.git denied. {token}"], ("permission to",)
+        )
+
+        assert "R" * 20 not in line
+        assert len(line) <= 200
+
+    def test_setup_failure_snippet_redacts_before_cutting(self):
+        import pytest
+
+        token = "ghs_" + "S" * 600
+        with pytest.raises(RuntimeError) as excinfo:
+            repo._fail_setup_command("push-preflight", "owner/repo", f"fatal: odd {token}", None)
+
+        assert "S" * 20 not in str(excinfo.value)
+
+
+class TestPushRefusalFitsTheTaskRecord:
+    """#801 review: the task record keeps the first 1,000 characters of the error
+    (task_state), and the classifier needs the sentence after the fix. The longest
+    message must fit: the longest owner/repo GitHub allows (39 + 1 + 100), a token of
+    no known type (the longest remedy), and a full 200-character git excerpt."""
+
+    def test_longest_refusal_fits(self):
+        repo_url = f"{'o' * 39}/{'r' * 100}"
+        stderr = f"remote: Permission to {repo_url}.git denied to someone. {'x' * 300}"
+        refusal = repo._push_refusal(_config(repo_url=repo_url, github_token=""), stderr)
+
+        persisted = (
+            f"PushCapabilityError: {refusal}"  # as pipeline._chain_prior_agent_error stores it
+        )
+        assert len(persisted) <= 1000, len(persisted)
+        assert "The task stopped before the agent ran" in persisted[:1000]
+
+
 class TestPushPreflightRetries:
     """Through the real bounded retry loop: a refusal fails in one attempt, an
     outage is retried."""
@@ -1798,7 +1939,7 @@ class TestPushPreflightAgainstRealGit:
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_cfg))
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
-        repo._configure_git_credentials(str(work))
+        repo._configure_git_credentials(str(work), "owner/repo")
 
         filled = subprocess.run(
             ["git", "credential", "fill"],
@@ -1811,3 +1952,56 @@ class TestPushPreflightAgainstRealGit:
         ).stdout
         assert "username=task-token" in filled
         assert not marker.exists()
+
+    def test_push_url_ignores_push_insteadof_and_a_rewrite_is_refused(self, tmp_path, monkeypatch):
+        import pytest
+
+        _, work = self._remote_and_clone(tmp_path, monkeypatch)
+        global_cfg = tmp_path / "global.gitconfig"
+        global_cfg.write_text('[url "git@github.com:"]\n\tpushInsteadOf = https://github.com/\n')
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_cfg))
+
+        repo._configure_git_credentials(str(work), "owner/repo")
+
+        push_url = self._git("remote", "get-url", "--push", "origin", cwd=work).strip()
+        assert push_url == "https://github.com/owner/repo.git"
+
+        # insteadOf rewrites even an explicit push URL: setup refuses rather than push
+        # with another credential.
+        global_cfg.write_text('[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n')
+        with pytest.raises(RuntimeError, match="rewrites the push URL"):
+            repo._configure_git_credentials(str(work), "owner/repo")
+
+    def test_helper_reset_is_scoped_to_github(self, tmp_path, monkeypatch):
+        # A login for another host in the same checkout keeps working (#801 review).
+        _, work = self._remote_and_clone(tmp_path, monkeypatch)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\ncat >/dev/null\necho username=task-token\necho password=x\n"
+        )
+        (bin_dir / "saved-login").write_text(
+            "#!/bin/sh\ncat >/dev/null\necho username=saved-login\necho password=y\n"
+        )
+        for f in bin_dir.iterdir():
+            f.chmod(0o755)
+        global_cfg = tmp_path / "global.gitconfig"
+        global_cfg.write_text(f"[credential]\n\thelper = !{bin_dir}/saved-login\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_cfg))
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        repo._configure_git_credentials(str(work), "owner/repo")
+
+        def fill(host):
+            return subprocess.run(
+                ["git", "credential", "fill"],
+                cwd=work,
+                input=f"protocol=https\nhost={host}\n\n",
+                capture_output=True,
+                text=True,
+                check=True,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            ).stdout
+
+        assert "username=task-token" in fill("github.com")
+        assert "username=saved-login" in fill("gitlab.example.com")

@@ -117,7 +117,8 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
         # TaskResult.error (DynamoDB, `bgagent status`). The original check=True
         # path redacted here (shell.py run_cmd); preserve that so a credential in
         # git stderr never lands in cleartext.
-        snippet = redact_secrets((stderr or "").strip()[:500])
+        # Redact first: a cut can remove the prefix the redactor recognizes a token by.
+        snippet = redact_secrets((stderr or "").strip())[:500]
         raise RuntimeError(f"{label} failed (non-transient): {snippet}")
 
     # (2) Transient with no nameable host.
@@ -231,20 +232,23 @@ class _TokenRemedy(NamedTuple):
     remedy: str
 
 
-def _token_remedy(token: str, repo_url: str) -> _TokenRemedy:
+def _token_remedy(token: str) -> _TokenRemedy:
     """The token type and the permission to add, for a token GitHub refused a push.
 
     Reads only the documented type prefix of the token; the token itself never
     reaches the message. A personal access token acts for its owner, so the owner
-    needs write access to the repository as well: the remedies say so."""
-    owner = f"its owner needs write access to {repo_url}"
+    needs write access to the repository as well: the remedies say so. They say
+    "the repository", never its name: the message names it once, and a long
+    ``owner/repo`` repeated in every remedy could push the end of the message past
+    what the task record stores, where the classifier reads it."""
+    owner = "its owner needs write access to the repository"
     classic = (
-        f"give the token the `public_repo` scope if {repo_url} is public, or `repo` if "
-        "it is private (`repo` grants every private repository its owner can reach)"
+        "give the token the `public_repo` scope for a public repository, or `repo` for a "
+        "private one (`repo` grants every private repository its owner can reach)"
     )
     fine_grained = (
-        f"include {repo_url} in the token's repository access and give it the Contents "
-        "permission with Read and write access"
+        "include the repository in the token's repository access and give it the "
+        "Contents permission with Read and write access"
     )
     if token.startswith("github_pat_"):
         return _TokenRemedy("fine-grained personal access token", f"{fine_grained}; {owner}")
@@ -253,8 +257,8 @@ def _token_remedy(token: str, repo_url: str) -> _TokenRemedy:
     if token.startswith(("ghs_", "ghu_")):
         return _TokenRemedy(
             "GitHub App token",
-            "give the app the Contents permission with Read and write access and "
-            f"install it on {repo_url}",
+            "give the app the Contents permission with Read and write access and install "
+            "it on the repository",
         )
     return _TokenRemedy(
         "GitHub token",
@@ -271,7 +275,8 @@ def _quoted_line(lines: list[str], signatures: tuple[str, ...]) -> str:
 
     line = next((ln for ln in lines if any(s in ln.lower() for s in signatures)), "")
     line = re.sub(r"(?i)(denied to )\S+", r"\1<token user>", line or (lines[0] if lines else ""))
-    return redact_secrets(line[:200])
+    # Redact first: a cut can remove the prefix the redactor recognizes a token by.
+    return redact_secrets(line)[:200]
 
 
 def _push_refusal(config: TaskConfig, stderr: str) -> PushCapabilityError | None:
@@ -315,7 +320,7 @@ def _push_refusal(config: TaskConfig, stderr: str) -> PushCapabilityError | None
             cause="credential_rejected",
         )
     if any(sig in low for sig in _PUSH_REFUSED_SIGNATURES):
-        token_type, remedy = _token_remedy(config.github_token, repo_url)
+        token_type, remedy = _token_remedy(config.github_token)
         return PushCapabilityError(
             f"Token cannot push to {repo_url}: GitHub refused the {token_type} write "
             f"access ({_quoted_line(lines, _PUSH_REFUSED_SIGNATURES)}). To fix it, "
@@ -372,7 +377,8 @@ def _fail_push_preflight_timeout(
 
     output = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
     if output:
-        log("WARN", f"push-preflight output before the timeout: {redact_secrets(output[-500:])}")
+        # Redact first: a cut can remove the prefix the redactor recognizes a token by.
+        log("WARN", f"push-preflight output before the timeout: {redact_secrets(output)[-500:]}")
     detail = f"push-preflight got no answer from GitHub within {_PUSH_PREFLIGHT_TIMEOUT_S}s"
     _record_blocker_reason("dependency_unreachable", detail, config.repo_url)
     if progress is not None:
@@ -409,24 +415,54 @@ def _report_refusal(refusal: PushCapabilityError, config: TaskConfig, progress: 
         )
 
 
-def _configure_git_credentials(repo_dir: str) -> None:
-    """Make the task's token the only credential git uses for this clone.
+_GITHUB = "https://github.com"
 
-    Git asks every configured credential helper in turn (system, global, then
-    local config) and takes the first credential one returns. On a developer
-    machine a saved GitHub login (osxkeychain, a credential store, a global ``gh``
-    helper) would answer before a helper added here, so the push preflight, and the
-    final push, would run as that login instead of the task's token. An empty
-    ``credential.helper`` in the local config clears every helper read before it,
-    URL-scoped ones included, so only ``gh``, reading ``GH_TOKEN``/``GITHUB_TOKEN``,
-    answers."""
+
+def _configure_git_credentials(repo_dir: str, repo_url: str) -> None:
+    """Make every push from this clone go to GitHub over HTTPS with the task's token.
+
+    - **The push URL.** A ``url.<base>.pushInsteadOf`` rule in the machine's git
+      config rewrites the push URL (to SSH, say) while the fetch URL stays HTTPS, so
+      the push preflight and the final push would use the developer's SSH key, not
+      the task's token. An explicit push URL is exempt from ``pushInsteadOf``. A plain
+      ``insteadOf`` rule rewrites it all the same, so the effective push URL is then
+      checked, and setup stops if it is not the HTTPS one.
+    - **The credential.** Git asks every credential helper that applies to a URL in
+      turn (system, global, then local config) and takes the first answer, so a
+      saved GitHub login would answer before a helper added here. An empty
+      ``credential.https://github.com.helper`` in the local config clears every
+      helper read before it for github.com, and only for github.com: a login for
+      another host keeps working. Then only ``gh`` answers there, reading
+      ``GH_TOKEN``/``GITHUB_TOKEN`` at call time; the token never touches disk.
+    """
+    url = f"{_GITHUB}/{repo_url}.git"
     run_cmd(
-        ["git", "config", "--local", "credential.helper", ""],
+        ["git", "remote", "set-url", "--push", "origin", url],
+        label="set-remote-push-url",
+        cwd=repo_dir,
+    )
+    effective = run_cmd(
+        ["git", "remote", "get-url", "--push", "origin"],
+        label="get-remote-push-url",
+        cwd=repo_dir,
+    ).stdout.strip()
+    if effective != url:
+        from shell import redact_secrets
+
+        raise RuntimeError(
+            f"git config rewrites the push URL of {repo_url} to {redact_secrets(effective)!r} "
+            "(a url.<base>.insteadOf rule in the system or global git config), so the push "
+            "would not use the task's GitHub token. Remove that rule, or run the agent "
+            "where git has no such configuration."
+        )
+    helper_key = f"credential.{_GITHUB}.helper"
+    run_cmd(
+        ["git", "config", "--local", helper_key, ""],
         label="reset-git-credential-helpers",
         cwd=repo_dir,
     )
     run_cmd(
-        ["git", "config", "--local", "--add", "credential.helper", "!gh auth git-credential"],
+        ["git", "config", "--local", "--add", helper_key, "!gh auth git-credential"],
         label="configure-git-credential-helper",
         cwd=repo_dir,
     )
@@ -437,8 +473,10 @@ def _task_pushes(config: TaskConfig) -> bool:
 
     Read-only workflows never push. A repository-bound workflow whose primary
     outcome is an artifact clones for context and delivers a document instead of a
-    PR (``Workflow.delivers_repo_artifact``, the rule the pipeline's post-hooks
-    use). When the workflow cannot be loaded the post-hooks fall back to opening a
+    PR (``Workflow.delivers_repo_artifact``). A workflow whose ``ensure_pr`` step
+    uses the ``resolve`` strategy only looks up the existing PR
+    (``Workflow.ensure_pr_strategy``). Both are the rules the pipeline's post-hooks
+    use. When the workflow cannot be loaded the post-hooks fall back to opening a
     PR, which pushes, so the check runs."""
     if config.read_only:
         return False
@@ -448,7 +486,7 @@ def _task_pushes(config: TaskConfig) -> bool:
         workflow = load_workflow((config.resolved_workflow or {}).get("id", "coding/new-task-v1"))
     except WorkflowValidationError:
         return True
-    return not workflow.delivers_repo_artifact
+    return not (workflow.delivers_repo_artifact or workflow.ensure_pr_strategy == "resolve")
 
 
 def _preflight_push_capability(config: TaskConfig, repo_dir: str, progress: Any) -> None:
@@ -706,7 +744,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         label="set-remote-url",
         cwd=repo_dir,
     )
-    _configure_git_credentials(repo_dir)
+    _configure_git_credentials(repo_dir, config.repo_url)
 
     # Fail in seconds, not after the agent's whole run, on a token that may not push.
     _preflight_push_capability(config, repo_dir, progress)

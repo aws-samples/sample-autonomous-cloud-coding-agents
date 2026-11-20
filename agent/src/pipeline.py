@@ -1507,10 +1507,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 _workflow = load_workflow(
                     (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
                 )
-                ensure_pr_strategy = next(
-                    (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
-                    "create",
-                )
+                # The rule the push preflight in repo.setup_repo applies too.
+                ensure_pr_strategy = _workflow.ensure_pr_strategy
             except WorkflowValidationError as exc:
                 log(
                     "WARN",

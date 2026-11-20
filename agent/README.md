@@ -70,7 +70,7 @@ A token can read a repository and still be refused every push. A classic PAT wit
 
 The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Tasks that never push skip the check: read-only workflows (`coding/pr-review-v1`) and repository-bound workflows that deliver an artifact instead of a PR.
 
-Setup clears the credential helpers the clone would inherit from the machine's git configuration (a saved GitHub login, for instance) before adding `gh`, so the check and the final push use the task's token, never another credential.
+Setup also makes every push from the clone use the task's token over HTTPS. It pins the push URL to `https://github.com/<owner>/<repo>.git`, which git's `pushInsteadOf` rules do not rewrite, and stops with an error if an `insteadOf` rule in the machine's git configuration still would. It clears the `github.com` credential helpers the clone would inherit (a saved GitHub login, for instance) before adding `gh`; helpers for other hosts keep working. Tasks whose workflow only looks up an existing pull request (`ensure_pr` with the `resolve` strategy) skip the check, as they never push.
 
 ### AWS Credentials
 
