@@ -125,6 +125,7 @@ process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 import { buildClarifyResumeDescription } from '../../src/handlers/shared/clarify-resume';
+import { resetSessionWorkspaceCacheForTests } from '../../src/handlers/shared/linear-channel-metadata';
 import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
 import { isBotAuthoredComment } from '../../src/handlers/shared/orchestration-comment-trigger';
 
@@ -1259,6 +1260,80 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(ctx.channelMetadata.orchestration_iteration).toBeUndefined();
       // 👀 ack on the comment.
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
+    });
+
+    // ADR-018 Phase 2: where sessions open, Linear opens one for this same
+    // mention and the session path answers it — acting here too would start a
+    // second task. The flag is stack-wide but Linear's "Agent session events"
+    // toggle is per installation, so the yield needs per-workspace evidence.
+    describe('agent sessions enabled', () => {
+      /** Registry row says whether this workspace has ever delivered a session event. */
+      function workspaceSessions(seen: boolean): void {
+        const base = ddbSend.getMockImplementation()!;
+        ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) =>
+          (cmd.input.ProjectionExpression === 'agent_sessions_seen_at'
+            ? { Item: seen ? { agent_sessions_seen_at: '2026-11-20T00:00:00Z' } : {} }
+            : base(cmd)));
+      }
+      function unlinkCommenter(): void {
+        const base = ddbSend.getMockImplementation()!;
+        ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) =>
+          ((cmd.input.Key as { linear_identity?: string } | undefined)?.linear_identity ? {} : base(cmd)));
+      }
+
+      beforeEach(() => {
+        process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+        resetSessionWorkspaceCacheForTests();
+        mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      });
+      afterEach(() => {
+        delete process.env.LINEAR_AGENT_SESSIONS_ENABLED;
+      });
+
+      test('a workspace that delivers sessions → the standalone mention yields to the session path', async () => {
+        workspaceSessions(true);
+        await handler(eventWith(comment()));
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+        expect(reactToCommentMock).not.toHaveBeenCalled();
+        expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+      });
+
+      test('a workspace that has never delivered a session → the comment trigger still answers', async () => {
+        // The installation's "Agent session events" toggle is off: no session
+        // will open, so yielding would leave the mention with no reply at all.
+        workspaceSessions(false);
+        await handler(eventWith(comment()));
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(99);
+      });
+
+      test('a registry read failure → the comment trigger still answers', async () => {
+        const base = ddbSend.getMockImplementation()!;
+        ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+          if (cmd.input.ProjectionExpression === 'agent_sessions_seen_at') throw new Error('throttled');
+          return base(cmd);
+        });
+        await handler(eventWith(comment()));
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      });
+
+      test('sessions delivered → an unlinked commenter gets no comment-path reply (the session tells them)', async () => {
+        workspaceSessions(true);
+        unlinkCommenter();
+        await handler(eventWith(comment()));
+        expect(reactToCommentMock).not.toHaveBeenCalled();
+        expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+      });
+
+      test('no sessions delivered → an unlinked commenter is told to link, as with the flag off', async () => {
+        workspaceSessions(false);
+        unlinkCommenter();
+        await handler(eventWith(comment()));
+        expect(reactToCommentMock).toHaveBeenCalledTimes(1);
+        expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+      });
     });
 
     test('plain issue resolves PR from pr_url when pr_number absent', async () => {
