@@ -27,7 +27,15 @@ import type { ScreeningConfig } from './shared/attachment-screening';
 import { APPENDED_BLOCK, buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
+import { AGENT_SESSION_EVENT_TYPE, isLinearAgentSessionsEnabled, type LinearAgentSessionEvent } from './shared/linear-agent-session-event';
+import { handleAgentSessionEvent } from './shared/linear-agent-session-handler';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
+import {
+  lookupLinearPlatformUser,
+  lookupLinearProjectMapping,
+  vaultMetadata,
+  workspaceDeliversAgentSessions,
+} from './shared/linear-channel-metadata';
 import { readStartClaim, releaseStartClaim } from './shared/linear-console';
 import {
   deleteComment,
@@ -81,8 +89,8 @@ import { prNumberFromTask, readTaskPrNumber } from './shared/task-pr-number';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
-import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
-import { CODING_WORKFLOW_ID } from './shared/workflows';
+import { MAX_ATTACHMENTS_PER_TASK, MAX_IDEMPOTENCY_KEY_LENGTH, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
+import { CODING_WORKFLOW_ID, PR_ITERATION_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = makeDocClient();
 
@@ -113,9 +121,6 @@ const attachmentsScreeningConfig: ScreeningConfig | undefined =
   attachmentsBedrockClient && GUARDRAIL_ID && GUARDRAIL_VERSION
     ? { bedrockClient: attachmentsBedrockClient, guardrailId: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VERSION }
     : undefined;
-// createTaskCore rejects idempotency keys longer than this; synthesized keys
-// are sliced to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
-const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 /**
  * TTL (seconds) for the per-comment ack-claim marker. Only needs
  * to outlive Linear's webhook redelivery window (minutes), but we keep a day of
@@ -709,27 +714,6 @@ interface ProcessorEvent {
  *   handles all Linear I/O deterministically; there is no Linear MCP).
  */
 /**
- * The vault fields a task needs so the AGENT can mint its own Linear token.
- *
- * Every channel_metadata builder must spread this. A builder that omits it hands the
- * agent no provider, so it falls back to a Secrets-Manager token a vault-managed
- * workspace does not have: no reactions and no state transitions, on work that
- * otherwise succeeded.
- *
- * Three checks guard it, because they fail for different reasons. Two source-level ones
- * (in the test file) catch a builder nobody exercised — one keys off the object-literal
- * form, the other off the assignment form, so a builder that writes onto an existing
- * object is covered too (#879). The behavioural one asserts the fields actually reach
- * `channel_metadata`.
- */
-function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
-  return {
-    ...(resolved.providerName && { linear_provider_name: resolved.providerName }),
-    ...(resolved.vaultUserId && { linear_vault_user_id: resolved.vaultUserId }),
-  };
-}
-
-/**
  * The resolver fields the `channel_metadata` builders thread through.
  *
  * Declared once rather than re-stated per builder, because it has to stay WIDER than
@@ -789,6 +773,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     (payload as { organizationId?: string }).organizationId = bound;
   }
 
+  // Native Linear agent sessions (ADR-018 Phase 2): an @-mention or delegation
+  // of the bgagent app arrives as a typed AgentSessionEvent. Flag-gated — the
+  // receiver forwards these only when the flag is on, so a delivery here with
+  // the flag off is a misrouted event, not work.
+  if ((payload as { type?: string }).type === AGENT_SESSION_EVENT_TYPE) {
+    if (!isLinearAgentSessionsEnabled()) {
+      logger.warn('Agent-session delivery reached the processor with LINEAR_AGENT_SESSIONS_ENABLED off — ignoring');
+      return;
+    }
+    await handleAgentSessionEvent(payload as LinearAgentSessionEvent);
+    return;
+  }
+
   // A Comment with an @bgagent mention on an orchestrated sub-issue
   // re-iterates that sub-issue's PR (the reconciler then cascades the
   // re-stack). Handled on a separate path from Issue → task creation.
@@ -810,36 +807,26 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // lookup runs on every Issue webhook (one extra GetItem vs. lookup-after-
   // projectId-check), which is the price of having the silent label gate
   // come first — see comment on the `shouldTrigger` block below.
-  let mappingItem: Record<string, unknown> | undefined;
-  if (projectId) {
-    const mapping = await ddb.send(new GetCommand({
-      TableName: PROJECT_MAPPING_TABLE,
-      Key: { linear_project_id: projectId },
-    }));
-    if (mapping.Item && mapping.Item.status === 'active') {
-      mappingItem = mapping.Item;
-    }
-  }
-
+  const mapping = await lookupLinearProjectMapping(ddb, PROJECT_MAPPING_TABLE, projectId, payload.organizationId);
   // The mapping table is keyed on the project id alone, so `projectId` selects a
-  // repository on its own — and it arrives in the request body. Check the mapping
-  // against the workspace the delivery claims to be from, so naming another
-  // workspace's project cannot steer a task at that workspace's repository.
+  // repository on its own — and it arrives in the request body. The helper checks
+  // the mapping against the workspace the delivery claims to be from, so naming
+  // another workspace's project cannot steer a task at that workspace's repository.
   //
   // Drop rather than reply. The reply would go to the sender's own workspace, and
   // "that project belongs to someone else" both confirms the project exists and tells
   // a prober the attempt was seen. The log line is the diagnostic surface instead.
-  const mappedWorkspaceId = mappingItem?.linear_workspace_id as string | undefined;
-  if (mappingItem && mappedWorkspaceId && mappedWorkspaceId !== payload.organizationId) {
+  if (mapping.kind === 'foreign') {
     logger.warn('Linear project is mapped to a different workspace than this webhook — dropping', {
       issue_id: issue.id,
       linear_project_id: projectId,
       event_workspace_id: payload.organizationId,
-      mapped_workspace_id: mappedWorkspaceId,
+      mapped_workspace_id: mapping.mappedWorkspaceId,
     });
     return;
   }
-  if (mappingItem && !mappedWorkspaceId) {
+  const mappingItem = mapping.kind === 'mapped' ? mapping.item : undefined;
+  if (mapping.kind === 'mapped' && !mapping.ownerVerified) {
     // Allowed for now: rows written before the owning workspace was recorded have
     // nothing to check against, and rejecting them would break working installs on
     // deploy. Re-running `bgagent linear onboard-project` records the owner, and
@@ -2080,6 +2067,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     logger.warn('Comment trigger: commenter has no linked platform user — refusing to act on the trigger', {
       linear_workspace_id: workspaceId, linear_user_id: commenterId, linear_issue_id: commentedIssueId,
     });
+    // Where sessions open, the session for this same mention already tells the
+    // user to link their account; a ❓ + reply here would say it twice.
+    if (await mentionYieldsToAgentSession(workspaceId)) return;
     const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
     const commented = issueRef(commentedIssueId, workspaceId);
     await channel.reactToComment?.({ commentId }, commented, 'needs_input');
@@ -2154,6 +2144,18 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const child = snapshot?.children.find((c) => c.sub_issue_id === commentedIssueId);
   if (snapshot && !commentTargetBelongsToWorkspace(snapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
   if (!snapshot || !child || !child.child_task_id) {
+    if (await mentionYieldsToAgentSession(workspaceId)) {
+      // This workspace delivers agent sessions, so Linear opens one for this
+      // @-mention and the session path answers it (handleAgentSessionEvent).
+      // Acting here too would start a second task. Epic and orchestration-child
+      // mentions above stay on this path — the session path defers those back here.
+      logger.info('Comment trigger: standalone mention is left to the Linear agent session — skipping', {
+        linear_workspace_id: workspaceId,
+        linear_issue_id: commentedIssueId,
+        comment_id: commentId,
+      });
+      return;
+    }
     await handleStandaloneCommentTrigger({
       subIssueId: commentedIssueId,
       workspaceId,
@@ -2566,7 +2568,7 @@ async function iterateOrchestrationChild(args: {
     const result = await createTaskCore(
       {
         repo: child.repo,
-        workflow_ref: 'coding/pr-iteration-v1',
+        workflow_ref: PR_ITERATION_WORKFLOW_ID,
         pr_number: prNumber,
         // An iteration on the COMBINED PR gets a prompt that tells the agent to
         // reproduce across the merged siblings and fix the mismatch at its source.
@@ -2805,7 +2807,7 @@ async function handleStandaloneCommentTrigger(args: {
     const result = await createTaskCore(
       {
         repo: task.repo,
-        workflow_ref: 'coding/pr-iteration-v1',
+        workflow_ref: PR_ITERATION_WORKFLOW_ID,
         pr_number: prNumber,
         task_description: buildIterationInstruction(trigger),
       },
@@ -3602,6 +3604,22 @@ function isLinearUploadsUrl(url: string): boolean {
   }
 }
 
+/**
+ * Whether a standalone ``@bgagent`` mention in this workspace is answered by a
+ * Linear agent session instead of the comment trigger.
+ *
+ * The deployment flag alone is not enough: it is stack-wide, while Linear's
+ * "Agent session events" toggle is per app installation. Yielding on the flag
+ * would leave a mention unanswered — no session, no reply — in every workspace
+ * whose installation has the toggle off. So the yield also requires evidence
+ * that THIS workspace has delivered an agent-session event; until then the
+ * comment trigger keeps answering exactly as with the flag off.
+ */
+async function mentionYieldsToAgentSession(workspaceId: string): Promise<boolean> {
+  if (!isLinearAgentSessionsEnabled() || !WORKSPACE_REGISTRY_TABLE) return false;
+  return workspaceDeliversAgentSessions(ddb, WORKSPACE_REGISTRY_TABLE, workspaceId);
+}
+
 async function readConsoleStartClaim(issueId: string, workspaceId: string): Promise<string | null> {
   if (!WEBHOOK_DEDUP_TABLE) return null;
   try {
@@ -3625,11 +3643,5 @@ async function releaseConsoleStartClaim(issueId: string, platformUserId: string)
 }
 
 async function lookupPlatformUser(workspaceId: string, userId: string): Promise<string | null> {
-  const key = `${workspaceId}#${userId}`;
-  const result = await ddb.send(new GetCommand({
-    TableName: USER_MAPPING_TABLE,
-    Key: { linear_identity: key },
-  }));
-  if (!result.Item || result.Item.status === 'pending') return null;
-  return (result.Item.platform_user_id as string) ?? null;
+  return lookupLinearPlatformUser(ddb, USER_MAPPING_TABLE, workspaceId, userId);
 }

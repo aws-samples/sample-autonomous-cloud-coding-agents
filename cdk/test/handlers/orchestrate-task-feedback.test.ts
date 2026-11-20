@@ -27,9 +27,16 @@ jest.mock('@aws/durable-execution-sdk-js', () => ({
 
 const postIssueCommentMock = jest.fn();
 const reportIssueFailureMock = jest.fn();
+const resolveTokenMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
+  resolveToken: (...args: unknown[]) => resolveTokenMock(...args),
+}));
+
+const emitAgentActivityMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-agent-session', () => ({
+  emitAgentActivity: (...args: unknown[]) => emitAgentActivityMock(...args),
 }));
 
 const reportJiraIssueFailureMock = jest.fn();
@@ -81,6 +88,36 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     ...overrides,
   } as TaskRecord;
 }
+
+describe('notifyLinearOnConcurrencyCap — agent-session tasks', () => {
+  const sessionTask = () => task({
+    channel_source: 'linear',
+    channel_metadata: { linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', linear_agent_session_id: 'session-1' },
+  });
+
+  beforeEach(() => {
+    postIssueCommentMock.mockReset();
+    resolveTokenMock.mockReset().mockResolvedValue('lin_tok');
+    emitAgentActivityMock.mockReset().mockResolvedValue({ ok: true });
+  });
+
+  test('says "queued" in the session, not in an issue comment', async () => {
+    await notifyLinearOnConcurrencyCap(sessionTask());
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+    expect(emitAgentActivityMock).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'thought' }));
+    expect(emitAgentActivityMock.mock.calls[0][2].body).toMatch(/^Queued/);
+  });
+
+  test('never blocks admission: no token, a failed emit and a throw are all swallowed', async () => {
+    resolveTokenMock.mockResolvedValueOnce(null);
+    await expect(notifyLinearOnConcurrencyCap(sessionTask())).resolves.toBeUndefined();
+    emitAgentActivityMock.mockResolvedValueOnce({ ok: false, retryable: true });
+    await expect(notifyLinearOnConcurrencyCap(sessionTask())).resolves.toBeUndefined();
+    resolveTokenMock.mockRejectedValueOnce(new Error('ddb throttled'));
+    await expect(notifyLinearOnConcurrencyCap(sessionTask())).resolves.toBeUndefined();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+});
 
 describe('notifyLinearOnConcurrencyCap', () => {
   beforeEach(() => {

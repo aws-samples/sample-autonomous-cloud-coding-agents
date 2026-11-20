@@ -169,6 +169,39 @@ export interface AgentStackProps extends StackProps {
   readonly features?: DeploymentFeatures;
 }
 
+/**
+ * Per-user nudge rate limit. One value for both entry points that spend the
+ * same counter row: `POST /tasks/{id}/nudge` (TaskApi) and a follow-up in a
+ * Linear agent session (the Linear webhook processor).
+ */
+const NUDGE_RATE_LIMIT_PER_MINUTE = 10;
+
+/** `--context enableLinearAgentSessions=true` arrives as a string from the CLI, a boolean from cdk.json. */
+function isLinearAgentSessionsContextOn(value: unknown): boolean {
+  return value === true || value === 'true';
+}
+
+type LinearAgentSessionsProps = NonNullable<ConstructorParameters<typeof LinearIntegration>[2]['agentSessions']>;
+type LinearStopComputeKey = keyof NonNullable<LinearAgentSessionsProps['stopCompute']>;
+
+/**
+ * `agentSessions` for LinearIntegration: `undefined` with the flag off (the
+ * construct then synthesizes unchanged), else the nudges table plus a stop
+ * grant for each compute backend this deployment actually runs.
+ */
+function linearAgentSessionsProps(
+  enabled: boolean,
+  nudgesTable: LinearAgentSessionsProps['nudgesTable'],
+  backends: ReadonlyArray<readonly [deployed: boolean, key: LinearStopComputeKey, arn: string]>,
+): LinearAgentSessionsProps | undefined {
+  if (!enabled) return undefined;
+  return {
+    nudgesTable,
+    nudgeRateLimitPerMinute: NUDGE_RATE_LIMIT_PER_MINUTE,
+    stopCompute: Object.fromEntries(backends.filter(([deployed]) => deployed).map(([, key, arn]) => [key, arn])),
+  };
+}
+
 export class AgentStack extends Stack {
   /** The REST API and its Cognito user pool; the operator console stack signs users in against these. */
   public readonly taskApi: TaskApi;
@@ -375,6 +408,13 @@ export class AgentStack extends Stack {
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
 
+    // ADR-018 Phase 2 (Linear native agent sessions, #990). Additive + default-off
+    // (ADR-006): the Linear receiver, processor and fan-out consumer key off this
+    // one predicate. Flip it together with the Linear app's "Agent session events"
+    // webhook category — with the category on and this off, every mention opens a
+    // session nothing answers.
+    const linearAgentSessionsEnabled = isLinearAgentSessionsContextOn(this.node.tryGetContext('enableLinearAgentSessions'));
+
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
     // below, because TaskApi — created well before the MicroVM construct — needs
@@ -534,6 +574,7 @@ export class AgentStack extends Stack {
 
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
+      nudgeRateLimitPerMinute: NUDGE_RATE_LIMIT_PER_MINUTE,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
@@ -1621,6 +1662,13 @@ export class AgentStack extends Stack {
       // Image attachments extracted from issue descriptions upload here
       // (otherwise createTaskCore 503s "Attachment storage is not configured").
       attachmentsBucket: attachmentsBucket.bucket,
+      // A session `stop` shuts compute down like DELETE /tasks/{id} does: same
+      // lazy ARNs and same per-backend gating as TaskApi's cancel Lambda.
+      agentSessions: linearAgentSessionsProps(linearAgentSessionsEnabled, taskNudgesTable.table, [
+        [agentCoreEnabled, 'agentCoreRuntimeArn', lazyRuntimeArn],
+        [ecsEnabled, 'ecsClusterArn', lazyEcsClusterArn],
+        [microvmImageConfigured, 'lambdaMicrovmImageArn', lazyMicrovmImageArn],
+      ]),
     }) : undefined;
     const linearOauthSecretArn = Stack.of(this).formatArn({
       service: 'secretsmanager',
@@ -2003,6 +2051,7 @@ export class AgentStack extends Stack {
         linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
         linearOauthSecretArnPattern: linearOauthSecretArn,
       }),
+      linearAgentSessionsEnabled,
       // Jira dispatcher posts a deterministic final-status comment with
       // cost/turns/duration on Jira-origin terminal tasks. Same scope
       // `bgagent-jira-oauth-*` as the orchestrator and Jira webhook
