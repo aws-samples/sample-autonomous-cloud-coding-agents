@@ -2090,6 +2090,8 @@ export class AgentStack extends Stack {
       budgetAlerts.warningAlarm,
       budgetAlerts.exceededAlarm,
       budgetAlerts.teamMembershipUnresolvedAlarm,
+      // #1063: XSS-shaped bodies counted (not blocked) on the signed webhook routes.
+      ...[taskApi.webhookXssCountedAlarm].filter(alarm => alarm !== undefined),
     );
 
     // #812: the Linear webhook processor announces a revoked authorization here.
