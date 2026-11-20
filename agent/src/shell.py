@@ -487,6 +487,7 @@ _TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
     "502 bad gateway",
     "504 gateway",
     "429 too many requests",
+    "the requested url returned error: 429",  # git's form of a rate limit
     "eai_again",
     "network is unreachable",
     "tls handshake timeout",
