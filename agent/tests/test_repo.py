@@ -718,6 +718,62 @@ class TestBaselineCommandThatCannotStart:
         assert setup.lint_gate_inert is False
 
 
+# What mise 2026.11.6 prints, with exit 1, for the two default commands (less
+# the version lines that close every error), by the label of the baseline run.
+# In a repository without any mise task (`lint` resembles commands of mise,
+# `build` does not):
+_NO_MISE_TASK_AT_ALL = {
+    "verify-build-pre": (
+        "mise ERROR no tasks defined in /workspace/task-abc. Are you in a project directory?"
+    ),
+    "verify-lint-pre": (
+        "mise ERROR unknown command: lint\n\nDid you mean:\n  mise link\n  mise list\n  mise ln"
+    ),
+}
+# In a repository whose mise.toml defines a `test` task and no other:
+_OTHER_MISE_TASKS_ONLY = {
+    "verify-build-pre": (
+        "mise ERROR no task build found\n\nAvailable tasks:\n  Name  Description\n  test  "
+    ),
+    "verify-lint-pre": (
+        "mise ERROR no task lint found\n\nDid you mean the command:\n  mise link\n  mise list\n"
+        "  mise ln\n\nAvailable tasks:\n  Name  Description\n  test  "
+    ),
+}
+
+
+class TestBaselineDefaultTaskMissing:
+    """A repository that configures no build or lint command gets the mise
+    defaults. Where mise has no such task the baseline verified nothing, and
+    setup says so, in whichever words mise reports the missing task (#749)."""
+
+    @pytest.mark.parametrize(
+        "said",
+        [_NO_MISE_TASK_AT_ALL, _OTHER_MISE_TASKS_ONLY],
+        ids=["no-mise-task-at-all", "other-mise-tasks-only"],
+    )
+    def test_missing_default_tasks_are_gates_that_did_not_run(self, monkeypatch, said):
+        fake = _fake_run_cmd()
+
+        def run_cmd(cmd, label, **kwargs):
+            if label in said:
+                return SimpleNamespace(returncode=1, stdout="", stderr=said[label])
+            return fake(cmd, label, **kwargs)
+
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(run_cmd))
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config())
+
+        assert setup.build_gate_inert is True
+        assert any("Build-regression gating is INERT" in n for n in setup.notes)
+        assert setup.lint_gate_inert is True
+        assert setup.lint_before is True  # no baseline, so nothing to regress from
+        assert any("lint verification is INERT" in n for n in setup.notes)
+        assert "Initial lint (mise run lint) FAILED before agent changes" not in setup.notes
+
+
 class TestFindMiseConfigs:
     """`mise trust <repo_dir>` trusts only the ROOT config;
     a monorepo's per-package `mise.toml` roots must ALSO be trusted or
