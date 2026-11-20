@@ -22,7 +22,8 @@ import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy, type SessionHandle } from './shared/compute-strategy';
 import { MicrovmStartUncertainError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
-import { postIssueComment } from './shared/linear-feedback';
+import { emitAgentActivity } from './shared/linear-agent-session';
+import { postIssueComment, resolveToken } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { stopMicrovmWithDiagnostics } from './shared/microvm/supervisor';
 import { pollMicrovmTask } from './shared/microvm/task-poll';
@@ -629,6 +630,24 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
   // workspace registry lookup. Suppress + log so the admission step is
   // never blocked by Linear-feedback failures.
   try {
+    // Agent-session task (ADR-018 Phase 2): say it in the session. An issue
+    // comment would notify every subscriber once per queued task — dozens in a
+    // burst of delegations — and reads as a failure next to a live session.
+    const agentSessionId = task.channel_metadata?.linear_agent_session_id;
+    if (agentSessionId) {
+      const token = await resolveToken({ linearWorkspaceId, registryTableName });
+      if (!token) return;
+      const result = await emitAgentActivity(token, agentSessionId, {
+        type: 'thought',
+        body: 'Queued: you are at your concurrency limit. This task starts automatically when a slot frees up — no action needed.',
+      });
+      if (!result.ok) {
+        logger.warn('Linear concurrency-cap session activity failed (non-fatal)', {
+          task_id: task.task_id, linear_agent_session_id: agentSessionId, retryable: result.retryable,
+        });
+      }
+      return;
+    }
     await postIssueComment(
       { linearWorkspaceId, registryTableName },
       issueId,

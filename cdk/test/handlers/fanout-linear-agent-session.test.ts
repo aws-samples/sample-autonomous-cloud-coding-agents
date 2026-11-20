@@ -54,6 +54,7 @@ process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 import {
   CHANNEL_DEFAULTS,
   linearSessionTerminalActivity,
+  resetLinearHeartbeatMemoForTests,
   routeEvent,
   type FanOutEvent,
   type TaskNotificationsConfig,
@@ -107,7 +108,12 @@ beforeEach(() => {
   mockResolveToken.mockReset().mockResolvedValue('lin_tok');
   mockEmitAgentActivity.mockReset().mockResolvedValue({ ok: true });
   mockAddAgentSessionExternalUrl.mockReset().mockResolvedValue({ ok: true });
+  resetLinearHeartbeatMemoForTests();
 });
+
+function gets(): unknown[] {
+  return mockDdbSend.mock.calls.filter((c) => c[0]._type === 'Get');
+}
 
 test('the flag subscribes the Linear channel to per-turn events', () => {
   expect(CHANNEL_DEFAULTS.linear.has('agent_turn')).toBe(true);
@@ -124,7 +130,11 @@ test('pr_created attaches the PR to the session and announces it, post-once', as
   expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', {
     type: 'action', action: 'Opened pull request', parameter: 'https://github.com/acme/web/pull/7',
   });
-  expect(updates()[0].UpdateExpression).toContain('linear_pr_comment_event_id');
+  // The link and the activity are marked separately, so each retries on its own.
+  expect(updates().map((u) => u.UpdateExpression)).toEqual([
+    'SET linear_session_pr_link_event_id = :eid',
+    'SET linear_pr_comment_event_id = :eid',
+  ]);
   // Session tasks never fall through to issue comments.
   expect(mockPostIssueComment).not.toHaveBeenCalled();
 });
@@ -134,6 +144,33 @@ test('pr_created after a stop stays quiet (the final status carries the link)', 
   await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
   expect(mockAddAgentSessionExternalUrl).not.toHaveBeenCalled();
+});
+
+test('a retried pr_created does not attach the PR link a second time', async () => {
+  // First attempt: link attached, activity failed transiently → record retried.
+  mockTask({
+    ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7', linear_session_pr_link_event_id: 'e-first',
+  });
+  await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  expect(mockAddAgentSessionExternalUrl).not.toHaveBeenCalled();
+  expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
+});
+
+test('a transient PR-link failure is retried before the activity is announced', async () => {
+  mockTask({ ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7' });
+  mockAddAgentSessionExternalUrl.mockResolvedValue({ ok: false, retryable: true });
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  expect(outcome.infraRejections).toEqual(['linear']);
+  expect(mockEmitAgentActivity).not.toHaveBeenCalled();
+  expect(updates()).toEqual([]);
+});
+
+test('a permanent PR-link failure still announces the pull request', async () => {
+  mockTask({ ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7' });
+  mockAddAgentSessionExternalUrl.mockResolvedValue({ ok: false, retryable: false });
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  expect(outcome.infraRejections).toEqual([]);
+  expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
 });
 
 test('pr_created is skipped once its marker is set', async () => {
@@ -171,6 +208,20 @@ test('a final activity already emitted is not repeated', async () => {
 test('a cancel that came from the session stop signal is not confirmed twice', async () => {
   mockTask({ ...SESSION_TASK, status: 'CANCELLED' });
   await routeEvent(ev('task_cancelled', { cancelled_via: SESSION_STOP_CANCELLED_VIA }), LINEAR_ONLY);
+  expect(mockEmitAgentActivity).not.toHaveBeenCalled();
+});
+
+test('a session stop closes the session: its cancel stamps the post-once marker', async () => {
+  mockTask({ ...SESSION_TASK, status: 'CANCELLED' });
+  await routeEvent(ev('task_cancelled', { cancelled_via: SESSION_STOP_CANCELLED_VIA }), LINEAR_ONLY);
+  expect(updates().map((u) => u.UpdateExpression)).toEqual(['SET linear_final_comment_event_id = :eid']);
+
+  // ...so a later terminal event for the same task (reconciler task_failed /
+  // task_stranded, a second task_cancelled) posts nothing under "Stopped."
+  for (const later of ['task_failed', 'task_stranded', 'task_cancelled']) {
+    mockTask({ ...SESSION_TASK, status: 'CANCELLED', linear_final_comment_event_id: 'e-task_cancelled' });
+    await routeEvent(ev(later), LINEAR_ONLY);
+  }
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 });
 
@@ -231,6 +282,31 @@ describe('keep-alive heartbeat', () => {
     mockTask(SESSION_TASK);
     mockEmitAgentActivity.mockResolvedValue({ ok: false, retryable: true });
     expect((await routeEvent(ev('agent_turn', { turn: 6 }), LINEAR_ONLY)).infraRejections).toEqual([]);
+  });
+
+  test('turns inside the keep-alive window cost no task read', async () => {
+    mockTask(SESSION_TASK);
+    await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
+    expect(gets()).toHaveLength(1);
+
+    for (const turn of [2, 3, 4]) await routeEvent(ev('agent_turn', { turn }), LINEAR_ONLY);
+    expect(gets()).toHaveLength(1);
+    expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
+  });
+
+  test('a task that is not a session task is read once, then its turns are free', async () => {
+    mockTask({ ...SESSION_TASK, channel_source: 'slack', channel_metadata: {} });
+    for (const turn of [1, 2, 3]) await routeEvent(ev('agent_turn', { turn }), LINEAR_ONLY);
+    expect(gets()).toHaveLength(1);
+  });
+
+  test('the memo only skips heartbeats: a terminal event still reads the task and posts', async () => {
+    mockTask(SESSION_TASK);
+    await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
+    mockEmitAgentActivity.mockClear();
+    mockTask({ ...SESSION_TASK, status: 'COMPLETED' });
+    await routeEvent(ev('task_completed'), LINEAR_ONLY);
+    expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
   });
 
   test('no heartbeat once the task is terminal', async () => {

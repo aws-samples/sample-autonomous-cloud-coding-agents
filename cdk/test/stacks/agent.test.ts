@@ -2229,6 +2229,15 @@ describe('AgentStack — Linear agent sessions gate (ADR-018 Phase 2, #990)', ()
     expect(gated.some((vars) => 'NUDGES_TABLE_NAME' in vars && 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)).toBe(true);
   });
 
+  test('flag on: the processor can stop the default backend\'s compute on a session stop', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsStop', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const processor = envVarsWith(template, 'true').find((vars) => 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)!;
+    // AgentCore is the default compute: its runtime ARN is the stop fallback.
+    expect(processor.RUNTIME_ARN).toBeDefined();
+  });
+
   test('flag off (default): no Lambda carries the gate', () => {
     const template = Template.fromStack(new AgentStack(new App(), 'LinearSessionsOff', {
       env: { account: '123456789012', region: 'us-east-1' },

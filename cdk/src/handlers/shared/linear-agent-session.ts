@@ -42,7 +42,7 @@
 import type { AgentSessionRequest } from './linear-agent-session-event';
 import { graphqlData, graphqlRequest, type LinearPostResult } from './linear-feedback';
 import { isLookupFailure, LOOKUP_ABSENT, lookupFound, type LookupResult } from './lookup-result';
-import { MAX_TASK_DESCRIPTION_LENGTH } from './validation';
+import { MAX_IDEMPOTENCY_KEY_LENGTH, MAX_TASK_DESCRIPTION_LENGTH } from './validation';
 
 /** Activity content ABCA emits. ``prompt`` is human-only and deliberately absent. */
 export type AgentActivityContent =
@@ -134,17 +134,22 @@ export async function fetchAgentSessionIssue(
 
 /** Separator + heading that introduces Linear's `promptContext` in the description. */
 const SESSION_CONTEXT_PREFIX = '\n\n## Linear session context\n\n';
-/** createTaskCore's idempotency-key length cap. */
-const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const CONTEXT_TRUNCATION_NOTICE = '\n\n_(session context truncated)_';
 
 /**
  * Build the task description for a session-triggered task. Leads with the
- * human's directive (if any), then the issue, then Linear's ``promptContext``
- * (thread + team guidance) as advisory context. Never exceeds
- * ``MAX_TASK_DESCRIPTION_LENGTH`` so createTaskCore's length check cannot turn
- * long context into a rejection. The result is screened by createTaskCore's
- * input guardrail like any other task description.
+ * human's directive (if any), then the issue heading, then the issue body.
+ *
+ * Linear's ``promptContext`` already carries the issue (identifier, title,
+ * description) together with the thread and team guidance, so when it is
+ * present it IS the body: adding the fetched description as well would state
+ * the issue twice and, for a long description, push the thread and guidance —
+ * the part only ``promptContext`` has — out of the length budget. The fetched
+ * description is the fallback for deliveries without it (``prompted``).
+ *
+ * Never exceeds ``MAX_TASK_DESCRIPTION_LENGTH`` so createTaskCore's length
+ * check cannot turn long context into a rejection. The result is screened by
+ * createTaskCore's input guardrail like any other task description.
  */
 export function buildAgentSessionTaskDescription(
   issue: AgentSessionIssue,
@@ -157,13 +162,14 @@ export function buildAgentSessionTaskDescription(
     ? `${issue.identifier}: ${issue.title}`
     : issue.title ?? issue.identifier ?? 'Linear issue';
   parts.push(heading);
-  if (issue.description?.trim()) parts.push('', issue.description.trim());
+  const context = promptContext?.trim();
+  if (!context && issue.description?.trim()) parts.push('', issue.description.trim());
   let out = parts.join('\n');
   if (out.length > MAX_TASK_DESCRIPTION_LENGTH) {
     return out.slice(0, MAX_TASK_DESCRIPTION_LENGTH);
   }
-  if (promptContext) {
-    const section = `${SESSION_CONTEXT_PREFIX}${promptContext.trim()}`;
+  if (context) {
+    const section = `${SESSION_CONTEXT_PREFIX}${context}`;
     const budget = MAX_TASK_DESCRIPTION_LENGTH - out.length;
     if (section.length <= budget) {
       out += section;

@@ -94,6 +94,21 @@ describe('parseAgentSessionEvent', () => {
     expect(at('  @bgagent  ')).toBe('');
   });
 
+  test('a mention stored as the app user\'s profile URL is not part of the instruction', () => {
+    const at = (body: string) => parseAgentSessionEvent({
+      ...base, action: 'created', agentSession: { id: 's-1', issueId: 'i-1', comment: { body } },
+    })?.directive;
+    expect(at('https://linear.app/acme/profiles/bgagent please add tests')).toBe('please add tests');
+    expect(at('[@bgagent](https://linear.app/acme/profiles/bgagent), add tests')).toBe('add tests');
+    expect(at('<https://linear.app/acme/profiles/bgagent> add tests')).toBe('add tests');
+    // A bare mention is no instruction at all.
+    expect(at('https://linear.app/acme/profiles/bgagent')).toBe('');
+    // Only a LEADING mention is stripped; a link the user pasted stays.
+    expect(at('ask https://linear.app/acme/profiles/dana about this')).toBe('ask https://linear.app/acme/profiles/dana about this');
+    // Other links at the start are the user's text.
+    expect(at('https://linear.app/acme/issue/ENG-1 is related')).toBe('https://linear.app/acme/issue/ENG-1 is related');
+  });
+
   test('created by delegation has an empty directive and tolerates a blank promptContext', () => {
     const r = parseAgentSessionEvent({ ...base, action: 'created', agentSession: { id: 's-1', issueId: 'i-1' }, promptContext: '  ' });
     expect(r).toEqual(expect.objectContaining({ directive: '', actorId: null, promptContext: null }));
@@ -155,9 +170,23 @@ describe('agentSessionIdempotencyKey', () => {
 describe('buildAgentSessionTaskDescription', () => {
   const issue = { id: 'i', identifier: 'ENG-1', title: 'Title', description: 'Body', projectId: null };
 
-  test('directive, then issue, then session context', () => {
+  test('directive, then heading, then session context — which already carries the issue', () => {
+    // promptContext includes the issue's description; the fetched one is not repeated.
     expect(buildAgentSessionTaskDescription(issue, 'Do X', '<ctx/>'))
-      .toBe('Do X\n\nENG-1: Title\n\nBody\n\n## Linear session context\n\n<ctx/>');
+      .toBe('Do X\n\nENG-1: Title\n\n## Linear session context\n\n<ctx/>');
+  });
+
+  test('without session context the fetched description is the body', () => {
+    expect(buildAgentSessionTaskDescription(issue, 'Do X', null)).toBe('Do X\n\nENG-1: Title\n\nBody');
+    expect(buildAgentSessionTaskDescription(issue, '', '   ')).toBe('ENG-1: Title\n\nBody');
+  });
+
+  test('a long description no longer crowds the thread and guidance out of the budget', () => {
+    const long = { ...issue, description: 'd'.repeat(MAX_TASK_DESCRIPTION_LENGTH - 500) };
+    const context = `<issue>${long.description}</issue><thread>please keep the old API</thread>`;
+    const out = buildAgentSessionTaskDescription(long, '', context);
+    expect(out).toContain('please keep the old API');
+    expect(out).not.toContain('truncated');
   });
 
   test('falls back to a generic heading', () => {

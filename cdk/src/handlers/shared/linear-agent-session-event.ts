@@ -146,13 +146,22 @@ export function parseAgentSessionEvent(payload: LinearAgentSessionEvent): AgentS
 export const SESSION_STOP_CANCELLED_VIA = 'linear_session_stop';
 
 /**
- * The instruction in a mention comment, with the ``@bgagent`` handle removed —
- * a bare mention is no instruction at all. Uses the comment trigger's parser so
- * both channels read a mention the same way; a body that never names the
- * handle textually (Linear rendered the mention as a link) is kept as-is.
+ * A leading mention as Linear stores it in ``comment.body``: the app user's
+ * profile URL, bare or as a markdown link (``[@bgagent](https://linear.app/…)``),
+ * optionally followed by punctuation. Anchored to the start, so a profile link
+ * someone pastes mid-sentence is left alone.
+ */
+const LEADING_PROFILE_MENTION = /^(?:\[[^\]\n]*\]\(\s*https:\/\/linear\.app\/[^\s)]+\/profiles\/[^\s)]+\s*\)|<?https:\/\/linear\.app\/\S+\/profiles\/[^\s>]+>?)[,:]?\s*/i;
+
+/**
+ * The instruction in a mention comment, with the mention itself removed — a
+ * bare mention is no instruction at all. Linear stores a real mention as the
+ * app user's profile URL, so that is stripped first; the ``@bgagent`` text form
+ * goes through the comment trigger's parser so both channels read it the same
+ * way.
  */
 function mentionDirective(body: string | undefined): string {
-  const trimmed = (body ?? '').trim();
+  const trimmed = (body ?? '').trim().replace(LEADING_PROFILE_MENTION, '').trim();
   const trigger = parseCommentTrigger(trimmed);
   return trigger.triggered ? trigger.instruction : trimmed;
 }

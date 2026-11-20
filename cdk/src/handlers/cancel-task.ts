@@ -17,30 +17,21 @@
  *  SOFTWARE.
  */
 
-import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
-import { LambdaMicrovmsClient, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
-import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
-import { transitionTaskToCancelled, writeTaskCancelledEvent } from './shared/cancel-task-core';
+import { cancelTask, stopTaskCompute } from './shared/cancel-task-core';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { TaskRecord } from './shared/types';
-import { makeClient, makeDocClient } from './shared/ua';
-import { computeTtlEpoch } from './shared/validation';
+import { makeDocClient } from './shared/ua';
 
 const ddb = makeDocClient();
-const agentCoreClient = makeClient(BedrockAgentCoreClient);
-const ecsClient = makeClient(ECSClient);
-const microvmClient = makeClient(LambdaMicrovmsClient);
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
-const RUNTIME_ARN = process.env.RUNTIME_ARN;
-const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN;
 
 /**
  * DELETE /v1/tasks/{task_id} — Cancel a task.
@@ -83,19 +74,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} is already in terminal state ${record.status}.`, requestId);
     }
 
-    // A task waiting for approval may own a suspended MicroVM: stop that too.
-    const mayHaveCompute = record.status === TaskStatus.HYDRATING
-      || record.status === TaskStatus.RUNNING
-      || record.status === TaskStatus.AWAITING_APPROVAL
-      || record.status === TaskStatus.FINALIZING;
-    const runtimeSessionId = record.session_id;
-    // Prefer the ARN recorded on the task record (agent container writes
-    // this when the session starts). Fall back to the stack's single
-    // runtime ARN for the pre-session window — the task was admitted but
-    // the container hasn't written its session info yet.
-    const agentRuntimeArn = record.agent_runtime_arn ?? RUNTIME_ARN;
-
-    // 6. Update task to CANCELLED with condition to prevent race
+    // 6. Cancel: CANCELLED transition + task_cancelled event in one transaction,
+    // conditioned on the task not having reached a terminal state first.
     const now = new Date().toISOString();
     const cancelTables = {
       ddb,
@@ -103,129 +83,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       taskEventsTableName: EVENTS_TABLE_NAME,
       retentionDays: TASK_RETENTION_DAYS,
     };
-    if (await transitionTaskToCancelled(cancelTables, taskId, now) === 'already_terminal') {
+    if (await cancelTask(cancelTables, taskId, userId, now) === 'already_terminal') {
       return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} transitioned to a terminal state.`, requestId);
     }
 
-    // 6b. Stop the compute session so the container winds down (best-effort)
-    if (mayHaveCompute && runtimeSessionId) {
-      const computeType = record.compute_type;
-      if (computeType === 'ecs') {
-        // ECS-backed task — stop the Fargate task
-        const clusterArn = record.compute_metadata?.clusterArn ?? ECS_CLUSTER_ARN;
-        const taskArn = record.compute_metadata?.taskArn;
-        if (clusterArn && taskArn) {
-          try {
-            await ecsClient.send(new StopTaskCommand({
-              cluster: clusterArn,
-              task: taskArn,
-              reason: 'Cancelled by user',
-            }));
-            logger.info('ECS StopTask invoked after cancel', { task_id: taskId, ecs_task_arn: taskArn, request_id: requestId });
-          } catch (stopErr) {
-            logger.warn('ECS StopTask failed after cancel (task may already be stopped)', {
-              task_id: taskId,
-              request_id: requestId,
-              error: stopErr instanceof Error ? stopErr.message : String(stopErr),
-            });
-          }
-        } else {
-          logger.warn('ECS task cancel skipped: missing clusterArn or taskArn in compute_metadata', {
-            task_id: taskId,
-            request_id: requestId,
-            has_cluster: !!clusterArn,
-            has_task: !!taskArn,
-          });
-        }
-      } else if (computeType === 'lambda-microvm') {
-        // ADR-021: `terminate-microvm` is the ACTIVE cleanup path — a cancelled
-        // MicroVM must not be left to the 8-hour `maximumDurationInSeconds` cap
-        // (with `idlePolicy` omitted there is no tighter substrate bound), both
-        // for cost and because running/suspended VMs count against the account
-        // memory quota that gates admission of new tasks.
-        //
-        // This branch MUST come before the `agentRuntimeArn` branch below.
-        // `agentRuntimeArn` falls back to the stack-level RUNTIME_ARN env var,
-        // which task-api.ts sets whenever AgentCore stop-session is wired — so in
-        // a mixed agentcore+lambda-microvm deployment a MicroVM task would
-        // otherwise fall into the AgentCore branch and call StopRuntimeSession
-        // against an unrelated runtime ARN, silently leaving the MicroVM running.
-        const microvmId = record.compute_metadata?.microvmId;
-        if (microvmId) {
-          try {
-            await microvmClient.send(new TerminateMicrovmCommand({
-              microvmIdentifier: microvmId,
-            }));
-            logger.info('TerminateMicrovm invoked after cancel', { task_id: taskId, microvm_id: microvmId, request_id: requestId });
-          } catch (stopErr) {
-            // Best-effort, matching the ECS/AgentCore branches: the CANCELLED
-            // transition already committed and must stand.
-            logger.warn('TerminateMicrovm failed after cancel (MicroVM may already be gone)', {
-              task_id: taskId,
-              microvm_id: microvmId,
-              request_id: requestId,
-              error: stopErr instanceof Error ? stopErr.message : String(stopErr),
-            });
-          }
-        } else {
-          logger.warn('MicroVM cancel skipped: missing microvmId in compute_metadata', {
-            task_id: taskId,
-            request_id: requestId,
-          });
-        }
-      } else if (agentRuntimeArn) {
-        // AgentCore-backed task (default)
-        try {
-          await agentCoreClient.send(new StopRuntimeSessionCommand({
-            runtimeSessionId: runtimeSessionId,
-            agentRuntimeArn: agentRuntimeArn,
-          }));
-          logger.info('StopRuntimeSession invoked after cancel', { task_id: taskId, request_id: requestId });
-        } catch (stopErr) {
-          logger.warn('StopRuntimeSession failed after cancel (session may already be gone)', {
-            task_id: taskId,
-            request_id: requestId,
-            error: stopErr instanceof Error ? stopErr.message : String(stopErr),
-          });
-        }
-      } else {
-        // Task status was flipped to CANCELLED in DDB but we have no
-        // compute handle to actually stop the container. This is a
-        // resource-leak risk: the container may still be running and
-        // consuming tokens/concurrency. Emit a dedicated event so ops
-        // dashboards / alarms can surface the orphan.
-        logger.error('Active task has no recognized compute backend to stop — possible orphan', {
-          task_id: taskId,
-          request_id: requestId,
-          compute_type: computeType,
-          has_runtime_arn: !!agentRuntimeArn,
-        });
-        try {
-          await ddb.send(new PutCommand({
-            TableName: EVENTS_TABLE_NAME,
-            Item: {
-              task_id: taskId,
-              event_id: ulid(),
-              event_type: 'task_cancel_compute_orphan',
-              timestamp: now,
-              ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
-              metadata: {
-                compute_type: computeType,
-                reason: 'missing_runtime_handle',
-              },
-            },
-          }));
-        } catch (eventErr) {
-          logger.warn('Failed to write task_cancel_compute_orphan event', {
-            task_id: taskId,
-            error: eventErr instanceof Error ? eventErr.message : String(eventErr),
-          });
-        }
-      }
-    }
-
-    // 7. Write task_cancelled event
-    await writeTaskCancelledEvent(cancelTables, taskId, userId, now);
+    // 7. Stop the compute session so the container winds down (best-effort)
+    await stopTaskCompute(cancelTables, record, now, requestId);
 
     logger.info('Task cancelled', { task_id: taskId, user_id: userId, request_id: requestId });
 

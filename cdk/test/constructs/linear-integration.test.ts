@@ -406,7 +406,7 @@ describe('revoked-authorization recording (#812)', () => {
 });
 
 describe('LinearIntegration construct — agent sessions (ADR-018 Phase 2)', () => {
-  function synth(agentSessions?: { withNudges: boolean }): Template {
+  function synth(agentSessions?: { withNudges: boolean; stopCompute?: Record<string, string>; nudgeRate?: number }): Template {
     const stack = new Stack(new App(), 'TestStack');
     const taskTable = new dynamodb.Table(stack, 'TaskTable', {
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
@@ -424,7 +424,13 @@ describe('LinearIntegration construct — agent sessions (ADR-018 Phase 2)', () 
       userPool: new cognito.UserPool(stack, 'TestUserPool'),
       taskTable,
       taskEventsTable,
-      ...(agentSessions && { agentSessions: agentSessions.withNudges ? { nudgesTable } : {} }),
+      ...(agentSessions && {
+        agentSessions: {
+          ...(agentSessions.withNudges && { nudgesTable }),
+          ...(agentSessions.nudgeRate !== undefined && { nudgeRateLimitPerMinute: agentSessions.nudgeRate }),
+          ...(agentSessions.stopCompute && { stopCompute: agentSessions.stopCompute }),
+        },
+      }),
     });
     return Template.fromStack(stack);
   }
@@ -468,6 +474,69 @@ describe('LinearIntegration construct — agent sessions (ADR-018 Phase 2)', () 
     expect(processor.LINEAR_AGENT_SESSIONS_ENABLED).toBe('true');
     expect(processor).not.toHaveProperty('NUDGES_TABLE_NAME');
     expect(nudgeStatements(t)).toEqual([]);
+  });
+
+  const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/abca';
+  const CLUSTER_ARN = 'arn:aws:ecs:us-east-1:123456789012:cluster/abca';
+  const IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca';
+  const STOP_ACTIONS = ['bedrock-agentcore:StopRuntimeSession', 'ecs:StopTask', 'lambda:TerminateMicrovm'];
+
+  const statementsWith = (template: Template, action: string): Array<{ Action: unknown; Resource: unknown; Condition?: unknown }> =>
+    Object.values(template.findResources('AWS::IAM::Policy')).flatMap((p) =>
+      ((p.Properties as { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } })
+        .PolicyDocument.Statement)
+        .filter((st) => [st.Action].flat().includes(action)));
+
+  const dedupPuts = (template: Template): unknown[] =>
+    statementsWith(template, 'dynamodb:PutItem').filter((st) =>
+      JSON.stringify(st.Resource).includes('WebhookDedupTable') && [st.Action].flat().length === 1);
+
+  test('flag on: the nudge rate limit follows the configured value (default 10)', () => {
+    expect(envOf(synth({ withNudges: true }), 'LINEAR_PROJECT_MAPPING_TABLE_NAME').NUDGE_RATE_LIMIT_PER_MINUTE).toBe('10');
+    expect(envOf(synth({ withNudges: true, nudgeRate: 3 }), 'LINEAR_PROJECT_MAPPING_TABLE_NAME').NUDGE_RATE_LIMIT_PER_MINUTE).toBe('3');
+  });
+
+  test('flag on: the processor may write the session → task pointer, and nothing else, to the dedup table', () => {
+    const puts = dedupPuts(synth({ withNudges: false }));
+    expect(puts).toHaveLength(1);
+    expect(puts[0]).toEqual(expect.objectContaining({ Action: 'dynamodb:PutItem' }));
+  });
+
+  test('flag on: a session stop can stop each configured backend, scoped like the cancel API', () => {
+    const t = synth({
+      withNudges: false,
+      stopCompute: { agentCoreRuntimeArn: RUNTIME_ARN, ecsClusterArn: CLUSTER_ARN, lambdaMicrovmImageArn: IMAGE_ARN },
+    });
+    expect(statementsWith(t, 'bedrock-agentcore:StopRuntimeSession')).toEqual([
+      expect.objectContaining({ Resource: [RUNTIME_ARN, `${RUNTIME_ARN}/*`] }),
+    ]);
+    expect(statementsWith(t, 'ecs:StopTask')).toEqual([
+      expect.objectContaining({ Resource: '*', Condition: { ArnEquals: { 'ecs:cluster': CLUSTER_ARN } } }),
+    ]);
+    expect(statementsWith(t, 'lambda:TerminateMicrovm')).toEqual([
+      expect.objectContaining({ Resource: [IMAGE_ARN, `${IMAGE_ARN}:*`] }),
+    ]);
+    const processor = envOf(t, 'LINEAR_PROJECT_MAPPING_TABLE_NAME');
+    expect(processor.RUNTIME_ARN).toBe(RUNTIME_ARN);
+    expect(processor.ECS_CLUSTER_ARN).toBe(CLUSTER_ARN);
+  });
+
+  test('flag on: a backend that is not configured gets no stop grant', () => {
+    const t = synth({ withNudges: false, stopCompute: { ecsClusterArn: CLUSTER_ARN } });
+    expect(statementsWith(t, 'ecs:StopTask')).toHaveLength(1);
+    expect(statementsWith(t, 'bedrock-agentcore:StopRuntimeSession')).toEqual([]);
+    expect(statementsWith(t, 'lambda:TerminateMicrovm')).toEqual([]);
+    expect(envOf(t, 'LINEAR_PROJECT_MAPPING_TABLE_NAME')).not.toHaveProperty('RUNTIME_ARN');
+  });
+
+  test('flag off (default): no stop-compute grants, no dedup write, no fallback compute env', () => {
+    const t = synth();
+    for (const action of STOP_ACTIONS) expect(statementsWith(t, action)).toEqual([]);
+    expect(dedupPuts(t)).toEqual([]);
+    const processor = envOf(t, 'LINEAR_PROJECT_MAPPING_TABLE_NAME');
+    expect(processor).not.toHaveProperty('RUNTIME_ARN');
+    expect(processor).not.toHaveProperty('ECS_CLUSTER_ARN');
+    expect(processor).not.toHaveProperty('NUDGE_RATE_LIMIT_PER_MINUTE');
   });
 
   test('flag off (default): no gate, no nudge env, no grant', () => {

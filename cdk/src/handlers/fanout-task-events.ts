@@ -719,6 +719,19 @@ async function saveLinearPrCommentState(taskId: string, eventId: string): Promis
   });
 }
 
+/** Persist the post-once marker after the PR link is attached to a Linear agent session. */
+async function saveLinearSessionPrLinkState(taskId: string, eventId: string): Promise<void> {
+  await saveDispatchMarker({
+    taskId,
+    updateExpression: 'SET linear_session_pr_link_event_id = :eid',
+    conditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(linear_session_pr_link_event_id)',
+    values: { ':eid': eventId },
+    channel: 'linear',
+    errorId: 'FANOUT_LINEAR_SESSION_LINK_PERSIST_FAILED',
+    logContext: { event_id: eventId },
+  });
+}
+
 /**
  * Persist the post-once marker after a successful ordinary Jira final-status
  * comment (see ``dispatchToJira``). Iteration comments are edited in place and
@@ -1209,7 +1222,15 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // Per-turn events reach this dispatcher for EVERY task once the session flag
+  // is on. Decide from memory before paying a task read: a task known not to
+  // be a session task never heartbeats, and a session task inside its
+  // keep-alive window has nothing to post yet.
+  const isHeartbeat = event.event_type === LINEAR_SESSION_HEARTBEAT_EVENT;
+  if (isHeartbeat && heartbeatCanSkipTaskRead(event.task_id)) return;
+
   const task = await loadTaskForComment(event.task_id);
+  if (isHeartbeat) rememberHeartbeatTask(event.task_id, task);
   if (!task) {
     logger.warn('[fanout/linear] task not found — skipping comment', {
       event: 'fanout.linear.task_missing',
@@ -1416,6 +1437,41 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
 }
 
 /**
+ * What this container remembers about a task for the per-turn heartbeat:
+ * whether it is an agent-session task at all (fixed at creation), and when its
+ * keep-alive window was last claimed. Only ever used to SKIP work — the
+ * conditional write in ``emitLinearSessionHeartbeat`` stays the throttle.
+ */
+interface HeartbeatTaskMemo {
+  readonly sessionTask: boolean;
+  readonly heartbeatAtMs: number;
+}
+const HEARTBEAT_MEMO_MAX_ENTRIES = 2000;
+const heartbeatMemo = new Map<string, HeartbeatTaskMemo>();
+
+function heartbeatCanSkipTaskRead(taskId: string): boolean {
+  const memo = heartbeatMemo.get(taskId);
+  if (!memo) return false;
+  return !memo.sessionTask || Date.now() - memo.heartbeatAtMs < LINEAR_SESSION_HEARTBEAT_INTERVAL_MS;
+}
+
+function rememberHeartbeatTask(taskId: string, task: TaskRecord | null, heartbeatAtMs?: number): void {
+  // Bounded: a warm container sees many tasks. Dropping everything is fine —
+  // a forgotten task costs one read to relearn.
+  if (heartbeatMemo.size >= HEARTBEAT_MEMO_MAX_ENTRIES && !heartbeatMemo.has(taskId)) heartbeatMemo.clear();
+  const recorded = task?.linear_session_heartbeat_at ? Date.parse(task.linear_session_heartbeat_at) : 0;
+  heartbeatMemo.set(taskId, {
+    sessionTask: task?.channel_source === 'linear' && Boolean(task.channel_metadata?.linear_agent_session_id),
+    heartbeatAtMs: heartbeatAtMs ?? (Number.isFinite(recorded) ? recorded : 0),
+  });
+}
+
+/** Test seam: forget what this container learned about tasks' heartbeats. */
+export function resetLinearHeartbeatMemoForTests(): void {
+  heartbeatMemo.clear();
+}
+
+/**
  * Minimum gap between keep-alive activities. Linear marks a session `stale`
  * after 30 minutes without an activity; 10 minutes keeps a long run visibly
  * alive with ample margin for a slow turn, at ≤6 activities per hour.
@@ -1457,7 +1513,12 @@ async function dispatchToLinearAgentSession(
     return;
   }
   if (effective === 'task_cancelled' && event.metadata?.cancelled_via === SESSION_STOP_CANCELLED_VIA) {
+    // The stop handler already posted "Stopped." — that IS the session's close.
+    // Stamp the post-once marker so a later terminal event for the same task
+    // (a reconciler `task_failed` / `task_stranded`, a second `task_cancelled`)
+    // short-circuits below instead of posting a second closing activity.
     logger.info('[fanout/linear-session] cancel came from a session stop — confirmation already posted', logCtx);
+    if (!task.linear_final_comment_event_id) await saveLinearCommentState(task.task_id, event.event_id);
     return;
   }
   // After a stop the session must stay quiet; the PR link still rides the final status.
@@ -1480,9 +1541,21 @@ async function dispatchToLinearAgentSession(
   if (effective === 'pr_created') {
     const prUrl = task.pr_url!;
     const label = typeof task.pr_number === 'number' ? `Pull request #${task.pr_number}` : 'Pull request';
-    const link = await addAgentSessionExternalUrl(token, agentSessionId, { label, url: prUrl });
-    if (!link.ok) {
-      logger.warn('[fanout/linear-session] could not attach PR link to session', { ...logCtx, retryable: link.retryable });
+    // Own marker: `addedExternalUrls` appends, so repeating it on a retry of the
+    // activity below would duplicate the header link, and a failed attach has
+    // to be retried on its own.
+    if (!task.linear_session_pr_link_event_id) {
+      const link = await addAgentSessionExternalUrl(token, agentSessionId, { label, url: prUrl });
+      if (link.ok) {
+        await saveLinearSessionPrLinkState(task.task_id, event.event_id);
+      } else {
+        logger.warn('[fanout/linear-session] could not attach PR link to session', { ...logCtx, retryable: link.retryable });
+        if (link.retryable) {
+          throw new Error(
+            `[fanout/linear-session] transient Linear PR-link failure for task ${task.task_id} — escalating for batch retry`,
+          );
+        }
+      }
     }
     result = await emitAgentActivity(token, agentSessionId, {
       type: 'action', action: 'Opened pull request', parameter: prUrl,
@@ -1556,8 +1629,11 @@ async function emitLinearSessionHeartbeat(
         task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
       });
     }
+    // Lost the claim to another container: its window is as good as ours.
+    if ((err as Error)?.name === CONDITIONAL_CHECK_FAILED) rememberHeartbeatTask(task.task_id, task, now);
     return;
   }
+  rememberHeartbeatTask(task.task_id, task, now);
   const token = await resolveToken(ctx);
   if (!token) return;
   const turn = typeof event.metadata?.turn === 'number' ? event.metadata.turn : null;

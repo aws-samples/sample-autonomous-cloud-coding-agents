@@ -334,6 +334,13 @@ export interface TaskRecord {
    */
   readonly linear_session_heartbeat_at?: string;
   /**
+   * Event id of the ``pr_created`` whose PR link was attached to the Linear
+   * agent session's header. Separate from ``linear_pr_comment_event_id``
+   * (the "Opened pull request" activity) so each is retried on its own and the
+   * appended link is never duplicated.
+   */
+  readonly linear_session_pr_link_event_id?: string;
+  /**
    * Event ID of the terminal event whose ordinary Jira final-status comment
    * was successfully posted (fan-out plane). This marker makes that create
    * idempotent across partial-batch Lambda retries. Comment-triggered

@@ -175,6 +175,9 @@ export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
  */
 export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
+/** The workflow that iterates on an existing pull request. */
+export const PR_ITERATION_WORKFLOW_ID = 'coding/pr-iteration-v1';
+
 // Fail at MODULE LOAD (deploy/import time), not at request time, if either
 // well-known id ever drifts out of DESCRIPTORS — e.g. a descriptor rename.
 // Without this a rename surfaces as an obscure runtime

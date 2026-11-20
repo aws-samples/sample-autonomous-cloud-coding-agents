@@ -147,8 +147,9 @@ describe('cancel-task handler', () => {
     expect(body.data.status).toBe('CANCELLED');
     expect(body.data.cancelled_at).toBeDefined();
 
-    // 3 DynamoDB calls: Get + Update + Put (event)
-    expect(mockSend).toHaveBeenCalledTimes(3);
+    // 2 DynamoDB calls: Get + one transaction (CANCELLED transition + task_cancelled event)
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(mockSend.mock.calls[1][0]._type).toBe('TransactWrite');
   });
 
   test('returns 401 when user is not authenticated', async () => {
@@ -202,15 +203,18 @@ describe('cancel-task handler', () => {
   test.each(['RUNNING', 'AWAITING_APPROVAL'])('does not stop %s compute when cancellation loses a terminal race', async (status) => {
     mockSend.mockReset();
     mockSend.mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status, compute_type: 'lambda-microvm' } });
-    const condError = new Error('Condition not met');
-    condError.name = 'ConditionalCheckFailedException';
+    const condError = Object.assign(new Error('Transaction cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    });
     mockSend.mockRejectedValueOnce(condError);
-    mockSend.mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status: 'COMPLETED' } });
 
     const result = await handler(makeEvent());
 
     expect(result.statusCode).toBe(409);
     expect(JSON.parse(result.body).error.code).toBe('TASK_ALREADY_TERMINAL');
+    // The event rides the same transaction, so losing the race writes nothing.
+    expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
     expect(mockEcsSend).not.toHaveBeenCalled();
     expect(mockMicrovmSend).not.toHaveBeenCalled();
@@ -225,25 +229,33 @@ describe('cancel-task handler', () => {
     expect(result.statusCode).toBe(500);
   });
 
-  test('stamps TTL on task and event when cancelling', async () => {
-    mockSend.mockReset();
-    mockSend
-      .mockResolvedValueOnce({ Item: RUNNING_TASK }) // GetCommand
-      .mockResolvedValueOnce({}) // UpdateCommand
-      .mockResolvedValueOnce({}); // PutCommand (event)
-
+  test('cancels the task and writes its event in one transaction, both with a TTL', async () => {
     await handler(makeEvent());
 
-    // UpdateCommand (second call) should include ttl
-    const updateCall = mockSend.mock.calls[1][0];
-    expect(updateCall.input.UpdateExpression).toContain('#ttl = :ttl');
-    expect(updateCall.input.ExpressionAttributeNames['#ttl']).toBe('ttl');
-    expect(typeof updateCall.input.ExpressionAttributeValues[':ttl']).toBe('number');
+    const [update, put] = mockSend.mock.calls[1][0].input.TransactItems;
+    expect(update.Update.UpdateExpression).toContain('#ttl = :ttl');
+    expect(update.Update.ExpressionAttributeNames['#ttl']).toBe('ttl');
+    expect(typeof update.Update.ExpressionAttributeValues[':ttl']).toBe('number');
+    expect(update.Update.ConditionExpression).toContain('NOT #status IN');
 
-    // PutCommand (third call) should include ttl on event
-    const eventCall = mockSend.mock.calls[2][0];
-    expect(eventCall.input.Item.ttl).toBeDefined();
-    expect(typeof eventCall.input.Item.ttl).toBe('number');
+    expect(put.Put.TableName).toBe('TaskEvents');
+    expect(put.Put.Item.event_type).toBe('task_cancelled');
+    expect(put.Put.Item.metadata).toEqual({ cancelled_by: 'user-123' });
+    expect(typeof put.Put.Item.ttl).toBe('number');
+  });
+
+  test('returns 500 and stops no compute when the cancel transaction fails for another reason', async () => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({ Item: RUNNING_TASK });
+    mockSend.mockRejectedValueOnce(Object.assign(new Error('throttled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ThrottlingError' }, { Code: 'None' }],
+    }));
+
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(500);
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
   });
 
   test.each(['SUBMITTED', 'QUEUED', 'PENDING_UPLOADS'])('cancels %s without stopping compute', async (status) => {

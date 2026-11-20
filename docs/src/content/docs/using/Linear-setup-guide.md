@@ -220,7 +220,11 @@ Linear's [Agents API](https://linear.app/developers/agents) gives an installed a
 
 If you do these the other way round, every mention in the meantime opens a session that nothing answers, and Linear shows "did not respond". To turn the channel off, reverse the order: untick **Agent session events** first, then redeploy without the flag.
 
-**Every workspace on the stack needs step 2.** The flag is stack-wide, but the toggle belongs to each workspace's Linear app. With the flag on, a workspace whose app lacks the toggle gets no reply to standalone `@bgagent` mentions. ABCA logs `standalone mention is left to the Linear agent session` at WARN, naming the workspace. Label triggers still work there.
+3. Delegate one issue to bgagent in each workspace you enabled. ABCA switches a workspace's standalone `@bgagent` mentions over to sessions once it has received a session event from that workspace, and this is the first one. Skip it and the first mention may be answered by both the session and the comment flow.
+
+**Step 2 is per workspace.** The flag is stack-wide, but the toggle belongs to each workspace's Linear app. A workspace whose app lacks the toggle isn't affected by the flag: its `@bgagent` comments, label triggers and epics keep working as before.
+
+> **@-mentions and the WAF.** A session opened by an @-mention carries XML-like context that the API's web application firewall has been seen to reject, in which case the mention gets no response. **Delegating the issue works.** See the known gaps in [ADR-018](/sample-autonomous-cloud-coding-agents/decisions/adr-018-linear-agent-session-interaction).
 
 **What changes once it's on**
 
@@ -230,13 +234,18 @@ If you do these the other way round, every mention in the meantime opens a sessi
 | — the agent opens a PR | Attaches the pull request to the session header and posts an **Opened pull request** action. |
 | — a long run is in progress | Posts a short-lived "Still working" thought at most every 10 minutes, so the session never goes stale (Linear's idle limit is 30 minutes). |
 | — the task finishes | Posts one final activity carrying the same outcome, cost, turns and duration as the comment channel: a *response* on success, an *elicitation* if the run stopped to ask you a question, an *error* on failure. Linear turns it into the thread comment. |
+| — you're at your concurrency limit | Posts a "Queued" thought in the session. The task starts on its own when a slot frees up. |
 | Reply inside the session while the task runs | Your message goes to the running agent as a nudge (the same guardrail screening, 2,000-character cap and per-minute limit as `bgagent nudge`). The agent picks it up at its next step. Only the task's owner can steer it. |
 | Reply after the task has finished | Starts a follow-up task. If the run stopped to ask a question, your reply resumes the original request with the answer. Otherwise it's a PR iteration if a PR exists, or new work from your message plus the issue. |
-| Click **Stop** in the session | Cancels the running task (the agent exits after its current step) and confirms with a final response. Only the task's owner can stop it. |
+| Click **Stop** in the session | Cancels the running task and shuts its agent down, like `bgagent cancel`, then confirms with a final response. Only the task's owner can stop it. |
 
-**What stays on the comment path.** Linear sessions are per-issue and can't roll up across issues. So mentions on an **epic** or on a **started sub-issue of an orchestration** are still handled by the `@bgagent` comment flow and its epic panel. The session for those mentions replies with a pointer and closes. Label triggers (`bgagent`, `bgagent:help`) are unchanged. With the flag on, ABCA no longer acts on standalone `@bgagent` comments, because the session answers that same mention and acting on both would start two tasks.
+**What stays on the comment path.** Linear sessions are per-issue and can't roll up across issues. So mentions on an **epic** or on a **started sub-issue of an orchestration** are still handled by the `@bgagent` comment flow and its epic panel. The session for those mentions replies with a pointer and closes. Label triggers (`bgagent`, `bgagent:help`) are unchanged. In a workspace that delivers session events, ABCA no longer acts on standalone `@bgagent` comments, because the session answers that same mention and acting on both would start two tasks.
 
-**Who can act.** Every session request, `stop` included, needs a linked ABCA user ([Inviting teammates](#inviting-teammates)). An unlinked user gets an error activity and nothing runs. A new task is attributed to whoever asked for it. Steering or stopping a *running* task follows the API's rule: only its owner can do it.
+**Re-delegating a finished issue does nothing.** Linear opens no new session and sends ABCA nothing when you delegate an issue whose session is already complete. To restart work, reply inside the existing session.
+
+**Who can act.** Every session request, `stop` included, needs a linked ABCA user ([Inviting teammates](#inviting-teammates)). An unlinked user is told to link their account and nothing runs. The refusal never marks someone else's running session as failed. A new task is attributed to whoever asked for it. Steering or stopping a *running* task follows the API's rule: only its owner can do it.
+
+**Reactions.** A session task gets no 👀/✅/❌ reactions on the issue, since the session shows that state. The issue still moves to *In Progress* and *In Review*.
 
 **Not yet supported in sessions:** image and file attachments from the issue description (use a label trigger for those), and Linear's *plan* checklist.
 

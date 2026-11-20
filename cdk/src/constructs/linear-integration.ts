@@ -158,6 +158,25 @@ export interface LinearIntegrationProps {
      * tells the user to wait for the run to finish.
      */
     readonly nudgesTable?: dynamodb.ITable;
+    /**
+     * Per-user nudge rate limit, the value TaskApi gives ``POST /tasks/{id}/nudge``.
+     * Both paths spend the same counter row, so they must agree. Default 10.
+     */
+    readonly nudgeRateLimitPerMinute?: number;
+    /**
+     * Compute backends a session ``stop`` may shut down, mirroring the grants
+     * ``DELETE /tasks/{id}`` holds (TaskApi's cancel Lambda): cancelling the
+     * record alone lets the agent finish its turn and push after "Stopped".
+     * Each is optional so a deployment without that backend gets no grant.
+     */
+    readonly stopCompute?: {
+      /** AgentCore runtime ARN → ``bedrock-agentcore:StopRuntimeSession`` + ``RUNTIME_ARN``. */
+      readonly agentCoreRuntimeArn?: string;
+      /** ECS cluster ARN → ``ecs:StopTask`` (conditioned on the cluster) + ``ECS_CLUSTER_ARN``. */
+      readonly ecsClusterArn?: string;
+      /** Platform MicroVM image ARN → ``lambda:TerminateMicrovm``. */
+      readonly lambdaMicrovmImageArn?: string;
+    };
   };
 }
 
@@ -256,6 +275,25 @@ export class LinearIntegration extends Construct {
       ...commonBundling,
       nodeModules: ['pdf-parse'],
     };
+    // The processor reaches the shared cancel core, which calls
+    // StopRuntimeSession / TerminateMicrovm. The Lambda runtime's own AWS SDK
+    // lags current and may not carry those clients or commands, and an
+    // externalized import that is missing fails at module init — for every
+    // Linear webhook, flag on or off. So bundle them (anything not listed here),
+    // and keep only the long-stable clients external, as TaskApi does.
+    const webhookProcessorBundling: lambda.BundlingOptions = {
+      ...attachmentScreeningBundling,
+      externalModules: [
+        '@aws-sdk/client-dynamodb',
+        '@aws-sdk/client-ecs',
+        '@aws-sdk/client-lambda',
+        '@aws-sdk/client-bedrock-runtime',
+        '@aws-sdk/client-s3',
+        '@aws-sdk/client-secrets-manager',
+        '@aws-sdk/lib-dynamodb',
+        '@aws-sdk/util-dynamodb',
+      ],
+    };
 
     // --- Task creation environment (matches TaskApi / SlackIntegration pattern) ---
     const createTaskEnv: Record<string, string> = {
@@ -347,10 +385,10 @@ export class LinearIntegration extends Construct {
         // the threat-model note below argues down, to recover an alert, not a diagnosis.
         LINEAR_REVOCATION_RECORDING: 'true',
         ...(props.agentSessions && { LINEAR_AGENT_SESSIONS_ENABLED: 'true' }),
-        ...(props.agentSessions?.nudgesTable && { NUDGES_TABLE_NAME: props.agentSessions.nudgesTable.tableName }),
+        ...agentSessionProcessorEnv(props.agentSessions),
       },
       // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.
-      bundling: attachmentScreeningBundling,
+      bundling: webhookProcessorBundling,
     });
     this.webhookProcessorFn = webhookProcessorFn;
     this.projectMappingTable.grantReadData(webhookProcessorFn);
@@ -380,6 +418,7 @@ export class LinearIntegration extends Construct {
       resources: [this.workspaceRegistryTable.tableArn],
     }));
     // Console start claims: read for attribution, deleted once the task is dispatched.
+    // (GetItem also reads the agent-session task pointer.)
     webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:DeleteItem'],
       resources: [this.webhookDedupTable.tableArn],
@@ -458,16 +497,9 @@ export class LinearIntegration extends Construct {
       props.attachmentsBucket.grantPut(webhookProcessorFn);
       props.attachmentsBucket.grantDelete(webhookProcessorFn);
     }
-    // Agent-session follow-ups forwarded to a running agent (shared nudge core):
-    // a rate-limit counter UpdateItem and the nudge PutItem — never read or
-    // delete, so not `grantReadWriteData`. Same narrowing rationale as the
-    // registry grant above: this role parses attacker-supplied attachments.
-    if (props.agentSessions?.nudgesTable) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
-        resources: [props.agentSessions.nudgesTable.tableArn],
-      }));
-    }
+    // Agent-session channel (flag on only): nudges, the session → task pointer
+    // and the compute stop for a session `stop`.
+    grantAgentSessionAccess(webhookProcessorFn, this.webhookDedupTable, props.agentSessions);
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---
     const webhookFn = new lambda.NodejsFunction(this, 'WebhookFn', {
@@ -630,5 +662,74 @@ export class LinearIntegration extends Construct {
         },
       ], true);
     }
+  }
+}
+
+type AgentSessionsProps = NonNullable<LinearIntegrationProps['agentSessions']>;
+
+/** Processor env for the agent-session channel, beyond the gate itself. */
+function agentSessionProcessorEnv(agentSessions: AgentSessionsProps | undefined): Record<string, string> {
+  if (!agentSessions) return {};
+  const { nudgesTable, stopCompute } = agentSessions;
+  return {
+    ...(nudgesTable && {
+      NUDGES_TABLE_NAME: nudgesTable.tableName,
+      NUDGE_RATE_LIMIT_PER_MINUTE: String(agentSessions.nudgeRateLimitPerMinute ?? 10),
+    }),
+    // Fallback compute handles for a session stop (see `stopCompute`).
+    ...(stopCompute?.agentCoreRuntimeArn && { RUNTIME_ARN: stopCompute.agentCoreRuntimeArn }),
+    ...(stopCompute?.ecsClusterArn && { ECS_CLUSTER_ARN: stopCompute.ecsClusterArn }),
+  };
+}
+
+/**
+ * What the processor may do for the agent-session channel, and only with the
+ * flag on. Narrow by design: this role parses attacker-supplied attachments.
+ */
+function grantAgentSessionAccess(
+  processorFn: lambda.NodejsFunction,
+  webhookDedupTable: dynamodb.ITable,
+  agentSessions: AgentSessionsProps | undefined,
+): void {
+  if (!agentSessions) return;
+  // submitNudge writes the nudge row and bumps the rate-limit counter: no read,
+  // no delete, so not `grantReadWriteData`.
+  if (agentSessions.nudgesTable) {
+    processorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      resources: [agentSessions.nudgesTable.tableArn],
+    }));
+  }
+  // Session → task pointer (shared/linear-channel-metadata.ts): one Put per
+  // session-started task, read back consistently to cover the issue index's
+  // lag. PutItem only — the console-claim GetItem grant already covers the read.
+  processorFn.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:PutItem'],
+    resources: [webhookDedupTable.tableArn],
+  }));
+  // Session `stop` shuts the task's compute down, like DELETE /tasks/{id}.
+  // Same scoping as TaskApi's cancel Lambda, one statement per configured
+  // backend. Stop actions only — never start.
+  const stopCompute = agentSessions.stopCompute;
+  if (stopCompute?.agentCoreRuntimeArn) {
+    processorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock-agentcore:StopRuntimeSession'],
+      resources: [stopCompute.agentCoreRuntimeArn, `${stopCompute.agentCoreRuntimeArn}/*`],
+    }));
+  }
+  if (stopCompute?.ecsClusterArn) {
+    processorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:StopTask'],
+      resources: ['*'],
+      conditions: { ArnEquals: { 'ecs:cluster': stopCompute.ecsClusterArn } },
+    }));
+  }
+  if (stopCompute?.lambdaMicrovmImageArn) {
+    // Authorizes against the MicroVM *image*; `<arn>:*` is the version-suffix
+    // hedge TaskApi uses, still pinned to this image's name.
+    processorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['lambda:TerminateMicrovm'],
+      resources: [stopCompute.lambdaMicrovmImageArn, `${stopCompute.lambdaMicrovmImageArn}:*`],
+    }));
   }
 }

@@ -20,7 +20,7 @@
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
-import { transitionTaskToCancelled, writeTaskCancelledEvent, type CancelTaskTables } from './cancel-task-core';
+import { cancelTask, stopTaskCompute, type CancelTaskTables } from './cancel-task-core';
 import { buildClarifyResumeDescription, isClarifyHold, type ClarifyHoldRow } from './clarify-resume';
 import { createTaskCore } from './create-task-core';
 import {
@@ -37,7 +37,14 @@ import {
   type AgentSessionRequest,
   type LinearAgentSessionEvent,
 } from './linear-agent-session-event';
-import { lookupLinearPlatformUser, vaultMetadata } from './linear-channel-metadata';
+import {
+  lookupLinearPlatformUser,
+  lookupLinearProjectMapping,
+  readSessionTaskPointer,
+  recordWorkspaceAgentSession,
+  vaultMetadata,
+  writeSessionTaskPointer,
+} from './linear-channel-metadata';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { fetchIssueParentId } from './linear-subissue-fetch';
 import { lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
@@ -46,9 +53,9 @@ import { isLookupFailure, lookupValueOr } from './lookup-result';
 import { submitNudge } from './nudge-core';
 import { deriveOrchestrationId, loadOrchestration } from './orchestration-store';
 import { prNumberFromTask } from './task-pr-number';
-import { NUDGE_MAX_MESSAGE_LENGTH } from './types';
+import { NUDGE_MAX_MESSAGE_LENGTH, type TaskRecord } from './types';
 import { makeDocClient } from './ua';
-import { CODING_WORKFLOW_ID } from './workflows';
+import { CODING_WORKFLOW_ID, PR_ITERATION_WORKFLOW_ID } from './workflows';
 
 const ddb = makeDocClient();
 
@@ -61,9 +68,10 @@ const TASK_EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 /** Optional: without it a follow-up to a running task cannot be forwarded to the agent. */
 const NUDGES_TABLE_NAME = process.env.NUDGES_TABLE_NAME;
+/** Same value TaskApi gives `POST /tasks/{id}/nudge`: both paths share one counter row. */
 const NUDGE_RATE_LIMIT_PER_MINUTE = Number(process.env.NUDGE_RATE_LIMIT_PER_MINUTE ?? '10');
-
-const PR_ITERATION_WORKFLOW_ID = 'coding/pr-iteration-v1';
+/** Optional: holds the session → task pointer that covers the issue index's lag. */
+const WEBHOOK_DEDUP_TABLE = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME;
 
 const UNLINKED_ACTOR_MESSAGE =
   'I can only act on requests from a linked ABCA user. Link your Linear account first '
@@ -122,6 +130,9 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
   }
   const emit = (content: AgentActivityContent, ephemeral = false) =>
     emitSessionActivity(resolved.accessToken, request, content, ephemeral);
+  // Per-workspace evidence that sessions open here; the comment trigger only
+  // yields to sessions in workspaces that carry it.
+  await recordWorkspaceAgentSession(ddb, WORKSPACE_REGISTRY_TABLE, request.workspaceId);
 
   if (request.stopRequested) {
     // Orchestration children are cancelled through the epic, never from a
@@ -151,7 +162,7 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
     logger.warn('Agent-session actor has no linked platform user — refusing', {
       ...logCtx, linear_user_id: request.actorId,
     });
-    await emit({ type: 'error', body: UNLINKED_ACTOR_MESSAGE });
+    await emit(refusal(UNLINKED_ACTOR_MESSAGE, await findPriorTask(request)));
     return;
   }
 
@@ -201,6 +212,11 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
   };
   const idempotencyKey = agentSessionIdempotencyKey(request);
   const taskId = ulid();
+  // Before the create, so a prompt or stop that lands while it is in flight
+  // (or before the issue index catches up) still finds this task.
+  if (WEBHOOK_DEDUP_TABLE) {
+    await writeSessionTaskPointer(ddb, WEBHOOK_DEDUP_TABLE, { issueId: request.issueId, taskId });
+  }
   const result = await createTaskCore(
     iterate
       ? {
@@ -243,10 +259,23 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
 }
 
 /**
+ * A refusal must not change what the session says about the task. Linear
+ * derives session state from the LAST activity, so an ``error`` here would turn
+ * the owner's healthy, running session red because a teammate was refused. A
+ * ``thought`` leaves a running session running; once nothing is running the
+ * refusal is the session's answer, a ``response``.
+ */
+function refusal(body: string, priorTask: PriorTask | null): AgentActivityContent {
+  return priorTask && !isTerminal(priorTask.status) ? { type: 'thought', body } : { type: 'response', body };
+}
+
+/**
  * ``stop`` signal: Linear requires the agent to take no further action and
- * confirm with a final ``response``/``error``. The CANCELLED transition is what
- * stops the agent (it re-reads its record between turns); the fan-out
- * dispatcher skips its own cancel confirmation for this path.
+ * confirm with a final ``response``/``error``. Same behaviour as
+ * ``DELETE /tasks/{id}``: the task is cancelled (transition + event in one
+ * transaction) and its compute is stopped, so the agent does not finish its
+ * turn and push after "Stopped". The fan-out dispatcher skips its own cancel
+ * confirmation for this path.
  */
 async function handleStopRequest(
   request: AgentSessionRequest,
@@ -255,11 +284,11 @@ async function handleStopRequest(
   const platformUserId = request.actorId
     ? await lookupLinearPlatformUser(ddb, USER_MAPPING_TABLE, request.workspaceId, request.actorId)
     : null;
+  const priorTask = await findPriorTask(request);
   if (!platformUserId) {
-    await emit({ type: 'error', body: `Stop request ignored. ${UNLINKED_ACTOR_MESSAGE}` });
+    await emit(refusal(`Stop request ignored. ${UNLINKED_ACTOR_MESSAGE}`, priorTask));
     return;
   }
-  const priorTask = await findPriorTask(request);
   if (!priorTask || isTerminal(priorTask.status)) {
     await emit({ type: 'response', body: 'Stopped. Nothing was running for this issue.' });
     return;
@@ -269,7 +298,7 @@ async function handleStopRequest(
     logger.warn('Agent-session stop from a user who does not own the running task — refusing', {
       linear_agent_session_id: request.sessionId, task_id: priorTask.task_id,
     });
-    await emit({ type: 'error', body: `Stop request ignored. ${NOT_OWNER_MESSAGE}` });
+    await emit(refusal(`Stop request ignored. ${NOT_OWNER_MESSAGE}`, priorTask));
     return;
   }
   const tables: CancelTaskTables = {
@@ -279,19 +308,22 @@ async function handleStopRequest(
     retentionDays: TASK_RETENTION_DAYS,
   };
   const now = new Date().toISOString();
-  if (await transitionTaskToCancelled(tables, priorTask.task_id, now) === 'already_terminal') {
+  const outcome = await cancelTask(tables, priorTask.task_id, platformUserId, now, {
+    cancelled_via: SESSION_STOP_CANCELLED_VIA,
+  });
+  if (outcome === 'already_terminal') {
     await emit({ type: 'response', body: `Stopped. Task \`${priorTask.task_id}\` had already finished.` });
     return;
   }
-  await writeTaskCancelledEvent(tables, priorTask.task_id, platformUserId, now, {
-    cancelled_via: SESSION_STOP_CANCELLED_VIA,
-  });
+  // `priorTask` is the row as read before the cancel — the statuses and compute
+  // handle stopTaskCompute decides on.
+  await stopTaskCompute(tables, priorTask, now);
   logger.info('Agent-session stop cancelled task', {
     linear_agent_session_id: request.sessionId, task_id: priorTask.task_id, cancelled_by: platformUserId,
   });
   await emit({
     type: 'response',
-    body: `Stopped. Task \`${priorTask.task_id}\` is cancelled; the agent exits after its current step.`,
+    body: `Stopped. Task \`${priorTask.task_id}\` is cancelled and its agent is being shut down.`,
   });
 }
 
@@ -352,32 +384,59 @@ async function steerRunningTask(
 }
 
 /** The prior task as read from the base table (strongly consistent). */
-type PriorTask = LinearIssueTask & ClarifyHoldRow & {
-  readonly channel_metadata?: Readonly<Record<string, string>>;
-};
+type PriorTask = LinearIssueTask & ClarifyHoldRow
+  & Pick<TaskRecord, 'session_id' | 'agent_runtime_arn' | 'compute_type' | 'compute_metadata' | 'created_at'>
+  & {
+    readonly status: TaskStatusType;
+    readonly channel_metadata?: Readonly<Record<string, string>>;
+  };
 
 /**
  * The issue's newest ABCA task, scoped to this workspace. Throws on a lookup
  * failure: guessing "no task" would start a duplicate run beside a live one.
+ *
+ * Two sources, because neither is enough alone. The ``LinearIssueIndex`` GSI
+ * knows every task for the issue but is eventually consistent, so it can miss
+ * one created a moment ago. The session → task pointer is strongly consistent
+ * but only covers tasks a session just started. Each candidate row is re-read
+ * from the base table, and the newer one wins.
  */
 async function findPriorTask(request: AgentSessionRequest): Promise<PriorTask | null> {
   const lookup = await lookupTaskByLinearIssue(ddb, TASK_TABLE_NAME, request.issueId);
   if (lookup.kind === 'error') {
     throw new Error(`Task lookup for Linear issue ${request.issueId} failed: ${lookup.message}`);
   }
-  if (lookup.kind === 'none') return null;
-  // The GSI is eventually consistent and projects no clarify/owner detail: re-read
-  // the row itself so "still running?" (nudge vs. new task) and "who owns it?"
-  // are decided on current data, not a lagging index.
+  const pointerTaskId = WEBHOOK_DEDUP_TABLE
+    ? await readSessionTaskPointer(ddb, WEBHOOK_DEDUP_TABLE, request.issueId)
+    : null;
+  const indexTaskId = lookup.kind === 'found' ? lookup.task.task_id : null;
+  const fromIndex = indexTaskId ? await readTaskForIssue(indexTaskId, request) : null;
+  const fromPointer = pointerTaskId && pointerTaskId !== indexTaskId
+    ? await readTaskForIssue(pointerTaskId, request)
+    : null;
+  if (fromIndex && fromPointer) return fromPointer.created_at > fromIndex.created_at ? fromPointer : fromIndex;
+  return fromIndex ?? fromPointer;
+}
+
+/**
+ * Strongly consistent read of one candidate. The index projects no
+ * clarify/owner/compute detail and may lag, so "still running?" (nudge vs. new
+ * task) and "who owns it?" are decided on the row itself.
+ */
+async function readTaskForIssue(taskId: string, request: AgentSessionRequest): Promise<PriorTask | null> {
   const { Item: record } = await ddb.send(new GetCommand({
     TableName: TASK_TABLE_NAME,
-    Key: { task_id: lookup.task.task_id },
+    Key: { task_id: taskId },
     ConsistentRead: true,
   }));
+  // A pointer written just before a create that was then rejected names no row.
   if (!record) return null;
   const task = record as PriorTask;
   const ownerWorkspaceId = task.channel_metadata?.linear_workspace_id;
-  if (ownerWorkspaceId !== request.workspaceId) {
+  // Only a MISMATCH is another tenant's task. A task with no recorded workspace
+  // predates that field; Linear issue ids are globally unique, so it is this
+  // issue's task, and ignoring it would start a duplicate beside it.
+  if (ownerWorkspaceId && ownerWorkspaceId !== request.workspaceId) {
     logger.warn('Agent-session issue\'s task belongs to another workspace — ignoring it', {
       linear_issue_id: request.issueId,
       event_workspace_id: request.workspaceId,
@@ -411,22 +470,26 @@ async function belongsToOrchestration(accessToken: string, issueId: string): Pro
   return Boolean(child?.child_task_id);
 }
 
-/** Project → repo mapping, scoped to the delivering workspace. */
+/**
+ * Project → repo mapping, through the same helper as the label trigger so both
+ * channels admit the same issues — including mappings written before the owning
+ * workspace was recorded, which the label path still accepts.
+ */
 async function resolveMappedRepo(issue: AgentSessionIssue, workspaceId: string): Promise<string | null> {
-  if (!issue.projectId) return null;
-  const result = await ddb.send(new GetCommand({
-    TableName: PROJECT_MAPPING_TABLE,
-    Key: { linear_project_id: issue.projectId },
-  }));
-  const item = result.Item;
-  if (!item || item.status !== 'active' || typeof item.repo !== 'string') return null;
-  if (item.linear_workspace_id !== workspaceId) {
+  const mapping = await lookupLinearProjectMapping(ddb, PROJECT_MAPPING_TABLE, issue.projectId, workspaceId);
+  if (mapping.kind === 'foreign') {
     logger.warn('Agent-session issue\'s project mapping belongs to another workspace — refusing', {
       linear_project_id: issue.projectId, event_workspace_id: workspaceId,
     });
     return null;
   }
-  return item.repo;
+  if (mapping.kind === 'none' || typeof mapping.item.repo !== 'string') return null;
+  if (!mapping.ownerVerified) {
+    logger.warn('Linear project mapping records no owning workspace — cannot verify the tenant', {
+      linear_project_id: issue.projectId, event_workspace_id: workspaceId,
+    });
+  }
+  return mapping.item.repo;
 }
 
 function isTerminal(status: string | undefined): boolean {
