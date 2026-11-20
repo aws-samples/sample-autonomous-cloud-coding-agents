@@ -249,6 +249,31 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // The agent's push preflight (agent/src/repo.py): SAML SSO or an IP allow list
+    // blocks the token, which scopes would not fix.
+    pattern: /GitHub organization policy blocks pushes to/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'GitHub organization policy blocks the token',
+      description: 'The organization that owns the repository enforces SAML single sign-on or an IP allow list, and the GitHub token does not satisfy it.',
+      remedy: 'Do what the error detail names: authorize the token for the organization\'s SAML single sign-on, or add the agent\'s egress IP addresses to the organization\'s IP allow list. Then resubmit.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    // The agent's push preflight: no token change makes an archived repository writable.
+    pattern: /is archived on GitHub, so it is read-only/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'Repository is archived',
+      description: 'The repository is archived on GitHub, so nothing can be pushed to it.',
+      remedy: 'Unarchive the repository on GitHub, or submit the task against another repository.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /Token cannot (push to|interact with pull requests on)/i,
     classification: {
       category: ErrorCategory.AUTH,
@@ -909,6 +934,30 @@ const PATTERNS: readonly ErrorPattern[] = [
 ];
 
 /**
+ * The agent's push preflight refusal (``PushCapabilityError`` in agent/src/repo.py):
+ * ``Token cannot push to <repo>: GitHub refused the <token type> write access (<git
+ * line>). To fix it, <fix>. The task stopped before the agent ran …``. The fix
+ * depends on the token type (scope for a classic PAT, repository access and
+ * Contents for a fine-grained one, installation for a GitHub App), so the
+ * classification carries the agent's own fix rather than the generic remedy of
+ * the ``Token cannot push`` pattern, which the orchestrator's preflight shares.
+ * The fix is matched up to the sentence that follows it, so a period inside it (a
+ * repository named ``a.b``) does not cut it short.
+ */
+const AGENT_PUSH_REFUSAL = /Token cannot push to (\S+): GitHub refused the (.+?) write access \(.*?\)\. To fix it, (.+?)\. The task stopped before the agent ran/;
+
+function agentPushRefusalClassification(repo: string, tokenType: string, fix: string): ErrorClassification {
+  return {
+    category: ErrorCategory.AUTH,
+    title: 'Insufficient GitHub token scopes',
+    description: `GitHub refused the ${tokenType} write access to ${repo}.`,
+    remedy: `${fix.charAt(0).toUpperCase()}${fix.slice(1)}. Then resubmit. The permissions each token type needs are in agent/README.md, GitHub PAT — Minimal Permissions.`,
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  };
+}
+
+/**
  * Canonical blocker-reason contract. Matches ``BLOCKED[<kind>]`` and,
  * separately, the optional `` (resource: <resource>)``
  * segment ``format_blocker_reason`` appends. This is the SINGLE source of truth
@@ -1064,6 +1113,11 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
   if (kindMatch) {
     const resource = BLOCKED_RESOURCE.exec(errorMessage)?.[1];
     return blockerClassification(kindMatch[1].toLowerCase(), resource);
+  }
+
+  const pushRefusal = AGENT_PUSH_REFUSAL.exec(errorMessage);
+  if (pushRefusal) {
+    return agentPushRefusalClassification(pushRefusal[1], pushRefusal[2], pushRefusal[3]);
   }
 
   for (const { pattern, exclude, classification } of PATTERNS) {
