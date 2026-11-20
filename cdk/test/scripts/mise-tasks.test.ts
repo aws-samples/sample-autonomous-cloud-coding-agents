@@ -98,3 +98,81 @@ describe('the default task, which `mise run` without a task name runs', () => {
     ]);
   });
 });
+
+describe('the git hooks step of the install task', () => {
+  const [, hooks] = task('install').map((line) => /^\s*'''(bash -c '.*') ''',$/.exec(line)).find(Boolean) ?? [];
+  if (hooks === undefined) {
+    throw new Error('install: no git hooks step');
+  }
+
+  type Git = (...args: string[]) => void;
+  type Setup = (git: Git, repo: string, outside: string) => NodeJS.ProcessEnv | void;
+
+  const run = (setup: Setup, prekStatus = 0, from = 'repo') => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'abca-install-hooks-')));
+    try {
+      const [repo, outside, bin] = ['repo', 'outside', 'bin'].map((name) => path.join(root, name));
+      [repo, outside, bin].forEach((dir) => fs.mkdirSync(dir));
+      fs.symlinkSync(repo, path.join(root, 'link'));
+      fs.writeFileSync(path.join(bin, 'prek'), `#!/bin/sh\ntouch "${root}/called"\nexit ${prekStatus}\n`, { mode: 0o755 });
+
+      const env: NodeJS.ProcessEnv = {
+        ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+        GIT_CONFIG_GLOBAL: path.join(root, 'global'),
+        GIT_CONFIG_SYSTEM: path.join(root, 'system'),
+      };
+      const git: Git = (...args) => expect(spawnSync('git', args, { cwd: repo, env }).status).toBe(0);
+      git('init', '-q');
+      Object.assign(env, setup(git, repo, outside));
+
+      const result = spawnSync('sh', ['-c', hooks], { cwd: path.join(root, from), env, encoding: 'utf-8' });
+      return { status: result.status, stderr: result.stderr, called: fs.existsSync(path.join(root, 'called')) };
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test.each<[string, Setup]>([
+    ['unset', () => undefined],
+    ['local, relative', (git) => git('config', '--local', 'core.hooksPath', '.githooks')],
+    ['local, absolute inside the repository', (git, repo) => git('config', '--local', 'core.hooksPath', path.join(repo, '.githooks'))],
+    ['local, absolute outside the repository', (git, _, outside) => git('config', '--local', 'core.hooksPath', outside)],
+    ['global, overridden by local', (git, _, outside) => {
+      git('config', '--global', 'core.hooksPath', outside);
+      git('config', '--local', 'core.hooksPath', '.githooks');
+    }],
+  ])('installs the hooks when core.hooksPath is %s', (_, setup) => {
+    const result = run(setup);
+
+    expect(result).toMatchObject({ status: 0, called: true });
+    expect(result.stderr).not.toContain('git hooks not installed');
+  });
+
+  test.each<[string, Setup]>([
+    ['global, absolute outside the repository', (git, _, outside) => git('config', '--global', 'core.hooksPath', outside)],
+    ['global, relative', (git) => git('config', '--global', 'core.hooksPath', '.githooks')],
+    ['global, absolute inside the repository', (git, repo) => git('config', '--global', 'core.hooksPath', path.join(repo, '.githooks'))],
+    ['global, empty', (git) => git('config', '--global', 'core.hooksPath', '')],
+    ['system', (git, _, outside) => git('config', '--system', 'core.hooksPath', outside)],
+    ['on the command line', (_, __, outside) => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: outside })],
+  ])('skips the hooks with a warning and succeeds when core.hooksPath is %s', (_, setup) => {
+    const result = run(setup);
+
+    expect(result).toMatchObject({ status: 0, called: false });
+    expect(result.stderr).toContain('git hooks not installed');
+  });
+
+  test('decides by config scope, not by path, when the repository is reached through a symlink', () => {
+    expect(run((git, _, outside) => git('config', '--global', 'core.hooksPath', outside), 0, 'link')).toMatchObject({ called: false });
+    expect(run((git, _, outside) => git('config', '--local', 'core.hooksPath', outside), 0, 'link')).toMatchObject({ called: true });
+  });
+
+  test('fails when prek fails for any other reason', () => {
+    expect(run(() => undefined, 3)).toMatchObject({ status: 3, called: true });
+  });
+
+  test('does nothing outside a git checkout', () => {
+    expect(run((_, repo) => fs.rmSync(path.join(repo, '.git'), { recursive: true }))).toMatchObject({ status: 0, called: false, stderr: '' });
+  });
+});
