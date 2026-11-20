@@ -353,6 +353,38 @@ async function expireQueuedTask(task: QueuedTask): Promise<boolean> {
   return true;
 }
 
+/** How often a task still waiting in the queue re-announces itself. */
+const QUEUE_HEARTBEAT_MINUTES = 15;
+const QUEUE_HEARTBEAT_SECONDS = QUEUE_HEARTBEAT_MINUTES * 60;
+/** The pickup schedule's interval (the default; see AdmissionQueuePickup). */
+const PICKUP_INTERVAL_SECONDS = 60;
+
+/**
+ * True when a task queued for ``ageSeconds`` crossed another heartbeat mark in the
+ * last pickup interval, so each mark fires once on a 1-minute schedule.
+ * @param ageSeconds - how long the task has been queued.
+ */
+export function isQueueHeartbeatDue(ageSeconds: number): boolean {
+  return ageSeconds >= QUEUE_HEARTBEAT_SECONDS && ageSeconds % QUEUE_HEARTBEAT_SECONDS < PICKUP_INTERVAL_SECONDS;
+}
+
+/**
+ * Re-emit ``admission_queued`` (with ``waited_s``) for tasks that stay queued past a
+ * heartbeat mark (#1066). A Linear agent session shows it as "Still queued (N min so
+ * far)", and the activity keeps a long wait from turning the session stale. Best effort
+ * (``emitEvent`` logs and swallows a failed write).
+ * @param waiting - tasks this cycle leaves in the queue.
+ */
+async function emitQueueHeartbeats(waiting: readonly QueuedTask[]): Promise<void> {
+  for (const task of waiting) {
+    if (!isQueueHeartbeatDue(task.age_seconds)) continue;
+    await emitEvent(task.task_id, 'admission_queued', {
+      reason: { S: 'concurrency_limit' },
+      waited_s: { N: String(Math.floor(task.age_seconds)) },
+    });
+  }
+}
+
 export async function handler(): Promise<PickupSummary> {
   const now = new Date();
   const summary: PickupSummary = {
@@ -428,6 +460,7 @@ export async function handler(): Promise<PickupSummary> {
 
     if (available <= 0) {
       summary.skipped_no_capacity += live.length;
+      await emitQueueHeartbeats(live);
       continue;
     }
 
@@ -459,6 +492,7 @@ export async function handler(): Promise<PickupSummary> {
       }
     }
     summary.skipped_no_capacity += Math.max(0, live.length - available);
+    await emitQueueHeartbeats(live.slice(available));
   }
 
   // Escalate to ERROR when the cycle made no forward progress despite a

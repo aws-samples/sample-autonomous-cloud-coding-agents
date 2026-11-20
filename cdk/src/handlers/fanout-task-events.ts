@@ -66,7 +66,7 @@ import {
   renderJiraFinishedPointer,
   type JiraFinishedPointerKind,
 } from './shared/jira-status-comment';
-import { addAgentSessionExternalUrl, emitAgentActivity, type AgentActivityContent } from './shared/linear-agent-session';
+import { addAgentSessionExternalUrl, emitAgentActivity, setAgentSessionPlan, type AgentActivityContent } from './shared/linear-agent-session';
 import { isLinearAgentSessionsEnabled, SESSION_STOP_CANCELLED_VIA } from './shared/linear-agent-session-event';
 import {
   EMOJI_FAILURE,
@@ -75,10 +75,27 @@ import {
   postIssueComment,
   resolveToken,
   swapCommentReaction,
+  transitionIssueState,
   upsertThreadedReply,
   type LinearFeedbackContext,
   type LinearPostResult,
 } from './shared/linear-feedback';
+import {
+  checklistKind,
+  checklistMoveForEvent,
+  closingLine,
+  renderChecklist,
+  type ChecklistEnding,
+  type ChecklistState,
+  type SessionOutcome,
+} from './shared/linear-session-checklist';
+import {
+  LINEAR_SESSION_PROGRESS_EVENTS,
+  LINEAR_SESSION_PROGRESS_MILESTONES,
+  progressActivityId,
+  sessionProgressActivity,
+  type SessionProgressActivity,
+} from './shared/linear-session-progress';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -219,9 +236,10 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     'task_timed_out',
     // Agent-session channel (ADR-018 Phase 2): per-turn events drive the throttled
     // keep-alive activity that stops a long run's Linear session going `stale`
-    // (30 min idle). Subscribed only with the flag on, so a default deployment
-    // does not pay a task read per agent turn.
-    ...(isLinearAgentSessionsEnabled() ? [LINEAR_SESSION_HEARTBEAT_EVENT] : []),
+    // (30 min idle), and these plus tool calls, queueing, context and milestones are
+    // streamed into the session as progress (#1066). Subscribed only with the flag
+    // on, so a default deployment does not pay a task read per agent turn.
+    ...(isLinearAgentSessionsEnabled() ? [...LINEAR_SESSION_PROGRESS_EVENTS] : []),
   ]),
   // Jira posts a single deterministic final-status comment on terminal
   // events — the Jira analogue of the Linear default above.
@@ -379,7 +397,7 @@ export function parseStreamRecord(record: DynamoDBRecord): FanOutEvent | null {
  * ``trajectory_uploaded``, ``trace_truncated``. Only ``pr_created``
  * is currently in any channel's default filter (§6.2 Slack + GitHub).
  */
-const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set(['pr_created']);
+const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set(['pr_created', ...LINEAR_SESSION_PROGRESS_MILESTONES]);
 
 /**
  * Unwrap ``agent_milestone`` events to their milestone name for
@@ -1223,17 +1241,17 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
-  // Per-turn events reach this dispatcher for EVERY task once the session flag
-  // is on. Decide from memory before paying a task read: a task known not to
-  // be a session task never heartbeats, and a session task inside its
-  // keep-alive window has nothing to post yet.
-  const isHeartbeat = event.event_type === LINEAR_SESSION_HEARTBEAT_EVENT;
-  if (isHeartbeat && heartbeatCanSkipTaskRead(event.task_id)) return;
+  // Session-progress events (per-turn, tool calls, …) reach this dispatcher for
+  // EVERY task once the session flag is on. Decide from memory before paying a
+  // task read: a task known not to be a session task has nothing to show, and a
+  // session task's text-less turn inside its keep-alive window has nothing to post.
+  const progressOnly = LINEAR_SESSION_PROGRESS_EVENTS.has(effectiveEventType(event));
+  if (progressOnly && progressCanSkipTaskRead(event)) return;
 
   const task = await loadTaskForComment(event.task_id);
   // Only a row that was actually read says what kind of task this is: a miss
   // (not replicated yet, a transient read) must not switch its keep-alive off.
-  if (isHeartbeat && task) rememberHeartbeatTask(event.task_id, task);
+  if (progressOnly && task) rememberHeartbeatTask(event.task_id, task);
   if (!task) {
     logger.warn('[fanout/linear] task not found — skipping comment', {
       event: 'fanout.linear.task_missing',
@@ -1273,8 +1291,9 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     });
     return;
   }
-  // The per-turn heartbeat only matters to session tasks.
-  if (event.event_type === LINEAR_SESSION_HEARTBEAT_EVENT) return;
+  // Session progress only matters to session tasks. (The comment path below would
+  // otherwise read any `agent_milestone` as the PR milestone.)
+  if (progressOnly) return;
 
   // Iteration-UX: this task is a comment-iteration when it carries a maturing
   // reply id (set at trigger time). For those, the progress + terminal status
@@ -1452,6 +1471,20 @@ interface HeartbeatTaskMemo {
 const HEARTBEAT_MEMO_MAX_ENTRIES = 2000;
 const heartbeatMemo = new Map<string, HeartbeatTaskMemo>();
 
+/**
+ * True when a session-progress event can be dropped without reading the task: the
+ * task is known not to be a session task, or this is a turn with no text (a bare
+ * keep-alive) inside the session's keep-alive window.
+ */
+function progressCanSkipTaskRead(event: FanOutEvent): boolean {
+  const memo = heartbeatMemo.get(event.task_id);
+  if (!memo) return false;
+  if (!memo.sessionTask) return true;
+  return event.event_type === LINEAR_SESSION_HEARTBEAT_EVENT
+    && sessionProgressActivity(event.event_type, event.metadata) === null
+    && heartbeatCanSkipTaskRead(event.task_id);
+}
+
 function heartbeatCanSkipTaskRead(taskId: string): boolean {
   const memo = heartbeatMemo.get(taskId);
   if (!memo) return false;
@@ -1507,6 +1540,16 @@ async function dispatchToLinearAgentSession(
   ctx: LinearFeedbackContext,
 ): Promise<void> {
   const effective = effectiveEventType(event);
+  await advanceSessionChecklist(event, task, agentSessionId, ctx);
+  if (LINEAR_SESSION_PROGRESS_EVENTS.has(effective)) {
+    const progress = sessionProgressActivity(effective, event.metadata);
+    if (progress) {
+      await emitLinearSessionProgress(event, task, agentSessionId, ctx, progress);
+      return;
+    }
+    // A turn without text is still the keep-alive below.
+    if (effective !== LINEAR_SESSION_HEARTBEAT_EVENT) return;
+  }
   const isTerminalEvent = LINEAR_SESSION_TERMINAL_EVENTS.has(effective);
   if (effective !== 'pr_created' && effective !== LINEAR_SESSION_HEARTBEAT_EVENT && !isTerminalEvent) return;
   const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effective };
@@ -1566,7 +1609,10 @@ async function dispatchToLinearAgentSession(
     if (result.ok) await saveLinearPrCommentState(task.task_id, event.event_id);
   } else {
     result = await emitAgentActivity(token, agentSessionId, linearSessionTerminalActivity(task, event));
-    if (result.ok) await saveLinearCommentState(task.task_id, event.event_id);
+    if (result.ok) {
+      await saveLinearCommentState(task.task_id, event.event_id);
+      if (sessionOutcome(task, event) === 'pr') await moveSessionIssueToReview(task, ctx);
+    }
   }
 
   if (result.ok) {
@@ -1585,10 +1631,183 @@ async function dispatchToLinearAgentSession(
   }
 }
 
+/**
+ * How a finished task reads in its session: a pull request to review (also one shipped
+ * by a run that then stopped early), a question back, no change, a stop, or a failure.
+ */
+function sessionOutcome(task: TaskRecord, event: FanOutEvent): SessionOutcome {
+  if (event.event_type === 'task_completed') {
+    if (task.pr_url) return 'pr';
+    // Same shape as the elicitation: no PR and no code change means the run asked a question.
+    return task.code_changed === false ? 'question' : 'no_change';
+  }
+  if (event.event_type === 'task_cancelled') return 'cancelled';
+  return task.pr_url ? 'pr' : 'failed';
+}
+
+/** ``#12`` from a pull request URL. */
+function prLabel(prUrl: string | undefined): string | undefined {
+  const n = prUrl?.match(/\/pull\/(\d+)/)?.[1];
+  return n ? `#${n}` : undefined;
+}
+
+/**
+ * Move the session's checklist (#1066). In-flight events move it forward only, with a
+ * conditional write on ``linear_checklist_stage``; the terminal event completes it, or
+ * cancels what was left. Best effort: the checklist is a view, never worth a batch retry.
+ */
+async function advanceSessionChecklist(
+  event: FanOutEvent,
+  task: TaskRecord,
+  agentSessionId: string,
+  ctx: LinearFeedbackContext,
+): Promise<void> {
+  const kind = checklistKind(task.resolved_workflow?.id);
+  if (!kind || task.linear_final_comment_event_id) return;
+  const effective = effectiveEventType(event);
+  // The document client returns numbers as numbers; coerce in case an older writer stored a string.
+  const recorded = Number(task.linear_checklist_stage ?? 0);
+  let state: ChecklistState;
+  let ending: ChecklistEnding | undefined;
+  if (LINEAR_SESSION_TERMINAL_EVENTS.has(effective)) {
+    const outcome = sessionOutcome(task, event);
+    if (outcome === 'question') {
+      state = { stage: recorded, note: 'waiting on your answer' };
+    } else {
+      state = { stage: recorded, pr: prLabel(task.pr_url) };
+      ending = outcome === 'pr' && event.event_type === 'task_completed' ? 'done' : 'stopped';
+    }
+  } else {
+    if (TERMINAL_STATUSES.includes(task.status)) return;
+    const move = checklistMoveForEvent(effective, task.pr_url);
+    if (!move) return;
+    state = { ...move, pr: move.pr ?? prLabel(task.pr_url) };
+  }
+  const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effective };
+  try {
+    if (!ending && state.note !== 'waiting on your answer' && !(await claimChecklistStage(task.task_id, state.stage))) return;
+    const token = await resolveToken(ctx);
+    if (!token) return;
+    const result = await setAgentSessionPlan(token, agentSessionId, renderChecklist(kind, state, ending));
+    if (!result.ok) logger.warn('[fanout/linear-session] checklist not updated', { ...logCtx, retryable: result.retryable });
+  } catch (err) {
+    logger.warn('[fanout/linear-session] checklist update failed (best effort)', {
+      ...logCtx, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Record a checklist stage if it is past the recorded one; false when it is not (nothing to show). */
+async function claimChecklistStage(taskId: string, stage: number): Promise<boolean> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return false;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET linear_checklist_stage = :s',
+      ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_checklist_stage) OR linear_checklist_stage < :s)',
+      ExpressionAttributeValues: { ':s': stage },
+    }));
+    return true;
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+/**
+ * A session task that ends with a pull request moves its issue to "In Review" (a
+ * ``started`` state, so a person's later move to Done is never undone). Best effort.
+ */
+async function moveSessionIssueToReview(task: TaskRecord, ctx: LinearFeedbackContext): Promise<void> {
+  const issueId = task.channel_metadata?.linear_issue_id;
+  if (!issueId) return;
+  try {
+    await transitionIssueState(ctx, issueId, 'started', ['In Review']);
+  } catch (err) {
+    logger.warn('[fanout/linear-session] could not move the issue to In Review (best effort)', {
+      task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Persistent progress activities per session task; ephemeral ones replace each other and are not counted. */
+const LINEAR_SESSION_PROGRESS_CAP = 30;
+
+/**
+ * Emit one progress activity into the task's session (#1066). Best effort: a failure is
+ * logged and never retried through the batch, since the next event supersedes it. Never
+ * posts after the session's final activity or into a finished task, because an activity
+ * after the closing `response` would reopen the session. Persistent activities are capped
+ * per task by a conditional counter on the task row; the activity id is derived from the
+ * event id, so a re-run record emits the same activity.
+ */
+async function emitLinearSessionProgress(
+  event: FanOutEvent,
+  task: TaskRecord,
+  agentSessionId: string,
+  ctx: LinearFeedbackContext,
+  progress: SessionProgressActivity,
+): Promise<void> {
+  if (task.linear_final_comment_event_id || TERMINAL_STATUSES.includes(task.status)) return;
+  const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effectiveEventType(event) };
+  try {
+    if (!progress.ephemeral && !(await claimProgressSlot(task.task_id))) return;
+    const token = await resolveToken(ctx);
+    if (!token) return;
+    const result = await emitAgentActivity(token, agentSessionId, progress.content, {
+      ephemeral: progress.ephemeral,
+      id: progressActivityId(event.event_id),
+    });
+    if (!result.ok) logger.warn('[fanout/linear-session] progress activity not emitted', { ...logCtx, retryable: result.retryable });
+  } catch (err) {
+    logger.warn('[fanout/linear-session] progress activity failed (best effort)', {
+      ...logCtx, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Take one of the task's persistent progress slots; false once the cap is reached. */
+async function claimProgressSlot(taskId: string): Promise<boolean> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName) return false;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { task_id: taskId },
+      UpdateExpression: 'ADD linear_session_progress_count :one',
+      ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_session_progress_count) OR linear_session_progress_count < :cap)',
+      ExpressionAttributeValues: { ':one': 1, ':cap': LINEAR_SESSION_PROGRESS_CAP },
+    }));
+    return true;
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+/**
+ * Event ids of tool calls that a later tool call of the same task in this batch
+ * supersedes. Only the newest one is shown (it is an ephemeral "currently doing" line,
+ * replaced by the next activity anyway), which keeps a busy agent's Linear calls down.
+ */
+export function supersededToolCallIds(records: DynamoDBStreamEvent['Records']): Set<string> {
+  const latest = new Map<string, string>();
+  const all: Array<{ taskId: string; eventId: string }> = [];
+  for (const record of records) {
+    const ev = parseStreamRecord(record);
+    if (!ev || ev.event_type !== 'agent_tool_call') continue;
+    all.push({ taskId: ev.task_id, eventId: ev.event_id });
+    latest.set(ev.task_id, ev.event_id);
+  }
+  return new Set(all.filter((c) => latest.get(c.taskId) !== c.eventId).map((c) => c.eventId));
+}
+
 /** The session's final activity for a terminal event. */
 export function linearSessionTerminalActivity(task: TaskRecord, event: FanOutEvent): AgentActivityContent {
   const args = linearFinalStatusArgs(task, event);
-  const body = renderLinearFinalStatusComment(args);
+  const body = `${renderLinearFinalStatusComment(args)}\n\n${closingLine(sessionOutcome(task, event))}`;
   if (event.event_type === 'task_completed') {
     return args.needsInput ? { type: 'elicitation', body } : { type: 'response', body };
   }
@@ -2360,6 +2579,10 @@ export const handler = async (
   event: DynamoDBStreamEvent,
 ): Promise<DynamoDBBatchResponse> => {
   const perTaskCounts = new Map<string, number>();
+  // Session-progress events have their own per-task budget, so a burst of them can
+  // never push a task's PR or terminal event out of the batch.
+  const perTaskProgressCounts = new Map<string, number>();
+  const supersededToolCalls = supersededToolCallIds(event.Records);
   const batchItemFailures: DynamoDBBatchItemFailure[] = [];
   let processed = 0;
   let dispatched = 0;
@@ -2382,8 +2605,15 @@ export const handler = async (
         dropped++;
         continue;
       }
+      // Only the latest tool call of a task in this batch is shown: the session's
+      // "currently doing" line would replace the earlier ones at once anyway.
+      if (supersededToolCalls.has(ev.event_id)) {
+        dropped++;
+        continue;
+      }
 
-      const seen = perTaskCounts.get(ev.task_id) ?? 0;
+      const counts = LINEAR_SESSION_PROGRESS_EVENTS.has(effectiveEventType(ev)) ? perTaskProgressCounts : perTaskCounts;
+      const seen = counts.get(ev.task_id) ?? 0;
       if (seen >= MAX_EVENTS_PER_TASK_PER_INVOCATION) {
         logger.warn('[fanout] per-task cap hit — dropping event', {
           event: 'fanout.rate_limit.hit',
@@ -2396,7 +2626,7 @@ export const handler = async (
         dropped++;
         continue;
       }
-      perTaskCounts.set(ev.task_id, seen + 1);
+      counts.set(ev.task_id, seen + 1);
 
       const outcome = await routeEvent(ev, overrides);
       if (outcome.dispatched.length > 0) dispatched++;

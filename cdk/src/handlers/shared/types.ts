@@ -343,6 +343,11 @@ export interface TaskRecord {
    */
   readonly linear_session_pr_link_event_id?: string;
   /**
+   * Stage the Linear agent session's checklist has reached (#1066). Written with a
+   * forward-only conditional update, so the checklist never moves back.
+   */
+  readonly linear_checklist_stage?: number;
+  /**
    * Event ID of the terminal event whose ordinary Jira final-status comment
    * was successfully posted (fan-out plane). This marker makes that create
    * idempotent across partial-batch Lambda retries. Comment-triggered

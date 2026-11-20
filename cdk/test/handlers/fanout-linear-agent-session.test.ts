@@ -99,8 +99,10 @@ function mockTask(task: Record<string, unknown>, updateError?: Error): void {
   });
 }
 
+/** Task-record writes, without the session checklist's stage (covered in fanout-linear-session-progress.test.ts). */
 function updates(): Array<{ UpdateExpression: string; ConditionExpression?: string }> {
-  return mockDdbSend.mock.calls.filter((c) => c[0]._type === 'Update').map((c) => c[0].input);
+  return mockDdbSend.mock.calls.filter((c) => c[0]._type === 'Update').map((c) => c[0].input)
+    .filter((u) => !String(u.UpdateExpression).includes('linear_checklist_stage'));
 }
 
 beforeEach(() => {

@@ -76,11 +76,12 @@ export async function emitAgentActivity(
   accessToken: string,
   agentSessionId: string,
   content: AgentActivityContent,
-  options: { readonly ephemeral?: boolean } = {},
+  options: { readonly ephemeral?: boolean; readonly id?: string } = {},
 ): Promise<LinearPostResult> {
   const ephemeral = options.ephemeral === true && (content.type === 'thought' || content.type === 'action');
   return graphqlRequest(accessToken, AGENT_ACTIVITY_CREATE_MUTATION, {
-    input: { agentSessionId, content, ...(ephemeral && { ephemeral: true }) },
+    // `id` (a version-4 UUID) makes a retried emit the same activity rather than a second one.
+    input: { agentSessionId, content, ...(ephemeral && { ephemeral: true }), ...(options.id && { id: options.id }) },
   });
 }
 
@@ -97,6 +98,18 @@ export async function addAgentSessionExternalUrl(
     id: agentSessionId,
     input: { addedExternalUrls: [{ label: link.label, url: link.url }] },
   });
+}
+
+/**
+ * Replace the session's checklist (Linear's ``plan``, technology preview). The whole
+ * list goes on every call.
+ */
+export async function setAgentSessionPlan(
+  accessToken: string,
+  agentSessionId: string,
+  steps: readonly { readonly content: string; readonly status: string }[],
+): Promise<LinearPostResult> {
+  return graphqlRequest(accessToken, AGENT_SESSION_UPDATE_MUTATION, { id: agentSessionId, input: { plan: steps } });
 }
 
 export interface AgentSessionIssue {
