@@ -41,6 +41,11 @@
   },
   {
     "template": "backgroundagent-dev.template.json",
+    "logicalId": "ConcurrencyMaintenanceNestedStackConcurrencyMaintenanceNestedStackResource52B62B95",
+    "type": "AWS::CloudFormation::Stack"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
     "logicalId": "DnsFirewallQueryLogGroup747F517E",
     "type": "AWS::Logs::LogGroup"
   },

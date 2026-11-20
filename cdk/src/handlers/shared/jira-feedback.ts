@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { requestJiraAppActor } from './jira-app-actor';
+import { requestJiraAppActor, type JiraAppActorConfig } from './jira-app-actor';
 import {
   resolveJiraOutboundAuth,
   type ResolvedJiraOutboundAuth,
@@ -97,14 +97,38 @@ export interface AdfTextRun {
 export type AdfParagraph = ReadonlyArray<AdfTextRun>;
 
 /**
+ * One block of a comment body: a paragraph, or a block of code, which Jira
+ * shows as written, line breaks included.
+ */
+export type AdfBlock = AdfParagraph | { readonly code: string };
+
+/**
  * Parse the controlled Markdown emitted by ABCA's own status renderers.
  *
  * This is intentionally not a general Markdown parser. The generated comments
- * use bold, inline code, links, and linked preview images; handling that exact subset avoids
+ * use bold, inline code, links, linked preview images, and italics that span a
+ * whole line; handling that exact subset avoids
  * treating the whole panel as one literal ADF text node while keeping malformed
  * input harmless as plain text.
  */
 export function parseMarkdownRuns(line: string): AdfParagraph {
+  return parseRuns(line, true);
+}
+
+/** What Markdown counts as punctuation: the Unicode punctuation and symbol characters. */
+const PUNCTUATION = /[\p{P}\p{S}]/u;
+
+/**
+ * The parser behind {@link parseMarkdownRuns}. Without ``links`` a link or an
+ * image stays as typed, with its URL: that is for text the agent wrote.
+ */
+function parseRuns(line: string, links: boolean): AdfParagraph {
+  // `_…_` around the whole line: the heartbeat's liveness line and the panel
+  // footer. ADF allows `code` only together with `link`, so a code run inside
+  // the line stays without emphasis.
+  if (line.length > 2 && line.startsWith('_') && line.endsWith('_')) {
+    return parseRuns(line.slice(1, -1), links).map((run) => (run.code ? run : { ...run, em: true }));
+  }
   const runs: AdfTextRun[] = [];
   let cursor = 0;
   const append = (run: AdfTextRun): void => {
@@ -128,7 +152,7 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
     // links instead. Constant labels match jiraPreviewDocument and avoid using
     // arbitrary image alt text as operator guidance. The token boundary below
     // includes ! so embedded images reach this branch.
-    const image = line.slice(cursor).match(/^\[?!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)(?:\]\((https?:\/\/[^)\s]+)\))?/);
+    const image = links && line.slice(cursor).match(/^\[?!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)(?:\]\((https?:\/\/[^)\s]+)\))?/);
     if (image) {
       append({ text: 'Open screenshot', href: image[2] });
       if (image[3]) {
@@ -141,9 +165,20 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
 
     if (line.startsWith('**', cursor)) {
       const end = line.indexOf('**', cursor + 2);
-      if (end !== -1) {
-        for (const run of parseMarkdownRuns(line.slice(cursor + 2, end))) {
-          append({ ...run, strong: true });
+      // Bold as Markdown has it: text right after the opening pair and right
+      // before the closing one. An asterisk is not text, so a run of them
+      // (a masked value, `****`) stays as typed. A pair with a word on its
+      // outer side and punctuation on its inner side is an operator:
+      // `2**(n-1) + 2**(m-1)` and `f(**a) + g(**b)` stay as typed, like
+      // `a ** b ** c`.
+      if (
+        end !== -1 && /[^\s*]/.test(line.charAt(cursor + 2)) && /\S/.test(line.charAt(end - 1))
+        && !(/\w/.test(line.charAt(cursor - 1)) && PUNCTUATION.test(line.charAt(cursor + 2)))
+        && !(PUNCTUATION.test(line.charAt(end - 1)) && /\w/.test(line.charAt(end + 2)))
+      ) {
+        for (const run of parseRuns(line.slice(cursor + 2, end), links)) {
+          // As for italics above: a code run takes no other emphasis.
+          append(run.code ? run : { ...run, strong: true });
         }
         cursor = end + 2;
         continue;
@@ -159,7 +194,7 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
       }
     }
 
-    if (line[cursor] === '[') {
+    if (links && line[cursor] === '[') {
       const match = line.slice(cursor).match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/);
       if (match) {
         append({ text: match[1], href: match[2] });
@@ -181,24 +216,66 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
   return runs;
 }
 
+/** A line that opens or closes a fenced code block; an opening one may name a language. */
+const CODE_FENCE = /^\s*```[^`]*$/;
+
 /**
- * Build a multi-paragraph ADF document. Each element of ``paragraphs``
+ * Parse Markdown the agent wrote (an answer, a question) into blocks: the
+ * lines between two fences are one code block, every other line is a paragraph
+ * of {@link parseMarkdownRuns}, except that a link or an image stays as typed,
+ * with its URL: the text is the agent's own. What that subset does not know
+ * (a heading, a list marker) stays as typed too.
+ */
+export function parseMarkdownBlocks(text: string): AdfBlock[] {
+  const blocks: AdfBlock[] = [];
+  // The lines of the code block that is open, if one is.
+  let open: string[] | undefined;
+  const closeBlock = (lines: string[]): void => {
+    const code = lines.join('\n');
+    // An ADF text node cannot be empty, so a block without text is left out.
+    if (code) blocks.push({ code });
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (!CODE_FENCE.test(line)) {
+      // Inside a block nothing is Markdown.
+      if (open) open.push(line);
+      else blocks.push(parseRuns(line, false));
+    } else if (open) {
+      closeBlock(open);
+      open = undefined;
+    } else {
+      open = [];
+    }
+  }
+  // A fence left open runs to the end of the text, as in Markdown: the
+  // agent's text is cut at a length limit.
+  if (open) closeBlock(open);
+  return blocks;
+}
+
+/**
+ * Build a multi-paragraph ADF document. Each paragraph of ``blocks``
  * becomes one ADF ``paragraph`` node; an empty run list yields an empty
  * paragraph (Jira renders it as a blank line, which is how we get the
  * spacing between the header, the metrics line, and the footer without
- * embedding ``\n`` — ADF text nodes do not honor newlines).
+ * embedding ``\n`` — ADF text nodes do not honor newlines). A code block
+ * becomes one ``codeBlock`` node, the one place where a newline is kept.
  *
  * Exported for the fan-out final-status renderer + its tests. The
  * single-paragraph {@link toAdfDocument} stays for the short processor
  * messages that have no structure to preserve.
  */
-export function buildAdfDocument(paragraphs: ReadonlyArray<AdfParagraph>): Record<string, unknown> {
+export function buildAdfDocument(blocks: ReadonlyArray<AdfBlock>): Record<string, unknown> {
   return {
     type: 'doc',
     version: 1,
-    content: paragraphs.map((runs) => ({
+    content: blocks.map((block) => ('code' in block ? {
+      type: 'codeBlock',
+      // No marks: ADF allows none on the text of a code block.
+      content: [{ type: 'text', text: block.code }],
+    } : {
       type: 'paragraph',
-      content: runs.map((run) => {
+      content: block.map((run) => {
         const marks: Array<Record<string, unknown>> = [];
         if (run.strong) marks.push({ type: 'strong' });
         if (run.em) marks.push({ type: 'em' });
@@ -236,7 +313,7 @@ export type JiraUpdateResult =
  * Outcome of a single comment POST. We distinguish auth rejection (401/403)
  * from other failures so the caller can react to the former with a forced
  * token refresh + retry. Non-auth failures carry a ``retryable`` flag so the
- * classified caller ({@link postCommentWithResult}) can tell a transient
+ * classified caller ({@link writeCommentWithRefresh}) can tell a transient
  * 5xx/429/network blip from a terminal 4xx.
  */
 type WriteOutcome =
@@ -551,13 +628,22 @@ export async function transitionIssueState(
       Boolean(value) && typeof value === 'object' && !Array.isArray(value))
     : [];
   const override = intent === 'started' ? overrides.started : overrides.inReview;
-  const preferred = intent === 'started'
+  const preferred: readonly string[] = intent === 'started'
     ? ['in progress']
     : (intent === 'in_review' ? REVIEW_STATUS_NAMES : ['done', 'completed', 'closed']);
   const fallbackCategory = override
     ? undefined
     : (intent === 'completed' ? 'done' : 'indeterminate');
-  const transition = selectTransition(transitions, override, preferred, fallbackCategory);
+  // A status that is itself a rung of the ladder ends the ladder there: the
+  // rungs below it and the category fallback would move the issue backward or
+  // sideways (In Review to In Progress, In Progress to On Hold).
+  const currentName = typeof snapshot.fields?.status?.name === 'string'
+    ? snapshot.fields.status.name.trim().toLowerCase()
+    : '';
+  const rung = preferred.indexOf(currentName);
+  const transition = rung === -1
+    ? selectTransition(transitions, override, preferred, fallbackCategory)
+    : selectTransition(transitions, override, preferred.slice(0, rung), undefined);
   if (!transition || typeof transition.id !== 'string') {
     logger.warn('No matching Jira workflow transition', {
       issue_id_or_key: issueIdOrKey,
@@ -591,7 +677,7 @@ export async function postIssueComment(
   issueIdOrKey: string,
   body: string,
 ): Promise<string | null> {
-  const result = await postCommentWithResult(ctx, issueIdOrKey, toAdfDocument(body));
+  const result = await postIssueCommentAdf(ctx, issueIdOrKey, toAdfDocument(body));
   return result.ok ? result.commentId : null;
 }
 
@@ -611,76 +697,71 @@ export async function postIssueCommentAdf(
   issueIdOrKey: string,
   body: Record<string, unknown>,
 ): Promise<JiraPostResult> {
-  return postCommentWithResult(ctx, issueIdOrKey, body);
+  return createdCommentResult(await writeCommentWithRefresh(ctx, issueIdOrKey, body), ctx, issueIdOrKey);
 }
 
-async function postCommentWithResult(
+/** Outcome of {@link writeCommentWithRefresh}: Jira's response body on success. */
+type CommentWriteResult =
+  | { readonly ok: true; readonly responseBody: string }
+  | { readonly ok: false; readonly retryable: boolean };
+
+/**
+ * Create a comment, or update the comment ``commentId`` when one is given, as
+ * the tenant's outbound identity. Both writes share this one path, so the
+ * deadline checks and the forced refresh after a 401/403 exist once.
+ */
+async function writeCommentWithRefresh(
   ctx: JiraFeedbackContext,
   issueIdOrKey: string,
   body: Record<string, unknown>,
-): Promise<JiraPostResult> {
+  commentId?: string,
+): Promise<CommentWriteResult> {
+  const writeAsApp = async (appActor: JiraAppActorConfig): Promise<CommentWriteResult> => {
+    const appResult = await requestJiraAppActor(appActor, {
+      version: 1,
+      operation: commentId ? 'update_comment' : 'comment',
+      cloud_id: ctx.cloudId,
+      issue_key: issueIdOrKey,
+      ...(commentId && { comment_id: commentId }),
+      body,
+    }, undefined, ctx.signal);
+    return appResult.ok
+      ? { ok: true, responseBody: appResult.body }
+      : { ok: false, retryable: appResult.retryable };
+  };
+  const logContext = {
+    jira_cloud_id: ctx.cloudId,
+    issue_id_or_key: issueIdOrKey,
+    ...(commentId && { comment_id: commentId }),
+  };
+
   if (ctx.signal?.aborted) return { ok: false, retryable: true };
   const resolved = await resolveTenantAuth(ctx);
   if (ctx.signal?.aborted) return { ok: false, retryable: true };
   if (!resolved) return { ok: false, retryable: false };
+  if (resolved.kind === 'app') return writeAsApp(resolved.appActor);
 
-  if (resolved.kind === 'app') {
-    const appResult = await requestJiraAppActor(resolved.appActor, {
-      version: 1,
-      operation: 'comment',
-      cloud_id: ctx.cloudId,
-      issue_key: issueIdOrKey,
-      body,
-    }, undefined, ctx.signal);
-    return createdCommentResult(appResult, ctx, issueIdOrKey);
-  }
-
-  const outcome = await writeComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body, undefined, ctx.signal);
-  if (outcome.kind === 'ok') {
-    return createdCommentResult({
-      ok: true,
-      body: outcome.responseBody,
-    }, ctx, issueIdOrKey);
-  }
+  const outcome = await writeComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body, commentId, ctx.signal);
+  if (outcome.kind === 'ok') return { ok: true, responseBody: outcome.responseBody };
   if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
 
   // outcome.kind === 'auth': the stored access token was rejected. Force a
   // refresh (bypassing the resolver's cache and proactive-expiry
   // short-circuit) and retry once with the freshly-minted token.
-  logger.info('Jira feedback got auth rejection — forcing token refresh and retrying once', {
-    jira_cloud_id: ctx.cloudId,
-    issue_id_or_key: issueIdOrKey,
-  });
+  logger.info('Jira feedback got auth rejection — forcing token refresh and retrying once', logContext);
   if (ctx.signal?.aborted) return { ok: false, retryable: true };
   const refreshed = await resolveTenantAuth(ctx, true);
   if (ctx.signal?.aborted) return { ok: false, retryable: true };
   if (!refreshed) return { ok: false, retryable: false };
-  if (refreshed.kind === 'app') {
-    const appResult = await requestJiraAppActor(refreshed.appActor, {
-      version: 1,
-      operation: 'comment',
-      cloud_id: ctx.cloudId,
-      issue_key: issueIdOrKey,
-      body,
-    }, undefined, ctx.signal);
-    return createdCommentResult(appResult, ctx, issueIdOrKey);
-  }
+  if (refreshed.kind === 'app') return writeAsApp(refreshed.appActor);
   // If the refresh handed back the same access token, the retry can only
   // reproduce the 401 — skip the redundant network call.
   if (refreshed.accessToken === resolved.accessToken) {
-    logger.warn('Jira feedback refresh returned an unchanged token — not retrying', {
-      jira_cloud_id: ctx.cloudId,
-      issue_id_or_key: issueIdOrKey,
-    });
+    logger.warn('Jira feedback refresh returned an unchanged token — not retrying', logContext);
     return { ok: false, retryable: false };
   }
-  const retryOutcome = await writeComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body, undefined, ctx.signal);
-  if (retryOutcome.kind === 'ok') {
-    return createdCommentResult({
-      ok: true,
-      body: retryOutcome.responseBody,
-    }, ctx, issueIdOrKey);
-  }
+  const retryOutcome = await writeComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body, commentId, ctx.signal);
+  if (retryOutcome.kind === 'ok') return { ok: true, responseBody: retryOutcome.responseBody };
   // A second auth rejection means the credential is genuinely unusable —
   // terminal. A transient error on the retry stays retryable so the
   // dispatcher can escalate for a Lambda retry.
@@ -689,14 +770,13 @@ async function postCommentWithResult(
 }
 
 function createdCommentResult(
-  result: { readonly ok: true; readonly body: string }
-    | { readonly ok: false; readonly retryable: boolean },
+  result: CommentWriteResult,
   ctx: JiraFeedbackContext,
   issueIdOrKey: string,
 ): JiraPostResult {
   if (!result.ok) return { ok: false, retryable: result.retryable };
   try {
-    const value = JSON.parse(result.body) as { id?: unknown };
+    const value = JSON.parse(result.responseBody) as { id?: unknown };
     const commentId = typeof value.id === 'string'
       ? value.id
       : (typeof value.id === 'number' ? String(value.id) : '');
@@ -752,79 +832,8 @@ export async function updateIssueCommentAdf(
     });
     return { ok: false, retryable: false };
   }
-  if (ctx.signal?.aborted) return { ok: false, retryable: true };
-  const resolved = await resolveTenantAuth(ctx);
-  if (ctx.signal?.aborted) return { ok: false, retryable: true };
-  if (!resolved) return { ok: false, retryable: false };
-
-  if (resolved.kind === 'app') {
-    const appResult = await requestJiraAppActor(resolved.appActor, {
-      version: 1,
-      operation: 'update_comment',
-      cloud_id: ctx.cloudId,
-      issue_key: issueIdOrKey,
-      comment_id: commentId,
-      body,
-    }, undefined, ctx.signal);
-    return appResult.ok
-      ? { ok: true }
-      : { ok: false, retryable: appResult.retryable };
-  }
-
-  const outcome = await writeComment(
-    resolved.accessToken,
-    ctx.cloudId,
-    issueIdOrKey,
-    body,
-    commentId,
-    ctx.signal,
-  );
-  if (outcome.kind === 'ok') return { ok: true };
-  if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
-
-  logger.info('Jira feedback got auth rejection — forcing token refresh and retrying once', {
-    jira_cloud_id: ctx.cloudId,
-    issue_id_or_key: issueIdOrKey,
-    comment_id: commentId,
-  });
-  if (ctx.signal?.aborted) return { ok: false, retryable: true };
-  const refreshed = await resolveTenantAuth(ctx, true);
-  if (ctx.signal?.aborted) return { ok: false, retryable: true };
-  if (!refreshed) return { ok: false, retryable: false };
-  if (refreshed.kind === 'app') {
-    const appResult = await requestJiraAppActor(refreshed.appActor, {
-      version: 1,
-      operation: 'update_comment',
-      cloud_id: ctx.cloudId,
-      issue_key: issueIdOrKey,
-      comment_id: commentId,
-      body,
-    }, undefined, ctx.signal);
-    return appResult.ok
-      ? { ok: true }
-      : { ok: false, retryable: appResult.retryable };
-  }
-  if (refreshed.accessToken === resolved.accessToken) {
-    logger.warn('Jira feedback refresh returned an unchanged token — not retrying', {
-      jira_cloud_id: ctx.cloudId,
-      issue_id_or_key: issueIdOrKey,
-      comment_id: commentId,
-    });
-    return { ok: false, retryable: false };
-  }
-  const retryOutcome = await writeComment(
-    refreshed.accessToken,
-    ctx.cloudId,
-    issueIdOrKey,
-    body,
-    commentId,
-    ctx.signal,
-  );
-  if (retryOutcome.kind === 'ok') return { ok: true };
-  if (retryOutcome.kind === 'error') {
-    return { ok: false, retryable: retryOutcome.retryable };
-  }
-  return { ok: false, retryable: false };
+  const result = await writeCommentWithRefresh(ctx, issueIdOrKey, body, commentId);
+  return result.ok ? { ok: true } : result;
 }
 
 /**

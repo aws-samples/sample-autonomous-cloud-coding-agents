@@ -2,7 +2,7 @@
 title: "Developer guide introduction"
 ---
 
-This project is built in TypeScript with [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/), [mise](https://mise.jdx.dev/) for tasks and tool versions, and AWS CDK for infrastructure. There is project-wide testing, code checks, and compilation. There is currently no dedicated development container, so you need to configure your local development environment by following the steps below.
+ABCA uses [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/) for its TypeScript packages, [mise](https://mise.jdx.dev/) for tools and tasks, and AWS CDK for infrastructure. To build and test the project, [open the contributor dev container](/sample-autonomous-cloud-coding-agents/developer-guide/installation#open-the-contributor-dev-container) or follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to set up your own machine.
 
 ![ABCA architecture](/sample-autonomous-cloud-coding-agents/imgs/abca-arch.png)
 

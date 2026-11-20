@@ -48,6 +48,8 @@ Three authentication mechanisms protect the platform, matching its input channel
 
 The compute role retains only non-tenant access (Bedrock model invocation — already ARN-scoped; CloudWatch Logs; the GitHub PAT secret, read once before the SessionRole is assumed; AgentCore Memory) plus `sts:AssumeRole`/`sts:TagSession` on the SessionRole. Because the agent runs under credentials that are themselves an assumed role, its `AssumeRole` is *role chaining* — capped at one hour regardless of the role's max session duration — so the agent uses a **refreshable** credential provider that re-assumes before expiry (tasks can run up to the 8-hour `maxLifetime`). The design is backend-agnostic: the same SessionRole and agent code serve all three backends (AgentCore Runtime, ECS Fargate, Lambda MicroVMs). A compromised agent session is therefore confined to its own task's data, enforced at the IAM layer rather than by application-code conventions. The policy structure (the `dynamodb:LeadingKeys` condition on `${aws:PrincipalTag/task_id}`, per-user S3 prefixes, and `Scan` exclusion) is asserted by CDK template tests, and the refreshable-credential and session-tag flow by agent unit tests; the matching-tag → allow / mismatched-or-absent-tag → deny behaviour was additionally confirmed once via the IAM policy simulator during development.
 
+**Lambda MicroVMs credentials after sleep (P3)** - A resumed MicroVM must not sign with keys cached before the freeze. `/resume` refreshes the task-scoped SessionRole and ambient credentials before releasing coding, and the Claude CLI reads credentials from a loopback container-credential broker that renews them synchronously instead of the export helper's stale cache. Suspension changes no IAM scope.
+
 **Lambda MicroVMs compute-role delta** - On this backend the compute role additionally holds prefix-scoped `secretsmanager:GetSecretValue` on the per-workspace channel-OAuth secrets (`bgagent-linear-oauth-*`, `bgagent-jira-oauth-*`), read access to the `/run` payload bucket (the task payload arrives as an S3 object, not as environment), and `ec2:DescribeAvailabilityZones` (`Resource: *`, read-only — EC2 describe actions have no resource-level scoping) for a CDK repo's own synth gate. It is also **the only compute role in the platform whose trust policy carries no confused-deputy condition**: the Lambda MicroVMs service populates no `aws:SourceAccount` or `aws:SourceArn` when it assumes the role, so a trust policy carrying one is unassumable — verified live, not assumed (connector creation failed deterministically, and `RunMicrovm` surfaced the same root cause as a misleading caller-side `iam:PassRole` denial). The compensating controls are that each of the three MicroVM roles can be passed to `lambda.amazonaws.com` only by a named principal — the orchestrator, via an `iam:PassRole` scoped to the execution role's exact ARN, and the CloudFormation deployment role for the build and connector-operator roles — that every other resource they reach is account-scoped by ARN apart from two justified `Resource: *` read/create-time statements, and that none of them holds `iam:*`, cross-account trust, or any `sts:AssumeRole` beyond the execution role's scoped hop to the per-task SessionRole. Full evidence, the two-arm PassRole experiment, and the alternatives considered are in [ADR-021 §4](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend#4-infra-and-iam-conditional-resources-behind-bootstrap-computetypes).
 
 > Out of scope for this control and tracked separately as GitHub issues: replacing the shared GitHub PAT (GitHub App / Token Vault), binding credentials to the MicroVM via attestation, and scoping AgentCore Memory (namespace isolation by `actorId`/`sessionId` remains its boundary).
@@ -65,9 +67,10 @@ Input screening happens at two points in the pipeline, forming a defense-in-dept
 
 ### Hydration-time screening
 
-- **PR tasks** (`pr_iteration`, `pr_review`) - The assembled prompt (PR body, review comments, diff, task description) is screened through Bedrock Guardrails before the agent receives it.
-- **`new_task` with issue content** - The assembled prompt (issue body, comments, task description) is screened. When no issue content is present, hydration-time screening is skipped because the task description was already screened at submission.
+- **PR tasks** (`pr_iteration`, `pr_review`) - The external PR content (title, body, branch names, comment authors and bodies, rendered review paths and diff hunks, diff summary) is screened through Bedrock Guardrails before the agent receives it.
+- **`new_task` with issue content** - The external issue content (title, body, comments) is screened. When no issue content is present, hydration-time screening is skipped because the task description was already screened at submission.
 - **URL attachments** - URL attachments are fetched during hydration with full SSRF protection (DNS resolution pinning to prevent rebinding attacks, private IP blocking, redirect validation, timeout enforcement). Fetched content is screened through the same pipeline as inline attachments before being stored in S3.
+- **Platform text excluded** - Only the external content is screened, not the platform's own prompt wrapper (task header, closing instructions), so platform wording does not count toward the classifier score. The task description was already screened at submission.
 - **Fail-closed** - A Bedrock outage during hydration fails the task. A `guardrail_blocked` event is emitted when content is blocked. Attachment resolution errors (fetch failures, screening blocks, integrity failures) also fail the task — attachments are never silently dropped.
 
 ### Tool access control
@@ -152,10 +155,11 @@ flowchart LR
 | Submission | Input validation | `validation.ts`, `create-task-core.ts` | HTTP error only |
 | Submission | Repo onboarding gate | `repo-config.ts` | HTTP error only |
 | Submission | Guardrail screening | `create-task-core.ts` | HTTP error only |
-| Admission | Concurrency limit | `orchestrator.ts` | `admission_rejected` event |
+| Admission | Concurrency limit | `orchestrator.ts` | `admission_queued` event |
 | Pre-flight | GitHub access, PAT permissions, PR access | `preflight.ts` | `preflight_failed` event |
 | Hydration | Guardrail prompt screening | `context-hydration.ts` | `guardrail_blocked` event |
 | Hydration | Budget/quota resolution | `orchestrator.ts` | Persisted on task record |
+| Repo setup | GitHub token may push (dry-run push, skipped for read-only workflows) | `agent/src/repo.py` | `agent_blocked` event, task `FAILED` before the agent runs |
 | Execution | Tool-call policy (Cedar) | `agent/src/hooks.py`, `agent/src/policy.py` | `POLICY_DECISION` telemetry |
 | Execution | Output secret screening | `agent/src/output_scanner.py` | `OUTPUT_SCREENING` telemetry |
 | Execution | Turn/cost budget | Claude Agent SDK | Cost in task result |

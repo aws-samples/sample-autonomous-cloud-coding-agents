@@ -19,6 +19,7 @@
 
 import { type DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { JIRA_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
+import { prNumberFromTask } from './task-pr-number';
 
 const QUERY_PAGE_SIZE = 25;
 
@@ -81,25 +82,6 @@ export async function resolveTaskByJiraIssue(
     exclusiveStartKey = result.LastEvaluatedKey;
   } while (exclusiveStartKey);
 
-  return null;
-}
-
-/** Extract a PR number from the canonical field or a persisted GitHub PR URL. */
-export function prNumberFromTask(task: { pr_number?: unknown; pr_url?: unknown }): number | null {
-  if (
-    typeof task.pr_number === 'number'
-    && Number.isInteger(task.pr_number)
-    && task.pr_number > 0
-  ) {
-    return task.pr_number;
-  }
-  if (typeof task.pr_url === 'string') {
-    const match = task.pr_url.match(/\/pull\/(\d+)\b/);
-    if (match) {
-      const parsed = Number(match[1]);
-      if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
-    }
-  }
   return null;
 }
 

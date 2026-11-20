@@ -365,4 +365,26 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
     expect(result.statusCode).toBe(500);
     expect(lambdaSend).not.toHaveBeenCalled();
   });
+
+  test('an organizationId that is not a string names no workspace: a bad signature is a 401, not a 500', async () => {
+    // The registry is keyed on a string, and DynamoDB rejects a Get whose key has
+    // another type. The id is read before the signature is checked, so reaching the
+    // registry with it let any unsigned request produce a 500 and an error log.
+    ddbSend.mockImplementation((cmd: { _type?: string; input: { Key?: { linear_workspace_id?: unknown } } }) => {
+      if (cmd._type === 'Get' && typeof cmd.input.Key?.linear_workspace_id !== 'string') {
+        const err = new Error('One or more parameter values were invalid: Type mismatch for key linear_workspace_id expected: S actual: N');
+        (err as Error & { name: string }).name = 'ValidationException';
+        return Promise.reject(err);
+      }
+      return Promise.resolve({});
+    });
+    configureSecretsManager({
+      [process.env.LINEAR_WEBHOOK_SECRET_ARN!]: STACK_WIDE_SECRET,
+    });
+    const body = JSON.stringify({ ...JSON.parse(payloadFor(WORKSPACE_A_ID)), organizationId: 5 });
+    const result = await handler(makeEvent(body, 'deadbeef'));
+    expect(result.statusCode).toBe(401);
+    expect(ddbSend.mock.calls.filter(([cmd]) => cmd._type === 'Get')).toHaveLength(0);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
 });

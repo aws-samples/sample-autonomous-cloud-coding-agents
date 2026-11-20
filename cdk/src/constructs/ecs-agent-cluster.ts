@@ -28,6 +28,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
+import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import {
@@ -40,16 +41,27 @@ import {
 import { LinearIdentityVault } from './linear-identity-vault';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
-import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
   readonly agentImageAsset: ecr_assets.DockerImageAsset;
   readonly taskTable: dynamodb.ITable;
   readonly taskEventsTable: dynamodb.ITable;
+  /** Approval storage. Required for human approval gates; optional in isolated tests. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
   readonly userConcurrencyTable: dynamodb.ITable;
   readonly githubTokenSecret: secretsmanager.ISecret;
   readonly memoryId?: string;
+
+  /**
+   * Table of mid-task nudges (`bgagent nudge`). When provided, the container
+   * gets `NUDGES_TABLE_NAME`; without it the agent's nudge reader is off, so a
+   * nudge the API accepted for an ECS task is never delivered. The agent reads
+   * the table through the SessionRole, which must list it; without a SessionRole
+   * the task role is granted the two calls the reader makes. Omitted in isolated
+   * construct tests → no env, no grant.
+   */
+  readonly taskNudgesTable?: dynamodb.ITable;
 
   /**
    * Optional Fargate task sizing overrides. Any unset field uses the generous
@@ -256,7 +268,9 @@ export interface EcsTaskSizing {
 const RESERVED_BUILD_ENV_KEYS = new Set([
   'TASK_TABLE_NAME',
   'TASK_EVENTS_TABLE_NAME',
+  'TASK_APPROVALS_TABLE_NAME',
   'USER_CONCURRENCY_TABLE_NAME',
+  'NUDGES_TABLE_NAME',
   'LOG_GROUP_NAME',
   'GITHUB_TOKEN_SECRET_ARN',
   'MEMORY_ID',
@@ -413,7 +427,14 @@ export class EcsAgentCluster extends Construct {
         inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+      ...(props.taskApprovalsTable && {
+        TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
+      }),
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+      // Mid-task nudges, parity with the AgentCore runtime env: without the
+      // table name the agent's nudge reader is off, and a nudge the API accepted
+      // for an ECS task is never delivered.
+      ...(props.taskNudgesTable && { NUDGES_TABLE_NAME: props.taskNudgesTable.tableName }),
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
       ...(props.memoryId && { MEMORY_ID: props.memoryId }),
@@ -556,7 +577,15 @@ export class EcsAgentCluster extends Construct {
       props.agentSessionRole.admitComputeRole(taskRole);
     } else {
       props.taskTable.grantReadWriteData(taskRole);
+      // The two calls of the agent's nudge reader: read pending, mark consumed.
+      props.taskNudgesTable?.grant(taskRole, 'dynamodb:Query', 'dynamodb:UpdateItem');
       props.taskEventsTable.grantReadWriteData(taskRole);
+      props.taskApprovalsTable?.grant(
+        taskRole,
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+      );
     }
     // UserConcurrencyTable is user-scoped (not task_id leading-key-able) and is
     // touched by the reconciler/orchestrator path; keep it on the task role.

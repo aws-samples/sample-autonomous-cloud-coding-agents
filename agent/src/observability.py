@@ -13,7 +13,6 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry import baggage, context, trace
-from opentelemetry.trace import StatusCode
 
 from shell import log
 
@@ -40,7 +39,8 @@ def task_span(
 ) -> Generator[Span]:
     """Context manager that wraps a pipeline phase in an OTEL span.
 
-    * Records exceptions and sets span status to ERROR on failure.
+    * On failure the tracer records the exception on the span and sets its
+      status to ERROR (the defaults of ``start_as_current_span``).
     * Accepts optional *attributes* dict merged onto the span at creation.
 
     Usage::
@@ -51,12 +51,7 @@ def task_span(
     """
     tracer = get_tracer()
     with tracer.start_as_current_span(name, attributes=attributes or {}) as span:
-        try:
-            yield span
-        except Exception as exc:
-            span.set_status(StatusCode.ERROR, str(exc))
-            span.record_exception(exc)
-            raise
+        yield span
 
 
 def current_otel_trace_id() -> str | None:

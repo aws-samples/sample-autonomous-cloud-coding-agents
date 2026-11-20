@@ -75,6 +75,21 @@ describe('TaskTable', () => {
     });
   });
 
+  test('creates UserCreatedAtIndex GSI', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: 'UserCreatedAtIndex',
+          KeySchema: [
+            { AttributeName: 'user_id', KeyType: 'HASH' },
+            { AttributeName: 'created_at', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+      ]),
+    });
+  });
+
   test('creates StatusIndex GSI', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       GlobalSecondaryIndexes: Match.arrayWith([
@@ -173,6 +188,7 @@ describe('TaskTable', () => {
 
   test('static index name constants match actual GSI names', () => {
     expect(TaskTable.USER_STATUS_INDEX).toBe('UserStatusIndex');
+    expect(TaskTable.USER_CREATED_AT_INDEX).toBe('UserCreatedAtIndex');
     expect(TaskTable.STATUS_INDEX).toBe('StatusIndex');
     expect(TaskTable.IDEMPOTENCY_INDEX).toBe('IdempotencyIndex');
     expect(TaskTable.LINEAR_ISSUE_INDEX).toBe('LinearIssueIndex');

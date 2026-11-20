@@ -97,6 +97,8 @@ export default defineConfig(
       'react-hooks/unsupported-syntax': 'error',
       // Promise and operator misuse that compiles (type-aware rules, as in cdk and cli).
       '@typescript-eslint/await-thenable': 'error',
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
       '@typescript-eslint/prefer-promise-reject-errors': 'error',
       '@typescript-eslint/return-await': 'error',
       '@typescript-eslint/no-array-delete': 'error',

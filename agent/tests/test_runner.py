@@ -1,7 +1,7 @@
 """Unit tests for runner.py helpers.
 
-The full ``run_agent`` path is integration-tested via test_pipeline.py
-with a mocked ``pipeline.run_agent``. This module covers the narrower
+Pipeline tests mock ``pipeline.run_agent``; they do not exercise its SDK loop.
+This module covers client/broker ownership and the narrower
 ``_initialize_policy_engine_and_hooks`` helper extracted in Chunk 7 so
 the policy-engine bootstrap + ``pre_approvals_loaded`` emission can be
 verified without spinning up the Claude Agent SDK client.
@@ -10,15 +10,20 @@ verified without spinning up the Claude Agent SDK client.
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 import subprocess
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import claude_agent_sdk as sdk
 import pytest
 
 import runner
+from clarification_tool import CLARIFICATION_SERVER_NAME, CLARIFICATION_TOOL_NAME
 from gateway_tools import GATEWAY_SERVER_NAME
-from models import TaskConfig
+from models import AgentResult, TaskConfig, TokenUsage
 from runner import (
     _CLAUDE_VERSION_PROBE_TIMEOUT_S,
     _DISALLOWED_TOOLS,
@@ -31,6 +36,8 @@ from runner import (
     _setup_agent_env,
     _setup_bedrock_cost_attribution,
 )
+from telemetry import _TrajectoryWriter
+from workflow import load_workflow
 
 
 def _config(**overrides: Any) -> TaskConfig:
@@ -73,6 +80,98 @@ class TestBlueprintCedarPolicyBootstrap:
             engine.evaluate_tool_use("Write", {"file_path": "prod/x", "content": "y"}).outcome
             == "deny"
         )
+
+
+class TestClaudeSessionOwnership:
+    @pytest.mark.parametrize("microvm", [False, True])
+    @pytest.mark.parametrize(
+        "failure", [None, "connect", "query", "receive", "cancel", "hook-denied"]
+    )
+    def test_broker_selection_and_cleanup_on_every_session_exit(
+        self, monkeypatch, microvm, failure
+    ):
+        import claude_agent_sdk
+
+        import microvm_credentials
+        import microvm_lifecycle
+
+        config = _config()
+        context = microvm_lifecycle.register_task(config.task_id, "vm") if microvm else None
+        client = MagicMock()
+        client.connect = AsyncMock()
+        client.query = AsyncMock()
+        client.disconnect = AsyncMock()
+        if failure in {"connect", "query"}:
+            getattr(client, failure).side_effect = RuntimeError("synthetic failure")
+
+        async def messages():
+            if failure == "receive":
+                raise RuntimeError("synthetic receive failure")
+            if failure == "cancel":
+                raise asyncio.CancelledError
+            if failure == "hook-denied":
+                if context is not None:
+                    await context.tool_started("denied-call")
+                    await context.tool_started("other-active-call")
+                yield claude_agent_sdk.UserMessage(
+                    content=[
+                        claude_agent_sdk.ToolResultBlock(
+                            tool_use_id="denied-call",
+                            content="Project hook denied",
+                            is_error=True,
+                        ),
+                    ]
+                )
+                if context is not None:
+                    assert context.diagnostic_snapshot()["active_tools"] == 1
+                    assert "other-active-call" in context._tools
+            yield claude_agent_sdk.ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=0,
+                session_id="synthetic",
+                total_cost_usd=0,
+                usage={},
+            )
+
+        client.receive_response = messages
+        make_client = MagicMock(return_value=client)
+        monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", make_client)
+        broker = MagicMock()
+        broker.environment = {"ABCA_MICROVM_CREDENTIAL_BROKER": "1"}
+        make_broker = MagicMock(return_value=broker)
+        monkeypatch.setattr(microvm_credentials, "ScopedCredentialBroker", make_broker)
+        monkeypatch.setattr(runner, "_setup_agent_env", lambda _config: None)
+        monkeypatch.setattr(runner, "_log_claude_cli_version", lambda: None)
+        monkeypatch.setattr(runner, "_initialize_policy_engine_and_hooks", lambda **_kw: (None, {}))
+        monkeypatch.setattr(runner, "_register_gateway_server", lambda _servers: None)
+        monkeypatch.setattr(runner, "build_clarification_server", lambda: None)
+        monkeypatch.setattr(runner, "_ProgressWriter", MagicMock())
+        monkeypatch.setattr(runner, "log_error_cw", MagicMock())
+        try:
+            if failure == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    asyncio.run(runner.run_agent("probe", "probe", config, trajectory=MagicMock()))
+            else:
+                result = asyncio.run(
+                    runner.run_agent("probe", "probe", config, trajectory=MagicMock())
+                )
+                expected = "error" if failure not in {None, "hook-denied"} else "success"
+                assert result.status == expected
+            options = make_client.call_args.kwargs["options"]
+            if microvm:
+                make_broker.assert_called_once_with(context)
+                assert options.env == broker.environment
+                broker.close.assert_called_once()
+            else:
+                make_broker.assert_not_called()
+                assert options.env == {}
+            client.disconnect.assert_awaited_once()
+        finally:
+            if context is not None:
+                microvm_lifecycle.unregister_task(context)
 
 
 class TestInitializePolicyEngineAndHooks:
@@ -407,6 +506,7 @@ class TestToolSurfaceHardening:
             "CronCreate",
             "CronDelete",
             "CronList",
+            "ScheduleWakeup",
         }
 
     def test_repo_less_loads_no_setting_sources(self):
@@ -438,12 +538,13 @@ class TestSetupAgentEnv:
         # this — so config's default must be the us.* inference profile.
         import os
 
-        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL and
-        # CLAUDE_CODE_USE_BEDROCK straight to os.environ. Pre-claim them through
-        # monkeypatch so its teardown restores them and this test can't leak into
-        # order-dependent neighbors (#523).
+        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL,
+        # CLAUDE_CODE_USE_BEDROCK and CLAUDE_CODE_MODEL_CATALOG straight to
+        # os.environ. Pre-claim them through monkeypatch so its teardown restores
+        # them and this test can't leak into order-dependent neighbors (#523).
         monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
         monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
+        monkeypatch.setenv("CLAUDE_CODE_MODEL_CATALOG", "")
 
         config = _config(haiku_model="us.anthropic.claude-haiku-4-5-20251001-v1:0")
         _setup_agent_env(config)
@@ -451,6 +552,58 @@ class TestSetupAgentEnv:
             os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
             == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         )
+
+    def test_model_catalog_is_switched_off(self, monkeypatch):
+        # Claude Code 2.1.311 and later fetch model settings on Bedrock from
+        # downloads.claude.ai unless this variable says "off". The platform's DNS
+        # allowlist does not name that host, and a task keeps the model table of
+        # the pinned CLI, whatever value the process was started with.
+        import os
+
+        monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
+        monkeypatch.setenv("CLAUDE_CODE_MODEL_CATALOG", "on")
+
+        _setup_agent_env(_config())
+        assert os.environ["CLAUDE_CODE_MODEL_CATALOG"] == "off"
+
+    def test_instrumentation_variables_are_removed_from_the_process(self, monkeypatch):
+        # The Claude Code CLI and what it starts (the Bash tool, so the target
+        # repository's own Python) inherit os.environ. What the agent's
+        # opentelemetry-instrument wrapper put there would make that Python try
+        # to instrument itself with packages only the agent has.
+        import os
+
+        for name in (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_MODEL_CATALOG",
+        ):
+            monkeypatch.setenv(name, "")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+        monkeypatch.setenv("OTEL_PYTHON_DISTRO", "aws_distro")
+        instrumentation = "/opt/venv/lib/opentelemetry/instrumentation/auto_instrumentation"
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join((instrumentation, "/repo/src")))
+
+        _setup_agent_env(_config())
+
+        assert [name for name in os.environ if name.startswith("OTEL_")] == []
+        assert os.environ["PYTHONPATH"] == "/repo/src"
+
+    def test_python_path_of_instrumentation_only_is_removed(self, monkeypatch):
+        import os
+
+        for name in (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_MODEL_CATALOG",
+        ):
+            monkeypatch.setenv(name, "")
+        monkeypatch.setenv("PYTHONPATH", "/opt/venv/lib/opentelemetry/instrumentation")
+
+        _setup_agent_env(_config())
+
+        assert "PYTHONPATH" not in os.environ
 
     def test_config_default_haiku_model_is_an_inference_profile(self):
         # The platform default (no override) must be a GEO-PREFIXED profile, never a
@@ -608,3 +761,508 @@ class TestRegisterGatewayServer:
             "clarification": existing,
             GATEWAY_SERVER_NAME: sentinel,
         }
+
+
+def _run_agent(
+    monkeypatch, *messages: Any, config: TaskConfig | None = None, **run_agent_kwargs: Any
+) -> SimpleNamespace:
+    """Run ``run_agent`` over ``messages`` in place of what the Claude Code CLI sends.
+
+    The SDK client is replaced, so no CLI is started and nothing reaches Bedrock;
+    the environment setup, the version probe, the policy engine and the gateway
+    bridge are stubbed too. ``run_agent_kwargs`` (``cwd``, ``trajectory``) are
+    passed on. Returns the ``AgentResult``, the progress writer the run wrote its
+    events to (a mock), the options the client was built with and the hooks that
+    stand in for those of the policy engine.
+    """
+    seen: dict[str, Any] = {}
+    hooks: dict[str, Any] = {}
+
+    class Client:
+        def __init__(self, options):
+            seen["options"] = options
+
+        async def connect(self):
+            pass
+
+        async def query(self, prompt):
+            pass
+
+        async def receive_response(self):
+            for message in messages:
+                yield message
+
+        async def disconnect(self):
+            pass
+
+    progress = MagicMock()
+    monkeypatch.setattr(sdk, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(runner, "_setup_agent_env", lambda _config: None)
+    monkeypatch.setattr(runner, "_log_claude_cli_version", lambda: None)
+    monkeypatch.setattr(runner, "_initialize_policy_engine_and_hooks", lambda **_kw: (None, hooks))
+    monkeypatch.setattr(runner, "_register_gateway_server", lambda _servers: None)
+    monkeypatch.setattr(runner, "_ProgressWriter", MagicMock(return_value=progress))
+    result: AgentResult = asyncio.run(
+        runner.run_agent("prompt", "system", config or _config(), **run_agent_kwargs)
+    )
+    return SimpleNamespace(result=result, progress=progress, options=seen["options"], hooks=hooks)
+
+
+def _result(**fields: Any) -> sdk.ResultMessage:
+    """The message that ends a run; a clean one unless ``fields`` say otherwise."""
+    base: dict[str, Any] = {
+        "subtype": "success",
+        "duration_ms": 1200,
+        "duration_api_ms": 900,
+        "is_error": False,
+        "num_turns": 1,
+        "session_id": "session",
+    }
+    base.update(fields)
+    return sdk.ResultMessage(**base)
+
+
+class TestClarificationToolIsOfferedPerWorkflow:
+    """``request_clarification`` holds a task for the requester's answer. Only the
+    lane that opens a pull request reads the question the agent asked through it:
+    a workflow whose pipeline path ignores the question must not be given the tool,
+    or the tool tells the model that its question will be posted and nothing is."""
+
+    @staticmethod
+    def _offered(monkeypatch, workflow_id: str) -> bool:
+        config = _config(resolved_workflow={"id": workflow_id, "version": "1.0.0"})
+        options = _run_agent(monkeypatch, _result(), config=config).options
+        return (
+            CLARIFICATION_SERVER_NAME in options.mcp_servers
+            and CLARIFICATION_TOOL_NAME in options.allowed_tools
+        )
+
+    def test_new_task_workflow_is_offered_the_tool(self, monkeypatch):
+        assert self._offered(monkeypatch, "coding/new-task-v1") is True
+
+    @pytest.mark.parametrize("workflow_id", sorted(runner._NO_CLARIFICATION_WORKFLOW_IDS))
+    def test_excluded_workflow_is_one_that_ships_and_is_not_offered_the_tool(
+        self, monkeypatch, workflow_id
+    ):
+        # An id that no workflow file has excludes nothing.
+        assert load_workflow(workflow_id).id == workflow_id
+        assert self._offered(monkeypatch, workflow_id) is False
+
+    def test_research_workflow_is_not_offered_the_tool(self, monkeypatch):
+        # Repo-less: its result is the agent's last message, uploaded as the
+        # artifact. A question asked through the tool would be dropped and the
+        # task would end COMPLETED.
+        assert self._offered(monkeypatch, "knowledge/web-research-v1") is False
+
+
+class TestOptionsOfTheSdkClient:
+    """``run_agent`` hands the SDK client one options object. The tool lock, the
+    policy hooks and the limits of the task all travel in it, and the session runs
+    without whatever that call leaves out. The helpers that compute the pieces have
+    tests of their own; these check that the pieces arrive."""
+
+    def test_session_gets_the_tool_lock_the_hooks_and_the_limits_of_the_task(self, monkeypatch):
+        config = _config(max_turns=7, max_budget_usd=1.5)
+        run = _run_agent(monkeypatch, _result(), config=config, cwd="/w")
+
+        options = run.options
+        # The one hard lock on the tools that leave work running after the
+        # session: under bypassPermissions ``allowed_tools`` restricts nothing.
+        assert options.disallowed_tools == _DISALLOWED_TOOLS
+        # Cedar policy, output screening, cancellation and nudges all run as hooks.
+        assert options.hooks is run.hooks
+        assert options.permission_mode == "bypassPermissions"
+        assert options.setting_sources == ["project"]
+        assert options.system_prompt == "system"
+        assert options.cwd == "/w"
+        assert options.max_turns == 7
+        assert options.max_budget_usd == 1.5
+
+    def test_read_only_task_gets_neither_a_write_tool_nor_the_clarification_tool(self, monkeypatch):
+        config = _config(read_only=True, allowed_tools=["Bash", "Read", "Write", "Edit"])
+        options = _run_agent(monkeypatch, _result(), config=config).options
+
+        assert options.allowed_tools == ["Bash", "Read"]
+        assert options.mcp_servers == {}
+
+
+class TestCleanResult:
+    """The message that ends a run says how the run went. The runner copies it onto
+    the ``AgentResult``: the pipeline takes the task's verdict, its cost and its
+    token counts from there, and the final text is what a task without a repository
+    delivers."""
+
+    def test_status_final_text_cost_and_usage_are_recorded(self, monkeypatch):
+        run = _run_agent(
+            monkeypatch,
+            _result(
+                result="The cache is never invalidated.",
+                total_cost_usd=0.42,
+                usage={"input_tokens": 1200, "output_tokens": 340},
+            ),
+        )
+
+        assert run.result.status == "success"
+        assert run.result.result_text == "The cache is never invalidated."
+        assert run.result.cost_usd == 0.42
+        assert run.result.session_id == "session"
+        assert run.result.usage == TokenUsage(input_tokens=1200, output_tokens=340)
+
+
+# Credential-shaped values, assembled here so that this file holds no such literal:
+# an AWS access key id, a GitHub token in a git URL, the value of a token header.
+_AWS_KEY_ID = "AKIA" + "IOSFODNN7EXAMPLE"
+_GIT_URL_TOKEN = "gh" + "s_" + "a1B2c3D4" * 5
+_HEADER_TOKEN = "made-up-" + "0123456789"
+_SECRETS = (_AWS_KEY_ID, _GIT_URL_TOKEN, _HEADER_TOKEN)
+
+
+def _assert_screened(recorded: str) -> None:
+    """``recorded`` holds none of ``_SECRETS``: both steps of the screening ran."""
+    for secret in _SECRETS:
+        assert secret not in recorded
+    # The marker of the output scanner, and the form the log redaction leaves.
+    assert "[REDACTED-AWS_KEY]" in recorded
+    assert "Authorization: token ***" in recorded
+
+
+class TestErrorResult:
+    """A result that the CLI marks as an error ends the run with status "error" and
+    an error text. That text becomes the task's error message: the platform
+    classifies the failure by it and quotes it in the reply to the requester."""
+
+    def test_error_subtype_carries_the_reason_the_cli_gave(self, monkeypatch):
+        # The error subtypes send no ``result``: their reason is in ``errors``.
+        run = _run_agent(
+            monkeypatch,
+            _result(
+                subtype="error_during_execution",
+                is_error=True,
+                errors=["queryParams builder failed: boom"],
+            ),
+        )
+
+        assert run.result.status == "error"
+        assert run.result.error == (
+            "Agent session error (subtype='error_during_execution'): "
+            "queryParams builder failed: boom"
+        )
+
+    def test_turn_limit_keeps_the_wrapper_the_classifier_reads(self, monkeypatch):
+        run = _run_agent(
+            monkeypatch,
+            _result(
+                subtype="error_max_turns",
+                is_error=True,
+                num_turns=31,
+                errors=["Reached maximum number of turns (30)"],
+            ),
+        )
+
+        # cdk/src/handlers/shared/error-classifier.ts keys on this wrapper, and
+        # pipeline._resolve_overall_task_status on the subtype in it.
+        assert run.result.error == "Agent session error (subtype='error_max_turns')"
+
+    def test_several_reasons_are_all_kept(self, monkeypatch):
+        run = _run_agent(
+            monkeypatch,
+            _result(subtype="error_during_execution", is_error=True, errors=["first", "second"]),
+        )
+
+        assert run.result.error.endswith("): first; second")
+
+    def test_error_subtype_without_a_reason_is_the_wrapper_alone(self, monkeypatch):
+        run = _run_agent(monkeypatch, _result(subtype="error_max_budget_usd", is_error=True))
+
+        assert run.result.error == "Agent session error (subtype='error_max_budget_usd')"
+
+    def test_failed_model_call_is_reported_with_its_result_text(self, monkeypatch):
+        # A model call that the provider refuses ends the run with subtype
+        # "success", ``is_error`` and the refusal as ``result``.
+        refusal = "API Error: 403 You don't have access to the model with the specified model ID."
+        run = _run_agent(monkeypatch, _result(is_error=True, result=f" {refusal}\n"))
+
+        assert run.result.status == "error"
+        assert run.result.error == refusal
+        assert run.result.result_text == ""
+
+    def test_reason_is_screened_before_it_is_recorded(self, monkeypatch, capfd):
+        # The reason is the CLI's own account of what failed and may quote a
+        # command or a URL. It is stored on the task record and posted to the
+        # requester, so it is screened like tool output and redacted like a log
+        # line.
+        run = _run_agent(
+            monkeypatch,
+            _result(
+                subtype="error_during_execution",
+                is_error=True,
+                errors=[
+                    f"git push https://x-access-token:{_GIT_URL_TOKEN}@github.com/o/r failed",
+                    f"denied for {_AWS_KEY_ID} with Authorization: token {_HEADER_TOKEN}",
+                ],
+            ),
+        )
+
+        assert run.result.error.startswith(
+            "Agent session error (subtype='error_during_execution'): git push https://"
+        )
+        _assert_screened(run.result.error)
+        _assert_screened(capfd.readouterr().out)
+
+
+def _assistant(*blocks: Any, answer: str | None) -> sdk.AssistantMessage:
+    """One message of the model answer ``answer``.
+
+    The CLI sends an answer as one message per content block (thinking, text,
+    each tool call), and every one of them carries the id of the answer.
+    """
+    return sdk.AssistantMessage(content=list(blocks), model="claude-opus-5-5", message_id=answer)
+
+
+def _thinking(text: str) -> sdk.ThinkingBlock:
+    return sdk.ThinkingBlock(thinking=text, signature="sig")
+
+
+def _bash(tool_use_id: str, command: str) -> sdk.ToolUseBlock:
+    return sdk.ToolUseBlock(id=tool_use_id, name="Bash", input={"command": command})
+
+
+def _tool_result(tool_use_id: str, content: Any, is_error: bool = False) -> sdk.UserMessage:
+    """What the CLI sends when a tool call has ended: a user message with its result."""
+    block = sdk.ToolResultBlock(tool_use_id=tool_use_id, content=content, is_error=is_error)
+    return sdk.UserMessage(content=[block])
+
+
+def _turns_of(write: MagicMock) -> list[int]:
+    """The ``turn`` of every event written through one progress-writer method."""
+    return [call.kwargs["turn"] for call in write.call_args_list]
+
+
+class TestTurnCount:
+    """A turn is one answer of the model, which is what ``max_turns`` limits. The
+    runner numbers its events by it. The CLI's ``num_turns`` is not this number:
+    it grows with every tool result, so an answer that calls two tools adds two."""
+
+    def test_messages_of_one_answer_are_one_turn(self, monkeypatch):
+        trajectory = MagicMock()
+        run = _run_agent(
+            monkeypatch,
+            _assistant(_thinking("Look at the tests first."), answer="msg_1"),
+            _assistant(_bash("call_1", "npm test"), answer="msg_1"),
+            _tool_result("call_1", "12 passing"),
+            _assistant(sdk.TextBlock(text="All green."), answer="msg_2"),
+            _result(num_turns=2),
+            trajectory=trajectory,
+        )
+
+        assert run.result.turns == 2
+        assert run.result.num_turns == 2
+        # One event per message, numbered by the answer it belongs to.
+        assert _turns_of(run.progress.write_agent_turn) == [1, 1, 2]
+        assert _turns_of(run.progress.write_agent_tool_call) == [1]
+        assert _turns_of(run.progress.write_agent_tool_result) == [1]
+        assert _turns_of(trajectory.write_turn) == [1, 1, 2]
+
+    def test_result_between_two_calls_of_one_answer_starts_no_turn(self, monkeypatch):
+        # The CLI runs a tool while the answer that asked for it is still
+        # arriving, so the result of the first call can precede the second call.
+        run = _run_agent(
+            monkeypatch,
+            _assistant(_bash("call_1", "ls src"), answer="msg_1"),
+            _tool_result("call_1", "a.py"),
+            _assistant(_bash("call_2", "ls tests"), answer="msg_1"),
+            _tool_result("call_2", "test_a.py"),
+            _assistant(sdk.TextBlock(text="Two files."), answer="msg_2"),
+            _result(num_turns=3),
+        )
+
+        assert run.result.turns == 2
+        assert _turns_of(run.progress.write_agent_turn) == [1, 1, 2]
+        assert _turns_of(run.progress.write_agent_tool_result) == [1, 1]
+
+    def test_run_without_a_result_reports_the_turns_it_saw(self, monkeypatch):
+        # No result message (the stream broke off): the task record then takes
+        # its turn counts from this number, and clamps it to max_turns.
+        run = _run_agent(
+            monkeypatch,
+            _assistant(_thinking("Look at the tests first."), answer="msg_1"),
+            _assistant(_bash("call_1", "npm test"), answer="msg_1"),
+            _tool_result("call_1", "12 passing"),
+            _assistant(sdk.TextBlock(text="All green."), answer="msg_2"),
+        )
+
+        assert run.result.status == "unknown"
+        assert run.result.num_turns == 0
+        assert run.result.turns == 2
+
+    def test_message_without_an_answer_id_is_a_turn_of_its_own(self, monkeypatch):
+        run = _run_agent(
+            monkeypatch,
+            _assistant(sdk.TextBlock(text="One."), answer=None),
+            _assistant(sdk.TextBlock(text="Two."), answer=None),
+            _result(num_turns=2),
+        )
+
+        assert run.result.turns == 2
+
+
+class TestClarificationCallIsRecorded:
+    """The agent asks its question by calling ``request_clarification``. The runner
+    records the call, and the pipeline holds the task for whatever is recorded."""
+
+    @staticmethod
+    def _recorded(monkeypatch, tool_input: dict) -> str:
+        call = sdk.ToolUseBlock(id="call_1", name=CLARIFICATION_TOOL_NAME, input=tool_input)
+        run = _run_agent(monkeypatch, _assistant(call, answer="msg_1"), _result())
+        return run.result.clarification_question
+
+    def test_question_is_recorded_without_the_space_around_it(self, monkeypatch):
+        recorded = self._recorded(monkeypatch, {"question": " Which page is slow? "})
+
+        assert recorded == "Which page is slow?"
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [{"question": ""}, {"question": "  "}, {}],
+        ids=["empty", "blank", "missing"],
+    )
+    def test_call_without_a_question_is_recorded_all_the_same(self, monkeypatch, tool_input):
+        # Not as the empty string, which is what a run without the call leaves.
+        recorded = self._recorded(monkeypatch, tool_input)
+
+        assert recorded
+        assert recorded.strip() == ""
+
+
+def _trace(trajectory: _TrajectoryWriter) -> list[dict]:
+    """The events of the trace artifact, as ``bgagent trace download`` prints them."""
+    artifact = trajectory.dump_gzipped_jsonl()
+    assert artifact is not None
+    _header, *events = [json.loads(line) for line in gzip.decompress(artifact).splitlines()]
+    return events
+
+
+class TestToolResultsAreRecorded:
+    """The result of a tool call reaches the runner in a user message, after the
+    message of the model that asked for it. It is written to the log, to the
+    task's events and to the trajectory (the CloudWatch stream and the ``--trace``
+    artifact)."""
+
+    def test_trace_holds_what_the_tool_returned(self, monkeypatch):
+        trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
+        _run_agent(
+            monkeypatch,
+            _assistant(_bash("call_1", "npm test"), answer="msg_1"),
+            _tool_result("call_1", "12 passing"),
+            _assistant(sdk.TextBlock(text="All green."), answer="msg_2"),
+            _result(num_turns=2),
+            trajectory=trajectory,
+        )
+
+        events = _trace(trajectory)
+        assert [event["event"] for event in events] == [
+            "TRAJECTORY_TURN",
+            "TRAJECTORY_TOOL_RESULT",
+            "TRAJECTORY_TURN",
+            "TRAJECTORY_RESULT",
+        ]
+        assert events[0]["tool_calls"] == [{"name": "Bash", "input": {"command": "npm test"}}]
+        assert events[1] == {
+            "event": "TRAJECTORY_TOOL_RESULT",
+            "task_id": "t-runner-1",
+            "turn": 1,
+            "tool_name": "Bash",
+            "is_error": False,
+            "content": "12 passing",
+        }
+
+    def test_failed_call_is_recorded_as_an_error(self, monkeypatch):
+        # A call that a hook denied or a command that failed: the CLI marks the
+        # result, and its content can be a list of blocks.
+        trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
+        run = _run_agent(
+            monkeypatch,
+            _assistant(_bash("call_1", "git push --force"), answer="msg_1"),
+            _tool_result("call_1", [{"type": "text", "text": "denied by policy"}], is_error=True),
+            _result(),
+            trajectory=trajectory,
+        )
+
+        recorded = _trace(trajectory)[1]
+        assert recorded["is_error"] is True
+        assert recorded["content"] == "[{'type': 'text', 'text': 'denied by policy'}]"
+        run.progress.write_agent_tool_result.assert_called_once_with(
+            tool_name="Bash",
+            is_error=True,
+            content="[{'type': 'text', 'text': 'denied by policy'}]",
+            turn=1,
+        )
+
+    @pytest.mark.parametrize(
+        "separator",
+        ["='{}' # \"prod\"", "\t{}", ":\n{}"],
+        ids=["quoted", "after a tab", "on the next line"],
+    )
+    def test_credentials_in_a_list_of_blocks_are_replaced_as_in_a_string(
+        self, monkeypatch, capfd, separator
+    ):
+        # A result that is a list of content blocks is recorded as its repr, and a
+        # repr escapes quotes, tabs and newlines: the strings are screened first.
+        # 40 characters in the shape of a secret access key, from short pieces.
+        value = "wJalrXUt" + "nFEMI/K7" + "MDENG/bP" + "xRfiCYEX" + "AMPLEKEY"
+        text = "aws_secret_access_key" + separator.format(value)
+        recorded = {}
+        for shape, content in (("string", text), ("list", [{"type": "text", "text": text}])):
+            trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
+            run = _run_agent(
+                monkeypatch,
+                _assistant(_bash("call_1", "cat config"), answer="msg_1"),
+                _tool_result("call_1", content),
+                _result(),
+                trajectory=trajectory,
+            )
+            recorded[shape] = (
+                _trace(trajectory)[1]["content"]
+                + run.progress.write_agent_tool_result.call_args.kwargs["content"]
+                + capfd.readouterr().out
+            )
+
+        assert value not in recorded["string"]
+        assert value not in recorded["list"]
+
+    def test_long_output_is_cut_in_the_trace(self, monkeypatch):
+        trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
+        _run_agent(
+            monkeypatch,
+            _assistant(_bash("call_1", "cat big.log"), answer="msg_1"),
+            _tool_result("call_1", "x" * 5000),
+            _result(),
+            trajectory=trajectory,
+        )
+
+        assert _trace(trajectory)[1]["content"] == "x" * 2000 + "... [truncated, 5000 chars total]"
+
+    def test_credentials_in_a_result_are_replaced_before_it_is_recorded(self, monkeypatch, capfd):
+        # The PostToolUse hook screens what a tool returns, but not every result
+        # passes it (a failed command does not) and the CLI does not take every
+        # rewrite. What the runner records is screened here, whatever came before.
+        output = (
+            f"remote: https://x-access-token:{_GIT_URL_TOKEN}@github.com/o/r\n"
+            f"AWS_ACCESS_KEY_ID={_AWS_KEY_ID}\n"
+            f"curl -H 'Authorization: token {_HEADER_TOKEN}' https://api.example.com"
+        )
+        trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
+        run = _run_agent(
+            monkeypatch,
+            _assistant(_bash("call_1", "git remote -v && env"), answer="msg_1"),
+            _tool_result("call_1", output, is_error=True),
+            _result(),
+            trajectory=trajectory,
+        )
+
+        in_trace = _trace(trajectory)[1]["content"]
+        in_event = run.progress.write_agent_tool_result.call_args.kwargs["content"]
+        assert in_trace.startswith("remote: https://")
+        _assert_screened(in_trace)
+        assert in_event == in_trace
+        _assert_screened(capfd.readouterr().out)

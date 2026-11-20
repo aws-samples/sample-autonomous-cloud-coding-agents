@@ -18,44 +18,25 @@
  */
 
 /**
- * Parent rollup comments for Linear orchestration.
+ * The epic panel: the single comment on the PARENT issue of an orchestration.
  *
  * The fan-out plane posts a final-status comment on each CHILD's
- * sub-issue. The PARENT issue has no task, so its aggregate rollup is
- * posted here, by the reconciler, which already holds the orchestration
- * snapshot. The comment renderer is pure (unit-testable); ``postRollup``
- * wraps ``postIssueComment`` best-effort (a failed Linear comment must
- * never fail the reconcile — gating is the source of truth).
+ * sub-issue. The PARENT issue has no task, so its panel is rendered and
+ * written here, for the callers that hold the orchestration snapshot (the
+ * reconciler, the seed and the retry paths). ONE comment, edited in place,
+ * that shows the full DAG and matures from in-progress → complete and back to
+ * in-progress on an extend/revision. The renderer is pure (unit-testable);
+ * ``upsertEpicPanel`` writes it best-effort (a failed comment must never
+ * fail the reconcile — gating is the source of truth).
  */
 
 import { logger } from './logger';
 import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound } from './lookup-result';
 import type { Channel, IssueRef } from './orchestration-channel';
 import { isIntegrationNode } from './orchestration-integration-node';
-import { ORCH_LOG } from './orchestration-log-events';
 import type { OrchestrationChildRow } from './orchestration-store';
 import { encodeMarkdownUrl } from './screenshot-url';
 import { DEFAULT_LABEL_FILTER } from './trigger-label';
-
-/** Which rollup we're posting — drives the heading + emoji. */
-export type RollupKind = 'complete' | 'partial_failure' | 'cancelled';
-
-export interface RollupChildView {
-  readonly sub_issue_id: string;
-  readonly display_id?: string;
-  readonly title?: string;
-  readonly child_status: string;
-  readonly child_task_id?: string;
-  /**
-   * The child task's PR url, when one was opened. Resolved by the
-   * reconciler from the TaskTable at rollup time (pr_url lands on the
-   * TaskRecord in a separate write from the status transition, so it is
-   * not persisted on the orchestration row). Rendered as a link on the
-   * child's line; the integration node's PR is additionally surfaced as a
-   * prominent callout (it is the fan-out's combined deliverable).
-   */
-  readonly pr_url?: string;
-}
 
 const STATUS_ICON: Record<string, string> = {
   succeeded: '✅',
@@ -67,105 +48,7 @@ const STATUS_ICON: Record<string, string> = {
   blocked: '⏳',
 };
 
-/**
- * Render the parent rollup comment body (pure). Lists each child with its
- * status, and a one-line summary. ``kind`` is derived by the caller from
- * the terminal child statuses.
- */
-export function renderRollupComment(
-  kind: RollupKind,
-  children: readonly RollupChildView[],
-): string {
-  const counts = { succeeded: 0, failed: 0, skipped: 0 };
-  for (const c of children) {
-    if (c.child_status === 'succeeded') counts.succeeded += 1;
-    else if (c.child_status === 'failed') counts.failed += 1;
-    else if (c.child_status === 'skipped') counts.skipped += 1;
-  }
-
-  const heading =
-    kind === 'complete'
-      ? '✅ **ABCA orchestration complete**'
-      : kind === 'cancelled'
-        ? '🛑 **ABCA orchestration cancelled**'
-        : '⚠️ **ABCA orchestration finished with failures**';
-
-  const lines = [...children]
-    .sort((a, b) => (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id))
-    .map((c) => {
-      const icon = STATUS_ICON[c.child_status] ?? '•';
-      const label = c.display_id
-        ? (c.title ? `${c.display_id}: ${c.title}` : c.display_id)
-        : (c.title ?? c.sub_issue_id);
-      // Append the child's PR link when one was opened, so the parent
-      // rollup is a single place to reach every sub-issue's PR.
-      const pr = c.pr_url ? ` — [PR](${c.pr_url})` : '';
-      return `- ${icon} ${label} — ${c.child_status}${pr}`;
-    });
-
-  const summary = `${counts.succeeded} succeeded, ${counts.failed} failed, ${counts.skipped} skipped `
-    + `(of ${children.length}).`;
-
-  // Surface the integration node's combined PR as a prominent callout —
-  // it is the fan-out's single merged deliverable, and (being a synthetic node
-  // with no Linear sub-issue) it is otherwise unreachable from Linear. Only
-  // when the integration node actually opened a PR.
-  const integration = children.find((c) => isIntegrationNode(c.sub_issue_id) && c.pr_url);
-  const callout = integration
-    ? ['', `🔗 **Combined PR (all sub-issues merged):** [${integration.pr_url}](${integration.pr_url})`]
-    : [];
-
-  return [heading, '', summary, ...callout, '', ...lines].join('\n');
-}
-
-/**
- * Render the LIVE status block (pure) — the single edit-in-place comment on
- * the parent epic that answers "where are we" during a running
- * orchestration. Posted at seed and re-rendered + edited on
- * every child transition, so the parent shows current progress without a
- * comment stream. Once all children are terminal the reconciler replaces
- * the body with the final {@link renderRollupComment}, so this block is the
- * in-flight view only.
- *
- * Per-child line shows the same icons as the rollup (running/blocked/done/
- * failed/skipped) plus the child's PR link when known.
- */
-export function renderStatusBlock(children: readonly RollupChildView[]): string {
-  const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
-  const done = children.filter((c) => terminal(c.child_status)).length;
-
-  const heading = `🔄 **ABCA orchestration** · ${done}/${children.length} complete`;
-
-  const lines = [...children]
-    .sort((a, b) => (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id))
-    .map((c) => {
-      const icon = STATUS_ICON[c.child_status] ?? '•';
-      const label = c.display_id
-        ? (c.title ? `${c.display_id}: ${c.title}` : c.display_id)
-        : (c.title ?? c.sub_issue_id);
-      // Human-friendly status words for the in-flight view. 'releasing' (the
-      // transient flip-then-create claim) reads as running like
-      // released/ready — the child is mid-launch, not a distinct user-facing state.
-      const word =
-        c.child_status === 'released' || c.child_status === 'ready' || c.child_status === 'releasing' ? 'running'
-          : c.child_status === 'blocked' ? 'blocked'
-            : c.child_status;
-      // Link the PR as soon as it is known, even mid-run.
-      const pr = c.pr_url ? ` — [PR](${c.pr_url})` : '';
-      return `- ${icon} ${label} — ${word}${pr}`;
-    });
-
-  return [heading, '', ...lines, '', '_Updates live as sub-issues progress._'].join('\n');
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// The single MATURING panel comment. Supersedes the
-// separate renderStatusBlock + renderRollupComment — ONE comment, edited in
-// place, that shows the full DAG and matures from in-progress → complete and
-// back to in-progress on an extend/revision.
-// ───────────────────────────────────────────────────────────────────────────
-
-/** Per-sub-issue view for the maturing panel — adds the 'updating' context the rollup/block can't express. */
+/** Per-sub-issue view for the maturing panel. */
 export interface EpicPanelRow {
   readonly sub_issue_id: string;
   readonly display_id?: string;
@@ -223,16 +106,6 @@ export interface EpicPanelParams {
 const PANEL_FOOTER = '_One live panel — updates in place as the epic progresses; no comment stream._';
 
 /**
- * Truncate a quoted comment for the "updating per …" row, keeping it short.
- * Exported so the caller (reconciler) builds the ``updatingReason`` string —
- * e.g. ``per ENG-42's "${truncateQuote(commentBody)}"``.
- */
-export function truncateQuote(s: string, max = 40): string {
-  const oneLine = s.replace(/\s+/g, ' ').trim();
-  return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
-}
-
-/**
  * SHORT friendly name for a node, used where a node is NAMED inside prose (e.g.
  * the cascade reason "updating to include <X>'s change"). The integration node
  * gets the friendly "the integration" rather than its raw stored title, so a
@@ -284,8 +157,12 @@ export function renderEpicPanel(params: EpicPanelParams): string {
     heading = '✅ **ABCA orchestration complete**';
   }
 
+  // Issue order: by the number in the identifier (ENG-9 before ENG-10), and the
+  // integration row last. It has no identifier, and its id (orch_<hash>…) would
+  // otherwise place it by the team key: after ENG-1, before WEB-1.
   const lines = [...rows]
-    .sort((a, b) => (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id))
+    .sort((a, b) => Number(isIntegrationNode(a.sub_issue_id)) - Number(isIntegrationNode(b.sub_issue_id))
+      || (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id, undefined, { numeric: true }))
     .map((r) => {
       const label = panelLabel(r);
       const pr = r.pr_url ? ` — [PR](${r.pr_url})` : '';
@@ -361,17 +238,6 @@ export function renderEpicPanel(params: EpicPanelParams): string {
   }
 
   return [heading, '', ...lines, ...callout, ...retryHint, ...shot, '', PANEL_FOOTER].join('\n');
-}
-
-/**
- * Decide the rollup kind from the (terminal) child statuses.
- * - any failed/skipped → partial_failure
- * - all succeeded → complete
- * (cancelled is passed explicitly by the cancel path, not derived here)
- */
-export function rollupKindFromChildren(children: readonly RollupChildView[]): RollupKind {
-  const anyBad = children.some((c) => c.child_status === 'failed' || c.child_status === 'skipped');
-  return anyBad ? 'partial_failure' : 'complete';
 }
 
 /**
@@ -527,106 +393,4 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<Lo
     }
   }
   return commentId ? lookupFound(commentId) : LOOKUP_ABSENT;
-}
-
-export interface PostRollupParams {
-  /** The surface adapter to drive. Optional capabilities it omits are skipped. */
-  readonly channel: Channel;
-  readonly orchestrationId: string;
-  /** The parent epic, on whichever surface triggered the orchestration. */
-  readonly parent: IssueRef;
-  readonly kind: RollupKind;
-  readonly children: readonly OrchestrationChildRow[];
-  /**
-   * The live status-block comment id stamped at seed. When set, the
-   * final rollup EDITS that comment in place (one comment for the whole run,
-   * no stream). When absent (seed-time create failed, or an older
-   * orchestration), the rollup posts a fresh comment.
-   */
-  readonly statusCommentId?: string;
-  /**
-   * ``sub_issue_id → pr_url`` for children that opened a PR. Supplied
-   * by the reconciler (batch-read from the TaskTable at rollup time, when
-   * pr_urls have settled). Threaded into the rendered comment as per-child
-   * links + the integration node's combined-PR callout. Absent/partial is
-   * fine — a missing entry just renders no link.
-   */
-  readonly prUrls?: Readonly<Record<string, string>>;
-}
-
-/**
- * Post the parent rollup comment. Best-effort: never throws; logs a
- * stable event on both success and failure so automated tests can assert
- * on ``orch.rollup.posted`` / ``orch.rollup.failed``.
- */
-export async function postRollup(params: PostRollupParams): Promise<boolean> {
-  const { channel, parent, orchestrationId, kind, children, statusCommentId } = params;
-  const prUrls = params.prUrls ?? {};
-  const body = renderRollupComment(
-    kind,
-    children.map((c) => ({
-      sub_issue_id: c.sub_issue_id,
-      ...(c.display_id !== undefined && { display_id: c.display_id }),
-      ...(c.title !== undefined && { title: c.title }),
-      child_status: c.child_status,
-      ...(c.child_task_id !== undefined && { child_task_id: c.child_task_id }),
-      ...(prUrls[c.sub_issue_id] !== undefined && { pr_url: prUrls[c.sub_issue_id] }),
-    })),
-  );
-
-  let ok = false;
-  try {
-    // Edit the live status block into the final rollup when we have its id (one
-    // comment for the whole run); else post a fresh comment.
-    if (statusCommentId) {
-      ok = (await channel.upsertComment(parent, body, { commentId: statusCommentId })) !== null;
-    } else {
-      ok = (await channel.postComment(parent, body)) !== null;
-    }
-  } catch (err) {
-    logger.warn('Parent rollup comment threw (non-fatal)', {
-      event: ORCH_LOG.rollupFailed,
-      orchestration_id: orchestrationId,
-      parent_issue_id: parent.issueId,
-      rollup_kind: kind,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return false;
-  }
-
-  if (ok) {
-    logger.info('Parent rollup comment posted', {
-      event: ORCH_LOG.rollupPosted,
-      orchestration_id: orchestrationId,
-      parent_issue_id: parent.issueId,
-      rollup_kind: kind,
-      child_count: children.length,
-    });
-
-    // Mirror the children's status signal on the PARENT epic:
-    // - state: on a clean 'complete', advance to awaiting-review (work done,
-    //   child PRs awaiting a human merge — NOT done, since nothing is merged).
-    //   On a partial-failure / cancelled rollup, leave the state in place (the
-    //   comment + ❌ reaction already convey the outcome).
-    // - reaction: replace the seed 👀 with ✅ (complete) / ❌ (otherwise) so the
-    //   parent shows exactly ONE marker at a time, like the children.
-    // Run SEQUENTIALLY, not concurrently: the state transition and the reaction
-    // replace each fan out into multiple surface calls. Firing them together —
-    // on top of the comment edit just above — self-throttled the request budget,
-    // so the states read aborted and the transition silently no-op'd, leaving
-    // the parent stuck. Serialising keeps each read under its own budget. Both
-    // best-effort; a hiccup never suppresses the rollup.
-    if (kind === 'complete') {
-      await channel.transitionState?.(parent, 'in_review');
-    }
-    await channel.replaceIssueReaction?.(parent, kind === 'complete' ? 'succeeded' : 'failed');
-  } else {
-    logger.warn('Parent rollup comment post returned false', {
-      event: ORCH_LOG.rollupFailed,
-      orchestration_id: orchestrationId,
-      parent_issue_id: parent.issueId,
-      rollup_kind: kind,
-    });
-  }
-  return ok;
 }

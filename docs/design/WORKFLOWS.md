@@ -430,7 +430,7 @@ Enforced at author time (CDK synth / CI lint over `agent/workflows/**`) and at r
 1. `id` matches `^[a-z][a-z0-9-]*/[a-z][a-z0-9-]*-v\d+$`; `version` is valid semver; the two are consistent (`-vN` ↔ major `N`).
 2. Exactly one `run_agent` step (current single-agentic-step invariant).
 3. `requires_repo:false` ⇒ no `clone_repo`, `ensure_pr`, `post_review`, `verify_build`, or `verify_lint` steps; `hydration.sources` excludes `issue`/`pull_request`.
-4. `read_only:true` ⇒ `agent_config.allowed_tools` excludes `Write`/`Edit`; no `ensure_pr` with `strategy: create|push_resolve`.
+4. `read_only:true` ⇒ `agent_config.allowed_tools` excludes `Write`/`Edit`; no `ensure_pr` with `strategy: create|push_resolve` (a step that names no strategy counts as `create`, which is what it runs as).
 5. **Policy floor:** `read_only:false` ⇒ `agent_config.cedar_policy_modules` includes `builtin/soft_deny` (and always-on `builtin/hard_deny`). Dropping the soft-deny floor requires an admin-approved exception, not a field edit (see [Replacing the Cedar principal](#replacing-the-cedar-principal)).
 6. **Tier ceiling:** the declared reach of `agent_config` (tools, `mcp_servers`, `plugins`, `skills`) may not exceed its `tier` (`standard` < `elevated`; `read-only` excludes mutating tools).
 7. **Repo-config gating:** `requires_repo:false` ⇒ `repo_config.discover` is `false` and `repo_config.provider` is absent (no repo to clone or discover from).
@@ -487,7 +487,7 @@ The point: `convergence` now documents "what counts as done" per workflow withou
 ## Observability & metadata
 
 - `resolved_workflow: { id, version }` is persisted on the `TaskRecord` and returned in `TaskDetail` — for audit, eval correlation (alongside `prompt_version`), and cost segmentation by `domain`.
-- The step runner emits a `step:<name>:start` / `step:<name>:complete` milestone per step boundary via the existing `progress_writer` (free-form milestone strings — no schema change to `TaskEventsTable`).
+- The step runner emits a milestone at both boundaries of every step it runs, via the existing `progress_writer` (free-form milestone strings — no schema change to `TaskEventsTable`): `step:<name>:start`, then `step:<name>:succeeded`, `:failed` or `:skipped`, where `<name>` is the step's `name`, else its `kind`. On the repo-bound path the runner runs the agent step only, so the pipeline emits the milestones of the build and pull-request steps itself, under the names the workflow gives those steps (none for a step the workflow does not declare): the start and the result of the build (no result when the build command could not run), and the start of the pull-request step (`pr_created` follows once a pull request exists).
 - On failure, the failing step `name`/`kind` is recorded in the structured error, so terminal `FAILED` states are attributable to a step.
 - **Pulling a bad workflow version:** because resolution pins `{id, version}` at submit time and `production` is single-winner per id lineage, a regressed version is withdrawn by promoting a fixed version (auto-deprecating the bad one) or by marking it `deprecated`; in-flight tasks keep their pinned version, new tasks get the replacement. No data migration (mirrors the `error_classification` derived-field pattern).
 

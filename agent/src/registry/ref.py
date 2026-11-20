@@ -30,13 +30,18 @@ RESERVED_KINDS = ("plugin", "subagent", "prompt_fragment", "capability")
 # ``\Z`` (absolute end of string), not ``$``: Python's ``$`` also matches just
 # before a trailing newline, so ``$`` would accept ``…@1.0.0\n`` that the JS
 # mirror (ref.ts, no ``m`` flag) rejects — a byte-for-byte parity break.
+# The constraint is ``.+`` in the JS mirror, where the dot matches none of the four
+# line terminators. Python's dot stops at ``\n`` only, so the class is spelled out.
 _REF_SHAPE = re.compile(
-    r"^registry://([a-z][a-z0-9_]*)/([a-z][a-z0-9-]*)/([a-z0-9][a-z0-9._-]*)@(.+)\Z"
+    r"^registry://([a-z][a-z0-9_]*)/([a-z][a-z0-9-]*)/([a-z0-9][a-z0-9._-]*)"
+    r"@([^\n\r\u2028\u2029]+)\Z"
 )
 # exact / caret / tilde over MAJOR.MINOR.PATCH with an optional prerelease.
 # Rejects ``*``, ``latest``, ``>=``, ``<=``, x-ranges, and bare prerelease modifiers.
+# ``re.ASCII``: without it ``\d`` matches every Unicode decimal digit, which ``int()``
+# then converts. In the JS mirror ``\d`` is 0-9.
 _CONSTRAINT = re.compile(
-    r"^([\^~]?)(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z"
+    r"^([\^~]?)(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z", re.ASCII
 )
 _OP_BY_PREFIX = {"": "exact", "^": "caret", "~": "tilde"}
 
@@ -83,6 +88,11 @@ def parse_constraint(raw: str) -> ParsedConstraint | None:
     if not m:
         return None
     prefix, major, minor, patch, prerelease = m.groups()
+    # A component with more digits than _MAX_SAFE_INT is above it (there are no
+    # leading zeros). Checked on the text, because int() raises a plain ValueError
+    # for more than 4300 digits, where the TS parser answers INVALID_CONSTRAINT.
+    if max(len(major), len(minor), len(patch)) > len(str(_MAX_SAFE_INT)):
+        return None
     major_i, minor_i, patch_i = int(major), int(minor), int(patch)
     if max(major_i, minor_i, patch_i) > _MAX_SAFE_INT:
         return None

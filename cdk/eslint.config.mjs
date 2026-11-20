@@ -125,7 +125,9 @@ export default [
       '@stylistic/quotes': ['error', 'single', { avoidEscape: true }],
       '@stylistic/comma-dangle': ['error', 'always-multiline'],
       '@stylistic/comma-spacing': ['error', { before: false, after: true }],
-      '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false }],
+      // The exceptions of the core rule this replaced: the plugin's own default also lets
+      // two spaces inside an import attribute pass.
+      '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false, exceptions: { Property: true, ImportAttribute: false } }],
       '@stylistic/array-bracket-spacing': ['error', 'never'],
       '@stylistic/array-bracket-newline': ['error', 'consistent'],
       '@stylistic/object-curly-spacing': ['error', 'always'],
@@ -146,7 +148,7 @@ export default [
       }],
       '@stylistic/quote-props': ['error', 'consistent-as-needed'],
       '@stylistic/key-spacing': ['error'],
-      '@stylistic/no-multiple-empty-lines': ['error'],
+      '@stylistic/no-multiple-empty-lines': ['error', { max: 1 }],
       '@stylistic/no-trailing-spaces': ['error'],
       '@stylistic/no-extra-semi': ['error'],
       '@stylistic/spaced-comment': ['error', 'always', {
@@ -169,41 +171,27 @@ export default [
       'no-throw-literal': ['error'],
       // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
       // A function above it is split, not exempted. The eslint-disable-next-line
-      // directives in src mark the functions that were above it when it landed: they
-      // must not grow. When a directive stops applying, as when its function comes to
-      // fit, the eslint task (--fix) deletes it and eslint:check reports it as unused.
+      // directives in src mark the functions that were above it when it landed. The
+      // first number in the parenthesis of a directive is the record: the value the
+      // function had then, lowered whenever a change makes the function smaller. Four
+      // records were raised once, to what #904 had made of their functions before
+      // anything held a record; those name the earlier value second. Records
+      // must not grow, and test/eslint-config.test.ts holds each to its record. When a
+      // directive stops applying, as when its function comes to fit, the eslint task
+      // (--fix) deletes it and eslint:check reports it as unused.
       'complexity': ['error', { max: 40 }],
-      'quotes': ['error', 'single', { avoidEscape: true }],
+      // These two core formatting rules stay on beside their @stylistic forks, which each
+      // leave checks out: the space in `catch (`, and the space after the comma of an
+      // array hole (`[, second]`) and at the trailing comma of a type parameter list.
       'comma-spacing': ['error', { before: false, after: true }],
-      'no-multi-spaces': ['error', { ignoreEOLComments: false }],
-      'array-bracket-spacing': ['error', 'never'],
-      'array-bracket-newline': ['error', 'consistent'],
-      'object-curly-spacing': ['error', 'always'],
-      'object-curly-newline': ['error', { multiline: true, consistent: true }],
-      'object-property-newline': ['error', { allowAllPropertiesOnSameLine: true }],
       'keyword-spacing': ['error'],
-      'brace-style': ['error', '1tbs', { allowSingleLine: true }],
-      'space-before-blocks': 'error',
       'eol-last': ['error', 'always'],
       'no-duplicate-imports': ['error'],
-      'key-spacing': ['error'],
-      'semi': ['error', 'always'],
-      'quote-props': ['error', 'consistent-as-needed'],
-      'no-multiple-empty-lines': ['error', { max: 1 }],
-      'max-len': ['error', {
-        code: 150,
-        ignoreUrls: true,
-        ignoreStrings: true,
-        ignoreTemplateLiterals: true,
-        ignoreComments: true,
-        ignoreRegExpLiterals: true,
-      }],
       'no-console': ['error'],
       // A coverage-ignore comment takes code out of what the coverage floors measure:
       // test the code, or leave it counted as uncovered. These are the spellings that
       // jest (v8-to-istanbul) and vitest honour.
       'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
-      'no-trailing-spaces': ['error'],
       'no-restricted-syntax': ['error', NO_MD5],
       // A holder that a closure reads before its one assignment cannot become a const
       // (the Lazy ARN holders in stacks/agent.ts).
@@ -212,9 +200,6 @@ export default [
       // until its findings are fixed; delete the line to turn the rule on.
       '@typescript-eslint/no-explicit-any': 'off',
       'no-useless-assignment': 'off',
-      'preserve-caught-error': 'off',
-      // Off for good: its one finding is the sanitizer that strips control characters.
-      'no-control-regex': 'off',
 
       // TypeScript rules
       // Dead-code parity with Python ruff F401 (#282): unused imports/locals/params
@@ -390,6 +375,14 @@ export default [
     },
   },
 
+  // One catch of this file still throws a new error without the caught one as its cause.
+  {
+    files: ['src/handlers/shared/repo-config.ts'],
+    rules: {
+      'preserve-caught-error': 'off',
+    },
+  },
+
   // Override: tests legitimately use inline literals (fixtures, assertions)
   {
     files: ['test/**/*.{ts,tsx,mts,cts}'],
@@ -400,7 +393,6 @@ export default [
       // Table-driven assertions and long expected strings read better on one line
       // than wrapped.
       '@stylistic/max-len': 'off',
-      'max-len': 'off',
       // NOTE: `no-shadow` is deliberately NOT relaxed here. It is
       // correctness-adjacent in test code — a shadowed `row` or `mock` inside a
       // nested describe is a common way to assert against the wrong fixture and

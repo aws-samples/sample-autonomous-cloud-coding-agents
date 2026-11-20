@@ -368,7 +368,7 @@ class TestCancelShortCircuitsNudgeConsumption:
         result = hooks_mod._nudge_between_turns_hook(ctx)
 
         assert result == []
-        # The early-return happens before ``_emit_nudge_milestone`` — no
+        # The early-return happens before the milestone is written — no
         # ``nudge_acknowledged`` event should be written for a cancelled task.
         progress.write_agent_milestone.assert_not_called()
         table.query.assert_not_called()

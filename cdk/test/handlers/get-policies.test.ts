@@ -20,8 +20,7 @@
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 const mockSend = jest.fn();
-const mockLoadRepoConfig = jest.fn();
-const mockCheckRepoOnboarded = jest.fn();
+const mockLookupRepo = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({})),
@@ -32,8 +31,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
 }));
 jest.mock('../../src/handlers/shared/repo-config', () => ({
-  loadRepoConfig: (...args: unknown[]) => mockLoadRepoConfig(...args),
-  checkRepoOnboarded: (...args: unknown[]) => mockCheckRepoOnboarded(...args),
+  lookupRepo: (...args: unknown[]) => mockLookupRepo(...args),
 }));
 
 let ulidCounter = 0;
@@ -43,6 +41,33 @@ process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.POLICIES_RATE_LIMIT_PER_MINUTE = '30';
 
 import { _resetCacheForTests, handler } from '../../src/handlers/get-policies';
+import type { RepoLookupResult } from '../../src/handlers/shared/repo-config';
+
+/** A Blueprint entry in the annotated form: listed under its own rule id. */
+const CUSTOM_SOFT_RULE =
+  '@tier("soft") @rule_id("custom_rule") @severity("low") @approval_timeout_s("60") ' +
+  'forbid (principal, action == Agent::Action::"execute_bash", resource) ' +
+  'when { context.command like "*npm publish*" };';
+
+/** Blueprint entries without annotations, the form `cdk/test/constructs/blueprint.test.ts` uses. */
+const UNANNOTATED_RULE =
+  'forbid (principal, action == Agent::Action::"execute_bash", resource) when { context.command like "*npm publish*" };';
+const OTHER_UNANNOTATED_RULE =
+  'forbid (principal, action == Agent::Action::"execute_bash", resource) when { context.command like "*terraform apply*" };';
+
+/** What `lookupRepo` answers for an onboarded repository whose Blueprint holds these Cedar policies. */
+function onboardedWith(cedarPolicies?: string[]): RepoLookupResult {
+  return {
+    onboarded: true,
+    config: {
+      repo: 'owner/repo',
+      status: 'active',
+      onboarded_at: '',
+      updated_at: '',
+      ...(cedarPolicies && { cedar_policies: cedarPolicies }),
+    },
+  };
+}
 
 function makeEvent(repoId = 'owner%2Frepo'): APIGatewayProxyEvent {
   return {
@@ -77,13 +102,12 @@ function makeEvent(repoId = 'owner%2Frepo'): APIGatewayProxyEvent {
 
 beforeEach(() => {
   mockSend.mockReset();
-  mockLoadRepoConfig.mockReset();
-  mockCheckRepoOnboarded.mockReset();
+  mockLookupRepo.mockReset();
   // Default: assume repos are onboarded so existing tests that
   // predate the Chunk 10 onboarding gate continue to exercise the
   // happy path. The new T1.4-regression test explicitly overrides
   // this to simulate a non-onboarded repo.
-  mockCheckRepoOnboarded.mockResolvedValue({ onboarded: true });
+  mockLookupRepo.mockResolvedValue({ onboarded: true, config: null });
   ulidCounter = 0;
   _resetCacheForTests();
 });
@@ -111,15 +135,15 @@ describe('get-policies', () => {
 
   test('422 REPO_NOT_ONBOARDED when repo is not in RepoTable', async () => {
     mockSend.mockResolvedValue({}); // rate-limit update succeeds
-    mockCheckRepoOnboarded.mockResolvedValue({ onboarded: false });
+    mockLookupRepo.mockResolvedValue({ onboarded: false, config: null });
 
     const res = await handler(makeEvent('typo%2Frepo'));
     expect(res.statusCode).toBe(422);
     const body = JSON.parse(res.body);
     expect(body.error.code).toBe('REPO_NOT_ONBOARDED');
     expect(body.error.message).toContain('typo/repo');
-    // loadRepoConfig must NOT have been called — the gate short-circuits.
-    expect(mockLoadRepoConfig).not.toHaveBeenCalled();
+    // The gate short-circuits: the one read of the repository row is all it costs.
+    expect(mockLookupRepo.mock.calls).toEqual([['typo/repo']]);
   });
 
   test('422 gate runs after rate-limit (rate-limited caller gets 429, not 422)', async () => {
@@ -132,21 +156,16 @@ describe('get-policies', () => {
         name: 'ConditionalCheckFailedException',
       }),
     );
-    mockCheckRepoOnboarded.mockResolvedValue({ onboarded: false });
+    mockLookupRepo.mockResolvedValue({ onboarded: false, config: null });
 
     const res = await handler(makeEvent('typo%2Frepo'));
     expect(res.statusCode).toBe(429);
-    expect(mockCheckRepoOnboarded).not.toHaveBeenCalled();
+    expect(mockLookupRepo).not.toHaveBeenCalled();
   });
 
   test('200 with built-in hard + soft rule summaries when repo has no custom policies', async () => {
     mockSend.mockResolvedValue({}); // rate-limit
-    mockLoadRepoConfig.mockResolvedValue({
-      repo: 'owner/repo',
-      status: 'active',
-      onboarded_at: '',
-      updated_at: '',
-    });
+    mockLookupRepo.mockResolvedValue(onboardedWith());
 
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(200);
@@ -171,7 +190,6 @@ describe('get-policies', () => {
 
   test('decodes URL-encoded repo path segment', async () => {
     mockSend.mockResolvedValue({});
-    mockLoadRepoConfig.mockResolvedValue(null);
     const res = await handler(makeEvent('owner%2Frepo-with-dash'));
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
@@ -180,33 +198,64 @@ describe('get-policies', () => {
 
   test('custom blueprint soft rules appear in response', async () => {
     mockSend.mockResolvedValue({});
-    mockLoadRepoConfig.mockResolvedValue({
-      repo: 'owner/repo',
-      status: 'active',
-      onboarded_at: '',
-      updated_at: '',
-      cedar_policies: [
-        '@tier("soft") @rule_id("custom_rule") @severity("low") @approval_timeout_s("60") ' +
-          'forbid (principal, action == Agent::Action::"execute_bash", resource) ' +
-          'when { context.command like "*npm publish*" };',
-      ],
-    });
+    mockLookupRepo.mockResolvedValue(onboardedWith([CUSTOM_SOFT_RULE]));
     const res = await handler(makeEvent());
     const body = JSON.parse(res.body);
     const ruleIds = body.data.policies.soft.map((r: { rule_id: string }) => r.rule_id);
     expect(ruleIds).toContain('custom_rule');
   });
 
+  test('lists Blueprint rules written without annotations under the ids the agent gives them', async () => {
+    // The agent runs such an entry as a soft rule named legacy_extra_<n>
+    // (agent/src/policy.py). That id is what an approval request shows and what
+    // `--pre-approve rule:<id>` takes, so the listing has to show it.
+    mockSend.mockResolvedValue({});
+    mockLookupRepo.mockResolvedValue(onboardedWith([UNANNOTATED_RULE, OTHER_UNANNOTATED_RULE]));
+
+    const res = await handler(makeEvent());
+
+    expect(res.statusCode).toBe(200);
+    const ruleIds = JSON.parse(res.body).data.policies.soft.map((r: { rule_id: string }) => r.rule_id);
+    expect(ruleIds).toEqual(expect.arrayContaining(['legacy_extra_0', 'legacy_extra_1']));
+  });
+
+  test('numbers the unannotated entries among themselves, whatever stands between them', async () => {
+    // An annotated entry brings its own id and takes no number.
+    mockSend.mockResolvedValue({});
+    mockLookupRepo.mockResolvedValue(onboardedWith([UNANNOTATED_RULE, CUSTOM_SOFT_RULE, OTHER_UNANNOTATED_RULE]));
+
+    const res = await handler(makeEvent());
+
+    expect(res.statusCode).toBe(200);
+    const ruleIds = JSON.parse(res.body).data.policies.soft.map((r: { rule_id: string }) => r.rule_id);
+    expect(ruleIds).toEqual(expect.arrayContaining(['legacy_extra_0', 'custom_rule', 'legacy_extra_1']));
+  });
+
+  test('lists a Blueprint rule annotated @tier("hard") among the hard rules', async () => {
+    mockSend.mockResolvedValue({});
+    mockLookupRepo.mockResolvedValue(onboardedWith([
+      '@tier("hard") @rule_id("block_prod_writes") ' +
+        'forbid (principal, action == Agent::Action::"write_file", resource) ' +
+        'when { context.file_path like "prod/**" };',
+    ]));
+
+    const res = await handler(makeEvent());
+
+    const { hard, soft } = JSON.parse(res.body).data.policies;
+    expect(hard.map((r: { rule_id: string }) => r.rule_id)).toContain('block_prod_writes');
+    expect(soft.map((r: { rule_id: string }) => r.rule_id)).not.toContain('block_prod_writes');
+  });
+
   test('caches per-repo response across calls', async () => {
     mockSend.mockResolvedValue({});
-    mockLoadRepoConfig.mockResolvedValue(null);
 
-    await handler(makeEvent());
-    const firstCallCount = mockLoadRepoConfig.mock.calls.length;
+    const first = await handler(makeEvent());
 
-    // Second call within cache TTL — should not re-invoke loadRepoConfig.
-    await handler(makeEvent());
-    expect(mockLoadRepoConfig.mock.calls.length).toBe(firstCallCount);
+    // Second call within cache TTL: the onboarding gate reads the row again,
+    // but the listing is not rebuilt, so a rule added meanwhile is not in it.
+    mockLookupRepo.mockResolvedValue(onboardedWith([CUSTOM_SOFT_RULE]));
+    const second = await handler(makeEvent());
+    expect(JSON.parse(second.body).data).toEqual(JSON.parse(first.body).data);
   });
 
   test('429 on rate-limit exceeded', async () => {
@@ -219,27 +268,49 @@ describe('get-policies', () => {
 
   test('503 on invalid blueprint cedar_policies text', async () => {
     mockSend.mockResolvedValue({});
-    mockLoadRepoConfig.mockResolvedValue({
-      repo: 'owner/repo',
-      status: 'active',
-      onboarded_at: '',
-      updated_at: '',
-      cedar_policies: ['this is not valid cedar at all ;'],
-    });
+    mockLookupRepo.mockResolvedValue(onboardedWith(['this is not valid cedar at all ;']));
     const res = await handler(makeEvent('owner%2Frepo-bad'));
     expect(res.statusCode).toBe(503);
   });
 
-  test('continues with built-ins when repo config load fails', async () => {
+  test('logs an invalid policy set under its own message, with the text of the parser in `error`', async () => {
+    // A data key named `message` would replace the message of the line, and a
+    // search of the log group for 'Cedar parse failure' would find nothing.
     mockSend.mockResolvedValue({});
-    mockLoadRepoConfig.mockRejectedValue(new Error('DDB throttle'));
-    const res = await handler(makeEvent('fallback%2Frepo'));
-    expect(res.statusCode).toBe(200);
+    mockLookupRepo.mockResolvedValue(onboardedWith(['this is not valid cedar at all ;']));
+    const stderr = jest.spyOn(process.stderr, 'write').mockReturnValue(true);
+    await handler(makeEvent('owner%2Frepo-bad'));
+    const lines = stderr.mock.calls.map(([line]) => JSON.parse(String(line)));
+    stderr.mockRestore();
+
+    expect(lines).toEqual([{
+      level: 'ERROR',
+      message: 'Cedar parse failure for repo policies',
+      repo_id: 'owner/repo-bad',
+      error: 'cedar-wasm rejected policy set',
+    }]);
+  });
+
+  test('a failed read of the repository row fails that request and is not cached', async () => {
+    // A listing built without the Blueprint's rules must not be answered as a
+    // 200, and above all not be kept in the per-repository cache: every caller
+    // of the next five minutes would be told the repository has no rules of its own.
+    mockSend.mockResolvedValue({});
+    mockLookupRepo
+      .mockRejectedValueOnce(new Error('DDB throttle'))
+      .mockResolvedValue(onboardedWith([CUSTOM_SOFT_RULE]));
+
+    const failed = await handler(makeEvent());
+    const next = await handler(makeEvent());
+
+    expect(failed.statusCode).toBe(500);
+    expect(next.statusCode).toBe(200);
+    const ruleIds = JSON.parse(next.body).data.policies.soft.map((r: { rule_id: string }) => r.rule_id);
+    expect(ruleIds).toContain('custom_rule');
   });
 
   test('hard rules do not include severity / approval_timeout_s', async () => {
     mockSend.mockResolvedValue({});
-    mockLoadRepoConfig.mockResolvedValue(null);
     const res = await handler(makeEvent('hard%2Fshape'));
     const body = JSON.parse(res.body);
     const hardRule = body.data.policies.hard[0];
@@ -251,7 +322,6 @@ describe('get-policies', () => {
 
   test('soft rules carry severity + approval_timeout_s', async () => {
     mockSend.mockResolvedValue({});
-    mockLoadRepoConfig.mockResolvedValue(null);
     const res = await handler(makeEvent('soft%2Fshape'));
     const body = JSON.parse(res.body);
     const soft = body.data.policies.soft.find(

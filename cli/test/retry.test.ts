@@ -29,6 +29,16 @@ describe('isTransientError', () => {
     expect(isTransientError(new ApiError(404, 'NOT_FOUND', 'missing', 'r2'))).toBe(false);
   });
 
+  // 500 is what the platform's handlers answer for any unhandled failure.
+  test.each([
+    [499, false],
+    [500, true],
+    [599, true],
+    [600, false],
+  ])('ApiError %i is transient: %s', (status, transient) => {
+    expect(isTransientError(new ApiError(status, 'X', 'x', ''))).toBe(transient);
+  });
+
   test('undici "fetch failed" TypeError is transient', () => {
     expect(isTransientError(new TypeError('fetch failed'))).toBe(true);
   });

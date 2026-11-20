@@ -18,7 +18,6 @@
  */
 
 import {
-  adminCreateUser,
   adminDeleteUser,
   adminInviteUser,
   adminResetPassword,
@@ -262,22 +261,6 @@ describe('listCognitoUsers', () => {
   });
 });
 
-describe('adminCreateUser', () => {
-  beforeEach(() => {
-    cognitoSend.mockReset();
-  });
-
-  test('maps UsernameExistsException to CliError', async () => {
-    const err = new Error('exists');
-    err.name = 'UsernameExistsException';
-    cognitoSend.mockRejectedValueOnce(err);
-    const client = { send: cognitoSend } as never;
-
-    await expect(adminCreateUser(client, 'pool', 'a@b.com', 'pwd'))
-      .rejects.toThrow(/already exists/);
-  });
-});
-
 describe('adminInviteUser (#238 — temporary password, first-login rotation)', () => {
   beforeEach(() => {
     cognitoSend.mockReset();
@@ -297,6 +280,7 @@ describe('adminInviteUser (#238 — temporary password, first-login rotation)', 
     expect(cognitoSend).toHaveBeenCalledTimes(1);
     const input = cognitoSend.mock.calls[0][0].input;
     expect(input).toEqual(expect.objectContaining({
+      UserPoolId: 'pool',
       Username: 'a@b.com',
       TemporaryPassword: 'SecretPass123!',
       MessageAction: 'SUPPRESS',
@@ -373,8 +357,15 @@ describe('adminResetPassword', () => {
       'NewPass123!',
     );
     expect(cognitoSend).toHaveBeenCalledTimes(2);
+    expect(cognitoSend.mock.calls[0][0].input).toEqual(expect.objectContaining({
+      UserPoolId: 'pool',
+      Filter: 'email = "a@b.com"',
+    }));
     expect(cognitoSend.mock.calls[1][0].input).toEqual(expect.objectContaining({
+      UserPoolId: 'pool',
       Username: 'uuid-a',
+      Password: 'NewPass123!',
+      Permanent: true,
     }));
   });
 

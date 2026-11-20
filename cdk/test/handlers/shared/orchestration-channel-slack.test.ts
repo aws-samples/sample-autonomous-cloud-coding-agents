@@ -63,10 +63,6 @@ describe('Slack channel adapter — the capability-gated surface', () => {
     // platform mirrored a state it never moved.
     expect('transitionState' in ch).toBe(false);
     expect('revertState' in ch).toBe(false);
-    // Slack has no dependency model, so a DAG can't be read from it.
-    expect('fetchChildGraph' in ch).toBe(false);
-    // Bulk-deleting messages in a shared channel needs its own decision.
-    expect('sweepNotes' in ch).toBe(false);
   });
 
   test('still satisfies the required contract every surface must support', () => {

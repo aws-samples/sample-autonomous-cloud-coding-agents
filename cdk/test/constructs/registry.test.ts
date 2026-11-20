@@ -177,4 +177,29 @@ describe('AgentRegistry construct', () => {
     expect(statement?.Resource).not.toBe('*');
     expect(JSON.stringify(statement?.Resource)).toContain('registry/*');
   });
+
+  test('lets both Provider handlers list and delete the records of a registry', () => {
+    // AWS refuses DeleteRegistry while the registry holds a record, so Delete removes the
+    // records first, from onEvent and from every isComplete poll.
+    const template = createStack();
+
+    for (const role of [
+      'AgentRegistryOnEventFnServiceRole',
+      'AgentRegistryIsCompleteFnServiceRole',
+    ]) {
+      const statement = policyStatementsForRole(template, role).find(candidate => {
+        const actions = Array.isArray(candidate.Action) ? candidate.Action : [candidate.Action];
+        return actions.includes('agent-registry:DeleteRegistryRecord');
+      });
+
+      expect(statement).toBeDefined();
+      expect(statement?.Action).toEqual(expect.arrayContaining([
+        'agent-registry:ListRegistryRecords',
+        'agent-registry:DeleteRegistryRecord',
+      ]));
+      expect(statement?.Resource).not.toBe('*');
+      // A record's ARN is registry/<registry id>/record/<record id>, which `registry/*` matches.
+      expect(JSON.stringify(statement?.Resource)).toContain('registry/*');
+    }
+  });
 });

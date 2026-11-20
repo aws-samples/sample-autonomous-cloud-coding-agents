@@ -25,7 +25,11 @@ import {
   releaseReadyChildren,
 } from '../../../src/handlers/shared/orchestration-release';
 import { deriveOrchestrationId, type OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
-import { isValidIdempotencyKey } from '../../../src/handlers/shared/validation';
+import {
+  isValidIdempotencyKey,
+  isValidTaskDescriptionLength,
+  MAX_TASK_DESCRIPTION_LENGTH,
+} from '../../../src/handlers/shared/validation';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
@@ -260,8 +264,103 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
   });
 });
 
+describe('releaseChild — the shared context gives way to the description limit', () => {
+  // createTaskCore refuses a task_description above the limit with a 400, and
+  // releaseChild takes every 400 for a fault of the sub-issue: the child is
+  // failed for good and its dependents are skipped. The shared block is
+  // advisory, so it is the part that has to give way.
+  const OWN_TITLE = 'ENG-1: Build the thing';
+  const EPIC = { title: 'Booking flow', description: 'E'.repeat(4000) };
+
+  async function taskDescription(
+    description: string,
+    parentContext: { title?: string; description?: string } = EPIC,
+  ): Promise<string> {
+    const createTaskCore = created('T-1');
+    await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ description }),
+      platformUserId: 'user-1',
+      createTaskCore: createTaskCore as never,
+      parentContext,
+      now: NOW,
+    });
+    return createTaskCore.mock.calls[0][0].task_description as string;
+  }
+
+  test('a long sub-issue under a long epic keeps all of its own text and stays inside the limit', async () => {
+    const own = 'c'.repeat(6000); // valid on its own: the limit is 10,000
+    const d = await taskDescription(own);
+
+    expect(d.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_LENGTH);
+    expect(isValidTaskDescriptionLength(d)).toBe(true); // what createTaskCore asks
+    expect(d.endsWith(`${OWN_TITLE}\n\n${own}`)).toBe(true);
+    // The block is still there, cut where the epic's body is, and the cut is marked.
+    expect(d.startsWith('--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---\n')).toBe(true);
+    expect(d).toContain('Epic: Booking flow\n\nEEEE');
+    expect(d).toContain('E\n… [truncated]\n\n--- END SHARED ORCHESTRATION CONTEXT ---\n\nENG-1');
+    // It gets every character the limit leaves, and not one more.
+    expect(d).toHaveLength(MAX_TASK_DESCRIPTION_LENGTH);
+  });
+
+  test('a cut does not leave half of a character behind', async () => {
+    // An emoji is two code units: of two neighbouring lengths, one cuts between them.
+    for (const ownLength of [6000, 6001]) {
+      const d = await taskDescription('c'.repeat(ownLength), { title: EPIC.title, description: '😀'.repeat(2000) });
+      expect(d).not.toMatch(/\p{Surrogate}/u);
+      expect(d).toContain('😀\n… [truncated]\n\n--- END SHARED ORCHESTRATION CONTEXT ---');
+      expect(isValidTaskDescriptionLength(d)).toBe(true);
+    }
+  });
+
+  test('a block that fits is not cut', async () => {
+    const d = await taskDescription('c'.repeat(5000));
+    expect(d).toContain(`${EPIC.description}\n\n--- END SHARED ORCHESTRATION CONTEXT ---`);
+    expect(d).not.toContain('[truncated]');
+  });
+
+  test('the epic title stays when there is no room for any of the body', async () => {
+    // What the frame and the title take: a block without a body, measured.
+    const frame = (await taskDescription('short', { title: EPIC.title })).length - `\n\n${OWN_TITLE}\n\nshort`.length;
+    // Room for that and five more characters: less than one character of body and the mark of a cut.
+    const own = 'c'.repeat(MAX_TASK_DESCRIPTION_LENGTH - frame - 5 - `\n\n${OWN_TITLE}\n\n`.length);
+    const d = await taskDescription(own);
+
+    expect(isValidTaskDescriptionLength(d)).toBe(true);
+    expect(d).toContain('Epic: Booking flow\n\n--- END SHARED ORCHESTRATION CONTEXT ---\n\nENG-1');
+    expect(d).not.toContain('[truncated]');
+    expect(d.endsWith(`${OWN_TITLE}\n\n${own}`)).toBe(true);
+  });
+
+  test('room for half a character of the body is room for none of it', async () => {
+    const frame = (await taskDescription('short', { title: EPIC.title })).length - `\n\n${OWN_TITLE}\n\nshort`.length;
+    // 17: the two line breaks around a body, the mark of a cut, and one code unit.
+    const own = 'c'.repeat(MAX_TASK_DESCRIPTION_LENGTH - frame - 17 - `\n\n${OWN_TITLE}\n\n`.length);
+    const d = await taskDescription(own, { title: EPIC.title, description: '😀'.repeat(2000) });
+
+    expect(d).not.toMatch(/\p{Surrogate}/u);
+    expect(d).toContain('Epic: Booking flow\n\n--- END SHARED ORCHESTRATION CONTEXT ---\n\nENG-1');
+    expect(d).not.toContain('[truncated]');
+  });
+
+  test('a sub-issue that leaves no room for the block is sent without it', async () => {
+    const own = 'c'.repeat(9900);
+    expect(await taskDescription(own)).toBe(`${OWN_TITLE}\n\n${own}`);
+    // Nor is an empty frame sent when the epic has a body and no title.
+    expect(await taskDescription(own, { description: EPIC.description })).toBe(`${OWN_TITLE}\n\n${own}`);
+  });
+
+  test('a sub-issue that is too long on its own is sent as it is, so the refusal is about its own text', async () => {
+    const own = 'c'.repeat(MAX_TASK_DESCRIPTION_LENGTH);
+    const d = await taskDescription(own);
+    expect(d).toBe(`${OWN_TITLE}\n\n${own}`);
+    expect(isValidTaskDescriptionLength(d)).toBe(false);
+  });
+});
+
 describe('releaseChild — a retry salts the idempotency key with the prior task id', () => {
-  test('retry=true + a prior child_task_id → key salted so a NEW task is created', async () => {
+  test('a prior child_task_id → key salted so a NEW task is created', async () => {
     const createTaskCore = created('T-new');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -270,7 +369,6 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
-      retry: true,
     });
     const ctx = createTaskCore.mock.calls[0][1];
     // Salted with the prior task id → distinct from the original 'orch_abc_SUB-1'
@@ -279,27 +377,13 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
     expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
   });
 
-  test('retry=true but NO prior task id (never-run child) → back-compat key', async () => {
-    const createTaskCore = created('T-1');
-    await releaseChild({
-      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
-      tableName: 'OrchestrationTable',
-      row: makeRow(), // no child_task_id
-      platformUserId: 'user-1',
-      createTaskCore: createTaskCore as never,
-      now: NOW,
-      retry: true,
-    });
-    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1');
-  });
-
-  test('the key is salted whenever a prior child_task_id exists, even without retry=true', async () => {
+  test('the key is salted whenever a prior child_task_id exists, whoever releases the child', async () => {
     // A child re-released while it still carries a child_task_id inherently means
     // that prior task is TERMINAL (a live child is 'released', not back in
-    // ready/blocked). The salt must fire on the id's PRESENCE — NOT the retry
-    // flag — else a downstream chain child (reset to blocked, later released by
-    // the reconciler with retry=false) replays its dead task under the unsalted
-    // key. This is the fix; the OLD behavior (only salt on retry=true) was the bug.
+    // ready/blocked). The salt must fire on the id's PRESENCE, not on who
+    // releases — else a downstream chain child (reset to blocked, later released
+    // by the reconciler) replays its dead task under the unsalted key. This is
+    // the fix; the OLD behavior (only the epic retry salted) was the bug.
     const createTaskCore = created('T-1');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -308,7 +392,6 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
-      // NOTE: retry intentionally omitted (defaults false) — the salt still fires.
     });
     expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1_OLD-TASK');
   });
@@ -339,7 +422,6 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
-      retry: true,
     });
     const key = createTaskCore.mock.calls[0][1].idempotencyKey;
     expect(key.length).toBeLessThanOrEqual(128);
@@ -416,6 +498,24 @@ describe('releaseChild — happy path', () => {
     expect(finalize.input.ConditionExpression).toBe('child_status = :releasing');
     expect(finalize.input.ExpressionAttributeValues![':tid']).toBe('T-100');
     expect(finalize.input.ExpressionAttributeValues![':released']).toBe('released');
+  });
+
+  test('starting a task removes the reason of an earlier start that was refused', async () => {
+    // The panel shows a failed row's own reason before its task's. A reason that
+    // outlived this release would hide how the task started here ends.
+    const ddb = { send: jest.fn().mockResolvedValue({}) };
+    await releaseChild({
+      ddb: ddb as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow({ child_task_id: 'T-old', failure_reason: "Couldn't start — a monthly budget is exhausted." }),
+      platformUserId: 'user-1',
+      createTaskCore: created('T-new') as never,
+      now: NOW,
+    });
+
+    const finalize = ddb.send.mock.calls[1][0] as UpdateCommand;
+    expect(finalize.input.ExpressionAttributeValues![':tid']).toBe('T-new');
+    expect(finalize.input.UpdateExpression).toMatch(/ REMOVE failure_reason$/);
   });
 
   test('the planner scope (description) reaches the child task_description below the title', async () => {
@@ -669,6 +769,40 @@ describe('releaseChild — idempotency + failure', () => {
     expect(fail.input.ExpressionAttributeValues![':failed']).toBe('failed');
     expect(fail.input.ExpressionAttributeValues![':ready']).toBeUndefined();
     expect(fail.input.ExpressionAttributeValues![':reason']).toContain('content policy');
+  });
+
+  test.each([
+    ['the content policy', 'Task description was blocked by content policy.', /^Blocked by content policy — reword this sub-issue, /],
+    ['validation', 'task_description exceeds maximum length of 10000 characters.', /^Couldn't start \(validation error\) — edit this sub-issue, /],
+  ])('a text refused by %s is to be changed and then retried', async (_name, message, start) => {
+    // A child is started with the text stored on its row. The retry comment
+    // reads the sub-issue again before it releases the child, as a re-applied
+    // trigger label does, so the retry sends the new text.
+    const result = await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: jest.fn().mockResolvedValue({ statusCode: 400, body: JSON.stringify({ error: { message } }) }) as never,
+      now: NOW,
+    });
+    expect(result.kind).toBe('create_failed_terminal');
+    const reason = result.kind === 'create_failed_terminal' ? result.failureReason : '';
+    expect(reason).toMatch(start);
+    expect(reason).toMatch(/, then reply `@bgagent retry` on the epic to re-run\.$/);
+  });
+
+  test.each([422, 429])('a %i refusal has nothing to do with the text and asks for a retry as well', async (statusCode) => {
+    const result = await releaseChild({
+      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
+      tableName: 'OrchestrationTable',
+      row: makeRow(),
+      platformUserId: 'user-1',
+      createTaskCore: jest.fn().mockResolvedValue({ statusCode, body: '{}' }) as never,
+      now: NOW,
+    });
+    const reason = result.kind === 'create_failed_terminal' ? result.failureReason : '';
+    expect(reason).toMatch(/, then reply `@bgagent retry` on the epic to re-run\.$/);
   });
 
   // Against the codes createTaskCore ACTUALLY returns: 400 (validation/guardrail),

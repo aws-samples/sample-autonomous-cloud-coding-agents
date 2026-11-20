@@ -44,28 +44,22 @@ ARTIFACT_KEY_PREFIX = "artifacts"
 # backstop — if the model STILL ends with a deferral, we fail LOUDLY (a
 # debuggable FAILED) rather than upload the promise.
 #
-# These are deliberately full-phrase, first-person deferral promises, not the
-# generic tokens they were pared down from: earlier candidates like "/workflows"
-# (a genuine answer citing `.../actions/workflows/ci.yml`), "watch progress",
-# "check back", or "running in the background" ("compaction runs in the
-# background") appear verbatim in legitimate finished prose, so matching them
-# threw away good output — strictly worse than the placeholder bug this guards.
+# Only phrases that name the platform's own background machinery are listed:
+# that is how the placeholder recorded on a live task reads ("Use /workflows to
+# watch live progress."). A promise in everyday words ("results will follow",
+# "I will share the results", "check back later") is deliberately NOT listed:
+# when the task is to write a reply, a notice or a status update, those words
+# are the finished deliverable. Neither are the generic tokens tried earlier:
+# "/workflows" (a genuine answer citing `.../actions/workflows/ci.yml`), "watch
+# progress", "check back", or "running in the background" ("compaction runs in
+# the background"). All of these appear verbatim in legitimate finished prose,
+# so matching them threw away good output — strictly worse than the placeholder
+# bug this guards.
 # Matching also runs on prose with code fences / inline code / URLs stripped
 # (see `_strip_code_and_urls`) so a cited URL or code snippet can't trip it.
 _DEFERRAL_MARKERS = (
-    "results will follow",
-    "report will follow",
-    "will follow shortly",
-    "results will be ready shortly",
-    "i'll deliver the",
-    "i will deliver the",
-    "i'll share the results",
-    "i will share the results",
     "watch live progress",
     "the workflow is now running in the background",
-    "launched in the background",
-    "check back later",
-    "come back later",
 )
 
 # Fenced blocks (```...```), inline code (`...`), and URLs. Stripped before
@@ -147,9 +141,6 @@ def _artifact_body(ctx: StepContext) -> bytes:
     text = ctx.agent_result.result_text if ctx.agent_result else ""
     if not text:
         raise ValueError("deliver_artifact: agent produced no result text to deliver")
-    # Reject a deferral/placeholder message before it can be uploaded as the
-    # deliverable (exit-path backstop to the runner tool block).
-    _reject_if_deferral(text)
     # Bound memory BEFORE encoding. UTF-8 uses ≥1 byte per character, so a string
     # whose character count already exceeds the byte cap cannot possibly fit —
     # reject it without materializing a second full copy as bytes. This is what
@@ -161,6 +152,10 @@ def _artifact_body(ctx: StepContext) -> bytes:
             f"deliver_artifact: artifact text is {len(text)} characters, exceeds the "
             f"{MAX_ARTIFACT_BYTES}-byte limit"
         )
+    # Reject a deferral/placeholder message before it can be uploaded as the
+    # deliverable (exit-path backstop to the runner tool block). After the cap:
+    # the scan makes two more copies of the text.
+    _reject_if_deferral(text)
     body = text.encode("utf-8")
     # Precise byte check for the borderline case (multibyte chars can push a
     # within-character-budget string just over the byte cap).

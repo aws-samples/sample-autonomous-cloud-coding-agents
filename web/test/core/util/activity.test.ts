@@ -72,6 +72,15 @@ describe('describeEvent', () => {
     }
   });
 
+  it('words the start of the last step by what that step does', () => {
+    const start = (step: string) => describeEvent(ev('agent_milestone', { milestone: `step:${step}:start` }))?.text;
+    expect(start('open_pr')).toBe('Opening a pull request');
+    // An iteration, a review and a restack end on a pull request that exists already.
+    expect(start('resolve_pr')).toBe('Finishing up on the pull request');
+    // A task without a repository has no pull request: it delivers its result.
+    expect(start('deliver')).toBe('Delivering the result');
+  });
+
   it('shows the message the agent read', () => {
     expect(describeEvent(ev('agent_milestone', { milestone: 'nudge_acknowledged', details: '1 nudge(s) acknowledged (ids=…abcd1234): add a test' })))
       .toMatchObject({ kind: 'message', text: 'Read your message: "add a test"' });

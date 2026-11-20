@@ -8,7 +8,7 @@ introduced for Cedar HITL gates. See
 
 Covers:
 
-- ``PolicyDecision`` construction (new + legacy kwargs; factory helpers).
+- ``PolicyDecision`` construction (keywords; factory helpers).
 - ``Outcome`` enum membership and the ``.allowed`` shim's mapping.
 - ``ApprovalAllowlist`` for every scope type.
 - ``RecentDecisionCache`` TTL, LRU eviction, APPROVED-not-populated rule,
@@ -43,6 +43,7 @@ from policy import (
     PolicyDecision,
     PolicyEngine,
     RecentDecisionCache,
+    _sha256_tool_input,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,17 +56,6 @@ class TestPolicyDecisionConstruction:
         d = PolicyDecision(outcome=Outcome.ALLOW, reason="ok")
         assert d.outcome == Outcome.ALLOW
         assert d.allowed is True
-
-    def test_legacy_allowed_true_maps_to_allow(self):
-        d = PolicyDecision(allowed=True, reason="ok", duration_ms=1.0)
-        assert d.outcome == Outcome.ALLOW
-        assert d.allowed is True
-        assert d.duration_ms == 1.0
-
-    def test_legacy_allowed_false_maps_to_deny(self):
-        d = PolicyDecision(allowed=False, reason="nope")
-        assert d.outcome == Outcome.DENY
-        assert d.allowed is False
 
     def test_require_approval_has_allowed_false(self):
         d = PolicyDecision(
@@ -81,13 +71,19 @@ class TestPolicyDecisionConstruction:
         # path in Chunk 3.
         assert d.allowed is False
 
-    def test_cannot_pass_both_outcome_and_allowed(self):
-        with pytest.raises(TypeError, match="not both"):
-            PolicyDecision(outcome=Outcome.ALLOW, allowed=True, reason="ok")
+    def test_outcome_is_required(self):
+        # No default: a decision is never an ALLOW by omission.
+        without_outcome: dict = {"reason": "orphan"}
+        with pytest.raises(TypeError, match="outcome"):
+            PolicyDecision(**without_outcome)
 
-    def test_cannot_pass_neither_outcome_nor_allowed(self):
-        with pytest.raises(TypeError, match="requires either"):
-            PolicyDecision(reason="orphan")
+    def test_decision_cannot_be_modified(self):
+        # Nothing can turn a DENY into an ALLOW after the engine returned it.
+        d = PolicyDecision.deny("blocked")
+        for name in ("outcome", "reason"):
+            with pytest.raises(AttributeError):
+                setattr(d, name, "allow")
+        assert d.outcome == Outcome.DENY
 
     def test_factory_allow(self):
         d = PolicyDecision.allow()
@@ -634,6 +630,19 @@ class TestRecentDecisionCacheIntegration:
         assert d.outcome == Outcome.ALLOW
         assert "Allowlist" in d.reason
 
+    def test_pre_approval_beats_a_recent_denial_of_the_same_call(self):
+        # Step 2 (allowlist) runs before step 2.5 (recent-decision cache). The
+        # user denies a force push, then approves every Bash call of the
+        # session: the agent's retry within the minute must go through.
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        tool_input = {"command": "git push --force origin feature"}
+        engine.recent_decisions.record("Bash", _sha256_tool_input(tool_input), "DENIED", "not yet")
+        assert engine.evaluate_tool_use("Bash", tool_input).outcome == Outcome.DENY
+        engine.allowlist.add("tool_type:Bash")
+        d = engine.evaluate_tool_use("Bash", tool_input)
+        assert d.outcome == Outcome.ALLOW
+        assert d.reason == "Pre-approved by allowlist"
+
     def test_non_cache_decisions_have_no_cache_hit_metadata(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         # ALLOW path
@@ -789,6 +798,122 @@ class TestLoadTimeValidation:
                 repo="owner/repo",
                 initial_approvals=["flimflam:foo"],
             )
+
+    @pytest.mark.parametrize(
+        ("policies", "message"),
+        [
+            pytest.param(
+                {"extra_policies": ["forbid (principal, action, resource) when {"]},
+                "Cedar policy parse failed",
+                id="text that is not Cedar",
+            ),
+            pytest.param(
+                {
+                    "blueprint_soft_policies": '@tier("soft") @rule_id("t") '
+                    '@approval_timeout_s("soon") forbid (principal, action, resource);'
+                },
+                "@approval_timeout_s must be integer",
+                id="a timeout that is not a number",
+            ),
+            pytest.param(
+                {
+                    "blueprint_soft_policies": '@tier("soft") @rule_id("t") '
+                    '@severity("urgent") forbid (principal, action, resource);'
+                },
+                "@severity must be one of",
+                id="a severity outside low, medium, high",
+            ),
+            pytest.param(
+                {
+                    "blueprint_soft_policies": '@tier("soft") @rule_id("force_push_any") '
+                    "forbid (principal, action, resource);"
+                },
+                "duplicate @rule_id 'force_push_any'",
+                id="the rule id of a built-in rule of the same tier",
+            ),
+            pytest.param(
+                {
+                    "blueprint_soft_policies": '@tier("hard") @rule_id("h") '
+                    "forbid (principal, action, resource);"
+                },
+                "lives in the 'soft' file",
+                id="a hard rule among the soft rules",
+            ),
+        ],
+    )
+    def test_policy_the_engine_cannot_use_fails_at_start(self, policies, message):
+        # One row per rejection. Without it the task would start with a rule
+        # that does not mean what its author wrote: a rule without its timeout
+        # or with an unknown severity, two rules behind one id, an absolute
+        # rule that a human can approve. Text that is not Cedar has to be
+        # reported as a parse error, not as whatever fails after it.
+        with pytest.raises(ValueError, match=message):
+            PolicyEngine(task_type="new_task", repo="owner/repo", **policies)
+
+    @pytest.mark.parametrize(
+        ("rule", "attribute"),
+        [
+            pytest.param(
+                "forbid (principal, action, resource) "
+                'when { context.command like "*terraform destroy*" };',
+                "command",
+                id="a rule for every action reads the command",
+            ),
+            pytest.param(
+                'forbid (principal, action == Agent::Action::"invoke_tool", '
+                'resource == Agent::Tool::"Read") when { context.file_path like "*.pem" };',
+                "file_path",
+                id="a rule for the Read tool reads the file path",
+            ),
+            pytest.param(
+                "forbid (principal, action, resource) "
+                'when { resource == Agent::Tool::"Bash" && context.command like "*curl*" };',
+                "command",
+                id="a rule for the Bash tool reads the command",
+            ),
+            pytest.param(
+                "forbid (principal, action, resource) "
+                'when { resource == Agent::Tool::"Write" && context.file_path like "*.pem" };',
+                "file_path",
+                id="a rule for the Write tool reads the file path",
+            ),
+            pytest.param(
+                "forbid (principal, action, resource) "
+                'when { resource == Agent::Tool::"Edit" && context.file_path like "*.pem" };',
+                "file_path",
+                id="a rule for the Edit tool reads the file path",
+            ),
+            pytest.param(
+                'forbid (principal, action == Agent::Action::"write_file", resource) '
+                'when { context.command like "*terraform destroy*" };',
+                "command",
+                id="a rule for file writes reads the command",
+            ),
+            pytest.param(
+                'forbid (principal, action == Agent::Action::"execute_bash", resource) '
+                'when { context.file_path like "*.pem" };',
+                "file_path",
+                id="a rule for shell commands reads the file path",
+            ),
+        ],
+    )
+    def test_rule_reading_an_absent_context_attribute_fails_at_start(self, rule, attribute):
+        # ``command`` exists only in the request that checks a shell command and
+        # ``file_path`` only in the one that checks a file write; the request
+        # that checks a tool by its name has neither. Cedar reports a rule that
+        # reads one where it is absent as an evaluation error, and at run time
+        # the engine then denies every call the rule is evaluated for
+        # ("fail-closed"): with the first rule, every tool call of the task.
+        with pytest.raises(ValueError, match=rf"soft-deny Cedar probe failed.*{attribute}"):
+            PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=[rule])
+
+    def test_hard_rule_reading_an_absent_context_attribute_fails_at_start(self):
+        rule = (
+            '@tier("hard") @rule_id("no_destroy") forbid (principal, action, resource) '
+            'when { context.command like "*terraform destroy*" };'
+        )
+        with pytest.raises(ValueError, match=r"hard-deny Cedar probe failed.*command"):
+            PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_hard_policies=rule)
 
 
 # ---------------------------------------------------------------------------
@@ -1017,3 +1142,31 @@ class TestCeilingShrinkingLatch:
         e.mark_ceiling_shrinking_emitted()
         assert e.mark_ceiling_shrinking_emitted() is False
         assert e.mark_ceiling_shrinking_emitted() is False
+
+
+class TestRecentDecisionReasonText:
+    """A timed-out gate has no human reason; the retry deny must not print 'None'."""
+
+    def test_timed_out_retry_omits_the_missing_reason(self):
+        from policy import PolicyEngine, _sha256_tool_input
+
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        tool_input = {"file_path": "/workspace/t/docs/a.env", "content": "X=1\n"}
+        engine.recent_decisions.record(
+            "Write", _sha256_tool_input(tool_input), decision="TIMED_OUT", reason=""
+        )
+        decision = engine.evaluate_tool_use("Write", tool_input)
+        assert decision.outcome == "deny"
+        assert decision.reason == "Recent TIMED_OUT within 60s"
+
+    def test_denied_retry_keeps_the_human_reason(self):
+        from policy import PolicyEngine, _sha256_tool_input
+
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        tool_input = {"file_path": "/workspace/t/docs/b.env", "content": "X=1\n"}
+        engine.recent_decisions.record(
+            "Write", _sha256_tool_input(tool_input), decision="DENIED", reason="use .example"
+        )
+        assert engine.evaluate_tool_use("Write", tool_input).reason == (
+            "Recent DENIED within 60s: use .example"
+        )

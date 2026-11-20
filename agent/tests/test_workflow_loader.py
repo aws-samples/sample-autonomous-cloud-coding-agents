@@ -19,6 +19,7 @@ from workflow import (
     WorkflowValidationError,
     load_workflow,
     load_workflow_file,
+    validate_workflow,
 )
 from workflow.loader import parse_workflow, validate_shape
 
@@ -91,6 +92,28 @@ class TestParseWorkflow:
         body = _valid_new_task()
         del body["status"]
         with pytest.raises(WorkflowValidationError, match="status"):
+            parse_workflow(body)
+
+    def test_reserved_empty_post_hooks_loads(self):
+        # The schema reserves `post_hooks` and pins it to empty. A file the
+        # validator accepts must also load.
+        body = _valid_new_task()
+        body["post_hooks"] = []
+        assert validate_workflow(body) == []
+        assert parse_workflow(body).post_hooks == []
+
+    def test_model_keeps_post_hooks_empty(self):
+        with pytest.raises(ValidationError) as exc:
+            Workflow.model_validate({**_valid_new_task(), "post_hooks": ["verify_build"]})
+        assert [e["type"] for e in exc.value.errors()] == ["too_long"]
+
+    def test_model_rejection_is_a_workflow_validation_error(self):
+        # A step may carry extra keys, but the model takes string keys only,
+        # and YAML reads a bare `on:` as the boolean true. Callers catch
+        # WorkflowValidationError, so the model's refusal has to be one.
+        body = _valid_new_task()
+        body["steps"][2][True] = "push"
+        with pytest.raises(WorkflowValidationError, match="model validation: steps/2/"):
             parse_workflow(body)
 
     def test_bad_id_pattern_rejected(self):

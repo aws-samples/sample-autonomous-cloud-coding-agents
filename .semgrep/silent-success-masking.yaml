@@ -105,29 +105,21 @@ rules:
       "# nosemgrep: py-silent-success-masking -- <why callers may safely
       treat this failure as an empty success>".
     patterns:
+      # `except ...:` matches every handler head: one type, a tuple of types,
+      # with or without `as`, a bare except. A try statement matches only a
+      # pattern that has the same optional clauses (`else:`, `finally:`), hence
+      # the four shapes.
       - pattern-either:
           - pattern: |
               try:
                 ...
-              except $EXC:
+              except ...:
                 ...
                 return $RET
           - pattern: |
               try:
                 ...
-              except $EXC as $E:
-                ...
-                return $RET
-          - pattern: |
-              try:
-                ...
-              except:
-                ...
-                return $RET
-          - pattern: |
-              try:
-                ...
-              except $EXC:
+              except ...:
                 ...
                 return $RET
               finally:
@@ -135,23 +127,27 @@ rules:
           - pattern: |
               try:
                 ...
-              except $EXC as $E:
+              except ...:
                 ...
                 return $RET
-              finally:
+              else:
                 ...
           - pattern: |
               try:
                 ...
-              except:
+              except ...:
                 ...
                 return $RET
+              else:
+                ...
               finally:
                 ...
       # Classify-then-reraise is NOT masking (see the TS twin above): a
       # classified return followed by a `raise` on the fallthrough surfaces
       # every other error. The order distinguishes it from
       # masked_conditional_reraise (raise guarded FIRST, then a masking return).
+      # The exemption is as narrow as these two patterns: the handler binds the
+      # error (`as`), the try statement has no `else:` and no `finally:`.
       - pattern-not: |
           try:
             ...

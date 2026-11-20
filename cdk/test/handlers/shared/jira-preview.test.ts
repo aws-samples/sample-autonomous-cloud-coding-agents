@@ -153,6 +153,16 @@ test('a preview on an older terminal task renders its outcome', async () => {
   expect(JSON.stringify(put.mock.calls.at(-1)![3])).toContain('Task completed');
 });
 
+test('a preview on an older task that completed with a red build renders a failure and its reason', async () => {
+  const f = fixture();
+  f.finish({ build_passed: false });
+  f.screenshot();
+  await f.update();
+  const body = JSON.stringify(put.mock.calls.at(-1)![3]);
+  expect(body).toContain('Task failed: Build or tests did not pass');
+  expect(body).not.toContain('Task completed');
+});
+
 test('completed runtime metrics stored as strings do not block the saved terminal status or preview', async () => {
   const f = fixture();
   f.finish({ cost_usd: '0.20663065', turns_attempted: '12', duration_s: '69.3' });

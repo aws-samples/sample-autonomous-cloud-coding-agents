@@ -24,7 +24,7 @@ Guidelines:
 
 - One logical change per pull request. Related changes (e.g. a feature + its tests) are fine together; unrelated changes should be separate PRs.
 - Every change requires a unit test. Tests live alongside the code they cover (`cdk/test/` mirrors `cdk/src/`, `agent/tests/`, `cli/test/`).
-- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python); an ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`), and `mise run lint` runs the lint and type checks of agent, cdk, cli and web, and the agent's dead-code check, the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web: test the code, or leave it counted as uncovered.
+- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python); an ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`), and `mise run lint` runs the lint and type checks of agent, cdk, cli and web, and the agent's dead-code check, the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web, and in the agent `# pragma: no cover` and `# pragma: no branch` have no effect: test the code, or leave it counted as uncovered.
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match, and `web/src/core/api/types.ts` where the console mirrors the type. `mise run check:types-sync` fails the build on drift.
 - If you change docs sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, `CONTRIBUTING.md`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
@@ -92,7 +92,7 @@ The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR 
 
 PRs labeled `auto-approve` are approved automatically by the `auto-approve` workflow; only apply the label to automated PRs whose changes are gated by the full build (e.g. the dependency-upgrade PRs).
 
-The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `uv`, `semgrep`, `osv-scanner`, `grype` and `zizmor` are pinned to exact versions in the root `mise.toml` (`uv` and `trivy` in `agent/mise.toml`), and every workflow that installs mise pins the mise version (`version:` under `jdx/mise-action`). Nothing bumps these pins automatically: bump them by pull request, to a release that is at least 7 days old, and keep `uv` the same in both files. After pulling a change to a pin, run `mise install`.
+The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `uv`, `semgrep`, `osv-scanner`, `grype` and `zizmor` are pinned to exact versions in the root `mise.toml` (`uv` and `trivy` in `agent/mise.toml`), and every workflow that installs mise pins the mise version (`version:` under `jdx/mise-action`). Nothing bumps these pins automatically: bump them by pull request, to a release that is at least 7 days old, and keep `uv` the same in both files and in the `uv` image that `agent/Dockerfile` copies from. After pulling a change to a pin, run `mise install`.
 
 ### Git hooks
 
@@ -102,6 +102,13 @@ The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `
 - **pre-push** - Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
 
 If `prek install` fails with "refusing to install hooks with `core.hooksPath` set", another tool owns your hooks. Either unset it (`git config --unset-all core.hooksPath`) or integrate these checks into your hook manager.
+
+The build's transaction tests use DynamoDB Local through
+`ABCA_DDB_LOCAL_ENDPOINT` (a loopback HTTP endpoint). CI starts a Docker service
+pinned by image digest and supplies its mapped port to both CDK and Python tests;
+those tests fail if `CI=true` without an endpoint. To reproduce locally, start
+DynamoDB Local with `-inMemory -sharedDb`, bind port 8000 to loopback, and run
+`ABCA_DDB_LOCAL_ENDPOINT=http://127.0.0.1:8000 mise run build`.
 
 ## Versioning
 

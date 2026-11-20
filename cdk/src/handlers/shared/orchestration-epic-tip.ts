@@ -30,21 +30,19 @@
  * branch that no longer exists on origin degrades to a branch off default),
  * so this layer only needs to NAME the tip; it never has to detect merge.
  *
- * The tip is the **leaf frontier**: nodes that nothing else depends on. Among
- * those, we pick the most-recently-created real (non-integration) leaf — the
- * single node a linear chain naturally extends from. This keeps the common
- * "epic was a chain, add one more step" case a clean linear stack; a fan-out
- * epic with multiple independent leaves yields a multi-predecessor (diamond)
- * implicit dependency so the new node sees ALL of the accumulated work.
+ * The tip is the **leaf frontier**: the nodes that nothing else depends on,
+ * among the nodes that can be built on (neither failed nor skipped). This
+ * keeps the common "epic was a chain, add one more step" case a clean linear
+ * stack; a fan-out epic with multiple independent leaves yields a
+ * multi-predecessor (diamond) implicit dependency so the new node sees ALL of
+ * the accumulated work.
  */
-
-import { isIntegrationNode } from './orchestration-integration-node';
 
 /** Minimal shape needed to compute the tip — a subset of OrchestrationChildRow. */
 export interface TipCandidate {
   readonly sub_issue_id: string;
   readonly depends_on: readonly string[];
-  readonly created_at: string;
+  readonly child_status: string;
 }
 
 /**
@@ -54,41 +52,46 @@ export interface TipCandidate {
  * usable tip (e.g. empty epic — degrade to root/main).
  *
  * Algorithm:
- *  1. Consider only the EXISTING nodes (the new node isn't in the graph yet).
+ *  1. Consider only the EXISTING nodes (the new node isn't in the graph yet),
+ *     and of those only the ones that have not ``failed`` or been ``skipped``:
+ *     a node that depends on one of these never runs, it is skipped in turn.
  *  2. The leaf frontier = nodes that appear in no other node's ``depends_on``.
- *  3. If an INTEGRATION node exists, it already depends on every real leaf —
- *     it IS the single combined tip, so stack on it alone (avoids a redundant
- *     diamond that re-merges what integration already merged).
- *  4. Otherwise return every real leaf. One leaf → a clean linear stack; many
- *     leaves → a diamond so the new node inherits all parallel branches.
+ *     An INTEGRATION node depends on every leaf it was made for, so it is the
+ *     single combined tip (no redundant diamond that re-merges what it already
+ *     merged) — unless a sub-issue was added beside it since, which is then a
+ *     leaf too.
+ *  3. Return every leaf. One leaf → a clean linear stack; many leaves → a
+ *     diamond so the new node inherits all parallel branches.
  *
  * Pure + deterministic (ties broken by sub_issue_id); no I/O.
  */
 export function resolveEpicTip(existing: readonly TipCandidate[]): string[] {
-  if (existing.length === 0) return [];
+  // Not failed or skipped, and not waiting behind such a node: the sweep skips those next.
+  const dead = new Set(existing
+    .filter((n) => n.child_status === 'failed' || n.child_status === 'skipped')
+    .map((n) => n.sub_issue_id));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const n of existing) {
+      const waits = n.child_status === 'blocked' || n.child_status === 'ready';
+      if (waits && !dead.has(n.sub_issue_id) && n.depends_on.some((d) => dead.has(d))) {
+        dead.add(n.sub_issue_id);
+        grew = true;
+      }
+    }
+  }
+  const alive = existing.filter((n) => !dead.has(n.sub_issue_id));
 
-  // A node is depended-upon if it appears in any other node's depends_on.
+  // A node is depended-upon if it appears in the depends_on of another of these.
   const dependedUpon = new Set<string>();
-  for (const node of existing) {
+  for (const node of alive) {
     for (const dep of node.depends_on) dependedUpon.add(dep);
   }
 
-  const leaves = existing.filter((n) => !dependedUpon.has(n.sub_issue_id));
-  if (leaves.length === 0) {
-    // Pathological (every node depended upon ⇒ a cycle, which the DAG
-    // validator rejects upstream). Degrade to root rather than throw.
-    return [];
-  }
-
-  // An integration node already merges all real leaves — it is the combined
-  // tip. Stack on it alone.
-  const integration = leaves.find((n) => isIntegrationNode(n.sub_issue_id));
-  if (integration) return [integration.sub_issue_id];
-
-  // Real leaves only (defensive — integration handled above). One → linear
-  // stack; many → diamond. Sorted for deterministic depends_on ordering.
-  return leaves
-    .filter((n) => !isIntegrationNode(n.sub_issue_id))
+  // One leaf → linear stack; many → diamond; none (an empty epic, or nothing
+  // left to build on) → root. Sorted for deterministic depends_on ordering.
+  return alive
+    .filter((n) => !dependedUpon.has(n.sub_issue_id))
     .map((n) => n.sub_issue_id)
     .sort();
 }

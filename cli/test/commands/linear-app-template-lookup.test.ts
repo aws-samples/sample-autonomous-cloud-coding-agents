@@ -139,7 +139,7 @@ describe('app-template callback discovery', () => {
   });
 
   test('an AUTH failure renders, but SAYS it could not read the stack', async () => {
-    // getStackOutput rethrows non-"does not exist" errors. This command must not
+    // findStackOutput rethrows non-"does not exist" errors. This command must not
     // propagate them — `app-template` has to work before `aws configure` — but it used to
     // swallow them silently, which rendered a VAULT stack as a no-vault one (#914 review).
     cfnSend.mockRejectedValue(Object.assign(new Error('Unable to locate credentials'), {

@@ -16,6 +16,7 @@ import pytest
 
 import config
 import jira_reactions
+import microvm_http
 import policy
 import server
 
@@ -46,6 +47,16 @@ _OWNED = [
     ),
     (config, "_LINEAR_VAULT_SCOPES", ("linear_vault", "scopes")),
     (config, "_LINEAR_VAULT_CUSTOM_PARAMS", ("linear_vault", "custom_parameters")),
+    (
+        microvm_http,
+        "LIFECYCLE_HANDLER_BUDGET_S",
+        ("microvm_hook_budgets", "lifecycle_handler_budget_seconds"),
+    ),
+    (
+        microvm_http,
+        "LIFECYCLE_HOOK_TIMEOUT_S",
+        ("microvm_hook_budgets", "lifecycle_hook_timeout_seconds"),
+    ),
 ]
 
 

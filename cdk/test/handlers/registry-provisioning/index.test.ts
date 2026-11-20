@@ -22,8 +22,9 @@
  * onEvent (Create/Update/Delete) and isComplete (Create/Update/Delete). The
  * handler drives an async Agent Registry lifecycle, so these lock in the
  * non-obvious branches the source comments flag as prior bugs: idempotent
- * create tokens, the Update branch actually issuing UpdateRegistry, and
- * asynchronous delete completion.
+ * create tokens, the Update branch actually issuing UpdateRegistry,
+ * asynchronous delete completion, and the deletion of a registry's records
+ * before the registry.
  */
 
 // Command classes are tagged so the mock `send` can dispatch on constructor.
@@ -71,8 +72,10 @@ jest.mock('@aws-sdk/client-agent-registry-control', () => ({
   ConflictException,
   CreateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'CreateRegistry', input })),
   DeleteRegistryCommand: jest.fn((input: unknown) => ({ _type: 'DeleteRegistry', input })),
+  DeleteRegistryRecordCommand: jest.fn((input: unknown) => ({ _type: 'DeleteRegistryRecord', input })),
   GetRegistryCommand: jest.fn((input: unknown) => ({ _type: 'GetRegistry', input })),
   InternalServerException,
+  ListRegistryRecordsCommand: jest.fn((input: unknown) => ({ _type: 'ListRegistryRecords', input })),
   ResourceNotFoundException,
   ThrottlingException,
   UpdateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'UpdateRegistry', input })),
@@ -90,10 +93,11 @@ beforeEach(() => {
   mockSend.mockReset();
 });
 
-/** Route mockSend by command type using the provided handlers. */
+/** Route mockSend by command type using the provided handlers. The registry holds no record unless a test routes ListRegistryRecords. */
 function routeSend(handlers: Record<string, (input: Record<string, unknown>) => unknown>): void {
+  const routes: typeof handlers = { ListRegistryRecords: () => ({ registryRecords: [] }), ...handlers };
   mockSend.mockImplementation((cmd: TaggedCommand) => {
-    const h = handlers[cmd._type];
+    const h = routes[cmd._type];
     if (!h) throw new Error(`unexpected command ${cmd._type}`);
     return Promise.resolve(h(cmd.input));
   });
@@ -177,7 +181,7 @@ describe('onEvent Delete', () => {
       ResourceProperties: { RegistryName: 'abca' },
     });
     const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
-    expect(types).toEqual(['DeleteRegistry']);
+    expect(types).toEqual(['ListRegistryRecords', 'DeleteRegistry']);
   });
 
   test('treats an already-absent registry as deleted', async () => {
@@ -268,8 +272,8 @@ describe('onEvent Delete', () => {
       PhysicalResourceId: ARN,
       ResourceProperties: { RegistryName: 'abca' },
     });
-    // Normalised for the API...
-    expect((mockSend.mock.calls[0][0] as TaggedCommand).input.registryId).toBe(REGISTRY_ID);
+    // Normalised for the API, in the record list and in the delete...
+    expect(mockSend.mock.calls.map((c) => (c[0] as TaggedCommand).input.registryId)).toEqual([REGISTRY_ID, REGISTRY_ID]);
     // ...but echoed verbatim back to CloudFormation, which requires an exact match.
     expect(res.PhysicalResourceId).toBe(ARN);
   });
@@ -281,7 +285,7 @@ describe('onEvent Delete', () => {
       PhysicalResourceId: REGISTRY_ID,
       ResourceProperties: { RegistryName: 'abca' },
     });
-    expect((mockSend.mock.calls[0][0] as TaggedCommand).input.registryId).toBe(REGISTRY_ID);
+    expect(mockSend.mock.calls.map((c) => (c[0] as TaggedCommand).input.registryId)).toEqual([REGISTRY_ID, REGISTRY_ID]);
   });
 
   // Pins both ends of the length bound. Without these, {12,64} could drift to {1,64}
@@ -302,7 +306,8 @@ describe('onEvent Delete', () => {
       PhysicalResourceId: physicalId,
       ResourceProperties: { RegistryName: 'abca' },
     });
-    expect(mockSend).toHaveBeenCalledTimes(shouldCallApi ? 1 : 0);
+    // The record list and the delete, or nothing.
+    expect(mockSend).toHaveBeenCalledTimes(shouldCallApi ? 2 : 0);
   });
 
   // The guard fails open on shape drift; this fails open on a request the service
@@ -526,7 +531,7 @@ describe('isComplete Delete', () => {
     });
     expect(res.IsComplete).toBe(false);
     const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
-    expect(types).toEqual(['GetRegistry', 'DeleteRegistry']);
+    expect(types).toEqual(['GetRegistry', 'ListRegistryRecords', 'DeleteRegistry']);
   });
 
   test('keeps polling when a re-driven delete gets a retryable conflict', async () => {
@@ -569,5 +574,172 @@ describe('isComplete Delete', () => {
         ResourceProperties: { RegistryName: 'abca' },
       }),
     ).rejects.toThrow(/DELETE_FAILED.*records locked/);
+  });
+});
+
+// AWS refuses DeleteRegistry with a ConflictException while the registry holds a record.
+// The handler used to retry that refusal as if it would pass, and deleted no record: a
+// stack whose registry held a published asset could not be deleted, and after 15 minutes
+// of polling the Provider reported "Operation timed out".
+describe('Delete of a registry that holds records', () => {
+  const DELETE = {
+    RequestType: 'Delete' as const,
+    PhysicalResourceId: REGISTRY_ID,
+    ResourceProperties: { RegistryName: 'abca' },
+  };
+
+  /**
+   * Routes for a registry that answers as AWS does: DeleteRegistry is refused while a
+   * record exists, and an accepted DeleteRegistry removes the registry.
+   * @param records - ids of the records the registry holds; a deleted record leaves the list.
+   * @param beforeDelete - runs before a record is deleted; when it throws, the record stays.
+   * @returns the routes for `routeSend`.
+   */
+  function registryHolding(records: string[], beforeDelete: (recordId: unknown) => void = () => undefined) {
+    let deleted = false;
+    return {
+      GetRegistry: () => {
+        if (deleted) throw new ResourceNotFoundException();
+        return { status: 'READY' };
+      },
+      ListRegistryRecords: () => ({ registryRecords: records.map((recordId) => ({ recordId })) }),
+      DeleteRegistryRecord: ({ recordId }: Record<string, unknown>) => {
+        beforeDelete(recordId);
+        records.splice(records.indexOf(recordId as string), 1);
+        return {};
+      },
+      DeleteRegistry: () => {
+        if (records.length > 0) throw new ConflictException();
+        deleted = true;
+        return { status: 'DELETING' };
+      },
+    };
+  }
+
+  /** The commands sent so far, each with the record or the page it names. */
+  function sent(): string[] {
+    return mockSend.mock.calls.map((c) => {
+      const { _type, input } = c[0] as TaggedCommand;
+      return [_type, input.recordId ?? input.nextToken].filter(Boolean).join(' ');
+    });
+  }
+
+  /**
+   * Poll isComplete as the Provider's waiter does. It polls every 10 seconds and gives up
+   * after 15 minutes (constructs/registry.ts), so 90 polls are what a delete can use.
+   * @returns the number of polls it took.
+   */
+  async function pollsUntilDeleted(): Promise<number> {
+    for (let poll = 1; poll <= 90; poll++) {
+      if ((await isComplete(DELETE)).IsComplete) return poll;
+    }
+    throw new Error('the registry is still there after 90 polls: the Provider reports "Operation timed out"');
+  }
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('deletes the records, then the registry', async () => {
+    routeSend(registryHolding(['rec1', 'rec2']));
+
+    await onEvent(DELETE);
+
+    expect(await pollsUntilDeleted()).toBe(1);
+    expect(sent()).toEqual([
+      'ListRegistryRecords', 'DeleteRegistryRecord rec1', 'DeleteRegistryRecord rec2', 'DeleteRegistry', 'GetRegistry',
+    ]);
+  });
+
+  test('follows the record list to its last page', async () => {
+    routeSend({
+      ListRegistryRecords: jest.fn()
+        .mockReturnValueOnce({ registryRecords: [{ recordId: 'rec1' }, { recordId: 'rec2' }], nextToken: 'page2' })
+        .mockReturnValue({ registryRecords: [{ recordId: 'rec3' }] }),
+      DeleteRegistryRecord: () => ({}),
+      DeleteRegistry: () => ({ status: 'DELETING' }),
+    });
+
+    await onEvent(DELETE);
+
+    expect(sent()).toEqual([
+      'ListRegistryRecords', 'DeleteRegistryRecord rec1', 'DeleteRegistryRecord rec2',
+      'ListRegistryRecords page2', 'DeleteRegistryRecord rec3', 'DeleteRegistry',
+    ]);
+  });
+
+  // A record that is still being created or updated refuses its deletion.
+  test('leaves a record that refuses deletion for the next poll', async () => {
+    let creating = true;
+    routeSend(registryHolding(['rec1', 'rec2'], (recordId) => {
+      if (recordId === 'rec1' && creating) {
+        creating = false;
+        throw new ConflictException();
+      }
+    }));
+
+    await onEvent(DELETE);
+
+    expect(sent()).toEqual(['ListRegistryRecords', 'DeleteRegistryRecord rec1', 'DeleteRegistryRecord rec2', 'DeleteRegistry']);
+    expect(await pollsUntilDeleted()).toBe(2);
+  });
+
+  test('skips a record that is already gone', async () => {
+    routeSend({
+      ListRegistryRecords: () => ({ registryRecords: [{ recordId: 'rec1' }, { recordId: 'rec2' }] }),
+      DeleteRegistryRecord: ({ recordId }) => {
+        if (recordId === 'rec1') throw new ResourceNotFoundException();
+        return {};
+      },
+      DeleteRegistry: () => ({ status: 'DELETING' }),
+    });
+
+    await onEvent(DELETE);
+
+    expect(sent()).toEqual(['ListRegistryRecords', 'DeleteRegistryRecord rec1', 'DeleteRegistryRecord rec2', 'DeleteRegistry']);
+  });
+
+  test('fails the delete when a record cannot be deleted for another reason', async () => {
+    routeSend({
+      ListRegistryRecords: () => ({ registryRecords: [{ recordId: 'rec1' }] }),
+      DeleteRegistryRecord: () => {
+        throw new Error('AccessDenied');
+      },
+    });
+
+    await expect(onEvent(DELETE)).rejects.toThrow('AccessDenied');
+  });
+
+  // The record list is the first call to carry the registry id, so it is the one that
+  // meets a registry that is gone or an id the service rejects. Like the same answers to
+  // DeleteRegistry, none of them may fail the delete.
+  test.each([
+    ['not found: the registry is already gone', ResourceNotFoundException],
+    ['a validation error: the service rejects the id', ValidationException],
+    ['throttling', ThrottlingException],
+  ])('does not fail when the record list answers %s', async (_label, ErrorType) => {
+    routeSend({
+      ListRegistryRecords: () => {
+        throw new ErrorType();
+      },
+    });
+
+    await expect(onEvent(DELETE)).resolves.toEqual({ PhysicalResourceId: REGISTRY_ID });
+    expect(sent()).toEqual(['ListRegistryRecords']);
+  });
+
+  // The handler's Lambda is stopped after 60 seconds, and that would fail the delete at
+  // once. Here every record takes that long, so one invocation has time for one record.
+  test('stops deleting records when its time is up, and the next poll goes on', async () => {
+    let now = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    routeSend(registryHolding(['rec1', 'rec2', 'rec3'], () => {
+      now += 60_000;
+    }));
+
+    await onEvent(DELETE);
+
+    expect(sent()).toEqual(['ListRegistryRecords', 'DeleteRegistryRecord rec1', 'DeleteRegistry']);
+    expect(await pollsUntilDeleted()).toBe(3);
   });
 });

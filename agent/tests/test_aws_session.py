@@ -56,6 +56,43 @@ class TestConfigureSession:
         assert "u-1" not in aws_session.os.environ.values()
 
 
+class TestSuccessiveTasks:
+    """A reused server keeps one identity per running task (#904 review)."""
+
+    def _start(self, task_id: str):
+        configure_session(user_id="u-1", repo="owner/repo", task_id=task_id)
+        with patch("boto3.Session", return_value=MagicMock(name=f"session-{task_id}")):
+            return get_session()
+
+    def test_the_next_task_starts_after_the_previous_one_is_released(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        first = self._start("t-1")
+        aws_session.release_session("t-1")
+
+        second = self._start("t-2")
+
+        assert second is not first
+        assert aws_session._tags["task_id"] == "t-2"
+
+    def test_a_running_task_still_cannot_change_identity(self, monkeypatch):
+        from aws_session import SessionScopingError
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        self._start("t-1")
+
+        with pytest.raises(SessionScopingError):
+            configure_session(user_id="u-1", repo="owner/repo", task_id="t-2")
+
+    def test_releasing_another_task_keeps_the_current_session(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        session = self._start("t-1")
+
+        aws_session.release_session("t-other")
+
+        assert aws_session._session is session
+        assert aws_session._tags["task_id"] == "t-1"
+
+
 # ---------------------------------------------------------------------------
 # Fail-safe: no SessionRole ARN → plain session, never scoped
 # ---------------------------------------------------------------------------
@@ -84,8 +121,8 @@ class TestFailSafe:
 # autouse fixture. This file's `_reset` fixture (above) itself does
 # `monkeypatch.delenv(SESSION_ROLE_ARN_ENV)`, which would MASK whether conftest's
 # `_clean_env` performs the scrub — a guard placed here passes even if the
-# conftest line is deleted. Only a fixture-free module truly
-# guards the fix.
+# conftest line is deleted. Only a module without an autouse fixture
+# of its own truly guards the fix.
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +131,10 @@ class TestFailSafe:
 
 
 class TestScopedSession:
+    """A test that sets the session role must script ``assume_role`` (or patch
+    ``_build_scoped_session``): a bare ``MagicMock`` client sends botocore's
+    expiry parsing into a loop that never returns."""
+
     def _arn(self, monkeypatch):
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         monkeypatch.setenv(SESSION_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/abca-session")
@@ -182,6 +223,91 @@ class TestScopedSession:
             get_session()
         # The downgrade attempt was surfaced loudly before failing.
         assert any("SESSION_SCOPING_FAILED" in m for m in logged)
+
+    def test_role_that_cannot_be_assumed_fails_closed(self, monkeypatch):
+        """STS refusing the SessionRole must abort at the first get_session(),
+        not surface later as per-call errors behind best-effort wrappers, and
+        must leave nothing cached that a later call could take for unscoped."""
+        from botocore.exceptions import ClientError
+
+        from aws_session import SessionScopingError
+
+        self._arn(monkeypatch)
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+        sts = MagicMock(name="sts")
+        sts.assume_role.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "not authorized"}}, "AssumeRole"
+        )
+        logged: list[str] = []
+
+        with (
+            patch("boto3.client", return_value=sts),
+            patch("shell.log_error_cw", side_effect=lambda msg, **kw: logged.append(msg)),
+            pytest.raises(SessionScopingError),
+        ):
+            get_session()
+
+        sts.assume_role.assert_called_once()
+        assert any("SESSION_SCOPING_FAILED" in m for m in logged)
+        assert aws_session._session is None
+        assert aws_session._scoped is None
+
+    def test_role_that_cannot_be_assumed_stops_run_task(self, monkeypatch):
+        """An STS refusal must stop the task before it writes RUNNING or clones.
+        What stops it is the is_scoped() call in run_task's scoping log line;
+        the status and progress writes that follow are best-effort and would
+        carry on."""
+        from botocore.exceptions import ClientError
+
+        from aws_session import SessionScopingError
+        from pipeline import run_task
+
+        self._arn(monkeypatch)
+        sts = MagicMock(name="sts")
+        sts.assume_role.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "not authorized"}}, "AssumeRole"
+        )
+
+        with (
+            patch("boto3.client", return_value=sts),
+            patch("shell.log_error_cw"),
+            patch("pipeline.task_state") as task_state,
+            patch("repo.setup_repo") as setup_repo,
+            pytest.raises(SessionScopingError),
+        ):
+            run_task(
+                repo_url="owner/repo",
+                task_description="fix bug",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="test-id",
+            )
+
+        task_state.write_running.assert_not_called()
+        setup_repo.assert_not_called()
+
+    def test_assumable_role_is_assumed_once(self, monkeypatch):
+        """The resolution in get_session() is the one AssumeRole the first
+        tenant-data call would have made anyway, not an extra one."""
+        self._arn(monkeypatch)
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+        sts = MagicMock(name="sts")
+        sts.assume_role.return_value = {
+            "Credentials": {
+                "AccessKeyId": "ASIAEXAMPLE",
+                "SecretAccessKey": "secret",
+                "SessionToken": "token",
+                "Expiration": datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1),
+            }
+        }
+
+        with patch("boto3.client", return_value=sts):
+            session = get_session()
+            frozen = session.get_credentials().get_frozen_credentials()
+
+        assert is_scoped() is True
+        assert frozen.access_key == "ASIAEXAMPLE"
+        assert sts.assume_role.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -431,3 +557,115 @@ class TestSolutionUserAgent:
             get_session()
 
         assert fake_botocore_session.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+
+class TestRetryMode:
+    """Every client keeps the legacy retry mode, whatever default the SDK ships.
+
+    botocore 1.44 made ``standard`` the default (3 attempts, 4 for DynamoDB).
+    The agent names its mode, so an SDK update cannot change how long a throttled
+    call is retried. A caller's Config and ``AWS_RETRY_MODE`` still decide, as
+    they did while ``legacy`` was botocore's own default. The tests named
+    ``real`` build real clients (nothing is sent): they read what botocore
+    resolved, not what was passed, and fail if botocore stops honouring it.
+    """
+
+    def test_platform_client_names_the_retry_mode(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        with patch("boto3.client", return_value=MagicMock(name="logs")) as mk:
+            platform_client("logs", region_name="us-east-1")
+
+        assert mk.call_args.kwargs["config"].retries == {"mode": "legacy"}
+
+    def test_unscoped_tenant_client_and_resource_name_the_retry_mode(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import tenant_client, tenant_resource
+
+        with patch("boto3.client", return_value=MagicMock(name="ddb")) as client:
+            tenant_client("dynamodb")
+        with patch("boto3.resource", return_value=MagicMock(name="ddb")) as resource:
+            tenant_resource("dynamodb")
+
+        assert client.call_args.kwargs["config"].retries == {"mode": "legacy"}
+        assert resource.call_args.kwargs["config"].retries == {"mode": "legacy"}
+
+    def test_caller_retry_settings_survive_and_get_the_mode(self):
+        from botocore.config import Config
+
+        # Config.merge replaces the whole ``retries`` mapping: without the carry-over
+        # the caller's attempt limit would be dropped for the mode alone.
+        caller = Config(read_timeout=7, retries={"total_max_attempts": 1})
+        merged = aws_session._merge_ua_config({"config": caller})["config"]
+        assert merged.retries == {"mode": "legacy", "total_max_attempts": 1}
+        assert merged.read_timeout == 7
+        assert merged.user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+    def test_caller_retry_mode_wins(self):
+        from botocore.config import Config
+
+        caller = Config(retries={"mode": "adaptive", "total_max_attempts": 2})
+        merged = aws_session._merge_ua_config({"config": caller})["config"]
+        assert merged.retries == {"mode": "adaptive", "total_max_attempts": 2}
+
+    def test_scoped_session_and_its_sts_client_name_the_retry_mode(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv(SESSION_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/abca-session")
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+
+        fake_botocore_session = MagicMock(name="botocore-session")
+        with (
+            patch("boto3.client", return_value=MagicMock(name="sts")) as sts,
+            patch("boto3.Session", return_value=MagicMock(name="boto3-session")),
+            patch("botocore.credentials.DeferredRefreshableCredentials"),
+            patch("botocore.session.get_session", return_value=fake_botocore_session),
+        ):
+            get_session()
+
+        fake_botocore_session.set_config_variable.assert_any_call("retry_mode", "legacy")
+        assert sts.call_args.kwargs["config"].retries == {"mode": "legacy"}
+
+    def test_real_factory_client_resolves_the_legacy_mode(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        from aws_session import platform_client
+
+        client = platform_client("dynamodb", region_name="us-east-1")
+        assert client.meta.config.retries["mode"] == "legacy"
+
+    def test_real_session_client_resolves_the_legacy_mode(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        # The session-level setting, which the scoped session shares: a caller's
+        # own attempt limit is kept beside it.
+        from botocore.config import Config
+
+        session = get_session()
+        assert session.client("dynamodb").meta.config.retries["mode"] == "legacy"
+        capped = session.client("dynamodb", config=Config(retries={"total_max_attempts": 2}))
+        assert capped.meta.config.retries == {"mode": "legacy", "total_max_attempts": 2}
+
+    def test_environment_retry_mode_is_left_to_botocore(self, monkeypatch):
+        """``AWS_RETRY_MODE`` decided the mode before botocore's default changed,
+        and it still does: the agent then names none, on a client or a session."""
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("AWS_RETRY_MODE", "adaptive")
+        from aws_session import platform_client
+
+        with patch("boto3.client", return_value=MagicMock(name="logs")) as mk:
+            platform_client("logs", region_name="us-east-1")
+        assert mk.call_args.kwargs["config"].retries is None
+        assert mk.call_args.kwargs["config"].user_agent_extra == "md/uksb-wt64nei4u6#agent"
+
+        # What botocore resolves, from the factory and from the session.
+        real = platform_client("dynamodb", region_name="us-east-1")
+        assert real.meta.config.retries["mode"] == "adaptive"
+        assert get_session().client("dynamodb").meta.config.retries["mode"] == "adaptive"
+
+    def test_environment_retry_mode_keeps_a_callers_retry_settings(self, monkeypatch):
+        from botocore.config import Config
+
+        monkeypatch.setenv("AWS_RETRY_MODE", "standard")
+        caller = Config(retries={"total_max_attempts": 1})
+        merged = aws_session._merge_ua_config({"config": caller})["config"]
+        assert merged.retries == {"total_max_attempts": 1}
