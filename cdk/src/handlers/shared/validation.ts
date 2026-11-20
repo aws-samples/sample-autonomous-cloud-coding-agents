@@ -43,7 +43,9 @@ export const MAX_TASK_DESCRIPTION_LENGTH = 10_000;
 // dots (`owner/..`, `./repo`) is a path token, not a repo name — the
 // lookaheads reject those so URL/key interpolation never sees `.`/`..`.
 const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
-const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+/** Longest idempotency key createTaskCore accepts; synthesized keys are sliced to fit. */
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+const IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[a-zA-Z0-9_-]{1,${MAX_IDEMPOTENCY_KEY_LENGTH}}$`);
 const WEBHOOK_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9]$/;
 // ULID format: 26 chars, Crockford Base32 alphabet (0-9, A-Z excluding I, L, O, U).
 // Matches the ``_generate_ulid`` output in ``agent/src/progress_writer.py``.
