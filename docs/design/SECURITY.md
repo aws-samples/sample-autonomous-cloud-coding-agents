@@ -110,7 +110,7 @@ The platform is self-hosted in the customer's AWS account. No code or repo data 
 
 | Layer | Mechanism | What it protects against |
 |-------|-----------|------------------------|
-| Edge | AWS WAFv2 (common rules, known bad inputs, rate limit: 1,000 req/5 min/IP) | Web exploits, volumetric abuse |
+| Edge | AWS WAFv2 (common rules, known bad inputs, rate limit: 1,000 req/5 min/IP). On the HMAC-signed webhook routes, `CrossSiteScripting_BODY` and `SizeRestrictions_BODY` count instead of block (their bodies carry user text and markup); counted XSS matches are alarmed | Web exploits, volumetric abuse |
 | Network | DNS Firewall domain allowlist (GitHub, npm, PyPI, AWS services) | Agent reaching unauthorized domains |
 | Network | Security group egress restricted to TCP 443 | Non-HTTPS traffic |
 | Compute | MicroVM isolation per session | Cross-session compromise |
