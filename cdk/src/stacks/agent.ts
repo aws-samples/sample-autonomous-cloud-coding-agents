@@ -169,6 +169,13 @@ export interface AgentStackProps extends StackProps {
   readonly features?: DeploymentFeatures;
 }
 
+/**
+ * Per-user nudge rate limit. One value for both entry points that spend the
+ * same counter row: `POST /tasks/{id}/nudge` (TaskApi) and a follow-up in a
+ * Linear agent session (the Linear webhook processor).
+ */
+const NUDGE_RATE_LIMIT_PER_MINUTE = 10;
+
 /** `--context enableLinearAgentSessions=true` arrives as a string from the CLI, a boolean from cdk.json. */
 function isLinearAgentSessionsContextOn(value: unknown): boolean {
   return value === true || value === 'true';
@@ -190,6 +197,7 @@ function linearAgentSessionsProps(
   if (!enabled) return undefined;
   return {
     nudgesTable,
+    nudgeRateLimitPerMinute: NUDGE_RATE_LIMIT_PER_MINUTE,
     stopCompute: Object.fromEntries(backends.filter(([deployed]) => deployed).map(([, key, arn]) => [key, arn])),
   };
 }
@@ -566,6 +574,7 @@ export class AgentStack extends Stack {
 
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
+      nudgeRateLimitPerMinute: NUDGE_RATE_LIMIT_PER_MINUTE,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,

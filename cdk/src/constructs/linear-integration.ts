@@ -658,7 +658,12 @@ export class LinearIntegration extends Construct {
             'Wildcards cover (a) DynamoDB index ARN patterns from CDK grant helpers, '
             + 'and (b) the Secrets Manager `bgagent-linear-oauth-*` prefix grant — '
             + 'the per-workspace OAuth secret name is not known at synth time '
-            + '(operators add workspaces by slug at runtime via `bgagent linear add-workspace`).',
+            + '(operators add workspaces by slug at runtime via `bgagent linear add-workspace`). '
+            + 'With the agent-session flag on, the webhook processor additionally holds (c) the stop actions a '
+            + 'session `stop` needs, scoped like the cancel API: `ecs:StopTask` on `*` conditioned on the one '
+            + 'cluster ARN (task ARNs are not known at synth time), `StopRuntimeSession` on the one runtime ARN '
+            + 'and its `/*` session children, and `TerminateMicrovm` on the one platform image ARN and its '
+            + '`:*` version suffix.',
         },
       ], true);
     }

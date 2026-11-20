@@ -300,6 +300,19 @@ describe('keep-alive heartbeat', () => {
     expect(gets()).toHaveLength(1);
   });
 
+  test('a missed task read does not switch the task\'s keep-alive off', async () => {
+    // First turn: the row is not readable yet (or the read missed).
+    mockDdbSend.mockReset().mockResolvedValue({});
+    await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
+    expect(mockEmitAgentActivity).not.toHaveBeenCalled();
+
+    // Next turn the row is there: it must be read, and the session kept alive.
+    mockTask(SESSION_TASK);
+    await routeEvent(ev('agent_turn', { turn: 2 }), LINEAR_ONLY);
+    expect(gets()).toHaveLength(1);
+    expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
+  });
+
   test('the memo only skips heartbeats: a terminal event still reads the task and posts', async () => {
     mockTask(SESSION_TASK);
     await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);

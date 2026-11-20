@@ -244,6 +244,57 @@ describe('cancel-task handler', () => {
     expect(typeof put.Put.Item.ttl).toBe('number');
   });
 
+  const conflict = () => Object.assign(new Error('Transaction cancelled'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: [{ Code: 'TransactionConflict' }, { Code: 'None' }],
+  });
+
+  test('a transaction conflict with a concurrent write to the task row is retried, not a 500', async () => {
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({ Item: RUNNING_TASK })
+      .mockRejectedValueOnce(conflict())
+      .mockRejectedValueOnce(conflict())
+      .mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(200);
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
+    // Every attempt carries the same event id, so a retry cannot write two events.
+    const eventIds = mockSend.mock.calls.slice(1).map((c) => c[0].input.TransactItems[1].Put.Item.event_id);
+    expect(eventIds).toHaveLength(3);
+    expect(new Set(eventIds).size).toBe(1);
+  });
+
+  test('a conflict that then finds the task terminal is a 409, not a cancel', async () => {
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({ Item: RUNNING_TASK })
+      .mockRejectedValueOnce(conflict())
+      .mockRejectedValueOnce(Object.assign(new Error('Transaction cancelled'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+      }));
+
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(409);
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
+  test('a conflict that never clears gives up after a bounded number of attempts', async () => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({ Item: RUNNING_TASK });
+    mockSend.mockRejectedValue(conflict());
+
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(500);
+    expect(mockSend).toHaveBeenCalledTimes(1 + 4);
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+  });
+
   test('returns 500 and stops no compute when the cancel transaction fails for another reason', async () => {
     mockSend.mockReset();
     mockSend.mockResolvedValueOnce({ Item: RUNNING_TASK });

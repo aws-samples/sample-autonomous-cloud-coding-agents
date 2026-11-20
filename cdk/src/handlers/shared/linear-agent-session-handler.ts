@@ -22,6 +22,7 @@ import { ulid } from 'ulid';
 import { TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
 import { cancelTask, stopTaskCompute, type CancelTaskTables } from './cancel-task-core';
 import { buildClarifyResumeDescription, isClarifyHold, type ClarifyHoldRow } from './clarify-resume';
+import { screenWithGuardrail } from './context-hydration';
 import { createTaskCore } from './create-task-core';
 import {
   agentSessionIdempotencyKey,
@@ -45,7 +46,7 @@ import {
   vaultMetadata,
   writeSessionTaskPointer,
 } from './linear-channel-metadata';
-import { resolveLinearOauthToken } from './linear-oauth-resolver';
+import { resolveLinearOauthToken, type ResolvedLinearToken } from './linear-oauth-resolver';
 import { fetchIssueParentId } from './linear-subissue-fetch';
 import { lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
 import { logger } from './logger';
@@ -131,9 +132,23 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
   const emit = (content: AgentActivityContent, ephemeral = false) =>
     emitSessionActivity(resolved.accessToken, request, content, ephemeral);
   // Per-workspace evidence that sessions open here; the comment trigger only
-  // yields to sessions in workspaces that carry it.
-  await recordWorkspaceAgentSession(ddb, WORKSPACE_REGISTRY_TABLE, request.workspaceId);
+  // yields to sessions in workspaces that carry it. Started now but awaited
+  // only once the delivery is handled, so its round trip never sits between
+  // the webhook and the acknowledgement Linear times at 10s. Never rejects.
+  const workspaceMarked = recordWorkspaceAgentSession(ddb, WORKSPACE_REGISTRY_TABLE, request.workspaceId);
+  try {
+    await respondToAgentSession(request, resolved, emit, logCtx);
+  } finally {
+    await workspaceMarked;
+  }
+}
 
+async function respondToAgentSession(
+  request: AgentSessionRequest,
+  resolved: ResolvedLinearToken,
+  emit: (content: AgentActivityContent, ephemeral?: boolean) => Promise<void>,
+  logCtx: Record<string, unknown>,
+): Promise<void> {
   if (request.stopRequested) {
     // Orchestration children are cancelled through the epic, never from a
     // per-issue session (the reconciler owns their lifecycle).
@@ -162,7 +177,7 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
     logger.warn('Agent-session actor has no linked platform user — refusing', {
       ...logCtx, linear_user_id: request.actorId,
     });
-    await emit(refusal(UNLINKED_ACTOR_MESSAGE, await findPriorTask(request)));
+    await emit(refusal(UNLINKED_ACTOR_MESSAGE, request, await findPriorTask(request)));
     return;
   }
 
@@ -212,11 +227,6 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
   };
   const idempotencyKey = agentSessionIdempotencyKey(request);
   const taskId = ulid();
-  // Before the create, so a prompt or stop that lands while it is in flight
-  // (or before the issue index catches up) still finds this task.
-  if (WEBHOOK_DEDUP_TABLE) {
-    await writeSessionTaskPointer(ddb, WEBHOOK_DEDUP_TABLE, { issueId: request.issueId, taskId });
-  }
   const result = await createTaskCore(
     iterate
       ? {
@@ -230,7 +240,9 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
         workflow_ref: CODING_WORKFLOW_ID,
         task_description: clarifyResume
           ? buildClarifyResumeDescription(priorTask!.task_description, priorTask!.answer_text, request.directive)
-          : buildAgentSessionTaskDescription(issue, request.directive, request.promptContext),
+          : buildAgentSessionTaskDescription(
+            issue, request.directive, await screenSessionContextOrDrop(request.promptContext, taskId, logCtx),
+          ),
       },
     {
       userId: platformUserId,
@@ -243,8 +255,11 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
   );
 
   if (result.statusCode === 200) {
-    // Idempotent replay of a delivery we already admitted — its activity was emitted then.
+    // Idempotent replay of a delivery we already admitted — its activity was
+    // emitted then. The task is the ORIGINAL one, not the id generated above:
+    // point at it, in case the first delivery died before writing its pointer.
     logger.info('Agent-session delivery replayed an existing task — no new activity', { ...logCtx, idempotency_key: idempotencyKey });
+    await pointIssueAtTask(request.issueId, replayedTaskId(result.body));
     return;
   }
   if (result.statusCode !== 201) {
@@ -252,21 +267,86 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
     await emit({ type: 'error', body: describeCreateTaskFailure(result.statusCode, result.body) });
     return;
   }
+  // Only now that the task exists: a prompt or stop that lands before the
+  // issue index catches up finds it through this pointer.
+  await pointIssueAtTask(request.issueId, taskId);
   logger.info('Agent-session task created', { ...logCtx, task_id: taskId, repo, iterate, clarify_resume: clarifyResume });
   await emit(iterate
     ? { type: 'action', action: 'Iterating on pull request', parameter: `${repo}#${prNumber}`, result: `Task \`${taskId}\`` }
     : { type: 'action', action: 'Started coding task', parameter: repo, result: `Task \`${taskId}\`` });
 }
 
+async function pointIssueAtTask(issueId: string, taskId: string | null): Promise<void> {
+  if (!WEBHOOK_DEDUP_TABLE || !taskId) return;
+  await writeSessionTaskPointer(ddb, WEBHOOK_DEDUP_TABLE, { issueId, taskId });
+}
+
+/** The task id in createTaskCore's idempotent-replay (200) body, if it can be read. */
+function replayedTaskId(rawBody: string): string | null {
+  try {
+    const taskId = (JSON.parse(rawBody) as { data?: { task_id?: unknown } }).data?.task_id;
+    return typeof taskId === 'string' && taskId ? taskId : null;
+  } catch {
+    return null; // nosemgrep: ts-silent-success-masking -- an unreadable replay body only means no pointer is written, never a wrong one; the task itself already exists and the issue index still finds it
+  }
+}
+
 /**
- * A refusal must not change what the session says about the task. Linear
- * derives session state from the LAST activity, so an ``error`` here would turn
- * the owner's healthy, running session red because a teammate was refused. A
- * ``thought`` leaves a running session running; once nothing is running the
- * refusal is the session's answer, a ``response``.
+ * Screen Linear's ``promptContext`` on its own before it joins the task
+ * description. It carries the issue's comment thread — other people's text —
+ * and createTaskCore screens the whole description fail-closed, so one comment
+ * that trips the guardrail would otherwise block the requester's task.
+ *
+ * Same posture as the label trigger's comment screening: context that is
+ * blocked, cannot be screened, or has no guardrail to screen it is DROPPED and
+ * the task proceeds on the requester's own instruction and the issue as
+ * fetched (which createTaskCore still screens, fail-closed).
  */
-function refusal(body: string, priorTask: PriorTask | null): AgentActivityContent {
-  return priorTask && !isTerminal(priorTask.status) ? { type: 'thought', body } : { type: 'response', body };
+async function screenSessionContextOrDrop(
+  promptContext: string | null,
+  taskId: string,
+  logCtx: Record<string, unknown>,
+): Promise<string | null> {
+  if (!promptContext) return null;
+  try {
+    const screened = await screenWithGuardrail(promptContext, taskId);
+    if (screened?.action === 'NONE') return promptContext;
+    logger.warn(screened
+      ? 'Dropping Linear session context: blocked by content policy (task still proceeds)'
+      : 'Dropping Linear session context: guardrail not configured to screen it', logCtx);
+    return null;
+  } catch (err) {
+    logger.warn('Dropping Linear session context: screening unavailable (task still proceeds)', {
+      ...logCtx, error: err instanceof Error ? err.message : String(err),
+    });
+    return null; // nosemgrep: ts-silent-success-masking -- session context is advisory enrichment; a screening outage drops it (logged) and the requester's task still proceeds on text createTaskCore screens fail-closed
+  }
+}
+
+/**
+ * Whether ``request`` arrived in the session that ``task`` reports into, while
+ * that task is still running. Only that session hears the task's outcome from
+ * the fan-out plane; any other session (a second mention, another user's
+ * session, a session on a label-triggered run) hears nothing more.
+ */
+function isRunningTasksOwnSession(request: AgentSessionRequest, task: PriorTask | null): boolean {
+  return Boolean(task)
+    && !isTerminal(task!.status)
+    && request.action === 'prompted'
+    && task!.channel_metadata?.linear_agent_session_id === request.sessionId;
+}
+
+/**
+ * A refusal is the session's answer, so it is a ``response`` — which also
+ * closes the session, as a refused ``stop`` requires — with one exception.
+ * Linear derives session state from the LAST activity, so in the session a
+ * running task reports into, a closing or ``error`` activity would mark the
+ * owner's healthy run as finished or failed because a teammate was refused.
+ * There the refusal is a ``thought`` and the task's own final activity still
+ * closes the session.
+ */
+function refusal(body: string, request: AgentSessionRequest, priorTask: PriorTask | null): AgentActivityContent {
+  return isRunningTasksOwnSession(request, priorTask) ? { type: 'thought', body } : { type: 'response', body };
 }
 
 /**
@@ -286,7 +366,7 @@ async function handleStopRequest(
     : null;
   const priorTask = await findPriorTask(request);
   if (!platformUserId) {
-    await emit(refusal(`Stop request ignored. ${UNLINKED_ACTOR_MESSAGE}`, priorTask));
+    await emit(refusal(`Stop request ignored. ${UNLINKED_ACTOR_MESSAGE}`, request, priorTask));
     return;
   }
   if (!priorTask || isTerminal(priorTask.status)) {
@@ -298,7 +378,7 @@ async function handleStopRequest(
     logger.warn('Agent-session stop from a user who does not own the running task — refusing', {
       linear_agent_session_id: request.sessionId, task_id: priorTask.task_id,
     });
-    await emit(refusal(`Stop request ignored. ${NOT_OWNER_MESSAGE}`, priorTask));
+    await emit(refusal(`Stop request ignored. ${NOT_OWNER_MESSAGE}`, request, priorTask));
     return;
   }
   const tables: CancelTaskTables = {
@@ -341,8 +421,7 @@ async function steerRunningTask(
   platformUserId: string,
   emit: (content: AgentActivityContent) => Promise<void>,
 ): Promise<void> {
-  const ownSession = request.action === 'prompted'
-    && task.channel_metadata?.linear_agent_session_id === request.sessionId;
+  const ownSession = isRunningTasksOwnSession(request, task);
   const reply = (body: string) => emit(ownSession ? { type: 'thought', body } : { type: 'response', body });
   if (!request.directive) {
     await reply(ownSession

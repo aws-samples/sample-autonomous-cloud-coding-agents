@@ -107,12 +107,16 @@ const SESSION_TASK_POINTER_TTL_SECONDS = 600;
 const sessionTaskPointerKey = (issueId: string) => `agent-session-task#${issueId}`;
 
 /**
- * Record, in the webhook dedup table, the task an agent session is about to
- * start for ``issueId``. Read back strongly consistently by
+ * Record, in the webhook dedup table, the task an agent session started for
+ * ``issueId``. Read back strongly consistently by
  * {@link readSessionTaskPointer}, it lets a ``prompted`` / ``stop`` delivery
  * that arrives before the eventually-consistent ``LinearIssueIndex`` GSI has
  * caught up still find the task — instead of starting a second one beside it
  * or answering "nothing was running".
+ *
+ * Callers write it only for a task that EXISTS (a create that returned 201, or
+ * the task an idempotent replay resolved to). A pointer to an id that was
+ * never created would hide the real task from exactly the lookups it serves.
  *
  * Best-effort: a failed write only reopens that sub-second window.
  */
@@ -157,37 +161,70 @@ export async function readSessionTaskPointer(
   return Item.task_id;
 }
 
-/** Workspaces this container has already marked (or seen marked) as delivering sessions. */
-const sessionWorkspacesSeen = new Set<string>();
+/**
+ * How long one delivered ``AgentSessionEvent`` counts as evidence that a
+ * workspace's installation still has "Agent session events" on. Linear tells
+ * us nothing when an admin turns the toggle off, so the evidence has to
+ * expire: a marker that lasted forever would keep the comment trigger yielding
+ * to sessions that no longer open, and every mention would be lost in silence.
+ *
+ * The cost of expiry falls on a workspace that is simply quiet for longer than
+ * this: its next mention is answered by the comment trigger as well as the
+ * session. That is visible and corrects itself on that same mention; a lost
+ * mention is neither.
+ */
+const AGENT_SESSION_EVIDENCE_TTL_DAYS = 14;
+export const AGENT_SESSION_EVIDENCE_TTL_MS = AGENT_SESSION_EVIDENCE_TTL_DAYS * 24 * 60 * 60 * 1000;
+/** Refresh the marker at most this often per workspace: one write a day keeps it far inside the TTL. */
+const AGENT_SESSION_MARKER_REFRESH_MS = 24 * 60 * 60 * 1000;
+/** How long a container trusts its own last look at a workspace's marker. */
+const AGENT_SESSION_CACHE_MINUTES = 5;
+const AGENT_SESSION_CACHE_MS = AGENT_SESSION_CACHE_MINUTES * 60 * 1000;
+
+/** Per container: when each workspace's marker was last seen fresh (epoch ms of the check). */
+const sessionWorkspacesSeen = new Map<string, number>();
+
+function cachedAsDelivering(workspaceId: string, nowMs: number): boolean {
+  const checkedAt = sessionWorkspacesSeen.get(workspaceId);
+  return checkedAt !== undefined && nowMs - checkedAt < AGENT_SESSION_CACHE_MS;
+}
 
 /**
  * Note on the workspace's registry row that it delivered an
  * ``AgentSessionEvent``. The deployment flag is stack-wide, but Linear's "Agent
- * session events" toggle is per app installation: this marker is the
+ * session events" toggle is per app installation: this timestamp is the
  * per-workspace evidence that sessions really open there, and
- * {@link workspaceDeliversAgentSessions} keys the comment trigger's yield on it.
+ * {@link workspaceDeliversAgentSessions} keys the comment trigger's yield on it
+ * while it is fresh.
  *
- * One conditional write per container per workspace; best-effort.
+ * Refreshed, not write-once: the write goes through when the marker is absent
+ * or older than a day, so an active workspace costs one write a day. Never
+ * throws — it must not delay or fail the delivery it rides on.
  */
 export async function recordWorkspaceAgentSession(
   ddb: DynamoDBDocumentClient,
   registryTableName: string,
   workspaceId: string,
-  now: string = new Date().toISOString(),
+  nowMs: number = Date.now(),
 ): Promise<void> {
-  if (sessionWorkspacesSeen.has(workspaceId)) return;
+  if (cachedAsDelivering(workspaceId, nowMs)) return;
   try {
     await ddb.send(new UpdateCommand({
       TableName: registryTableName,
       Key: { linear_workspace_id: workspaceId },
       UpdateExpression: 'SET agent_sessions_seen_at = :now',
-      ConditionExpression: 'attribute_exists(linear_workspace_id) AND attribute_not_exists(agent_sessions_seen_at)',
-      ExpressionAttributeValues: { ':now': now },
+      ConditionExpression: 'attribute_exists(linear_workspace_id) AND '
+        + '(attribute_not_exists(agent_sessions_seen_at) OR agent_sessions_seen_at < :stale)',
+      ExpressionAttributeValues: {
+        ':now': new Date(nowMs).toISOString(),
+        ':stale': new Date(nowMs - AGENT_SESSION_MARKER_REFRESH_MS).toISOString(),
+      },
     }));
-    sessionWorkspacesSeen.add(workspaceId);
+    sessionWorkspacesSeen.set(workspaceId, nowMs);
   } catch (err) {
     if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-      sessionWorkspacesSeen.add(workspaceId);
+      // Already marked within the last day (or no registry row to mark).
+      sessionWorkspacesSeen.set(workspaceId, nowMs);
       return;
     }
     logger.warn('Could not record that this workspace delivers agent sessions', {
@@ -198,17 +235,19 @@ export async function recordWorkspaceAgentSession(
 }
 
 /**
- * Whether this workspace has ever delivered an ``AgentSessionEvent`` — i.e. its
- * app installation has "Agent session events" on, so an @-mention opens a
- * session. ``false`` (including on a read failure) keeps the comment trigger
- * answering, which is the safe side: a mention is never left unanswered.
+ * Whether this workspace delivered an ``AgentSessionEvent`` recently enough to
+ * trust that its app installation still has "Agent session events" on, so an
+ * @-mention opens a session. ``false`` (no marker, an expired one, or a read
+ * failure) keeps the comment trigger answering, which is the safe side: a
+ * mention is never left unanswered.
  */
 export async function workspaceDeliversAgentSessions(
   ddb: DynamoDBDocumentClient,
   registryTableName: string,
   workspaceId: string,
+  nowMs: number = Date.now(),
 ): Promise<boolean> {
-  if (sessionWorkspacesSeen.has(workspaceId)) return true;
+  if (cachedAsDelivering(workspaceId, nowMs)) return true;
   try {
     const { Item } = await ddb.send(new GetCommand({
       TableName: registryTableName,
@@ -216,8 +255,9 @@ export async function workspaceDeliversAgentSessions(
       ProjectionExpression: 'agent_sessions_seen_at',
       ConsistentRead: true,
     }));
-    if (typeof Item?.agent_sessions_seen_at !== 'string') return false;
-    sessionWorkspacesSeen.add(workspaceId);
+    const seenAtMs = typeof Item?.agent_sessions_seen_at === 'string' ? Date.parse(Item.agent_sessions_seen_at) : NaN;
+    if (!Number.isFinite(seenAtMs) || nowMs - seenAtMs >= AGENT_SESSION_EVIDENCE_TTL_MS) return false;
+    sessionWorkspacesSeen.set(workspaceId, nowMs);
     return true;
   } catch (err) {
     logger.warn('Could not read whether this workspace delivers agent sessions — the comment trigger answers', {

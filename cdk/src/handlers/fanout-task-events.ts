@@ -1230,7 +1230,9 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   if (isHeartbeat && heartbeatCanSkipTaskRead(event.task_id)) return;
 
   const task = await loadTaskForComment(event.task_id);
-  if (isHeartbeat) rememberHeartbeatTask(event.task_id, task);
+  // Only a row that was actually read says what kind of task this is: a miss
+  // (not replicated yet, a transient read) must not switch its keep-alive off.
+  if (isHeartbeat && task) rememberHeartbeatTask(event.task_id, task);
   if (!task) {
     logger.warn('[fanout/linear] task not found — skipping comment', {
       event: 'fanout.linear.task_missing',
@@ -1455,13 +1457,13 @@ function heartbeatCanSkipTaskRead(taskId: string): boolean {
   return !memo.sessionTask || Date.now() - memo.heartbeatAtMs < LINEAR_SESSION_HEARTBEAT_INTERVAL_MS;
 }
 
-function rememberHeartbeatTask(taskId: string, task: TaskRecord | null, heartbeatAtMs?: number): void {
+function rememberHeartbeatTask(taskId: string, task: TaskRecord, heartbeatAtMs?: number): void {
   // Bounded: a warm container sees many tasks. Dropping everything is fine —
   // a forgotten task costs one read to relearn.
   if (heartbeatMemo.size >= HEARTBEAT_MEMO_MAX_ENTRIES && !heartbeatMemo.has(taskId)) heartbeatMemo.clear();
-  const recorded = task?.linear_session_heartbeat_at ? Date.parse(task.linear_session_heartbeat_at) : 0;
+  const recorded = task.linear_session_heartbeat_at ? Date.parse(task.linear_session_heartbeat_at) : 0;
   heartbeatMemo.set(taskId, {
-    sessionTask: task?.channel_source === 'linear' && Boolean(task.channel_metadata?.linear_agent_session_id),
+    sessionTask: task.channel_source === 'linear' && Boolean(task.channel_metadata?.linear_agent_session_id),
     heartbeatAtMs: heartbeatAtMs ?? (Number.isFinite(recorded) ? recorded : 0),
   });
 }

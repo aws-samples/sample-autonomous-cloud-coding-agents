@@ -19,6 +19,7 @@
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
+  AGENT_SESSION_EVIDENCE_TTL_MS,
   lookupLinearProjectMapping,
   readSessionTaskPointer,
   recordWorkspaceAgentSession,
@@ -109,54 +110,86 @@ describe('session → task pointer', () => {
 });
 
 describe('per-workspace agent-session marker', () => {
-  test('the first session event marks the registry row once per container', async () => {
-    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', '2026-11-20T00:00:00Z');
-    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1');
-    expect(send).toHaveBeenCalledTimes(1);
+  const NOW = Date.parse('2026-11-20T12:00:00Z');
+  const DAY = 24 * 60 * 60 * 1000;
+  const MINUTE = 60 * 1000;
+  const seenAt = (ms: number) => ({ Item: { agent_sessions_seen_at: new Date(ms).toISOString() } });
+
+  test('a session event stamps the registry row, refreshing a marker older than a day', async () => {
+    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW);
     expect(inputs()[0]).toEqual(expect.objectContaining({
       Key: { linear_workspace_id: 'org-1' },
       UpdateExpression: 'SET agent_sessions_seen_at = :now',
-      // Never creates a registry row, and never rewrites the first-seen time.
-      ConditionExpression: 'attribute_exists(linear_workspace_id) AND attribute_not_exists(agent_sessions_seen_at)',
+      // Never creates a registry row; rewrites only an absent or day-old marker.
+      ConditionExpression: 'attribute_exists(linear_workspace_id) AND '
+        + '(attribute_not_exists(agent_sessions_seen_at) OR agent_sessions_seen_at < :stale)',
+      ExpressionAttributeValues: { ':now': '2026-11-20T12:00:00.000Z', ':stale': '2026-11-19T12:00:00.000Z' },
     }));
   });
 
-  test('an already-marked row is not an error and is not written again', async () => {
+  test('a container writes at most once per cache window, then tries again', async () => {
+    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW);
+    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW + MINUTE);
+    expect(send).toHaveBeenCalledTimes(1);
+    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW + 6 * MINUTE);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  test('a marker that is already fresh is not an error', async () => {
     send.mockRejectedValueOnce(conditionFailed());
-    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1');
-    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1');
+    await expect(recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW)).resolves.toBeUndefined();
+    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW + MINUTE);
     expect(send).toHaveBeenCalledTimes(1);
   });
 
   test('a failed write is swallowed and retried on the next event', async () => {
     send.mockRejectedValueOnce(new Error('throttled'));
-    await expect(recordWorkspaceAgentSession(ddb, 'Registry', 'org-1')).resolves.toBeUndefined();
-    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1');
+    await expect(recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW)).resolves.toBeUndefined();
+    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW);
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  test('a marked workspace delivers sessions; the answer is remembered', async () => {
-    send.mockResolvedValue({ Item: { agent_sessions_seen_at: '2026-11-20T00:00:00Z' } });
-    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1')).resolves.toBe(true);
-    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1')).resolves.toBe(true);
+  test('a recently marked workspace delivers sessions; the answer is cached briefly', async () => {
+    send.mockResolvedValue(seenAt(NOW - 3 * DAY));
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(true);
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW + MINUTE)).resolves.toBe(true);
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  test('an unmarked workspace does not, and is re-checked every time', async () => {
-    send.mockResolvedValue({ Item: {} });
-    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1')).resolves.toBe(false);
-    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1')).resolves.toBe(false);
+  test('the evidence expires: a workspace that stopped delivering sessions gets its comment trigger back', async () => {
+    // e.g. an admin turned "Agent session events" off; Linear sends no signal for that.
+    send.mockResolvedValue(seenAt(NOW - AGENT_SESSION_EVIDENCE_TTL_MS + MINUTE));
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(true);
+    resetSessionWorkspaceCacheForTests();
+    send.mockResolvedValue(seenAt(NOW - AGENT_SESSION_EVIDENCE_TTL_MS));
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(false);
+  });
+
+  test('a warm container does not keep answering "yes" forever', async () => {
+    send.mockResolvedValue(seenAt(NOW - AGENT_SESSION_EVIDENCE_TTL_MS + MINUTE));
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(true);
+    // Six minutes on, the cached answer has lapsed and the marker has expired.
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW + 6 * MINUTE)).resolves.toBe(false);
+  });
+
+  test.each([
+    ['unmarked', { Item: {} }],
+    ['with an unreadable marker', { Item: { agent_sessions_seen_at: 'not-a-date' } }],
+  ])('a workspace %s does not deliver sessions, and is re-checked every time', async (_name, row) => {
+    send.mockResolvedValue(row);
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(false);
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(false);
     expect(send).toHaveBeenCalledTimes(2);
   });
 
   test('a read failure answers false, so the comment trigger keeps replying', async () => {
     send.mockRejectedValue(new Error('throttled'));
-    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1')).resolves.toBe(false);
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(false);
   });
 
   test('one workspace\'s marker says nothing about another', async () => {
-    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1');
+    await recordWorkspaceAgentSession(ddb, 'Registry', 'org-1', NOW);
     send.mockResolvedValue({ Item: {} });
-    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-2')).resolves.toBe(false);
+    await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-2', NOW)).resolves.toBe(false);
   });
 });

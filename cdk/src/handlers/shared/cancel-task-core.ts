@@ -64,6 +64,36 @@ export async function cancelTask(
   extraMetadata: Record<string, string> = {},
 ): Promise<'cancelled' | 'already_terminal'> {
   const ttl = computeTtlEpoch(tables.retentionDays);
+  // One event id for every attempt, so a retry can never write a second event.
+  const eventId = ulid();
+  for (let attempt = 1; ; attempt += 1) {
+    const outcome = await attemptCancel(tables, taskId, cancelledBy, now, extraMetadata, ttl, eventId);
+    if (outcome !== 'conflict') return outcome;
+    if (attempt >= CANCEL_CONFLICT_ATTEMPTS) {
+      throw new Error(`Cancel of task ${taskId} kept conflicting with concurrent writes after ${attempt} attempts`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, CANCEL_CONFLICT_BACKOFF_MS * attempt));
+  }
+}
+
+/**
+ * A task row is written constantly while it runs (heartbeats, status and cost
+ * updates), and DynamoDB cancels a transaction that touches an item another
+ * write is in flight on (``TransactionConflict``). That says nothing about the
+ * task's state, so it is retried rather than surfaced as a failed cancel.
+ */
+const CANCEL_CONFLICT_ATTEMPTS = 4;
+const CANCEL_CONFLICT_BACKOFF_MS = 50;
+
+async function attemptCancel(
+  tables: CancelTaskTables,
+  taskId: string,
+  cancelledBy: string,
+  now: string,
+  extraMetadata: Record<string, string>,
+  ttl: number,
+  eventId: string,
+): Promise<'cancelled' | 'already_terminal' | 'conflict'> {
   try {
     await tables.ddb.send(new TransactWriteCommand({
       TransactItems: [
@@ -91,7 +121,7 @@ export async function cancelTask(
             TableName: tables.taskEventsTableName,
             Item: {
               task_id: taskId,
-              event_id: ulid(),
+              event_id: eventId,
               event_type: 'task_cancelled',
               timestamp: now,
               ttl,
@@ -104,10 +134,13 @@ export async function cancelTask(
     return 'cancelled';
   } catch (err) {
     const cancelled = err as { name?: string; CancellationReasons?: ReadonlyArray<{ Code?: string }> };
-    if (cancelled?.name === 'TransactionCanceledException'
-      && cancelled.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed') {
-      return 'already_terminal';
+    if (cancelled?.name === 'TransactionCanceledException') {
+      const codes = cancelled.CancellationReasons?.map((reason) => reason.Code) ?? [];
+      // The condition is on the task row (first item): it reached a terminal state first.
+      if (codes[0] === 'ConditionalCheckFailed') return 'already_terminal';
+      if (codes.includes('TransactionConflict')) return 'conflict';
     }
+    if (cancelled?.name === 'TransactionInProgressException') return 'conflict';
     throw err;
   }
 }

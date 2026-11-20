@@ -222,7 +222,9 @@ If you do these the other way round, every mention in the meantime opens a sessi
 
 **Step 2 is per workspace.** The flag is stack-wide, but the toggle belongs to each workspace's Linear app. A workspace whose app lacks the toggle isn't affected by the flag: its `@bgagent` comments, label triggers and epics keep working as before.
 
-> **@-mentions and the WAF.** A session opened by an @-mention carries XML-like context that the API's web application firewall has been seen to reject, in which case the mention gets no response. **Delegating the issue works.** See the known gaps in [ADR-018](../decisions/ADR-018-linear-agent-session-interaction.md).
+> **@-mentions need the WAF fix.** A session opened by an @-mention carries XML-like context that the API's web application firewall has been seen to reject. Deploy a version that includes the signed-webhook WAF rule ([#1065](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/1065)) before you turn the flag on. Without it, once a workspace has delivered its first session, a standalone `@bgagent` mention there gets no session and no comment reply. Delegating an issue works either way.
+
+**Turning it off for one workspace.** Untick **Agent session events** in that workspace's Linear app. Linear doesn't tell ABCA about this, so ABCA goes back to answering that workspace's `@bgagent` comments once it has seen no session event from it for 14 days. To switch back immediately, remove the `agent_sessions_seen_at` attribute from the workspace's row in the Linear workspace registry table.
 
 **What changes once it's on**
 
@@ -241,7 +243,7 @@ If you do these the other way round, every mention in the meantime opens a sessi
 
 **Re-delegating a finished issue does nothing.** Linear opens no new session and sends ABCA nothing when you delegate an issue whose session is already complete. To restart work, reply inside the existing session.
 
-**Who can act.** Every session request, `stop` included, needs a linked ABCA user ([Inviting teammates](#inviting-teammates)). An unlinked user is told to link their account and nothing runs. The refusal never marks someone else's running session as failed. A new task is attributed to whoever asked for it. Steering or stopping a *running* task follows the API's rule: only its owner can do it.
+**Who can act.** Every session request, `stop` included, needs a linked ABCA user ([Inviting teammates](#inviting-teammates)). An unlinked user is told to link their account and nothing runs. A refusal closes the session it was made in, unless that is the session a running task reports into; there it's a note, so someone else's run isn't marked finished or failed. A new task is attributed to whoever asked for it. Steering or stopping a *running* task follows the API's rule: only its owner can do it.
 
 **Reactions.** A session task gets no 👀/✅/❌ reactions on the issue, since the session shows that state. The issue still moves to *In Progress* and *In Review*.
 

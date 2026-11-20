@@ -72,6 +72,11 @@ jest.mock('../../../src/handlers/shared/nudge-core', () => ({
   submitNudge: (...args: unknown[]) => submitNudgeMock(...args),
 }));
 
+const screenWithGuardrailMock = jest.fn();
+jest.mock('../../../src/handlers/shared/context-hydration', () => ({
+  screenWithGuardrail: (...args: unknown[]) => screenWithGuardrailMock(...args),
+}));
+
 const cancelTaskMock = jest.fn();
 const stopTaskComputeMock = jest.fn();
 jest.mock('../../../src/handlers/shared/cancel-task-core', () => ({
@@ -195,6 +200,7 @@ beforeEach(() => {
   sessionPointer = null;
   resetSessionWorkspaceCacheForTests();
   stopTaskComputeMock.mockResolvedValue(undefined);
+  screenWithGuardrailMock.mockResolvedValue({ action: 'NONE' });
   resolveLinearOauthTokenMock.mockResolvedValue(RESOLVED);
   emitAgentActivityMock.mockResolvedValue({ ok: true });
   fetchAgentSessionIssueMock.mockResolvedValue({ ok: true, value: ISSUE });
@@ -268,6 +274,55 @@ describe('handleAgentSessionEvent — created', () => {
     expect(marker!.input.ConditionExpression).toContain('attribute_not_exists(agent_sessions_seen_at)');
   });
 
+  test('the acknowledgement does not wait for the workspace marker', async () => {
+    // The marker write hangs until released; the ack must already be out.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const route = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation(async (cmd: { _type: string; input: { TableName: string } }) => {
+      if (cmd.input.TableName === 'LinearWorkspaceRegistry' && cmd._type === 'Update') { await held; return {}; }
+      return route(cmd);
+    });
+    const handled = handleAgentSessionEvent(created());
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(activities()[0]).toEqual(expect.objectContaining({ type: 'thought' }));
+    release();
+    await handled;
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe('session context (promptContext) is screened on its own', () => {
+    test('clean context joins the description', async () => {
+      await handleAgentSessionEvent(created());
+      expect(screenWithGuardrailMock).toHaveBeenCalledWith(expect.stringContaining('<issue identifier="ENG-7">'), expect.any(String));
+      expect(createTaskCoreMock.mock.calls[0][0].task_description).toContain('## Linear session context');
+    });
+
+    test.each([
+      ['a comment in it trips the guardrail', async () => ({ action: 'GUARDRAIL_INTERVENED' })],
+      ['screening is unavailable', async () => { throw new Error('bedrock down'); }],
+      ['no guardrail is configured', async () => undefined],
+    ])('when %s, the context is dropped and the task still starts from the issue', async (_name, screen) => {
+      screenWithGuardrailMock.mockImplementation(screen);
+      await handleAgentSessionEvent(created());
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      const description = createTaskCoreMock.mock.calls[0][0].task_description;
+      expect(description).not.toContain('## Linear session context');
+      // Falls back to the issue as fetched; createTaskCore screens that fail-closed.
+      expect(description).toContain('Users cannot log in.');
+      expect(activities().at(-1)).toEqual(expect.objectContaining({ type: 'action', action: 'Started coding task' }));
+    });
+
+    test('a PR iteration carries no session context and screens none', async () => {
+      priorTask({ task_id: 't-1', status: 'COMPLETED', user_id: 'platform-user-1', repo: 'acme/web', pr_number: 7, linear_workspace_id: 'org-1' });
+      await handleAgentSessionEvent(created({
+        agentSession: { id: 'session-1', issueId: 'issue-1', creatorId: 'linear-user-1', comment: { id: 'c-1', body: '@bgagent add tests' } },
+      }));
+      expect(screenWithGuardrailMock).not.toHaveBeenCalled();
+    });
+  });
+
   test('a project mapping that predates the owning-workspace field is accepted, like the label path', async () => {
     ddbWith({ mapping: { linear_project_id: 'project-1', repo: 'acme/web', status: 'active' } });
     await handleAgentSessionEvent(created());
@@ -275,7 +330,7 @@ describe('handleAgentSessionEvent — created', () => {
     expect(createTaskCoreMock.mock.calls[0][0].repo).toBe('acme/web');
   });
 
-  test('points the issue at the new task before creating it', async () => {
+  test('points the issue at the new task only once it exists', async () => {
     const order: string[] = [];
     createTaskCoreMock.mockImplementation(async () => { order.push('create'); return { statusCode: 201, body: '{}' }; });
     const route = ddbSend.getMockImplementation()!;
@@ -284,12 +339,42 @@ describe('handleAgentSessionEvent — created', () => {
       return route(cmd);
     });
     await handleAgentSessionEvent(created());
-    expect(order).toEqual(['pointer', 'create']);
+    expect(order).toEqual(['create', 'pointer']);
     const [pointer] = sent('LinearDedup', 'Put');
     expect(pointer!.input.Item).toEqual(expect.objectContaining({
       dedup_key: 'agent-session-task#issue-1',
       task_id: createTaskCoreMock.mock.calls[0][1].taskId,
     }));
+  });
+
+  test('a rejected create leaves no pointer behind', async () => {
+    createTaskCoreMock.mockResolvedValue({ statusCode: 429, body: '{}' });
+    await handleAgentSessionEvent(created());
+    expect(sent('LinearDedup', 'Put')).toEqual([]);
+  });
+
+  test('a redelivered `created` points at the ORIGINAL task, not the id generated for the replay', async () => {
+    createTaskCoreMock.mockResolvedValue({ statusCode: 200, body: JSON.stringify({ data: { task_id: 't-original' } }) });
+    await handleAgentSessionEvent(created());
+    const puts = sent('LinearDedup', 'Put');
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.input.Item.task_id).toBe('t-original');
+    expect(puts[0]!.input.Item.task_id).not.toBe(createTaskCoreMock.mock.calls[0][1].taskId);
+  });
+
+  test('a replay whose body names no task writes no pointer rather than a wrong one', async () => {
+    createTaskCoreMock.mockResolvedValue({ statusCode: 200, body: '{}' });
+    await handleAgentSessionEvent(created());
+    expect(sent('LinearDedup', 'Put')).toEqual([]);
+  });
+
+  test('an unlinked user\'s new session closes with a response even while another session\'s task runs', async () => {
+    ddbWith({ linked: false });
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-other' });
+    await handleAgentSessionEvent(created());
+    // This session will never hear t-1's outcome: a thought would leave it open forever.
+    expect(activities().at(-1)).toEqual(expect.objectContaining({ type: 'response' }));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
   test('a task with no recorded workspace (older row) is still this issue\'s task', async () => {
@@ -518,12 +603,31 @@ describe('handleAgentSessionEvent — prompted', () => {
     expect(activities()).toEqual([]);
   });
 
-  test('stop from a linked user who does not own the task cancels nothing and leaves the session running', async () => {
-    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'someone-else', linear_workspace_id: 'org-1' });
+  test('a non-owner\'s stop in the running task\'s own session cancels nothing and leaves that session running', async () => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'someone-else', linear_workspace_id: 'org-1', session: 'session-1' });
     await handleAgentSessionEvent(prompted({ signal: 'stop' }));
     expect(cancelTaskMock).not.toHaveBeenCalled();
     expect(activities()).toEqual([expect.objectContaining({ type: 'thought' })]);
     expect(String(activities()[0]!.body)).toContain('Only the person who started');
+  });
+
+  test.each([
+    ['another session', 'session-other'],
+    ['no session (label-triggered)', undefined],
+  ])('a non-owner\'s stop when the running task reports to %s is confirmed with a response', async (_name, session) => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'someone-else', linear_workspace_id: 'org-1', ...(session && { session }) });
+    await handleAgentSessionEvent(prompted({ signal: 'stop' }));
+    expect(cancelTaskMock).not.toHaveBeenCalled();
+    // A stop must end on a response; this session hears nothing more about t-1.
+    expect(activities()).toEqual([expect.objectContaining({ type: 'response' })]);
+  });
+
+  test('an unlinked user\'s stop from another session is confirmed with a response', async () => {
+    ddbWith({ linked: false });
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-other' });
+    await handleAgentSessionEvent(prompted({ signal: 'stop' }));
+    expect(cancelTaskMock).not.toHaveBeenCalled();
+    expect(activities()).toEqual([expect.objectContaining({ type: 'response' })]);
   });
 
   test('stop on an orchestration child is deferred to the epic', async () => {
