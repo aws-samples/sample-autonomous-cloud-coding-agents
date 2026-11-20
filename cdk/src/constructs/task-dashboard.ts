@@ -22,7 +22,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import { FACTORY_DIMENSIONS, FACTORY_METRIC_NAMESPACE, FACTORY_METRICS, FACTORY_WORK } from '../handlers/shared/scoreboard';
-import type { TaskOutcome } from '../handlers/shared/types';
+import type { PullRequestState, TaskOutcome } from '../handlers/shared/types';
 
 /** Metric aggregation period for the Cedar-HITL approval widgets (minutes). */
 const HITL_METRIC_PERIOD_MINUTES = 15;
@@ -37,6 +37,12 @@ const SCOREBOARD_START = '-P30D';
  */
 const OVER_THE_WINDOW = { start: SCOREBOARD_START, setPeriodToTimeRange: true } as const;
 
+/** A graph of the row: stacked sums per day over the same window, two graphs to a line. */
+const PER_DAY = { stacked: true, period: Duration.days(1), start: SCOREBOARD_START, width: 12, height: 6 } as const;
+
+/** The units a time widget of the row can show, each in the seconds the metrics are written in. */
+const SECONDS_PER = { minutes: 60, hours: 3600 } as const;
+
 const VERIFIED_PR: TaskOutcome = 'verified_pr';
 
 /** The console's names for the outcomes of a finished task, in the order the graph stacks them. */
@@ -49,19 +55,31 @@ const OUTCOME_LABELS: Readonly<Record<TaskOutcome, string>> = {
   timed_out: 'Ran out of time',
 };
 
-/** A metric of the factory scoreboard. The names are those of the module that writes the metric line. */
+/** The two final states of a pull request, in the order the graph stacks them. */
+const PR_OUTCOME_LABELS: Readonly<Record<Extract<PullRequestState, 'merged' | 'closed'>, string>> = {
+  merged: 'Merged',
+  closed: 'Closed without merging',
+};
+
+/** A metric of the factory scoreboard. The names are those of the module that writes the metric lines. */
 function factoryMetric(metricName: string, statistic: string, dimensionsMap: Record<string, string> = {}, label?: string): cloudwatch.Metric {
   return new cloudwatch.Metric({ namespace: FACTORY_METRIC_NAMESPACE, metricName, statistic, dimensionsMap, label });
 }
 
 /**
- * The factory scoreboard row: what the finished tasks of every user came to. The widget
- * titles follow the labels of the console's Scoreboard page, which shows these numbers for
- * the tasks of one user.
+ * The factory scoreboard row: what the finished tasks of every user came to, and what
+ * became of the pull requests they opened. The widget titles follow the labels of the
+ * console's Scoreboard page, which shows these numbers for the tasks of one user.
  */
 function factoryScoreboardWidgets(): cloudwatch.IWidget[] {
   const math = (expression: string, usingMetrics: Record<string, cloudwatch.IMetric>, label: string): cloudwatch.MathExpression =>
     new cloudwatch.MathExpression({ expression, usingMetrics, label });
+  // The two values of a time widget. An agent takes minutes and a merge takes days, so each
+  // widget has the unit its numbers read well in, and each label names it.
+  const medianAndSpread = (metricName: string, unit: keyof typeof SECONDS_PER): cloudwatch.MathExpression[] => [
+    math(`time50 / ${SECONDS_PER[unit]}`, { time50: factoryMetric(metricName, 'p50') }, `Median (${unit})`),
+    math(`time90 / ${SECONDS_PER[unit]}`, { time90: factoryMetric(metricName, 'p90') }, `9 in 10 within (${unit})`),
+  ];
   const ofCodingTasks = { [FACTORY_DIMENSIONS.work]: FACTORY_WORK.coding };
   // The divisor of the two ratios. They have no zero branch: a window without a verified
   // pull request shows no value, where 0 would read as "no touchpoints" or "no spend".
@@ -72,16 +90,21 @@ function factoryScoreboardWidgets(): cloudwatch.IWidget[] {
       markdown: '## Factory scoreboard\n'
         + "Every user's tasks that finished in the last 30 days, or since the scoreboard was deployed if that is less. "
         + 'The row keeps that window whatever time range the dashboard shows. '
-        + "A verified pull request is one opened after the repository's build passed.",
+        + "A verified pull request is one opened after the repository's build passed. "
+        + 'The two pull-request widgets count a pull request on the day it was merged or closed, not on the day its task finished, '
+        + 'and reach up to 13 days back before the deployment.',
       width: 24,
       height: 2,
     }),
     new cloudwatch.SingleValueWidget({
       title: 'Time to verified pull request',
-      metrics: [
-        math('time50 / 60', { time50: factoryMetric(FACTORY_METRICS.timeToVerifiedPr, 'p50') }, 'Median (minutes)'),
-        math('time90 / 60', { time90: factoryMetric(FACTORY_METRICS.timeToVerifiedPr, 'p90') }, '9 in 10 within (minutes)'),
-      ],
+      metrics: medianAndSpread(FACTORY_METRICS.timeToVerifiedPr, 'minutes'),
+      width: 8,
+      ...OVER_THE_WINDOW,
+    }),
+    new cloudwatch.SingleValueWidget({
+      title: 'Time to merged pull request',
+      metrics: medianAndSpread(FACTORY_METRICS.timeToMerge, 'hours'),
       width: 8,
       ...OVER_THE_WINDOW,
     }),
@@ -119,7 +142,7 @@ function factoryScoreboardWidgets(): cloudwatch.IWidget[] {
           'USD on coding tasks, failed ones too',
         ),
       ],
-      width: 12,
+      width: 8,
       ...OVER_THE_WINDOW,
     }),
     new cloudwatch.SingleValueWidget({
@@ -128,18 +151,20 @@ function factoryScoreboardWidgets(): cloudwatch.IWidget[] {
         factoryMetric(FACTORY_METRICS.guardrailStops, 'Sum', {}, 'Stopped by a guardrail'),
         factoryMetric(FACTORY_METRICS.blanketApprovals, 'Sum', {}, 'Started with blanket approval'),
       ],
-      width: 12,
+      width: 8,
       ...OVER_THE_WINDOW,
     }),
     new cloudwatch.GraphWidget({
       title: 'Tasks finished per day, by outcome',
       left: Object.entries(OUTCOME_LABELS).map(([outcome, label]) =>
         factoryMetric(FACTORY_METRICS.tasksFinished, 'Sum', { [FACTORY_DIMENSIONS.outcome]: outcome }, label)),
-      stacked: true,
-      period: Duration.days(1),
-      start: SCOREBOARD_START,
-      width: 24,
-      height: 6,
+      ...PER_DAY,
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Pull requests merged and closed per day',
+      left: Object.entries(PR_OUTCOME_LABELS).map(([state, label]) =>
+        factoryMetric(FACTORY_METRICS.pullRequestsResolved, 'Sum', { [FACTORY_DIMENSIONS.prOutcome]: state }, label)),
+      ...PER_DAY,
     }),
   ];
 }
@@ -176,7 +201,9 @@ export interface TaskDashboardProps {
  *
  * The factory scoreboard row, first on the dashboard, reads no logs: its widgets
  * read the ``ABCA/Factory`` metrics, written once per finished task by the
- * TaskTable stream consumer (``handlers/scoreboard-metrics.ts``).
+ * TaskTable stream consumer (``handlers/scoreboard-metrics.ts``) and once per
+ * merged or closed pull request by the hourly read of GitHub
+ * (``handlers/sweep-pr-outcomes.ts``).
  */
 export class TaskDashboard extends Construct {
   public readonly dashboard: cloudwatch.Dashboard;

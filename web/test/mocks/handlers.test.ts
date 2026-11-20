@@ -19,7 +19,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Scoreboard } from '../../src/core/api/types';
-import { buildFixtures } from '../../src/mocks/fixtures';
+import { buildFixtures, mockScoreboard } from '../../src/mocks/fixtures';
 import { TEST_API_BASE } from '../helpers/server';
 
 const DAY_MS = 86_400_000;
@@ -75,5 +75,26 @@ describe('mock tasks', () => {
     expect([...new Set(tasks.filter((task) => task.cost_usd !== null).map((task) => task.status))].sort()).toEqual(['COMPLETED', 'FAILED']);
     // The 30 days of history hold cancelled tasks too, so the rule is checked there as well.
     expect(tasks.filter((task) => task.status === 'CANCELLED').length).toBeGreaterThan(1);
+  });
+});
+
+/** The scoreboard samples are written by hand: they must add up the way the API's numbers do, or the page's counts contradict each other. */
+describe('mock scoreboard', () => {
+  it.each(['30d', '7d'] as const)('puts every new pull request of the %s sample in one of the four states, in both periods', (range) => {
+    const { current, previous } = mockScoreboard(range, new Date());
+    const periods = [current, previous].filter((period) => period !== null);
+    expect(periods).toHaveLength(2);
+    // No sample holds the pull request of an orchestration, so ABCA follows every new one.
+    for (const { pull_requests: { merged, closed, open, unread }, outcomes, merged_clean: clean } of periods) {
+      expect(merged + closed + open + unread).toBe(outcomes.verified_pr + outcomes.unverified_pr);
+      expect(clean.total).toBe(merged);
+    }
+  });
+
+  it('gives no count of the pull requests that wait only where the API would give none: the week before has some, all unread', () => {
+    const { previous, open_over_7d: waiting } = mockScoreboard('7d', new Date());
+    expect(waiting).toBeNull();
+    // In the 7-day range only the pull requests of the week before are old enough to count.
+    expect(previous?.pull_requests).toEqual({ merged: 0, closed: 0, open: 0, unread: 1 });
   });
 });

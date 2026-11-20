@@ -70,6 +70,7 @@ import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
+import { PrOutcomeSweep } from '../constructs/pr-outcome-sweep';
 import { AgentRegistryStack } from '../constructs/registry';
 import { RegistryApi } from '../constructs/registry-api';
 import { RepoTable } from '../constructs/repo-table';
@@ -1482,6 +1483,11 @@ export class AgentStack extends Stack {
       taskEventsTable: taskEventsTable.table,
       attachmentsBucket: attachmentsBucket.bucket,
     });
+
+    // --- Pull-request outcomes ---
+    // Reads from GitHub, once an hour, what became of each new pull request that
+    // ABCA follows, and records it on the task for the factory scoreboard.
+    new PrOutcomeSweep(concurrencyMaintenance, 'PrOutcomeSweep', { taskTable: taskTable.table, githubTokenSecret });
 
     // FanOutConsumer is constructed below LinearIntegration so the
     // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.

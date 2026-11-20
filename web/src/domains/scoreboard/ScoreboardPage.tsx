@@ -52,7 +52,7 @@ import {
 import { NewTaskButton } from '../tasks/components/NewTaskButton';
 import { useScoreboard } from './hooks';
 
-/** The tasks behind a count, newest first, each by the end of its id. The API names ten at most. */
+/** The tasks behind a count, each by the end of its id, in the order the API names them. It names ten at most. */
 function TaskLinks({ flagged }: { flagged: Flagged }) {
   const unnamed = flagged.count - flagged.task_ids.length;
   return (
@@ -69,19 +69,25 @@ function TaskLinks({ flagged }: { flagged: Flagged }) {
 }
 
 function ScoreTile({ tile, board }: { tile: TileSpec; board: Scoreboard | undefined }) {
-  const period = board?.current;
+  const detail = board && tile.detail?.(board.current, board);
+  const tasks = board && tile.tasks?.(board.current, board);
   const before = board && previousLine(tile, board);
   return (
-    <Tile label={tile.label} loading={!period} value={period ? tile.value(period) : null} explanation={tile.explanation}>
-      {period && tile.detail && <Box color="text-body-secondary">{tile.detail(period)}</Box>}
-      {period && tile.tasks && <TaskLinks flagged={tile.tasks(period)} />}
+    <Tile label={tile.label} loading={!board} value={board ? tile.value(board.current, board) : null} explanation={tile.explanation}>
+      {/* The links stand under the count they belong to. A line beside them is about other tasks, and comes after. */}
+      {tasks && <TaskLinks flagged={tasks} />}
+      {detail && <Box color="text-body-secondary">{detail}</Box>}
       {before && <Box variant="small" color="text-body-secondary">{before}</Box>}
     </Tile>
   );
 }
 
-/** One column grid for every section, as wide as the fullest one, so the tiles line up down the page. */
-const COLUMNS = Math.max(...SECTIONS.map((section) => section.tiles.length));
+/**
+ * One column grid for every section, so the tiles line up down the page. A section with
+ * more tiles goes on to a second line: a fourth column would leave each tile too narrow
+ * for the sentence under its number.
+ */
+const COLUMNS = 3;
 
 function Section({ section, board }: { section: SectionSpec; board: Scoreboard | undefined }) {
   return (
@@ -145,7 +151,8 @@ function Outcomes({ period }: { period: ScoreboardPeriod | undefined }) {
       {/* Two tile columns wide in a window of the usual size: over the whole container a count sits far from its label. */}
       <div style={{ maxWidth: 700 }}>
         <SpaceBetween size="m">
-          {period && <OutcomeBar period={period} dark={dark} />}
+          {/* The page is drawn without a finished task when pull requests of the period before wait: there is then no bar. */}
+          {period && period.finished > 0 && <OutcomeBar period={period} dark={dark} />}
           <Table<OutcomeRow>
             variant="embedded"
             wrapLines
@@ -163,7 +170,8 @@ function Outcomes({ period }: { period: ScoreboardPeriod | undefined }) {
                 cell: (row) => <span style={{ display: 'flex', alignItems: 'baseline' }}><Swatch color={seriesColor(row.slot, dark)} />{row.label}</span>,
               },
               { id: 'tasks', header: 'Tasks', cell: (row) => formatCount(row.count) },
-              { id: 'share', header: 'Share', cell: (row) => row.share },
+              // No task finished: a share of nothing shows the dash a tile without a number shows.
+              { id: 'share', header: 'Share', cell: (row) => row.share ?? '-' },
             ]}
           />
         </SpaceBetween>
@@ -173,7 +181,8 @@ function Outcomes({ period }: { period: ScoreboardPeriod | undefined }) {
 }
 
 function ScoreboardBody({ board, stale }: { board: Scoreboard | undefined; stale: boolean }) {
-  const nothing = board?.current.finished === 0;
+  // Pull requests can wait from the period before: with no task finished in this one, the page still has that count to show.
+  const nothing = board?.current.finished === 0 && !board.open_over_7d?.count;
   return (
     <>
       {/*
@@ -221,7 +230,7 @@ export function ScoreboardPage() {
       header={
         <Header
           variant="h1"
-          description="How the work you hand to agents turns into pull requests: speed, quality, leverage and trust. Your own tasks, up to the pull request."
+          description="How the work you hand to agents turns into merged pull requests: speed, quality, leverage and trust. Your own tasks, up to the merge."
           actions={
             <SegmentedControl
               label="Time range"

@@ -26,7 +26,7 @@ import { loadPersonalBudgetStatus } from './shared/budgets';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, paginatedResponse, successResponse } from './shared/response';
-import { buildScoreboard, parseScoreboardRange, SCOREBOARD_TASK_FIELDS, type ScoreboardTask, scoreboardWindows } from './shared/scoreboard';
+import { buildScoreboard, parseScoreboardRange, SCOREBOARD_PROJECTION, type ScoreboardTask, scoreboardWindows } from './shared/scoreboard';
 import { type Scoreboard, type ScoreboardRange, type TaskRecord, toTaskSummary } from './shared/types';
 import { makeDocClient } from './shared/ua';
 import { decodePaginationToken, encodePaginationToken, parseLimit, parseStatusFilter } from './shared/validation';
@@ -85,15 +85,6 @@ async function listIndex(requestId: string): Promise<keyof typeof SORT_KEY_OF> {
  * records, whatever the projection returns, so the four statuses bound a request at 24 pages.
  */
 const SCOREBOARD_PAGES_PER_STATUS = 6;
-
-/**
- * The fields a scoreboard reads, every name behind an alias: `status` is a reserved word of
- * DynamoDB, and aliasing all of them needs no knowledge of that list.
- */
-const SCOREBOARD_PROJECTION = {
-  ProjectionExpression: SCOREBOARD_TASK_FIELDS.map((field) => `#${field}`).join(', '),
-  ExpressionAttributeNames: Object.fromEntries(SCOREBOARD_TASK_FIELDS.map((field) => [`#${field}`, field])),
-};
 
 /**
  * The time from which a status read that the page cap stopped is complete. Read newest

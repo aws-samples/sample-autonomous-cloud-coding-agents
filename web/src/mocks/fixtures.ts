@@ -509,14 +509,25 @@ type PeriodSample = Omit<ScoreboardPeriod, 'from' | 'to'>;
 
 /**
  * Scoreboard numbers per range: fixed samples, not computed from the mock tasks. `30d`
- * is a busy month with a month before it. `7d` is a week without a verified pull
- * request after a week of no coding work, so the page shows its zero-denominator tiles
- * and no previous-period lines. The tasks started with blanket approval are core fixture
- * tasks, so their links open. No sample counts a guardrail stop: no fixture task is one.
+ * is a busy month with a month before it: most of its new pull requests are merged, a few
+ * are closed or still open, one is not read. `7d` is two weeks in a repository ABCA has
+ * read no pull request of: a week without a verified pull request, whose two pull requests
+ * without a passed build are not read, after a week with one such pull request. The page
+ * shows its tiles without a number, and no count of the pull requests that wait: the one
+ * that is old enough is not read. The tasks started with blanket approval, and the two
+ * whose pull request has been open for more than 7 days, are core fixture tasks, so their
+ * links open. No sample counts a guardrail stop or the pull request of an orchestration:
+ * no fixture task is either.
  */
-const SCOREBOARD_SAMPLES: Readonly<Record<ScoreboardRange, { days: number; current: PeriodSample; previous: PeriodSample }>> = {
+const SCOREBOARD_SAMPLES: Readonly<Record<ScoreboardRange, {
+  days: number;
+  current: PeriodSample;
+  previous: PeriodSample;
+  open_over_7d: Scoreboard['open_over_7d'];
+}>> = {
   '30d': {
     days: 30,
+    open_over_7d: { count: 2, task_ids: [MOCK_IDS.completedOld, MOCK_IDS.completed] },
     current: {
       finished: 52,
       outcomes: { verified_pr: 26, unverified_pr: 2, no_new_pr: 15, failed: 5, cancelled: 2, timed_out: 2 },
@@ -532,6 +543,10 @@ const SCOREBOARD_SAMPLES: Readonly<Record<ScoreboardRange, { days: number; curre
       guardrail_stops: { count: 0, task_ids: [] },
       blanket_approvals: { count: 3, task_ids: [MOCK_IDS.completed, MOCK_IDS.cancelled, MOCK_IDS.completedOld] },
       gated: { count: 3, total: 45 },
+      pull_requests: { merged: 20, closed: 2, open: 5, unread: 1 },
+      merged_clean: { count: 17, total: 20 },
+      time_to_merge_s: { p50: 27 * HOUR, p90: 74 * HOUR, count: 20 },
+      first_review_s: { p50: 6 * HOUR, p90: 28 * HOUR, count: 18 },
     },
     previous: {
       finished: 41,
@@ -548,18 +563,23 @@ const SCOREBOARD_SAMPLES: Readonly<Record<ScoreboardRange, { days: number; curre
       guardrail_stops: { count: 0, task_ids: [] },
       blanket_approvals: { count: 0, task_ids: [] },
       gated: { count: 2, total: 36 },
+      pull_requests: { merged: 15, closed: 3, open: 3, unread: 0 },
+      merged_clean: { count: 12, total: 15 },
+      time_to_merge_s: { p50: 33 * HOUR, p90: 96 * HOUR, count: 15 },
+      first_review_s: { p50: 8 * HOUR, p90: 40 * HOUR, count: 13 },
     },
   },
   '7d': {
     days: 7,
+    open_over_7d: null,
     current: {
       finished: 8,
-      outcomes: { verified_pr: 0, unverified_pr: 0, no_new_pr: 3, failed: 3, cancelled: 1, timed_out: 1 },
+      outcomes: { verified_pr: 0, unverified_pr: 2, no_new_pr: 1, failed: 3, cancelled: 1, timed_out: 1 },
       time_to_verified_pr_s: null,
       wait_p50_s: null,
       queued: { count: 1, total: 7 },
       verified: { count: 0, total: 5 },
-      not_reworked: { count: 0, total: 0 },
+      not_reworked: { count: 2, total: 2 },
       untouched: { count: 0, total: 5 },
       touchpoints: { approve: 2, clarify: 1, follow_up: 1, cancel: 1 },
       spend_usd: 12.4,
@@ -567,34 +587,43 @@ const SCOREBOARD_SAMPLES: Readonly<Record<ScoreboardRange, { days: number; curre
       guardrail_stops: { count: 0, task_ids: [] },
       blanket_approvals: { count: 1, task_ids: [MOCK_IDS.cancelled] },
       gated: { count: 1, total: 6 },
+      pull_requests: { merged: 0, closed: 0, open: 0, unread: 2 },
+      merged_clean: { count: 0, total: 0 },
+      time_to_merge_s: null,
+      first_review_s: null,
     },
     previous: {
       finished: 2,
-      outcomes: { verified_pr: 0, unverified_pr: 0, no_new_pr: 1, failed: 0, cancelled: 0, timed_out: 1 },
+      outcomes: { verified_pr: 0, unverified_pr: 1, no_new_pr: 0, failed: 0, cancelled: 0, timed_out: 1 },
       time_to_verified_pr_s: null,
       wait_p50_s: null,
       queued: { count: 0, total: 2 },
-      verified: { count: 0, total: 0 },
-      not_reworked: { count: 0, total: 0 },
-      untouched: { count: 0, total: 0 },
+      verified: { count: 0, total: 1 },
+      not_reworked: { count: 1, total: 1 },
+      untouched: { count: 0, total: 1 },
       touchpoints: { approve: 0, clarify: 0, follow_up: 0, cancel: 0 },
-      spend_usd: 0,
+      spend_usd: 1.9,
       uncosted: 0,
       guardrail_stops: { count: 0, task_ids: [] },
       blanket_approvals: { count: 0, task_ids: [] },
-      gated: { count: 0, total: 0 },
+      gated: { count: 0, total: 1 },
+      pull_requests: { merged: 0, closed: 0, open: 0, unread: 1 },
+      merged_clean: { count: 0, total: 0 },
+      time_to_merge_s: null,
+      first_review_s: null,
     },
   },
 };
 
 /** The response of `GET /tasks?view=scoreboard`: the range's sample between the dates the API would name. */
 export function mockScoreboard(range: ScoreboardRange, now: Date): Scoreboard {
-  const { days, current, previous } = SCOREBOARD_SAMPLES[range];
+  const { days, current, previous, open_over_7d } = SCOREBOARD_SAMPLES[range];
   const from = ago(now, days * DAY);
   return {
     range,
     truncated: false,
     current: { from, to: now.toISOString(), ...current },
     previous: { from: ago(now, 2 * days * DAY), to: from, ...previous },
+    open_over_7d,
   };
 }

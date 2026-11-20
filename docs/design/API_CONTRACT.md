@@ -330,7 +330,7 @@ With `view=budget`, the Cognito-authenticated caller receives only their persona
 
 When no personal limit exists, `configured` is false, the limit/remaining/utilization fields are null, and `spend_usd` still reports the caller's current estimated spend. Team budgets are not returned. This read-only view backs `bgagent budget status --me`; budget mutation remains an operator-AWS-credential workflow.
 
-With `view=scoreboard`, the caller receives the factory scoreboard of their own finished tasks: how the work they handed to agents turned into pull requests during the last `range`, and during the period of the same length before it. A `range` of `7d` or `30d` is that many days of 24 hours up to the time of the request. [OBSERVABILITY.md](./OBSERVABILITY.md#factory-scoreboard) defines every number.
+With `view=scoreboard`, the caller receives the factory scoreboard of their own finished tasks: how the work they handed to agents turned into pull requests during the last `range` and during the period of the same length before it, and what became on GitHub of the pull requests ABCA follows. A `range` of `7d` or `30d` is that many days of 24 hours up to the time of the request. [OBSERVABILITY.md](./OBSERVABILITY.md#factory-scoreboard) defines every number.
 
 ```json
 {
@@ -353,7 +353,11 @@ With `view=scoreboard`, the caller receives the factory scoreboard of their own 
       "uncosted": 2,
       "guardrail_stops": { "count": 1, "task_ids": ["01M6P..."] },
       "blanket_approvals": { "count": 1, "task_ids": ["01M7F..."] },
-      "gated": { "count": 1, "total": 7 }
+      "gated": { "count": 1, "total": 7 },
+      "pull_requests": { "merged": 1, "closed": 0, "open": 1, "unread": 1 },
+      "merged_clean": { "count": 1, "total": 1 },
+      "time_to_merge_s": { "p50": 93600, "p90": 93600, "count": 1 },
+      "first_review_s": { "p50": 21600, "p90": 21600, "count": 1 }
     },
     "previous": {
       "from": "2026-09-20T12:00:00.000Z",
@@ -371,13 +375,18 @@ With `view=scoreboard`, the caller receives the factory scoreboard of their own 
       "uncosted": 0,
       "guardrail_stops": { "count": 0, "task_ids": [] },
       "blanket_approvals": { "count": 0, "task_ids": [] },
-      "gated": { "count": 0, "total": 2 }
-    }
+      "gated": { "count": 0, "total": 2 },
+      "pull_requests": { "merged": 1, "closed": 0, "open": 0, "unread": 0 },
+      "merged_clean": { "count": 1, "total": 1 },
+      "time_to_merge_s": { "p50": 172800, "p90": 172800, "count": 1 },
+      "first_review_s": { "p50": 7200, "p90": 7200, "count": 1 }
+    },
+    "open_over_7d": { "count": 1, "task_ids": ["01M4C..."] }
   }
 }
 ```
 
-`range` is the range served. `current` holds the numbers of the tasks that finished in it, `previous` those of the period before it, or `null` (see below). Both have these fields:
+`range` is the range served. `current` holds the numbers of the tasks that finished in it, `previous` those of the period before it, or `null` (see below). `open_over_7d` belongs to neither: it is described under the table. Both periods have these fields:
 
 | Field | Type | Description |
 |---|---|---|
@@ -396,15 +405,23 @@ With `view=scoreboard`, the caller receives the factory scoreboard of their own 
 | `guardrail_stops` | Flagged | Finished tasks of any kind, not only coding tasks, that a guardrail stopped; newest first. Each is also one of `outcomes.failed` |
 | `blanket_approvals` | Flagged | Finished tasks of any kind that were submitted with every approval granted in advance; newest first |
 | `gated` | Fraction | Coding tasks that stopped for at least one approval request, of the coding tasks that ran |
+| `pull_requests` | Object | The new pull requests of the period that ABCA follows, by their state at the period's end: `merged`, `closed`, `open`, or `unread` until a read records a state. The four add up to those pull requests. A pull request opened by a task of an orchestration is not followed, and is in none of them. All four keys are always present |
+| `merged_clean` | Fraction | Merged pull requests nobody sent back first (no change request by a reviewer with write access, no reworking follow-up before the merge), of the merged ones |
+| `time_to_merge_s` | Object or null | Seconds from task creation to the merge, over the pull requests merged before the period's end: `p50`, `p90` and `count`. `null` when none was merged |
+| `first_review_s` | Object or null | Seconds from the end of the task to the first review of its pull request by a person with write access to the repository, other than the pull request's author, over the merged ones that had one: `p50`, `p90` and `count`. A review before that end counts as 0. `null` when none had |
 
-A Fraction is `count` of `total`: the rate is `count / total`; with a `total` of 0 there is none. A Flagged is a `count` with the ids (`task_ids`) of up to 10 of the tasks behind it. Durations are whole seconds. The two figures per verified pull request are left to the client: divide the sum of `touchpoints`, or `spend_usd`, by `outcomes.verified_pr`.
+A Fraction is `count` of `total`: the rate is `count / total`; with a `total` of 0 there is none. A Flagged is a `count` with the ids (`task_ids`) of up to 10 of the tasks behind it. Durations are whole seconds. The figures per pull request are left to the client: divide the sum of `touchpoints`, or `spend_usd`, by `outcomes.verified_pr`, or by `pull_requests.merged` for the figures per merged pull request. So is the merged share: `merged` of `merged` + `closed` + `open`, with `unread` outside it.
+
+`open_over_7d` is one number of the whole response, a Flagged or `null`: the new pull requests that ABCA follows and that were open at its last read more than 7 days after their task finished, oldest first, over the tasks of both periods. Those are the tasks that finished 7 to 14 days ago with `range=7d`, and 7 to 60 days ago with `range=30d`. It is `null` when the count is not known: the read did not cover the earlier period (`previous` is `null` then too), or some pull requests are that old and ABCA has read none of them on GitHub. With no pull request that old, the count is 0.
+
+The state of a pull request comes from a read of GitHub that ABCA makes about once an hour, with the platform's GitHub token: a pull request is `unread` until a read records a state, and stays so in a repository that token cannot read. [Pull-request outcomes](./OBSERVABILITY.md#pull-request-outcomes) has the rules and the limits.
 
 The scoreboard counts the caller's own tasks and nothing else: no variant returns a team's numbers or every user's. Every user's are CloudWatch metrics in the `ABCA/Factory` namespace; there are none per team. A `view` response is not paginated, and `status`, `repo`, `limit` and `next_token` do not apply to it.
 
 A request reads a bounded number of task records, newest first: at most six pages of up to 1 MB for each terminal status. When the caller's finished tasks since the start of the previous period exceed that, the scoreboard covers the time from which every status was read in full, and no number is computed over a span in which one was not:
 
-- The read stopped inside the previous period: `previous` is `null`. `truncated` is `false`, because `current` is whole.
-- The read stopped inside the range: `truncated` is `true`, `previous` is `null`, and `current.from` is the time from which every finished task was read, later than the start of the range. With `range=30d`, `7d` may fit.
+- The read stopped inside the previous period: `previous` and `open_over_7d` are `null`. `truncated` is `false`, because `current` is whole.
+- The read stopped inside the range: `truncated` is `true`, `previous` and `open_over_7d` are `null`, and `current.from` is the time from which every finished task was read, later than the start of the range. With `range=30d`, `7d` may fit.
 
 Any other `view` is refused with `400 VALIDATION_ERROR` and the message `Invalid view value. Expected "budget" or "scoreboard".`. With `view=scoreboard`, any other `range` is refused with the message `Invalid range value. Expected "7d" or "30d".`.
 

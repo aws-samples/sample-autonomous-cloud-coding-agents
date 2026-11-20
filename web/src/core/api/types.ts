@@ -120,6 +120,9 @@ export type TaskOutcome = 'verified_pr' | 'unverified_pr' | 'no_new_pr' | 'faile
 /** A place the work waited for, or was redirected by, a person. `approve` counts approval requests, whatever the answer. */
 export type TouchpointKind = 'approve' | 'clarify' | 'follow_up' | 'cancel';
 
+/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it; `unread` until one records a state. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
+export type PullRequestState = 'merged' | 'closed' | 'open' | 'unread';
+
 /** How far back a scoreboard looks: that many days up to now. */
 export type ScoreboardRange = '7d' | '30d';
 
@@ -135,6 +138,13 @@ export interface Flagged {
   readonly task_ids: readonly string[];
 }
 
+/** The median and the 90th percentile of durations in whole seconds, and how many durations there are. */
+export interface DurationSummary {
+  readonly p50: number;
+  readonly p90: number;
+  readonly count: number;
+}
+
 /** The scoreboard's numbers over the tasks that finished in one period. */
 export interface ScoreboardPeriod {
   /** ISO bounds: tasks that finished at or after `from` and before `to`. The current period has no upper test: a finish time ahead of the clock belongs to it. */
@@ -144,7 +154,7 @@ export interface ScoreboardPeriod {
   readonly finished: number;
   readonly outcomes: Readonly<Record<TaskOutcome, number>>;
   /** Seconds from task creation to a verified pull request; null when there is none. With fewer than 10 values, `p90` is the largest or close to it. */
-  readonly time_to_verified_pr_s: { readonly p50: number; readonly p90: number; readonly count: number } | null;
+  readonly time_to_verified_pr_s: DurationSummary | null;
   /** Median seconds from creation to the start of the session, time in the admission queue included, over the verified pull requests above whose start is known; null when there is none. */
   readonly wait_p50_s: number | null;
   /** Tasks that waited in the admission queue, of the tasks that waited or ran. */
@@ -167,6 +177,14 @@ export interface ScoreboardPeriod {
   readonly blanket_approvals: Flagged;
   /** Coding tasks that stopped for at least one approval request, of the coding tasks that ran. */
   readonly gated: Fraction;
+  /** The new pull requests of the period that ABCA follows, by their state at the period's end: the four add up to those pull requests. A pull request opened by a task of an orchestration is not followed, and is in none of them. Shown as the merged share: `merged` of `merged` + `closed` + `open`, with `unread` outside it. */
+  readonly pull_requests: Readonly<Record<PullRequestState, number>>;
+  /** Merged pull requests nobody sent back first (no change request by a reviewer with write access, no reworking follow-up before the merge), of the merged ones. */
+  readonly merged_clean: Fraction;
+  /** Seconds from task creation to the merge, over the pull requests merged before the period's end; null when none was merged. */
+  readonly time_to_merge_s: DurationSummary | null;
+  /** Seconds from the end of the task to the first review of its pull request by a person with write access to the repository, other than the pull request's author, over the merged ones that had one; null when none had. A review before that end counts as 0. */
+  readonly first_review_s: DurationSummary | null;
 }
 
 /** GET /v1/tasks?view=scoreboard: the caller's scoreboard for a range. */
@@ -177,6 +195,14 @@ export interface Scoreboard {
   readonly current: ScoreboardPeriod;
   /** The period of equal length before `current`; null when the read did not cover it. */
   readonly previous: ScoreboardPeriod | null;
+  /**
+   * New pull requests that ABCA follows and that were open at its last read more than 7 days
+   * after their task finished, oldest first, over the tasks of both periods. Null when the
+   * count is not known: the read did not cover the earlier period, so the pull requests of
+   * the tasks it left out would be missing; or some pull requests are that old and ABCA has
+   * read none of them on GitHub.
+   */
+  readonly open_over_7d: Flagged | null;
 }
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */

@@ -18,13 +18,16 @@
  */
 
 /**
- * Factory scoreboard: what a finished task counts as.
+ * Factory scoreboard: what a finished task counts as, and what became of the
+ * pull request it opened.
  *
- * {@link taskFacts} is the one definition. It has two readers: the TaskTable
- * stream step, which writes one metric line per finished task
- * ({@link taskMetricLine}), and `GET /v1/tasks?view=scoreboard`, which
- * aggregates the caller's finished tasks ({@link buildScoreboard}). No AWS
- * client and no clock: a record counts the same wherever it is read.
+ * {@link taskFacts} is the one definition. It has three readers. Two write
+ * metric lines: the TaskTable stream step, one per finished task
+ * ({@link taskMetricLine}), and the hourly read of pull requests on GitHub, one
+ * per pull request whose final state it records ({@link prOutcomeMetricLine}).
+ * The third is `GET /v1/tasks?view=scoreboard`, which aggregates the caller's
+ * finished tasks ({@link buildScoreboard}). No AWS client and no clock: a record
+ * counts the same wherever it is read.
  *
  * A number is added in six places:
  *  1. the fact of one task: {@link TaskFacts} and {@link taskFacts} ({@link SCOREBOARD_TASK_FIELDS} when it reads a new field);
@@ -33,8 +36,11 @@
  *  4. the tile list of the console page: `web/src/core/util/scoreboard.ts`;
  *  5. the definitions table of `docs/design/OBSERVABILITY.md`;
  *  6. the field table and the example of `docs/design/API_CONTRACT.md`.
- * A CloudWatch metric is added in {@link FACTORY_METRICS} and {@link taskMetricLine}, and needs a
- * widget in `cdk/src/constructs/task-dashboard.ts`. A new series changes the count (14) in
+ * A fact that comes from GitHub starts before the first of these: in the query, the snapshot
+ * and the final write of `./pr-outcome`, and as a field of `TaskRecord` in `./types`.
+ * A CloudWatch metric is added in {@link FACTORY_METRICS} and in the line builder of the step that
+ * emits it ({@link taskMetricLine} or {@link prOutcomeMetricLine}), and needs a widget in
+ * `cdk/src/constructs/task-dashboard.ts`. A new series changes the count (17) in
  * `docs/design/OBSERVABILITY.md` and, with the price, in `docs/guides/COST_ATTRIBUTION.md`.
  */
 
@@ -49,8 +55,10 @@ import {
   APPROVAL_GATE_CAP_MAX,
   MAX_BUDGET_USD_MAX,
   type ApprovalScope,
+  type DurationSummary,
   type Flagged,
   type Fraction,
+  type PullRequestState,
   type Scoreboard,
   type ScoreboardPeriod,
   type ScoreboardRange,
@@ -61,7 +69,7 @@ import {
 
 export const FACTORY_METRIC_NAMESPACE = 'ABCA/Factory';
 
-/** Metric names, shared by the line builder and the dashboard so they cannot be spelled apart. */
+/** Metric names, shared by the line builders and the dashboard so they cannot be spelled apart. */
 export const FACTORY_METRICS = {
   tasksFinished: 'TasksFinished',
   timeToVerifiedPr: 'TimeToVerifiedPrSeconds',
@@ -70,15 +78,20 @@ export const FACTORY_METRICS = {
   humanTouchpoints: 'HumanTouchpoints',
   guardrailStops: 'GuardrailStops',
   blanketApprovals: 'BlanketApprovals',
+  pullRequestsResolved: 'PullRequestsResolved',
+  timeToMerge: 'TimeToMergeSeconds',
 } as const;
 
-/** Dimension names, shared with the dashboard like the metric names. `Outcome` takes a `TaskOutcome`. */
-export const FACTORY_DIMENSIONS = { outcome: 'Outcome', work: 'Work' } as const;
+/**
+ * Dimension names, shared with the dashboard like the metric names. `Outcome` takes a
+ * `TaskOutcome`; `PrOutcome` takes the final state of a pull request, `merged` or `closed`.
+ */
+export const FACTORY_DIMENSIONS = { outcome: 'Outcome', work: 'Work', prOutcome: 'PrOutcome' } as const;
 
 /** The values of `Work`: `coding` for a coding task, `other` for every other finished task. */
 export const FACTORY_WORK = { coding: 'coding', other: 'other' } as const;
 
-/** The task fields the scoreboard reads: the projection of the API read and the input type, one list. */
+/** The task fields the scoreboard reads: the projection of its reads and the input type, one list. */
 export const SCOREBOARD_TASK_FIELDS = [
   'task_id',
   'status',
@@ -86,6 +99,7 @@ export const SCOREBOARD_TASK_FIELDS = [
   'resolved_workflow',
   'workflow_ref',
   'channel_metadata',
+  'orchestration_id',
   'created_at',
   'updated_at',
   'queued_at',
@@ -93,6 +107,10 @@ export const SCOREBOARD_TASK_FIELDS = [
   'completed_at',
   'pr_url',
   'pr_number',
+  'pr_state',
+  'pr_closed_at',
+  'pr_first_review_at',
+  'pr_changes_requested',
   'build_passed',
   'code_changed',
   'answer_text',
@@ -104,6 +122,16 @@ export const SCOREBOARD_TASK_FIELDS = [
 
 /** A task record as far as the scoreboard reads it. */
 export type ScoreboardTask = Pick<TaskRecord, (typeof SCOREBOARD_TASK_FIELDS)[number]>;
+
+/**
+ * The fields a scoreboard reads, as the projection of a DynamoDB read. Every name is behind
+ * an alias: `status` is a reserved word of DynamoDB, and aliasing all of them needs no
+ * knowledge of that list. The other expressions of the same read can use the aliases too.
+ */
+export const SCOREBOARD_PROJECTION = {
+  ProjectionExpression: SCOREBOARD_TASK_FIELDS.map((field) => `#${field}`).join(', '),
+  ExpressionAttributeNames: Object.fromEntries(SCOREBOARD_TASK_FIELDS.map((field) => [`#${field}`, field])),
+};
 
 /** Everything the scoreboard knows about one finished task. */
 export interface TaskFacts {
@@ -129,6 +157,21 @@ export interface TaskFacts {
   /** `<repo lower-cased>#<number>`: set for a new pull request and for a task that reworks one. */
   readonly prKey: string | null;
   readonly reworks: boolean;
+  /**
+   * The hourly read of GitHub follows the pull request: a new one, opened by a task that is
+   * not part of an orchestration. The five facts below exist for a followed pull request only.
+   */
+  readonly prFollowed: boolean;
+  /** The state on GitHub of the followed pull request, as last recorded; null until a read records one. */
+  readonly prState: 'open' | 'merged' | 'closed' | null;
+  /** Epoch milliseconds of GitHub's merge or close time; null without a usable one. */
+  readonly prClosedAtMs: number | null;
+  /** Whole seconds from creation to the merge; null unless the pull request is merged and both ends are known. */
+  readonly timeToMergeS: number | null;
+  /** Whole seconds from the finish time to the first review that counts (a person who can push, other than the author), 0 for a review before the finish; null without one. */
+  readonly firstReviewS: number | null;
+  /** Reviews that requested changes, counted when the final state was recorded. */
+  readonly changesRequested: number;
 }
 
 /** With `coding/new-task-v1`, the workflows whose work goes into pull requests. */
@@ -167,6 +210,9 @@ const P90 = 90;
 
 /** How many task ids a `Flagged` count carries. */
 const FLAGGED_TASK_IDS_MAX = 10;
+
+/** The days a new pull request can stay open after its task finished before it is listed as waiting for a person. */
+const OPEN_OVER_DAYS = 7;
 
 /** A record is typed, but it is read from storage: a field counts only when it holds text. */
 function isSet(value: unknown): value is string {
@@ -224,14 +270,18 @@ function recordedCost(task: ScoreboardTask): number | null {
   return cost !== null && cost >= 0 && cost <= MAX_TASK_COST_USD ? cost : null;
 }
 
+/** A count as a record stores it: whole, and 0 for a value that is not a count of at least one. */
+function storedCount(task: ScoreboardTask, field: 'approval_gate_count' | 'pr_changes_requested'): number {
+  const count = coerceNumericOrNull(task[field], { task_id: task.task_id, field }, logger);
+  return count !== null && count >= 1 ? Math.floor(count) : 0;
+}
+
 /**
  * `approval_gate_count` counts requests, not approvals: each one asked for a person, and one
- * that could not be stored is counted too. Whole requests, and never more than the platform
- * lets a task make.
+ * that could not be stored is counted too. Never more than the platform lets a task make.
  */
 function approvalRequests(task: ScoreboardTask): number {
-  const requests = coerceNumericOrNull(task.approval_gate_count, { task_id: task.task_id, field: 'approval_gate_count' }, logger);
-  return requests !== null && requests >= 1 ? Math.min(Math.floor(requests), APPROVAL_GATE_CAP_MAX) : 0;
+  return Math.min(storedCount(task, 'approval_gate_count'), APPROVAL_GATE_CAP_MAX);
 }
 
 /**
@@ -249,6 +299,44 @@ function pullRequestKey(task: ScoreboardTask): string | null {
   return isSet(task.repo) && number !== null ? `${task.repo.toLowerCase()}#${number}` : null;
 }
 
+/**
+ * A task that an orchestration released, or that works on one of its nodes: its record
+ * carries the orchestration's id. A write to such a record makes the TaskTable stream consumer
+ * reconcile the orchestration again, so the hourly read of GitHub leaves these records alone.
+ * The test is the consumer's own: the text at the top level of the record, where no writer
+ * puts the id today, else the text in `channel_metadata`; any text but an empty one is an id.
+ */
+function isOrchestrationTask(task: ScoreboardTask): boolean {
+  const orchestrationId = typeof task.orchestration_id === 'string' ? task.orchestration_id : task.channel_metadata?.orchestration_id;
+  return typeof orchestrationId === 'string' && orchestrationId !== '';
+}
+
+/** What the hourly read of GitHub recorded about the pull request a task opened. */
+type PullRequestFacts = Pick<TaskFacts, 'prState' | 'prClosedAtMs' | 'timeToMergeS' | 'firstReviewS' | 'changesRequested'>;
+
+/** A pull request that is not followed has none of these facts, whatever the record of its task carries. */
+const NO_PULL_REQUEST: PullRequestFacts = { prState: null, prClosedAtMs: null, timeToMergeS: null, firstReviewS: null, changesRequested: 0 };
+
+/** A record is read from storage: a state that no read records counts as no state. */
+function recordedState(value: unknown): TaskFacts['prState'] {
+  return value === 'open' || value === 'merged' || value === 'closed' ? value : null;
+}
+
+function pullRequestFacts(task: ScoreboardTask, createdAtMs: number, finishedAtMs: number): PullRequestFacts {
+  const prState = recordedState(task.pr_state);
+  const closedAtMs = epochMs(task.pr_closed_at);
+  return {
+    prState,
+    prClosedAtMs: Number.isFinite(closedAtMs) ? closedAtMs : null,
+    timeToMergeS: prState === 'merged' ? wholeSeconds(createdAtMs, closedAtMs) : null,
+    // The pull request is open before its task finishes, and a review can come by then: it
+    // waited for nothing, which is not the same as no review. Without a review time the
+    // later of the two is NaN, and the wait is unknown.
+    firstReviewS: wholeSeconds(finishedAtMs, Math.max(finishedAtMs, epochMs(task.pr_first_review_at))),
+    changesRequested: storedCount(task, 'pr_changes_requested'),
+  };
+}
+
 /** The facts of a finished task; null for a task that is not terminal. Never throws on a sparse or odd record. */
 export function taskFacts(task: ScoreboardTask): TaskFacts | null {
   if (!TERMINAL_STATUSES.includes(task.status)) return null;
@@ -264,6 +352,7 @@ export function taskFacts(task: ScoreboardTask): TaskFacts | null {
   // "changed", the side the reply to a follow-up takes too.
   const reworks = iteration && key !== null && task.code_changed !== false;
   const opensPullRequest = outcome === 'verified_pr' || outcome === 'unverified_pr';
+  const prFollowed = opensPullRequest && !isOrchestrationTask(task);
   return {
     taskId: task.task_id,
     finishedAtMs,
@@ -286,6 +375,8 @@ export function taskFacts(task: ScoreboardTask): TaskFacts | null {
     blanketApproval: Array.isArray(task.initial_approvals) && task.initial_approvals.includes(BLANKET_APPROVAL_SCOPE),
     prKey: opensPullRequest || reworks ? key : null,
     reworks,
+    prFollowed,
+    ...(prFollowed ? pullRequestFacts(task, createdAtMs, finishedAtMs) : NO_PULL_REQUEST),
   };
 }
 
@@ -330,15 +421,18 @@ function touchpointSums(tasks: readonly TaskFacts[]): Record<TouchpointKind, num
   return { approve: sum('approve'), clarify: sum('clarify'), follow_up: sum('follow_up'), cancel: sum('cancel') };
 }
 
-function timeToVerifiedPr(verified: readonly TaskFacts[]): ScoreboardPeriod['time_to_verified_pr_s'] {
-  const leadTimes = ascending(verified.map((facts) => facts.leadTimeS));
-  if (leadTimes.length === 0) return null;
-  return { p50: percentile(leadTimes, MEDIAN), p90: percentile(leadTimes, P90), count: leadTimes.length };
+/** The summary of the durations that are known; null when none is. */
+function durationSummary(durations: readonly (number | null)[]): DurationSummary | null {
+  const known = ascending(durations);
+  if (known.length === 0) return null;
+  return { p50: percentile(known, MEDIAN), p90: percentile(known, P90), count: known.length };
 }
 
-function flagged(tasks: readonly TaskFacts[]): Flagged {
-  const newestFirst = [...tasks].sort((a, b) => b.finishedAtMs - a.finishedAtMs);
-  return { count: tasks.length, task_ids: newestFirst.slice(0, FLAGGED_TASK_IDS_MAX).map((facts) => facts.taskId) };
+/** A count of tasks, with the ids of the first of them by finish time: the newest, or the oldest. */
+function flagged(tasks: readonly TaskFacts[], first: 'newest' | 'oldest'): Flagged {
+  const direction = first === 'newest' ? -1 : 1;
+  const ordered = [...tasks].sort((a, b) => direction * (a.finishedAtMs - b.finishedAtMs));
+  return { count: tasks.length, task_ids: ordered.slice(0, FLAGGED_TASK_IDS_MAX).map((facts) => facts.taskId) };
 }
 
 /** Per pull-request key, the earliest finish time of a task that reworks it. */
@@ -365,6 +459,55 @@ function notReworked(finished: readonly TaskFacts[], firstReworkMs: ReadonlyMap<
   return { count: opened.size - reworked, total: opened.size };
 }
 
+/**
+ * The state of a followed pull request as it stood at `endMs`. A merge or a close that had not
+ * happened by then leaves it open: an earlier period is not judged with more hindsight than
+ * the current one.
+ */
+function stateAt(facts: TaskFacts, endMs: number): PullRequestState {
+  if (facts.prState === null) return 'unread';
+  return facts.prClosedAtMs !== null && facts.prClosedAtMs < endMs ? facts.prState : 'open';
+}
+
+/** Whether a task reworked the pull request before it was merged or closed. A pull request without a key has no rework to find. */
+function reworkedBeforeClose(facts: TaskFacts, firstReworkMs: ReadonlyMap<string, number>): boolean {
+  return facts.prKey !== null && facts.prClosedAtMs !== null && (firstReworkMs.get(facts.prKey) ?? Infinity) < facts.prClosedAtMs;
+}
+
+/** The numbers of the followed pull requests among `finished`, each in the state it had at `endMs`. */
+function pullRequestNumbers(
+  finished: readonly TaskFacts[],
+  firstReworkMs: ReadonlyMap<string, number>,
+  endMs: number,
+): Pick<ScoreboardPeriod, 'pull_requests' | 'merged_clean' | 'time_to_merge_s' | 'first_review_s'> {
+  const followed = finished.filter((facts) => facts.prFollowed);
+  const states: Record<PullRequestState, number> = { merged: 0, closed: 0, open: 0, unread: 0 };
+  for (const facts of followed) states[stateAt(facts, endMs)] += 1;
+  const merged = followed.filter((facts) => stateAt(facts, endMs) === 'merged');
+  const clean = merged.filter((facts) => facts.changesRequested === 0 && !reworkedBeforeClose(facts, firstReworkMs));
+  return {
+    pull_requests: states,
+    merged_clean: { count: clean.length, total: merged.length },
+    time_to_merge_s: durationSummary(merged.map((facts) => facts.timeToMergeS)),
+    first_review_s: durationSummary(merged.map((facts) => facts.firstReviewS)),
+  };
+}
+
+/**
+ * The followed pull requests that were open at the last read, more than `OPEN_OVER_DAYS` days
+ * after their task finished: finished work that waits for a person. A number of the response,
+ * not of a period: in the 7-day range no task of the current period is that old, so it rests
+ * on the tasks of both. Null when some pull requests are that old and none of them has been
+ * read: how many are open is then not known, which is not the same as none.
+ */
+function openTooLong(all: readonly TaskFacts[], previousFrom: Date, now: Date): Flagged | null {
+  const finishedBeforeMs = now.getTime() - OPEN_OVER_DAYS * MS_PER_DAY;
+  const oldEnough = all.filter((facts) =>
+    facts.prFollowed && facts.finishedAtMs >= previousFrom.getTime() && facts.finishedAtMs < finishedBeforeMs);
+  if (oldEnough.length > 0 && oldEnough.every((facts) => facts.prState === null)) return null;
+  return flagged(oldEnough.filter((facts) => facts.prState === 'open'), 'oldest');
+}
+
 /** The numbers of the tasks that finished in [from, endMs). `to` is the bound the response names. */
 function buildPeriod(
   all: readonly TaskFacts[],
@@ -384,7 +527,7 @@ function buildPeriod(
     to: to.toISOString(),
     finished: finished.length,
     outcomes: outcomeCounts(finished),
-    time_to_verified_pr_s: timeToVerifiedPr(verified),
+    time_to_verified_pr_s: durationSummary(verified.map((facts) => facts.leadTimeS)),
     wait_p50_s: waits.length === 0 ? null : percentile(waits, MEDIAN),
     queued: {
       count: finished.filter((facts) => facts.queued).length,
@@ -396,9 +539,10 @@ function buildPeriod(
     touchpoints: touchpointSums(coding),
     spend_usd: Math.round(coding.reduce((total, facts) => total + (facts.costUsd ?? 0), 0) * MICRO_USD) / MICRO_USD,
     uncosted: codingRan.filter((facts) => facts.costUsd === null).length,
-    guardrail_stops: flagged(finished.filter((facts) => facts.guardrailStop)),
-    blanket_approvals: flagged(finished.filter((facts) => facts.blanketApproval)),
+    guardrail_stops: flagged(finished.filter((facts) => facts.guardrailStop), 'newest'),
+    blanket_approvals: flagged(finished.filter((facts) => facts.blanketApproval), 'newest'),
     gated: { count: codingRan.filter((facts) => facts.touchpoints.approve > 0).length, total: codingRan.length },
+    ...pullRequestNumbers(finished, firstReworkMs, endMs),
   };
 }
 
@@ -423,6 +567,8 @@ export function buildScoreboard(tasks: readonly ScoreboardTask[], range: Scorebo
     // No upper test: a finish time ahead of the clock belongs to the current period.
     current: buildPeriod(all, firstReworkMs, truncated ? coveredFrom : from, now, Infinity),
     previous: previousCovered ? buildPeriod(all, firstReworkMs, previousFrom, from, from.getTime()) : null,
+    // It rests on the tasks of the earlier period: a read that did not reach its start cannot say.
+    open_over_7d: previousCovered ? openTooLong(all, previousFrom, now) : null,
   };
 }
 
@@ -433,24 +579,66 @@ interface LineMetric {
   readonly value: number | null;
 }
 
+/** The metrics that share one set of dimensions, each dimension with its value on the line; `{}` for the metrics without dimensions. */
+interface MetricGroup {
+  readonly dimensions: Readonly<Record<string, string>>;
+  readonly metrics: readonly LineMetric[];
+}
+
+/** Whose task a line is about: plain fields, which create no metric series. */
+interface LineContext {
+  readonly user_id?: string;
+  readonly repo?: string;
+  readonly workflow?: string;
+}
+
+/** One EMF line stamped `timestampMs`: a directive per group, the members the directives name, then the plain fields. */
+function metricLine(timestampMs: number, groups: readonly MetricGroup[], plainFields: Readonly<Record<string, unknown>>): string {
+  // The specification requires every declared metric to be a member of the line, and a
+  // directive without metrics declares nothing.
+  const declared = groups
+    .map(({ dimensions, metrics }) => ({ dimensions, metrics: metrics.filter((metric) => metric.value !== null) }))
+    .filter(({ metrics }) => metrics.length > 0);
+  return JSON.stringify({
+    _aws: {
+      Timestamp: timestampMs,
+      CloudWatchMetrics: declared.map(({ dimensions, metrics }) => ({
+        Namespace: FACTORY_METRIC_NAMESPACE,
+        // One DimensionSet each, the empty one for the metrics without dimensions: `[]` would declare no metric.
+        Dimensions: [Object.keys(dimensions)],
+        Metrics: metrics.map(({ name, unit }) => ({ Name: name, Unit: unit })),
+      })),
+    },
+    ...Object.fromEntries(declared.flatMap(({ dimensions }) => Object.entries(dimensions))),
+    ...Object.fromEntries(declared.flatMap(({ metrics }) => metrics.map(({ name, value }) => [name, value]))),
+    ...plainFields,
+  });
+}
+
+function taskIdentity(facts: TaskFacts, context: LineContext): Record<string, string | undefined> {
+  return { task_id: facts.taskId, user_id: context.user_id, repo: context.repo, workflow: context.workflow };
+}
+
 /**
  * One EMF line for one finished task. The outcome and the kind of work are the only dimensions,
  * both closed sets; the identifiers and the workflow ride as plain fields, which create no
  * metric series.
  */
-export function taskMetricLine(facts: TaskFacts, context: { user_id?: string; repo?: string; workflow?: string }, nowMs: number): string {
+export function taskMetricLine(facts: TaskFacts, context: LineContext, nowMs: number): string {
   const untouched = isUntouchedVerifiedPr(facts) ? 1 : 0;
-  const groups: readonly { readonly dimensions: readonly string[]; readonly metrics: readonly LineMetric[] }[] = [
-    { dimensions: [FACTORY_DIMENSIONS.outcome], metrics: [{ name: FACTORY_METRICS.tasksFinished, unit: 'Count', value: 1 }] },
+  // Never ahead of the clock: CloudWatch drops a timestamp more than two hours in the future.
+  const timestampMs = Number.isFinite(facts.finishedAtMs) ? Math.min(facts.finishedAtMs, nowMs) : nowMs;
+  const groups: readonly MetricGroup[] = [
+    { dimensions: { [FACTORY_DIMENSIONS.outcome]: facts.outcome }, metrics: [{ name: FACTORY_METRICS.tasksFinished, unit: 'Count', value: 1 }] },
     {
-      dimensions: [FACTORY_DIMENSIONS.work],
+      dimensions: { [FACTORY_DIMENSIONS.work]: facts.coding ? FACTORY_WORK.coding : FACTORY_WORK.other },
       metrics: [
         { name: FACTORY_METRICS.humanTouchpoints, unit: 'Count', value: touchpointTotal(facts) },
         { name: FACTORY_METRICS.costUsd, unit: 'None', value: facts.costUsd },
       ],
     },
     {
-      dimensions: [],
+      dimensions: {},
       metrics: [
         { name: FACTORY_METRICS.guardrailStops, unit: 'Count', value: facts.guardrailStop ? 1 : 0 },
         { name: FACTORY_METRICS.blanketApprovals, unit: 'Count', value: facts.blanketApproval ? 1 : 0 },
@@ -460,29 +648,20 @@ export function taskMetricLine(facts: TaskFacts, context: { user_id?: string; re
       ],
     },
   ];
-  // The specification requires every declared metric to be a member of the line, and a
-  // directive without metrics declares nothing.
-  const declared = groups
-    .map(({ dimensions, metrics }) => ({ dimensions, metrics: metrics.filter((metric) => metric.value !== null) }))
-    .filter(({ metrics }) => metrics.length > 0);
-  return JSON.stringify({
-    _aws: {
-      // Never ahead of the clock: CloudWatch drops a timestamp more than two hours in the future.
-      Timestamp: Number.isFinite(facts.finishedAtMs) ? Math.min(facts.finishedAtMs, nowMs) : nowMs,
-      CloudWatchMetrics: declared.map(({ dimensions, metrics }) => ({
-        Namespace: FACTORY_METRIC_NAMESPACE,
-        // One DimensionSet each, the empty one for the metrics without dimensions: `[]` would declare no metric.
-        Dimensions: [dimensions],
-        Metrics: metrics.map(({ name, unit }) => ({ Name: name, Unit: unit })),
-      })),
-    },
-    [FACTORY_DIMENSIONS.outcome]: facts.outcome,
-    [FACTORY_DIMENSIONS.work]: facts.coding ? FACTORY_WORK.coding : FACTORY_WORK.other,
-    ...Object.fromEntries(declared.flatMap(({ metrics }) => metrics.map(({ name, value }) => [name, value]))),
-    task_id: facts.taskId,
-    user_id: context.user_id,
-    repo: context.repo,
-    workflow: context.workflow,
-    wait_s: facts.waitS ?? undefined,
-  });
+  return metricLine(timestampMs, groups, { ...taskIdentity(facts, context), wait_s: facts.waitS ?? undefined });
+}
+
+/**
+ * One EMF line for the final state of one followed pull request; null for facts without a
+ * final state, or without a usable time for it. The state is the only dimension. The line is
+ * stamped with GitHub's merge or close time, whatever its age: this module has no clock, and
+ * the caller answers for what CloudWatch accepts.
+ */
+export function prOutcomeMetricLine(facts: TaskFacts, context: LineContext): string | null {
+  if ((facts.prState !== 'merged' && facts.prState !== 'closed') || facts.prClosedAtMs === null) return null;
+  const groups: readonly MetricGroup[] = [
+    { dimensions: { [FACTORY_DIMENSIONS.prOutcome]: facts.prState }, metrics: [{ name: FACTORY_METRICS.pullRequestsResolved, unit: 'Count', value: 1 }] },
+    { dimensions: {}, metrics: [{ name: FACTORY_METRICS.timeToMerge, unit: 'Seconds', value: facts.timeToMergeS }] },
+  ];
+  return metricLine(facts.prClosedAtMs, groups, taskIdentity(facts, context));
 }

@@ -81,6 +81,8 @@ Triggered by GitHub webhooks, not by agent execution:
 - **PR review events** - Extract actionable rules via LLM, write to review feedback memory
 - **PR close/merge events** - Record outcome signal (positive/negative) on the task episode
 
+For the new pull requests that the hourly read of GitHub follows, the merge or close itself is already on the task record (see [Pull-request outcomes](./OBSERVABILITY.md#pull-request-outcomes) in OBSERVABILITY.md).
+
 ## Memory components
 
 ### Short-term memory

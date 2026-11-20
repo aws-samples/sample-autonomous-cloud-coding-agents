@@ -145,9 +145,11 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // would move them to cli/src/types.ts and off this list:
   'TaskOutcome',
   'TouchpointKind',
+  'PullRequestState',
   'ScoreboardRange',
   'Fraction',
   'Flagged',
+  'DurationSummary',
   'ScoreboardPeriod',
   'Scoreboard',
   // Server-side helper / internal contracts:

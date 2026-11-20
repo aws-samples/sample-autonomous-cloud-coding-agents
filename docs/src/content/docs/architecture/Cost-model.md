@@ -118,7 +118,7 @@ Authenticated users can inspect their personal scope with `bgagent budget status
 
 The controls add one on-demand DynamoDB table with PITR, three standard CloudWatch alarms, and up to three custom metric time series. Admission, terminal rollup, and user-status requests incur usage-based DynamoDB/API Gateway/Lambda/SNS charges; no dedicated continuously running compute is added. See the operator guide's [cost-control setup and cost breakdown](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#setting-up-cost-controls).
 
-The [factory scoreboard](/sample-autonomous-cloud-coding-agents/architecture/observability#factory-scoreboard) adds custom metric time series in the `ABCA/Factory` namespace and a few requests per finished task in the existing TaskTable stream reconciler, and no alarm, table or function. The operator guide's [cost breakdown](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#cost-of-the-controls) has the count and the price.
+The [factory scoreboard](/sample-autonomous-cloud-coding-agents/architecture/observability#factory-scoreboard) adds custom metric time series in the `ABCA/Factory` namespace, a few requests per finished task in the existing TaskTable stream reconciler, and one function that reads the state of open pull requests from GitHub once an hour; it adds no alarm and no table. The operator guide's [cost breakdown](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#cost-of-the-controls) has the count and the price.
 
 ## Additional guardrails
 

@@ -525,8 +525,10 @@ describe('list-tasks handler', () => {
     });
 
     test('returns the scoreboard of the caller\'s finished tasks: the range asked for and the period before it', async () => {
+      // The pull request of the task of the earlier period was found open on GitHub.
+      const earlier: ScoreboardTask = { ...finishedAt('2026-10-01T10:30:00Z'), pr_state: 'open' };
       indexHolds({
-        COMPLETED: [{ Items: [finishedAt('2026-11-18T10:24:00Z'), finishedAt('2026-10-01T10:30:00Z')] }],
+        COMPLETED: [{ Items: [finishedAt('2026-11-18T10:24:00Z'), earlier] }],
         FAILED: [{ Items: [finishedAt('2026-11-05T14:00:03.120Z', 'FAILED')] }],
         CANCELLED: [{ Items: [finishedAt('2026-11-14T15:30:10.500Z', 'CANCELLED')] }],
         TIMED_OUT: [{ Items: [finishedAt('2026-11-15T20:00:00.250Z', 'TIMED_OUT')] }],
@@ -547,6 +549,8 @@ describe('list-tasks handler', () => {
           outcomes: { verified_pr: 1, unverified_pr: 0, no_new_pr: 0, failed: 1, cancelled: 1, timed_out: 1 },
         },
         previous: { from: '2026-09-20T12:00:00.000Z', to: '2026-10-20T12:00:00.000Z', finished: 1, outcomes: { verified_pr: 1 } },
+        // A number of the whole read, which reached the start of the earlier period.
+        open_over_7d: { count: 1, task_ids: [earlier.task_id] },
       });
       // One query per terminal status, and no look at the table: the index it reads is always there.
       expect(mockSend).toHaveBeenCalledTimes(4);
@@ -685,6 +689,8 @@ describe('list-tasks handler', () => {
       expect(queriesFor('FAILED')).toHaveLength(6);
       expect(board.truncated).toBe(true);
       expect(board.previous).toBeNull();
+      // It would count the completed tasks the cut happened to leave: no number is reported.
+      expect(board.open_over_7d).toBeNull();
       expect(board.current).toMatchObject({
         from: '2026-11-10T08:30:16.000Z',
         to: '2026-11-19T12:00:00.000Z',
@@ -697,12 +703,12 @@ describe('list-tasks handler', () => {
       [
         'in two statuses starts it after the later cut',
         { FAILED: cutAt('FAILED', '2026-11-10T08:30:15Z'), CANCELLED: cutAt('CANCELLED', '2026-11-15T09:00:00.250Z') },
-        { truncated: true, previous: null, current: { from: '2026-11-15T09:00:01.000Z' } },
+        { truncated: true, previous: null, open_over_7d: null, current: { from: '2026-11-15T09:00:01.000Z' } },
       ],
       [
         'inside the previous period leaves the current one whole, and reports no previous one',
         { TIMED_OUT: cutAt('TIMED_OUT', '2026-10-01T00:00:00Z') },
-        { truncated: false, previous: null, current: { from: '2026-10-20T12:00:00.000Z' } },
+        { truncated: false, previous: null, open_over_7d: null, current: { from: '2026-10-20T12:00:00.000Z' } },
       ],
     ])('a read cut %s', async (_where, pages, expected) => {
       indexHolds(pages);

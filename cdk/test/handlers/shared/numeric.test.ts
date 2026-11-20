@@ -83,4 +83,16 @@ describe('coerceNumericOrNull', () => {
     expect(warnCalls[0].meta?.raw).toBe('oops');
     expect(warnCalls[0].meta?.event_id).toBe('e-1');
   });
+
+  // A stored value can be as long as its record, and the warning repeats at every read.
+  test.each([
+    ['a value of 100 characters whole', 'x'.repeat(100), 100],
+    ['the first 100 characters of a longer value', 'x'.repeat(101), 100],
+    ['the first 100 characters of a value as long as a record', `${'x'.repeat(100)}${'y'.repeat(400_000)}`, 100],
+  ])('warn payload carries %s', (_what, value, length) => {
+    const { logger, warnCalls } = mkLogger();
+
+    expect(coerceNumericOrNull(value, { field: 'cost_usd' }, logger)).toBeNull();
+    expect(warnCalls[0].meta?.raw).toBe('x'.repeat(length));
+  });
 });

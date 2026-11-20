@@ -52,7 +52,7 @@ server still binds to `127.0.0.1` only.
 | Task detail: summary, error remedy, event timeline | `src/domains/tasks/TaskDetailPage.tsx` | `GET /v1/tasks/{id}`, `GET /v1/tasks/{id}/events` |
 | Approvals: pending Cedar HITL gates | `src/domains/approvals/` | `GET /v1/pending` |
 | Repositories: where your agents worked; per repository, the open issues not started yet and its tasks | `src/domains/repos/` | `GET /v1/tasks`; console API `GET /repos/{repo}/issues`, `GET /repos/{repo}/linear-issues` |
-| Scoreboard: speed, quality, leverage and trust of your finished tasks, up to the pull request | `src/domains/scoreboard/` | `GET /v1/tasks?view=scoreboard` |
+| Scoreboard: speed, quality, leverage and trust of your finished tasks, up to the merge of their pull requests | `src/domains/scoreboard/` | `GET /v1/tasks?view=scoreboard` |
 | Costs: spend per day by repository, outcome or source, the most expensive tasks, your monthly limit | `src/domains/costs/` | `GET /v1/tasks`, `GET /v1/tasks?view=budget` |
 
 Views poll (10-15 s; Costs every minute; the Scoreboard every five minutes); the
@@ -64,12 +64,17 @@ other pages: it marks the Scoreboard stale, and the next visit reads it again.
 reconciler would act on.
 
 The API defines every Scoreboard number (`cdk/src/handlers/shared/scoreboard.ts`);
-the page formats them and divides the two figures per verified pull request.
-Its sections and tiles are a list in `src/core/util/scoreboard.ts`, where a
-number is added to the page with one entry. In mock mode the Scoreboard numbers
-are fixed samples that do not follow the mock tasks: "Last 30 days" is a busy
-month, "Last 7 days" a week without a verified pull request, so the two ranges
-show the page with and without numbers.
+the page formats them. Its only arithmetic is presentation: a percentage from a
+fraction, the merged share of the pull requests read, a sum per verified and per
+merged pull request, the pull requests ABCA does not follow as a period's new
+pull requests less the four states, and the six outcomes folded into the three
+parts of the bar. Its sections and tiles are a list in
+`src/core/util/scoreboard.ts`, where a number is added to the page with one
+entry. In mock mode the Scoreboard numbers are fixed samples that do not follow
+the mock tasks: "Last 30 days" is a busy month with most of its pull requests
+merged, "Last 7 days" two weeks without a verified pull request in a repository
+whose pull requests ABCA has not read, so the two ranges show the page with and
+without numbers.
 
 The tiles and the parts of the outcome bar on the Scoreboard, the four tiles on
 Costs and the six counters on the Overview explain themselves in a bubble: what

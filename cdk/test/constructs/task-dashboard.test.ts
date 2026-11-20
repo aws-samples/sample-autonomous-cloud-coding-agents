@@ -27,6 +27,7 @@ import {
   FACTORY_METRIC_NAMESPACE,
   FACTORY_METRICS,
   FACTORY_WORK,
+  prOutcomeMetricLine,
   taskFacts,
   taskMetricLine,
   type ScoreboardTask,
@@ -54,6 +55,9 @@ type MetricRow = readonly (string | Readonly<Record<string, unknown>>)[];
 
 interface Widget {
   readonly type: string;
+  /** The line of the grid the widget starts on, and how many of its 24 columns it takes. */
+  readonly y: number;
+  readonly width: number;
   readonly properties: {
     readonly title?: string;
     readonly markdown?: string;
@@ -209,12 +213,15 @@ describe('TaskDashboard construct', () => {
     // The titles follow the labels of the console's Scoreboard page, in the order of the row.
     const NUMBER_TITLES = [
       'Time to verified pull request',
+      'Time to merged pull request',
       'Verified pull request with no stop for a person',
       'Human touchpoints per verified pull request',
       'Spend per verified pull request',
       'Guardrail stops and blanket approvals',
     ];
     const GRAPH_TITLE = 'Tasks finished per day, by outcome';
+    const PR_GRAPH_TITLE = 'Pull requests merged and closed per day';
+    const TITLES = [...NUMBER_TITLES, GRAPH_TITLE, PR_GRAPH_TITLE];
 
     /** A statistic of one series, as `valuesShown` writes it: `Sum(ABCA/Factory TasksFinished{Outcome=verified_pr})`. */
     function reading(stat: string, metricName: string, dimensions: Record<string, string> = {}, namespace = FACTORY_METRIC_NAMESPACE): string {
@@ -263,7 +270,20 @@ describe('TaskDashboard construct', () => {
         "Every user's tasks that finished in the last 30 days, or since the scoreboard was deployed if that is less.",
       );
       expect(heading.properties.markdown).toContain('whatever time range the dashboard shows');
-      expect(below.slice(0, NUMBER_TITLES.length + 1).map((widget) => widget.properties.title)).toEqual([...NUMBER_TITLES, GRAPH_TITLE]);
+      // A merge is counted when it happened, which can be weeks after the task finished, or days before the deployment.
+      expect(heading.properties.markdown).toContain(
+        'The two pull-request widgets count a pull request on the day it was merged or closed, not on the day its task finished, '
+        + 'and reach up to 13 days back before the deployment.',
+      );
+      expect(below.slice(0, TITLES.length).map((widget) => widget.properties.title)).toEqual(TITLES);
+    });
+
+    test('fills every line of the grid', () => {
+      const widthOfLine = new Map<number, number>();
+      for (const { y, width } of widgetsOf(template).slice(0, 1 + TITLES.length)) widthOfLine.set(y, (widthOfLine.get(y) ?? 0) + width);
+
+      // The heading, the six numbers three to a line, the two graphs.
+      expect([...widthOfLine.values()]).toEqual([24, 24, 24, 24]);
     });
 
     test.each<[string, Record<string, string>]>([
@@ -276,19 +296,27 @@ describe('TaskDashboard construct', () => {
       ],
       [
         NUMBER_TITLES[1],
+        // A merge takes days where an agent takes minutes: this widget is in hours, and each label names its unit.
+        {
+          'Median (hours)': `${reading('p50', FACTORY_METRICS.timeToMerge)} / 3600`,
+          '9 in 10 within (hours)': `${reading('p90', FACTORY_METRICS.timeToMerge)} / 3600`,
+        },
+      ],
+      [
+        NUMBER_TITLES[2],
         // The metric is 0 or 1 on each task that asked for a new pull request: its average is the share.
         { '% of the tasks that asked for a new pull request': `100 * ${reading('Average', FACTORY_METRICS.untouchedVerifiedPrs)}` },
       ],
       [
-        NUMBER_TITLES[2],
+        NUMBER_TITLES[3],
         { 'On coding tasks, failed ones too': `${reading('Sum', FACTORY_METRICS.humanTouchpoints, ofCodingTasks)} / ${verified}` },
       ],
       [
-        NUMBER_TITLES[3],
+        NUMBER_TITLES[4],
         { 'USD on coding tasks, failed ones too': `${reading('Sum', FACTORY_METRICS.costUsd, ofCodingTasks)} / ${verified}` },
       ],
       [
-        NUMBER_TITLES[4],
+        NUMBER_TITLES[5],
         {
           'Stopped by a guardrail': reading('Sum', FACTORY_METRICS.guardrailStops),
           'Started with blanket approval': reading('Sum', FACTORY_METRICS.blanketApprovals),
@@ -322,6 +350,14 @@ describe('TaskDashboard construct', () => {
       expect(Object.entries(valuesShown(widget))).toEqual(series);
     });
 
+    test(`${PR_GRAPH_TITLE}: a stacked sum per day, one series for each final state`, () => {
+      const widget = widgetTitled(template, PR_GRAPH_TITLE);
+      const resolved = (state: string): string => reading('Sum', FACTORY_METRICS.pullRequestsResolved, { [FACTORY_DIMENSIONS.prOutcome]: state });
+
+      expect(widget.properties).toMatchObject({ view: 'timeSeries', stacked: true, period: 86400, start: '-P30D' });
+      expect(Object.entries(valuesShown(widget))).toEqual([['Merged', resolved('merged')], ['Closed without merging', resolved('closed')]]);
+    });
+
     describe('and the metric line', () => {
       /** `name {dimension: value}` of a metric, the way CloudWatch tells two series apart. */
       const series = (name: string, dimensions: Record<string, unknown>): string =>
@@ -329,7 +365,7 @@ describe('TaskDashboard construct', () => {
 
       /** Every series a widget of the row reads. */
       function seriesRead(): string[] {
-        const rows = [...NUMBER_TITLES, GRAPH_TITLE].flatMap((title) => widgetTitled(template, title).properties.metrics ?? []);
+        const rows = TITLES.flatMap((title) => widgetTitled(template, title).properties.metrics ?? []);
         return rows
           .map((row) => row.filter((cell): cell is string => typeof cell === 'string'))
           .filter(([namespace]) => namespace === FACTORY_METRIC_NAMESPACE)
@@ -340,14 +376,18 @@ describe('TaskDashboard construct', () => {
           });
       }
 
-      /** Every series the metric lines of these tasks write. */
+      /** Every series these tasks write: on the line of the task, and on the line of its pull request once that is merged or closed. */
       function seriesWritten(tasks: readonly ScoreboardTask[]): Set<string> {
         const written = new Set<string>();
         for (const task of tasks) {
-          const line = JSON.parse(taskMetricLine(taskFacts(task)!, {}, 0));
-          for (const directive of line._aws.CloudWatchMetrics as { Dimensions: string[][]; Metrics: { Name: string }[] }[]) {
-            const dimensions = Object.fromEntries(directive.Dimensions[0].map((dimension) => [dimension, line[dimension]]));
-            for (const metric of directive.Metrics) written.add(series(metric.Name, dimensions));
+          const facts = taskFacts(task)!;
+          for (const text of [taskMetricLine(facts, {}, 0), prOutcomeMetricLine(facts, {})]) {
+            if (text === null) continue;
+            const line = JSON.parse(text);
+            for (const directive of line._aws.CloudWatchMetrics as { Dimensions: string[][]; Metrics: { Name: string }[] }[]) {
+              const dimensions = Object.fromEntries(directive.Dimensions[0].map((dimension) => [dimension, line[dimension]]));
+              for (const metric of directive.Metrics) written.add(series(metric.Name, dimensions));
+            }
           }
         }
         return written;
@@ -384,6 +424,8 @@ describe('TaskDashboard construct', () => {
           finished({ status: TaskStatus.FAILED }),
           finished({ status: TaskStatus.CANCELLED }),
           finished({ status: TaskStatus.TIMED_OUT }),
+          finished({ pr_state: 'merged', pr_closed_at: '2026-11-19T09:00:00Z' }),
+          finished({ pr_state: 'closed', pr_closed_at: '2026-11-19T09:00:00Z' }),
         ]);
         const read = seriesRead();
 

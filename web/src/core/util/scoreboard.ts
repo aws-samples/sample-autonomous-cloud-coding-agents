@@ -17,7 +17,16 @@
  *  SOFTWARE.
  */
 
-import type { Flagged, Fraction, Scoreboard, ScoreboardPeriod, ScoreboardRange, TaskOutcome, TouchpointKind } from '../api/types';
+import type {
+  DurationSummary,
+  Flagged,
+  Fraction,
+  Scoreboard,
+  ScoreboardPeriod,
+  ScoreboardRange,
+  TaskOutcome,
+  TouchpointKind,
+} from '../api/types';
 import type { Explanation } from '../components/Explain';
 import { formatCost, formatCount, formatDurationShort, formatTimestamp } from './format';
 
@@ -26,9 +35,11 @@ import { formatCost, formatCount, formatDurationShort, formatTimestamp } from '.
  * numbers of `GET /v1/tasks?view=scoreboard`.
  *
  * The server defines every number (`cdk/src/handlers/shared/scoreboard.ts`). The only
- * arithmetic here is presentation: a percentage from a fraction, a sum per verified
- * pull request, the six outcomes folded into the three parts of the bar. A number is
- * added to the page with one entry in {@link SECTIONS}, which holds its explanation too.
+ * arithmetic here is presentation: a percentage from a fraction, the merged share of the
+ * pull requests read, a sum per verified and per merged pull request, the pull requests
+ * ABCA does not follow as a period's new pull requests less the four states, the six
+ * outcomes folded into the three parts of the bar. A number is added to the page with one
+ * entry in {@link SECTIONS}, which holds its explanation too.
  */
 
 export const SCOREBOARD_RANGES: Readonly<Record<ScoreboardRange, string>> = {
@@ -43,6 +54,9 @@ const P90_MIN_COUNT = 10;
 
 const NO_VERIFIED_PR = 'No verified pull request in this period.';
 const NO_NEW_WORK = 'No task asked for a new pull request in this period.';
+const NO_NEW_PR = 'No new pull request in this period.';
+const NONE_MERGED = 'No pull request of this period is merged yet.';
+const ORCHESTRATION_NOT_FOLLOWED = 'ABCA does not follow the pull requests of an orchestration on GitHub.';
 
 /**
  * What the page calls the coding tasks that started (`gated.total`), in the singular and
@@ -53,6 +67,11 @@ const STARTED_TO_WRITE_CODE = ['task that writes code and started', 'tasks that 
 /** "1 task", "2,140 tasks"; `many` for a word that takes no "s". */
 function counted(count: number, one: string, many = `${one}s`): string {
   return `${formatCount(count)} ${count === 1 ? one : many}`;
+}
+
+/** The counts above zero, each with its words: "2 closed without merging, 5 still open". Empty when all are zero. */
+function countsAboveZero(counts: readonly (readonly [count: number, words: string])[]): string {
+  return counts.filter(([count]) => count > 0).map(([count, words]) => `${formatCount(count)} ${words}`).join(', ');
 }
 
 /**
@@ -67,22 +86,59 @@ export function percent({ count, total }: Fraction): string | null {
   return `${share}%`;
 }
 
+/** A share as the previous-period line quotes it, with the two counts it rests on: "62% (18 of 29)". */
+function shareWithCounts(fraction: Fraction): string | null {
+  const share = percent(fraction);
+  return share === null ? null : `${share} (${formatCount(fraction.count)} of ${formatCount(fraction.total)})`;
+}
+
 /** A sum over the period for each verified pull request; null when the period has none. */
 function perVerifiedPr(sum: number, period: ScoreboardPeriod, format: (ratio: number) => string): string | null {
   const pullRequests = period.outcomes.verified_pr;
   return pullRequests === 0 ? null : format(sum / pullRequests);
 }
 
+/**
+ * The same sum for each pull request merged so far, as the second figure of a tile that
+ * divides by the verified ones; null while none is merged.
+ */
+function perMergedPr(sum: number, period: ScoreboardPeriod, format: (ratio: number) => string): string | null {
+  const { merged } = period.pull_requests;
+  return merged === 0 ? null : `${format(sum / merged)} per merged pull request so far`;
+}
+
+/** The merged pull requests, of the period's new pull requests that ABCA has read on GitHub. */
+function mergedOfRead({ pull_requests: { merged, closed, open } }: ScoreboardPeriod): Fraction {
+  return { count: merged, total: merged + closed + open };
+}
+
+/**
+ * The period's new pull requests that ABCA does not follow: those of an orchestration. They
+ * are in the tiles that count every new pull request and in none of the four states, so a
+ * line that counts the states names them where the two totals would otherwise differ.
+ */
+function notFollowed({ outcomes, pull_requests: { merged, closed, open, unread } }: ScoreboardPeriod): number {
+  return outcomes.verified_pr + outcomes.unverified_pr - merged - closed - open - unread;
+}
+
+/** What a count over the pull requests ABCA follows says of the others, beside it. */
+function orchestrationNotFollowed(count: number): string {
+  return count === 1 ? 'The one of an orchestration is not followed.' : `The ${formatCount(count)} of an orchestration are not followed.`;
+}
+
 export interface TileSpec {
   readonly label: string;
   /** What it is, why it matters and how it is computed: the bubble of the tile. */
   readonly explanation: Explanation;
-  /** The headline number; null when the period has nothing to compute it from. */
-  readonly value: (period: ScoreboardPeriod) => string | null;
-  /** The line under the number: the counts behind it, or why there is none. */
-  readonly detail?: (period: ScoreboardPeriod) => string;
-  /** The tasks behind a count, linked under it where other tiles have a line of text. */
-  readonly tasks?: (period: ScoreboardPeriod) => Flagged;
+  /**
+   * The headline number; null when there is nothing to compute it from. A number of a period
+   * reads the period. The board is for the one number that belongs to the whole response.
+   */
+  readonly value: (period: ScoreboardPeriod, board: Scoreboard) => string | null;
+  /** The line under the number: the counts behind it, or why there is none. Null where the number needs no line. */
+  readonly detail?: (period: ScoreboardPeriod, board: Scoreboard) => string | null;
+  /** The tasks behind a count, linked under it where other tiles have a line of text. Null while the count is not known. */
+  readonly tasks?: (period: ScoreboardPeriod, board: Scoreboard) => Flagged | null;
   /** The number as the previous-period line quotes it. Only the tiles that compare have one. */
   readonly compare?: (period: ScoreboardPeriod) => string | null;
 }
@@ -104,8 +160,8 @@ function shareTile({ label, explanation, of, noun, plural, rest = '', none, comp
   noun: string;
   plural?: string;
   rest?: string;
-  /** The line shown when the total is zero. */
-  none: string;
+  /** The line shown when the total is zero: one sentence, or the one that fits the period. */
+  none: string | ((period: ScoreboardPeriod) => string);
   compare?: boolean;
 }): TileSpec {
   return {
@@ -114,30 +170,93 @@ function shareTile({ label, explanation, of, noun, plural, rest = '', none, comp
     value: (period) => percent(of(period)),
     detail: (period) => {
       const { count, total } = of(period);
-      return total === 0 ? none : `${formatCount(count)} of ${counted(total, noun, plural)}${rest}`;
+      if (total === 0) return typeof none === 'string' ? none : none(period);
+      return `${formatCount(count)} of ${counted(total, noun, plural)}${rest}`;
     },
-    ...(compares && {
-      compare: (period) => {
-        const fraction = of(period);
-        const share = percent(fraction);
-        return share === null ? null : `${share} (${formatCount(fraction.count)} of ${formatCount(fraction.total)})`;
-      },
-    }),
+    ...(compares && { compare: (period) => shareWithCounts(of(period)) }),
   };
 }
 
-function timeToVerifiedPr(period: ScoreboardPeriod): string | null {
-  const time = period.time_to_verified_pr_s;
+/** The median of the durations, as the number of a tile and of its previous-period line; null when there is none. */
+function median(time: DurationSummary | null): string | null {
   return time === null ? null : formatDurationShort(time.p50);
+}
+
+const timeToVerifiedPr = (period: ScoreboardPeriod): string | null => median(period.time_to_verified_pr_s);
+const timeToMergedPr = (period: ScoreboardPeriod): string | null => median(period.time_to_merge_s);
+
+/** What a median rests on, then the spread once there are enough durations to show one. */
+function medianOf(time: DurationSummary, noun: string): string[] {
+  const sentences = [`Median of ${counted(time.count, noun)}.`];
+  if (time.count >= P90_MIN_COUNT) sentences.push(`9 in 10 within ${formatDurationShort(time.p90)}.`);
+  return sentences;
 }
 
 function timeDetail(period: ScoreboardPeriod): string {
   const time = period.time_to_verified_pr_s;
   if (time === null) return NO_VERIFIED_PR;
-  const sentences = [`Median of ${counted(time.count, 'verified pull request')}.`];
-  if (time.count >= P90_MIN_COUNT) sentences.push(`9 in 10 within ${formatDurationShort(time.p90)}.`);
+  const sentences = medianOf(time, 'verified pull request');
   if (period.wait_p50_s !== null) sentences.push(`Typically ${formatDurationShort(period.wait_p50_s)} of it before the agent started.`);
   return sentences.join(' ');
+}
+
+/**
+ * Why a number over the merged pull requests is missing: none of those ABCA has read is
+ * merged; it has read none of them; or it follows none, because the period has no new
+ * pull request, or only those of an orchestration.
+ */
+function noneMerged(period: ScoreboardPeriod): string {
+  if (mergedOfRead(period).total > 0) return NONE_MERGED;
+  const { unread } = period.pull_requests;
+  if (unread > 0) {
+    // No "yet": for a repository ABCA's GitHub token cannot read, no read is coming.
+    const unreadOnes = unread === 1 ? 'the new pull request' : `the ${formatCount(unread)} new pull requests`;
+    return `ABCA has not read ${unreadOnes} of this period on GitHub.`;
+  }
+  return notFollowed(period) === 0 ? NO_NEW_PR : ORCHESTRATION_NOT_FOLLOWED;
+}
+
+function mergeTimeDetail(period: ScoreboardPeriod): string {
+  const time = period.time_to_merge_s;
+  if (time === null) return noneMerged(period);
+  const sentences = medianOf(time, 'merged pull request');
+  const review = period.first_review_s;
+  if (review !== null) {
+    // One pull request is "it", and one review has a time, not a typical time.
+    const reviewed = time.count === 1 ? 'It' : `${formatCount(review.count)} of them`;
+    // The clock starts when the task finishes: a review that came before then counts as 0.
+    const timing = review.p50 === 0 ? 'before the task had finished' : `${formatDurationShort(review.p50)} after the task finished`;
+    sentences.push(`${reviewed} had a review by someone else, ${review.count === 1 ? '' : 'typically '}${timing}.`);
+  }
+  return sentences.join(' ');
+}
+
+function mergedDetail(period: ScoreboardPeriod): string {
+  const { closed, open, unread } = period.pull_requests;
+  const { count: merged, total: read } = mergedOfRead(period);
+  const sentences: string[] = [];
+  if (read === 0) {
+    sentences.push(noneMerged(period));
+  } else {
+    sentences.push(`${formatCount(merged)} of ${counted(read, 'new pull request')} that ABCA has read on GitHub.`);
+    const notMerged = countsAboveZero([[closed, 'closed without merging'], [open, 'still open']]);
+    if (notMerged) sentences.push(`${notMerged}.`);
+    if (unread > 0) sentences.push(`${formatCount(unread)} not read.`);
+  }
+  // Beside pull requests that ABCA follows. A period with none of those has the orchestration as its reason already.
+  const orchestration = notFollowed(period);
+  if (orchestration > 0 && read + unread > 0) sentences.push(orchestrationNotFollowed(orchestration));
+  return sentences.join(' ');
+}
+
+/**
+ * Why the count of pull requests that wait for a person is not known. The API decides that
+ * it is not, for one of two reasons, and the response shows which.
+ */
+function waitingNotCounted(board: Scoreboard): string {
+  return board.previous === null
+    ? 'The scoreboard did not read far enough back to count these.'
+    : 'ABCA has not read these pull requests on GitHub.';
 }
 
 /** The kinds of touchpoint in the order the line names them, each in the singular and the plural. */
@@ -168,7 +287,8 @@ function touchpointDetail(period: ScoreboardPeriod): string {
   const kinds = (Object.keys(TOUCHPOINT_WORDS) as TouchpointKind[])
     .filter((kind) => period.touchpoints[kind] > 0)
     .map((kind) => counted(period.touchpoints[kind], ...TOUCHPOINT_WORDS[kind]));
-  const inAll = `${formatCount(total)} in all: ${kinds.join(' · ')}`;
+  const perMerged = perMergedPr(total, period, oneDecimal);
+  const inAll = `${formatCount(total)} in all: ${kinds.join(' · ')}${perMerged === null ? '' : `. ${perMerged}.`}`;
   return period.outcomes.verified_pr === 0 ? `${NO_VERIFIED_PR} ${inAll}` : inAll;
 }
 
@@ -197,6 +317,14 @@ function spendDetail(period: ScoreboardPeriod): string {
   } else {
     spent = `${formatCost(period.spend_usd)} ${noPullRequest ? 'spent on' : 'on'} ${counted(started, ...STARTED_TO_WRITE_CODE)}.`;
     if (period.uncosted > 0) spent += ` ${counted(period.uncosted, 'has', 'have')} no recorded cost.`;
+    const perMerged = perMergedPr(period.spend_usd, period, formatCost);
+    if (perMerged !== null) {
+      // What the divisor leaves out. The open ones can still be merged and the ones not read may be: the figure falls
+      // as they are. The ones of an orchestration never count, though their tasks are in the spend.
+      const { merged, open, unread } = period.pull_requests;
+      const counts = countsAboveZero([[merged, 'merged'], [open, 'still open'], [unread, 'not read'], [notFollowed(period), 'of an orchestration not followed']]);
+      spent += ` ${perMerged}: ${counts}.`;
+    }
   }
   return noPullRequest ? `${NO_VERIFIED_PR} ${spent}` : spent;
 }
@@ -221,6 +349,21 @@ export const SECTIONS: readonly SectionSpec[] = [
         detail: timeDetail,
         compare: timeToVerifiedPr,
       },
+      {
+        label: 'Time to merged pull request',
+        explanation: {
+          what: 'How long it takes, from the moment you submit a task, until its pull request is merged.',
+          why: 'It is the wait for a change that was accepted, review included. Most of it is usually spent after the agent'
+            + ' finished: compare it with "Time to verified pull request", and see "Pull requests open for more than 7 days".',
+          how: "The median time from the moment you submit a task until GitHub records the merge, over this period's new pull"
+            + ' requests merged so far. The line under the number counts a review when someone with write access to the'
+            + " repository, other than the pull request's author, submits it. The author is the account of ABCA's GitHub"
+            + ' token: if that is your account, your reviews do not count.',
+        },
+        value: timeToMergedPr,
+        detail: mergeTimeDetail,
+        compare: timeToMergedPr,
+      },
       shareTile({
         label: 'Waited in line',
         explanation: {
@@ -236,9 +379,31 @@ export const SECTIONS: readonly SectionSpec[] = [
         rest: ' that waited in line or started',
         none: 'No task waited or started in this period.',
       }),
+      {
+        label: 'Pull requests open for more than 7 days',
+        explanation: {
+          what: 'New pull requests that are still open on GitHub more than 7 days after their task finished.',
+          why: 'This is finished agent work waiting for a person. The longer one sits, the staler it gets and the harder it is'
+            + ' to merge. Open the tasks linked under the number and decide: review it, send it back, or close it.',
+          how: 'New pull requests that were open when ABCA last read them, more than 7 days after their task finished. It'
+            + ' covers the pull requests of this period and of the one before. The tasks linked under the number are the ones'
+            + ' that finished longest ago, ten at most. Not in it: pull requests ABCA could not read, one opened by a task that'
+            + ' failed, and those of an orchestration.',
+        },
+        // The one number of the whole response: the API counts it over both periods, and says when it cannot.
+        value: (_period, board) => board.open_over_7d && formatCount(board.open_over_7d.count),
+        detail: (_period, board) => {
+          if (board.open_over_7d === null) return waitingNotCounted(board);
+          // The count rests on the tasks of both periods, and so does what it leaves out. The API gives no
+          // count without the period before: the test for it is there for the type, and no response reaches its other side.
+          const orchestration = notFollowed(board.current) + (board.previous ? notFollowed(board.previous) : 0);
+          return orchestration > 0 ? orchestrationNotFollowed(orchestration) : null;
+        },
+        tasks: (_period, board) => board.open_over_7d,
+      },
     ],
-    notMeasured: 'Not measured by ABCA: review, merge, deploy, how often you deploy, and the outcome for your customer.'
-      + ' The clock stops when the task finishes with a verified pull request.',
+    notMeasured: 'Not measured by ABCA: deploy, how often you deploy, and the outcome for your customer. The last thing ABCA'
+      + ' sees is the merge.',
   },
   {
     title: 'Quality',
@@ -261,6 +426,37 @@ export const SECTIONS: readonly SectionSpec[] = [
         none: NO_NEW_WORK,
         compare: true,
       }),
+      {
+        label: 'Merged, so far',
+        explanation: {
+          what: "Of this period's new pull requests that ABCA has read on GitHub, the share that are merged.",
+          why: 'A merge is the first outside sign that the work was accepted; a passed build only says it builds. When the'
+            + ' share is low, read the line under the number: closed without merging, or still open (see "Pull requests open'
+            + ' for more than 7 days").',
+          how: "Merged pull requests divided by this period's new pull requests that ABCA has read. Recent ones have had less"
+            + ' time, so it can still rise; the period before is counted as it stood at its own end. ABCA reads GitHub about'
+            + " once an hour. Not read: pull requests in a repository ABCA's GitHub token cannot read. Not followed: those of a"
+            + ' task that failed, and of an orchestration.',
+        },
+        value: (period) => percent(mergedOfRead(period)),
+        detail: mergedDetail,
+        compare: (period) => shareWithCounts(mergedOfRead(period)),
+      },
+      shareTile({
+        label: 'Merged without being sent back',
+        explanation: {
+          what: 'Of the merged pull requests, the share that nobody sent back for changes first.',
+          why: "It is how often the agents' work was accepted without a second round. A low share means reviewers had to ask"
+            + ' for changes before merging: sharpen the task description, or the instructions the repository gives agents.',
+          how: 'Merged pull requests of this period with no change request by a reviewer with write access and no follow-up'
+            + " task of yours that changed the pull request before the merge, divided by the period's merged pull requests."
+            + ' Not counted: review comments without a change request, and a change request that was dismissed. Not visible'
+            + ' to ABCA: follow-ups by other people and fixes pushed by hand.',
+        },
+        of: (period) => period.merged_clean,
+        noun: 'merged pull request',
+        none: noneMerged,
+      }),
       shareTile({
         label: 'Not reworked through ABCA, so far',
         explanation: {
@@ -268,16 +464,17 @@ export const SECTIONS: readonly SectionSpec[] = [
           why: 'A pull request that comes back costs a second run and more of your attention. A falling share means first'
             + ' attempts miss what you wanted: sharpen the task description or the instructions the repository gives agents.',
           how: 'New pull requests of this period, verified or not, with no follow-up task sent to change them, divided by all new'
-            + ' pull requests of the period. A follow-up that changed no code does not count. Follow-ups by other people, fixes'
-            + ' pushed by hand and reviews on GitHub are not visible to ABCA, and recent pull requests can still be sent back.',
+            + ' pull requests of the period. A follow-up that changed no code does not count. Follow-ups by other people and'
+            + ' fixes pushed by hand are not visible to ABCA, reviews on GitHub are not counted here, and recent pull requests'
+            + ' can still be sent back.',
         },
         of: (period) => period.not_reworked,
         noun: 'new pull request',
-        none: 'No new pull request in this period.',
+        none: NO_NEW_PR,
       }),
     ],
     notMeasured: 'Not measured by ABCA: change failure rate and time to restore, which need deploy and incident data, and'
-      + ' whether a pull request was reviewed, merged or closed, which happens on GitHub.',
+      + ' whether a merged change was later reverted.',
   },
   {
     title: 'Leverage',
@@ -334,7 +531,7 @@ export const SECTIONS: readonly SectionSpec[] = [
         compare: spendPerPr,
       },
     ],
-    notMeasured: 'Not measured by ABCA: the hours people spent, review time, and work a person did by hand.',
+    notMeasured: 'Not measured by ABCA: the hours people spent, the time people spent reviewing, and work a person did by hand.',
   },
   {
     title: 'Trust',
@@ -441,8 +638,8 @@ const OUTCOME_PARTS: readonly { label: string; slot: 0 | 1 | 2; explanation: Exp
       what: 'Tasks that asked for a new pull request and delivered one after the build passed.',
       why: 'Every number above that names a verified pull request rests on this count. When it is small, one task swings them'
         + ' all. A bigger count is more volume, not a better score: for that, read "Ended in a verified pull request".',
-      how: 'Tasks that ended normally, opened a new pull request and recorded a passed build. ABCA does not see whether the'
-        + ' pull request was then reviewed or merged.',
+      how: 'Tasks that ended normally, opened a new pull request and recorded a passed build. Whether it was merged'
+        + ' afterwards is counted under "Merged, so far".',
     },
   },
   {

@@ -426,6 +426,12 @@ describe('task API against the AWS Emulator', () => {
       build_passed: true,
       cost_usd: '3.75',
       approval_gate_count: 2,
+      // What the hourly read of GitHub recorded: merged an hour after the task was created, first
+      // reviewed 15 minutes after it finished, with one change request. GitHub's times are whole seconds.
+      pr_state: 'merged',
+      pr_closed_at: agentStamp(at(3600)),
+      pr_first_review_at: agentStamp(at(2700)),
+      pr_changes_requested: 1,
     });
     // A follow-up that changed the code of that pull request, started with every approval granted
     // in advance. It stores the number of the pull request, not its URL.
@@ -464,29 +470,48 @@ describe('task API against the AWS Emulator', () => {
       completed_at: undefined,
       error_message: 'Hydration failed: Error: Guardrail blocked: Task description blocked by content policy: PROMPT_ATTACK',
     });
+    // New work of an orchestration, which its record names at the top level: a verified pull
+    // request like the first, except that the hourly read of GitHub does not follow it.
+    const orchestrated = await seedTask(user, 'COMPLETED', agentStamp(at(16200)), {
+      repo: REPO,
+      resolved_workflow: newTask,
+      orchestration_id: 'orch_1',
+      started_at: platformStamp(at(14441)),
+      pr_url: pullRequest(14),
+      build_passed: true,
+      cost_usd: '1',
+    });
     // A field added to the list needs a task above that sets it, and a number below that shows it.
-    const seeded = Object.keys({ ...verified, ...followUp, ...question, ...integration, ...stopped });
+    const seeded = Object.keys({ ...verified, ...followUp, ...question, ...integration, ...stopped, ...orchestrated });
     expect(SCOREBOARD_TASK_FIELDS.filter((field) => !seeded.includes(field))).toEqual([]);
 
-    const { current } = await scoreboard(user);
+    const { current, open_over_7d } = await scoreboard(user);
 
     // Beside each number, the fields it is wrong without.
     expect(current).toMatchObject({
-      finished: 5, // status, updated_at
-      outcomes: { verified_pr: 1, unverified_pr: 0, no_new_pr: 3, failed: 1, cancelled: 0, timed_out: 0 }, // resolved_workflow, pr_url, build_passed, channel_metadata
-      time_to_verified_pr_s: { p50: 1800, p90: 1800, count: 1 }, // created_at, completed_at
+      finished: 6, // status, updated_at
+      outcomes: { verified_pr: 2, unverified_pr: 0, no_new_pr: 3, failed: 1, cancelled: 0, timed_out: 0 }, // resolved_workflow, pr_url, build_passed, channel_metadata
+      time_to_verified_pr_s: { p50: 1800, p90: 1800, count: 2 }, // created_at, completed_at
       wait_p50_s: 41, // started_at
-      queued: { count: 1, total: 4 }, // queued_at
-      verified: { count: 1, total: 3 }, // workflow_ref
-      not_reworked: { count: 0, total: 1 }, // repo, pr_number
-      untouched: { count: 0, total: 3 },
+      queued: { count: 1, total: 5 }, // queued_at
+      verified: { count: 2, total: 4 }, // workflow_ref
+      not_reworked: { count: 1, total: 2 }, // repo, pr_number
+      untouched: { count: 1, total: 4 },
       touchpoints: { approve: 2, clarify: 1, follow_up: 1, cancel: 0 }, // approval_gate_count, code_changed, answer_text
-      spend_usd: 7.75, // cost_usd
+      spend_usd: 8.75, // cost_usd
       uncosted: 0,
       guardrail_stops: { count: 1, task_ids: [stopped.task_id] }, // error_message, task_id
       blanket_approvals: { count: 1, task_ids: [followUp.task_id] }, // initial_approvals
-      gated: { count: 1, total: 4 },
+      gated: { count: 1, total: 5 },
+      // One of the two new pull requests: the orchestration's is not followed, and is in none of the four.
+      pull_requests: { merged: 1, closed: 0, open: 0, unread: 0 }, // pr_state, pr_closed_at, orchestration_id
+      // The follow-up finished after the merge: only the change request sent the pull request back.
+      merged_clean: { count: 0, total: 1 }, // pr_changes_requested
+      time_to_merge_s: { p50: 3600, p90: 3600, count: 1 },
+      first_review_s: { p50: 900, p90: 900, count: 1 }, // pr_first_review_at
     });
+    // Every task finished yesterday: no pull request is old enough to have been open for more than 7 days.
+    expect(open_over_7d).toEqual({ count: 0, task_ids: [] });
   });
 
   test('scoreboard: a status that does not fit one page of the index is read whole', async () => {
@@ -522,10 +547,12 @@ describe('task API against the AWS Emulator', () => {
     await seedTask(user, 'FAILED', platformStamp(start + 500));
     await seedTask(user, 'FAILED', platformStamp(start + CUT_TASKS * 1000));
 
-    const { truncated, current, previous } = await scoreboard(user);
+    const { truncated, current, previous, open_over_7d } = await scoreboard(user);
 
     expect(truncated).toBe(true);
     expect(previous).toBeNull();
+    // The pull requests open for more than 7 days are counted over both periods: not over a read that was cut.
+    expect(open_over_7d).toBeNull();
     // The read stopped at the key of one task, and the scoreboard starts the second after it:
     // it holds the tasks that finished later, of either status.
     const stoppedAt = (Date.parse(current.from) - start) / 1000 - 1;

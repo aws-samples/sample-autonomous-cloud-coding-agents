@@ -31,6 +31,7 @@ import {
   SCOREBOARD_TASK_FIELDS,
   buildScoreboard,
   parseScoreboardRange,
+  prOutcomeMetricLine,
   scoreboardWindows,
   taskFacts,
   taskMetricLine,
@@ -109,7 +110,21 @@ const NO_PULL_REQUEST = { pr_url: undefined, build_passed: undefined };
 /** What a task leaves when no agent session ever wrote to it. */
 const NEVER_RAN = { ...NO_PULL_REQUEST, started_at: undefined, cost_usd: undefined };
 
-/** The facts of `task()`. */
+/** What the record of every task of an orchestration carries: the orchestration's id and the node the task works on. */
+const inOrchestration = (subIssueId: string): Pick<TaskRecord, 'channel_source' | 'channel_metadata'> =>
+  ({ channel_source: 'linear', channel_metadata: { orchestration_id: 'orch_1', orchestration_sub_issue_id: subIssueId } });
+/** The node of an orchestration that merges the branches of its other tasks. */
+const INTEGRATION_NODE = inOrchestration(`orch-1${INTEGRATION_NODE_SUFFIX}`);
+
+/**
+ * What the hourly read of GitHub adds to the record of `task()` once its pull request is
+ * merged, a day after the task was created. GitHub's times are whole seconds.
+ */
+const MERGED = { pr_state: 'merged', pr_closed_at: '2026-11-19T10:00:00Z', pr_changes_requested: 0 } as const;
+/** A first review six hours after the task finished. */
+const REVIEWED_AT = '2026-11-18T16:24:00Z';
+
+/** The facts of `task()`: no read of GitHub has recorded anything about its pull request. */
 const VERIFIED: TaskFacts = {
   taskId: 'task-1',
   finishedAtMs: Date.parse('2026-11-18T10:24:00.000Z'),
@@ -126,10 +141,18 @@ const VERIFIED: TaskFacts = {
   blanketApproval: false,
   prKey: 'owner/repo#12',
   reworks: false,
+  prFollowed: true,
+  prState: null,
+  prClosedAtMs: null,
+  timeToMergeS: null,
+  firstReviewS: null,
+  changesRequested: 0,
 };
 const facts = (overrides: Partial<TaskFacts> = {}): TaskFacts => ({ ...VERIFIED, ...overrides });
 const touchpoints = (counts: Partial<Record<TouchpointKind, number>>): TaskFacts['touchpoints'] =>
   ({ ...VERIFIED.touchpoints, ...counts });
+/** The facts of `task(MERGED)`. */
+const MERGED_FACTS = facts({ prState: 'merged', prClosedAtMs: Date.parse('2026-11-19T10:00:00.000Z'), timeToMergeS: 86400 });
 
 /** What the API read returns for a record: the projected fields and nothing else. */
 function projected(record: TaskRecord): ScoreboardTask {
@@ -146,83 +169,119 @@ const SHAPES: readonly (readonly [string, TaskRecord, TaskFacts])[] = [
   [
     'a change that broke a passing build',
     task({ status: TaskStatus.FAILED, build_passed: false, error_message: "Task did not succeed (agent_status='success', build_ok=False)" }),
-    facts({ outcome: 'failed', prKey: null }),
+    facts({ outcome: 'failed', prKey: null, prFollowed: false }),
   ],
   [
     'a clarify hold',
     task({ ...NO_PULL_REQUEST, code_changed: false, answer_text: 'Which environment should this deploy to?' }),
-    facts({ outcome: 'no_new_pr', touchpoints: touchpoints({ clarify: 1 }), prKey: null }),
+    facts({ outcome: 'no_new_pr', touchpoints: touchpoints({ clarify: 1 }), prKey: null, prFollowed: false }),
   ],
-  ['new work that completed without a pull request', task(NO_PULL_REQUEST), facts({ outcome: 'no_new_pr', prKey: null })],
+  ['new work that completed without a pull request', task(NO_PULL_REQUEST), facts({ outcome: 'no_new_pr', prKey: null, prFollowed: false })],
   [
     'a follow-up that changed the code',
     iteration(),
-    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), reworks: true }),
+    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), reworks: true, prFollowed: false }),
   ],
   [
     'a follow-up that only answered',
     iteration({ code_changed: false, answer_text: 'It retries three times.' }),
-    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), prKey: null }),
+    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), prKey: null, prFollowed: false }),
   ],
   [
     'a follow-up that left no comparison of commits',
     iteration({ code_changed: undefined }),
-    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), reworks: true }),
+    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), reworks: true, prFollowed: false }),
   ],
   [
     'a follow-up that failed',
     iteration({ status: TaskStatus.FAILED, code_changed: undefined, error_message: 'Agent session lost: no heartbeat for 300s' }),
-    facts({ outcome: 'failed', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), reworks: true }),
+    facts({ outcome: 'failed', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), reworks: true, prFollowed: false }),
   ],
   [
     'a follow-up on a pull request the record does not name',
     iteration({ pr_number: undefined, pr_url: undefined }),
-    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), prKey: null }),
+    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), prKey: null, prFollowed: false }),
   ],
   [
     'a review',
     task({ ...runs(PR_REVIEW), pr_number: 12, code_changed: false, answer_text: 'Two findings, both minor.' }),
-    facts({ outcome: 'no_new_pr', newWork: false, coding: false, prKey: null }),
+    facts({ outcome: 'no_new_pr', newWork: false, coding: false, prKey: null, prFollowed: false }),
   ],
   [
     'a restack',
     task({ ...runs(RESTACK), pr_number: 12, code_changed: true }),
-    facts({ outcome: 'no_new_pr', newWork: false, prKey: null }),
+    facts({ outcome: 'no_new_pr', newWork: false, prKey: null, prFollowed: false }),
   ],
   [
     'repo-less work',
     task({ ...runs(RESEARCH), ...NO_PULL_REQUEST, repo: undefined }),
-    facts({ outcome: 'no_new_pr', newWork: false, coding: false, prKey: null }),
+    facts({ outcome: 'no_new_pr', newWork: false, coding: false, prKey: null, prFollowed: false }),
+  ],
+  ['an integration node', task(INTEGRATION_NODE), facts({ outcome: 'no_new_pr', newWork: false, prKey: null, prFollowed: false })],
+  // New work with a verified pull request like any other, except that the hourly read does not follow it.
+  ['a sub-issue of an orchestration', task(inOrchestration('sub-issue-7')), facts({ prFollowed: false })],
+  [
+    'a sub-issue of an orchestration whose record carries the state of its pull request',
+    task({ ...inOrchestration('sub-issue-7'), ...MERGED, pr_first_review_at: REVIEWED_AT, pr_changes_requested: 2 }),
+    facts({ prFollowed: false }),
   ],
   [
-    'an integration node',
-    task({ channel_source: 'linear', channel_metadata: { orchestration_sub_issue_id: `orch-1${INTEGRATION_NODE_SUFFIX}` } }),
-    facts({ outcome: 'no_new_pr', newWork: false, prKey: null }),
+    'a sub-issue of an orchestration whose pull request has no passed build',
+    task({ ...inOrchestration('sub-issue-7'), build_passed: false, pr_state: 'open' }),
+    facts({ outcome: 'unverified_pr', prFollowed: false }),
+  ],
+  // The two keys travel together. The id is the one that counts: it is what the consumer of the table's stream goes by.
+  [
+    'a record that names a node and no orchestration',
+    task({ channel_metadata: { orchestration_sub_issue_id: 'sub-issue-7' }, pr_state: 'open' }),
+    facts({ prState: 'open' }),
   ],
   [
-    'a sub-issue of an orchestration',
-    task({ channel_source: 'linear', channel_metadata: { orchestration_sub_issue_id: 'sub-issue-7' } }),
-    VERIFIED,
+    'a record that names an orchestration and no node',
+    task({ channel_metadata: { orchestration_id: 'orch_1' }, pr_state: 'open' }),
+    facts({ prFollowed: false }),
+  ],
+  // The consumer takes any text for an id, and nothing else.
+  ['an orchestration id of white space', task({ channel_metadata: { orchestration_id: '  ' }, pr_state: 'open' }), facts({ prFollowed: false })],
+  ['an empty orchestration id', task({ channel_metadata: { orchestration_id: '' }, pr_state: 'open' }), facts({ prState: 'open' })],
+  [
+    'an orchestration id that is not text',
+    task({ channel_metadata: { orchestration_id: 7 as unknown as string }, pr_state: 'open' }),
+    facts({ prState: 'open' }),
+  ],
+  // The consumer looks at the top level of the record first, where no writer puts the id today.
+  ['an orchestration id at the top level of the record only', task({ orchestration_id: 'orch_1', pr_state: 'open' }), facts({ prFollowed: false })],
+  [
+    // Text is what the consumer takes from either place: it goes on to the metadata.
+    'a top-level orchestration id that is not text, beside the id in the metadata',
+    task({ ...inOrchestration('sub-issue-7'), orchestration_id: 7 as unknown as string, pr_state: 'open' }),
+    facts({ prFollowed: false }),
+  ],
+  [
+    // The consumer stops at the first text it finds, takes an empty one for no id and passes the record by.
+    'an empty top-level orchestration id, beside the id in the metadata',
+    task({ ...inOrchestration('sub-issue-7'), orchestration_id: '', pr_state: 'open' }),
+    facts({ prState: 'open' }),
   ],
   [
     'a task a person cancelled',
     task({ status: TaskStatus.CANCELLED, ...NO_PULL_REQUEST, cost_usd: undefined }),
-    facts({ outcome: 'cancelled', costUsd: null, touchpoints: touchpoints({ cancel: 1 }), prKey: null }),
+    facts({ outcome: 'cancelled', costUsd: null, touchpoints: touchpoints({ cancel: 1 }), prKey: null, prFollowed: false }),
   ],
   [
     'an upload window that expired',
     task({ status: TaskStatus.CANCELLED, ...NEVER_RAN, error_message: 'Upload window expired (30 minutes). Please re-submit the task.' }),
-    facts({ outcome: 'cancelled', ran: false, waitS: null, costUsd: null, prKey: null }),
+    facts({ outcome: 'cancelled', ran: false, waitS: null, costUsd: null, prKey: null, prFollowed: false }),
   ],
   [
     'a task that ran out of time',
     task({ status: TaskStatus.TIMED_OUT, ...NO_PULL_REQUEST, cost_usd: undefined, error_message: 'Orchestrator poll timeout exceeded' }),
-    facts({ outcome: 'timed_out', costUsd: null, prKey: null }),
+    facts({ outcome: 'timed_out', costUsd: null, prKey: null, prFollowed: false }),
   ],
   [
     'content blocked by a guardrail',
     task({ status: TaskStatus.FAILED, ...NEVER_RAN, error_message: `Hydration failed: Error: ${GUARDRAIL_BLOCKED}` }),
-    facts({ outcome: 'failed', ran: false, waitS: null, costUsd: null, guardrailStop: true, prKey: null }),
+    facts({ outcome: 'failed', ran: false, waitS: null, costUsd: null, guardrailStop: true, prKey: null, prFollowed: false }),
   ],
   ['a task started with blanket approval', task({ initial_approvals: ['all_session'] }), facts({ blanketApproval: true })],
   ['approvals granted in advance for some actions only', task({ initial_approvals: ['tool_type_session', 'bash_pattern:git push*'] }), VERIFIED],
@@ -259,16 +318,25 @@ const SHAPES: readonly (readonly [string, TaskRecord, TaskFacts])[] = [
   [
     'a task cancelled while it waited in the queue',
     task({ status: TaskStatus.CANCELLED, ...NEVER_RAN, queued_at: '2026-11-18T10:00:01.000Z' }),
-    facts({ outcome: 'cancelled', ran: false, queued: true, waitS: null, costUsd: null, touchpoints: touchpoints({ cancel: 1 }), prKey: null }),
+    facts({
+      outcome: 'cancelled',
+      ran: false,
+      queued: true,
+      waitS: null,
+      costUsd: null,
+      touchpoints: touchpoints({ cancel: 1 }),
+      prKey: null,
+      prFollowed: false,
+    }),
   ],
   [
     'a session that never started',
     task({ status: TaskStatus.FAILED, ...NEVER_RAN, error_message: 'Session start failed: ThrottlingException: Rate exceeded' }),
-    facts({ outcome: 'failed', ran: false, waitS: null, costUsd: null, prKey: null }),
+    facts({ outcome: 'failed', ran: false, waitS: null, costUsd: null, prKey: null, prFollowed: false }),
   ],
   ['a pull request URL that names no number', task({ pr_url: 'https://github.com/Owner/Repo/tree/bgagent/task-1' }), facts({ prKey: null })],
-  ['a pull request URL of white space', task({ pr_url: '  ' }), facts({ outcome: 'no_new_pr', prKey: null })],
-  ['a pull request URL that is not text', task({ pr_url: 12 as unknown as string }), facts({ outcome: 'no_new_pr', prKey: null })],
+  ['a pull request URL of white space', task({ pr_url: '  ' }), facts({ outcome: 'no_new_pr', prKey: null, prFollowed: false })],
+  ['a pull request URL that is not text', task({ pr_url: 12 as unknown as string }), facts({ outcome: 'no_new_pr', prKey: null, prFollowed: false })],
   ['a pull request without a repository', task({ repo: undefined }), facts({ prKey: null })],
   [
     'no completed_at',
@@ -284,6 +352,73 @@ const SHAPES: readonly (readonly [string, TaskRecord, TaskFacts])[] = [
   ['no created_at', task({ created_at: undefined }), facts({ leadTimeS: null, waitS: null })],
   ['a creation time after the finish', task({ created_at: '2026-11-18T10:30:00.000Z' }), facts({ leadTimeS: null, waitS: null })],
   ['a record without the workflow pin', task({ resolved_workflow: undefined, workflow_ref: `${CODING_WORKFLOW_ID}@1.0.0` }), VERIFIED],
+  ['a pull request found open', task({ pr_state: 'open' }), facts({ prState: 'open' })],
+  ['a pull request merged without a review', task(MERGED), MERGED_FACTS],
+  [
+    'a pull request merged after a review and a change request',
+    task({ ...MERGED, pr_first_review_at: REVIEWED_AT, pr_changes_requested: 1 }),
+    facts({ ...MERGED_FACTS, firstReviewS: 21600, changesRequested: 1 }),
+  ],
+  [
+    'a pull request closed without a merge',
+    task({ ...MERGED, pr_state: 'closed', pr_first_review_at: REVIEWED_AT }),
+    facts({ prState: 'closed', prClosedAtMs: MERGED_FACTS.prClosedAtMs, firstReviewS: 21600 }),
+  ],
+  [
+    // The pull request is open before its task finishes: the review waited for nothing.
+    'a review four minutes before the task finished',
+    task({ ...MERGED, pr_first_review_at: '2026-11-18T10:20:00Z' }),
+    facts({ ...MERGED_FACTS, firstReviewS: 0 }),
+  ],
+  ['a review time that is not a time', task({ ...MERGED, pr_first_review_at: 'none' }), MERGED_FACTS],
+  [
+    'a review of a pull request whose task has no finish time',
+    task({ ...MERGED, pr_first_review_at: REVIEWED_AT, completed_at: undefined, updated_at: undefined }),
+    facts({ ...MERGED_FACTS, finishedAtMs: NaN, leadTimeS: null }),
+  ],
+  ['a merge time that is not a time', task({ ...MERGED, pr_closed_at: 'soon' }), facts({ prState: 'merged' })],
+  ['a merged pull request without a merge time', task({ ...MERGED, pr_closed_at: undefined }), facts({ prState: 'merged' })],
+  [
+    'a merge dated before the task was created',
+    task({ ...MERGED, pr_closed_at: '2026-11-18T09:00:00Z' }),
+    facts({ prState: 'merged', prClosedAtMs: Date.parse('2026-11-18T09:00:00.000Z') }),
+  ],
+  [
+    'a merged pull request of a task without a creation time',
+    task({ ...MERGED, created_at: undefined }),
+    facts({ ...MERGED_FACTS, leadTimeS: null, waitS: null, timeToMergeS: null }),
+  ],
+  ['a state that no read records', task({ pr_state: 'draft' as 'open' }), VERIFIED],
+  ['a state that is not text', task({ pr_state: ['merged'] as unknown as 'merged' }), VERIFIED],
+  [
+    'change requests stored as a string',
+    task({ ...MERGED, pr_changes_requested: '2' as unknown as number }),
+    facts({ ...MERGED_FACTS, changesRequested: 2 }),
+  ],
+  ['change requests that are not a number', task({ ...MERGED, pr_changes_requested: 'some' as unknown as number }), MERGED_FACTS],
+  ['a count of change requests below zero', task({ ...MERGED, pr_changes_requested: -1 }), MERGED_FACTS],
+  ['a merged pull request without a count of change requests', task({ ...MERGED, pr_changes_requested: undefined }), MERGED_FACTS],
+  [
+    'pull-request fields of the wrong type',
+    task({ ...MERGED, pr_closed_at: 2026, pr_first_review_at: 2027, pr_changes_requested: {} } as unknown as Partial<TaskRecord>),
+    facts({ prState: 'merged' }),
+  ],
+  // A task that opened no new pull request has no pull-request facts, whatever its record carries.
+  [
+    'a failed task whose pull request was merged since',
+    task({ status: TaskStatus.FAILED, error_message: 'Post-run build failed', ...MERGED, pr_first_review_at: REVIEWED_AT, pr_changes_requested: 2 }),
+    facts({ outcome: 'failed', prKey: null, prFollowed: false }),
+  ],
+  [
+    'a follow-up whose record carries the state of the pull request',
+    iteration({ ...MERGED, pr_first_review_at: REVIEWED_AT, pr_changes_requested: 2 }),
+    facts({ outcome: 'no_new_pr', newWork: false, touchpoints: touchpoints({ follow_up: 1 }), reworks: true, prFollowed: false }),
+  ],
+  [
+    'an integration node whose record carries the state of its pull request',
+    task({ ...INTEGRATION_NODE, ...MERGED, pr_first_review_at: REVIEWED_AT }),
+    facts({ outcome: 'no_new_pr', newWork: false, prKey: null, prFollowed: false }),
+  ],
 ];
 
 describe('taskFacts', () => {
@@ -354,6 +489,12 @@ describe('taskFacts', () => {
       blanketApproval: false,
       prKey: null,
       reworks: false,
+      prFollowed: false,
+      prState: null,
+      prClosedAtMs: null,
+      timeToMergeS: null,
+      firstReviewS: null,
+      changesRequested: 0,
     });
   });
 
@@ -365,6 +506,7 @@ describe('taskFacts', () => {
       resolved_workflow: CODING_WORKFLOW_ID,
       workflow_ref: 7,
       channel_metadata: 'linear',
+      orchestration_id: 7,
       // As strings these two would parse as years.
       created_at: 2025,
       updated_at: 2026,
@@ -373,6 +515,10 @@ describe('taskFacts', () => {
       completed_at: null,
       pr_url: 12,
       pr_number: '12',
+      pr_state: 1,
+      pr_closed_at: 2026,
+      pr_first_review_at: 2027,
+      pr_changes_requested: 'some',
       build_passed: 'true',
       code_changed: 'false',
       answer_text: 9,
@@ -394,7 +540,8 @@ describe('SCOREBOARD_TASK_FIELDS', () => {
     repo: task(),
     resolved_workflow: task({ workflow_ref: undefined }),
     workflow_ref: task({ resolved_workflow: undefined }),
-    channel_metadata: task({ channel_metadata: { orchestration_sub_issue_id: `orch-1${INTEGRATION_NODE_SUFFIX}` } }),
+    channel_metadata: task(INTEGRATION_NODE),
+    orchestration_id: task({ orchestration_id: 'orch_1' }),
     created_at: task(),
     updated_at: task({ completed_at: undefined }),
     queued_at: task({ queued_at: '2026-11-18T10:00:01.000Z' }),
@@ -402,6 +549,10 @@ describe('SCOREBOARD_TASK_FIELDS', () => {
     completed_at: task({ updated_at: '2026-11-18T11:00:00.000Z' }),
     pr_url: task(),
     pr_number: iteration({ pr_url: undefined }),
+    pr_state: task({ pr_state: 'open' }),
+    pr_closed_at: task(MERGED),
+    pr_first_review_at: task({ ...MERGED, pr_first_review_at: REVIEWED_AT }),
+    pr_changes_requested: task({ ...MERGED, pr_changes_requested: 1 }),
     build_passed: task(),
     code_changed: iteration({ code_changed: false }),
     answer_text: task({ ...NO_PULL_REQUEST, code_changed: false, answer_text: 'Which environment?' }),
@@ -464,6 +615,15 @@ function finished(id: string, days: number, overrides: Partial<TaskRecord> = {})
 const followUp = (id: string, days: number, number: number, overrides: Partial<TaskRecord> = {}): TaskRecord =>
   finished(id, days, { ...runs(PR_ITERATION), pr_number: number, pr_url: pullRequest(number), code_changed: true, ...overrides });
 
+/** What the hourly read of GitHub records on a task when it finds its pull request merged at `at`, or closed. */
+const mergedAt = (at: string, overrides: Partial<TaskRecord> = {}): Partial<TaskRecord> =>
+  ({ pr_state: 'merged', pr_closed_at: at, pr_changes_requested: 0, ...overrides });
+const closedAt = (at: string, overrides: Partial<TaskRecord> = {}): Partial<TaskRecord> =>
+  ({ pr_state: 'closed', pr_closed_at: at, pr_changes_requested: 0, ...overrides });
+/** What it records the first time it finds the pull request open. */
+const FOUND_OPEN: Partial<TaskRecord> = { pr_state: 'open' };
+const NO_PULL_REQUESTS = { merged: 0, closed: 0, open: 0, unread: 0 };
+
 const emptyPeriod = (from: string, to: string): ScoreboardPeriod => ({
   from,
   to,
@@ -481,6 +641,10 @@ const emptyPeriod = (from: string, to: string): ScoreboardPeriod => ({
   guardrail_stops: { count: 0, task_ids: [] },
   blanket_approvals: { count: 0, task_ids: [] },
   gated: { count: 0, total: 0 },
+  pull_requests: NO_PULL_REQUESTS,
+  merged_clean: { count: 0, total: 0 },
+  time_to_merge_s: null,
+  first_review_s: null,
 });
 
 /**
@@ -537,12 +701,7 @@ const WEEK: readonly TaskRecord[] = [
     created_at: before(6, 600),
     started_at: before(6, 580),
   }),
-  finished('n1', 4, {
-    pr_url: pullRequest(6),
-    cost_usd: '0.75',
-    channel_source: 'linear',
-    channel_metadata: { orchestration_sub_issue_id: `orch-1${INTEGRATION_NODE_SUFFIX}` },
-  }),
+  finished('n1', 4, { pr_url: pullRequest(6), cost_usd: '0.75', ...INTEGRATION_NODE }),
   finished('s1', 4, { ...runs(RESTACK), pr_number: 7, pr_url: pullRequest(7), code_changed: true, cost_usd: '0.4' }),
 ];
 
@@ -582,8 +741,15 @@ describe('buildScoreboard', () => {
         guardrail_stops: { count: 1, task_ids: ['g1'] },
         blanket_approvals: { count: 1, task_ids: ['b1'] },
         gated: { count: 1, total: 12 },
+        // The pull requests of v1, v2, u1 and b1. No read of GitHub has recorded anything about them.
+        pull_requests: { merged: 0, closed: 0, open: 0, unread: 4 },
+        merged_clean: { count: 0, total: 0 },
+        time_to_merge_s: null,
+        first_review_s: null,
       },
       previous: emptyPeriod('2026-11-05T12:00:00.000Z', '2026-11-12T12:00:00.000Z'),
+      // No pull request of the two weeks is 7 days old: none can have been open that long.
+      open_over_7d: { count: 0, task_ids: [] },
     });
   });
 
@@ -654,6 +820,7 @@ describe('buildScoreboard', () => {
       untouched: { count: 1, total: 2 },
       spend_usd: 3,
       gated: { count: 0, total: 2 },
+      pull_requests: { merged: 0, closed: 0, open: 0, unread: 2 },
     });
     expect(board.current).toMatchObject({ finished: 1, spend_usd: 8 });
   });
@@ -822,12 +989,275 @@ describe('buildScoreboard', () => {
     expect(blanket_approvals).toEqual(guardrail_stops);
   });
 
+  describe('pull-request outcomes', () => {
+    test('counts each new pull request of a period in the state it had at the period\'s end', () => {
+      const board = buildScoreboard([
+        // This week.
+        finished('m1', 5, { pr_url: pullRequest(1), ...mergedAt(before(4)) }),
+        finished('m2', 6, { pr_url: pullRequest(2), ...mergedAt(before(2), { pr_first_review_at: before(5), pr_changes_requested: 1 }) }),
+        finished('c1', 3, { pr_url: pullRequest(3), ...closedAt(before(2)) }),
+        finished('o1', 2, { pr_url: pullRequest(4), ...FOUND_OPEN }),
+        finished('n1', 1, { pr_url: pullRequest(5), build_passed: false }),
+        // The week before.
+        finished('p1', 12, { pr_url: pullRequest(6), ...mergedAt(before(10)) }),
+        // Merged and closed since that week ended: both were open when it did.
+        finished('p2', 9, { pr_url: pullRequest(7), ...mergedAt(before(3)) }),
+        finished('p3', 13, { pr_url: pullRequest(8), ...closedAt(before(1)) }),
+        finished('p4', 8, { pr_url: pullRequest(9) }),
+        finished('p5', 11, { pr_url: pullRequest(10), ...FOUND_OPEN }),
+      ], '7d', NOW);
+
+      expect(board.current).toMatchObject({
+        outcomes: { verified_pr: 4, unverified_pr: 1 },
+        pull_requests: { merged: 2, closed: 1, open: 1, unread: 1 },
+        // A reviewer sent m2 back.
+        merged_clean: { count: 1, total: 2 },
+        // One day and four days after the finish of tasks that took 24 minutes.
+        time_to_merge_s: { p50: 87840, p90: 347040, count: 2 },
+        // m2, a day after its task finished. Nobody reviewed m1.
+        first_review_s: { p50: 86400, p90: 86400, count: 1 },
+      });
+      expect(board.previous).toMatchObject({
+        outcomes: { verified_pr: 5, unverified_pr: 0 },
+        pull_requests: { merged: 1, closed: 0, open: 3, unread: 1 },
+        merged_clean: { count: 1, total: 1 },
+        time_to_merge_s: { p50: 174240, p90: 174240, count: 1 },
+        first_review_s: null,
+      });
+      // Of the five whose task finished more than 7 days ago, p5 is the one that is open today.
+      expect(board.open_over_7d).toEqual({ count: 1, task_ids: ['p5'] });
+    });
+
+    test.each([
+      ['was never read', 'unread', {}],
+      ['was found open', 'open', FOUND_OPEN],
+      ['was merged a millisecond before that end', 'merged', mergedAt(before(7, 0.001))],
+      ['was closed a millisecond before that end', 'closed', closedAt(before(7, 0.001))],
+      ['was merged at that very end', 'open', mergedAt(before(7))],
+      ['was merged in the period after', 'open', mergedAt(before(3))],
+      ['was closed in the period after', 'open', closedAt(before(3))],
+      // A time that cannot be read is before no end.
+      ['is merged at a time that cannot be read', 'open', mergedAt('soon')],
+    ])('a pull request of the earlier period that %s counts there as %s', (_what, state, recorded) => {
+      const board = buildScoreboard([finished('p', 10, recorded)], '7d', NOW);
+
+      expect(board.previous?.pull_requests).toEqual({ ...NO_PULL_REQUESTS, [state]: 1 });
+      expect(board.current.pull_requests).toEqual(NO_PULL_REQUESTS);
+    });
+
+    // The current period has no end to judge by: it counts what the last read recorded.
+    test.each([
+      ['was never read', 'unread', {}],
+      ['was found open', 'open', FOUND_OPEN],
+      ['was merged', 'merged', mergedAt(before(1))],
+      ['was closed', 'closed', closedAt(before(1))],
+      ['was merged at a time ahead of the clock', 'merged', mergedAt(before(-0.01))],
+    ])('a pull request of the current period that %s counts as %s', (_what, state, recorded) => {
+      const board = buildScoreboard([finished('p', 2, recorded)], '7d', NOW);
+
+      expect(board.current.pull_requests).toEqual({ ...NO_PULL_REQUESTS, [state]: 1 });
+    });
+
+    test('a merge after the end of the earlier period counts in neither period, and in the current period of a range that holds its task', () => {
+      const tasks = [finished('p', 10, mergedAt(before(3)))];
+      const week = buildScoreboard(tasks, '7d', NOW);
+      const month = buildScoreboard(tasks, '30d', NOW);
+
+      expect(week.previous).toMatchObject({ pull_requests: { ...NO_PULL_REQUESTS, open: 1 }, merged_clean: { count: 0, total: 0 }, time_to_merge_s: null });
+      expect(week.current).toMatchObject({ pull_requests: NO_PULL_REQUESTS, merged_clean: { count: 0, total: 0 }, time_to_merge_s: null });
+      expect(month.current).toMatchObject({
+        pull_requests: { ...NO_PULL_REQUESTS, merged: 1 },
+        merged_clean: { count: 1, total: 1 },
+        // Seven days after the finish of a task that took 24 minutes.
+        time_to_merge_s: { p50: 606240, p90: 606240, count: 1 },
+      });
+    });
+
+    test('has no share, no time and no count of the open ones while no pull request has been read', () => {
+      const board = buildScoreboard([
+        finished('n1', 1, { pr_url: pullRequest(1) }),
+        finished('n2', 3, { pr_url: pullRequest(2), build_passed: false }),
+        finished('n3', 10, { pr_url: pullRequest(3) }),
+      ], '7d', NOW);
+
+      expect(board.current).toMatchObject({
+        pull_requests: { ...NO_PULL_REQUESTS, unread: 2 },
+        merged_clean: { count: 0, total: 0 },
+        time_to_merge_s: null,
+        first_review_s: null,
+      });
+      expect(board.previous?.pull_requests).toEqual({ ...NO_PULL_REQUESTS, unread: 1 });
+      // n3 finished 10 days ago, and nothing says whether its pull request is open.
+      expect(board.open_over_7d).toBeNull();
+    });
+
+    /** The pull-request numbers of a period that has no followed pull request. */
+    const NONE_FOLLOWED = { pull_requests: NO_PULL_REQUESTS, merged_clean: { count: 0, total: 0 }, time_to_merge_s: null, first_review_s: null };
+
+    test('leaves out the pull request of a task that did not end in one, whatever its record carries', () => {
+      const board = buildScoreboard([FOUND_OPEN, mergedAt(before(8), { pr_first_review_at: before(9) })].flatMap((recorded, index) => [
+        finished(`failed-${index}`, 10, { status: TaskStatus.FAILED, pr_url: pullRequest(1), ...recorded }),
+        followUp(`follow-up-${index}`, 10, 2, recorded),
+        finished(`integration-${index}`, 10, { ...INTEGRATION_NODE, ...recorded }),
+      ]), '7d', NOW);
+
+      // Merged, they would count in the earlier period.
+      expect(board.previous).toMatchObject({ finished: 6, ...NONE_FOLLOWED });
+      expect(board.current).toMatchObject({ finished: 0, ...NONE_FOLLOWED });
+      // Open, they would be listed. None of them is a pull request that could be read: the count is a known 0.
+      expect(board.open_over_7d).toEqual({ count: 0, task_ids: [] });
+    });
+
+    test('leaves the pull request of an orchestration\'s task out of every pull-request number, and counts its task like any other', () => {
+      const board = buildScoreboard([
+        finished('open', 10, { ...inOrchestration('sub-issue-1'), pr_url: pullRequest(1), ...FOUND_OPEN }),
+        finished('merged', 10, { ...inOrchestration('sub-issue-2'), pr_url: pullRequest(2), ...mergedAt(before(8), { pr_first_review_at: before(9) }) }),
+        finished('never-read', 10, { ...inOrchestration('sub-issue-3'), pr_url: pullRequest(3), build_passed: false }),
+        followUp('r', 9, 1),
+      ], '7d', NOW);
+
+      expect(board.previous).toMatchObject({
+        finished: 4,
+        outcomes: { verified_pr: 2, unverified_pr: 1, no_new_pr: 1 },
+        verified: { count: 2, total: 3 },
+        // The follow-up changed the first of the three.
+        not_reworked: { count: 2, total: 3 },
+        ...NONE_FOLLOWED,
+      });
+      // A pull request that is not followed is not one that waits to be read: the count is a known 0.
+      expect(board.open_over_7d).toEqual({ count: 0, task_ids: [] });
+    });
+
+    test.each([
+      ['nothing before the merge', 1, {}, []],
+      ['a change request by a reviewer', 0, { pr_changes_requested: 1 }, []],
+      ['a follow-up that changed it before the merge', 0, {}, [followUp('r', 3, 1)]],
+      ['a follow-up that changed it after the merge', 1, {}, [followUp('r', 1, 1)]],
+      ['a follow-up that finished at the very time of the merge', 1, {}, [followUp('r', 2, 1)]],
+      ['a follow-up that only answered a question', 1, {}, [followUp('r', 3, 1, { code_changed: false, answer_text: 'It retries three times.' })]],
+      ['a follow-up that changed another pull request', 1, {}, [followUp('r', 3, 2)]],
+    ])('a merged pull request with %s: %s of 1 merged without being sent back', (_what, clean, recorded, others) => {
+      const board = buildScoreboard([
+        finished('p', 5, { pr_url: pullRequest(1), ...mergedAt(before(2), recorded) }),
+        ...others,
+      ], '7d', NOW);
+
+      expect(board.current.merged_clean).toEqual({ count: clean, total: 1 });
+    });
+
+    test('a merged pull request whose number is not known counts by its change requests alone', () => {
+      const unnumbered = 'https://github.com/Owner/Repo/tree/main';
+      const board = buildScoreboard([
+        finished('no-change-request', 5, { pr_url: unnumbered, ...mergedAt(before(2)) }),
+        finished('change-request', 5, { pr_url: unnumbered, ...mergedAt(before(2), { pr_changes_requested: 1 }) }),
+        // Nothing ties a follow-up to either of them.
+        followUp('r', 3, 1),
+      ], '7d', NOW);
+
+      expect(board.current.merged_clean).toEqual({ count: 1, total: 2 });
+    });
+
+    test('measures the time to merge from the creation of the task, over the pull requests that are merged', () => {
+      const board = buildScoreboard([
+        // Both tasks took 600 seconds: merged 1,000 seconds and two days after they finished.
+        finished('soon', 3, { pr_url: pullRequest(1), created_at: before(3, 600), ...mergedAt(before(3, -1000)) }),
+        finished('later', 3, { pr_url: pullRequest(2), created_at: before(3, 600), ...mergedAt(before(1)) }),
+        finished('no-creation-time', 3, { pr_url: pullRequest(3), created_at: undefined, ...mergedAt(before(1)) }),
+        finished('closed', 3, { pr_url: pullRequest(4), created_at: before(3, 600), ...closedAt(before(1)) }),
+        finished('open', 3, { pr_url: pullRequest(5), created_at: before(3, 600), ...FOUND_OPEN }),
+      ], '7d', NOW);
+
+      expect(board.current.time_to_merge_s).toEqual({ p50: 1600, p90: 173400, count: 2 });
+      expect(board.current.pull_requests).toEqual({ merged: 3, closed: 1, open: 1, unread: 0 });
+    });
+
+    test('measures the first review from the end of the task, over the merged pull requests that had one', () => {
+      const board = buildScoreboard([
+        finished('reviewed', 5, { pr_url: pullRequest(1), ...mergedAt(before(2), { pr_first_review_at: before(5, -21600) }) }),
+        // A review while the task was still running waited for nothing, and it is still a review.
+        finished('reviewed-early', 5, { pr_url: pullRequest(2), ...mergedAt(before(2), { pr_first_review_at: before(5, 60) }) }),
+        finished('not-reviewed', 5, { pr_url: pullRequest(3), ...mergedAt(before(2)) }),
+        finished('closed', 5, { pr_url: pullRequest(4), ...closedAt(before(2), { pr_first_review_at: before(4) }) }),
+      ], '7d', NOW);
+
+      expect(board.current.first_review_s).toEqual({ p50: 0, p90: 21600, count: 2 });
+    });
+
+    // A number of the response, not of a period: in the 7-day range no task of the current period
+    // is 7 days old, so the count rests on the tasks of both periods.
+    describe('open for more than 7 days', () => {
+      test.each([
+        ['7d', 10],
+        ['30d', 31],
+      ] as const)('lists, in the %s range, a pull request that is open %s days after its task finished', (range, days) => {
+        const board = buildScoreboard([finished('waiting', days, FOUND_OPEN)], range, NOW);
+
+        expect(board.open_over_7d).toEqual({ count: 1, task_ids: ['waiting'] });
+        expect(board.current.pull_requests).toEqual(NO_PULL_REQUESTS);
+      });
+
+      test.each([
+        ['was merged on its eighth day', mergedAt(before(2))],
+        ['was closed on its eighth day', closedAt(before(2))],
+        ['was merged at a time ahead of the clock', mergedAt(before(-0.01))],
+        // Open at a period's end, because the merge is before no end; not open at the last read.
+        ['is merged at a time that cannot be read', mergedAt('soon')],
+      ])('does not list a pull request that %s', (_what, recorded) => {
+        expect(buildScoreboard([finished('p', 10, recorded)], '7d', NOW).open_over_7d).toEqual({ count: 0, task_ids: [] });
+      });
+
+      test.each([
+        ['7 days before now', 0, before(7)],
+        ['a millisecond more than 7 days before now', 1, before(7, 0.001)],
+        ['at the start of the earlier period', 1, before(14)],
+        // Whatever the read returned: the pull request is not one of the two periods.
+        ['a millisecond before the earlier period', 0, before(14, 0.001)],
+      ])('counts an open pull request whose task finished %s: %s', (_when, count, stamp) => {
+        const waiting = finished('p', 0, { created_at: before(20), completed_at: stamp, updated_at: stamp, ...FOUND_OPEN });
+
+        expect(buildScoreboard([waiting], '7d', NOW).open_over_7d).toMatchObject({ count });
+      });
+
+      // Not read is not "not open": with nothing read among the pull requests old enough to
+      // count, how many are open is not known.
+      test.each([
+        ['one pull request old enough, never read', null, [finished('never-read', 10)]],
+        ['one old enough and never read, and a younger one found open', null, [finished('never-read', 10), finished('young', 2, FOUND_OPEN)]],
+        [
+          'two old enough, one of them found open',
+          { count: 1, task_ids: ['open'] },
+          [finished('never-read', 12), finished('open', 10, FOUND_OPEN)],
+        ],
+        [
+          'two old enough, one of them merged',
+          { count: 0, task_ids: [] },
+          [finished('never-read', 12), finished('merged', 10, mergedAt(before(9)))],
+        ],
+        ['no pull request old enough', { count: 0, task_ids: [] }, [finished('young', 2), finished('younger', 1, FOUND_OPEN)]],
+        ['one never read whose task finished before the earlier period', { count: 0, task_ids: [] }, [finished('before', 15)]],
+      ])('with %s, the count is %j', (_what, expected, tasks) => {
+        expect(buildScoreboard(tasks, '7d', NOW).open_over_7d).toEqual(expected);
+      });
+
+      test('lists the ten that have waited longest, oldest first', () => {
+        const order = [15, 21, 12, 18, 10, 19, 13, 17, 11, 20, 16, 14];
+        const waiting = order.map((days) => finished(`w${days}`, days, FOUND_OPEN));
+
+        expect(buildScoreboard(waiting, '30d', NOW).open_over_7d).toEqual({
+          count: 12,
+          task_ids: ['w21', 'w20', 'w19', 'w18', 'w17', 'w16', 'w15', 'w14', 'w13', 'w12'],
+        });
+      });
+    });
+  });
+
   describe('a read that was cut', () => {
     const tasks = [
       finished('day-1', 1, { pr_url: pullRequest(1) }),
       finished('day-4', 4, { pr_url: pullRequest(2) }),
       finished('day-6', 6, { pr_url: pullRequest(3) }),
-      finished('day-9', 9, { pr_url: pullRequest(4) }),
+      // Its pull request has been open for more than 7 days.
+      finished('day-9', 9, { pr_url: pullRequest(4), ...FOUND_OPEN }),
     ];
 
     test.each([
@@ -839,9 +1269,12 @@ describe('buildScoreboard', () => {
       expect(board.truncated).toBe(false);
       expect([board.current.from, board.current.finished]).toEqual(['2026-11-12T12:00:00.000Z', 3]);
       expect([board.previous?.from, board.previous?.finished]).toEqual(['2026-11-05T12:00:00.000Z', 1]);
+      expect(board.open_over_7d).toEqual({ count: 1, task_ids: ['day-9'] });
     });
 
     // The current period is whole: only the comparison is missing, and nothing is truncated.
+    // The pull requests open for more than 7 days are those of the earlier period's tasks: a
+    // read that did not reach its start would leave some of them out, so it reports no count.
     test.each([
       ['a millisecond into the previous period', new Date(before(14, -0.001))],
       ['in the middle of the previous period', new Date(before(10))],
@@ -851,6 +1284,7 @@ describe('buildScoreboard', () => {
       expect(board.truncated).toBe(false);
       expect(board.previous).toBeNull();
       expect([board.current.from, board.current.finished]).toEqual(['2026-11-12T12:00:00.000Z', 3]);
+      expect(board.open_over_7d).toBeNull();
     });
 
     test.each([
@@ -862,6 +1296,7 @@ describe('buildScoreboard', () => {
       expect(board.previous).toBeNull();
       expect([board.current.from, board.current.to, board.current.finished]).toEqual([from, '2026-11-19T12:00:00.000Z', counted]);
       expect(board.current.verified).toEqual({ count: counted, total: counted });
+      expect(board.open_over_7d).toBeNull();
     });
   });
 });
@@ -957,7 +1392,7 @@ describe('taskMetricLine', () => {
   });
 
   test('leaves out the plain fields it was not given, and the wait of a task that never started', () => {
-    const neverStarted = facts({ outcome: 'failed', ran: false, waitS: null, costUsd: null, prKey: null });
+    const neverStarted = facts({ outcome: 'failed', ran: false, waitS: null, costUsd: null, prKey: null, prFollowed: false });
     const line = JSON.parse(taskMetricLine(neverStarted, {}, NOW.getTime())) as MetricLine;
 
     expect(Object.keys(line).sort()).toEqual([
@@ -1000,7 +1435,7 @@ describe('taskMetricLine', () => {
     ['a pull request without a passed build', task({ build_passed: false }), 0],
     ['new work that failed', task({ status: TaskStatus.FAILED, ...NO_PULL_REQUEST }), 0],
     ['a follow-up', iteration(), undefined],
-    ['an integration node', task({ channel_metadata: { orchestration_sub_issue_id: `orch-1${INTEGRATION_NODE_SUFFIX}` } }), undefined],
+    ['an integration node', task(INTEGRATION_NODE), undefined],
     ['a review', task({ ...runs(PR_REVIEW), pr_number: 12 }), undefined],
   ])('UntouchedVerifiedPrs on %s', (_what, record, expected) => {
     const line = lineOf(record);
@@ -1020,6 +1455,75 @@ describe('taskMetricLine', () => {
     ['the given time when the finish time is ahead of it', task({ completed_at: before(-1), updated_at: before(-1) }), NOW.getTime()],
   ])('is stamped with %s', (_what, record, expected) => {
     expect(lineOf(record)._aws.Timestamp).toBe(expected);
+  });
+});
+
+/** The line the hourly read of GitHub writes for a record, parsed back; null when it writes none. */
+function outcomeLineOf(record: TaskRecord): MetricLine | null {
+  const recordFacts = taskFacts(record);
+  if (recordFacts === null) throw new Error(`${record.task_id} is not finished`);
+  const context = { user_id: record.user_id, repo: record.repo, workflow: record.resolved_workflow?.id };
+  const line = prOutcomeMetricLine(recordFacts, context);
+  return line === null ? null : JSON.parse(line) as MetricLine;
+}
+
+describe('prOutcomeMetricLine', () => {
+  test('writes one line of JSON for a merged pull request: two directives, their members, then the plain fields', () => {
+    const line = prOutcomeMetricLine(MERGED_FACTS, { user_id: 'user-1', repo: 'Owner/Repo', workflow: CODING_WORKFLOW_ID });
+
+    expect(line).not.toContain('\n');
+    expect(JSON.parse(line ?? '')).toEqual({
+      _aws: {
+        Timestamp: Date.parse('2026-11-19T10:00:00.000Z'),
+        CloudWatchMetrics: [
+          { Namespace: 'ABCA/Factory', Dimensions: [['PrOutcome']], Metrics: [{ Name: 'PullRequestsResolved', Unit: 'Count' }] },
+          { Namespace: 'ABCA/Factory', Dimensions: [[]], Metrics: [{ Name: 'TimeToMergeSeconds', Unit: 'Seconds' }] },
+        ],
+      },
+      PrOutcome: 'merged',
+      PullRequestsResolved: 1,
+      TimeToMergeSeconds: 86400,
+      task_id: 'task-1',
+      user_id: 'user-1',
+      repo: 'Owner/Repo',
+      workflow: 'coding/new-task-v1',
+    });
+  });
+
+  // A directive without metrics declares nothing: the line carries the one that has its metric.
+  test.each([
+    ['a closed pull request', task({ ...MERGED, pr_state: 'closed' }), 'closed'],
+    ['a merged pull request of a task without a creation time', task({ ...MERGED, created_at: undefined }), 'merged'],
+  ])('%s has no time to merge: the line declares its outcome alone', (_what, record, state) => {
+    const line = outcomeLineOf(record);
+
+    expect(line?._aws.CloudWatchMetrics).toEqual([
+      { Namespace: 'ABCA/Factory', Dimensions: [['PrOutcome']], Metrics: [{ Name: 'PullRequestsResolved', Unit: 'Count' }] },
+    ]);
+    expect(line).toMatchObject({ PrOutcome: state, PullRequestsResolved: 1 });
+    expect(line).not.toHaveProperty('TimeToMergeSeconds');
+  });
+
+  test.each([
+    ['a pull request that no read has recorded', task()],
+    ['a pull request found open', task({ pr_state: 'open' })],
+    // A close time alone is no final state.
+    ['an open pull request whose record carries a close time', task({ ...MERGED, pr_state: 'open' })],
+    ['a close time on a record without a state', task({ ...MERGED, pr_state: undefined })],
+    ['a merge without a time that can be read', task({ ...MERGED, pr_closed_at: 'soon' })],
+    ['a failed task whose record carries a merge', task({ status: TaskStatus.FAILED, ...MERGED })],
+    // Not followed: the hourly read writes nothing on such a record, and no line for it.
+    ['a task of an orchestration whose record carries a merge', task({ ...inOrchestration('sub-issue-7'), ...MERGED })],
+  ])('writes no line for %s', (_what, record) => {
+    expect(outcomeLineOf(record)).toBeNull();
+  });
+
+  // The builder reads no clock: whether CloudWatch still takes a time is for its caller to say.
+  test.each([
+    ['40 days old', before(40)],
+    ['ahead of the clock', before(-1)],
+  ])('is stamped with the time the pull request was merged or closed, even one %s', (_what, stamp) => {
+    expect(outcomeLineOf(task({ ...MERGED, pr_closed_at: stamp }))?._aws.Timestamp).toBe(Date.parse(stamp));
   });
 });
 

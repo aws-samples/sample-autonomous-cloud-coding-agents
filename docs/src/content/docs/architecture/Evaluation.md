@@ -29,7 +29,7 @@ Evaluation consumes the same data that observability and code attribution captur
 | TaskEvents | Audit log: state transitions, step events, guardrail events |
 | Agent logs and traces | CloudWatch logs, X-Ray spans, tool calls, reasoning steps |
 | Code artifacts | PR description, commits, diff, repo/branch/issue links |
-| PR outcome signals | Merged vs. closed-without-merge (via GitHub webhooks). Positive/negative signal on task episodes. |
+| PR outcome signals | Merged vs. closed-without-merge, read from GitHub once an hour and recorded on the task record (see [Pull-request outcomes](/sample-autonomous-cloud-coding-agents/architecture/observability#pull-request-outcomes)). Writing it as a positive/negative signal on task episodes is a later step. |
 | Review feedback | PR review comments captured via the review feedback memory loop (see [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory)) |
 
 ## Agent self-feedback
@@ -57,6 +57,8 @@ The primary measure of memory's value: **does the agent produce better PRs over 
 | Review comment density | Reviewer comments per PR | Decreases over time |
 | Repeated mistakes | Same reviewer feedback across multiple PRs | Drops to zero after feedback loop captures the rule |
 | Time to PR | Duration from task submission to PR creation | Decreases as agent reuses past approaches |
+
+The factory scoreboard has a number close to the first of these, under its own name: "Merged without being sent back" (see [The numbers](/sample-autonomous-cloud-coding-agents/architecture/observability#the-numbers)). For revision cycles it has the raw material only: the number of change requests is recorded for each pull request, and no average of it is shown.
 
 **Repeated mistakes** is the most telling metric. If a reviewer says "don't use `any` types" on PR #10 and the agent repeats it on PR #15, the review feedback memory has failed. Detection requires embedding-based similarity between review comments (simple string matching is insufficient). The review feedback extraction prompt normalizes comments into canonical rule forms, and new comments are compared against stored rules via semantic search.
 
@@ -124,7 +126,7 @@ The combined output of all three tiers is posted to the PR as a structured valid
 
 | Phase | What it adds |
 |-------|-------------|
-| Current | No automated evaluation. Manual inspection of PRs and logs. |
+| Current | No automated evaluation. Manual inspection of PRs and logs. The state of the new pull requests that ABCA follows (merged, closed, still open) is read from GitHub once an hour and shown on the factory scoreboard. |
 | Next | Agent self-feedback. Prompt versioning (hash stored with task records). Tiered validation pipeline (Tiers 1-3). PR risk level and validation reports. |
-| Later | Review feedback memory loop. PR outcome tracking. Failure categorization. Memory effectiveness metrics. |
+| Later | Review feedback memory loop. The rest of PR outcome tracking: an outcome event, and the outcome as a signal on task episodes. Failure categorization. Memory effectiveness metrics. |
 | Future | LLM-based trace analysis. A/B prompt comparison. Learned rules from memory in Tier 2. Historical risk correlation in Tier 3. Risk trending dashboards. |
