@@ -1,5 +1,5 @@
 ---
-title: Approval gates (Cedar HITL)
+title: "Approval gates (Cedar HITL)"
 ---
 
 The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, ...) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly-marked set of rules, the decision is **require-approval**: the agent pauses, the task transitions to `AWAITING_APPROVAL`, and you are asked to make the call.
@@ -59,7 +59,7 @@ The `--scope` flag controls how long the approval carries forward within the run
 | `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
 | `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
 | `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
-| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). |
+| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`tool_group:file_write` covers `Edit` and `Write`). For a tool that is in no group, `tool_group_session` covers that call only. |
 | `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
 | `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
 | `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
@@ -96,12 +96,24 @@ If you trust a task to make a certain class of changes without interactive confi
 ```bash
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
-  --pre-approve write_path:tests/**
+  --pre-approve 'write_path:tests/**'
 
 # Per-task timeout override (platform default is 300s)
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
-`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+`--pre-approve` can be repeated up to 20 times. Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+
+For Lambda MicroVM tasks, a waiting approval can put the worker to sleep so it
+stops billing compute. With the defaults (a 300-second approval window and a
+60-second sleep delay) the worker sleeps after one minute and wakes when you
+answer, or 60 seconds before the deadline so a timeout is still recorded
+normally. `--microvm-sleep-after 120` selects two minutes and
+`--microvm-sleep-after off` keeps the worker awake. The delay starts when each
+approval request is created; sleep never extends the approval deadline. The API
+equivalent is `microvm_sleep_after_s` (zero means off), and task details return
+the saved setting. Automatic sleep is disabled by default for new deployments.
+An operator enables it after [verifying the deployed image and
+coordinator](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md#live-acceptance-for-an-installation).

@@ -19,8 +19,8 @@
 
 import { PutCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
-import { computeTtlEpoch } from './validation';
 import { TaskStatus } from '../../constructs/task-status';
+import { computeTtlEpoch } from './validation';
 
 export interface CancelTaskTables {
   readonly ddb: DynamoDBDocumentClient;

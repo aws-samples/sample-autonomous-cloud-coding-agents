@@ -69,10 +69,35 @@ describe('parseCommentTrigger', () => {
     expect(parseCommentTrigger('email me at foo@bgagent.io').triggered).toBe(false);
   });
 
+  test('a mention that ends a sentence triggers, and its full stop goes with it', () => {
+    expect(parseCommentTrigger('Please rebase this onto main, @bgagent.'))
+      .toEqual({ triggered: true, instruction: 'Please rebase this onto main,' });
+    expect(parseCommentTrigger('Thanks @bgagent. One more thing: fix the flaky test'))
+      .toEqual({ triggered: true, instruction: 'Thanks One more thing: fix the flaky test' });
+    expect(parseCommentTrigger('@bgagent... any update?'))
+      .toEqual({ triggered: true, instruction: 'any update?' });
+    // Alone it is a bare mention: an empty instruction, not the instruction ".".
+    expect(parseCommentTrigger('@bgagent.')).toEqual({ triggered: true, instruction: '' });
+  });
+
   test('multiple mentions are all stripped', () => {
     const t = parseCommentTrigger('@bgagent do X and @bgagent also Y');
     expect(t.triggered).toBe(true);
     expect(t.instruction).toBe('do X and also Y');
+  });
+
+  test('keeps the lines of a multi-line instruction', () => {
+    expect(parseCommentTrigger('@bgagent please:\n- update docs\n- add a test').instruction)
+      .toBe('please:\n- update docs\n- add a test');
+  });
+
+  test('keeps a fenced block and its indentation as the reviewer wrote them', () => {
+    const block = '```yaml\nsteps:\n  - name: build\n    run: make\n```';
+    expect(parseCommentTrigger(`@bgagent replace the step with:\n${block}`).instruction)
+      .toBe(`replace the step with:\n${block}`);
+    // The mention may also close the comment, on a line of its own.
+    expect(parseCommentTrigger(`Replace the step with:\n${block}\n@bgagent`).instruction)
+      .toBe(`Replace the step with:\n${block}`);
   });
 
   // The bot's OWN comments must never re-trigger it, even when (especially
@@ -137,7 +162,7 @@ describe('detectNearMissMention — a wrong-handle mention gets a nudge, not sil
   });
 
   test('a boundary-miss @bgagent handle is a near-miss (parseCommentTrigger deliberately skips it)', () => {
-    // parseCommentTrigger's `@bgagent(?![\w.])` does NOT trigger on these …
+    // parseCommentTrigger's `@bgagent(?!\w|\.\w)` does NOT trigger on these …
     expect(parseCommentTrigger('ping @bgagentbot for help').triggered).toBe(false);
     // … so detectNearMissMention catches them for the nudge instead of a silent drop.
     expect(detectNearMissMention('ping @bgagentbot for help')).toBe(true);

@@ -19,6 +19,7 @@
 
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import { TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
 import { transitionTaskToCancelled, writeTaskCancelledEvent, type CancelTaskTables } from './cancel-task-core';
 import { buildClarifyResumeDescription, isClarifyHold, type ClarifyHoldRow } from './clarify-resume';
 import { createTaskCore } from './create-task-core';
@@ -39,15 +40,15 @@ import {
 import { lookupLinearPlatformUser, vaultMetadata } from './linear-channel-metadata';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { fetchIssueParentId } from './linear-subissue-fetch';
-import { lookupTaskByLinearIssue, prNumberFromTask, type LinearIssueTask } from './linear-task-by-issue';
+import { lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
 import { logger } from './logger';
 import { isLookupFailure, lookupValueOr } from './lookup-result';
 import { submitNudge } from './nudge-core';
 import { deriveOrchestrationId, loadOrchestration } from './orchestration-store';
+import { prNumberFromTask } from './task-pr-number';
 import { NUDGE_MAX_MESSAGE_LENGTH } from './types';
 import { makeDocClient } from './ua';
 import { CODING_WORKFLOW_ID } from './workflows';
-import { TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
 
 const ddb = makeDocClient();
 

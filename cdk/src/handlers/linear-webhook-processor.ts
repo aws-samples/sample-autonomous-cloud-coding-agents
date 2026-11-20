@@ -22,14 +22,16 @@ import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bed
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 import type { ScreeningConfig } from './shared/attachment-screening';
-import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
+import { APPENDED_BLOCK, buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import { AGENT_SESSION_EVENT_TYPE, isLinearAgentSessionsEnabled, type LinearAgentSessionEvent } from './shared/linear-agent-session-event';
 import { handleAgentSessionEvent } from './shared/linear-agent-session-handler';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
 import { lookupLinearPlatformUser, vaultMetadata } from './shared/linear-channel-metadata';
+import { readStartClaim, releaseStartClaim } from './shared/linear-console';
 import {
   deleteComment,
   fetchRecentComments,
@@ -51,7 +53,7 @@ import {
 } from './shared/linear-notes';
 import { resolveLinearOauthToken, resolveSoleActiveLinearWorkspace } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
-import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
+import { lookupTaskByLinearIssue } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
 import { type LookupResult, LOOKUP_ABSENT, isLookupFailure, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
 import { type Channel, type IssueRef } from './shared/orchestration-channel';
@@ -77,20 +79,21 @@ import {
 import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
-import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
-import { readTaskPrNumber } from './shared/task-pr-number';
+import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, refreshUnstartedText, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { prNumberFromTask, readTaskPrNumber } from './shared/task-pr-number';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
-import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = makeDocClient();
 
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+/** Holds console "start" claims (see shared/linear-console.ts); optional so older wiring keeps working. */
+const WEBHOOK_DEDUP_TABLE = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME;
 // Sub-issue orchestration: name of OrchestrationTable. Unset until the
 // orchestration stack is deployed — while unset, the parent/sub-issue path is
 // fully dormant and the handler behaves exactly as one-issue → one-task.
@@ -327,10 +330,11 @@ async function hydrateCommentAttachments(params: {
 }
 
 /**
- * Best-effort cleanup of S3 objects a comment-path hydrate uploaded when the
- * subsequent createTaskCore did NOT mint a fresh task (non-201, incl. a 200
- * idempotent replay) — those objects would otherwise orphan. No-op when there's
- * nothing to clean or storage isn't configured. Never throws.
+ * Best-effort cleanup of S3 objects a hydrate uploaded (on a comment path or the
+ * label path) when the subsequent createTaskCore did NOT mint a fresh task
+ * (non-201, incl. a 200 idempotent replay) — those objects would otherwise
+ * orphan. No-op when there's nothing to clean or storage isn't configured.
+ * Never throws.
  */
 async function cleanupPreScreenedForComment(records: readonly PassedAttachmentRecord[]): Promise<void> {
   if (records.length === 0 || !attachmentsS3Client || !ATTACHMENTS_BUCKET) return;
@@ -538,6 +542,63 @@ async function postIterationAck(
   }
 }
 
+/** What a comment-triggered dispatch posted BEFORE it called createTaskCore. */
+interface CommentAck {
+  readonly channel: Channel;
+  /** The issue the trigger comment lives on. */
+  readonly issue: IssueRef;
+  /** The comment the human wrote; it carries the 👀. */
+  readonly commentId: string;
+  /** The thread root the "On it" reply sits under. */
+  readonly replyTargetId: string;
+  /** The "On it" reply, or null when posting it failed. */
+  readonly replyId: string | null;
+}
+
+/**
+ * Settle the acknowledgement of a comment whose task was NOT created. There is no
+ * task, so neither the fan-out dispatcher nor the heartbeat sweep will ever edit
+ * the "On it" reply: turn it into the reason here (a fresh reply when the
+ * acknowledgement never landed) and swap the comment's 👀 for ❌. ``message`` must
+ * start with a bot marker, like every comment this file posts.
+ */
+async function settleFailedCommentAck(ack: CommentAck, message: string): Promise<void> {
+  await ack.channel.upsertThreadedReply?.(
+    ack.issue, { commentId: ack.replyTargetId }, message,
+    ack.replyId ? { commentId: ack.replyId } : undefined,
+  );
+  await ack.channel.replaceCommentReaction?.({ commentId: ack.commentId }, ack.issue, 'failed');
+}
+
+/**
+ * What the commenter is told when the monthly budget refuses the task. Never
+ * createTaskCore's own text for it: the task of a comment is created as, and
+ * billed to, the user whose work the comment continues (the issue's original
+ * requester, or the epic's release user), who need not be the commenter, and
+ * createTaskCore words the refusal for that user ("Your monthly budget is
+ * exhausted ($X of $Y)") or names one of their teams with its figures.
+ */
+const COMMENT_BUDGET_EXHAUSTED_MESSAGE = '❌ ABCA couldn\'t start this: the monthly budget is exhausted for the user or team '
+  + 'this issue\'s work is billed to. New tasks are disabled until the next UTC month.';
+
+/**
+ * Tell the commenter that createTaskCore did not create the task their comment
+ * asked for. A 200 is not that: it is the idempotent replay of the same comment
+ * (a second run of the delivery), whose task exists and owns the reply. A 429 is
+ * createTaskCore's budget refusal and nothing else.
+ */
+async function reportCommentTaskNotCreated(ack: CommentAck, statusCode: number, rawBody: string): Promise<void> {
+  if (statusCode === 200) return;
+  const message = statusCode === 429
+    ? COMMENT_BUDGET_EXHAUSTED_MESSAGE
+    // Not the label path's hint: re-applying the label would start a new run.
+    : buildCreateTaskFailureMessage(statusCode, rawBody, 'Please re-comment in a few minutes.');
+  await settleFailedCommentAck(ack, message);
+}
+
+/** What the commenter is told when createTaskCore threw: there is no status to translate, and the cause is in the log. */
+const COMMENT_TASK_ERROR_MESSAGE = '❌ ABCA hit an error and couldn\'t start this. Please re-comment in a few minutes.';
+
 async function safeReportIssueFailure(
   issueId: string,
   linearWorkspaceId: string | undefined,
@@ -666,6 +727,7 @@ type BuilderResolvedToken = {
   vaultUserId?: string;
 };
 
+// eslint-disable-next-line complexity -- predates the ceiling (118, down from 120 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Linear webhook processor invoked without raw_body');
@@ -790,14 +852,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // ``<base>:help`` — post a one-time explainer of what the trigger labels do
   // and create NO task (customer-caught: a first-time user couldn't tell the
   // labels apart). Handled BEFORE the trigger gate because ``:help`` is
-  // deliberately not a trigger variant (it must never spawn work). Requires the
-  // project to be onboarded (we need a workspace token to post) + the
-  // orchestration table (for the redelivery claim); otherwise a true no-op.
+  // deliberately not a trigger variant (it must never spawn work). Only for an
+  // onboarded project: on any other the label goes on to the gate below, whose
+  // nudge recognises it and says what is missing.
   if (
-    hasHelpLabel((issue.labels ?? []).map((l) => l?.name), labelFilter)
+    mappingItem
+    && hasHelpLabel((issue.labels ?? []).map((l) => l?.name), labelFilter)
     && shouldTriggerHelp(payload, labelFilter)
   ) {
-    await handleHelpLabel({ issue, workspaceId: payload.organizationId ?? '', labelFilter, mappingItem });
+    await handleHelpLabel({ issue, workspaceId: payload.organizationId, labelFilter });
     return;
   }
 
@@ -908,7 +971,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const platformUserId = await lookupPlatformUser(workspaceId, actorId);
+  // A label added from the operator console arrives with ABCA's own Linear app as the
+  // actor, which no ABCA user is linked to. The console left a single-use claim naming
+  // the user who clicked Start; it is consulted only when the actor is unlinked, so a
+  // linked person adding the label is always attributed to themselves.
+  const linkedUser = await lookupPlatformUser(workspaceId, actorId);
+  const claimUser = linkedUser ? null : await readConsoleStartClaim(issue.id, workspaceId);
+  const platformUserId = linkedUser ?? claimUser;
+  // The claim is released only once the work is dispatched, so a retried delivery after
+  // a failure below can still attribute the task; the claim's TTL covers the rest.
+  const releaseClaim = async () => {
+    if (claimUser) await releaseConsoleStartClaim(issue.id, claimUser);
+  };
   if (!platformUserId) {
     logger.warn('Linear actor has no linked platform user — skipping task creation', {
       linear_workspace_id: workspaceId,
@@ -1268,6 +1342,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }
       // The parent issue itself spawns no task; the reconciler (off the
       // TaskTable stream) releases downstream children as roots succeed.
+      await releaseClaim();
       return;
     }
     if (discovery.kind === 'extended') {
@@ -1287,6 +1362,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         logger.info('Linear orchestration re-trigger — no new sub-issues to add', {
           issue_id: issue.id, orchestration_id: discovery.orchestrationId,
         });
+        await releaseClaim();
         return;
       }
       let snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
@@ -1374,6 +1450,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           });
         }
       }
+      await releaseClaim();
       return;
     }
     // discovery.kind === 'single_task' → the issue had no sub-issues, so fall
@@ -1489,14 +1566,17 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
     // Don't orphan the attachment objects we uploaded before this call failed —
     // createTaskCore only rolls back its own inline uploads, not ours.
-    if (preScreenedAttachments.length > 0 && attachmentsS3Client && ATTACHMENTS_BUCKET) {
-      await cleanupPreScreenedAttachments(attachmentsS3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+    await cleanupPreScreenedForComment(preScreenedAttachments);
+    // A 200 is the idempotent replay the key above exists for: an earlier run of
+    // this delivery created the task, and it is working on the issue. Not a
+    // failure, so no ❌ comment (the Jira processor draws the same line).
+    if (result.statusCode !== 200) {
+      await safeReportIssueFailure(
+        issue.id,
+        workspaceId,
+        buildCreateTaskFailureMessage(result.statusCode, result.body),
+      );
     }
-    await safeReportIssueFailure(
-      issue.id,
-      workspaceId,
-      buildCreateTaskFailureMessage(result.statusCode, result.body),
-    );
     return;
   }
 
@@ -1506,6 +1586,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     repo,
     request_id: requestId,
   });
+  await releaseClaim();
 
   // ADR-016 P4.5: post the first-run "🤖 Starting" courtesy comment from the
   // Lambda tier. This used to be the agent's own `mcp__linear-server__save_comment`
@@ -1713,13 +1794,6 @@ async function maybeRetryTerminalEpic(
       await releaseReadyChildren(
         ddb, ORCHESTRATION_TABLE, releasableRows, releaseCtx,
         createTaskCore, now, freshChildren, 'main', budget,
-        // Salt the idempotency key with each child's prior (failed)
-        // task id so the retry spawns a NEW task instead of idempotently
-        // replaying the failed one. releasableRows carry the old child_task_id
-        // (the reset only changed child_status) — exactly the salt releaseChild
-        // needs. Without this the row flips to 'released' but points at the dead
-        // task and nothing actually re-runs (observed on the first retry pass).
-        true,
       );
     }
   }
@@ -1781,6 +1855,8 @@ async function maybeRetryTerminalEpic(
  *
  * @param replyIssueId  the issue to post the "nothing to retry" reply on (the
  *                      epic for a parent comment; the commented child otherwise).
+ * @param children      the epic's rows as the caller read them.
+ * @param accessToken   the workspace token, to read the epic's sub-issues with.
  */
 async function handleEpicRetryIntent(args: {
   orchestrationId: string;
@@ -1790,8 +1866,18 @@ async function handleEpicRetryIntent(args: {
   replyIssueId: string;
   replyTargetId: string;
   channel: Channel;
+  children: readonly OrchestrationChildRow[];
+  accessToken: string;
 }): Promise<void> {
-  const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, channel } = args;
+  const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, channel, children, accessToken } = args;
+  // A retry starts a sub-issue from the title and description stored on its row.
+  // Read the sub-issues again first, as re-applying the trigger label does, so
+  // that one that was refused for its text and then reworded is sent as it is
+  // now. A read that fails does not hold the retry up: it sends the stored text.
+  const graph = await linearGraphSource(accessToken, parentIssueId)();
+  if (graph.kind === 'ok') {
+    await refreshUnstartedText(ddb, ORCHESTRATION_TABLE!, children, graph.children);
+  }
   const outcome = await maybeRetryTerminalEpic(
     orchestrationId, parentIssueId, workspaceId,
     // Dedup on the COMMENT id — reliable even for a failed child with no task_id,
@@ -1977,8 +2063,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // retry an epic and START code-pushing agent runs, all attributed to and
   // BILLED against the original requester. Resolve the commenter to a platform
   // user BEFORE any dispatch. Unmapped →
-  // ❓ + a one-line reply, then stop. (The bot's own comments never carry the
-  // mention token, so they don't reach here; and an app-actor commenter is
+  // ❓ + a one-line reply, then stop. (The bot's own comments start with a bot
+  // marker or carry no mention token, so they don't reach here — that is why the
+  // reply below is 👋-prefixed: it names the handle. An app-actor commenter is
   // likewise unmapped, which is correct — the app can't authorize itself.)
   const commenterId = payload.actor?.id;
   const commenterPlatformUserId = commenterId
@@ -1997,7 +2084,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     try {
       await channel.upsertThreadedReply?.(
         commented, { commentId: replyTargetId },
-        'I can only act on `@bgagent` requests from a linked ABCA user. Link your Linear '
+        '👋 I can only act on `@bgagent` requests from a linked ABCA user. Link your Linear '
           + 'account first (ask your ABCA admin / run `bgagent linear link`), then re-comment.',
       );
     } catch { /* best-effort reply */ }
@@ -2090,6 +2177,8 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       trigger,
       resolved,
       registryTableName: WORKSPACE_REGISTRY_TABLE,
+      // Set for a sub-issue the epic has not started (a child row, no task yet).
+      unstartedChild: child,
     });
     return;
   }
@@ -2111,6 +2200,8 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       replyIssueId: commentedIssueId, // reply on the child the user commented on
       replyTargetId,
       channel,
+      children: snapshot.children,
+      accessToken: resolved.accessToken,
     });
     return;
   }
@@ -2193,6 +2284,8 @@ async function handleParentEpicCommentTrigger(args: {
       replyIssueId: snapshot.meta.parent_issue_ref, // reply on the epic
       replyTargetId,
       channel,
+      children: snapshot.children,
+      accessToken: resolved.accessToken,
     });
     return;
   }
@@ -2208,27 +2301,34 @@ async function handleParentEpicCommentTrigger(args: {
   const epicHasFailures = snapshot.children.some(
     (c) => c.child_status === 'failed' || c.child_status === 'skipped',
   );
+  // The label this project triggers on, stored when the epic was seeded (the
+  // platform default for an epic seeded before it was stored). The replies name
+  // it: a label the webhook does not filter on starts nothing.
+  const triggerLabel = snapshot.meta.release_context.trigger_label || DEFAULT_LABEL_FILTER;
 
-  if (!target || !target.child_task_id) {
-    // No confident single match (or matched a not-yet-started node) → ask.
+  if (!target) {
+    // No confident single match → ask.
     const reason = match.reason === 'ambiguous' ? 'ambiguous' : 'none';
     const suggestion = reason === 'none' ? suggestClosestNode(trigger.instruction, snapshot.children) : null;
     // If it reads like NEW work AND we found no close existing node,
     // lead with the create-a-sub-issue path rather than the generic "couldn't
     // tell". A close suggestion takes precedence (more likely a vague edit).
     const newWork = reason === 'none' && !suggestion && looksLikeNewWork(trigger.instruction);
-    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork, epicHasFailures);
+    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork, epicHasFailures, triggerLabel);
     await channel.postThreadedReply?.(parentRef, { commentId: replyTargetId }, body);
     // This is a QUESTION, not work-in-progress. Replace the 👀 we put on receipt
     // with ❓ so the comment doesn't look like it's still being worked.
     await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
-    logger.info('Comment trigger (parent epic): no single iterable sub-issue matched — asked', {
+    logger.info('Comment trigger (parent epic): no single sub-issue matched — asked', {
       orchestration_id: orchestrationId, reason, match_count: match.matches.length,
     });
     return;
   }
 
-  const prNumberResult = await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, target.child_task_id);
+  // A named sub-issue that has not become a task has no PR either.
+  const prNumberResult = target.child_task_id
+    ? await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, target.child_task_id)
+    : LOOKUP_ABSENT;
   if (isLookupFailure(prNumberResult)) {
     // The read broke — don't tell the user "no PR yet" (a distinct, misleading
     // state), and don't iterate on a PR number we couldn't read.
@@ -2256,24 +2356,38 @@ async function handleParentEpicCommentTrigger(args: {
     return;
   }
   if (!prNumberResult.ok) {
-    // Matched a node but it has no PR to iterate. If that node FAILED, the user
-    // named it to fix it — there's nothing to iterate (no PR), so point them
-    // straight at retry instead of the generic disambiguation. Observed in
-    // practice: naming a failed child got "couldn't tell / no PR" with no way out.
-    const targetRow = snapshot.children.find((c) => c.sub_issue_id === target.sub_issue_id);
-    const body = targetRow?.child_status === 'failed'
-      ? `👋 **${nodeDisplayId(target) ?? target.sub_issue_id}** failed before opening a PR, so there's `
+    // The comment named exactly one sub-issue and that one has no PR to iterate:
+    // say what state it is in. Not the "which sub-issue?" question — it asks for
+    // the name the reviewer just gave, and its "did you mean" is scored on title
+    // words, so for a sub-issue without a task it could offer a DIFFERENT one.
+    const status = snapshot.children.find((c) => c.sub_issue_id === target.sub_issue_id)?.child_status;
+    // The integration node has no identifier: its title, never its internal id.
+    const name = `**${nodeDisplayId(target) ?? target.title ?? target.sub_issue_id}**`;
+    // The default has to hold for a run that ENDED without a pull request too
+    // (see iterateOrchestrationChild): no "yet".
+    let body = `👋 ${name} has no pull request, so there's nothing to iterate on. `
+      + 'If its run is still in progress, comment again once it has opened one.';
+    if (status === 'failed') {
+      // The user named a failed node to fix it — point them straight at retry.
+      // Observed in practice: naming a failed child got "couldn't tell / no PR"
+      // with no way out.
+      body = `👋 ${name} failed before opening a PR, so there's `
         + 'nothing to iterate on yet. Reply `@bgagent retry` on this epic to re-run the failed work '
-        + '(or remove and re-apply the `abca` label) — then comment again once it has a PR.'
-      : renderParentDisambiguationReply('none', snapshot.children, target, false, epicHasFailures);
+        + `(or remove and re-apply the \`${triggerLabel}\` label) — then comment again once it has a PR.`;
+    } else if (status === 'skipped') {
+      body = `👋 ${name} did not run, because a sub-issue it depends on failed. `
+        + 'Reply `@bgagent retry` on this epic to re-run the failed work — then comment again once it has a PR.';
+    } else if (!target.child_task_id) {
+      body = `👋 ${name} hasn't started yet, so there's nothing to iterate on. `
+        + 'It starts on its own when its turn comes; comment again once it has a pull request.';
+    }
     await channel.postThreadedReply?.(parentRef, { commentId: replyTargetId }, body);
-    // Matched a node but it has no PR yet — also a "wait / clarify" state, not
-    // active work; 👀 → ❓.
+    // A "wait / retry" state, not active work; 👀 → ❓.
     await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
-    logger.info('Comment trigger (parent epic): matched sub-issue has no PR yet — asked', {
+    logger.info('Comment trigger (parent epic): named sub-issue has no PR to iterate — said so', {
       orchestration_id: orchestrationId,
       sub_issue_id: target.sub_issue_id,
-      child_status: targetRow?.child_status,
+      child_status: status,
     });
     return;
   }
@@ -2319,7 +2433,7 @@ async function handleParentEpicCommentTrigger(args: {
 async function iterateOrchestrationChild(args: {
   orchestrationId: string;
   snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>;
-  child: { sub_issue_id: string; repo: string; child_task_id?: string };
+  child: { sub_issue_id: string; repo: string; child_task_id?: string; child_status?: string };
   workspaceId: string;
   commentId: string;
   replyTargetId: string;
@@ -2344,6 +2458,8 @@ async function iterateOrchestrationChild(args: {
   } = args;
   const subIssueId = child.sub_issue_id;
   const triggerCommentIssueId = args.triggerCommentIssueId ?? subIssueId;
+  const channel = channelFor(registryTableName);
+  const commentedRef = issueRef(triggerCommentIssueId, workspaceId);
 
   let prNumber: number;
   if (args.prNumber !== undefined) {
@@ -2368,6 +2484,22 @@ async function iterateOrchestrationChild(args: {
           }),
         },
       );
+      // The commenter addressed the bot, so say why nothing starts: the epic
+      // path answers these outcomes for a sub-issue it names, and here they were
+      // only logged. ❓ rather than 👀 — "wait / retry", not work in progress.
+      // The default has to hold for a run that ENDED without a pull request too
+      // (it stopped to ask a question, or found nothing to change): no "yet".
+      let reply = '👋 This sub-issue has no pull request, so there\'s nothing to iterate on. '
+        + 'If its run is still in progress, comment again once it has opened one.';
+      if (isLookupFailure(prNumberResult)) {
+        reply = '⚠️ I couldn\'t read this sub-issue\'s pull request just now (a transient error reading '
+          + 'its task record), so I stopped rather than guess. Nothing was started. Please comment again to retry.';
+      } else if (child.child_status === 'failed') {
+        reply = '👋 This sub-issue failed before opening a PR, so there\'s nothing to iterate on yet. '
+          + 'Reply `@bgagent retry` to re-run the failed work, then comment again once it has a PR.';
+      }
+      await channel.reactToComment?.({ commentId }, commentedRef, 'needs_input');
+      await channel.postThreadedReply?.(commentedRef, { commentId: replyTargetId }, reply);
       return;
     }
     prNumber = prNumberResult.value;
@@ -2380,8 +2512,6 @@ async function iterateOrchestrationChild(args: {
   // ACK the request the instant we commit to acting on it. 👀 on the TRIGGERING
   // comment is the zero-clutter "on it" signal. The parent-epic path already
   // acked, so it passes skipAck.
-  const channel = channelFor(registryTableName);
-  const commentedRef = issueRef(triggerCommentIssueId, workspaceId);
   if (!args.skipAck) {
     await channel.reactToComment?.({ commentId }, commentedRef, 'started');
   }
@@ -2391,6 +2521,7 @@ async function iterateOrchestrationChild(args: {
   // (🔄→✅/💬) instead of posting new top-level comments. The reply threads under
   // the conversation root (replyTargetId) on the issue the comment lives on.
   const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, triggerCommentIssueId, replyTargetId), null);
+  const ack: CommentAck = { channel, issue: commentedRef, commentId, replyTargetId, replyId: iterationReplyId };
 
   // Idempotency: one iteration per (sub-issue, comment). The comment id is
   // unique per comment, so a webhook retry of the same comment dedups.
@@ -2441,7 +2572,7 @@ async function iterateOrchestrationChild(args: {
     probeIssue: false,
   });
   if (!iterHydrated.ok) {
-    await channel.postThreadedReply?.(commentedRef, { commentId: replyTargetId }, `❌ ${iterHydrated.message}`);
+    await settleFailedCommentAck(ack, `❌ ${iterHydrated.message}`);
     return;
   }
 
@@ -2475,6 +2606,7 @@ async function iterateOrchestrationChild(args: {
     // distinct key). Clean them up.
     if (result.statusCode !== 201) {
       await cleanupPreScreenedForComment(iterHydrated.records);
+      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
     }
     logger.info('Comment trigger: iteration task created for sub-issue PR', {
       orchestration_id: orchestrationId,
@@ -2490,6 +2622,7 @@ async function iterateOrchestrationChild(args: {
       sub_issue_id: subIssueId,
       error: err instanceof Error ? err.message : String(err),
     });
+    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
   }
 }
 
@@ -2549,6 +2682,21 @@ async function postStandaloneNudge(args: {
   }
 }
 
+/**
+ * The nudge for a mention on a sub-issue that its epic has not started, so no
+ * task is linked to it. The plain-issue nudge ("re-apply the trigger label for a
+ * fresh run") is wrong there: a label on the sub-issue starts a single task of
+ * its own, and the epic still starts its task for it when its turn comes.
+ * 👋-prefixed (the self-trigger guard skips it): one variant names the handle.
+ */
+function renderUnstartedSubIssueNudge(childStatus: string): string {
+  return childStatus === 'failed' || childStatus === 'skipped'
+    ? '👋 This sub-issue is run as part of its parent epic, and it did not run there (see the panel on '
+      + 'the epic). Reply `@bgagent retry` on the epic to re-run what failed.'
+    : '👋 This sub-issue is run as part of its parent epic and hasn\'t started yet. It starts on its own '
+      + 'when its turn comes; comment again once it has a pull request.';
+}
+
 async function handleStandaloneCommentTrigger(args: {
   subIssueId: string;
   workspaceId: string;
@@ -2560,6 +2708,8 @@ async function handleStandaloneCommentTrigger(args: {
   trigger: CommentTrigger;
   resolved: BuilderResolvedToken;
   registryTableName: string;
+  /** The row of a sub-issue its epic has not started; absent for any other issue. */
+  unstartedChild?: { child_status: string };
 }): Promise<void> {
   const { subIssueId: issueId, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
 
@@ -2574,10 +2724,13 @@ async function handleStandaloneCommentTrigger(args: {
     // written going forward, with no back-fill, so on the deploy that first enables
     // this path every in-flight issue lands here. Tell the user and point at the
     // way forward (re-label for a fresh run) instead of logging at info and moving
-    // on, which is indistinguishable from being ignored.
+    // on, which is indistinguishable from being ignored. Not for a sub-issue its
+    // epic has yet to start: a label there starts a second, detached run of it.
     const nudge = lookup.kind === 'error'
       ? renderTaskLookupFailedNudge()
-      : renderNoLinkedTaskNudge();
+      : args.unstartedChild
+        ? renderUnstartedSubIssueNudge(args.unstartedChild.child_status)
+        : renderNoLinkedTaskNudge();
     await postStandaloneNudge({ issueId, workspaceId, commentId, registryTableName, nudge });
     logger.info('Comment trigger (standalone): no linked task — told the user', {
       linear_issue_id: issueId, lookup: lookup.kind,
@@ -2627,6 +2780,7 @@ async function handleStandaloneCommentTrigger(args: {
   // Immediate "👀 On it" threaded reply + persist its id so the fanout dispatcher
   // matures THIS reply instead of posting new comments.
   const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
+  const ack: CommentAck = { channel, issue: target, commentId, replyTargetId, replyId: iterationReplyId };
 
   const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
   const channelMetadata: Record<string, string> = {
@@ -2657,7 +2811,7 @@ async function handleStandaloneCommentTrigger(args: {
     probeIssue: false,
   });
   if (!iterHydrated.ok) {
-    await channel.postThreadedReply?.(target, { commentId: replyTargetId }, `❌ ${iterHydrated.message}`);
+    await settleFailedCommentAck(ack, `❌ ${iterHydrated.message}`);
     return;
   }
 
@@ -2681,6 +2835,7 @@ async function handleStandaloneCommentTrigger(args: {
     );
     if (result.statusCode !== 201) {
       await cleanupPreScreenedForComment(iterHydrated.records);
+      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
     }
     logger.info('Comment trigger (standalone): iteration task created for issue PR', {
       linear_issue_id: issueId,
@@ -2694,6 +2849,7 @@ async function handleStandaloneCommentTrigger(args: {
       linear_issue_id: issueId,
       error: err instanceof Error ? err.message : String(err),
     });
+    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
   }
 }
 
@@ -2705,16 +2861,18 @@ async function handleStandaloneCommentTrigger(args: {
  * question/investigation run), and a follow-up ``@bgagent <request>`` on such an
  * issue is almost always a fresh ask ("then just do X instead") — not iteration.
  * Such comments used to hit a silent ``return`` and vanish. This dispatches
- * a fresh ``coding/new-task-v1`` against the SAME repo, using the comment text as
- * the task description, with the same 👀-ack + threaded reply + fanout terminal
- * ownership as the iteration/clarify paths.
+ * a fresh ``coding/new-task-v1`` against the SAME repo, described by what the
+ * previous run was given plus the comment ({@link buildFollowUpDescription}),
+ * with the same 👀-ack + threaded reply + fanout terminal ownership as the
+ * iteration/clarify paths.
  *
  * Returns true when it handled the comment (a task was dispatched, OR a bare
  * mention was answered with a "nothing to do" reply), false when it cannot act
  * (no repo/user) so the caller falls through to its no-op log.
  *
- * Best-effort: a dispatch failure is logged and still returns true (we already
- * ACKed) — the fanout terminal path reports the outcome.
+ * Best-effort: a dispatch that creates no task still returns true (we already
+ * ACKed) — the acknowledgement is settled with the reason, since no task exists
+ * for the fanout terminal path to report on.
  */
 async function maybeStartStandaloneNewWork(args: {
   issueId: string;
@@ -2770,13 +2928,15 @@ async function maybeStartStandaloneNewWork(args: {
   // (where an empty instruction means "address the latest review"), there is no
   // PR to fall back on here — so acknowledge briefly rather than dispatch a
   // vague task or stay silent. Handled (return true) so we don't no-op-log.
+  // 👋-prefixed: the reply shows an example mention, and without a bot marker
+  // Linear's delivery of this very reply would read as a trigger.
   if (!instruction) {
     await channel.reactToComment?.({ commentId }, target, 'started');
     try {
       await channel.upsertThreadedReply?.(
         target,
         { commentId: replyTargetId },
-        'This task already finished and has no open PR to iterate on. Reply with what '
+        '👋 This task already finished and has no open PR to iterate on. Reply with what '
           + "you'd like me to do (e.g. `@bgagent add a note to the README`) and I'll start it.",
       );
     } catch (err) {
@@ -2794,6 +2954,7 @@ async function maybeStartStandaloneNewWork(args: {
   // clarify-resume paths.
   await channel.reactToComment?.({ commentId }, target, 'started');
   const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
+  const ack: CommentAck = { channel, issue: target, commentId, replyTargetId, replyId: iterationReplyId };
 
   // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
   // comment doesn't spawn a second task. Distinct prefix from iterate_/clarify_.
@@ -2827,16 +2988,17 @@ async function maybeStartStandaloneNewWork(args: {
     probeIssue: true,
   });
   if (!newHydrated.ok) {
-    await channel.postThreadedReply?.(target, { commentId: replyTargetId }, `❌ ${newHydrated.message}`);
+    await settleFailedCommentAck(ack, `❌ ${newHydrated.message}`);
     return true;
   }
+  const taskDescription = await buildFollowUpDescription(task.task_id, instruction);
 
   try {
     const result = await createTaskCore(
       {
         repo: task.repo,
         workflow_ref: 'coding/new-task-v1',
-        task_description: instruction,
+        task_description: taskDescription,
       },
       {
         userId: task.user_id,
@@ -2850,6 +3012,7 @@ async function maybeStartStandaloneNewWork(args: {
     );
     if (result.statusCode !== 201) {
       await cleanupPreScreenedForComment(newHydrated.records);
+      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
     }
     logger.info('Comment trigger (standalone): fresh new-task dispatched from follow-up on PR-less task', {
       linear_issue_id: issueId,
@@ -2864,8 +3027,48 @@ async function maybeStartStandaloneNewWork(args: {
       prior_task_id: task.task_id,
       error: err instanceof Error ? err.message : String(err),
     });
+    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
   }
   return true;
+}
+
+/**
+ * Task description for NEW work that a follow-up comment starts on an issue whose
+ * last run ended without a pull request: what that run was given (the issue as
+ * the label path hydrated it), then the follow-up. The agent cannot read Linear
+ * and its prompt says the issue is in the task description, so the comment alone
+ * ("retry", "you missed the SAML case") is not a task.
+ *
+ * The follow-up always survives: a prior description that fills the size limit
+ * gives way at the end of the issue text, where the label path puts the advisory
+ * document and comment sections. What earlier comments appended after that text
+ * (the exchange of a clarifying question, an earlier follow-up) is the
+ * reviewer's word and stays whole: when those blocks alone leave no room, the
+ * description is over the limit and createTaskCore refuses it. Falls back to the
+ * comment alone when the prior task has no stored description or its row cannot
+ * be read.
+ */
+async function buildFollowUpDescription(priorTaskId: string, instruction: string): Promise<string> {
+  let prior: unknown;
+  try {
+    const res = await ddb.send(new GetCommand({ TableName: process.env.TASK_TABLE_NAME!, Key: { task_id: priorTaskId } }));
+    prior = res.Item?.task_description;
+  } catch (err) {
+    logger.warn('Follow-up new work: prior task row unreadable — dispatching with the comment alone', {
+      prior_task_id: priorTaskId, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const followUp = [
+    '---',
+    'An earlier run on this issue ended without a pull request.',
+    `The reviewer now asks: ${instruction}`,
+  ].join('\n');
+  const room = MAX_TASK_DESCRIPTION_LENGTH - followUp.length - 2;
+  if (typeof prior !== 'string' || !prior.trim() || room <= 0) return instruction;
+  const appendedAt = prior.search(APPENDED_BLOCK);
+  const issueText = appendedAt === -1 ? prior : prior.slice(0, appendedAt);
+  const appended = prior.slice(issueText.length);
+  return `${issueText.slice(0, Math.max(0, room - appended.length))}${appended}\n\n${followUp}`;
 }
 
 /**
@@ -2923,6 +3126,7 @@ async function maybeResumeClarifyHold(args: {
   const target = issueRef(issueId, workspaceId);
   await channel.reactToComment?.({ commentId }, target, 'started');
   const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
+  const ack: CommentAck = { channel, issue: target, commentId, replyTargetId, replyId: iterationReplyId };
 
   const resumeDescription = buildClarifyResumeDescription(
     typeof row.task_description === 'string' ? row.task_description : undefined,
@@ -2956,7 +3160,7 @@ async function maybeResumeClarifyHold(args: {
     probeIssue: true,
   });
   if (!resumeHydrated.ok) {
-    await channel.postThreadedReply?.(target, { commentId: replyTargetId }, `❌ ${resumeHydrated.message}`);
+    await settleFailedCommentAck(ack, `❌ ${resumeHydrated.message}`);
     return true;
   }
 
@@ -2979,6 +3183,7 @@ async function maybeResumeClarifyHold(args: {
     );
     if (result.statusCode !== 201) {
       await cleanupPreScreenedForComment(resumeHydrated.records);
+      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
     }
     logger.info('Clarify-resume: fresh new-task dispatched from the reviewer answer', {
       linear_issue_id: issueId,
@@ -2991,6 +3196,7 @@ async function maybeResumeClarifyHold(args: {
     logger.error('Clarify-resume: createTaskCore threw', {
       linear_issue_id: issueId, prior_task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
     });
+    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
   }
   return true;
 }
@@ -3081,21 +3287,21 @@ function labelJustPresent(
 
 /**
  * Post the one-time ``<base>:help`` explainer (customer-caught label
- * discoverability). Best-effort and idempotent: gated on an onboarded project
- * (need a workspace token to post) + the orchestration table (for the
- * redelivery claim). Creates no task and does not touch issue state.
+ * discoverability), on an issue of an onboarded project (the caller checks the
+ * mapping). Best-effort and idempotent: needs the workspace registry (a token
+ * to post with) + the orchestration table (for the redelivery claim). Creates
+ * no task and does not touch issue state.
  */
 async function handleHelpLabel(args: {
   issue: LinearIssueEvent['data'];
-  workspaceId: string;
+  workspaceId: string | undefined;
   labelFilter: string;
-  mappingItem: Record<string, unknown> | undefined;
 }): Promise<void> {
-  const { issue, workspaceId, labelFilter, mappingItem } = args;
+  const { issue, workspaceId, labelFilter } = args;
   const base = (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase();
-  if (!WORKSPACE_REGISTRY_TABLE || !ORCHESTRATION_TABLE || !mappingItem || !workspaceId) {
-    logger.info('Linear :help label — cannot post explainer (not onboarded / no token table)', {
-      issue_id: issue.id, has_mapping: Boolean(mappingItem),
+  if (!WORKSPACE_REGISTRY_TABLE || !ORCHESTRATION_TABLE || !workspaceId) {
+    logger.info('Linear :help label — cannot post explainer (a table is not configured, or no workspace id)', {
+      issue_id: issue.id,
     });
     return;
   }
@@ -3126,7 +3332,11 @@ async function handleHelpLabel(args: {
  *
  * Falls back to a generic message if the body fails to parse — best-effort, never throws.
  */
-function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): string {
+function buildCreateTaskFailureMessage(
+  statusCode: number,
+  rawBody: string,
+  retryHint = 'Please re-apply the trigger label in a few minutes.',
+): string {
   let detail = '';
   try {
     if (rawBody) {
@@ -3146,7 +3356,7 @@ function buildCreateTaskFailureMessage(statusCode: number, rawBody: string): str
     return `❌ ABCA couldn't accept this task: ${detail}`;
   }
   if (statusCode === 503) {
-    return `❌ ABCA is temporarily unavailable (status ${statusCode}). Please re-apply the trigger label in a few minutes.`;
+    return `❌ ABCA is temporarily unavailable (status ${statusCode}). ${retryHint}`;
   }
   if (detail) {
     return `❌ ABCA couldn't create this task (status ${statusCode}): ${detail}`;
@@ -3166,13 +3376,16 @@ function buildTaskDescription(
   } else if (issue.title) {
     parts.push(issue.title);
   }
-  if (contextHint) {
-    parts.push('');
-    parts.push(contextHint);
-  }
+  const hintIndex = parts.length;
   if (issue.description && issue.description.trim()) {
     parts.push('');
     parts.push(issue.description.trim());
+  }
+  // The hint goes between title and description, but it is ADVISORY like the
+  // sections below: only when the issue's own text leaves room for it and for
+  // the two line breaks that set it off.
+  if (contextHint && parts.join('\n').length + contextHint.length + 2 <= MAX_TASK_DESCRIPTION_LENGTH) {
+    parts.splice(hintIndex, 0, '', contextHint);
   }
   let out = parts.join('\n') || 'Linear issue';
 
@@ -3400,6 +3613,28 @@ function isLinearUploadsUrl(url: string): boolean {
     return host === 'uploads.linear.app' || host.endsWith('.uploads.linear.app');
   } catch {
     return false;
+  }
+}
+
+async function readConsoleStartClaim(issueId: string, workspaceId: string): Promise<string | null> {
+  if (!WEBHOOK_DEDUP_TABLE) return null;
+  try {
+    const user = await readStartClaim(ddb, WEBHOOK_DEDUP_TABLE, issueId, workspaceId);
+    if (user) logger.info('Linear label from the operator console attributed via start claim', { issue_id: issueId, linear_workspace_id: workspaceId });
+    return user;
+  } catch (err) {
+    logger.warn('Could not read a console start claim', { issue_id: issueId, error: err instanceof Error ? err.message : String(err) });
+    return null; // nosemgrep: ts-silent-success-masking -- falls through to the existing "not linked" reply, which is the correct outcome without a claim
+  }
+}
+
+/** Best-effort: the work is already dispatched, and an unreleased claim expires on its own. */
+async function releaseConsoleStartClaim(issueId: string, platformUserId: string): Promise<void> {
+  if (!WEBHOOK_DEDUP_TABLE) return;
+  try {
+    await releaseStartClaim(ddb, WEBHOOK_DEDUP_TABLE, issueId, platformUserId);
+  } catch (err) {
+    logger.warn('Could not release a console start claim (it expires on its own)', { issue_id: issueId, error: err instanceof Error ? err.message : String(err) });
   }
 }
 

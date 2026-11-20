@@ -158,7 +158,7 @@ export type LinearRefreshVerifier = (workspace: {
 export type LinearProbe = (accessToken: string) => Promise<ProbeResult>;
 
 /** Default probe: a minimal authenticated GraphQL query. */
-export const probeLinearAccessToken: LinearProbe = async (accessToken) => {
+const probeLinearAccessToken: LinearProbe = async (accessToken) => {
   try {
     const response = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
       method: 'POST',
@@ -480,8 +480,7 @@ function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: s
         + 'the platform would, and persists the rotated token).';
     case 'revoked':
       return `Authorization was REVOKED${revokedAt ? ` at ${revokedAt}` : ''} — the platform cannot post `
-        + 'to this workspace and is dropping its events. Re-authorize with `bgagent linear setup` '
-        + '(or `bgagent linear add-workspace` for an additional workspace).';
+        + 'to this workspace and is dropping its events. Re-authorize with `bgagent linear setup`.';
     case 'disabled':
       return 'Workspace is disabled in the registry.';
     case 'unknown':

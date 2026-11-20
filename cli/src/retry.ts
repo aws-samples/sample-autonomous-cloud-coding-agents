@@ -30,11 +30,11 @@ import { ApiError } from './errors';
  */
 
 /** Lower bound on the backoff base — the first retry waits at least this. */
-export const RETRY_BASE_DELAY_MS = 500;
+const RETRY_BASE_DELAY_MS = 500;
 
 /** Upper bound on a single backoff sleep. Keeps a retry storm from walking
  *  longer than a few seconds between attempts. */
-export const RETRY_CEILING_MS = 5_000;
+const RETRY_CEILING_MS = 5_000;
 
 /** ``error.cause.code`` values that mark a socket-level transient. Node's
  *  undici wraps most of these in a ``TypeError: fetch failed`` (caught by

@@ -49,6 +49,7 @@ export const CFN_TYPES_WITHOUT_EXEC_ROLE_IAM = new Set([
  * Parent issue: #350. Full synth-time aspect tracked in #125.
  */
 export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
+  'AWS::SSM::Parameter': ['ssm:PutParameter', 'ssm:GetParameters', 'ssm:DeleteParameter'],
   'AWS::ApiGateway::Authorizer': ['apigateway:POST'],
   'AWS::ApiGateway::Method': ['apigateway:POST'],
   'AWS::ApiGateway::RequestValidator': ['apigateway:POST'],
@@ -79,6 +80,8 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Cognito::UserPoolClient': ['cognito-idp:CreateUserPoolClient'],
   // RegistryPublisher / RegistryApprover groups (#246).
   'AWS::Cognito::UserPoolGroup': ['cognito-idp:CreateGroup'],
+  // Operator console managed-login domain.
+  'AWS::Cognito::UserPoolDomain': ['cognito-idp:CreateUserPoolDomain', 'cognito-idp:DescribeUserPoolDomain'],
   'AWS::DynamoDB::Table': ['dynamodb:CreateTable'],
   'AWS::EC2::EIP': ['ec2:AllocateAddress'],
   'AWS::EC2::FlowLog': ['ec2:CreateFlowLogs'],

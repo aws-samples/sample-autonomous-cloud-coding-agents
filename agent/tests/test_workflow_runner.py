@@ -98,9 +98,9 @@ def test_runs_all_steps_in_order_and_succeeds():
             {"kind": "ensure_pr", "strategy": "create"},
         ]
     )
-    handlers: dict[str, StepHandler] = {
-        k: track for k in ("clone_repo", "hydrate_context", "run_agent", "ensure_pr")
-    }
+    handlers: dict[str, StepHandler] = dict.fromkeys(
+        ("clone_repo", "hydrate_context", "run_agent", "ensure_pr"), track
+    )
     result = run_workflow(wf, _ctx(wf), handlers=handlers)
     assert seen == ["clone_repo", "hydrate_context", "run_agent", "ensure_pr"]
     assert result.succeeded
@@ -634,6 +634,34 @@ class TestCloneAndHydrateHandlers:
         outcome = _handle_hydrate_context(wf.steps[0], ctx)
         assert ctx.system_prompt == ""
         assert outcome.data["system_prompt_built"] is False
+
+    @staticmethod
+    def _hydrate_user_prompt(**ctx_fields) -> str:
+        """The user prompt after the hydrate_context step, whose context was
+        hydrated by the orchestrator with the prompt ``HYDRATED``."""
+        from models import HydratedContext
+        from workflow.runner import _handle_hydrate_context
+
+        wf = _workflow(
+            [
+                {"kind": "hydrate_context"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
+        )
+        ctx = _real_ctx(wf, hydrated=HydratedContext(user_prompt="HYDRATED"), **ctx_fields)
+        _handle_hydrate_context(wf.steps[0], ctx)
+        return ctx.user_prompt
+
+    def test_hydrate_context_takes_the_hydrated_prompt(self):
+        assert self._hydrate_user_prompt() == "HYDRATED"
+
+    def test_hydrate_context_keeps_a_prompt_the_caller_built(self):
+        # The pipeline hands the step the hydrated prompt with the attachment
+        # references appended. The step must not put the bare one back.
+        built = "HYDRATED\n\nAttachments: `Read /workspace/.attachments/att-1/report.txt`"
+
+        assert self._hydrate_user_prompt(user_prompt=built) == built
 
 
 class TestRunAgentHandler:

@@ -65,6 +65,15 @@ interface SlackEventPayload {
 /** Event types where retries are idempotent and must be re-processed. */
 const RETRY_ALLOWED_EVENT_TYPES = new Set(['app_uninstalled', 'tokens_revoked']);
 
+/**
+ * `X-Slack-Retry-Reason` values that say the previous delivery failed outright:
+ * Slack got an error status, or no connection at all
+ * (https://docs.slack.dev/apis/events-api/#retries). `http_timeout` and
+ * `unknown_error` are left out on purpose: a delivery that was only too slow for
+ * Slack may have been processed.
+ */
+const FAILED_DELIVERY_RETRY_REASONS = new Set(['http_error', 'connection_failed', 'ssl_error', 'too_many_redirects']);
+
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
     if (!event.body) {
@@ -107,10 +116,19 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // a double-submit. For security-critical revocation events, we MUST process
     // retries so a transient failure on first delivery doesn't leave the workspace
     // with a live bot token after uninstall.
+    //
+    // One retry of a user-facing event is processed: the first one, when Slack says
+    // the first delivery failed rather than timed out. This handler answers a
+    // mention with a non-2xx status only when it did not invoke the processor, so
+    // nothing was submitted, and acknowledging the retry would lose the request
+    // without any feedback. Later retries stay acknowledged: their reason describes
+    // only the attempt before them, so the first delivery may have been processed.
     const retryNum = event.headers['X-Slack-Retry-Num'] ?? event.headers['x-slack-retry-num'];
+    const retryReason = event.headers['X-Slack-Retry-Reason'] ?? event.headers['x-slack-retry-reason'];
+    const firstDeliveryFailed = retryNum === '1' && FAILED_DELIVERY_RETRY_REASONS.has(retryReason ?? '');
     const eventType = payload.type === 'event_callback' ? payload.event?.type : undefined;
-    if (retryNum && !(eventType && RETRY_ALLOWED_EVENT_TYPES.has(eventType))) {
-      logger.info('Acknowledging Slack retry without reprocessing', { retry_num: retryNum, event_type: eventType });
+    if (retryNum && !firstDeliveryFailed && !(eventType && RETRY_ALLOWED_EVENT_TYPES.has(eventType))) {
+      logger.info('Acknowledging Slack retry without reprocessing', { retry_num: retryNum, retry_reason: retryReason, event_type: eventType });
       return jsonResponse(200, { ok: true });
     }
 
@@ -173,27 +191,12 @@ async function handleAppMention(
   // Use source: 'mention' so the processor knows there's no response_url —
   // it should use chat.postMessage with the bot token instead.
   //
-  // For natural language mentions like "@Shoof fix the bug in org/repo#42",
-  // extract the repo pattern and reorder so submit gets "org/repo#42 fix the bug".
-  // The submit handler expects: submit <repo> <description...>
-  //
-  // When no repo is present we still forward the mention (rather than erroring
-  // here): the processor falls back to the channel's onboarded default repo
-  // (`bgagent slack onboard-channel`), and only replies with guidance if no
-  // default exists. Keeping that decision in one place (the processor) avoids
-  // duplicating the channel-mapping lookup in the events handler.
-  const repoPattern = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/;
-  const repoMatch = text.match(repoPattern);
-  let commandText: string;
-  if (repoMatch) {
-    const repo = repoMatch[0];
-    const description = text.replace(repo, '').replace(/\s+/g, ' ').trim();
-    commandText = `submit ${repo} ${description}`.trim();
-  } else {
-    // No repo token — forward the whole text; the processor treats it as the
-    // task description against the channel default repo (or replies with help).
-    commandText = `submit ${text}`;
-  }
+  // The text is forwarded as the user wrote it, line breaks included. Which
+  // word of "@Shoof fix the bug in org/repo#42" is the repo, or whether the
+  // channel's onboarded default repo applies (`bgagent slack onboard-channel`),
+  // is decided in one place, the processor: it can ask what is onboarded, and
+  // a slash alone ("CI/CD", "and/or", a file path) does not make a repo.
+  const commandText = `submit ${text}`;
 
   // Extract file references from the Slack event (if any attached)
   const rawFiles = Array.isArray(event.files) ? event.files as Array<Record<string, unknown>> : [];
@@ -207,6 +210,10 @@ async function handleAppMention(
       url_private_download: String(f.url_private_download),
     }));
 
+  // Two timestamps: replies go to the thread, reactions on the mention itself.
+  // They differ when the mention is a reply inside a thread, whose first
+  // message may be somebody else's and may carry the reactions of other tasks.
+  const mentionTs = messageTs ?? threadTs;
   const mentionPayload: MentionEvent = {
     text: commandText,
     user_id: userId,
@@ -214,11 +221,11 @@ async function handleAppMention(
     channel_id: channelId,
     source: 'mention',
     mention_thread_ts: threadTs ?? messageTs,
+    mention_message_ts: mentionTs,
     ...(files.length > 0 && { files }),
   };
 
   // React with :eyes: immediately so the user knows the bot saw their message.
-  const mentionTs = threadTs ?? messageTs;
   if (mentionTs) {
     const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
     if (botToken) {
@@ -250,7 +257,7 @@ async function handleAppMention(
       await slackFetch(botToken, 'reactions.add', { channel: channelId, timestamp: mentionTs, name: 'x' });
       await slackFetch(botToken, 'chat.postMessage', {
         channel: channelId,
-        thread_ts: mentionTs,
+        thread_ts: threadTs ?? mentionTs,
         text: ':x: Something went wrong forwarding your request. Please try again.',
       });
     }

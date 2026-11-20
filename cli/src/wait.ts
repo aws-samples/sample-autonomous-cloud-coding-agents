@@ -37,8 +37,9 @@ const DEFAULT_MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 
 /** Exit code for "the CLI stopped waiting" (timeout / transient exhaustion).
  *  Distinct from 1 (= the task itself reached a non-COMPLETED terminal
- *  status, via ``exitCodeForStatus``) so scripts wrapping ``--wait`` can
- *  tell "task failed" from "task may still be running; the CLI gave up". */
+ *  status, via ``exitCodeForStatus``) so scripts wrapping ``--wait`` or
+ *  ``bgagent watch`` can tell "task failed" from "task may still be
+ *  running; the CLI gave up". */
 export const EXIT_CODE_WAIT_ABORTED = 2;
 
 /**
@@ -102,7 +103,7 @@ export async function waitForTask(
       continue;
     }
 
-    if (isTerminal(task.status)) {
+    if (TERMINAL_STATUSES.includes(task.status)) {
       return task;
     }
 
@@ -116,8 +117,4 @@ export async function waitForTask(
 /** Returns the process exit code for a terminal task status. */
 export function exitCodeForStatus(status: string): number {
   return status === 'COMPLETED' ? 0 : 1;
-}
-
-function isTerminal(status: string): boolean {
-  return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }

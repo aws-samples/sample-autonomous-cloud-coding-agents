@@ -31,6 +31,7 @@ import { join } from 'node:path';
 
 import * as yaml from 'js-yaml';
 
+import { nestedStackExecutionPolicy } from '../src/bootstrap/nested-stack-policy';
 import {
   applicationPolicy,
   computeAgentcorePolicy,
@@ -68,11 +69,9 @@ const outputPath = join(outputDir, 'bootstrap-template.yaml');
  * parser proves nothing — `load(dump(x)) === x` holds for any object — so it cannot
  * detect the artifact drifting from the generator that is supposed to produce it.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function buildTemplate(): any {
   // --- Read and parse the default template ---
   const rawTemplate = readFileSync(cdkBootstrapTemplatePath, 'utf-8');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const template: any = yaml.load(rawTemplate);
 
   // --- Step 1: Update BootstrapVariant default ---
@@ -118,7 +117,6 @@ export function buildTemplate(): any {
   interface PolicyDef {
     logicalId: string;
     policyName: string;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     policyFn: () => any;
     condition?: string;
   }
@@ -165,7 +163,6 @@ export function buildTemplate(): any {
       policyDoc.Version = '2012-10-17';
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const resource: any = {
       Type: 'AWS::IAM::ManagedPolicy',
       Properties: {
@@ -193,7 +190,7 @@ export function buildTemplate(): any {
   }
 
   // --- Step 5: Modify CloudFormationExecutionRole ManagedPolicyArns ---
-  // Replace the conditional that falls back to AdministratorAccess with our inline policies.
+  // Replace the conditional that falls back to AdministratorAccess with our managed policies.
   // Keep the CloudFormationExecutionPolicies parameter override for flexibility.
   const coreRefs = [
     { Ref: 'IaCRoleABCAInfrastructure' },
@@ -217,6 +214,17 @@ export function buildTemplate(): any {
       coreRefs,
     ],
   };
+
+  // Nested stacks inherit the parent execution role. CloudFormation checks that
+  // the caller can pass it, including during change-set validation (#645).
+  const executionRole = template.Resources.CloudFormationExecutionRole.Properties;
+  executionRole.Policies = [
+    ...(executionRole.Policies ?? []),
+    {
+      PolicyName: 'PassExecutionRoleToCloudFormation',
+      PolicyDocument: nestedStackExecutionPolicy(),
+    },
+  ];
 
   // --- Step 6: Add outputs ---
   template.Outputs.BootstrapPolicyVersion = {
@@ -262,13 +270,12 @@ export function buildTemplate(): any {
  * file is exactly what the generator produces today.
  */
 export function renderTemplate(): string {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const template: any = buildTemplate();
 
   const yamlOutput = yaml.dump(template, {
     lineWidth: 120,
     noRefs: true,
-    quotingType: "'",
+    quoteStyle: 'single',
     forceQuotes: false,
   });
 
@@ -283,6 +290,7 @@ export function renderTemplate(): string {
     '#   - BootstrapVariant set to "ABCA: Least-Privilege Bootstrap"',
     '#   - ComputeTypes parameter added for compute-variant selection',
     '#   - IncludeComputeEcs / IncludeComputeLambdaMicrovms conditions added',
+    '#   - Execution role may pass only itself to CloudFormation for nested stacks',
     '#   - 6 AWS::IAM::ManagedPolicy resources replace AdministratorAccess; each',
     '#     PolicyDocument is a minified JSON string so the template stays under the',
     '#     51,200-char CloudFormation inline-template limit (#864)',
@@ -293,7 +301,6 @@ export function renderTemplate(): string {
 
   return header + yamlOutput;
 }
-
 
 /** Generate the artifact, refusing to emit one that cannot bootstrap a fresh account. */
 function main(): void {

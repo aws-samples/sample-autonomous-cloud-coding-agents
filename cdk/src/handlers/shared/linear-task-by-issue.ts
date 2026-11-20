@@ -18,8 +18,8 @@
  */
 
 import { type DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 import { logger } from './logger';
-import { TaskTable } from '../../constructs/task-table';
 
 /**
  * The fields the standalone comment trigger needs from the newest
@@ -79,7 +79,7 @@ export async function lookupTaskByLinearIssue(
   try {
     const res = await ddb.send(new QueryCommand({
       TableName: taskTableName,
-      IndexName: TaskTable.LINEAR_ISSUE_INDEX,
+      IndexName: LINEAR_ISSUE_INDEX_NAME,
       KeyConditionExpression: 'linear_issue_id = :iid',
       ExpressionAttributeValues: { ':iid': linearIssueId },
       ScanIndexForward: false, // newest created_at first
@@ -109,33 +109,4 @@ export async function lookupTaskByLinearIssue(
     });
     return { kind: 'error', message };
   }
-}
-
-/**
- * Back-compatible wrapper: the task, or null for both a miss and a failure.
- *
- * Prefer {@link lookupTaskByLinearIssue} on any path that replies to a user, so a
- * lookup failure isn't reported to them as "this isn't an ABCA issue".
- */
-export async function resolveTaskByLinearIssue(
-  ddb: DynamoDBDocumentClient,
-  taskTableName: string,
-  linearIssueId: string,
-): Promise<LinearIssueTask | null> {
-  const res = await lookupTaskByLinearIssue(ddb, taskTableName, linearIssueId);
-  return res.kind === 'found' ? res.task : null;
-}
-
-/**
- * Extract a PR number from a task's ``pr_number`` (preferred) or by parsing
- * ``/pull/<n>`` out of ``pr_url``. Returns null when neither yields a number —
- * the task ran but never opened a PR, so there's nothing to iterate on.
- */
-export function prNumberFromTask(task: LinearIssueTask): number | null {
-  if (typeof task.pr_number === 'number') return task.pr_number;
-  if (typeof task.pr_url === 'string') {
-    const m = task.pr_url.match(/\/pull\/(\d+)\b/);
-    if (m) return Number(m[1]);
-  }
-  return null;
 }

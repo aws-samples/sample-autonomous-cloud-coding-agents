@@ -2,24 +2,13 @@
 
 from unittest.mock import patch
 
+# Hard import (not importorskip): without cedarpy the engine denies every call.
+# These tests must then fail, not drop out of the run.
+import cedarpy  # noqa: F401
 import pytest
 
-cedarpy = pytest.importorskip("cedarpy")
-
 import policy
-from policy import PolicyDecision, PolicyEngine, _validate_constants
-
-
-class TestPolicyDecision:
-    def test_allowed_decision(self):
-        d = PolicyDecision(allowed=True, reason="permitted", duration_ms=0.5)
-        assert d.allowed is True
-        assert d.reason == "permitted"
-        assert d.duration_ms >= 0
-
-    def test_denied_decision(self):
-        d = PolicyDecision(allowed=False, reason="denied", duration_ms=1.0)
-        assert d.allowed is False
+from policy import PolicyEngine, _validate_constants
 
 
 class TestNewTaskPermissions:
@@ -239,8 +228,10 @@ class TestFilePathsWithSpecialChars:
 class TestExtraPolicies:
     def test_extra_forbid_applied(self):
         extra = [
-            'forbid (principal, action == Agent::Action::"invoke_tool", '
-            'resource == Agent::Tool::"WebFetch");'
+            (
+                'forbid (principal, action == Agent::Action::"invoke_tool", '
+                'resource == Agent::Tool::"WebFetch");'
+            )
         ]
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=extra)
         result = engine.evaluate_tool_use("WebFetch", {})
@@ -275,16 +266,6 @@ class TestDurationMetrics:
         engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "test.py"})
         assert result.duration_ms >= 0
-
-
-class TestTaskTypeProperty:
-    def test_task_type_property(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        assert engine.task_type == "new_task"
-
-    def test_task_type_pr_review(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
-        assert engine.task_type == "pr_review"
 
 
 class TestConstantsSemanticValidation:

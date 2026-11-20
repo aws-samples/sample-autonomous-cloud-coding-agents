@@ -75,12 +75,47 @@ interface LinearWebhookEnvelope {
   };
 }
 
+/** Log a delivery the receiver acknowledges without forwarding. */
+function logIgnoredWebhookType(
+  payload: { type?: string; action?: string; organizationId?: string },
+  agentSessionsEnabled: boolean,
+): void {
+  // Agent-session / app-notification events are the fingerprint of an
+  // OAuth app configured as a Linear *agent* (agent-activity events turned
+  // on). With the agent-session channel OFF, ABCA never consumes these,
+  // AND when they're enabled Linear renders an @mention of the app as its
+  // interactive agent-activity surface instead of a normal comment thread,
+  // which breaks the maturing-reply/reaction UX. Surface this at WARN (not
+  // a silent INFO ignore) so an operator can see "this workspace's app is
+  // in agent mode" and either disable agent/app events or deploy with
+  // `enableLinearAgentSessions=true`. See docs/guides for the config.
+  const AGENT_MODE_TYPES = ['AppUserNotification', 'AgentSession', 'AgentSessionEvent', 'AgentActivity'];
+  if (!agentSessionsEnabled && payload.type !== undefined && AGENT_MODE_TYPES.includes(payload.type)) {
+    // Message text unchanged from before the agent-session channel existed —
+    // operators' metric filters key on it. The remedy hint rides a field.
+    logger.warn(
+      'Ignoring Linear agent-mode webhook — the OAuth app appears configured as a Linear agent '
+      + '(agent/app events enabled). ABCA uses plain comment threads; agent mode makes @mentions render '
+      + 'as interactive agent activity instead of comments. Disable agent/app events on the Linear app '
+      + '(keep only Issue + Comment webhook events).',
+      {
+        type: payload.type,
+        action: payload.action,
+        linear_workspace_id: payload.organizationId,
+        alternative: 'deploy with --context enableLinearAgentSessions=true to answer agent sessions natively',
+      },
+    );
+    return;
+  }
+  logger.info('Ignoring non-Issue/Comment Linear webhook', { type: payload.type, action: payload.action });
+}
+
 /**
  * POST /v1/linear/webhook — Linear webhook receiver.
  *
  * Verifies the `Linear-Signature` HMAC over the raw body, rejects stale
  * `webhookTimestamp` values (replay protection), dedups on
- * `(issue_id, action)` with a 60s TTL, and async-invokes the processor
+ * `(data.id, action, webhookTimestamp)` with an 8h TTL, and async-invokes the processor
  * Lambda so we can ack within Linear's 5s timeout.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
@@ -109,9 +144,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
+    // `null` parses, but reading a field of it throws: answer as for unparseable JSON.
+    if (payload === null) {
+      return jsonResponse(400, { error: 'Invalid JSON' });
+    }
 
     // Try the per-workspace secret first. Falls through to the stack-wide
-    // path if (a) registry table not configured, (b) no orgId in body,
+    // path if (a) registry table not configured, (b) no orgId in body
+    // (or one that is not a string: the registry key is a string, and
+    // DynamoDB rejects a lookup by any other type),
     // (c) workspace not in registry, or (d) workspace's stored secret
     // lacks `webhook_signing_secret`. Per-workspace MISMATCH is fatal —
     // do NOT fall back, that would let an attacker bypass per-workspace
@@ -120,7 +161,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // ride the stack-wide fallback (which `setup` mirrored from the
     // first workspace's signing secret) back into a verified state.
     let verified = false;
-    if (WORKSPACE_REGISTRY_TABLE && payload.organizationId) {
+    if (WORKSPACE_REGISTRY_TABLE && typeof payload.organizationId === 'string' && payload.organizationId) {
       const result = await verifyLinearRequestForWorkspace(
         WORKSPACE_REGISTRY_TABLE,
         payload.organizationId,
@@ -207,43 +248,18 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const agentSessionsEnabled = isLinearAgentSessionsEnabled();
     const isAgentSessionDelivery = agentSessionsEnabled && payload.type === AGENT_SESSION_EVENT_TYPE;
     if (payload.type !== 'Issue' && payload.type !== 'Comment' && !isAgentSessionDelivery) {
-      // Agent-session / app-notification events are the fingerprint of an
-      // OAuth app configured as a Linear *agent* (agent-activity events turned
-      // on). With the agent-session channel OFF, ABCA never consumes these,
-      // AND when they're enabled Linear renders an @mention of the app as its
-      // interactive agent-activity surface instead of a normal comment thread,
-      // which breaks the maturing-reply/reaction UX. Surface this at WARN (not
-      // a silent INFO ignore) so an operator can see "this workspace's app is
-      // in agent mode" and either disable agent/app events or deploy with
-      // `enableLinearAgentSessions=true`. See docs/guides for the config.
-      const AGENT_MODE_TYPES = ['AppUserNotification', 'AgentSession', 'AgentSessionEvent', 'AgentActivity'];
-      if (!agentSessionsEnabled && payload.type !== undefined && AGENT_MODE_TYPES.includes(payload.type)) {
-        // Message text unchanged from before the agent-session channel existed —
-        // operators' metric filters key on it. The remedy hint rides a field.
-        logger.warn(
-          'Ignoring Linear agent-mode webhook — the OAuth app appears configured as a Linear agent '
-          + '(agent/app events enabled). ABCA uses plain comment threads; agent mode makes @mentions render '
-          + 'as interactive agent activity instead of comments. Disable agent/app events on the Linear app '
-          + '(keep only Issue + Comment webhook events).',
-          {
-            type: payload.type,
-            action: payload.action,
-            linear_workspace_id: payload.organizationId,
-            alternative: 'deploy with --context enableLinearAgentSessions=true to answer agent sessions natively',
-          },
-        );
-        return jsonResponse(200, { ok: true });
-      }
-      logger.info('Ignoring non-Issue/Comment Linear webhook', { type: payload.type, action: payload.action });
+      logIgnoredWebhookType(payload, agentSessionsEnabled);
       return jsonResponse(200, { ok: true });
     }
 
     // data.id is the issue id (Issue events) or the comment id (Comment
     // events); agent-session deliveries carry the session id instead.
-    const dataId = isAgentSessionDelivery ? payload.agentSession?.id : payload.data?.id;
+    const { id: dataId, missingMessage } = isAgentSessionDelivery
+      ? { id: payload.agentSession?.id, missingMessage: 'Linear webhook missing agentSession.id' }
+      : { id: payload.data?.id, missingMessage: 'Linear webhook missing data.id' };
     const action = payload.action ?? 'unknown';
     if (!dataId) {
-      logger.warn(isAgentSessionDelivery ? 'Linear webhook missing agentSession.id' : 'Linear webhook missing data.id', { type: payload.type, action });
+      logger.warn(missingMessage, { type: payload.type, action });
       return jsonResponse(400, { error: 'Missing data id' });
     }
     if (isAgentSessionDelivery && !isHandledAgentSessionAction(action)) {

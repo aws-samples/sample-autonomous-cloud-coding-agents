@@ -4,18 +4,18 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. A deployment can provision one or more compute backends:
+ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems, including registry infrastructure. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. A deployment can provision one or more compute backends:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
 | **Compute** | Bedrock AgentCore Runtime (Firecracker MicroVMs) | ECS Fargate containers | AWS Lambda MicroVMs |
-| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | 2 vCPU, 4 GB RAM | 8 GB baseline / 32 GB peak memory |
+| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | Build: 4 vCPU / 16 GiB; planning: 2 vCPU / 8 GiB (configurable) | 8 GiB baseline / 32 GiB peak memory |
 | **Orchestration** | Durable Lambda (checkpoint/replay) | Same durable Lambda via `ComputeStrategy` | Same durable Lambda via `ComputeStrategy` |
 | **Agent mode** | FastAPI server (HTTP invocation) | Batch (run-to-completion) | FastAPI server (lifecycle hooks) |
 | **Startup** | ~10s (warm MicroVM) | ~60-180s (Fargate cold start) | ~6s to `RUNNING` (live-measured) |
 | **Max duration** | 8 hours (AgentCore service limit) | 9 hours (orchestrator `executionTimeout`) | 8 hours (`maximumDurationInSeconds`) |
 
-All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
+All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. Task orchestration does not use Step Functions; other platform features may use them.
 
 AgentCore is the default. `compute_types` selects a comma-separated list (or a JSON array in `cdk/cdk.json`); its first entry is the repository default. For example, `-c compute_types=agentcore,ecs` deploys both, while `-c compute_types=ecs` deploys only ECS. Repository overrides can select any deployed backend. Memory, Gateway, Registry and the Linear vault remain independently configurable.
 
@@ -27,7 +27,7 @@ Without `compute_types`, legacy `compute_type=ecs` or `compute_type=lambda-micro
 
 Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
-The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. Wider inline combinations exceed 490 and fail synthesis; their split counterparts fit in the sampled matrix. The budget guard never changes topology automatically. The [offline census](./DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
+The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. With the approval, maintenance and MicroVM subsystems in nested stacks, every sampled combination fits inline (the widest, all three backends with every option, is 484); split reduces the application template further. The budget guard never changes topology automatically. The [offline census](./DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
 
 For a **new installation**:
 
@@ -92,13 +92,16 @@ Local synthesis tests verify the import ordering and unchanged remaining subnet 
 
 ### Lambda MicroVMs backend (experimental)
 
-> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits an unsuppressible warning to this effect whenever the backend is selected. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
+> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
 
-Include it in the deployment's backend list, preserving any backends already in use:
+Include it in the deployment's backend list, preserving any backends already in use. A new installation also selects the nested layout:
 
 ```bash
-mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
+mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm --context microvm_nested_stack=true
 ```
+
+Existing flat installations must retain `microvm_nested_stack=false` until
+completing the [resource migration](../verification/645-p3-nested-stack.md).
 
 **You must re-bootstrap first.** This is the single most common way this backend fails, and the failure does not look like a configuration problem:
 
@@ -120,17 +123,19 @@ mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
 
    Bundle 1.6.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md#iacrole-abca-compute-lambdamicrovms).
 
-3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent doctor` probes it live.
+3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent platform doctor` probes it live.
 
 Operational notes specific to this backend:
 
-- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check catches a hung guest inside a healthy VM -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
+- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check detects loss of the in-guest heartbeat writer (a pipeline hang can leave that writer running) -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
 - **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
-- **Deployment identifiers are not baked into the image.** The snapshot carries no configuration; table names, secret ARNs, and the per-task session-role ARN arrive in the `/run` payload as a `platform_config` block. A version-skewed orchestrator that does not send it is refused rather than run with tenant scoping disabled.
+- **Approval-wait sleep.** With `microvm_approval_suspend_enabled=true`, a task waiting for approval sleeps after its `microvm_sleep_after_s` delay (default 60 s, `--microvm-sleep-after off` keeps it awake) and wakes on the decision or 60 s before the gate deadline. A Parameter Store switch created by the stack can stop new suspensions without a redeploy; it never strands a suspended worker. Only images that declare the lifecycle protocol are suspended.
+- **Registry tools share the runtime network restriction.** Remote HTTP/SSE MCP assets need reachable HTTPS/443 endpoints. AgentCore and ECS defaults also block remote non-443 ports. `stdio` programs run locally but their outbound calls remain restricted; resolution does not test connectivity. The image builder's 80/443 access does not widen runtime egress. See [REGISTRY.md](../design/REGISTRY.md).
+- **Logging failures have a fallback record.** Debug/warn CloudWatch failures emit `cloudwatch_write_failed` to stdout with writer/task/error class, without another AWS call or sensitive log text. This is not a configured metric/alarm; verify collection in the guest log stream while the VM is running.
 
 ### Optional Agent Registry
 
-AWS Agent Registry is enabled by default. In an account or region where the preview service is unavailable or prohibited, omit the registry, its REST API, IAM grants, environment wiring, and stack outputs:
+Without a [deployment profile](#deployment-profiles), AWS Agent Registry is enabled. In an account or Region where the service is unavailable or prohibited, set `agentRegistry` to `false` in `abca.deployment.json`, or use the context switch, to omit the registry, its REST API, IAM grants, environment wiring and stack outputs:
 
 ```bash
 cdk deploy --context enableAgentRegistry=false
@@ -141,6 +146,129 @@ Blueprints without `registry://` asset references continue to work. A remaining 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
 This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. The optional network split preserves that lifecycle; registry retention remains deferred. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
+
+## Deployment profiles
+
+ABCA's core always deploys:
+- the AgentCore runtime with VPC/DNS egress controls;
+- the Task API, with Cognito and API-key authentication;
+- task state, admission and concurrency control, and budgets;
+- repository onboarding and the GitHub task/PR workflow;
+- Cedar HITL approvals and audit events;
+- attachments, reconcilers, alarms and diagnostics.
+
+Six features are optional and can be enabled independently ([ADR-024](../decisions/ADR-024-deployment-profiles.md)):
+
+| Feature (`abca.deployment.json` key) | Context switch | Root resources (enabled alone) | Region-limited by |
+|---|---|---:|---|
+| Slack (`slack`) | `enableSlack` | ~51 | — |
+| Linear (`linear`) | `enableLinear` | ~45 | — |
+| Jira (`jira`) | `enableJira` | ~35 | — |
+| Deploy-preview screenshots (`deployPreviewScreenshots`) | `enableDeployPreviewScreenshots` | ~23 | AgentCore Built-in Tools (Browser) |
+| AWS Agent Registry (`agentRegistry`) | `enableAgentRegistry` | 2 (plus nested stacks) | AWS Agent Registry |
+| Tool Gateway (`toolGateway`, experimental) | `enableToolGateway` | ~7 | AgentCore Gateway |
+
+Linear and Jira share the stranded-orchestration sweep and the iteration heartbeat, so enabling both costs slightly less than the sum. The minimal profile deploys about 317 root resources; the legacy topology deploys about 463.
+
+### Choosing features with `bgagent setup`
+
+Run the wizard from your ABCA checkout. The examples use the short `bgagent` form. Without a global install, run `node lib/bin/bgagent.js setup …` from `cli/` instead, as the [Quick Start](./QUICK_START.mdx) Step 3 does. Setup prints its next steps in whichever form you launched it with.
+
+```bash
+bgagent setup                                   # interactive
+bgagent setup --features slack,jira --yes       # scripted
+bgagent setup --features none --no-deploy       # only write the profile
+bgagent setup -c networkTopology=split          # pass the context you deploy with
+```
+
+The wizard works in this order:
+
+1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory. It shows the AWS account and identity your credentials resolve to (STS `GetCallerIdentity`) and asks you to confirm it. Before deploying it also checks for a running container engine, because the agent image is built locally: `CDK_DOCKER` if set, otherwise Docker, otherwise Finch (passed to CDK as `CDK_DOCKER=finch`).
+   - **Which deployment:** without `--stack-name`, it lists the ABCA deployments already in the account and Region. You can update one, or create a new deployment under a name you choose (the suggestion avoids existing names). With none yet, it asks for a name (default `backgroundagent-dev`).
+   - **Stack names:** ABCA's least-privilege bootstrap scopes its deploy role to `backgroundagent-dev` and `backgroundagent-dev-<suffix>`. When the account uses it (or setup installs it), setup only creates stacks with those names, for example `backgroundagent-dev-team-b`; a name outside that scope would fail partway through the create and leave a stack in `ROLLBACK_FAILED`. A standard CDK bootstrap with administrator access deploys any name. A stack that exists but is not a working deployment (for example after a failed first create) is not listed; setup tells you to delete it or pass `--stack-name`.
+2. Reads the existing stack (`--stack-name`, default `backgroundagent-dev`). It preselects the features listed in the stack's `DeploymentFeatures` output, or infers them for stacks that predate profiles. Accepting the defaults never removes anything. A new stack defaults to the minimal profile.
+   - The wizard passes only `stackName`, the profile and any `-c/--context key=value` you supply to CDK, alongside whatever `cdk/cdk.json` already holds.
+   - It refuses to continue if a `${stackName}-network` stack exists and `networkTopology=split` is missing from `--context` and `cdk/cdk.json`, because dropping it would rebuild the VPC rather than change features. Compute comes from the stack itself (see step 3).
+3. **New installations only:** asks where agents run: AgentCore Runtime (recommended), ECS Fargate, or both (`--compute agentcore|ecs|agentcore,ecs` when scripted). The first backend is the repository default. An existing stack keeps its deployed backends (`ComputeTypes` output; stacks from before it that report a non-AgentCore `ComputeSubstrate` must pass `--compute`). `--compute` may add a backend, and setup warns before changing which one is first, but it refuses to remove one (see the [backend transition procedure](../design/COMPUTE.md#selecting-and-changing-the-backend)). Lambda MicroVMs are experimental and are selected only with `--compute`.
+4. Marks features that the Region does not support as unavailable and does not offer them. A scripted request for one fails with the supported Regions.
+5. Plans any one-time account preparation and lists it on the review screen:
+   - **No `CDKToolkit` stack:** installs ABCA's least-privilege CDK bootstrap (`mise //cdk:bootstrap`). For ECS it also sets the bootstrap's `ComputeTypes` parameter, which `cdk bootstrap` cannot set.
+   - **An older ABCA bootstrap:** updates it to the version this CLI requires, and adds missing backends to `ComputeTypes`.
+   - **A standard CDK bootstrap** (no ABCA policy outputs): left unchanged, because other apps in the account may depend on it. `mise //cdk:deploy` starts with a check that fails on a standard bootstrap, so setup passes `ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` to that deploy, and the review screen says so. To switch to the least-privilege bootstrap instead, run `mise //cdk:bootstrap` before setup.
+
+   Preparation runs only after you confirm the deploy.
+6. Shows a review screen of what you chose, then runs `cdk diff` against a temporary copy of the profile and summarizes it in one line (for example `317 to create · 0 to update · 0 to remove`). The full change list goes to `~/.bgagent/logs/<stack>/setup-changes.log`. Nothing in the repository changes until you confirm.
+7. Requires stronger confirmation if the diff deletes, replaces or orphans state-bearing resources (DynamoDB tables, secrets, buckets, log groups, user pools, VPCs, nested stacks): type the stack name interactively, or pass `--accept-data-loss` together with `--yes`. Declining, or closing the terminal at any prompt, exits with code 130 and leaves the repository unchanged.
+8. Prepares the account, writes `abca.deployment.json` (or `abca.deployment.<stack>.json`), and deploys with `mise //cdk:deploy -- -c stackName=<name> -c deploymentProfile=<file> --all`. If preparation fails, nothing is written.
+   - While deploying, it shows a progress bar and one line per component (Networking, Task API, Agent runtime, each enabled feature), with a check mark as each finishes. Raw CDK output goes to `~/.bgagent/logs/<stack>/setup-deploy.log`.
+   - Your confirmation replaces CDK's own IAM approval prompt; the change summary says how many IAM roles and policies are included.
+   - On success it configures the CLI from the stack outputs and prints next steps, in the same command form you launched setup with. A new installation lists storing a GitHub token, creating a user, signing in and onboarding a repository. Any Slack, Linear or Jira feature added by this run lists its own setup command. If the CLI was previously signed in to another stack's user pool, the cached tokens are removed; run `bgagent login` again. On failure it names the failed component and CloudFormation's reason, and keeps your selection so you can rerun.
+
+`--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` or CI deploy applies the removal with no wizard in the loop.
+
+Commit `abca.deployment.json`. Each additional deployment from the same checkout gets its own `abca.deployment.<stackName>.json`, so deploying one never changes another's features. Synthesis uses only the file matching `-c stackName=…`: the default stack `backgroundagent-dev` uses `abca.deployment.json`, and any other stack without its own file keeps the legacy topology rather than inheriting the default stack's features.
+
+Deployments in one account share only the CDK bootstrap, with one exception: Bedrock model-invocation logging is an account-wide setting, configured by whichever deployment was deployed last. Every synthesis reads it, including `mise //cdk:synth`, `mise //cdk:deploy` and the CI build, so local and pipeline deployments match.
+
+### Profile file and precedence
+
+```json
+{
+  "schemaVersion": 1,
+  "features": {
+    "slack": false,
+    "linear": false,
+    "jira": false,
+    "deployPreviewScreenshots": false,
+    "agentRegistry": false,
+    "toolGateway": false
+  },
+  "compute": ["agentcore"]
+}
+```
+
+Every feature must be listed explicitly. `compute` is optional: the ordered list of backends, first = repository default. It applies unless `compute_types` or `compute_type` context is set, so a later plain `mise //cdk:deploy` keeps the backends `bgagent setup` deployed. Without it, today's compute context rules apply. Unknown keys, a different `schemaVersion` or a non-boolean value fail synthesis. For each feature, the first source that sets it wins:
+
+1. the per-feature context switch (for example `-c enableSlack=true`);
+2. the profile;
+3. the legacy topology.
+
+`-c deploymentProfile=<path>` selects another file; relative paths resolve against the repository root, not `cdk/`. `-c deploymentProfile=none` ignores the profile. The wizard refuses to deploy while `~/.cdk.json`, `cdk/cdk.json` or `cdk/cdk.context.json` sets a switch that contradicts your selection.
+
+**No profile means no change.** Without `abca.deployment.json`, Slack, Linear, Jira, screenshots and the Agent Registry deploy as before, and the Tool Gateway stays opt-in. The only template change for an existing stack is the new `DeploymentFeatures` output.
+
+### What disabling a feature removes
+
+A disabled feature synthesizes no API routes, WAF body-size exemptions, Lambdas, IAM grants, tables, secrets, fan-out wiring, alarms or outputs. That includes the compute roles (AgentCore, ECS, MicroVM): they can read a tracker's OAuth secrets only when that tracker is deployed. Screenshot-to-Linear or screenshot-to-Jira posting exists only when screenshots and that tracker are both enabled. The orchestration table and live reconciler remain core because the reconciler also owns per-task budget rollups. The task table keeps its `LinearIssueIndex` and `JiraIssueIndex` indexes, which do nothing while unused.
+
+Removing a feature from an existing stack **deletes its data**: Slack installations and mappings, Linear and Jira workspace registries, project and user mappings, webhook secrets, the screenshot bucket, or the Agent Registry and its records. Re-enabling it creates empty resources, and there is no import or recovery path. Rerun the feature's setup command (`bgagent slack setup`, `bgagent linear setup`, `bgagent jira setup`, `bgagent github set-webhook-secret`), and republish registry assets. Per-workspace OAuth secrets created by the CLI (`bgagent-linear-oauth-*`, `bgagent-jira-oauth-*`, `bgagent/slack/*`) are not managed by CloudFormation and survive removal. Delete them separately if you no longer need them.
+
+CLI commands for an omitted feature (for example `bgagent slack setup`) fail with a message directing you to `bgagent setup`. They check the stack named by `--stack-name`, or else the stack the CLI was configured from (`bgagent setup` or `bgagent configure --stack-name`); with neither, the command runs its own checks.
+
+### Regional availability
+
+`contracts/deployment-capabilities.json` records the services each capability needs, the Regions that support it, and the source and date of the last verification. CDK synthesis enforces it for a concrete Region, so a CI or manual deploy fails before CloudFormation runs, not only in the wizard. Environment-agnostic synthesis is not checked.
+
+To update the data when AWS expands coverage:
+
+1. Check the [supported AgentCore Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page.
+2. Edit `regions` and set `lastVerified` in `contracts/deployment-capabilities.json`.
+3. Mirror the change into `cli/src/deployment-capabilities.ts`.
+4. Run `mise //cdk:test` and `mise //cli:build`. The parity test fails if the mirror drifts, and the census fails if a footprint estimate drifts by more than 15%.
+
+A stale entry blocks a newly supported Region until it is updated. The check fails closed by design, and there is no context override: editing the catalog is the only way to unblock a Region. Stacks that synthesize without a concrete Region (for example CI without credentials) are not checked; synthesis fails before any AWS lookup when a Region is known.
+
+### Optional operator console
+
+The operator console is a read-only web UI for tasks, approvals and agent health. It deploys as a separate stack, `${stackName}-console`: a private S3 bucket served through CloudFront, plus a Cognito app client and managed-login domain on the platform's existing user pool. Enable it with:
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all -c operatorConsole=true
+```
+
+`--all` is required because the app now has more than one stack. The deploy task builds the bundle (`mise //web:bundle`) first. Open the `ConsoleUrl` stack output and sign in with the same Cognito user as the `bgagent` CLI.
+
+The static app shell is public, like any single-page app on a CDN. It holds no data or secrets. Every request for data goes to the REST API, which requires a Cognito ID token. The console stack also deploys a small console-only API for the issue picker. It lists the open issues of onboarded repositories, using the stored GitHub token on the server side; the browser never receives the token. That API requires a Cognito ID token on every route, and its CORS rules allow only the console's own address. To sign in from a local `vite` dev server against a deployed stack, add `-c operatorConsoleDevOrigins=http://localhost:5173`. Bootstrap policy bundle 1.8.0 or later is required for the managed-login domain; `mise //cdk:preflight` reports a stale bundle.
 
 ## Bedrock inference geography
 
@@ -278,7 +406,7 @@ The repository includes a two-stage CI/CD pipeline:
 
 ### Stage 1: Build (`build.yml`)
 
-Triggers on every PR and push to main. Runs `mise run build` (compile, test, lint, synth) and uploads the synthesized `cdk.out/` as a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
+Triggers on every pull request and merge-queue entry, and on manual dispatch. Runs `mise run build` (what it covers is listed under [Pull request](../../CONTRIBUTING.md#5-pull-request) in CONTRIBUTING.md) and uploads the synthesized `cdk.out/` together with a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
 
 ### Stage 2: Deploy (`deploy.yml`)
 
@@ -312,6 +440,32 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Known deployment issues
 
+### Scheduled maintenance stack
+
+Concurrency repair, admission-queue pickup, stranded-task repair and pending-upload
+cleanup run in the `ConcurrencyMaintenance` nested stack. An upgrade recreates the
+stateless functions, roles and schedules; their task tables and storage stay in
+the parent stack. This applies to every compute backend, including AgentCore,
+and replaces roughly twenty resources, depending on enabled features.
+CloudFormation creates the new schedules before deleting the old ones, so both
+can fire during the update. Task mutations use conditional writes to tolerate
+that overlap.
+
+Review the replacements in the change set. Existing Lambda log groups remain
+under their old generated names; use the new function's log group for post-upgrade
+invocations and retain the old groups when investigating earlier runs.
+Both flat and nested MicroVM layouts support the optional
+tool gateway and Linear Identity vault without exceeding the template budget.
+
+New MicroVM installations must explicitly select `microvm_nested_stack=true`
+(bootstrap bundle 1.12.0 or later; `mise //cdk:preflight` checks it).
+Before upgrading an existing flat MicroVM deployment, save
+`"microvm_nested_stack": false` in its CDK context or pass
+`--context microvm_nested_stack=false` on every deploy. Keep this escape hatch
+until completing the [resource migration](../verification/645-p3-nested-stack.md).
+Omitting the setting fails synthesis. Selecting `true` does not migrate existing flat resources.
+
+
 ### Log-delivery rename on upgrade (pin-table removal, #703)
 
 **Affects:** any stack — **whatever its name** — whose live `AWS::Logs::Delivery*` logical ids contain `CDKSource` or `CdkLogGroup`. In practice that is any stack last deployed before the CDK library switch in #339 (2026-06-13), plus any stack deployed while the pin table held those ids. The legacy names come from the *previous library version*, not from the pin table, so a custom stack name confers no immunity. A currently-working deployment is **not** evidence of being unaffected: the failure only appears on the first deploy after upgrading past the pin removal.
@@ -329,6 +483,28 @@ STACK_NAME=<stack> mise //cdk:preflight:log-delivery -- --check-only
 **The GitHub Actions pipeline does not migrate automatically.** Its deploy job calls `cdk deploy` directly and so inherits none of that task's steps. What it does do is *report*: the read-only **diff** job runs the preflight with `--check-only` and writes the result into the job summary, so a stack needing migration is visible in the run summary before the approval gate rather than discovered as a rollback afterwards. Migrate it with `STACK_NAME=<stack> mise //cdk:deploy`, or the manual sequence below, then re-run the pipeline.
 
 A bare `cdk deploy` (no mise, no pipeline) does **not** run the preflight. On that path, or after the rollback above, run the check command shown under *Affects* and then follow the manual steps in [Observability — AgentCore log delivery](../design/OBSERVABILITY.md#agentcore-log-delivery).
+
+### Task list keeps its old order while a new index is built (#51)
+
+**Affects:** an existing stack on its first deploy of a version that adds `UserCreatedAtIndex` to the task table. A fresh stack is not affected.
+
+**Symptom:** For a while after the deploy, `GET /v1/tasks` (`bgagent list`, the console's task list) still returns tasks grouped by status instead of newest first, and the `ListTasksFn` log has a `UserCreatedAtIndex is not ACTIVE` warning for each request that starts a list.
+
+**Root cause:** CloudFormation starts creating the index and continues with the update without waiting for it, and DynamoDB does not allow a query on an index until it is `ACTIVE`. The list handler therefore asks DynamoDB for the status of the index, and reads `UserStatusIndex`, as it did before, until the answer is `ACTIVE`. This has been tested against an emulated DynamoDB and not observed on a deployed stack; how long the build takes on a given table has not been measured.
+
+**Resolution:** None needed. The list is newest first once the index is `ACTIVE`:
+
+```bash
+aws dynamodb describe-table --table-name <TaskTableName stack output> \
+  --query "Table.GlobalSecondaryIndexes[?IndexName=='UserCreatedAtIndex'].IndexStatus"
+```
+
+Two CloudFormation limits apply to the same update. It creates one index per update, so each index a stack has not yet created (`JiraIssueIndex`, `LinearIssueIndex`, this one) needs a deploy of its own, in the order the versions added them, each once the index of the deploy before it is `ACTIVE`. And AWS recommends that an update which adds an index changes nothing else, which this version cannot follow: if the update rolls back while the index is being created, CloudFormation leaves the index in place. Delete it, wait until the status command above prints `[]`, then deploy again. DynamoDB refuses the delete in the first phase of the build; if it does, try again after a minute:
+
+```bash
+aws dynamodb update-table --table-name <TaskTableName stack output> \
+  --global-secondary-index-updates '[{"Delete": {"IndexName": "UserCreatedAtIndex"}}]'
+```
 
 ### AgentCore unsupported Availability Zones
 

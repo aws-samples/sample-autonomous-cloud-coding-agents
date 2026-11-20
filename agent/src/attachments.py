@@ -42,7 +42,10 @@ def download_attachments(
 
     Args:
         attachments: List of AttachmentConfig models from TaskConfig.
-        workspace: The agent workspace root (e.g., /workspace).
+        workspace: The task's own directory (e.g., /workspace/<task_id>): the
+            repository clone, or a directory of that name for a task without a
+            repository. Never one that tasks share: a failed download removes
+            its whole ``.attachments`` directory.
 
     Returns:
         List of PreparedAttachment with local file paths.
@@ -57,6 +60,15 @@ def download_attachments(
 
     attachments_dir = Path(workspace) / ATTACHMENTS_DIR
     attachments_dir.mkdir(parents=True, exist_ok=True)
+    # For a task with a repository the workspace is the clone. Its exclude file is
+    # local and never committed: listed there, the uploads stay out of `git status`
+    # and of a broad `git add`, so they cannot end up in the pull request. Without
+    # a repository the workspace is no clone, and the entry is skipped.
+    git_info = Path(workspace) / ".git" / "info"
+    if git_info.is_dir():
+        # The leading newline is for an exclude file whose last line has none.
+        with (git_info / "exclude").open("a") as exclude:
+            exclude.write(f"\n/{ATTACHMENTS_DIR}/\n")
 
     s3_client = tenant_client("s3")
     prepared: list[PreparedAttachment] = []

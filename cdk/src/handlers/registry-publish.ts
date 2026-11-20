@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { ConflictException } from '@aws-sdk/client-agent-registry-control';
+import { ConflictException, ValidationException } from '@aws-sdk/client-agent-registry-control';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId, userInGroup } from './shared/gateway';
@@ -31,6 +31,7 @@ import { REGISTRY_KINDS, RESERVED_KINDS, parseConstraint } from './shared/regist
 import { RegistryPublishIncompleteError, type PublishInput, type RuntimePayload } from './shared/registry/types';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { RegistryPublishRequest, RegistryRecordResponse } from './shared/types';
+import { parseBody } from './shared/validation';
 
 const NAMESPACE_RE = /^[a-z][a-z0-9-]*$/;
 const NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
@@ -52,7 +53,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(403, ErrorCode.FORBIDDEN, `Publishing requires the ${REGISTRY_PUBLISHER_GROUP} group.`, requestId);
     }
 
-    const body = parseBody(event.body);
+    // Shared helper, not a local copy: the duplicate this replaced had the same
+    // "missing body or invalid JSON ⇒ null" contract as the seven sibling
+    // handlers but re-implemented it without the contract's justification, so it
+    // read as an unexplained swallow (#756). One implementation, one rationale.
+    const body = parseBody<RegistryPublishRequest>(event.body);
     if (!body) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
@@ -92,7 +97,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return successResponse(201, response, requestId);
   } catch (err) {
     if (err instanceof ConflictException) {
-      return errorResponse(409, ErrorCode.REGISTRY_VERSION_EXISTS, 'A record with these coordinates already exists.', requestId);
+      // The message says which conflict: for a slot held by a corrupt record the
+      // adapter's text tells the publisher to have that record deleted.
+      return errorResponse(409, ErrorCode.REGISTRY_VERSION_EXISTS, err.message, requestId);
+    }
+    if (err instanceof ValidationException) {
+      // AWS refused the record as invalid: a name or version above its length limit, a
+      // descriptor above its size limit or against its schema. That is the publisher's
+      // request, and the message says which part.
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, err.message, requestId);
     }
     if (err instanceof RegistryPublishIncompleteError) {
       logger.error('registry publish incomplete', { requestId, recordId: err.recordId, error: String(err.cause) });
@@ -108,16 +121,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 }
 
-function parseBody(raw: string | null): RegistryPublishRequest | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as RegistryPublishRequest;
-  } catch {
-    // nosemgrep: ts-silent-success-masking -- malformed JSON is an expected client-input class, not a swallowed fault; null IS the failure encoding and the caller turns it into a 400 VALIDATION_ERROR.
-    return null;
-  }
-}
-
 /** Returns an error message, or null when the request is well-formed. */
 function validate(body: RegistryPublishRequest): string | null {
   if (RESERVED_KINDS.includes(body.kind as (typeof RESERVED_KINDS)[number])) {
@@ -126,13 +129,16 @@ function validate(body: RegistryPublishRequest): string | null {
   if (!REGISTRY_KINDS.includes(body.kind as (typeof REGISTRY_KINDS)[number])) {
     return `unknown kind '${body.kind}' (expected one of: ${REGISTRY_KINDS.join(', ')}).`;
   }
-  if (!body.namespace || !NAMESPACE_RE.test(body.namespace)) {
+  // typeof first: RegExp.test and exec convert their argument to a string, so a
+  // one-element array or a number would pass, and the adapter's immutability check
+  // (which compares with ===) would then never find the existing record.
+  if (typeof body.namespace !== 'string' || !NAMESPACE_RE.test(body.namespace)) {
     return 'namespace must match [a-z][a-z0-9-]*.';
   }
-  if (!body.name || !NAME_RE.test(body.name)) {
+  if (typeof body.name !== 'string' || !NAME_RE.test(body.name)) {
     return 'name must match [a-z0-9][a-z0-9._-]*.';
   }
-  const constraint = body.asset_version ? parseConstraint(body.asset_version) : null;
+  const constraint = typeof body.asset_version === 'string' ? parseConstraint(body.asset_version) : null;
   if (!constraint || constraint.op !== 'exact') {
     return 'asset_version must be an exact semver (MAJOR.MINOR.PATCH[-prerelease]).';
   }
@@ -198,8 +204,15 @@ function validateRuntime(kind: string, runtime: Record<string, unknown>): string
       } else if (typeof runtime.url !== 'string' || !runtime.url) {
         return `mcp_server runtime.url (non-empty string) is required for transport '${transport}'.`;
       }
-      if (runtime.headers !== undefined && !isPlainObject(runtime.headers)) {
-        return 'mcp_server runtime.headers, when present, must be a JSON object.';
+      // The agent refuses a pinned server whose header values or arguments are not
+      // strings (the CLI would skip it), so such a record must not be publishable.
+      if (runtime.headers !== undefined
+        && !(isPlainObject(runtime.headers) && Object.values(runtime.headers).every((v) => typeof v === 'string'))) {
+        return 'mcp_server runtime.headers, when present, must be a JSON object with string values.';
+      }
+      if (runtime.args !== undefined
+        && !(Array.isArray(runtime.args) && runtime.args.every((a) => typeof a === 'string'))) {
+        return 'mcp_server runtime.args, when present, must be an array of strings.';
       }
       return null;
     }

@@ -173,21 +173,26 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
       + 'the runtime, or the agent container crashed during startup.';
 
   // 1. Conditional status transition — only if still in the stranded state.
+  //    The orchestrator that stamps the retention ttl at finalize may be gone
+  //    or may never have started, so it is stamped here; a finalize that still
+  //    comes overwrites it with its own.
+  const ttl = Math.floor(Date.now() / 1000) + TASK_RETENTION_DAYS * 24 * 3600;
   try {
     await ddb.send(new UpdateItemCommand({
       TableName: TASK_TABLE,
       Key: { task_id: { S: task.task_id } },
       UpdateExpression:
         'SET #s = :failed, updated_at = :now, completed_at = :now, '
-        + 'error_message = :err, status_created_at = :sca',
+        + 'error_message = :err, status_created_at = :sca, #ttl = :ttl',
       ConditionExpression: '#s = :expected',
-      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeNames: { '#s': 'status', '#ttl': 'ttl' },
       ExpressionAttributeValues: {
         ':failed': { S: 'FAILED' },
         ':expected': { S: task.status },
         ':now': { S: now },
         ':err': { S: errorMessage },
         ':sca': { S: `FAILED#${now}` },
+        ':ttl': { N: String(ttl) },
       },
     }));
   } catch (err: unknown) {
@@ -205,7 +210,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
 
   // 2. Emit task_stranded + task_failed events. Best-effort — loss of an
   //    event is acceptable; the task record is the source of truth.
-  const ttl = Math.floor(Date.now() / 1000) + TASK_RETENTION_DAYS * 24 * 3600;
   try {
     await ddb.send(new PutItemCommand({
       TableName: EVENTS_TABLE,

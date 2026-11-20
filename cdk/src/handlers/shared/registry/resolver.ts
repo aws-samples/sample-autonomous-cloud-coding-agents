@@ -22,7 +22,7 @@
 // matching, so ranking is always done here in code (this is substrate-agnostic
 // ABCA logic — it does not import the AWS SDK).
 
-import { type ParsedConstraint, parseConstraint } from './ref';
+import type { ParsedConstraint } from './ref';
 
 export interface SemVer {
   readonly major: number;
@@ -76,7 +76,9 @@ function comparePrerelease(a: readonly string[], b: readonly string[]): number {
     if (ai === bi) continue;
     const an = isNumeric(ai);
     const bn = isNumeric(bi);
-    if (an && bn) return Number(ai) - Number(bi);
+    // BigInt, not Number: above 2^53 two different identifiers are the same double and
+    // would tie here, where the Python resolver (exact integers) tells them apart.
+    if (an && bn) return Number(BigInt(ai) - BigInt(bi));
     if (an) return -1; // numeric identifiers have lower precedence than alphanumeric
     if (bn) return 1;
     return ai < bi ? -1 : 1;
@@ -117,7 +119,8 @@ export function satisfies(v: SemVer, c: ParsedConstraint): boolean {
   };
 
   if (c.op === 'exact') {
-    return compareVersions(v, constraintCore) === 0;
+    // The version as written: 1.0.0-rc.01 compares equal to 1.0.0-rc.1 and is not it.
+    return v.raw === c.raw;
   }
 
   // Range ops: v must be >= the constraint's core.
@@ -157,13 +160,4 @@ export function selectHighest(
     if (best === null || compareVersions(v, best) > 0) best = v;
   }
   return best ? best.raw : null;
-}
-
-/** Convenience: parse a constraint string then select. Null on bad constraint. */
-export function selectHighestForConstraint(
-  candidates: readonly string[],
-  constraintRaw: string,
-): string | null {
-  const c = parseConstraint(constraintRaw);
-  return c ? selectHighest(candidates, c) : null;
 }

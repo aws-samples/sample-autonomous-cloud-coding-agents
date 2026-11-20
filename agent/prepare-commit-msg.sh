@@ -14,11 +14,11 @@ if [ -z "${TASK_ID}" ]; then
   exit 0
 fi
 
-if ! grep -q "^Task-Id:" "$COMMIT_MSG_FILE" 2>/dev/null; then
-  # Add a blank line separator before trailers (git convention)
-  echo "" >> "$COMMIT_MSG_FILE"
-  echo "Task-Id: ${TASK_ID}" >> "$COMMIT_MSG_FILE"
-  if [ -n "${PROMPT_VERSION}" ]; then
-    echo "Prompt-Version: ${PROMPT_VERSION}" >> "$COMMIT_MSG_FILE"
-  fi
-fi
+# git reads the trailers of a message from its last paragraph only, so these two join
+# the block the message ends with (Co-Authored-By stays a trailer) or start one when
+# there is none. A trailer the message already has is left alone, and --no-divider
+# keeps a "---" line in the body from being read as the end of the message.
+git interpret-trailers --in-place --no-divider --if-exists doNothing \
+  --trailer "Task-Id: ${TASK_ID}" \
+  ${PROMPT_VERSION:+--trailer "Prompt-Version: ${PROMPT_VERSION}"} \
+  "$COMMIT_MSG_FILE"

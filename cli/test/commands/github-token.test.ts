@@ -214,13 +214,45 @@ describe('isGithubTokenConfigured', () => {
     smSend.mockReset();
   });
 
-  test('returns true for a non-placeholder secret string', async () => {
-    smSend.mockResolvedValueOnce({ SecretString: 'ghp_abc123' });
+  test('returns false for a string that is not a GitHub token', async () => {
+    smSend.mockResolvedValueOnce({ SecretString: '{}' });
+    await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(false);
+  });
+
+  // What a deployed stack holds until someone stores a token: CDK creates the
+  // secret with CloudFormation's generated password (32 characters, at least one
+  // upper-case letter, lower-case letter, digit and punctuation character).
+  test('returns false for the generated password of a secret nobody has set', async () => {
+    smSend.mockResolvedValueOnce({ SecretString: 'Aa1!'.repeat(8) });
+    await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(false);
+  });
+
+  // Built with repeat() so that no token-shaped literal sits in the source.
+  test.each([
+    ['classic personal access token', `ghp_${'a1B2'.repeat(9)}`],
+    ['fine-grained personal access token', `github_pat_${'a1B2'.repeat(5)}aa_${'c3D4'.repeat(14)}ccc`],
+    ['OAuth token', `gho_${'a1B2'.repeat(9)}`],
+    ['GitHub App user access token', `ghu_${'a1B2'.repeat(9)}`],
+    ['GitHub App installation access token', `ghs_${'a1B2'.repeat(9)}`],
+    ['GitHub App refresh token', `ghr_${'a1B2'.repeat(9)}`],
+    ['token in the format issued before 2021', 'a1b2c3d4e5'.repeat(4)],
+  ])('returns true for a %s', async (_format, token) => {
+    smSend.mockResolvedValueOnce({ SecretString: token });
     await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(true);
   });
 
-  test('returns false for empty or JSON placeholder secrets', async () => {
-    smSend.mockResolvedValueOnce({ SecretString: '{}' });
+  // One row per anchor of the pattern: the value has to start with the token,
+  // and the format without a prefix is 40 hex digits and no more.
+  test.each([
+    ['value that only contains a token', JSON.stringify({ token: `ghp_${'a1B2'.repeat(9)}` })],
+    ['string of 41 hex digits', `${'a1b2c3d4e5'.repeat(4)}f`],
+  ])('returns false for a %s', async (_case, value) => {
+    smSend.mockResolvedValueOnce({ SecretString: value });
+    await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(false);
+  });
+
+  test('returns false when the secret has no string value', async () => {
+    smSend.mockResolvedValueOnce({});
     await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(false);
   });
 

@@ -113,4 +113,48 @@ describe('TaskDashboard construct', () => {
     expect(dashboardBodyContains(template, 'denied')).toBe(true);
     expect(dashboardBodyContains(template, 'timed_out')).toBe(true);
   });
+
+  describe('build and lint pass rates', () => {
+    let template: Template;
+    beforeAll(() => {
+      template = createStack().template;
+    });
+
+    /** The Logs Insights commands of one log widget, in order. */
+    function widgetQuery(title: string): string[] {
+      const [dashboard] = Object.values(template.findResources('AWS::CloudWatch::Dashboard'));
+      const parts = dashboard.Properties.DashboardBody['Fn::Join'][1] as unknown[];
+      const body = JSON.parse(parts.map((p) => (typeof p === 'string' ? p : 'TOKEN')).join(''));
+      const widget = body.widgets.find((w: { properties: { title?: string } }) => w.properties.title === title);
+      return (widget.properties.query as string).split('\n| ');
+    }
+
+    // A METRICS_REPORT line as the agent writes it (Python json.dumps). Both
+    // verdicts are null when nothing ran: a task without a repository, a
+    // crashed task, a build command that could not run.
+    const metricsLine = (verdict: boolean | null): string =>
+      `{"event": "METRICS_REPORT", "status": "${verdict === null ? 'error' : 'success'}", "agent_status": "success", `
+      + `"pr_url": null, "build_passed": ${verdict}, "lint_passed": ${verdict}, "cost_usd": 6.2, "turns": 60, "duration_s": 2400.0}`;
+
+    test.each([
+      ['Build Pass Rate (24h)', 'bp_raw'],
+      ['Lint Pass Rate (24h)', 'lp_raw'],
+    ])('%s counts a task without a verdict neither as passed nor as failed', (title, field) => {
+      const [, parse, filter, stats] = widgetQuery(title);
+      // What the query does with the parsed field: keep the events that have
+      // it, then divide those that read "true" by all that are left.
+      expect(filter).toBe(`filter ispresent(${field})`);
+      expect(stats).toContain(`stats sum(${field} = "true") / count(*) * 100 as`);
+      const pattern = new RegExp(parse.slice(parse.indexOf('/') + 1, parse.lastIndexOf('/')));
+      const passRate = (lines: string[]): number => {
+        const parsed = lines.map((line) => pattern.exec(line)?.groups?.[field]).filter((value) => value !== undefined);
+        return (parsed.filter((value) => value === 'true').length / parsed.length) * 100;
+      };
+
+      const ninePassed = Array<string>(9).fill(metricsLine(true));
+      const threeWithoutVerdict = Array<string>(3).fill(metricsLine(null));
+      expect(passRate([...ninePassed, ...threeWithoutVerdict])).toBe(100);
+      expect(passRate([...ninePassed, metricsLine(false), ...threeWithoutVerdict])).toBe(90);
+    });
+  });
 });

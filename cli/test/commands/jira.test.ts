@@ -32,7 +32,6 @@ import {
 import { ApiClient } from '../../src/api-client';
 import {
   makeJiraCommand,
-  openBrowser,
   renderJiraAppTemplate,
   synchronizeJiraWebhookSecrets,
   upsertOauthSecret,
@@ -85,10 +84,12 @@ jest.mock('../../src/api-client', () => ({
   ApiClient: jest.fn(() => ({ jiraLink: jiraLinkMock })),
 }));
 
-// Shared secret prompt — avoid touching real stdin in `setup`.
+// Shared prompts — avoid touching real stdin in `setup` and `link`.
 const promptSecretMock = jest.fn();
+const promptLineMock = jest.fn();
 jest.mock('../../src/prompt-secret', () => ({
   promptSecret: (...args: unknown[]) => promptSecretMock(...args),
+  promptLine: (...args: unknown[]) => promptLineMock(...args),
 }));
 
 // DynamoDB DocumentClient — capture PutCommand inputs from the `map` action.
@@ -101,7 +102,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
   };
 });
 
-// CloudFormation — `getStackOutput` reads JiraProjectMappingTableName from here.
+// CloudFormation — `findStackOutput` reads JiraProjectMappingTableName from here.
 const cfnSend = jest.fn();
 jest.mock('@aws-sdk/client-cloudformation', () => {
   const actual = jest.requireActual('@aws-sdk/client-cloudformation');
@@ -180,7 +181,7 @@ describe('makeJiraCommand', () => {
   });
 });
 
-describe('jira map action', () => {
+describe('jira map action status overrides', () => {
   let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
   let logSpy: jest.SpiedFunction<typeof console.log>;
 
@@ -213,7 +214,7 @@ describe('jira map action', () => {
       '--status-on-pr', 'Code Review',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd).toBeInstanceOf(PutCommand);
     expect(putCmd.input.Item).toMatchObject({
       jira_project_identity: 'cloud-1#ENG',
@@ -234,7 +235,7 @@ describe('jira map action', () => {
       'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
     expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
   });
@@ -247,7 +248,7 @@ describe('jira map action', () => {
       '--status-on-pr', '  Code Review  ',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd.input.Item).toMatchObject({ status_on_start: 'Doing', status_on_pr: 'Code Review' });
   });
 
@@ -261,7 +262,7 @@ describe('jira map action', () => {
       '--status-on-pr', '\t',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
     expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
   });
@@ -281,37 +282,6 @@ describe('generateInviteCode', () => {
       for (const c of chars) {
         expect(INVITE_CODE_ALPHABET).toContain(c);
       }
-    }
-  });
-});
-
-describe('openBrowser', () => {
-  beforeEach(() => execFileMock.mockReset());
-
-  test('resolves true when the OS opener succeeds', async () => {
-    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(null));
-    await expect(openBrowser('https://example.test')).resolves.toBe(true);
-    expect(execFileMock).toHaveBeenCalledTimes(1);
-  });
-
-  test('resolves false when the OS opener errors', async () => {
-    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(new Error('no opener')));
-    await expect(openBrowser('https://example.test')).resolves.toBe(false);
-  });
-
-  test.each([
-    ['darwin', 'open'],
-    ['win32', 'cmd'],
-    ['linux', 'xdg-open'],
-  ] as const)('invokes %s on %s', async (platform, expectedCmd) => {
-    const original = Object.getOwnPropertyDescriptor(process, 'platform');
-    Object.defineProperty(process, 'platform', { configurable: true, value: platform });
-    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(null));
-    try {
-      await openBrowser('https://example.test');
-      expect(execFileMock.mock.calls[0]?.[0]).toBe(expectedCmd);
-    } finally {
-      if (original) Object.defineProperty(process, 'platform', original);
     }
   });
 });
@@ -357,20 +327,16 @@ describe('jira link action', () => {
     jiraLinkMock.mockResolvedValueOnce({
       jira_account_id: 'acct-1', // no name/email/site → exercises fallback branches
     });
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const readline = require('readline') as typeof import('readline');
-    const rlMock = { question: (_q: string, cb: (a: string) => void) => cb('n'), close: jest.fn() };
-    const rlSpy = jest.spyOn(readline, 'createInterface').mockReturnValue(rlMock as unknown as ReturnType<typeof readline.createInterface>);
-    try {
-      const program = makeJiraCommand();
-      await program.parseAsync(['node', 'bgagent', 'link', 'CODE123']);
-      // Only the dry-run preview ran; no real link call.
-      expect(jiraLinkMock).toHaveBeenCalledTimes(1);
-      expect(jiraLinkMock).toHaveBeenCalledWith('CODE123', { dryRun: true });
-      expect(logSpy.mock.calls.some((c) => String(c[0]).includes('Aborted'))).toBe(true);
-    } finally {
-      rlSpy.mockRestore();
-    }
+    promptLineMock.mockResolvedValueOnce('n');
+
+    const program = makeJiraCommand();
+    await program.parseAsync(['node', 'bgagent', 'link', 'CODE123']);
+
+    // Only the dry-run preview ran; no real link call.
+    expect(promptLineMock).toHaveBeenCalledWith('Continue? [Y/n]');
+    expect(jiraLinkMock).toHaveBeenCalledTimes(1);
+    expect(jiraLinkMock).toHaveBeenCalledWith('CODE123', { dryRun: true });
+    expect(logSpy.mock.calls.some((c) => String(c[0]).includes('Aborted'))).toBe(true);
   });
 
   test('text mode shows a dry-run preview, then confirms and links', async () => {
@@ -382,24 +348,27 @@ describe('jira link action', () => {
         jira_site_url: 'https://acme.atlassian.net',
       })
       .mockResolvedValueOnce({ linked_at: '2026-06-17T02:00:00.000Z' });
-    // Auto-confirm the prompt by feeding "y\n" on stdin.
-    const stdinSpy = jest.spyOn(process.stdin, 'on').mockImplementation(function (this: typeof process.stdin) {
-      return this;
-    } as never);
-    const rlMock = { question: (_q: string, cb: (a: string) => void) => cb('y'), close: jest.fn() };
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const readline = require('readline') as typeof import('readline');
-    const rlSpy = jest.spyOn(readline, 'createInterface').mockReturnValue(rlMock as unknown as ReturnType<typeof readline.createInterface>);
-    try {
-      const program = makeJiraCommand();
-      await program.parseAsync(['node', 'bgagent', 'link', 'CODE123']);
-      expect(jiraLinkMock).toHaveBeenCalledWith('CODE123', { dryRun: true });
-      expect(jiraLinkMock).toHaveBeenCalledWith('CODE123');
-      expect(logSpy.mock.calls.some((c) => String(c[0]).includes('Jira account linked'))).toBe(true);
-    } finally {
-      rlSpy.mockRestore();
-      stdinSpy.mockRestore();
-    }
+    promptLineMock.mockResolvedValueOnce('y');
+
+    const program = makeJiraCommand();
+    await program.parseAsync(['node', 'bgagent', 'link', 'CODE123']);
+
+    expect(jiraLinkMock).toHaveBeenCalledWith('CODE123', { dryRun: true });
+    expect(jiraLinkMock).toHaveBeenCalledWith('CODE123');
+    expect(logSpy.mock.calls.some((c) => String(c[0]).includes('Jira account linked'))).toBe(true);
+  });
+
+  test('text mode does not link when the confirmation cannot be read', async () => {
+    // At the end of the input the shared prompt rejects. The private prompt this command had
+    // never answered, and the process ended with exit code 0 as if the link had been made.
+    jiraLinkMock.mockResolvedValueOnce({ jira_account_id: 'acct-1' });
+    promptLineMock.mockRejectedValueOnce(new Error('No input provided.'));
+
+    const program = makeJiraCommand();
+    await expect(program.parseAsync(['node', 'bgagent', 'link', 'CODE123'])).rejects.toThrow('No input provided.');
+
+    expect(jiraLinkMock).toHaveBeenCalledTimes(1);
+    expect(jiraLinkMock).toHaveBeenCalledWith('CODE123', { dryRun: true });
   });
 });
 
@@ -792,7 +761,7 @@ describe('jira invite-user action', () => {
   });
 
   test('fails before writing when the admin is not logged in', async () => {
-    loadCredentialsSpy.mockReturnValue(undefined as ReturnType<typeof config.loadCredentials>);
+    loadCredentialsSpy.mockReturnValue(null);
 
     await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/Not authenticated/);
 
@@ -1049,7 +1018,7 @@ describe('jira setup action', () => {
   afterEach(() => loadConfigSpy.mockRestore());
 
   test('throws a clear error when required stack outputs are missing (not deployed)', async () => {
-    // No outputs → getStackOutput returns null for both → setup aborts early.
+    // No outputs → findStackOutput returns null for both → setup aborts early.
     cfnSend.mockResolvedValue({ Stacks: [{ Outputs: [] }] });
     const program = makeJiraCommand();
     program.exitOverride();
@@ -1285,7 +1254,7 @@ describe('jira setup action', () => {
         ],
       }],
     });
-    const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue(undefined as ReturnType<typeof config.loadCredentials>);
+    const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue(null);
     try {
       const program = makeJiraCommand();
       await expect(program.parseAsync(['node', 'bgagent', 'setup'])).rejects.toThrow(/Not authenticated/);
@@ -1294,7 +1263,7 @@ describe('jira setup action', () => {
     }
   });
 
-  test('fails with a clear error when the cached id_token is malformed (extractCognitoSub branch)', async () => {
+  test('fails with a clear error when the cached id_token is malformed (cognitoSubFromSession branch)', async () => {
     cfnSend.mockResolvedValue({
       Stacks: [{
         Outputs: [
@@ -1303,19 +1272,21 @@ describe('jira setup action', () => {
         ],
       }],
     });
-    // id_token present but not a 3-segment JWT → extractCognitoSub throws.
+    // id_token present but not a 3-segment JWT → cognitoSubFromSession throws.
     const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
       id_token: 'not-a-jwt',
     } as ReturnType<typeof config.loadCredentials>);
     try {
       const program = makeJiraCommand();
-      await expect(program.parseAsync(['node', 'bgagent', 'setup'])).rejects.toThrow(/Could not read Cognito sub/);
+      await expect(program.parseAsync(['node', 'bgagent', 'setup'])).rejects.toThrow(
+        'Credentials file is corrupt. Run `bgagent login` to re-authenticate.',
+      );
     } finally {
       credsSpy.mockRestore();
     }
   });
 
-  test('resolves caller identity then prompts for the Client ID (covers extractCognitoSub + promptSecret)', async () => {
+  test('resolves caller identity then prompts for the Client ID (covers cognitoSubFromSession + promptSecret)', async () => {
     // Outputs present so setup proceeds past the deploy gate.
     cfnSend.mockResolvedValue({
       Stacks: [{
@@ -1325,7 +1296,7 @@ describe('jira setup action', () => {
         ],
       }],
     });
-    // A well-formed id_token with a `sub` claim so extractCognitoSub succeeds.
+    // A well-formed id_token with a `sub` claim so cognitoSubFromSession succeeds.
     const payload = Buffer.from(JSON.stringify({ sub: 'cognito-sub-123' })).toString('base64url');
     const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
       id_token: `header.${payload}.sig`,
@@ -1500,8 +1471,14 @@ describe('jira map action', () => {
 
   test('writes an active mapping row with the resolved label on the happy path', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo', '--label', 'agentme']);
-    expect(ddbSend).toHaveBeenCalledTimes(1);
-    const putInput = ddbSend.mock.calls[0][0].input;
+    // One read of the row that the put replaces, then the put.
+    expect(ddbSend).toHaveBeenCalledTimes(2);
+    expect(ddbSend.mock.calls[0][0].input).toEqual({
+      TableName: 'ProjMapTable',
+      Key: { jira_project_identity: 'cloud-123#ENG' },
+      ConsistentRead: true,
+    });
+    const putInput = ddbSend.mock.calls[1][0].input;
     expect(putInput.TableName).toBe('ProjMapTable');
     expect(putInput.Item).toMatchObject({
       jira_project_identity: 'cloud-123#ENG',
@@ -1515,7 +1492,60 @@ describe('jira map action', () => {
 
   test('defaults the trigger label to bgagent when --label is omitted', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']);
-    expect(ddbSend.mock.calls[0][0].input.Item.label_filter).toBe('bgagent');
+    expect(ddbSend.mock.calls[1][0].input.Item.label_filter).toBe('bgagent');
+  });
+
+  test('a second map keeps the first onboarded_at and moves updated_at', async () => {
+    // The mapping table, one row of it: a put stores the item, a get returns it.
+    let row: Record<string, unknown> | undefined;
+    ddbSend.mockImplementation(async (command: unknown) => {
+      if (command instanceof PutCommand) {
+        row = command.input.Item;
+        return {};
+      }
+      return { Item: row };
+    });
+    // Only the clock is faked, so that the two runs are a month apart.
+    jest.useFakeTimers({
+      now: new Date('2026-01-02T03:04:05.000Z'),
+      doNotFake: [
+        'nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+        'setInterval', 'clearInterval', 'hrtime', 'performance',
+      ],
+    });
+    try {
+      await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']);
+      expect(row).toMatchObject({
+        onboarded_at: '2026-01-02T03:04:05.000Z',
+        updated_at: '2026-01-02T03:04:05.000Z',
+      });
+
+      jest.setSystemTime(new Date('2026-02-03T04:05:06.000Z'));
+      await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo', '--status-on-pr', 'Code Review']);
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(row).toMatchObject({
+      jira_project_identity: 'cloud-123#ENG',
+      status_on_pr: 'Code Review',
+      onboarded_at: '2026-01-02T03:04:05.000Z',
+      updated_at: '2026-02-03T04:05:06.000Z',
+    });
+  });
+
+  test('stops with the AWS error, before writing, when the mapping row cannot be read', async () => {
+    // Not a reason to take the row for new: the put would date the mapping from today.
+    ddbSend.mockRejectedValueOnce(Object.assign(
+      new Error('User is not authorized to perform: dynamodb:GetItem'),
+      { name: 'AccessDeniedException' },
+    ));
+
+    await expect(runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']))
+      .rejects.toThrow('not authorized to perform: dynamodb:GetItem');
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
   });
 
   test('rejects a repository that is not actively onboarded before writing', async () => {

@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, AppProps, AspectPriority, Aspects, STACK_RESOURCE_LIMIT_CONTEXT, Tags } from 'aws-cdk-lib';
+import { App, AppProps, AspectPriority, Aspects, STACK_RESOURCE_LIMIT_CONTEXT, Stack, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { BlueprintDefinition, blueprintEgressDomains, resolveBlueprintDefinitions } from './blueprints/definitions';
 import {
@@ -27,8 +27,11 @@ import {
   resolveAgentCoreAzs,
 } from './constructs/agentcore-azs';
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
+import { assertCapabilitiesAvailable } from './deployment/capabilities';
+import { readDeploymentProfile, resolveDeploymentFeatures } from './deployment/features';
 import { resolveComputeBackends } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
+import { DEFAULT_CONSOLE_ASSET_DIRECTORY, OperatorConsoleStack } from './stacks/console';
 import { NetworkStack, resolveNetworkTopology } from './stacks/network';
 import { DEFAULT_BUDGETS } from './synthesis/budgets';
 
@@ -52,6 +55,14 @@ export interface BuildAppOptions {
   readonly resolveCallerAccount?: ResolveCallerAccountFn;
   /** Repository configuration shared by provisioning and DNS policy. */
   readonly blueprints?: readonly BlueprintDefinition[];
+  /** Directory holding `abca.deployment.json`. @default the repository root */
+  readonly profileRoot?: string;
+  /**
+   * Built operator console (`web/dist`). When set, the app adds the `<stack>-console` stack
+   * (opt out with `-c operatorConsole=false`). @default undefined — no console stack, so tests
+   * that synthesize the platform do not need a web build.
+   */
+  readonly operatorConsoleAssetDirectory?: string;
 }
 
 /**
@@ -100,6 +111,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
   const networkTopology = resolveNetworkTopology(app.node.tryGetContext('networkTopology'));
   const blueprints = options.blueprints ?? resolveBlueprintDefinitions(app.node);
+  // One profile read for local and CI synthesis alike (ADR-024); context
+  // switches still override individual features.
+  const profile = readDeploymentProfile(app.node, options.profileRoot);
+  const features = resolveDeploymentFeatures(app.node, profile?.features);
+  // The profile's compute selection applies unless context chooses explicitly,
+  // so a plain `mise //cdk:deploy` keeps the backends `bgagent setup` deployed.
+  if (profile?.compute && app.node.tryGetContext('compute_types') === undefined
+    && app.node.tryGetContext('compute_type') === undefined) {
+    app.node.setContext('compute_types', profile.compute.join(','));
+  }
+  // Fail before any AWS lookup or network stack; AgentStack repeats the check
+  // for direct construction.
+  assertCapabilitiesAvailable(features, options.region ?? devEnv.region);
 
   const env = {
     account: options.account ?? devEnv.account,
@@ -140,11 +164,41 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       agentCoreAvailabilityZones: azResolution.zones,
       network,
       blueprints,
+      features,
       description: 'ABCA Development Stack (uksb-wt64nei4u6)',
     },
   );
 
   applyAgentCoreAzDiagnostics(network ?? stack, azResolution);
+
+  // Opt-in: a second top-level stack means `cdk deploy` needs `--all` (or stack names),
+  // which a bare `mise //cdk:deploy` and existing pipelines do not pass.
+  const consoleContext = app.node.tryGetContext('operatorConsole');
+  const consoleEnabled = consoleContext === true || consoleContext === 'true';
+  // `-c operatorConsoleDevOrigins=http://localhost:5173` lets a local `vite` sign in against this stack.
+  const devOrigins = String(app.node.tryGetContext('operatorConsoleDevOrigins') ?? '')
+    .split(',').map((o) => o.trim()).filter(Boolean);
+  const consoleStack = options.operatorConsoleAssetDirectory && consoleEnabled
+    ? new OperatorConsoleStack(app, `${stackName}-console`, {
+      env,
+      userPool: stack.taskApi.userPool,
+      apiUrl: stack.taskApi.api.url,
+      repoTable: stack.repoTable.table,
+      githubTokenSecret: stack.githubTokenSecret,
+      repoGithubTokenSecretArns: blueprints.flatMap((b) => (b.credentials?.githubTokenSecretArn ? [b.credentials.githubTokenSecretArn] : [])),
+      // The console's Linear routes exist only when the profile deploys Linear (ADR-024).
+      linear: stack.linearIntegration ? {
+        projectMappingTable: stack.linearIntegration.projectMappingTable,
+        workspaceRegistryTable: stack.linearIntegration.workspaceRegistryTable,
+        webhookDedupTable: stack.linearIntegration.webhookDedupTable,
+        taskTable: stack.taskTable.table,
+        identityVault: stack.linearIdentityVault,
+      } : undefined,
+      assetDirectory: options.operatorConsoleAssetDirectory,
+      additionalOrigins: devOrigins,
+      description: 'ABCA operator console (uksb-wt64nei4u6)',
+    })
+    : undefined;
 
   // Outbound SDK solution attribution (#319): set AWS_SDK_UA_APP_ID on every
   // Lambda so the SDK emits `app/uksb-wt64nei4u6#{stackName}` natively. One
@@ -176,8 +230,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     'clean',
   ] as const;
 
-  for (const deploymentStack of network ? [network, stack] : [stack]) {
-    // Keep the application deployment identity on both stacks' SDK calls.
+  const deploymentStacks: Stack[] = [network, stack, consoleStack].filter((s) => s !== undefined);
+  for (const deploymentStack of deploymentStacks) {
+    // Keep the application deployment identity on every stack's SDK calls.
     Aspects.of(deploymentStack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
       priority: AspectPriority.MUTATING,
     });
@@ -193,12 +248,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
 
 /** Builds and synthesizes — the CDK app entrypoint (`cdk.json` `app`). */
 export async function main(): Promise<void> {
-  (await buildApp()).synth();
+  (await buildApp({ operatorConsoleAssetDirectory: DEFAULT_CONSOLE_ASSET_DIRECTORY })).synth();
 }
 
 // Only auto-run when executed as the app entrypoint, so importing this module
 // from a test drives `buildApp` without triggering a real synth.
-/* istanbul ignore next -- entrypoint guard: not reachable under jest import */
+// Not reachable under jest, which only imports the module.
 if (require.main === module) {
   // Surface any synth-time failure (e.g. a malformed `agentcore:availabilityZones`
   // override) as a non-zero exit. `void` satisfies no-floating-promises; throwing

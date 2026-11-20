@@ -262,11 +262,13 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   function cdpSend(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<CdpMessage> {
     const id = nextCdpId++;
     const message: CdpMessage = { id, method, params, ...(sessionId ? { sessionId } : {}) };
+    // Read once: when the timer fires nothing remains, and the message would say 0ms.
+    const budgetMs = remaining();
     return new Promise<CdpMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`CDP ${method} timed out after ${remaining()}ms`));
-      }, remaining());
+        reject(new Error(`CDP ${method} timed out after ${budgetMs}ms`));
+      }, budgetMs);
       pending.set(id, {
         resolve: (msg) => { clearTimeout(timer); resolve(msg); },
         reject: (err) => { clearTimeout(timer); reject(err); },

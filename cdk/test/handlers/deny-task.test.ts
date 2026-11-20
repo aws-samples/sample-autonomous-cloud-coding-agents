@@ -20,9 +20,14 @@
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 const mockSend = jest.fn();
+const mockWake = jest.fn();
+jest.mock('../../src/handlers/shared/microvm/approval-wake', () => ({
+  ...jest.requireActual('../../src/handlers/shared/microvm/approval-wake'),
+  wakeMicrovmAfterApproval: (...args: unknown[]) => mockWake(...args),
+}));
 
 class MockTransactionCanceledException extends Error {
-  name = 'TransactionCanceledException';
+  override name = 'TransactionCanceledException';
   CancellationReasons?: { Code?: string }[];
   constructor(reasons: { Code?: string }[]) {
     super('TransactionCanceledException');
@@ -55,6 +60,7 @@ import { handler } from '../../src/handlers/deny-task';
 // hook trips on AWS / GitHub / Slack tokens even inside tests).
 const FIX_AWS_KEY = 'AK' + 'IAIOSFODNN7EXAMPLE';
 const FIX_GITHUB_PAT = 'gh' + 'p_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij';
+const FIX_PEM_BEGIN = '-----' + 'BEGIN' + ' PRIVATE KEY' + '-----';
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {
@@ -90,6 +96,7 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 
 beforeEach(() => {
   mockSend.mockReset();
+  mockWake.mockReset().mockResolvedValue(undefined);
   ulidCounter = 0;
 });
 
@@ -115,6 +122,33 @@ describe('deny-task — auth + validation', () => {
     );
     expect(res.statusCode).toBe(202);
     // The deny_reason ends up as "" in the Update expression values.
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    expect(tx.TransactItems[0].Update.ExpressionAttributeValues[':reason']).toBe('');
+  });
+
+  test.each([
+    ['a number', 42],
+    ['an object', { text: 'too risky' }],
+    ['a list', ['too risky']],
+  ])('400 when reason is %s', async (_what, reason) => {
+    // The body is parsed JSON, so the field can hold any JSON type.
+    const res = await handler(
+      makeEvent({ body: JSON.stringify({ request_id: '01K', decision: 'deny', reason }) }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid reason. Must be a string.',
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('a reason of null is no reason', async () => {
+    mockSend.mockResolvedValue({});
+    const res = await handler(
+      makeEvent({ body: JSON.stringify({ request_id: '01K', decision: 'deny', reason: null }) }),
+    );
+    expect(res.statusCode).toBe(202);
     const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
     expect(tx.TransactItems[0].Update.ExpressionAttributeValues[':reason']).toBe('');
   });
@@ -166,6 +200,44 @@ describe('deny-task — secret redaction', () => {
     const reason = tx.TransactItems[0].Update.ExpressionAttributeValues[':reason'];
     expect(reason.length).toBeLessThanOrEqual(2000);
   });
+
+  // The scanner module that the handler calls; nothing in this file mocks it.
+  const scanner = jest.requireActual<typeof import('../../src/handlers/shared/deny-reason-scanner')>(
+    '../../src/handlers/shared/deny-reason-scanner',
+  );
+
+  test('scans only the first 20,000 characters of an oversized reason', async () => {
+    mockSend.mockResolvedValue({});
+    // 540 KB of key headers and no END marker: the private-key pattern
+    // walks from every header to the end of the text it is given.
+    const longReason = FIX_PEM_BEGIN.repeat(20_000);
+    const scan = jest.spyOn(scanner, 'scanDenyReason');
+    const res = await handler(
+      makeEvent({
+        body: JSON.stringify({ request_id: '01K', decision: 'deny', reason: longReason }),
+      }),
+    );
+    const scanned = scan.mock.calls.map(([text]) => text);
+    scan.mockRestore();
+    expect(scanned.map((text) => text.length)).toEqual([20_000]);
+    expect(scanned[0]).toBe(longReason.slice(0, 20_000));
+    expect(res.statusCode).toBe(202);
+  });
+
+  test('stores an ordinary reason longer than 20,000 characters as if all of it were scanned', async () => {
+    mockSend.mockResolvedValue({});
+    // A key id across the 2,000-character cut, then ordinary words: 27,219 characters.
+    const longReason = `${'x'.repeat(1989)} ${FIX_AWS_KEY} leaked. ${'do not push to main. '.repeat(1200)}`;
+    await handler(
+      makeEvent({
+        body: JSON.stringify({ request_id: '01K', decision: 'deny', reason: longReason }),
+      }),
+    );
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    const reason = tx.TransactItems[0].Update.ExpressionAttributeValues[':reason'];
+    expect(reason).toBe(scanner.scanDenyReason(longReason).slice(0, 2000));
+    expect(reason).not.toContain(FIX_AWS_KEY.slice(0, 10));
+  });
 });
 
 describe('deny-task — error classification', () => {
@@ -202,5 +274,68 @@ describe('deny-task — error classification', () => {
     const body = JSON.parse(res.body);
     expect(body.data.status).toBe('DENIED');
     expect(body.data.request_id).toBe('01KREQ');
+  });
+});
+
+describe('postcommit MicroVM wake', () => {
+  test('wake diagnostics are task-bound and keep the supplied remaining-time signal', async () => {
+    mockSend.mockResolvedValue({});
+    mockWake.mockImplementationOnce(async input => {
+      await input.emitEvent('microvm_resume_orphan', { stage: 'resume-request' }, input.options);
+    });
+    expect((await handler(makeEvent())).statusCode).toBe(202);
+    const emitted = mockSend.mock.calls.find(([command]) => command.input.Item?.event_type === 'microvm_resume_orphan');
+    expect(emitted?.[0].input.Item).toMatchObject({
+      task_id: 'task-1', user_id: 'user-alice', metadata: { stage: 'resume-request' },
+    });
+    expect(emitted?.[1]).toBe(mockWake.mock.calls[0][0].options);
+  });
+
+  test('wake runs after the committed transaction and keeps its decision identity', async () => {
+    mockSend.mockResolvedValue({});
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(202);
+    const transaction = mockSend.mock.calls.findIndex(([command]) => command._type === 'TransactWrite');
+    expect(mockSend.mock.invocationCallOrder[transaction]).toBeLessThan(mockWake.mock.invocationCallOrder[0]);
+    expect(mockWake.mock.calls[0][0]).toMatchObject({
+      taskId: 'task-1',
+      userId: 'user-alice',
+      decision: 'DENIED',
+      options: { abortSignal: expect.any(AbortSignal) },
+    });
+  });
+  test('an unexpected wake failure cannot change the committed202 response', async () => {
+    mockSend.mockResolvedValue({});
+    mockWake.mockRejectedValue(new Error('private wake failure'));
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(202);
+    expect(response.body).not.toContain('private wake failure');
+    expect(mockSend.mock.calls.filter(([command]) => command._type === 'TransactWrite')).toHaveLength(1);
+  });
+  test('transaction failure cannot wake a worker', async () => {
+    mockSend.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('transaction failed'));
+    expect((await handler(makeEvent())).statusCode).toBe(500);
+    expect(mockWake).not.toHaveBeenCalled();
+  });
+  test('near Lambda timeout, optional postcommit work gets an already-expired budget', async () => {
+    mockSend.mockResolvedValue({});
+    const response = await handler(makeEvent(), { getRemainingTimeInMillis: () => 500 });
+    expect(response.statusCode).toBe(202);
+    expect(mockSend.mock.calls.map(([command]) => command._type)).toEqual(['Update', 'TransactWrite']);
+    expect(mockWake.mock.calls[0][0].options.abortSignal.aborted).toBe(true);
+  });
+  test('audit failure still permits wake and does not fail the decision', async () => {
+    mockSend.mockResolvedValueOnce({}).mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('audit failed'));
+    expect((await handler(makeEvent())).statusCode).toBe(202);
+    expect(mockWake).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('trusted channel decision source', () => {
+  test('does not trust a source supplied in the HTTP body', async () => {
+    mockSend.mockResolvedValue({});
+    await handler(makeEvent({ body: JSON.stringify({ request_id: 'gate', decision: 'deny', decisionSource: 'forged' }) }));
+    const update = mockSend.mock.calls.find(([cmd]) => cmd._type === 'TransactWrite')![0].input.TransactItems[0].Update;
+    expect(update.UpdateExpression).not.toContain('decision_source');
   });
 });

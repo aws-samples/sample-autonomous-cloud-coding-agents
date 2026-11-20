@@ -177,7 +177,7 @@ export interface LinearIntegrationProps {
  *   provider name; Phase 2.0b OAuth migration). Webhook processor and
  *   orchestrator use this to look up which credential provider holds the
  *   workspace's OAuth token.
- * - LinearWebhookDedupTable (60s TTL dedup for webhook retries)
+ * - LinearWebhookDedupTable (8h TTL dedup for webhook retries)
  * - Lambda handlers for the webhook receiver, async processor, and account linking
  * - API Gateway routes under /linear/*
  * - Two Secrets Manager secrets (webhook signing secret + personal API token)
@@ -196,7 +196,7 @@ export class LinearIntegration extends Construct {
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
-  /** Webhook dedup table — (issue_id, action) keys with 60s TTL. */
+  /** Webhook dedup table — delivery rows keyed on (data.id, action, webhookTimestamp), 8h TTL. */
   public readonly webhookDedupTable: dynamodb.Table;
 
   /** Linear webhook signing secret (placeholder — populated by `bgagent linear setup`). */
@@ -225,7 +225,7 @@ export class LinearIntegration extends Construct {
     this.workspaceRegistryTable = workspaceRegistry.table;
 
     // Dedup table: linear webhook retries collapse to a single processor invoke
-    // within the 60s TTL window. Keyed on `{issue_id}#{action}`.
+    // within the 8h TTL window. Keyed on `{data.id}#{action}#{webhookTimestamp}`.
     this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
       partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -315,6 +315,8 @@ export class LinearIntegration extends Construct {
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
+        // Console "start" claims live in the dedup table (shared/linear-console.ts).
+        LINEAR_WEBHOOK_DEDUP_TABLE_NAME: this.webhookDedupTable.tableName,
         // When set, enables parent/sub-issue orchestration
         // (seed DAG + release roots). Unset → orchestration path dormant.
         ...(props.orchestrationTable && {
@@ -376,6 +378,11 @@ export class LinearIntegration extends Construct {
       actions: ['dynamodb:UpdateItem'],
       // The base table only. No `index/*`: UpdateItem never targets an index.
       resources: [this.workspaceRegistryTable.tableArn],
+    }));
+    // Console start claims: read for attribution, deleted once the task is dispatched.
+    webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:DeleteItem'],
+      resources: [this.webhookDedupTable.tableArn],
     }));
     // Seed the orchestration DAG + release root children.
     if (props.orchestrationTable) {

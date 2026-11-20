@@ -67,13 +67,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // Fetch the Slack App client ID and client secret from Secrets Manager.
-    const clientId = await getSlackSecret(CLIENT_ID_SECRET_ARN);
+    // Always a fresh read: an install runs once, and an operator who has just
+    // corrected a wrong credential must not get the cached one for five minutes.
+    const clientId = await getSlackSecret(CLIENT_ID_SECRET_ARN, true);
     if (!clientId) {
       logger.error('Slack client ID not found', { secret_arn: CLIENT_ID_SECRET_ARN });
       return htmlResponse(500, 'Slack client ID not configured. Populate the secret in Secrets Manager.');
     }
 
-    const clientSecret = await getSlackSecret(CLIENT_SECRET_ARN);
+    const clientSecret = await getSlackSecret(CLIENT_SECRET_ARN, true);
     if (!clientSecret) {
       logger.error('Slack client secret not found', { secret_arn: CLIENT_SECRET_ARN });
       return htmlResponse(500, 'Slack client secret not configured. Populate the secret in Secrets Manager.');

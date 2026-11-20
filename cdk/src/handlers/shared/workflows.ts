@@ -204,7 +204,7 @@ export function isValidWorkflowRef(value: unknown): boolean {
 }
 
 /** Split a ``workflow_ref`` into its id and optional ``@constraint`` suffix. */
-export function parseWorkflowRef(ref: string): { id: string; constraint?: string } {
+function parseWorkflowRef(ref: string): { id: string; constraint?: string } {
   const at = ref.indexOf('@');
   if (at === -1) return { id: ref };
   return { id: ref.slice(0, at), constraint: ref.slice(at + 1) };

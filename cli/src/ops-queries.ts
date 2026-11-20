@@ -27,7 +27,8 @@ import { documentClient, lowLevelClient } from './dynamo-clients';
 /** Align with ``reconcile-stranded-tasks.ts`` defaults. */
 export const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
 export const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 7200;
-export const DEFAULT_MAX_CONCURRENT_TASKS_PER_USER = 3;
+/** The per-user cap the stack deploys (``maxConcurrentTasksPerUser`` in ``cdk/src/stacks/agent.ts``). */
+export const DEFAULT_MAX_CONCURRENT_TASKS_PER_USER = 10;
 
 export type StuckTaskStatus = 'SUBMITTED' | 'HYDRATING' | 'AWAITING_APPROVAL';
 
@@ -90,13 +91,19 @@ async function queryStuckByStatus(
       const userId = item.user_id?.S;
       const createdAt = item.created_at?.S;
       if (!taskId || !userId || !createdAt) continue;
+      // Age by time in the current status, as the reconciler does (#441):
+      // status_created_at is `<STATUS>#<iso>`, and created_at is the fallback
+      // for a row without a readable one.
+      const enteredAt = item.status_created_at?.S?.split('#')[1];
+      const age = ageSeconds(enteredAt && !Number.isNaN(Date.parse(enteredAt)) ? enteredAt : createdAt);
+      if (age < thresholdSeconds) continue;
       rows.push({
         task_id: taskId,
         user_id: userId,
         status,
         repo: item.repo?.S,
         created_at: createdAt,
-        age_seconds: ageSeconds(createdAt),
+        age_seconds: age,
         threshold_seconds: thresholdSeconds,
       });
     }

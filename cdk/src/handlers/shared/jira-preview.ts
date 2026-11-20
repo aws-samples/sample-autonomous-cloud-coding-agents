@@ -18,17 +18,17 @@
  */
 
 import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { TERMINAL_STATUSES } from '../../constructs/task-status';
 import {
   buildAdfDocument, updateIssueCommentAdf,
   type JiraFeedbackContext, type JiraUpdateResult,
 } from './jira-feedback';
 import type { JiraPreviewBudget } from './jira-preview-budget';
-import { renderJiraFinalStatusComment } from './jira-status-comment';
+import { jiraIterationFrame, renderJiraFinalStatusComment } from './jira-status-comment';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import { isAllowedScreenshotUrl } from './screenshot-url';
 import type { TaskRecord } from './types';
-import { TERMINAL_STATUSES } from '../../constructs/task-status';
 
 const MAX_CONVERGENCE_ATTEMPTS = 4;
 
@@ -54,15 +54,13 @@ function render(task: TaskRecord): Record<string, unknown> {
     coerceNumericOrNull(task[field], { field, task_id: task.task_id }, logger);
   const body = saved && (!terminal || saved.terminal) ? saved.body : terminal
     ? buildAdfDocument(renderJiraFinalStatusComment({
-      eventType: task.status === 'COMPLETED' && task.build_passed === false
-        ? 'task_failed' : `task_${String(task.status).toLowerCase()}`,
+      ...jiraIterationFrame(`task_${String(task.status).toLowerCase()}`, task.build_passed, null),
       prUrl: task.pr_url ?? null,
       costUsd: metric('cost_usd'),
       turns: metric('turns_attempted'),
       maxTurns: metric('max_turns'),
       durationS: metric('duration_s'),
       taskId: task.task_id,
-      errorTitle: null,
     }))
     : buildAdfDocument([[{ text: '🔄 Working…' }]]);
   // Old tasks may have settled before this writer was deployed. A late preview

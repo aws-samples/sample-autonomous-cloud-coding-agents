@@ -1,5 +1,5 @@
 ---
-title: Tips for being a good citizen
+title: "Tips for being a good citizen"
 ---
 
 The platform is a shared resource - compute, model tokens, and GitHub API calls cost money and consume quotas. These practices help you get better results while keeping the platform healthy for everyone.
@@ -33,4 +33,4 @@ Every task consumes model tokens, compute time, and GitHub API calls. Setting li
 
 - **Content screening** - Task descriptions and PR context are screened by Bedrock Guardrails for prompt injection. If your task is unexpectedly blocked, check the task events for a `guardrail_blocked` entry and revise your description.
 - **Idempotency** - If you're creating tasks via the API and might retry on network errors, include an `Idempotency-Key` header to prevent duplicate tasks.
-- **Concurrency** - You share a per-user concurrency limit (default: 3 tasks). If you hit the limit, wait for a task to finish or cancel one you no longer need before submitting more.
+- **Concurrency** - You share a per-user concurrency limit (default: 10 tasks). If you hit the limit, new tasks are queued and start as active ones finish; cancel one you no longer need to free a slot.

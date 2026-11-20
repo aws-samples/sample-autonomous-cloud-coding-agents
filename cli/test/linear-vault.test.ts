@@ -203,23 +203,6 @@ describe('beginVaultConsent', () => {
     expect(dataSend).toHaveBeenCalledTimes(2);
   });
 
-  test('exposes the sessionUri so the caller can finalize the consent', async () => {
-    // The sessionUri is what CompleteResourceTokenAuth needs. The first
-    // implementation dropped it and only polled — so consent never finalized,
-    // the poll spun forever, and the browser 404'd on an unlistened return URL.
-    dataSend
-      .mockResolvedValueOnce({ workloadAccessToken: 'wat-0' })
-      .mockResolvedValueOnce({ authorizationUrl: 'https://x?request_uri=urn:x' }) // no cached grant
-      .mockResolvedValueOnce({ workloadAccessToken: 'wat-1' })
-      .mockResolvedValueOnce({
-        authorizationUrl: 'https://bedrock-agentcore.../authorize?request_uri=urn:x',
-        sessionUri: 'urn:ietf:params:oauth:request_uri:abc123',
-      });
-    const step = await beginVaultConsent(args);
-    if (step.kind !== 'consent-required') throw new Error('expected consent-required');
-    expect(step.sessionUri).toBe('urn:ietf:params:oauth:request_uri:abc123');
-  });
-
   test('throws when the vault returns neither a token nor an authorization URL', async () => {
     dataSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-0' })

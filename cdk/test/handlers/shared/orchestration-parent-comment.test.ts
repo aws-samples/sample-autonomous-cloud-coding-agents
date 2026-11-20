@@ -192,7 +192,22 @@ describe('renderParentDisambiguationReply', () => {
     expect(body).toContain('ABCA-306 — Add a newsletter signup section');
     expect(body).toContain('@bgagent ENG-123:'); // the how-to hint
     expect(body.toLowerCase()).toContain('new work'); // the create-a-sub-issue path
-    expect(body).toContain('`abca` label');
+  });
+
+  // The trigger label is set per project, and what folds a new sub-issue into
+  // the epic is re-applying it on the EPIC. A label on the sub-issue alone starts
+  // a separate task, and a label the project does not trigger on starts nothing.
+  test.each([
+    ['which-sub-issue', false],
+    ['new-work', true],
+  ])('the %s reply names the trigger label of the project, to re-apply on the epic', (_reply, newWork) => {
+    const body = renderParentDisambiguationReply('none', NODES, null, newWork, false, 'ship-it');
+    expect(body).toContain('create a new sub-issue under this epic, then remove and re-apply the `ship-it` label on this epic');
+    expect(body).not.toContain('abca');
+  });
+
+  test('names the platform default label for an epic that has none stored', () => {
+    expect(renderParentDisambiguationReply('none', NODES)).toContain('re-apply the `bgagent` label on this epic');
   });
 
   test('offers the integration node as an EXPLICIT target, with the exact phrasing', () => {

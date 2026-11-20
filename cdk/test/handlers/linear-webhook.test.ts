@@ -111,6 +111,12 @@ describe('linear-webhook handler', () => {
     expect(result.statusCode).toBe(400);
   });
 
+  test('400s on a body of null, which parses but is not an envelope', async () => {
+    const result = await handler(makeEvent('null', 'deadbeef'));
+    expect(result.statusCode).toBe(400);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
   test('401s when Linear-Signature header is missing', async () => {
     const body = issueCreatePayload();
     const result = await handler(makeEvent(body));

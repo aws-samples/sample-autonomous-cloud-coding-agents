@@ -109,6 +109,29 @@ describe('waitForTask', () => {
     expect(mockGetTask).toHaveBeenCalledTimes(3);
   });
 
+  test('a successful poll resets the transient-failure budget', async () => {
+    // Six failures in total, but never more than three in a row: the budget
+    // of five counts consecutive failures, so the wait must not give up.
+    const networkErr = new TypeError('fetch failed');
+    mockGetTask
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockResolvedValueOnce(makeTask('RUNNING'))
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockRejectedValueOnce(networkErr)
+      .mockResolvedValueOnce(makeTask('COMPLETED'));
+    const client = new ApiClient();
+
+    const promise = waitForTask(client, 'task-1');
+    await flushPolls(16);
+    const task = await promise;
+
+    expect(task.status).toBe('COMPLETED');
+    expect(mockGetTask).toHaveBeenCalledTimes(8);
+  });
+
   test('gives up after exceeding the transient-failure budget', async () => {
     const networkErr = new TypeError('fetch failed');
     mockGetTask.mockRejectedValue(networkErr);
@@ -118,6 +141,7 @@ describe('waitForTask', () => {
     // The message reports the ACTUAL failure count (6 = 5 retried + the
     // trip), not the retry budget — "after 5" while aborting on the 6th
     // read as an off-by-one against server logs.
+    // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
     const assertion = expect(promise).rejects.toThrow(/after 6 consecutive transient failures/);
     await flushPolls(12);
     await assertion;
@@ -140,6 +164,7 @@ describe('waitForTask', () => {
 
     // Tiny ceiling so the second poll observes elapsed >= maxWaitMs.
     const promise = waitForTask(client, 'task-1', { maxWaitMs: 1 });
+    // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
     const assertion = expect(promise).rejects.toThrow(/Timed out waiting/);
     await flushPolls(3);
     await assertion;

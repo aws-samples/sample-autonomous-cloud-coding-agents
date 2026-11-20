@@ -96,7 +96,7 @@ describe('generateTempPassword', () => {
   const upper = /[A-Z]/;
   const lower = /[a-z]/;
   const digit = /[0-9]/;
-  const symbol = /[!@#$%^&*()\-_=+\[\]{}<>?]/;
+  const symbol = /[!@#$%^&*()\-_=+[\]{}<>?]/;
 
   test('produces a password ≥ 18 chars', () => {
     const pwd = generateTempPassword();
@@ -151,6 +151,9 @@ describe('admin invite-user credentials file', () => {
     const invitePath = path.join(tmpDir, 'invites', 'teammate@example.com.txt');
     const body = fs.readFileSync(invitePath, 'utf-8');
     const lines = body.split('\n');
+
+    // The file holds a password: owner-only.
+    expect(fs.statSync(invitePath).mode % 0o1000).toBe(0o600);
 
     // The label is "temp password:" (not "password:") for invites.
     const emailLine = lines.find((l) => l.startsWith('email:'))!;

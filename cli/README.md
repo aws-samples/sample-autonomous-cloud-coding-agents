@@ -1,18 +1,16 @@
-# @backgroundagent/cli
+# bgagent CLI
 
 Command-line interface for the ABCA platform. Submit coding tasks, monitor their status, and manage results — all through the deployed REST API with Cognito authentication.
 
 ## Installation
 
-```bash
-npm install -g @backgroundagent/cli
-```
-
-Or run directly from the monorepo:
+The CLI is not published to npm: its package (`@abca/cli`) is private. Build it in the monorepo (`mise run install`, then `mise //cli:build`) and run it from there:
 
 ```bash
 node cli/lib/bin/bgagent.js
 ```
+
+The examples below write `bgagent` for that command.
 
 ## Quick start
 
@@ -61,6 +59,8 @@ bgagent configure \
 
 First-time configure needs all four core fields. The easiest paths are `--stack-name backgroundagent-dev --region …` (same outputs as `bgagent platform outputs`) or `--from-bundle` after `admin invite-user`. Individual flags override stack-derived values.
 
+Pointing the CLI at another user pool removes the cached login (`~/.bgagent/credentials.json`): its tokens belong to the previous deployment. Run `bgagent login` again.
+
 ### `bgagent login`
 
 Authenticate with Cognito and cache tokens locally.
@@ -105,7 +105,7 @@ At least one of `--issue` or `--task` is required.
 
 The repository must be onboarded to the platform via a `Blueprint` CDK construct. If the repo is not onboarded, the API returns a `REPO_NOT_ONBOARDED` error.
 
-When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise.
+When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise. If the CLI stops waiting before that (the API keeps failing, or the maximum wait is reached), it exits with code 2: the task may still be running.
 
 ### `bgagent list`
 
@@ -201,6 +201,22 @@ Shared flags:
 | `--region <region>` | AWS region (defaults to `bgagent configure` region or `AWS_REGION`) |
 | `--stack-name <name>` | CloudFormation stack name (default: `backgroundagent-dev`) |
 
+### `bgagent setup`
+
+Choose optional features, validate them against the target Region, and deploy from your ABCA checkout ([deployment profiles](../docs/guides/DEPLOYMENT_GUIDE.md#deployment-profiles)):
+
+```
+bgagent setup [--region <region>] [--stack-name <name>] [--repo-root <dir>]
+bgagent setup --features slack,jira --yes          # non-interactive
+bgagent setup --compute agentcore,ecs --features none --yes   # new install on both backends
+bgagent setup --features none --no-deploy          # write abca.deployment.json only
+bgagent setup -c networkTopology=split             # extra CDK context for diff and deploy (repeatable)
+```
+
+It first confirms the AWS account your credentials resolve to and lets you update an existing deployment or create a new one (named by you). For a new installation it then asks where agents run (AgentCore, ECS, or both), and prepares the account (CDK bootstrap) if needed. It then asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `~/.bgagent/logs/<stack>/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature the Region does not support fails with the supported Regions.
+
+Commands for a feature the stack omits (for example `bgagent slack setup`) fail and point back to `bgagent setup`.
+
 ### `bgagent budget status|set`
 
 Inspect or configure recurring monthly user/team USD limits with operator AWS credentials:
@@ -288,7 +304,7 @@ bgagent runtime status \
 
 ### `bgagent ops stuck-tasks`
 
-List tasks in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` older than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID.
+List tasks that have been in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` longer than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID. `AGE(s)` / `age_seconds` is the time in the current status; rows are listed oldest-created first.
 
 ```
 bgagent ops stuck-tasks \
@@ -303,7 +319,7 @@ Compare `UserConcurrencyTable` counters with live active task counts per user. R
 
 ```
 bgagent ops concurrency \
-  --limit <n>                 Per-user limit (default: 3) \
+  --limit <n>                 Per-user limit (default: 10) \
   --output <text|json>
 ```
 
@@ -407,14 +423,14 @@ bgagent admin reset-password <email> \
 For failed tasks, the error display is structured when a classification is available:
 
 ```
-Error:       [CONCURRENCY] Concurrency limit reached
-             The maximum number of concurrent tasks for this user has been reached.
-  Remedy:    Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.
-  Retryable: yes
-  Detail:    User concurrency limit reached
+Error:       [AUTH] Repository not found or inaccessible
+             The GitHub token cannot access the target repository. It may not exist or the token lacks visibility.
+  Remedy:    Check that the repository name is correct and the configured PAT has access to it.
+  Retryable: no
+  Detail:    Pre-flight check failed: REPO_NOT_FOUND_OR_NO_ACCESS — GitHub API returned HTTP 404 for acme/widgets
 ```
 
-The classifier covers 9 error categories: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, and `unknown`. When no classification is available, the raw error message is shown.
+The classifier covers 10 error categories: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `blocked`, and `unknown`. When no classification is available, the raw error message is shown.
 
 **JSON mode** (`--output json`) prints the raw API response as pretty-printed JSON, suitable for piping to `jq` or other tools.
 

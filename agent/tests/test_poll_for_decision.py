@@ -12,6 +12,7 @@ import asyncio
 from unittest.mock import MagicMock
 
 import hooks
+from policy import PolicyEngine
 
 
 def _run(coro):
@@ -28,8 +29,7 @@ class TestPollForDecisionConsecutiveFails:
         without further polling.
         """
         # Tiny intervals so the loop iterates fast but doesn't immediately
-        # bail via the ``sleep_for <= 0`` early-return on line 723 of
-        # hooks.py.
+        # bail via the ``sleep_for <= 0`` early return.
         monkeypatch.setattr(hooks, "POLL_FAST_INTERVAL_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_FAST_DURATION_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_SLOW_INTERVAL_S", 0.001)
@@ -43,7 +43,7 @@ class TestPollForDecisionConsecutiveFails:
             hooks._poll_for_decision(
                 task_id="01KTASK",
                 request_id="01KREQ",
-                timeout_s=300,  # large enough that the deadline doesn't fire first
+                deadline=hooks._ApprovalDeadline.from_recorded(hooks._iso_now(), 300),
                 progress=progress,
                 ts=ts,
             )
@@ -59,8 +59,7 @@ class TestPollForDecisionConsecutiveFails:
         on every subsequent poll — IMPL-22 / §13.2.
         """
         # Tiny intervals so the loop iterates fast but doesn't immediately
-        # bail via the ``sleep_for <= 0`` early-return on line 723 of
-        # hooks.py.
+        # bail via the ``sleep_for <= 0`` early return.
         monkeypatch.setattr(hooks, "POLL_FAST_INTERVAL_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_FAST_DURATION_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_SLOW_INTERVAL_S", 0.001)
@@ -73,7 +72,7 @@ class TestPollForDecisionConsecutiveFails:
             hooks._poll_for_decision(
                 task_id="01KTASK",
                 request_id="01KREQ",
-                timeout_s=300,
+                deadline=hooks._ApprovalDeadline.from_recorded(hooks._iso_now(), 300),
                 progress=progress,
                 ts=ts,
             )
@@ -100,8 +99,7 @@ class TestPollForDecisionConsecutiveFails:
         outage.
         """
         # Tiny intervals so the loop iterates fast but doesn't immediately
-        # bail via the ``sleep_for <= 0`` early-return on line 723 of
-        # hooks.py.
+        # bail via the ``sleep_for <= 0`` early return.
         monkeypatch.setattr(hooks, "POLL_FAST_INTERVAL_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_FAST_DURATION_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_SLOW_INTERVAL_S", 0.001)
@@ -126,7 +124,7 @@ class TestPollForDecisionConsecutiveFails:
             hooks._poll_for_decision(
                 task_id="01KTASK",
                 request_id="01KREQ",
-                timeout_s=300,
+                deadline=hooks._ApprovalDeadline.from_recorded(hooks._iso_now(), 300),
                 progress=progress,
                 ts=ts,
             )
@@ -143,8 +141,7 @@ class TestPollForDecisionConsecutiveFails:
         IMPL-24 design.
         """
         # Tiny intervals so the loop iterates fast but doesn't immediately
-        # bail via the ``sleep_for <= 0`` early-return on line 723 of
-        # hooks.py.
+        # bail via the ``sleep_for <= 0`` early return.
         monkeypatch.setattr(hooks, "POLL_FAST_INTERVAL_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_FAST_DURATION_S", 0.001)
         monkeypatch.setattr(hooks, "POLL_SLOW_INTERVAL_S", 0.001)
@@ -153,12 +150,12 @@ class TestPollForDecisionConsecutiveFails:
         ts.get_approval_row.return_value = {"status": "PENDING"}
 
         progress = MagicMock()
-        # 0 timeout → loop returns immediately at the deadline check.
+        # An already elapsed explicit deadline returns immediately.
         outcome = _run(
             hooks._poll_for_decision(
                 task_id="01KTASK",
                 request_id="01KREQ",
-                timeout_s=0,
+                deadline=hooks._ApprovalDeadline(0, 0),
                 progress=progress,
                 ts=ts,
             )
@@ -166,3 +163,20 @@ class TestPollForDecisionConsecutiveFails:
 
         assert outcome["status"] == "TIMED_OUT"
         assert outcome.get("reason") is None  # not the infra-failure path
+
+
+# --- Explicit approval deadlines (no compute-lifetime deadline) ------------
+
+
+def test_explicit_rule_deadline_survives_a_no_deadline_task_default():
+    engine = PolicyEngine(
+        task_type="new_task",
+        repo="owner/repo",
+        blueprint_soft_policies=(
+            '@tier("soft") @rule_id("explicit") @approval_timeout_s("120") '
+            'forbid (principal, action == Agent::Action::"execute_bash", resource) '
+            'when { context.command like "*explicit-tool*" };'
+        ),
+    )
+    decision = engine.evaluate_tool_use("Bash", {"command": "explicit-tool"})
+    assert decision.timeout_s == 120
