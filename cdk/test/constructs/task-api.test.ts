@@ -427,7 +427,12 @@ describe('TaskApi construct', () => {
     baseTemplate.hasResourceProperties('AWS::CloudWatch::Alarm', {
       Namespace: 'AWS/WAFV2',
       MetricName: 'CountedRequests',
-      Dimensions: Match.arrayWith([{ Name: 'Rule', Value: 'SignedWebhookXssCounted' }]),
+      Dimensions: Match.arrayWith([
+        { Name: 'Rule', Value: 'SignedWebhookXssCounted' },
+        // The web ACL's name, which WAF uses as the metric dimension (not the
+        // visibilityConfig metric name `TaskApiWebAcl`).
+        { Name: 'WebACL', Value: { 'Fn::Select': [0, { 'Fn::Split': ['|', { Ref: Match.stringLikeRegexp('WebAcl') }] }] } },
+      ]),
       Threshold: 20,
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',
       TreatMissingData: 'notBreaching',

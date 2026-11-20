@@ -283,8 +283,9 @@ export interface TaskApiProps {
  * `promptContext` (`<issue identifier=…>`), so CrossSiteScripting_BODY blocked them with a
  * 403 before the receiver ran and the task or session never started. Here that rule (and
  * SizeRestrictions_BODY: payloads > 8 KB) only counts. That is safe on these routes alone:
- * each receiver verifies the HMAC over the raw body before parsing anything, and nothing
- * renders a webhook body as HTML. Every other rule of the set still blocks, every other
+ * each receiver verifies the signature over the raw body before it dispatches the event
+ * (Linear and Jira first read the tenant id from the body to choose the signing secret),
+ * and nothing renders a webhook body as HTML. Every other rule of the set still blocks, every other
  * route still blocks XSS, and the priority-4 rate limit still applies. The second rule
  * counts the XSS matches let through under their own metric, which signedWebhookXssAlarm
  * watches (a counted rule inside a managed group has no metric of its own).
@@ -348,7 +349,10 @@ function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths:
     metric: new cloudwatch.Metric({
       namespace: 'AWS/WAFV2',
       metricName: 'CountedRequests',
-      // The ACL's Ref is `name|id|scope`; WAF metrics are dimensioned by the name.
+      // The ACL's Ref is `name|id|scope`. WAF dimensions its metrics by the web ACL's
+      // name (here generated, e.g. `TaskApiWebAcl28D7DCC9-…`), not its visibilityConfig
+      // metric name: observed on a deployed stack, where every CountedRequests series
+      // carries the name and none carries `TaskApiWebAcl`.
       dimensionsMap: { WebACL: Fn.select(0, Fn.split('|', webAcl.ref)), Rule: SIGNED_WEBHOOK_XSS_METRIC, Region: Stack.of(scope).region },
       statistic: 'Sum',
       period: Duration.hours(1),
