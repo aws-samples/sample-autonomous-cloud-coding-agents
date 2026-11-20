@@ -55,6 +55,31 @@ def _config(**overrides: Any) -> TaskConfig:
     return TaskConfig(**base)
 
 
+class TestBlueprintCedarPolicyBootstrap:
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            '@tier ( "soft" )',
+            '// Previously used @tier("hard").\n@tier("soft")',
+        ],
+    )
+    @patch("hooks.build_hook_matchers")
+    def test_cedar_recognizes_the_tier_despite_formatting_or_comments(
+        self, _mock_build_hooks, annotation
+    ):
+        policy = (
+            f'{annotation}\n@rule_id("review_report")\n'
+            'forbid (principal, action == Agent::Action::"execute_bash", resource)\n'
+            '  when { context.command == "echo report" };'
+        )
+        engine, _ = _initialize_policy_engine_and_hooks(
+            config=_config(cedar_policies=[policy]), trajectory=None, progress=MagicMock()
+        )
+        decision = engine.evaluate_tool_use("Bash", {"command": "echo report"})
+        assert decision.outcome == "require_approval"
+        assert decision.matching_rule_ids == ("review_report",)
+
+
 class TestClaudeSessionOwnership:
     @pytest.mark.parametrize("microvm", [False, True])
     @pytest.mark.parametrize(

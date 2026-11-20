@@ -90,6 +90,7 @@ export class CedarPolicyParseError extends Error {
 interface CedarPolicySetParts {
   type: 'success' | 'failure';
   policies?: readonly string[];
+  policy_templates?: readonly string[];
   errors?: readonly unknown[];
 }
 
@@ -109,14 +110,15 @@ interface CedarPolicyJson {
  * Order is preserved so `policy_id === "policyN"` maps back to
  * `rules[N]` (cedar-wasm assigns positional IDs in parse order).
  *
- * @param policiesText - raw Cedar policy text (concatenated hard +
- *                       soft). Empty string returns `[]`.
+ * @param policiesText - raw Cedar policy text. An empty built-in set returns `[]`.
+ * @param nextLegacyRuleId - pass when parsing one Blueprint entry. A single
+ *   rule without a tier or rule ID receives a generated ID and the soft tier.
  * @returns ordered list of parsed rules.
  * @throws CedarPolicyParseError if cedar-wasm rejects the text. The
  *         error carries the upstream errors array verbatim.
  */
-export function parseRules(policiesText: string): ParsedRule[] {
-  if (!policiesText.trim()) {
+export function parseRules(policiesText: string, nextLegacyRuleId?: () => string): ParsedRule[] {
+  if (!policiesText.trim() && !nextLegacyRuleId) {
     return [];
   }
   const parts = cedar.policySetTextToParts(policiesText) as CedarPolicySetParts;
@@ -126,9 +128,13 @@ export function parseRules(policiesText: string): ParsedRule[] {
       parts.errors ?? [],
     );
   }
+  const policies = parts.policies;
+  if (nextLegacyRuleId && (!policies.length || parts.policy_templates?.length)) {
+    throw new CedarPolicyParseError('Blueprint entry must contain static Cedar policies', []);
+  }
 
   const out: ParsedRule[] = [];
-  parts.policies.forEach((policyText, index) => {
+  policies.forEach((policyText, index) => {
     const parsed = cedar.policyToJson(policyText) as CedarPolicyJson;
     if (parsed.type !== 'success' || !parsed.json) {
       throw new CedarPolicyParseError(
@@ -137,6 +143,11 @@ export function parseRules(policiesText: string): ParsedRule[] {
       );
     }
     const annotations = parsed.json.annotations ?? {};
+    if (nextLegacyRuleId && policies.length === 1
+      && annotations.tier === undefined && annotations.rule_id === undefined) {
+      annotations.tier = 'soft';
+      annotations.rule_id = nextLegacyRuleId();
+    }
     const tier = annotations.tier;
     const rule_id = annotations.rule_id;
 
@@ -145,7 +156,7 @@ export function parseRules(policiesText: string): ParsedRule[] {
     // it to return ALLOW for non-matching requests rather than
     // default-deny. We skip it from ParsedRule[] so callers only see
     // user-facing rule entries.
-    if (rule_id === 'base_permit' && tier === undefined) {
+    if (!nextLegacyRuleId && rule_id === 'base_permit' && tier === undefined) {
       return;
     }
 
@@ -160,6 +171,9 @@ export function parseRules(policiesText: string): ParsedRule[] {
         `policy ${index} is missing @rule_id`,
         [],
       );
+    }
+    if (nextLegacyRuleId && out.length > 0 && out[0]!.tier !== tier) {
+      throw new CedarPolicyParseError('Put hard and soft rules in separate Blueprint entries', []);
     }
 
     const rule: ParsedRule = {
