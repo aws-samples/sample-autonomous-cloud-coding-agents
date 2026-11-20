@@ -26,16 +26,22 @@
  * cannot: index key order, `Limit` before `FilterExpression`, and the state a
  * sequence of real conditional writes leaves behind.
  *
+ * The scoreboard cases cover both readers of a finished task: the
+ * `view=scoreboard` read of the list handler, and the metric step of the task
+ * table's stream consumer. The tier has no stream, so that step is handed the
+ * record a stream would deliver.
+ *
  * Runs only through `jest.emulator.config.js` (see ./harness).
  */
 
 import { randomUUID } from 'node:crypto';
-import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
-import { PutCommand } from '@aws-sdk/lib-dynamodb';
-import type { APIGatewayProxyResult } from 'aws-lambda';
+import { DescribeTableCommand, GetItemCommand } from '@aws-sdk/client-dynamodb';
+import { PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import type { APIGatewayProxyResult, DynamoDBRecord, StreamRecord } from 'aws-lambda';
 import { RepoTable } from '../../src/constructs/repo-table';
 import { TaskApprovalsTable } from '../../src/constructs/task-approvals-table';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
+import { type TaskStatusType, TERMINAL_STATUSES } from '../../src/constructs/task-status';
 import { TaskTable } from '../../src/constructs/task-table';
 
 // Handlers read their table names at module load, so the environment is set
@@ -54,6 +60,10 @@ import { handler as getPending } from '../../src/handlers/get-pending';
 import { handler as getTask } from '../../src/handlers/get-task';
 import { handler as getTaskEvents } from '../../src/handlers/get-task-events';
 import { handler as listTasks } from '../../src/handlers/list-tasks';
+import { publishTaskMetrics } from '../../src/handlers/scoreboard-metrics';
+import { INTEGRATION_NODE_SUFFIX } from '../../src/handlers/shared/orchestration-integration-node';
+import { SCOREBOARD_TASK_FIELDS } from '../../src/handlers/shared/scoreboard';
+import type { Scoreboard, TaskRecord } from '../../src/handlers/shared/types';
 import { makeDocClient } from '../../src/handlers/shared/ua';
 import { apiEvent, emulatorTables } from './harness';
 
@@ -61,12 +71,28 @@ const REPO = 'acme/widgets';
 const CONCURRENT_CANCELS = 8;
 /** Approval window of the requests written here, in seconds. */
 const APPROVAL_TIMEOUT_S = 300;
+const MINUTE_MS = 60 * 1000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+/** The range the scoreboard cases ask for, in days. */
+const RANGE_DAYS = 7;
+/** The tasks of the paging case. A page of an index holds 1 MB of whole records: five of 300 KB need a second one. */
+const LARGE_TASKS = 5;
+const LARGE_TASK_BYTES = 300 * 1024;
+/** The tasks of the cut case. A scoreboard reads six pages of a status, 6 MB at most: 25 of 300 KB lie beyond them. */
+const CUT_TASKS = 25;
+
+const ddb = makeDocClient();
 
 /** A user no other test has written for, so tests need no cleanup between them. */
 const newUser = (): string => `user-${randomUUID()}`;
 const data = (result: APIGatewayProxyResult) => JSON.parse(result.body).data;
 const byId = (taskId: string) => ({ pathParameters: { task_id: taskId } });
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** A time as the platform stores it, with milliseconds, and as the agent does, in whole seconds. */
+const platformStamp = (ms: number): string => new Date(ms).toISOString();
+const agentStamp = (ms: number): string => platformStamp(ms).replace(/\.\d{3}Z$/, 'Z');
+/** The form of a platform time. */
+const PLATFORM_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /** POST /v1/tasks through the real handler. Returns the HTTP result. */
 function submit(userId: string, idempotencyKey?: string): Promise<APIGatewayProxyResult> {
@@ -82,6 +108,64 @@ async function list(userId: string, query?: Record<string, string>, handler = li
   const result = await handler(apiEvent(userId, { queryStringParameters: query ?? null }));
   expect(result.statusCode).toBe(200);
   return JSON.parse(result.body) as { data: { task_id: string; status: string }[]; pagination: { next_token: string | null; has_more: boolean } };
+}
+
+/**
+ * Write a task record straight to the table, as it is once `status` was entered at `at`: no
+ * writer can leave a task that finished days ago. A status write stamps its time in the index
+ * key and in `updated_at`, a terminal one in `completed_at` too. The task was created half an
+ * hour earlier.
+ * @param userId - the owner.
+ * @param status - the status the task is in.
+ * @param at - the stored time of that status, in the form its writer uses.
+ * @param fields - attributes to add or replace; `undefined` leaves one out.
+ * @returns the record.
+ */
+async function seedTask(userId: string, status: TaskStatusType, at: string, fields: Partial<TaskRecord> = {}): Promise<TaskRecord> {
+  const task: TaskRecord = {
+    task_id: `task-${randomUUID()}`,
+    user_id: userId,
+    status,
+    branch_name: '',
+    channel_source: 'api',
+    status_created_at: `${status}#${at}`,
+    created_at: platformStamp(Date.parse(at) - 30 * MINUTE_MS),
+    updated_at: at,
+    ...(TERMINAL_STATUSES.includes(status) && { completed_at: at }),
+    ...fields,
+  };
+  const Item = Object.fromEntries(Object.entries(task).filter(([, value]) => value !== undefined));
+  await ddb.send(new PutCommand({ TableName: process.env.TASK_TABLE_NAME, Item }));
+  return task;
+}
+
+/** GET /v1/tasks?view=scoreboard for the last RANGE_DAYS days, through the real handler. Returns the scoreboard. */
+async function scoreboard(userId: string): Promise<Scoreboard> {
+  const result = await listTasks(apiEvent(userId, { queryStringParameters: { view: 'scoreboard', range: `${RANGE_DAYS}d` } }));
+  expect(result.statusCode).toBe(200);
+  return data(result);
+}
+
+/** A task as DynamoDB stores it, in the attribute-value form of a stream image. Undefined when the table holds no such task. */
+async function storedTask(taskId: string): Promise<StreamRecord['NewImage']> {
+  const { Item } = await ddb.send(new GetItemCommand({
+    TableName: process.env.TASK_TABLE_NAME,
+    Key: { task_id: { S: taskId } },
+    ConsistentRead: true,
+  }));
+  return Item as StreamRecord['NewImage'];
+}
+
+/** Run the stream consumer's metric step on the record of a write that left a task as `image`. Returns its verdict and what it wrote to stdout. */
+async function publishMetrics(image: StreamRecord['NewImage']): Promise<{ published: boolean; written: string }> {
+  const record: DynamoDBRecord = { eventName: 'MODIFY', dynamodb: { NewImage: image } };
+  const stdout = jest.spyOn(process.stdout, 'write');
+  try {
+    const published = await publishTaskMetrics(record);
+    return { published, written: stdout.mock.calls.map(([chunk]) => chunk).join('') };
+  } finally {
+    stdout.mockRestore();
+  }
 }
 
 describe('task API against the AWS Emulator', () => {
@@ -291,5 +375,203 @@ describe('task API against the AWS Emulator', () => {
     // The handler can tell the two apart only if created_at and timeout_s reach it
     // through the projection of the index it reads.
     expect(data(listed).pending).toMatchObject([{ request_id: 'open', timeout_s: APPROVAL_TIMEOUT_S }]);
+  });
+
+  test('scoreboard: a finished task counts in the period of its finish time, in either timestamp form', async () => {
+    const user = newUser();
+    // The handler reads the clock after this does, so its bounds lie a moment later than
+    // these: a minute from a bound is far more than passes between the two readings.
+    const from = Date.now() - RANGE_DAYS * DAY_MS;
+    const previousFrom = from - RANGE_DAYS * DAY_MS;
+    for (const status of TERMINAL_STATUSES) {
+      for (const stamp of [platformStamp, agentStamp]) {
+        for (const at of [from + MINUTE_MS, from - MINUTE_MS, previousFrom + MINUTE_MS, previousFrom - MINUTE_MS]) {
+          await seedTask(user, status, stamp(at));
+        }
+      }
+    }
+    // In neither period: a task that has not finished, and a finished task of someone else.
+    await seedTask(user, 'RUNNING', platformStamp(from + MINUTE_MS));
+    await seedTask(newUser(), 'COMPLETED', platformStamp(from + MINUTE_MS));
+
+    const { truncated, current, previous } = await scoreboard(user);
+
+    // Per status and form, the first time lies in the current period, the next two in the
+    // previous one and the last before it.
+    expect(truncated).toBe(false);
+    expect(current).toMatchObject({ finished: 8, outcomes: { no_new_pr: 2, failed: 2, cancelled: 2, timed_out: 2 } });
+    expect(previous).toMatchObject({ finished: 16, outcomes: { no_new_pr: 4, failed: 4, cancelled: 4, timed_out: 4 } });
+  });
+
+  // No single task can show every field: an answer counts only without a pull request,
+  // `workflow_ref` only without the pin, `updated_at` only without `completed_at`.
+  test('scoreboard: every field of the projection reaches a number', async () => {
+    const user = newUser();
+    // The first task was created yesterday, on a whole second, so that the agent's form of
+    // a time below loses nothing. `at` counts seconds from then.
+    const start = Math.floor(Date.now() / 1000) * 1000 - DAY_MS;
+    const at = (seconds: number): number => start + seconds * 1000;
+    const newTask = { id: 'coding/new-task-v1', version: '1.0.0' };
+    const pullRequest = (number: number): string => `https://github.com/${REPO}/pull/${number}`;
+
+    // New work that waited in the queue, stopped twice for an approval and ended in a verified pull request.
+    const verified = await seedTask(user, 'COMPLETED', agentStamp(at(1800)), {
+      repo: REPO,
+      resolved_workflow: newTask,
+      queued_at: platformStamp(at(1)),
+      started_at: platformStamp(at(41)),
+      // A later write moved `updated_at`: the lead time tells which of the two times was read.
+      updated_at: platformStamp(at(1860)),
+      pr_url: pullRequest(12),
+      build_passed: true,
+      cost_usd: '3.75',
+      approval_gate_count: 2,
+    });
+    // A follow-up that changed the code of that pull request, started with every approval granted
+    // in advance. It stores the number of the pull request, not its URL.
+    const followUp = await seedTask(user, 'COMPLETED', agentStamp(at(5400)), {
+      repo: REPO,
+      resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
+      started_at: platformStamp(at(3630)),
+      pr_number: 12,
+      code_changed: true,
+      cost_usd: '1.5',
+      initial_approvals: ['all_session'],
+    });
+    // The agent asked a question instead of changing code. Only the raw ref says what this record ran.
+    const question = await seedTask(user, 'COMPLETED', agentStamp(at(9000)), {
+      repo: REPO,
+      workflow_ref: 'coding/new-task-v1',
+      started_at: platformStamp(at(7230)),
+      code_changed: false,
+      answer_text: 'Which environment should this deploy to?',
+      cost_usd: '0.5',
+    });
+    // An integration node opens a pull request too, but it merges the branches of other tasks.
+    const integration = await seedTask(user, 'COMPLETED', agentStamp(at(12600)), {
+      repo: REPO,
+      resolved_workflow: newTask,
+      channel_metadata: { orchestration_sub_issue_id: `issue-1${INTEGRATION_NODE_SUFFIX}` },
+      started_at: platformStamp(at(10830)),
+      pr_url: pullRequest(13),
+      build_passed: true,
+      cost_usd: '2',
+    });
+    // Stopped by a guardrail before it started. A record without `completed_at`: `updated_at` is its finish time.
+    const stopped = await seedTask(user, 'FAILED', platformStamp(at(14400)), {
+      repo: REPO,
+      resolved_workflow: newTask,
+      completed_at: undefined,
+      error_message: 'Hydration failed: Error: Guardrail blocked: Task description blocked by content policy: PROMPT_ATTACK',
+    });
+    // A field added to the list needs a task above that sets it, and a number below that shows it.
+    const seeded = Object.keys({ ...verified, ...followUp, ...question, ...integration, ...stopped });
+    expect(SCOREBOARD_TASK_FIELDS.filter((field) => !seeded.includes(field))).toEqual([]);
+
+    const { current } = await scoreboard(user);
+
+    // Beside each number, the fields it is wrong without.
+    expect(current).toMatchObject({
+      finished: 5, // status, updated_at
+      outcomes: { verified_pr: 1, unverified_pr: 0, no_new_pr: 3, failed: 1, cancelled: 0, timed_out: 0 }, // resolved_workflow, pr_url, build_passed, channel_metadata
+      time_to_verified_pr_s: { p50: 1800, p90: 1800, count: 1 }, // created_at, completed_at
+      wait_p50_s: 41, // started_at
+      queued: { count: 1, total: 4 }, // queued_at
+      verified: { count: 1, total: 3 }, // workflow_ref
+      not_reworked: { count: 0, total: 1 }, // repo, pr_number
+      untouched: { count: 0, total: 3 },
+      touchpoints: { approve: 2, clarify: 1, follow_up: 1, cancel: 0 }, // approval_gate_count, code_changed, answer_text
+      spend_usd: 7.75, // cost_usd
+      uncosted: 0,
+      guardrail_stops: { count: 1, task_ids: [stopped.task_id] }, // error_message, task_id
+      blanket_approvals: { count: 1, task_ids: [followUp.task_id] }, // initial_approvals
+      gated: { count: 1, total: 4 },
+    });
+  });
+
+  test('scoreboard: a status that does not fit one page of the index is read whole', async () => {
+    const user = newUser();
+    const hourAgo = Date.now() - 3600 * 1000;
+    for (let i = 0; i < LARGE_TASKS; i++) {
+      await seedTask(user, 'COMPLETED', platformStamp(hourAgo + i), { task_description: 'x'.repeat(LARGE_TASK_BYTES) });
+    }
+    // The premise: one page does not hold them all, whatever the read projects.
+    const firstPage = await ddb.send(new QueryCommand({
+      TableName: process.env.TASK_TABLE_NAME,
+      IndexName: TaskTable.USER_STATUS_INDEX,
+      KeyConditionExpression: 'user_id = :uid',
+      ExpressionAttributeValues: { ':uid': user },
+      Select: 'COUNT',
+    }));
+    expect(firstPage.Count).toBeLessThan(LARGE_TASKS);
+
+    const { truncated, current } = await scoreboard(user);
+
+    expect(truncated).toBe(false);
+    expect(current.finished).toBe(LARGE_TASKS);
+  });
+
+  test('scoreboard: a status beyond the page cap is reported from the second after the read stopped', async () => {
+    const user = newUser();
+    const start = Math.floor(Date.now() / 1000) * 1000 - 3600 * 1000;
+    // One task a second, a quarter of a second into it: no key holds the time of a whole second.
+    for (let i = 0; i < CUT_TASKS; i++) {
+      await seedTask(user, 'COMPLETED', platformStamp(start + i * 1000 + 250), { task_description: 'x'.repeat(LARGE_TASK_BYTES) });
+    }
+    // Another status, read whole: one task older than every task the read can stop at, one newer.
+    await seedTask(user, 'FAILED', platformStamp(start + 500));
+    await seedTask(user, 'FAILED', platformStamp(start + CUT_TASKS * 1000));
+
+    const { truncated, current, previous } = await scoreboard(user);
+
+    expect(truncated).toBe(true);
+    expect(previous).toBeNull();
+    // The read stopped at the key of one task, and the scoreboard starts the second after it:
+    // it holds the tasks that finished later, of either status.
+    const stoppedAt = (Date.parse(current.from) - start) / 1000 - 1;
+    expect(stoppedAt).toBeGreaterThanOrEqual(0);
+    expect(current.outcomes).toMatchObject({ no_new_pr: CUT_TASKS - 1 - stoppedAt, failed: 1 });
+  });
+
+  test('scoreboard metrics: a finished task is claimed once, and the claim changes nothing but its marker', async () => {
+    const user = newUser();
+    const taskId: string = data(await submit(user)).task_id;
+    expect((await cancelTask(apiEvent(user, byId(taskId)))).statusCode).toBe(200);
+    const cancelled = await storedTask(taskId);
+
+    // The record of the cancel, and its redelivery: neither image holds the marker.
+    const first = await publishMetrics(cancelled);
+    const claimed = await storedTask(taskId);
+    const second = await publishMetrics(cancelled);
+
+    expect(first.published).toBe(true);
+    const line = JSON.parse(first.written);
+    expect(line.task_id).toBe(taskId);
+    // A cancel by a person: the handler stores no message, and the scoreboard reads that as the touchpoint.
+    expect(line).toMatchObject({
+      Outcome: 'cancelled',
+      Work: 'coding',
+      HumanTouchpoints: 1,
+      UntouchedVerifiedPrs: 0,
+      user_id: user,
+      repo: REPO,
+      workflow: 'coding/new-task-v1',
+    });
+    expect(line).not.toHaveProperty('CostUsd');
+    expect(line._aws.CloudWatchMetrics[0].Namespace).toBe('ABCA/Factory');
+    // Nothing else may move: `updated_at` is the finish time of a record without `completed_at`, and `ttl` its retention.
+    expect(claimed).toEqual({ ...cancelled, metrics_emitted_at: { S: expect.stringMatching(PLATFORM_STAMP) } });
+    expect(second).toEqual({ published: false, written: '' });
+    expect(await storedTask(taskId)).toEqual(claimed);
+  });
+
+  test('scoreboard metrics: the record of a task that the table does not hold claims nothing and creates no item', async () => {
+    const taskId = `task-${randomUUID()}`;
+
+    const result = await publishMetrics({ task_id: { S: taskId }, status: { S: 'COMPLETED' }, completed_at: { S: platformStamp(Date.now()) } });
+
+    expect(result).toEqual({ published: false, written: '' });
+    // An update without the condition on the key creates the item.
+    expect(await storedTask(taskId)).toBeUndefined();
   });
 });

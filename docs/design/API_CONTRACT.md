@@ -303,9 +303,12 @@ Returns the authenticated user's tasks, newest first. Paginated.
 | `repo` | String | all | Filter by repository (`owner/repo`) |
 | `limit` | Number | 20 | Page size (1-100) |
 | `next_token` | String | - | Pagination token from previous response |
-| `view` | String | — | Omit for a task page; `budget` returns the authenticated caller's personal monthly budget instead |
+| `view` | String | — | Omit for a task page; `budget` returns the authenticated caller's personal monthly budget instead, `scoreboard` their factory scoreboard |
+| `range` | String | 30d | With `view=scoreboard`: the period the scoreboard covers, `7d` or `30d` |
 
 Returns a summary subset of fields. Use `GET /v1/tasks/{task_id}` for full details.
+
+The summary includes `agent_heartbeat_at` (same semantics as on the task detail above). It is on the summary as well as the detail because liveness is a list-level question — "is anything still alive?" is asked across tasks, and answering it one task at a time is how a hung task goes unnoticed.
 
 With `view=budget`, the Cognito-authenticated caller receives only their personal estimated-spend scope:
 
@@ -327,7 +330,83 @@ With `view=budget`, the Cognito-authenticated caller receives only their persona
 
 When no personal limit exists, `configured` is false, the limit/remaining/utilization fields are null, and `spend_usd` still reports the caller's current estimated spend. Team budgets are not returned. This read-only view backs `bgagent budget status --me`; budget mutation remains an operator-AWS-credential workflow.
 
-The summary includes `agent_heartbeat_at` (same semantics as on the task detail above). It is on the summary as well as the detail because liveness is a list-level question — "is anything still alive?" is asked across tasks, and answering it one task at a time is how a hung task goes unnoticed.
+With `view=scoreboard`, the caller receives the factory scoreboard of their own finished tasks: how the work they handed to agents turned into pull requests during the last `range`, and during the period of the same length before it. A `range` of `7d` or `30d` is that many days of 24 hours up to the time of the request. [OBSERVABILITY.md](./OBSERVABILITY.md#factory-scoreboard) defines every number.
+
+```json
+{
+  "data": {
+    "range": "30d",
+    "truncated": false,
+    "current": {
+      "from": "2026-10-20T12:00:00.000Z",
+      "to": "2026-11-19T12:00:00.000Z",
+      "finished": 8,
+      "outcomes": { "verified_pr": 2, "unverified_pr": 1, "no_new_pr": 2, "failed": 1, "cancelled": 1, "timed_out": 1 },
+      "time_to_verified_pr_s": { "p50": 1440, "p90": 3600, "count": 2 },
+      "wait_p50_s": 41,
+      "queued": { "count": 1, "total": 7 },
+      "verified": { "count": 2, "total": 7 },
+      "not_reworked": { "count": 2, "total": 3 },
+      "untouched": { "count": 1, "total": 7 },
+      "touchpoints": { "approve": 2, "clarify": 1, "follow_up": 1, "cancel": 1 },
+      "spend_usd": 14.5,
+      "uncosted": 2,
+      "guardrail_stops": { "count": 1, "task_ids": ["01M6P..."] },
+      "blanket_approvals": { "count": 1, "task_ids": ["01M7F..."] },
+      "gated": { "count": 1, "total": 7 }
+    },
+    "previous": {
+      "from": "2026-09-20T12:00:00.000Z",
+      "to": "2026-10-20T12:00:00.000Z",
+      "finished": 2,
+      "outcomes": { "verified_pr": 1, "unverified_pr": 0, "no_new_pr": 0, "failed": 1, "cancelled": 0, "timed_out": 0 },
+      "time_to_verified_pr_s": { "p50": 1800, "p90": 1800, "count": 1 },
+      "wait_p50_s": 60,
+      "queued": { "count": 0, "total": 2 },
+      "verified": { "count": 1, "total": 2 },
+      "not_reworked": { "count": 1, "total": 1 },
+      "untouched": { "count": 1, "total": 2 },
+      "touchpoints": { "approve": 0, "clarify": 0, "follow_up": 0, "cancel": 0 },
+      "spend_usd": 3.5,
+      "uncosted": 0,
+      "guardrail_stops": { "count": 0, "task_ids": [] },
+      "blanket_approvals": { "count": 0, "task_ids": [] },
+      "gated": { "count": 0, "total": 2 }
+    }
+  }
+}
+```
+
+`range` is the range served. `current` holds the numbers of the tasks that finished in it, `previous` those of the period before it, or `null` (see below). Both have these fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `from`, `to` | String | ISO 8601 bounds: the tasks that finished at or after `from` and before `to`. `current` has no upper test: a finish time ahead of the clock belongs to it. `current.to` is the time of the request |
+| `finished` | Number | Tasks that reached a terminal state |
+| `outcomes` | Object | `finished` by outcome. `failed`, `cancelled` and `timed_out` are the statuses of those names; `verified_pr`, `unverified_pr` and `no_new_pr` split the completed tasks. All six keys are always present |
+| `time_to_verified_pr_s` | Object or null | Seconds from task creation to a verified pull request: `p50`, `p90`, and the `count` of tasks measured. With fewer than 10 values, `p90` is the largest or close to it. `null` when there is none |
+| `wait_p50_s` | Number or null | Median seconds from creation to the start of the session, time in the admission queue included, over the verified pull requests above whose start is known. `null` when there is none |
+| `queued` | Fraction | Tasks that waited in the admission queue, of the tasks that waited or ran |
+| `verified` | Fraction | Verified pull requests, of the tasks that asked for a new pull request |
+| `not_reworked` | Fraction | New pull requests with no follow-up task before the period's end (a follow-up known to have changed no code is not one), of the new pull requests whose number is known |
+| `untouched` | Fraction | Verified pull requests whose task never stopped for a person, of the tasks that asked for a new pull request |
+| `touchpoints` | Object | Human touchpoints on coding tasks, by kind. `approve` counts approval requests, whatever the answer. All four keys are always present |
+| `spend_usd` | Number | Recorded spend of coding tasks, whatever their outcome, to the micro-dollar |
+| `uncosted` | Number | Coding tasks that ran and recorded no cost: `spend_usd` is short by them |
+| `guardrail_stops` | Flagged | Finished tasks of any kind, not only coding tasks, that a guardrail stopped; newest first. Each is also one of `outcomes.failed` |
+| `blanket_approvals` | Flagged | Finished tasks of any kind that were submitted with every approval granted in advance; newest first |
+| `gated` | Fraction | Coding tasks that stopped for at least one approval request, of the coding tasks that ran |
+
+A Fraction is `count` of `total`: the rate is `count / total`; with a `total` of 0 there is none. A Flagged is a `count` with the ids (`task_ids`) of up to 10 of the tasks behind it. Durations are whole seconds. The two figures per verified pull request are left to the client: divide the sum of `touchpoints`, or `spend_usd`, by `outcomes.verified_pr`.
+
+The scoreboard counts the caller's own tasks and nothing else: no variant returns a team's numbers or every user's. Every user's are CloudWatch metrics in the `ABCA/Factory` namespace; there are none per team. A `view` response is not paginated, and `status`, `repo`, `limit` and `next_token` do not apply to it.
+
+A request reads a bounded number of task records, newest first: at most six pages of up to 1 MB for each terminal status. When the caller's finished tasks since the start of the previous period exceed that, the scoreboard covers the time from which every status was read in full, and no number is computed over a span in which one was not:
+
+- The read stopped inside the previous period: `previous` is `null`. `truncated` is `false`, because `current` is whole.
+- The read stopped inside the range: `truncated` is `true`, `previous` is `null`, and `current.from` is the time from which every finished task was read, later than the start of the range. With `range=30d`, `7d` may fit.
+
+Any other `view` is refused with `400 VALIDATION_ERROR` and the message `Invalid view value. Expected "budget" or "scoreboard".`. With `view=scoreboard`, any other `range` is refused with the message `Invalid range value. Expected "7d" or "30d".`.
 
 **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`.
 

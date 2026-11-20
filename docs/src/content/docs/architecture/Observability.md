@@ -9,7 +9,7 @@ For a system where agents run for hours and burn tokens autonomously, observabil
 
 ## Telemetry architecture
 
-The platform combines three telemetry sources: AgentCore built-in metrics, custom OpenTelemetry spans from the agent harness, and structured task events from the orchestrator. All data flows to CloudWatch.
+The platform combines three telemetry sources: AgentCore built-in metrics, custom OpenTelemetry spans from the agent harness, and structured task events from the orchestrator. All data flows to CloudWatch. A fourth flow is derived from the task records: one metric line per finished task, see [Factory scoreboard](#factory-scoreboard).
 
 ```mermaid
 flowchart TB
@@ -138,18 +138,22 @@ All events carry `task_id` for filtering; the events the orchestrator and the ag
 | Counter drift frequency | Correctness | Concurrency accounting health |
 | Guardrail blocked rate | Security | Content screening activity |
 | Guardrail screening failure rate | Availability | Bedrock Guardrail API health |
+| `ABCA/Factory` (seven metrics) | Business | What each finished task came to: its outcome, the time to a verified pull request, human touchpoints, cost, guardrail stops and blanket approvals. Defined in [The metric stream](#the-metric-stream) |
 
 Emitted as custom CloudWatch metrics and used in dashboards and alarms.
 
 ## Dashboard
 
-A CloudWatch dashboard (`BackgroundAgent-Tasks-${stackName}`, i.e. the base name suffixed with the stack name) is deployed via the `TaskDashboard` CDK construct. It provides Logs Insights widgets for:
+A CloudWatch dashboard (`BackgroundAgent-Tasks-${stackName}`, i.e. the base name suffixed with the stack name) is deployed via the `TaskDashboard` CDK construct. It provides widgets for:
 
 - Task success rate and count by status
 - Cost per task and turns per task
 - Duration distribution
 - Build and lint pass rates
 - AgentCore built-in metrics (invocations, errors, latency)
+- The factory scoreboard, the first row: `ABCA/Factory` metric widgets that cover the last 30 days whatever time range the dashboard shows, for time to verified pull request, verified pull requests with no stop for a person, human touchpoints and spend per verified pull request, guardrail stops and blanket approvals, and tasks finished per day by outcome (see [Factory scoreboard](#factory-scoreboard))
+
+The "Task Success Rate (24h)" widget counts what the agent reported at the end of its own run: a task that stopped to ask a question and a pull request on a build that was already failing both count as success, and tasks that were cancelled or that the platform failed are not in it. The factory scoreboard row is the outcome view.
 
 The CloudWatch GenAI Observability console provides additional views: per-session traces, CPU/memory usage, trace timeline with custom spans, and transaction search by span attributes.
 
@@ -166,6 +170,152 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 | Monthly budget warning | Estimated spend crosses 80% | Notify the shared `OperationalAlerts` SNS topic; inspect `OrchestrationReconciler` logs for scope details. |
 | Monthly budget exceeded | Estimated spend crosses 100% | Notify the shared topic. Scopes configured with hard stop reject new tasks. |
 | Budget team membership unresolved | Cognito cannot resolve a mapped task owner | Inspect create-task logs for `budget_team_membership_user_missing`, then repair the stale mapping or federated identity configuration. User-budget enforcement remains active, but team-budget enforcement was skipped. |
+
+## Factory scoreboard
+
+The factory scoreboard shows whether the work handed to agents turns into verified pull requests, how much human attention and money that takes, and whether it stayed inside the rules. One definition of what a finished task counts as (`cdk/src/handlers/shared/scoreboard.ts`) feeds two surfaces, the operator console and CloudWatch, so both count a task the same way. ABCA sees a task up to the pull request and its build verdict and nothing after that: review, merge, deploy and the outcome for customers are not in these numbers.
+
+### Where the numbers appear
+
+| Surface | Whose tasks | How far back | How it is computed |
+|---------|-------------|--------------|--------------------|
+| Operator console, **Scoreboard** page | The signed-in user's own | Up to 60 days: the last 7 or 30 days, beside the period of the same length before. It does not start at the deployment: the page reads the task records, which are kept 90 days by default (`taskRetentionDays`) | On request, from the task records: `GET /v1/tasks?view=scoreboard` (see [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract#list-tasks)) |
+| CloudWatch dashboard, **Factory scoreboard** row | Every user's | From the deployment of the scoreboard on. The row shows the last 30 days, whatever time range the dashboard is set to | By CloudWatch, from one metric line per finished task (see [The metric stream](#the-metric-stream)) |
+
+The page takes percentiles by nearest rank and CloudWatch computes its own, so small differences between the two are expected. A request reads a bounded number of task records: when a range holds more, the page says from which date its numbers count and leaves out the comparison with the period before.
+
+The page reads records as they were written, so two kinds of older record count wrongly until they leave the range:
+
+- An agent image from before 2026-11-19 (#1052) recorded a build command that could not run as passed: the pull request of such a task counts as verified. Until those records leave the range (up to 30 days for the numbers, 60 for the comparison), the verified numbers of a repository whose build command cannot run are too high.
+- A deployment from before 2026-11-17 (#1048) left two kinds of finished task under the index key of an earlier status: tasks cancelled from Slack, and tasks that failed while their upload instructions were prepared. They are not on the page.
+
+### Words
+
+| Word | Meaning |
+|------|---------|
+| Finished task | A task in a terminal status: `COMPLETED`, `FAILED`, `CANCELLED` or `TIMED_OUT`. It counts in the period in which it finished (`completed_at`, or `updated_at` on a record without one) |
+| Task that asked for a new pull request | A finished task that ran `coding/new-task-v1`. The internal integration task of an orchestration is not one: it combines the branches of other tasks. Work that was never handed to an agent is not visible |
+| Coding task | A finished task that ran `coding/new-task-v1`, `coding/pr-iteration-v1` or `coding/restack-v1`: the work that goes into pull requests. Reviews and tasks without a repository are not charged to pull requests |
+| Ran | The task's agent session started (`started_at` is set) |
+| Verified pull request | A pull request opened by a task that asked for a new one, completed, and recorded a passed build: the repository's build command passed after the change. Lint does not count, and a pull request that a later follow-up repairs does not become verified |
+
+Every finished task has exactly one outcome:
+
+| Outcome | Console row | Rule |
+|---------|-------------|------|
+| `verified_pr` | Verified pull request | Asked for a new pull request, `COMPLETED`, has a pull request (`pr_url`), and `build_passed` is true |
+| `unverified_pr` | Pull request without a passed build | Asked for a new pull request, `COMPLETED`, has a pull request, and `build_passed` is false (the build was already failing before the change and still fails) or absent (the build command could not run, which is always the case in a repository that has neither a build command in its blueprint nor a `mise run build` task) |
+| `no_new_pr` | Finished, no new pull request | Every other `COMPLETED` task: one that asked for a new pull request and stopped to ask a question instead, a follow-up on a pull request, a review, a restack, a task without a repository, an integration task |
+| `failed` | Failed | `FAILED`. This includes a change that broke a passing build, whose pull request stays on the record, and a task that never started |
+| `cancelled` | Cancelled | `CANCELLED` |
+| `timed_out` | Ran out of time | `TIMED_OUT` |
+
+A touchpoint is a place where the work waited for a person or was redirected by one. A finished task has, by kind:
+
+| Kind | Rule |
+|------|------|
+| `approve` | Its number of approval requests (`approval_gate_count`). These are requests, not approvals: each one asked for a person, and one that could not be stored is counted too |
+| `clarify` | 1 when the agent stopped to ask a question instead of opening a pull request: a `coding/new-task-v1` task with `code_changed` false, an `answer_text` and no pull request |
+| `follow_up` | 1 when the task ran `coding/pr-iteration-v1`: a request came back to an existing pull request |
+| `cancel` | 1 when the task is `CANCELLED` and has no `error_message`. This is inferred: a cancel by a person writes no message, the automatic cancel of an expired upload does |
+
+Two flags mark a finished task for the trust numbers:
+
+| Flag | Rule |
+|------|------|
+| Guardrail stop | `FAILED`, and the `error_message` is classified as a guardrail block: content was blocked while the task was prepared |
+| Blanket approval | `initial_approvals` contains `all_session`: every approval was granted in advance, at submission. Rules that always refuse an action still applied |
+
+### The numbers
+
+Each number is computed over the tasks that finished in one period: the 7 or 30 days of 24 hours up to the moment of the request, or the same length before that. A share with nothing to divide by has no value, and the page shows a dash.
+
+| Number | What it counts | Start, stop, evidence | API field | CloudWatch metric |
+|--------|----------------|-----------------------|-----------|-------------------|
+| Time to verified pull request | Median and 90th percentile of the time from creation to finish, over the verified pull requests of the period. With fewer than 10 of them the 90th percentile is the slowest or close to it, and the page leaves it out | Start: the task is created (`created_at`). Stop: it finishes with a pull request and a passed build (`completed_at`). Evidence: the task record. The clock restarts with every attempt: a retry, or a task resumed after a question, is a new task | `time_to_verified_pr_s`: `p50`, `p90` and `count`, in whole seconds | `TimeToVerifiedPrSeconds`: p50 and p90, which the row shows in minutes |
+| Second line of that tile: the part before the agent started | Median time from creation to the start of the session, time in the admission queue included, over the same tasks | Start: the task is created. Stop: its session starts (`started_at`) | `wait_p50_s` | None: `wait_s` is a plain field of the metric line |
+| Waited in line | Finished tasks that waited in the admission queue, of the finished tasks that waited in it or ran | Evidence: `queued_at`, `started_at`. A task that was cancelled while it waited, or failed because it waited too long, counts as having waited | `queued` | None |
+| Ended in a verified pull request | Verified pull requests, of the tasks that asked for a new pull request | Evidence: the outcome rules above. A repository with no build command to run never has a verified pull request, so its share is zero | `verified` | The count only: `TasksFinished` with `Outcome=verified_pr` |
+| Not reworked through ABCA, so far | New pull requests of the period, verified or not, that no follow-up task reworked before the period's end, of those pull requests | Evidence: the repository and the pull request number. A follow-up task on the same pull request is rework unless it is known to have changed no code (`code_changed` false). Only rework requested through ABCA by the same user is visible, and a pull request whose number cannot be read is in neither count | `not_reworked` | None |
+| Verified pull request with no stop for a person | Verified pull requests whose task has no touchpoint, of the tasks that asked for a new pull request | Such a task can only have approval requests, so this is "no approval request" | `untouched` | `UntouchedVerifiedPrs`: average |
+| Human touchpoints per verified pull request | Touchpoints of all four kinds on the coding tasks of the period, failed ones included, divided by the verified pull requests | Evidence: the touchpoint rules above | `touchpoints` by kind: divide their sum by `outcomes.verified_pr` | Sum of `HumanTouchpoints` with `Work=coding`, over the sum of `TasksFinished` with `Outcome=verified_pr` |
+| Spend per verified pull request | Recorded cost of the coding tasks of the period, failed attempts and follow-ups included, divided by the verified pull requests | Evidence: `cost_usd`, an estimate of model usage that does not include compute. A task that was cancelled, timed out or lost its session records none: `uncosted` counts the coding tasks that ran without a recorded cost | `spend_usd` and `uncosted`: divide `spend_usd` by `outcomes.verified_pr` | Sum of `CostUsd` with `Work=coding`, over the sum of `TasksFinished` with `Outcome=verified_pr` |
+| Stopped by a guardrail | Finished tasks with the guardrail-stop flag | Evidence: `error_message` | `guardrail_stops`: `count`, and `task_ids` of the newest 10 | `GuardrailStops`: sum |
+| Held for approval | Coding tasks that ran and made at least one approval request, of the coding tasks that ran | Evidence: `approval_gate_count`. The person who submitted the task answers the request: there is no second reviewer | `gated` | None |
+| Started with blanket approval | Finished tasks with the blanket-approval flag | Evidence: `initial_approvals` | `blanket_approvals`: `count`, and `task_ids` of the newest 10 | `BlanketApprovals`: sum |
+| Tasks finished, by outcome | Finished tasks per outcome. Activity is a diagnostic, not a score | Evidence: the outcome rules above | `finished` and `outcomes` | `TasksFinished` by `Outcome`: sum per day |
+
+The places where a number is added are listed in the header of `cdk/src/handlers/shared/scoreboard.ts`. This table is one of them.
+
+### Not counted and not measured
+
+Touchpoints and stops that happen and are not in the numbers:
+
+| Not counted | What counting it would need |
+|-------------|-----------------------------|
+| Reviewing and merging on GitHub | Review, merge and close events of the pull request: ABCA reads none |
+| Messages sent to a running task | The nudges of the task: they are stored apart from the task record the scoreboard reads |
+| New tasks submitted to retry or continue earlier work | A link from a task to the task it retries or continues: the record has none |
+| Follow-ups by other people, on the console page | A read across users: a follow-up task that belongs to someone else is on their page, not against the pull request on yours |
+| Work a person finished by hand | The authors of the commits on the pull request's branch, from GitHub |
+| Requests and attachments refused before a task started | A record of the refusal: a refused request creates no task, and a refused attachment fails its task with the same kind of message as one that is too large |
+| Tool calls refused during a run | A count on the task record: the refusals are in the agent's logs (`POLICY_DECISION` events), and the task goes on |
+| Network destinations refused during a run | The DNS Firewall's query log, with the firewall set to block: the task record holds only the agent's reading of a failed connection |
+| A blanket approval granted during a run | A mark on the task record: the flag reads the approvals granted at submission only. Such a task shows under Held for approval |
+
+Numbers ABCA does not measure:
+
+| Not measured | What measuring it would need |
+|--------------|------------------------------|
+| Lead time past the pull request: review, merge, deploy, the outcome for customers | Pull request events from GitHub, then deploy and product data |
+| Deploy frequency | Deploy data |
+| Change failure rate and time to restore | Deploy and incident data |
+| The hours people spent, and review time | Time records, and review events from GitHub |
+| The share of gated actions that a pre-approval let through | A count of those calls on the task record: they are in the agent's logs only |
+| Tokens and changed lines | They are activity, not a score, and are left out on purpose. Token usage is in the dashboard's "Token Usage per Task" widget; changed lines would need the diff statistics of the pull request |
+
+### The metric stream
+
+When a task finishes, the consumer of the TaskTable stream (`OrchestrationReconciler`) writes one log line in CloudWatch embedded metric format, and CloudWatch extracts these metrics from it into the `ABCA/Factory` namespace:
+
+| Metric | Unit | Dimension | Emitted |
+|--------|------|-----------|---------|
+| `TasksFinished` | `Count` | `Outcome` | 1 on every finished task |
+| `HumanTouchpoints` | `Count` | `Work` | On every finished task: its touchpoints of all four kinds, 0 included |
+| `CostUsd` | `None` | `Work` | Only when the task recorded a cost |
+| `GuardrailStops` | `Count` | none | 0 or 1 on every finished task |
+| `BlanketApprovals` | `Count` | none | 0 or 1 on every finished task |
+| `TimeToVerifiedPrSeconds` | `Seconds` | none | Only on a task that ended in a verified pull request and whose creation time is known |
+| `UntouchedVerifiedPrs` | `Count` | none | 0 or 1 on every task that asked for a new pull request, so that its average is the share with no stop for a person |
+
+`Outcome` takes the six outcomes above. `Work` is `coding` for a coding task and `other` for every other task. Both sets are closed, so the namespace holds at most 14 time series: 6 for `TasksFinished`, 2 each for `HumanTouchpoints` and `CostUsd`, and 4 without a dimension. The task, the user, the repository and the workflow are plain fields of the line (`task_id`, `user_id`, `repo`, `workflow`), as is the wait before the session started (`wait_s`), and never dimensions: every distinct value of a dimension is one more billed time series, and a metric should not carry the identifier of a person or a repository. The fields remain queryable with Logs Insights in the log group of that function.
+
+One line, wrapped here:
+
+```json
+{
+  "_aws": {
+    "Timestamp": 1794997440000,
+    "CloudWatchMetrics": [
+      { "Namespace": "ABCA/Factory", "Dimensions": [["Outcome"]], "Metrics": [{ "Name": "TasksFinished", "Unit": "Count" }] },
+      { "Namespace": "ABCA/Factory", "Dimensions": [["Work"]], "Metrics": [{ "Name": "HumanTouchpoints", "Unit": "Count" }, { "Name": "CostUsd", "Unit": "None" }] },
+      { "Namespace": "ABCA/Factory", "Dimensions": [[]], "Metrics": [{ "Name": "GuardrailStops", "Unit": "Count" }, { "Name": "BlanketApprovals", "Unit": "Count" }, { "Name": "TimeToVerifiedPrSeconds", "Unit": "Seconds" }, { "Name": "UntouchedVerifiedPrs", "Unit": "Count" }] }
+    ]
+  },
+  "Outcome": "verified_pr", "Work": "coding",
+  "TasksFinished": 1, "HumanTouchpoints": 0, "CostUsd": 3.87,
+  "GuardrailStops": 0, "BlanketApprovals": 0, "TimeToVerifiedPrSeconds": 1440, "UntouchedVerifiedPrs": 1,
+  "task_id": "01HYX...", "user_id": "...", "repo": "owner/repo", "workflow": "coding/new-task-v1", "wait_s": 41
+}
+```
+
+- **Once per task** - The record of a finished task is written again for as long as it lives, and stream records are redelivered. The step therefore claims the task before it writes: one conditional write sets `metrics_emitted_at` on the task record (an internal field that no API response shows), and only the write that sets it is followed by a line. A line is written at most once. It is lost when the function stops between the claim and the line, or when the claim succeeds but its response is lost and the retry finds the task already claimed. A step that fails is logged (`Scoreboard metrics step failed: task not counted`) and is not reported for retry, so that metrics never hold back orchestration or the budget rollup. When it failed before its claim, the task is still counted if its record reaches the step again within 24 hours of the finish: on a later write of the record, or when Lambda delivers the batch again for another reason.
+- **History starts at deployment** - A delivery that reaches the step more than 24 hours after its task finished is skipped: that is a later write of a task that finished before the deployment, or of a task whose earlier claim failed. A task that finished within the 24 hours before the deployment is counted when its record is written again after it. A line carries the finish time of its task: CloudWatch drops values older than 14 days, and younger ones would show as data from before the deployment. The console page has no such limit, because it reads the task records.
+- **Duplicates** - The embedded metric format delivers the values of a line at least once, so CloudWatch can on rare occasions count a value twice.
+- **Not an audit record** - The row is an operational number, built from what each task record says when its task finishes. Use it to steer, not as evidence: the audit log is the TaskEvents table (see [Audit and retention](#audit-and-retention)).
+- **Shared namespace** - Neither the namespace nor a dimension names the stack: two ABCA stacks in one account and Region add up in the same series.
+- **Forwarding** - To send these metrics to another system, create a CloudWatch metric stream that includes the `ABCA/Factory` namespace: ABCA does not create one, and percentiles have to be added to the stream as an additional statistic.
+- **When a number looks wrong** - The batch line of the stream consumer (`Orchestration reconciler batch processed`) carries `metrics_published` and `metrics_failed`. A line that CloudWatch could not use is counted for that function's log group in the `AWS/Logs` namespace: `EMFParsingErrors`, `EMFValidationErrors`, and `EMFDisabledErrors` when an account policy switches extraction off. On the page's side, the list function (`ListTasksFn`) logs a read that fails as `Failed to list tasks` with `view` set to `scoreboard`, and a read that stops at its cap as the warning `Scoreboard read stopped at its page cap`, with the `user_id`, the `range` and the time from which the numbers count (`covered_from`).
 
 ## Code attribution
 

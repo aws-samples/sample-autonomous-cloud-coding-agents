@@ -83,7 +83,8 @@ describe('TaskDetailPage', () => {
     renderRoute(`/tasks/${MOCK_IDS.running}`);
     // Seven messages, five of which asked for tools; the fifth tool turn is still running.
     expect(await screen.findByText('5 of 60')).toBeInTheDocument();
-    expect(screen.getByText('$0.84 (limit $5.00)')).toBeInTheDocument();
+    // A task records its cost when it finishes.
+    expect(screen.getByText('Shown when it finishes (limit $5.00)')).toBeInTheDocument();
   });
 
   it('opens a step in the activity to show the command and what came back', async () => {

@@ -114,6 +114,71 @@ export interface PersonalBudgetStatus {
   readonly hard_stop_active: boolean;
 }
 
+/** What a finished task counts as on the scoreboard. `failed`, `cancelled` and `timed_out` are the statuses of those names; `verified_pr`, `unverified_pr` and `no_new_pr` split the completed tasks. */
+export type TaskOutcome = 'verified_pr' | 'unverified_pr' | 'no_new_pr' | 'failed' | 'cancelled' | 'timed_out';
+
+/** A place the work waited for, or was redirected by, a person. `approve` counts approval requests, whatever the answer. */
+export type TouchpointKind = 'approve' | 'clarify' | 'follow_up' | 'cancel';
+
+/** How far back a scoreboard looks: that many days up to now. */
+export type ScoreboardRange = '7d' | '30d';
+
+/** `count` of `total`. A rate is count / total; with a total of 0 there is none. */
+export interface Fraction {
+  readonly count: number;
+  readonly total: number;
+}
+
+/** A count, with the ids of up to 10 of the tasks behind it. */
+export interface Flagged {
+  readonly count: number;
+  readonly task_ids: readonly string[];
+}
+
+/** The scoreboard's numbers over the tasks that finished in one period. */
+export interface ScoreboardPeriod {
+  /** ISO bounds: tasks that finished at or after `from` and before `to`. The current period has no upper test: a finish time ahead of the clock belongs to it. */
+  readonly from: string;
+  readonly to: string;
+  /** Tasks that reached a terminal state, and their split. */
+  readonly finished: number;
+  readonly outcomes: Readonly<Record<TaskOutcome, number>>;
+  /** Seconds from task creation to a verified pull request; null when there is none. With fewer than 10 values, `p90` is the largest or close to it. */
+  readonly time_to_verified_pr_s: { readonly p50: number; readonly p90: number; readonly count: number } | null;
+  /** Median seconds from creation to the start of the session, time in the admission queue included, over the verified pull requests above whose start is known; null when there is none. */
+  readonly wait_p50_s: number | null;
+  /** Tasks that waited in the admission queue, of the tasks that waited or ran. */
+  readonly queued: Fraction;
+  /** Verified pull requests, of the tasks that asked for a new pull request. */
+  readonly verified: Fraction;
+  /** New pull requests with no follow-up task before the period's end (a follow-up known to have changed no code is not one), of the new pull requests whose number is known. */
+  readonly not_reworked: Fraction;
+  /** Verified pull requests whose task never stopped for a person, of the tasks that asked for a new pull request. */
+  readonly untouched: Fraction;
+  /** Touchpoints on coding tasks. Shown per verified pull request: divide the sum by `outcomes.verified_pr`. */
+  readonly touchpoints: Readonly<Record<TouchpointKind, number>>;
+  /** Recorded spend of coding tasks, all outcomes, to the micro-dollar. Shown per verified pull request: divide by `outcomes.verified_pr`. */
+  readonly spend_usd: number;
+  /** Coding tasks that ran and recorded no cost: `spend_usd` under-counts by them. */
+  readonly uncosted: number;
+  /** Finished tasks of any kind, not only coding tasks, that a guardrail stopped; newest first. Each is also one of `outcomes.failed`. */
+  readonly guardrail_stops: Flagged;
+  /** Finished tasks of any kind that were submitted with every approval granted in advance; newest first. */
+  readonly blanket_approvals: Flagged;
+  /** Coding tasks that stopped for at least one approval request, of the coding tasks that ran. */
+  readonly gated: Fraction;
+}
+
+/** GET /v1/tasks?view=scoreboard: the caller's scoreboard for a range. */
+export interface Scoreboard {
+  readonly range: ScoreboardRange;
+  /** The read hit its cap inside the current period: `current` starts later than the range asked for, and `previous` is null. */
+  readonly truncated: boolean;
+  readonly current: ScoreboardPeriod;
+  /** The period of equal length before `current`; null when the read did not cover it. */
+  readonly previous: ScoreboardPeriod | null;
+}
+
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
   readonly task_id: string;

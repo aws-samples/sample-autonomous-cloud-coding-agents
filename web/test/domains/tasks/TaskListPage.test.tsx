@@ -91,7 +91,7 @@ describe('TaskListPage', () => {
     fireEvent.click(screen.getByText('Cost', { selector: 'th *' }));
     const ascending = costs();
     const amounts = ascending.filter((c) => c.startsWith('$')).map((c) => Number(c.slice(1)));
-    expect(amounts.length).toBeGreaterThan(5);
+    expect(amounts.length).toBeGreaterThan(3);
     expect(amounts).toEqual([...amounts].sort((a, b) => a - b));
     expect(ascending.slice(amounts.length).every((c) => !c.startsWith('$'))).toBe(true);
   });

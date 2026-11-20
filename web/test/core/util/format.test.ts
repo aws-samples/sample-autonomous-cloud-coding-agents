@@ -18,9 +18,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { formatCost, formatDuration, formatRelativeTime, shortId, taskTitle } from '../../../src/core/util/format';
+import { aboutLabel, formatCost, formatCount, formatDuration, formatDurationShort, formatRelativeTime, shortId, taskTitle } from '../../../src/core/util/format';
 
 const NOW = new Date('2026-10-23T12:00:00.000Z');
+/** Between the two units of a short duration, which therefore stay on one line. */
+const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 
 describe('formatRelativeTime', () => {
   it.each([
@@ -54,15 +56,55 @@ describe('formatDuration', () => {
   });
 });
 
-describe('formatCost and shortId', () => {
+describe('formatDurationShort', () => {
+  it.each([
+    [45, '45s'],
+    [59.6, '1m'],
+    [1432, '24m'],
+    [3480, '58m'],
+    [3599, '1h'],
+    [7200, '2h'],
+    [7500, `2h${NO_BREAK_SPACE}5m`],
+    [85200, `23h${NO_BREAK_SPACE}40m`],
+    [86399, '1d'],
+    [223200, `2d${NO_BREAK_SPACE}14h`],
+  ])('%d -> %s', (s, expected) => {
+    expect(formatDurationShort(s)).toBe(expected);
+  });
+
+  it('renders missing, negative or non-finite input as a dash', () => {
+    expect(formatDurationShort(null)).toBe('-');
+    expect(formatDurationShort(undefined)).toBe('-');
+    expect(formatDurationShort(-1)).toBe('-');
+    expect(formatDurationShort(Number.NaN)).toBe('-');
+  });
+});
+
+describe('formatCost, formatCount and shortId', () => {
   it('formats dollars with two decimals', () => {
     expect(formatCost(2.305)).toBe('$2.31');
+    expect(formatCost(0)).toBe('$0.00');
     expect(formatCost(null)).toBe('-');
+  });
+
+  it('groups the digits of a thousand and more', () => {
+    expect(formatCost(999.999)).toBe('$1,000.00');
+    expect(formatCost(1234567.5)).toBe('$1,234,567.50');
+    expect(formatCount(999)).toBe('999');
+    expect(formatCount(2140)).toBe('2,140');
   });
 
   it('keeps the last eight characters of long ids', () => {
     expect(shortId('01JF3KQZ8X00000000RUNNING1')).toBe('RUNNING1');
     expect(shortId('abc')).toBe('abc');
+  });
+});
+
+describe('aboutLabel', () => {
+  it('names the "i" of a label, lowering its first letter only', () => {
+    expect(aboutLabel('Waited in line')).toBe('About waited in line');
+    // A name inside the label keeps its capitals.
+    expect(aboutLabel('Not reworked through ABCA, so far')).toBe('About not reworked through ABCA, so far');
   });
 });
 

@@ -23,7 +23,17 @@
  * All timestamps are relative to `now` so the data always looks current.
  */
 
-import type { LinearIssueSummary, PendingApprovalSummary, PersonalBudgetStatus, RepoIssueSummary, TaskDetail, TaskEvent } from '../core/api/types';
+import type {
+  LinearIssueSummary,
+  PendingApprovalSummary,
+  PersonalBudgetStatus,
+  RepoIssueSummary,
+  Scoreboard,
+  ScoreboardPeriod,
+  ScoreboardRange,
+  TaskDetail,
+  TaskEvent,
+} from '../core/api/types';
 
 /** A change the mock backend applies once its time comes: how mock tasks "progress". */
 export interface ScheduledChange {
@@ -168,6 +178,11 @@ function lifecycle(now: Date, taskId: string, startedAgoS: number, steps: Array<
   return [...base, ...steps].map(([agoS, type, meta], i) => event(taskId, i, ago(now, agoS), type, meta));
 }
 
+/**
+ * The mock tasks and what goes with them. A task has a cost once it has finished, and
+ * none when it was cancelled or ran out of time: the agent records the cost in its last
+ * write, which those tasks never make.
+ */
 export function buildFixtures(now: Date = new Date(), { history = false }: FixtureOptions = {}): MockData {
   const tasks: TaskDetail[] = [
     task(now, {
@@ -178,7 +193,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       started_at: ago(now, 6 * MIN),
       updated_at: ago(now, 6 * MIN),
       agent_heartbeat_at: ago(now, 20),
-      cost_usd: 0.84,
       turns_completed: 12,
     }),
     task(now, {
@@ -190,7 +204,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       started_at: ago(now, 24 * MIN),
       updated_at: ago(now, 24 * MIN),
       agent_heartbeat_at: ago(now, 9 * MIN),
-      cost_usd: 1.92,
       turns_completed: 31,
     }),
     task(now, {
@@ -202,7 +215,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       started_at: ago(now, 14 * MIN),
       updated_at: ago(now, 2 * MIN),
       agent_heartbeat_at: ago(now, 30),
-      cost_usd: 0.57,
       turns_completed: 8,
       approval_gate_count: 1,
       awaiting_approval_request_id: 'req-01JF3KR0APPROVE00000001',
@@ -280,7 +292,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       updated_at: ago(now, 26 * HOUR),
       completed_at: ago(now, 26 * HOUR),
       duration_s: 14400,
-      cost_usd: 3.4,
     }),
     task(now, {
       task_id: MOCK_IDS.cancelled,
@@ -473,20 +484,117 @@ function costHistory(now: Date): TaskDetail[] {
     const finishedAgo = daysAgo * DAY + Math.floor(rand() * 20) * HOUR + HOUR;
     const status = rand() < 0.8 ? 'COMPLETED' : rand() < 0.6 ? 'FAILED' : 'CANCELLED';
     const repo = repos[Math.floor(rand() * rand() * repos.length)];
+    const source = sources[Math.floor(rand() * sources.length)];
+    // Drawn for every task, so that the sequence stays what it was; a cancelled task records none.
+    const cost = Number((0.2 + rand() * rand() * 4).toFixed(2));
     out.push(task(now, {
       task_id: mockId(`HIST${String(i).padStart(4, '0')}`),
       status,
       repo,
       task_description: `${titles[i % titles.length]} (${repo.split('/')[1]})`,
-      channel_source: sources[Math.floor(rand() * sources.length)],
+      channel_source: source,
       created_at: ago(now, finishedAgo + 20 * MIN),
       started_at: ago(now, finishedAgo + 19 * MIN),
       completed_at: ago(now, finishedAgo),
       updated_at: ago(now, finishedAgo),
       duration_s: 1140,
-      cost_usd: Number((0.2 + rand() * rand() * 4).toFixed(2)),
+      cost_usd: status === 'CANCELLED' ? null : cost,
       ...(status === 'COMPLETED' ? { pr_number: 500 + i, pr_url: `https://github.com/${repo}/pull/${500 + i}` } : {}),
     }));
   }
   return out;
+}
+
+type PeriodSample = Omit<ScoreboardPeriod, 'from' | 'to'>;
+
+/**
+ * Scoreboard numbers per range: fixed samples, not computed from the mock tasks. `30d`
+ * is a busy month with a month before it. `7d` is a week without a verified pull
+ * request after a week of no coding work, so the page shows its zero-denominator tiles
+ * and no previous-period lines. The tasks started with blanket approval are core fixture
+ * tasks, so their links open. No sample counts a guardrail stop: no fixture task is one.
+ */
+const SCOREBOARD_SAMPLES: Readonly<Record<ScoreboardRange, { days: number; current: PeriodSample; previous: PeriodSample }>> = {
+  '30d': {
+    days: 30,
+    current: {
+      finished: 52,
+      outcomes: { verified_pr: 26, unverified_pr: 2, no_new_pr: 15, failed: 5, cancelled: 2, timed_out: 2 },
+      time_to_verified_pr_s: { p50: 1432, p90: 3480, count: 26 },
+      wait_p50_s: 62,
+      queued: { count: 4, total: 48 },
+      verified: { count: 26, total: 37 },
+      not_reworked: { count: 22, total: 28 },
+      untouched: { count: 23, total: 37 },
+      touchpoints: { approve: 20, clarify: 6, follow_up: 8, cancel: 2 },
+      spend_usd: 107.12,
+      uncosted: 3,
+      guardrail_stops: { count: 0, task_ids: [] },
+      blanket_approvals: { count: 3, task_ids: [MOCK_IDS.completed, MOCK_IDS.cancelled, MOCK_IDS.completedOld] },
+      gated: { count: 3, total: 45 },
+    },
+    previous: {
+      finished: 41,
+      outcomes: { verified_pr: 18, unverified_pr: 3, no_new_pr: 11, failed: 6, cancelled: 2, timed_out: 1 },
+      time_to_verified_pr_s: { p50: 1860, p90: 4500, count: 18 },
+      wait_p50_s: 75,
+      queued: { count: 6, total: 38 },
+      verified: { count: 18, total: 29 },
+      not_reworked: { count: 15, total: 21 },
+      untouched: { count: 16, total: 29 },
+      touchpoints: { approve: 14, clarify: 4, follow_up: 9, cancel: 2 },
+      spend_usd: 81.18,
+      uncosted: 2,
+      guardrail_stops: { count: 0, task_ids: [] },
+      blanket_approvals: { count: 0, task_ids: [] },
+      gated: { count: 2, total: 36 },
+    },
+  },
+  '7d': {
+    days: 7,
+    current: {
+      finished: 8,
+      outcomes: { verified_pr: 0, unverified_pr: 0, no_new_pr: 3, failed: 3, cancelled: 1, timed_out: 1 },
+      time_to_verified_pr_s: null,
+      wait_p50_s: null,
+      queued: { count: 1, total: 7 },
+      verified: { count: 0, total: 5 },
+      not_reworked: { count: 0, total: 0 },
+      untouched: { count: 0, total: 5 },
+      touchpoints: { approve: 2, clarify: 1, follow_up: 1, cancel: 1 },
+      spend_usd: 12.4,
+      uncosted: 1,
+      guardrail_stops: { count: 0, task_ids: [] },
+      blanket_approvals: { count: 1, task_ids: [MOCK_IDS.cancelled] },
+      gated: { count: 1, total: 6 },
+    },
+    previous: {
+      finished: 2,
+      outcomes: { verified_pr: 0, unverified_pr: 0, no_new_pr: 1, failed: 0, cancelled: 0, timed_out: 1 },
+      time_to_verified_pr_s: null,
+      wait_p50_s: null,
+      queued: { count: 0, total: 2 },
+      verified: { count: 0, total: 0 },
+      not_reworked: { count: 0, total: 0 },
+      untouched: { count: 0, total: 0 },
+      touchpoints: { approve: 0, clarify: 0, follow_up: 0, cancel: 0 },
+      spend_usd: 0,
+      uncosted: 0,
+      guardrail_stops: { count: 0, task_ids: [] },
+      blanket_approvals: { count: 0, task_ids: [] },
+      gated: { count: 0, total: 0 },
+    },
+  },
+};
+
+/** The response of `GET /tasks?view=scoreboard`: the range's sample between the dates the API would name. */
+export function mockScoreboard(range: ScoreboardRange, now: Date): Scoreboard {
+  const { days, current, previous } = SCOREBOARD_SAMPLES[range];
+  const from = ago(now, days * DAY);
+  return {
+    range,
+    truncated: false,
+    current: { from, to: now.toISOString(), ...current },
+    previous: { from: ago(now, 2 * days * DAY), to: from, ...previous },
+  };
 }

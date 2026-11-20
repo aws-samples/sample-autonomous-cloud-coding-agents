@@ -17,10 +17,12 @@
  *  SOFTWARE.
  */
 
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
+import { COUNTERS } from '../../../src/domains/overview/OverviewPage';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
+import { bubbleText } from '../../helpers/explanations';
 import { titleOf } from '../../helpers/fixtures';
 import { renderRoute } from '../../helpers/render';
 import { server, TEST_API_BASE } from '../../helpers/server';
@@ -36,6 +38,34 @@ describe('OverviewPage', () => {
     expect(screen.getByRole('link', { name: 'Failed (24h): 2' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Done (24h): 1' })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('link', { name: 'Approval requests: 1' })).toBeInTheDocument());
+  });
+
+  it('explains each counter in a bubble, from an "i" that stands beside the counter\'s link and not inside it', async () => {
+    const { router } = renderRoute('/');
+    const link = await screen.findByRole('link', { name: 'Failed (24h): 2' });
+    const icon = screen.getByRole('button', { name: 'About failed (24h)' });
+    expect(screen.getAllByRole('button', { name: /^About / })).toHaveLength(COUNTERS.length);
+    expect(link).not.toContainElement(icon);
+
+    fireEvent.focus(icon);
+    expect(screen.getByRole('tooltip').textContent).toBe(bubbleText('Failed (24h)', {
+      what: 'Tasks that failed or ran out of time in the last 24 hours.',
+      why: 'Each one left its work undone: read why it ended on its page, then try again, split it up or do it by hand.'
+        + ' They stay listed under "Needs you" until a day has passed.',
+      how: 'Your tasks that failed or ran out of time, and whose last change is less than 24 hours old, among your 100 most recent tasks.'
+        + ' Cancelled tasks are not counted, though the list the number opens shows them, and older tasks too.',
+    }));
+
+    // The counter still leads to its tasks.
+    fireEvent.click(link);
+    await waitFor(() => expect(router.state.location.search).toBe('?view=unsuccessful'));
+    expect(router.state.location.pathname).toBe('/tasks');
+  });
+
+  it('opens the bubble of a counter for a pointer that rests on its number, not only on its label', async () => {
+    renderRoute('/');
+    fireEvent.pointerMove(await screen.findByRole('link', { name: 'Working now: 4' }));
+    expect((await screen.findByRole('tooltip')).textContent).toMatch(/^Working nowWhat it isTasks under way, from starting up to wrapping up/);
   });
 
   it('lists the tasks that need you, by title', async () => {

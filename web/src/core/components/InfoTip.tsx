@@ -21,12 +21,13 @@ import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Popover from '@cloudscape-design/components/popover';
 import type { ReactNode } from 'react';
+import { aboutLabel } from '../util/format';
 
 /** A small "i" next to a heading or label; clicking it explains what that part of the page means. */
 export function InfoTip({ about, children }: { about: string; children: ReactNode }) {
   return (
     <Popover header={about} content={<Box variant="p">{children}</Box>} size="medium" triggerType="custom" dismissButton>
-      <Button variant="inline-icon" iconName="status-info" ariaLabel={`About ${about.toLowerCase()}`} />
+      <Button variant="inline-icon" iconName="status-info" ariaLabel={aboutLabel(about)} />
     </Popover>
   );
 }

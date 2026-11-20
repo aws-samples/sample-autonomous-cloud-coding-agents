@@ -28,6 +28,7 @@ import Table from '@cloudscape-design/components/table';
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router';
 import type { TaskSummary } from '../../core/api/types';
+import { Explain, type Explanation } from '../../core/components/Explain';
 import { QueryError } from '../../core/components/QueryError';
 import { RouterLink } from '../../core/components/RouterLink';
 import { StatusBadge } from '../../core/components/StatusBadge';
@@ -46,28 +47,93 @@ import { useTaskList } from '../tasks/hooks';
 
 interface Counter {
   readonly label: string;
-  readonly value: number;
   readonly href: string;
+  readonly explanation: Explanation;
+  readonly count: (tasks: readonly TaskSummary[], pendingApprovals: number, now: Date) => number;
 }
 
 function recent(task: TaskSummary, now: Date): boolean {
   return now.getTime() - Date.parse(task.updated_at) <= RECENT_FAILURE_WINDOW_SEC * 1000;
 }
 
-function summarize(tasks: readonly TaskSummary[], pendingApprovals: number, now: Date = new Date()): Counter[] {
-  return [
-    { label: 'Working now', value: tasks.filter((t) => isActive(t.status)).length, href: '/tasks?view=active' },
-    { label: 'Waiting in line', value: tasks.filter((t) => isQueued(t.status)).length, href: '/tasks?view=queued' },
-    { label: 'Approval requests', value: pendingApprovals, href: '/approvals' },
-    { label: 'No updates lately', value: tasks.filter((t) => hasStaleHeartbeat(t, now)).length, href: '/tasks?view=attention' },
-    {
-      label: 'Failed (24h)',
-      value: tasks.filter((t) => (t.status === 'FAILED' || t.status === 'TIMED_OUT') && recent(t, now)).length,
-      href: '/tasks?view=unsuccessful',
+/** The counters of "At a glance": what each counts, where it leads, and what it says about itself. */
+export const COUNTERS: readonly Counter[] = [
+  {
+    label: 'Working now',
+    href: '/tasks?view=active',
+    explanation: {
+      what: 'Tasks under way, from starting up to wrapping up, including any paused for your approval.',
+      why: 'Each one uses one of the places your limit on tasks running at once allows. If it stays high while "Done (24h)"'
+        + ' does not move, look at "No updates lately" and "Approval requests": something is stuck, or waiting for you.',
+      how: 'Your tasks whose status is "Starting", "Setting up", "Working", "Waiting for approval" or "Wrapping up", among your'
+        + ' 100 most recent tasks. The page refreshes every 15 seconds.',
     },
-    { label: 'Done (24h)', value: tasks.filter((t) => t.status === 'COMPLETED' && recent(t, now)).length, href: '/tasks?view=completed' },
-  ];
-}
+    count: (tasks) => tasks.filter((t) => isActive(t.status)).length,
+  },
+  {
+    label: 'Waiting in line',
+    href: '/tasks?view=queued',
+    explanation: {
+      what: 'Tasks that have not started: waiting in line behind the ones you have running, or waiting for their files.',
+      why: 'A line that does not clear means you submit work faster than your limit on tasks running at once lets it start:'
+        + ' submit fewer at once, or have the limit raised. "Waited in line", on the Scoreboard, shows how often it happens.',
+      how: 'Your tasks whose status is "Queued" or "Waiting for files", among your 100 most recent tasks. Only the queued ones'
+        + ' are held by your limit, and only they count under "Waited in line" on the Scoreboard; a task waiting for files is'
+        + ' waiting for its uploads.',
+    },
+    count: (tasks) => tasks.filter((t) => isQueued(t.status)).length,
+  },
+  {
+    label: 'Approval requests',
+    href: '/approvals',
+    explanation: {
+      what: 'Actions an agent has paused on until you approve them or say no.',
+      why: 'Each one holds a task still until you answer. Left unanswered, a request is refused when its time runs out, and the'
+        + ' agent has to find another way. Answer these first: the number opens them.',
+      how: 'Requests waiting for your answer right now, across all your tasks. Answered and expired requests are not counted.'
+        + ' It refreshes every 10 seconds.',
+    },
+    count: (_tasks, pendingApprovals) => pendingApprovals,
+  },
+  {
+    label: 'No updates lately',
+    href: '/tasks?view=attention',
+    explanation: {
+      what: 'Tasks with the status "Working" whose agent has gone quiet.',
+      why: 'A quiet agent may have hung or crashed, and the task then goes nowhere. Open it from "Needs you" to see how far it'
+        + ' got: send it a message, or cancel it and submit the work again.',
+      how: 'Tasks with the status "Working" whose agent last reported more than 4 minutes ago, or not once in its first 6'
+        + ' minutes, among your 100 most recent tasks. On AgentCore and Lambda MicroVMs ABCA fails such a task itself; on ECS'
+        + ' the agent reports only once, at its start, so a healthy task shows up here after 4 minutes.',
+    },
+    count: (tasks, _pendingApprovals, now) => tasks.filter((t) => hasStaleHeartbeat(t, now)).length,
+  },
+  {
+    label: 'Failed (24h)',
+    href: '/tasks?view=unsuccessful',
+    explanation: {
+      what: 'Tasks that failed or ran out of time in the last 24 hours.',
+      why: 'Each one left its work undone: read why it ended on its page, then try again, split it up or do it by hand. They'
+        + ' stay listed under "Needs you" until a day has passed.',
+      how: 'Your tasks that failed or ran out of time, and whose last change is less than 24 hours old, among your 100 most'
+        + ' recent tasks. Cancelled tasks are not counted, though the list the number opens shows them, and older tasks too.',
+    },
+    count: (tasks, _pendingApprovals, now) => tasks.filter((t) => (t.status === 'FAILED' || t.status === 'TIMED_OUT') && recent(t, now)).length,
+  },
+  {
+    label: 'Done (24h)',
+    href: '/tasks?view=completed',
+    explanation: {
+      what: 'Tasks that ended normally in the last 24 hours.',
+      why: 'It is what your agents got through in a day. That is volume, not results: for those, read "Ended in a verified pull'
+        + ' request" on the Scoreboard.',
+      how: 'Your tasks whose status is "Done" and whose last change is less than 24 hours old, among your 100 most recent tasks.'
+        + ' Done means the task ended normally: it did not fail, run out of time or get cancelled. It may have ended with a'
+        + ' question for you, or with a pull request without a passed build.',
+    },
+    count: (tasks, _pendingApprovals, now) => tasks.filter((t) => t.status === 'COMPLETED' && recent(t, now)).length,
+  },
+];
 
 export function OverviewPage() {
   const navigate = useNavigate();
@@ -75,7 +141,10 @@ export function OverviewPage() {
   const pendingQuery = usePendingApprovals();
 
   const tasks = useMemo(() => tasksQuery.data?.pages[0]?.data ?? [], [tasksQuery.data]);
-  const counters = useMemo(() => summarize(tasks, pendingQuery.data?.pending.length ?? 0), [tasks, pendingQuery.data]);
+  const counts = useMemo(() => {
+    const now = new Date();
+    return COUNTERS.map((counter) => counter.count(tasks, pendingQuery.data?.pending.length ?? 0, now));
+  }, [tasks, pendingQuery.data]);
   const attention = useMemo(() => tasks.filter((t) => attentionReason(t) !== null), [tasks]);
   const truncated = tasksQuery.data?.pages[0]?.pagination.has_more ?? false;
 
@@ -102,21 +171,25 @@ export function OverviewPage() {
           }
         >
           <ColumnLayout columns={3} variant="text-grid">
-            {counters.map((counter) => (
-              <div key={counter.label}>
-                <Box variant="awsui-key-label">{counter.label}</Box>
-                <Link
-                  variant="awsui-value-large"
-                  href={counter.href}
-                  ariaLabel={`${counter.label}: ${tasksQuery.isPending ? 'loading' : counter.value}`}
-                  onFollow={(event) => {
-                    event.preventDefault();
-                    void navigate(counter.href);
-                  }}
-                >
-                  {tasksQuery.isPending ? '-' : counter.value}
-                </Link>
-              </div>
+            {COUNTERS.map((counter, i) => (
+              <Explain key={counter.label} title={counter.label} explanation={counter.explanation}>
+                {(icon) => (
+                  <>
+                    <Box variant="awsui-key-label">{counter.label} {icon}</Box>
+                    <Link
+                      variant="awsui-value-large"
+                      href={counter.href}
+                      ariaLabel={`${counter.label}: ${tasksQuery.isPending ? 'loading' : counts[i]}`}
+                      onFollow={(event) => {
+                        event.preventDefault();
+                        void navigate(counter.href);
+                      }}
+                    >
+                      {tasksQuery.isPending ? '-' : counts[i]}
+                    </Link>
+                  </>
+                )}
+              </Explain>
             ))}
           </ColumnLayout>
         </Container>

@@ -38,15 +38,53 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
+/**
+ * Elapsed seconds for a summary, in the largest two units and rounded to the smaller
+ * one: "45s", "24m", "2h 5m", "2d 14h". No seconds past a minute; a unit at zero is left out.
+ */
+export function formatDurationShort(seconds: number | null | undefined): string {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return NONE;
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const minutes = Math.round(s / 60);
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 24 * 60) return twoUnits(Math.floor(minutes / 60), 'h', minutes % 60, 'm');
+  const hours = Math.round(s / 3600);
+  return twoUnits(Math.floor(hours / 24), 'd', hours % 24, 'h');
+}
+
+/** Between the two units of a duration, so that "2h 5m" never breaks across two lines of a sentence. */
+const NO_BREAK_SPACE = String.fromCharCode(0xa0);
+
+function twoUnits(large: number, largeUnit: string, small: number, smallUnit: string): string {
+  return small === 0 ? `${large}${largeUnit}` : `${large}${largeUnit}${NO_BREAK_SPACE}${small}${smallUnit}`;
+}
+
+/** Digits are grouped the same way for every reader ("$5,214.40"), as the dollar sign is fixed too. */
+const GROUPING_LOCALE = 'en-US';
+
 export function formatCost(usd: number | null | undefined): string {
   if (usd === null || usd === undefined || !Number.isFinite(usd)) return NONE;
-  return `$${usd.toFixed(2)}`;
+  return `$${usd.toLocaleString(GROUPING_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** A whole number with its digits grouped: "2,140". */
+export function formatCount(count: number): string {
+  return count.toLocaleString(GROUPING_LOCALE);
 }
 
 export function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return NONE;
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? NONE : date.toLocaleString();
+}
+
+/**
+ * The name of the "i" that explains a label: "About waited in line". Only the first
+ * letter drops its capital: a name inside the label ("ABCA") keeps its own.
+ */
+export function aboutLabel(label: string): string {
+  return `About ${label.charAt(0).toLowerCase()}${label.slice(1)}`;
 }
 
 /** Task ids are ULIDs; the last 8 characters are enough to tell rows apart. */

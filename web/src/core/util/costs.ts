@@ -18,12 +18,14 @@
  */
 
 import type { ChannelSource, TaskSummary } from '../api/types';
+import type { Explanation } from '../components/Explain';
 
 /**
  * Cost rollups for the Costs page, computed from task summaries.
  *
- * A task's spend is counted on the UTC day it finished (or, while it runs, the day
- * of its latest update), so a day's bar shows money spent that day.
+ * A task's spend is counted on the UTC day it finished, so a day's bar shows money
+ * spent that day. A task records its cost when it finishes: one that has not finished
+ * adds nothing to the spend, and is placed by its latest change for the count of tasks.
  */
 
 export type CostRange = 'this-month' | '7d' | '30d';
@@ -60,7 +62,7 @@ function utcDay(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-/** The instant a task's spend is attributed to. */
+/** The instant a task counts at: when it finished, or its latest change while it has not. */
 function spendAt(task: Pick<TaskSummary, 'completed_at' | 'updated_at'>): string {
   return task.completed_at ?? task.updated_at;
 }
@@ -125,6 +127,50 @@ export interface CostSummary {
   readonly averagePerTask: number | null;
   readonly unproductiveSpend: number;
 }
+
+/** What each number of the Costs page says about itself; `perDay` is the chart as a whole. */
+export const COST_EXPLANATIONS: Readonly<Record<keyof CostSummary | 'perDay', Explanation>> = {
+  spend: {
+    what: 'What your tasks cost in model usage over the selected time range.',
+    why: 'The total says how much, not what it bought: for that, read "Spend per verified pull request" on the Scoreboard. If'
+      + ' it climbs faster than you expect, "Spend per day" shows when, and "Spent on failed or stopped tasks" shows how much'
+      + ' bought nothing.',
+    how: 'The recorded cost of your tasks that finished in the selected range, added up. A task that has not finished adds'
+      + ' nothing yet. Days are UTC days. Costs are estimates of model usage: the machines the agents run on are not in them,'
+      + ' and tasks that were cancelled or ran out of time record no cost, so the true figure is higher. It reads your 500'
+      + ' most recent tasks.',
+  },
+  tasks: {
+    what: 'How many of your tasks fall in the selected time range.',
+    why: 'It is the volume behind the spend. Read it with "Average per task": spend can rise because you submitted more tasks,'
+      + ' or because each one cost more.',
+    how: 'Tasks that finished in the selected range, whatever the result, and tasks not yet finished whose last change falls in'
+      + ' it. Tasks that recorded no cost are counted too. It reads your 500 most recent tasks.',
+  },
+  averagePerTask: {
+    what: 'What one task costs on average, among the tasks that recorded a cost.',
+    why: 'It separates two reasons for a rising spend: more tasks, or costlier ones. When it climbs, "Most expensive tasks"'
+      + ' shows which tasks pulled it up: those are the ones to split or describe more precisely.',
+    how: 'The spend of the range divided by the number of its tasks that recorded a cost. Tasks with no recorded cost, cancelled'
+      + ' ones for example, are left out, so this is not the spend divided by the number under "Tasks".',
+  },
+  unproductiveSpend: {
+    what: 'The part of the spend that went to tasks that failed, ran out of time or were cancelled.',
+    why: 'It is money that bought no result you can use. When it is a large part of what you spent, tasks are often too big,'
+      + ' too vague or cut off by their turn or spending limit: "Most expensive tasks" shows where to start.',
+    how: "The recorded cost of the range's tasks that failed, ran out of time or were cancelled. In practice it is the cost of"
+      + ' the failed ones: tasks that were cancelled or ran out of time record no cost, so the true figure is higher. A task'
+      + ' that ended normally is not in it, even if it opened no pull request.',
+  },
+  perDay: {
+    what: 'What your tasks cost on each day of the selected range, one bar per day.',
+    why: 'It shows when the money went. Group the bars by "Repository", "Outcome" or "Source" to see what made a day expensive:'
+      + ' which repository, how the task ended, or where it was submitted from.',
+    how: "A task's recorded cost is placed on the UTC day the task finished; a task that has not finished shows nothing yet."
+      + ' When you group, the five groups that cost most across your 500 most recent tasks are shown on their own, in every'
+      + ' range; the rest are added up as "Other".',
+  },
+};
 
 export function summarizeCosts(tasks: readonly TaskSummary[], range: CostRange, now: Date = new Date()): CostSummary {
   const scoped = tasks.filter((t) => inRange(t, range, now));
