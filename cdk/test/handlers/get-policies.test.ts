@@ -246,6 +246,33 @@ describe('get-policies', () => {
     expect(soft.map((r: { rule_id: string }) => r.rule_id)).not.toContain('block_prod_writes');
   });
 
+  test('uses Cedar annotations to list inline rules and number legacy entries', async () => {
+    mockLookupRepo.mockResolvedValue(onboardedWith([
+      `// Previously @tier("hard")\n${UNANNOTATED_RULE}`,
+      `@tier ( "hard" ) @rule_id ( "publish_freeze" ) ${UNANNOTATED_RULE}`,
+      OTHER_UNANNOTATED_RULE,
+    ]));
+
+    const res = await handler(makeEvent());
+
+    expect(res.statusCode).toBe(200);
+    const { hard, soft } = JSON.parse(res.body).data.policies;
+    expect(hard).toContainEqual(expect.objectContaining({ rule_id: 'publish_freeze' }));
+    expect(soft.slice(-2).map((r: { rule_id: string }) => r.rule_id)).toEqual([
+      'legacy_extra_0', 'legacy_extra_1',
+    ]);
+  });
+
+  test.each([
+    ['both tiers', `${CUSTOM_SOFT_RULE}\n@tier("hard") @rule_id("freeze") ${UNANNOTATED_RULE}`],
+    ['a comment alone', '// no policies'],
+    ['an unbound template', 'forbid (principal == ?principal, action, resource);'],
+  ])('reports an invalid Blueprint entry containing %s', async (_description, entry) => {
+    mockLookupRepo.mockResolvedValue(onboardedWith([entry]));
+    const res = await handler(makeEvent());
+    expect(res.statusCode).toBe(503);
+  });
+
   test('caches per-repo response across calls', async () => {
     mockSend.mockResolvedValue({});
 

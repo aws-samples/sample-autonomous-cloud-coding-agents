@@ -30,7 +30,7 @@ new Blueprint(this, 'PaymentsBlueprint', {
       `@tier("hard")
        @rule_id("block_prod_writes")
        forbid (principal, action == Agent::Action::"write_file", resource)
-         when { context.file_path like "prod/**" };`,
+         when { context.file_path like "prod/*" || context.file_path like "*/prod/*" };`,
       `@tier("soft")
        @rule_id("deploy_staging")
        @severity("high")
@@ -44,13 +44,13 @@ new Blueprint(this, 'PaymentsBlueprint', {
 });
 ```
 
-- **`@tier("hard")`** rules always deny. **`@tier("soft")`** rules pause for approval.
+- The hard rule blocks Write and Edit for files under any directory named `prod`, including nested directories. It matches both relative and absolute paths as supplied by the tool.
 - Keep hard and soft rules in **separate entries**. An entry that declares both tiers, or `@rule_id` without a tier, fails task start rather than being guessed.
 - An entry with no annotations at all is treated as a legacy soft rule with a generated rule ID (`legacy_extra_<n>`).
-- `@approval_timeout_s` is **min-wins** with the task's own approval window (default 300 s; set `--approval-timeout` up to 3600 s on submit). The rule above therefore waits 300 s unless the task asks for 900 s or more.
+- The soft rule asks for approval with a 900-second limit. The task's approval window can shorten it. The default gives 300 seconds, `--approval-timeout 600` gives 600, and `--approval-timeout 3600` gives 900. The remaining task lifetime can shorten the window further.
 - Disabling built-in soft rules and capping `--pre-approve` scopes per repository are not supported yet.
 
-The built-in rule set is documented in [`agent/policies/hard_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/hard_deny.cedar) and [`agent/policies/soft_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/soft_deny.cedar). Run `bgagent policies list --repo owner/repo` against a deployed stack to see the effective rules for a repo.
+`bgagent policies list --repo owner/repo` lists the built-in rules and the repository's inline Blueprint rules. To see the additional rules the agent loads at task start, inspect the registry modules referenced by `assets.cedarPolicyModules`. The built-in rules are in [`hard_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/soft_deny.cedar).
 
 ## Vocabulary
 
@@ -68,9 +68,9 @@ Every tool call the agent makes is evaluated as a Cedar `(principal, action, res
 
 | Annotation | Required? | Values | Purpose |
 |---|---|---|---|
-| `@rule_id("...")` | **Yes on soft-deny** (recommended on hard-deny) | Unique kebab/snake-case identifier | Stable ID for `--pre-approve rule:X`, for audit events, and for `bgagent policies show --rule X`. Engine rejects duplicates at task start. |
-| `@tier("hard"\|"soft")` | **Yes** | Exactly one of `"hard"` or `"soft"` | Must match the file section. Mismatches fail task start. |
-| `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Per-rule timeout. Defaults to 300 s (overridable per-task via `--approval-timeout`). When multiple soft rules match, the engine picks the minimum. Values < 120 s emit a load-time warning; values < 30 s are rejected. Ignored on hard-deny. |
+| `@rule_id("...")` | **Yes on tiered rules** | Unique kebab/snake-case identifier | Names a rule in approval requests, audit events, and `bgagent policies show --rule X`. The engine rejects duplicate IDs at task start. |
+| `@tier("hard"\|"soft")` | **Yes on named rules** | Exactly one of `"hard"` or `"soft"` | Selects the tier. All rules in one Blueprint entry must use the same tier. |
+| `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Caps the task's approval window when this soft rule matches. The task default is 300 seconds and `--approval-timeout` can set it to at most 3600 seconds. Values below 120 seconds trigger a warning and values below 30 seconds fail validation. |
 | `@severity("low"\|"medium"\|"high")` | No | One of three | Displayed in the approval prompt. Default: `medium`. |
 | `@category("...")` | No | `destructive`, `network`, `filesystem`, `auth`, or free-form | Optional UX grouping. Not enforced. |
 
@@ -135,7 +135,7 @@ forbid (principal, action == Agent::Action::"execute_bash", resource)
 
 A single tool call can match several rules. When that happens the engine merges them:
 
-- **Timeout** — the minimum of all matching rules' `@approval_timeout_s` values (smallest window wins).
+- **Timeout** — the shortest of the task's approval window and the `@approval_timeout_s` limits on the matching rules.
 - **Severity** — the maximum across matches (`high` > `medium` > `low`).
 - **`matching_rule_ids`** — the full set, so the CLI can show the user every rule that fired.
 
@@ -148,7 +148,7 @@ The blueprint loader runs a probe Cedar evaluation before the task is admitted. 
 - Malformed Cedar syntax.
 - Duplicate `@rule_id` across hard + soft tiers.
 - An entry that declares both `@tier("hard")` and `@tier("soft")`, or `@rule_id` without a `@tier`.
-- Missing `@rule_id` on a soft-deny rule.
+- Missing `@rule_id` on a rule that declares a tier.
 - `@approval_timeout_s` below the 30 s floor or non-integer.
 - Combined hard + soft Cedar text exceeding 64 KB.
 

@@ -56,30 +56,28 @@ def _config(**overrides: Any) -> TaskConfig:
 
 
 class TestBlueprintCedarPolicyBootstrap:
-    """A Blueprint's annotated rules must build a real engine, not fail task start."""
-
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            '@tier ( "soft" )',
+            '// Previously used @tier("hard").\n@tier("soft")',
+        ],
+    )
     @patch("hooks.build_hook_matchers")
-    def test_annotated_blueprint_rules_reach_the_engine(self, _mock_build_hooks):
-        soft = (
-            '@tier("soft")\n@rule_id("deploy_staging")\n@approval_timeout_s("900")\n'
+    def test_cedar_recognizes_the_tier_despite_formatting_or_comments(
+        self, _mock_build_hooks, annotation
+    ):
+        policy = (
+            f'{annotation}\n@rule_id("review_report")\n'
             'forbid (principal, action == Agent::Action::"execute_bash", resource)\n'
-            '  when { context.command like "*terraform apply*" };'
-        )
-        hard = (
-            '@tier("hard")\n@rule_id("block_prod_writes")\n'
-            'forbid (principal, action == Agent::Action::"write_file", resource)\n'
-            '  when { context.file_path like "prod/**" };'
+            '  when { context.command == "echo report" };'
         )
         engine, _ = _initialize_policy_engine_and_hooks(
-            config=_config(cedar_policies=[soft, hard]), trajectory=None, progress=MagicMock()
+            config=_config(cedar_policies=[policy]), trajectory=None, progress=MagicMock()
         )
-        assert engine.evaluate_tool_use("Bash", {"command": "terraform apply"}).outcome == (
-            "require_approval"
-        )
-        assert (
-            engine.evaluate_tool_use("Write", {"file_path": "prod/x", "content": "y"}).outcome
-            == "deny"
-        )
+        decision = engine.evaluate_tool_use("Bash", {"command": "echo report"})
+        assert decision.outcome == "require_approval"
+        assert decision.matching_rule_ids == ("review_report",)
 
 
 class TestClaudeSessionOwnership:
