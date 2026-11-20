@@ -101,7 +101,7 @@ The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `
 - **pre-commit** - File-hygiene checks (trailing whitespace, final newline, conflict markers, YAML and JSON syntax), gitleaks on staged changes, and the checks that belong to the files you staged: ESLint for cdk, cli and web, the agent quality task for Python, the docs sync and `astro check`, the Markdown structure lint, the docs script tests, and the drift checks for API types and shared constants. The coverage contract check runs on every commit.
 - **pre-push** - Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
 
-If `prek install` fails with "refusing to install hooks with `core.hooksPath` set", another tool owns your hooks. Either unset it (`git config --unset-all core.hooksPath`) or integrate these checks into your hook manager.
+If `core.hooksPath` is set outside this repository (in your global or system git config, often by another hook manager), prek refuses to install its hooks, and `mise run install` skips them with a warning instead of failing. To switch to prek, unset it (`git config --unset-all --global core.hooksPath`) or set a hooks path for this repository only (`git config --local core.hooksPath <path>`), then run `mise run hooks:install`. To keep your own hook manager, run these checks through it instead.
 
 The build's transaction tests use DynamoDB Local through
 `ABCA_DDB_LOCAL_ENDPOINT` (a loopback HTTP endpoint). CI starts a Docker service

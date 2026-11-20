@@ -40,8 +40,10 @@ Go to GitHub > **Settings** > **Developer settings** > **Personal access tokens*
 
 | Scope | Reason |
 |-------|--------|
-| `repo` | Full repository access (clone, push, PRs, issues) |
+| `public_repo` (public repositories) or `repo` (private repositories) | Clone, push, PRs and issues. `public_repo` reaches public repositories only; `repo` grants every private repository the token's owner can reach, so use it only when a target repository is private |
 | `read:org` | Resolve org membership for org-owned repos |
+
+A token acts for its owner: whatever the scopes, the owner needs write access to the repository (collaborator or team role) for the agent to push.
 
 Set an expiration (90 days recommended) and store it in Secrets Manager the same way as a fine-grained token.
 
@@ -53,6 +55,22 @@ Set an expiration (90 days recommended) and store it in Secrets Manager the same
 | Collaborator on another user's repo | Classic |
 | Org has not opted in to fine-grained tokens | Classic |
 | Targeting repos across multiple orgs | Classic (single token covers all) |
+
+#### Push check before the agent runs
+
+A token can read a repository and still be refused every push. A classic PAT with no scopes, for instance, still reads public repositories. Once the clone's remote and credential helper are set, the agent runs `git push --dry-run` through the same helper the final push uses. When GitHub refuses it, the task fails within seconds instead of at the final push after the agent's work:
+
+| GitHub's answer | Task error |
+|-----------------|------------|
+| The token may not write | `Token cannot push to <repo>`, naming the token type and the permission to add |
+| No credential accepted (the token was revoked or expired after the clone; an invalid one already fails at `preflight_failed`) | `BLOCKED[auth_failure]`: replace the token secret |
+| The repository is archived | `Repository <repo> is archived on GitHub`: unarchive it or target another repository |
+| The organization enforces SAML single sign-on, or an IP allow list | `GitHub organization policy blocks pushes to <repo>`, naming the policy and its fix |
+| No answer: GitHub or the network down after retries, or no reply within 120 s | `BLOCKED[dependency_unreachable]`, retryable |
+
+The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Tasks that never push skip the check: read-only workflows (`coding/pr-review-v1`) and repository-bound workflows that deliver an artifact instead of a PR.
+
+Setup also makes every push from the clone use the task's token over HTTPS. It pins the push URL to `https://github.com/<owner>/<repo>.git`, which git's `pushInsteadOf` rules do not rewrite, and stops with an error if an `insteadOf` rule in the machine's git configuration still would. It clears the `github.com` credential helpers the clone would inherit (a saved GitHub login, for instance) before adding `gh`; helpers for other hosts keep working. Tasks whose workflow only looks up an existing pull request (`ensure_pr` with the `resolve` strategy) skip the check, as they never push.
 
 ### AWS Credentials
 

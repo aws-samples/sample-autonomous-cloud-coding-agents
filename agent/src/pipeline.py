@@ -1507,10 +1507,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 _workflow = load_workflow(
                     (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
                 )
-                ensure_pr_strategy = next(
-                    (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
-                    "create",
-                )
+                # The rule the push preflight in repo.setup_repo applies too.
+                ensure_pr_strategy = _workflow.ensure_pr_strategy
             except WorkflowValidationError as exc:
                 log(
                     "WARN",
@@ -1535,14 +1533,11 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # branch, but default/agent-v1 is repo-OPTIONAL — run WITH a repo it
             # takes THIS path yet still expects a PR (primary: artifact but
             # requires_repo: false). So gate on requires_repo too, or a
-            # repo-optional default-agent run would wrongly skip its PR. The
-            # resolved value, as in build_config: a coding workflow may leave the
-            # line out, and the raw field is then None.
-            artifact_workflow = bool(
-                _workflow
-                and _workflow.terminal_outcomes.primary == "artifact"
-                and _workflow.resolved_requires_repo
-            )
+            # repo-optional default-agent run would wrongly skip its PR. The rule is
+            # Workflow.delivers_repo_artifact (the resolved requires_repo, as in
+            # build_config: a coding workflow may leave the line out), which the push
+            # preflight in repo.setup_repo applies too, so a task it skips never pushes.
+            artifact_workflow = bool(_workflow and _workflow.delivers_repo_artifact)
             artifact_uri: str | None = None  # set by the artifact branch below
 
             # Clarify-before-spend (UX #4): a writeable, PR-producing task
