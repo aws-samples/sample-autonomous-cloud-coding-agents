@@ -52,6 +52,7 @@ jest.mock('@aws-sdk/client-bedrock', () => ({
   GetInferenceProfileCommand: jest.fn((input: unknown) => ({ _type: 'GetInferenceProfile', input })),
 }));
 
+import { BEDROCK_GEO_PREFIXES } from '../src/model-id';
 import {
   checkJiraAppIdentity,
   checkLinearProjectWorkspaces,
@@ -438,11 +439,11 @@ describe('doctor Bedrock catalog check', () => {
     // This regressed once: the strip matched `us|eu|apac` only, and when the
     // platform default moved to a `global.` profile it silently stopped stripping.
     // Asserting every geography the CDK models means a future default on any of
-    // them cannot reopen the hole.
+    // them cannot reopen the hole. The list is the CLI's own, which
+    // test/model-id.test.ts holds to the CDK's.
     const { PLATFORM_REPO_DEFAULTS } = await import('../src/repo-display');
-    const GEOS = ['global', 'us-gov', 'us', 'eu', 'apac', 'jp', 'au'];
 
-    for (const geo of GEOS) {
+    for (const geo of BEDROCK_GEO_PREFIXES) {
       jest.clearAllMocks();
       jest.resetModules();
       jest.doMock('../src/repo-display', () => ({
@@ -499,7 +500,13 @@ describe('doctor Bedrock catalog check error classification', () => {
   it('warns on a denial — a least-privilege caller says nothing about the model', async () => {
     const denied = new Error('User: … is not authorized to perform: bedrock:GetFoundationModel');
     denied.name = 'AccessDeniedException';
-    expect((await catalogCheck(denied)).status).toBe('warn');
+    const check = await catalogCheck(denied);
+    expect(check.status).toBe('warn');
+    // The remedy is the caller's missing permission. The console remedy is a conclusion
+    // about the MODEL, which a denial does not support.
+    expect(check.detail).toMatch(/permissions gap on the caller/);
+    expect(check.detail).toMatch(/re-run with credentials holding bedrock:GetFoundationModel/);
+    expect(check.detail).not.toMatch(/Enable model access/);
   });
 
   it('FAILS, with the console remedy, when the model is definitively absent', async () => {
@@ -735,6 +742,22 @@ describe('doctor granted-model profile check', () => {
     const check = await grantedCheck(null, 'global');
     expect(check.status).toBe('warn');
     expect(check.detail).toMatch(/BedrockModelIds/);
+    // The geography IS exported here, so the detail must not say otherwise.
+    expect(check.detail).not.toMatch(/BedrockGeoRegion/);
+  });
+
+  it('names only the geography when that is the output the stack lacks', async () => {
+    // A partially updated stack: the granted set is exported, the geography is not.
+    const check = await grantedCheck('anthropic.claude-opus-5', null);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/does not export BedrockGeoRegion,/);
+    expect(check.detail).not.toMatch(/BedrockModelIds/);
+  });
+
+  it('names both outputs when the stack exports neither', async () => {
+    const check = await grantedCheck(null, null);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/does not export BedrockModelIds and BedrockGeoRegion,/);
   });
 
   // A list that is non-empty as a STRING but yields zero models after trimming.

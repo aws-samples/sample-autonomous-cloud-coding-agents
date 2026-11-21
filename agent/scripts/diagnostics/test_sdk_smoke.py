@@ -127,7 +127,10 @@ async def smoke_test():
 
 def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
     """Print the verdict on one run. True for PASS only."""
-    ok = counts["assistant"] > 0 and counts["result"] > 0 and not failure
+    if errors:
+        print(f"\nErrors: {errors}")
+    answered = counts["assistant"] > 0 and counts["result"] > 0
+    ok = answered and not failure and not errors
     if ok:
         print("\nPASS — SDK yields messages for this model in this Region.")
         print("       Rules OUT the SDK/CLI/Bedrock path. It does not identify the")
@@ -143,6 +146,13 @@ def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
         print(f"       {failure}")
         print("       Check Bedrock model access for this model in this Region, and")
         print("       that these credentials may invoke it.")
+    elif answered:
+        # Only an exception leads here: the run delivered an answer and a clean result,
+        # then raised. Judged by its messages alone it is a PASS, and the verdict for a
+        # run without a result, below, would be false.
+        print("\nFAIL — The run raised an exception after it delivered its result")
+        print("       (see Errors above). The model answered, but the session did not")
+        print("       end cleanly: check the CLI stderr output above.")
     elif counts["system"] > 0 and counts["assistant"] == 0:
         print("\nFAIL — Got init but zero AssistantMessages.")
         print("       Same symptom as production. Issue is SDK/CLI level,")
@@ -171,8 +181,6 @@ def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
         print("       diagnostic, not evidence about the model. Check the CLI stderr")
         print("       above for a mid-stream error, and whether the run was killed")
         print("       (timeout, OOM, cancelled) before it could emit its result.")
-    if errors:
-        print(f"\nErrors: {errors}")
 
     # Exit code must match the verdict. It printed FAIL and exited 0, so any caller
     # that checked the status — CI, a script, a person using `&&` — read a failure as

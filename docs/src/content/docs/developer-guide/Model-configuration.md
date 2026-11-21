@@ -8,7 +8,7 @@ title: "Model configuration"
 
 | # | Layer | What it controls | Where | ID form |
 |---|---|---|---|---|
-| 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (default `us`) | **Bare** (`anthropic.claude-…`) |
+| 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (`global` in the shipped `cdk.json`, `us` if no context is supplied at all) | **Bare** (`anthropic.claude-…`) |
 | 2 | **Platform default model** | The model used when nothing narrower is set. Injected by the stack as `ANTHROPIC_MODEL`, derived from `bedrockGeoRegion`; the Python literal is the fallback a run with no env reaches. | `PLATFORM_DEFAULT_MODEL_ID` (`cdk/src/handlers/shared/bedrock-model-constants.ts`) — the value actually injected, so the one to change; then the no-env fallbacks `agent/src/config.py` and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
 | 3 | **Auxiliary / fast model** | The small model Claude Code uses for auxiliary work (WebFetch page summarization, the pre-flight safety check). | Stack env `ANTHROPIC_DEFAULT_HAIKU_MODEL` (`cdk/src/stacks/agent.ts` (the runtime environment block)); agent-side fallback at `agent/src/config.py` | Prefixed (`<geo>.anthropic.…`) |
 | 4 | **Per-repo override** | One repository's model, with no agent redeploy. | Blueprint `agent.modelId` (`cdk/src/constructs/blueprint.ts`, `BlueprintProps.agent.modelId`) → RepoTable `model_id` (`cdk/src/handlers/shared/repo-config.ts`) → ECS injects `ANTHROPIC_MODEL` (`cdk/src/handlers/shared/strategies/ecs-strategy.ts`) | Prefixed (`<geo>.anthropic.…`) |
@@ -104,7 +104,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 
 **Per-task runtime budgets are unlimited by default.** Because no platform-wide per-task runtime ceiling applies, the documented mitigation for cost is choosing a lighter-token model rather than relying only on a cap:
 
-- **Per repo:** Blueprint `agent.modelId` — no code change, no agent redeploy. Prefix it with the geography the stack grants, read from its `BedrockGeoRegion` output; a `us.` prefix on a `global` deployment is granted nothing and fails at turn 0.
+- **Per repo:** Blueprint `agent.modelId` — no code change, no agent redeploy. Prefix it with the geography the stack grants, read from its `BedrockGeoRegion` output. Synth accepts only the `<geo>.<model>` ID form, with the deployment's geography and a granted model: a bare ID, an ARN, another geography's prefix (a `us.` prefix on a `global` deployment is granted nothing) or a model outside the grant list fails it. `bgagent repo onboard --model` refuses the same values.
 - **Per task:** `model_id` in the task payload
 - **Platform-wide:** `PLATFORM_DEFAULT_MODEL_ID` (what every substrate is told to invoke) plus the `bedrockModels` context (what it is granted) — both, or the deploy fails at synth for disagreeing
 

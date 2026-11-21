@@ -45,6 +45,7 @@ export {
   DEFAULT_BEDROCK_MODEL_IDS,
   PLATFORM_DEFAULT_AUX_MODEL_ID,
   PLATFORM_DEFAULT_MODEL_ID,
+  geoPrefixOf,
   inferenceProfileId,
 } from '../handlers/shared/bedrock-model-constants';
 
