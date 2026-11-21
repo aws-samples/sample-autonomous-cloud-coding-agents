@@ -345,7 +345,9 @@ export class AgentStack extends Stack {
     ]);
 
     // Server access logging intentionally disabled. Rationale:
-    //  - writes: only the agent runtime IAM role (``grantPut`` below).
+    //  - uploads: only the per-task SessionRole (``AgentSessionRole``
+    //    below), tag-scoped to its own user and task prefixes. No
+    //    compute role holds a grant on this bucket.
     //  - reads: only via short-lived presigned URL issued by
     //    ``get-trace-url`` after a Cognito auth check + ownership
     //    check against the TaskRecord.
@@ -363,7 +365,7 @@ export class AgentStack extends Stack {
     NagSuppressions.addResourceSuppressions(traceArtifactsBucket.bucket, [
       {
         id: 'AwsSolutions-S1',
-        reason: 'Debug-only artifacts (design §10.1) with 7-day TTL; writes confined to runtime IAM role by grantPut; reads only via short-lived presigned URLs from an authn\'d handler. Object-level audit intentionally omitted — cost/complexity of CloudTrail data events or a log bucket is not justified for opt-in --trace usage.',
+        reason: 'Debug-only artifacts (design §10.1) with 7-day TTL; uploads confined to the per-task SessionRole, tag-scoped to its own user and task prefixes; reads only via short-lived presigned URLs from an authn\'d handler. Object-level audit intentionally omitted — cost/complexity of CloudTrail data events or a log bucket is not justified for opt-in --trace usage.',
       },
     ]);
 

@@ -33,6 +33,7 @@ import { AgentStack } from '../../src/stacks/agent';
 describe('AgentStack', () => {
   let template: Template;
   let concurrencyMaintenance: Template;
+  let nestedTemplates: Template[];
 
   beforeAll(() => {
     const app = new App();
@@ -41,6 +42,8 @@ describe('AgentStack', () => {
     });
     template = Template.fromStack(stack);
     concurrencyMaintenance = Template.fromStack(stack.node.findChild('ConcurrencyMaintenance') as NestedStack);
+    nestedTemplates = stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child))
+      .map(child => Template.fromStack(child));
   });
 
   test('synthesizes without errors', () => {
@@ -895,6 +898,37 @@ describe('AgentStack', () => {
       }
     }
     expect(objectStatements).toEqual([]);
+  });
+
+  test('only the per-task SessionRole can write the trace bucket, and its access-logging exception says so', () => {
+    // The AwsSolutions-S1 exception on this bucket argues from who can write it,
+    // and cdk-nag copies the reason into the template and the NagReport, where a
+    // reviewer reads it as evidence. It has to name the role that holds the grant.
+    // No compute role does (each runs repository code): the agent writes with the
+    // per-task SessionRole's credentials, whose prefixes agent-session-role.test.ts
+    // asserts.
+    const [, bucket] = Object.entries(template.findResources('AWS::S3::Bucket'))
+      .find(([id]) => id.startsWith('TraceArtifactsBucket'))!;
+    // In the root template a statement names the bucket by its logical id, in a
+    // nested one by the parameter that passes it in. Both contain the construct id.
+    const reaches = (resource: unknown) => resource === '*' || JSON.stringify(resource).includes('TraceArtifactsBucket');
+    // The policies of every template that allow a put or a delete on the bucket.
+    // Nested stacks have roles of their own, and CDK moves the statements of a
+    // large role into a managed policy. The bucket policy admits one more
+    // principal, CDK's auto-delete provider (see trace-artifacts-bucket.ts).
+    const writers = ['AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy']
+      .flatMap(type => [template, ...nestedTemplates].flatMap(t => Object.entries(t.findResources(type))))
+      .filter(([, policy]) => (policy.Properties.PolicyDocument.Statement as Array<{ Effect: string; Action: string | string[]; Resource: unknown }>)
+        .some(stmt => stmt.Effect === 'Allow' && /"s3:(Put|Delete|\*)/.test(JSON.stringify(stmt.Action)) && reaches(stmt.Resource)))
+      .map(([policyId]) => policyId);
+    expect(writers).toEqual([expect.stringMatching(/^AgentSessionRole/)]);
+
+    const s1 = (bucket.Metadata.cdk_nag.rules_to_suppress as Array<{ id: string; reason: string; is_reason_encoded?: boolean }>)
+      .find(rule => rule.id === 'AwsSolutions-S1')!;
+    // cdk-nag stores a reason base64-encoded when it holds a character above
+    // U+00FF (here the em dash).
+    const reason = s1.is_reason_encoded ? Buffer.from(s1.reason, 'base64').toString('utf8') : s1.reason;
+    expect(reason).toContain('SessionRole');
   });
 
   test('no hard-coded log-delivery logical ids or names anywhere in the stack', () => {
