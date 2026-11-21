@@ -717,6 +717,23 @@ class TestBaselineCommandThatCannotStart:
         assert setup.build_gate_inert is False
         assert setup.lint_gate_inert is False
 
+    def test_unclosed_quote_is_a_failed_baseline_not_a_task_crash(self, monkeypatch):
+        # No argv can be made of a command with a quote that is never closed.
+        # The shell gets it as written, like the same text beside a shell
+        # operator, and reports a syntax error: exit 2.
+        fake = _fake_run_cmd(returncodes={"verify-build-pre": 2, "verify-lint-pre": 2})
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(
+            _config(build_command="npm run 'build", lint_command='npx eslint "src')
+        )  # must not raise
+
+        assert fake.cmd_for("verify-build-pre") == ["bash", "-lc", "npm run 'build"]
+        assert fake.cmd_for("verify-lint-pre") == ["bash", "-lc", 'npx eslint "src']
+        assert setup.build_before is False
+        assert setup.lint_before is False
+
 
 # What mise 2026.11.6 prints, with exit 1, for the two default commands (less
 # the version lines that close every error), by the label of the baseline run.

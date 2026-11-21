@@ -184,12 +184,23 @@ def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     operators/assignment are passed as literal args to (or AS) the first program
     and mis-run (chained build commands would silently no-op; an env-prefixed
     lint command would exec ``VAR=value`` as the binary and crash).
+
+    A command that ``shlex`` cannot split, one with a quote that is never closed
+    or with a trailing backslash, is wrapped the same way.
     """
     cmd = (command or "").strip() or default
     needs_shell = any(op in cmd for op in _SHELL_OPERATORS) or bool(_ENV_ASSIGN_PREFIX.match(cmd))
     if needs_shell:
         return ["bash", "-lc", cmd]
-    return shlex.split(cmd)
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        # No argv can be made of the text, and an exception here ends the task:
+        # before the agent starts when the baseline resolves the command, after
+        # its work when the gate does. The shell gets the text as written, as it
+        # does for the same text beside a shell operator, and its exit status is
+        # the result of the gate.
+        return ["bash", "-lc", cmd]
 
 
 def _run_verify(repo_dir: str, command: str, default: str, label: str) -> VerifyOutcome:

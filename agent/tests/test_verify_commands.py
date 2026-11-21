@@ -81,6 +81,13 @@ class TestResolveVerifyArgv:
             "--define=X=1",
         ]
 
+    def test_command_that_cannot_be_split_runs_through_a_shell(self):
+        # A quote that is never closed, a trailing backslash: shlex raises on
+        # both, which would end the task. The shell gets the command as written,
+        # as it does for the same text beside a shell operator.
+        for cmd in ("npm run 'build", "npm run build \\"):
+            assert resolve_verify_argv(cmd, "") == ["bash", "-lc", cmd], cmd
+
 
 class TestVerifyBuildHonorsCommand:
     def _capture_argv(self, monkeypatch):
