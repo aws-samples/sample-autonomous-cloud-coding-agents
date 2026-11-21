@@ -21,6 +21,7 @@ import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -91,6 +92,7 @@ import { WebhookTable } from '../constructs/webhook-table';
 import { assertCapabilitiesAvailable } from '../deployment/capabilities';
 import { channelOauthSecretPatterns, DeploymentFeatures, enabledFeatures, resolveDeploymentFeatures } from '../deployment/features';
 import { resolveComputeBackends } from '../handlers/shared/compute-backend';
+import { WEBHOOK_METRIC_NAMESPACE, WEBHOOK_SCREENING_FAILED_METRIC } from '../handlers/shared/webhook-screening-metric';
 
 /** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
 const GUARDRAIL_NAME_MAX_LENGTH = 50;
@@ -138,6 +140,40 @@ function linearVaultWorkloadName(stack: Stack): string {
   return suffix
     ? `${LINEAR_VAULT_WORKLOAD_PREFIX}_${suffix.slice(0, room)}`
     : LINEAR_VAULT_WORKLOAD_PREFIX;
+}
+
+/** Webhook-screening alarm metric period (minutes). */
+const WEBHOOK_SCREENING_ALARM_PERIOD_MINUTES = 5;
+
+/**
+ * The alarm on webhook content dropped because its guardrail screening failed (#794), in a
+ * list for `OperationalAlerts.addAlarmActions`. Without a tracker the list is empty: only
+ * the Linear and Jira webhook processors emit the metric, and a disabled feature
+ * synthesizes no alarm (ADR-024).
+ *
+ * One drop alarms. The metric gets a datapoint only when a webhook event meets a failing
+ * guardrail call, so on a quiet deployment a rule that waits for several datapoints would
+ * stay silent through an outage.
+ */
+function webhookScreeningAlarms(scope: Construct, trackerDeployed: boolean): cloudwatch.Alarm[] {
+  if (!trackerDeployed) return [];
+  return [new cloudwatch.Alarm(scope, 'WebhookScreeningFailedAlarm', {
+    // No dimensions: the total that every source adds to.
+    metric: new cloudwatch.Metric({
+      namespace: WEBHOOK_METRIC_NAMESPACE,
+      metricName: WEBHOOK_SCREENING_FAILED_METRIC,
+      statistic: 'Sum',
+      period: Duration.minutes(WEBHOOK_SCREENING_ALARM_PERIOD_MINUTES),
+    }),
+    threshold: 1,
+    evaluationPeriods: 1,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    alarmDescription:
+      'Guardrail screening of Jira or Linear comments or project documents failed, so that content was dropped. '
+      + 'A task created from the event runs without it. '
+      + 'Search the Jira and Linear webhook processor logs for "screening unavailable" (#794).',
+  })];
 }
 
 /** Properties for {@link AgentStack}. */
@@ -2144,6 +2180,11 @@ export class AgentStack extends Stack {
       budgetAlerts.teamMembershipUnresolvedAlarm,
       // #1063: XSS-shaped bodies counted (not blocked) on the signed webhook routes.
       ...[taskApi.webhookXssCountedAlarm].filter(alarm => alarm !== undefined),
+      // Only with Linear or Jira: their webhook processors emit the metric (#794).
+      // In the maintenance stack, like the scheduled jobs: the alarm holds no
+      // state, and the widest inline deployment fills the root stack's resource
+      // budget to the last resource.
+      ...webhookScreeningAlarms(concurrencyMaintenance, issueOrchestrationEnabled),
     );
 
     // #812: the Linear webhook processor announces a revoked authorization here.

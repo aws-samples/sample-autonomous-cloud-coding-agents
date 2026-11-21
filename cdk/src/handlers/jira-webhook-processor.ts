@@ -73,6 +73,7 @@ import { prNumberFromTask } from './shared/task-pr-number';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
+import { emitWebhookScreeningFailedMetric } from './shared/webhook-screening-metric';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = makeDocClient();
@@ -1569,6 +1570,7 @@ async function screenCommentsOrDrop(
     return comments;
   } catch (err) {
     // Fail-open on a screening outage too — comments are advisory.
+    emitWebhookScreeningFailedMetric('jira-comments');
     logger.warn('Dropping Jira comments: screening unavailable (task still proceeds)', {
       issue_key: issueKey,
       jira_cloud_id: cloudId,

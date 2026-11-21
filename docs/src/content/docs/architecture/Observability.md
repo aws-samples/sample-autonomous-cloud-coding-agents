@@ -129,6 +129,7 @@ All events carry `task_id` for filtering; the events the orchestrator and the ag
 | Token usage per task | Cost | Cost attribution and budget enforcement |
 | `ABCA/Budgets:BudgetThresholdCrossed` | Cost | Claimed 80%/100% monthly user/team budget crossings; retries can rarely duplicate a metric |
 | `ABCA/Budgets:BudgetTeamMembershipUnresolved` | Correctness | Count of admissions where Cognito could not resolve a mapped user, so team-budget enforcement was skipped |
+| `ABCA/Webhooks:WebhookScreeningFailed` | Availability | Count of Jira or Linear comment blocks and Linear project-document blocks dropped because the Bedrock Guardrail call that screens them failed. The `source` dimension (`jira-comments`, `linear-comments`, `linear-docs`) names the content; the metric without dimensions is the total |
 | Cold start duration | Latency | Image optimization signal |
 | Active tasks (RUNNING count) | Capacity | Admission control and capacity planning |
 | Pending tasks (SUBMITTED count) | Capacity | Backlog depth and throughput monitoring |
@@ -166,10 +167,11 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 | Monthly budget warning | Estimated spend crosses 80% | Notify the shared `OperationalAlerts` SNS topic; inspect `OrchestrationReconciler` logs for scope details. |
 | Monthly budget exceeded | Estimated spend crosses 100% | Notify the shared topic. Scopes configured with hard stop reject new tasks. |
 | Budget team membership unresolved | Cognito cannot resolve a mapped task owner | Inspect create-task logs for `budget_team_membership_user_missing`, then repair the stale mapping or federated identity configuration. User-budget enforcement remains active, but team-budget enforcement was skipped. |
+| Webhook screening failed | A guardrail call that screens Jira or Linear comments or Linear project documents failed, once or more in 5 minutes | Notify the shared topic. The content was dropped, and a task created from the event runs without it; in a full guardrail outage the task is rejected at submission as well (Guardrail screening failures, above). Search the Jira and Linear webhook processor logs for `screening unavailable` to find the issue and the error. Deployed only with Linear or Jira. |
 
 ### Alarm notifications
 
-Every CloudWatch alarm the stack deploys publishes to one SNS topic when it goes into `ALARM`: the orchestrator's Lambda-error alarm, the DLQ-depth alarms of the two task-event stream consumers (`FanOutConsumer` and `ApprovalMetricsPublisherConsumer`), the three budget alarms and, where deploy-preview screenshots are deployed, the screenshot processor's Lambda-error and DLQ-depth alarms. The `OperationalAlerts` construct creates the topic, and the stack output `OperationalAlertsTopicArn` holds its ARN. Nothing is sent when an alarm returns to `OK`.
+Every CloudWatch alarm the stack deploys publishes to one SNS topic when it goes into `ALARM`: the orchestrator's Lambda-error alarm, the DLQ-depth alarms of the two task-event stream consumers (`FanOutConsumer` and `ApprovalMetricsPublisherConsumer`), the three budget alarms and, where deploy-preview screenshots are deployed, the screenshot processor's Lambda-error and DLQ-depth alarms and, where Linear or Jira is deployed, the webhook-screening alarm. The `OperationalAlerts` construct creates the topic, and the stack output `OperationalAlertsTopicArn` holds its ARN. Nothing is sent when an alarm returns to `OK`.
 
 The topic has no subscriber until an operator adds one:
 

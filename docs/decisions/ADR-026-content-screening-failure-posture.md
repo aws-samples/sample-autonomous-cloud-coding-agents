@@ -46,7 +46,7 @@ Normative requirements (EARS, per [ADR-020](./ADR-020-ears-requirements-syntax.m
 - (+) A comment, a project document or a sub-issue's file that is blocked or cannot be screened is dropped, and the task is not rejected for it.
 - (+) The rule is stated once. A new call site cites it, and a reviewer checks a path against one list.
 - (-) The agent can run without context that a person expected it to read, and nobody is told on the issue.
-- (!) A drop leaves no trace outside the processor's log. Nothing counts dropped enrichment, so a lasting screening fault degrades the context of Jira and Linear tasks without an alarm. [#794](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/794) tracks a metric.
+- (!) Only a failed screening call on comments or project documents is counted: it adds to `ABCA/Webhooks:WebhookScreeningFailed`, and the alarm on that metric notifies the shared alerts topic ([OBSERVABILITY.md](../design/OBSERVABILITY.md#alarms), [#794](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/794)). A sub-issue's own files dropped for the same reason are not counted, and a drop for any other reason leaves no trace outside the processor's log.
 - (!) A guardrail outage still rejects the task, because the task description fails closed. Dropping decides the outcome when only the enrichment is blocked, or only its screening call fails.
 
 ## References

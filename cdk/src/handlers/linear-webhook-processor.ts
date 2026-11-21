@@ -90,6 +90,7 @@ import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigge
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_IDEMPOTENCY_KEY_LENGTH, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
+import { emitWebhookScreeningFailedMetric } from './shared/webhook-screening-metric';
 import { CODING_WORKFLOW_ID, PR_ITERATION_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = makeDocClient();
@@ -3487,6 +3488,7 @@ async function screenProjectDocsOrDrop(
     }
     return docs;
   } catch (err) {
+    emitWebhookScreeningFailedMetric('linear-docs');
     logger.warn('Dropping Linear project docs: screening unavailable (task still proceeds)', {
       issue_id: issueId,
       linear_workspace_id: workspaceId,
@@ -3538,6 +3540,7 @@ async function screenCommentsOrDrop(
     return comments;
   } catch (err) {
     // Fail-open on a screening outage too — comments are advisory.
+    emitWebhookScreeningFailedMetric('linear-comments');
     logger.warn('Dropping Linear comments: screening unavailable (task still proceeds)', {
       issue_id: issueId,
       linear_workspace_id: workspaceId,

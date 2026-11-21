@@ -206,7 +206,7 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
       expect([feature, paths.some(constructPath => constructPath.includes(marker.path))]).toEqual([feature, enabled]);
     }
     const trackers = profile.context.enableLinear === true || profile.context.enableJira === true;
-    for (const shared of ['/IterationHeartbeat/', '/StrandedOrchestrationReconciler/']) {
+    for (const shared of ['/IterationHeartbeat/', '/StrandedOrchestrationReconciler/', '/WebhookScreeningFailedAlarm/']) {
       expect([shared, paths.some(constructPath => constructPath.includes(shared))]).toEqual([shared, trackers]);
     }
   });

@@ -1143,6 +1143,32 @@ describe('AgentStack', () => {
     }
   });
 
+  test('alarms on the first failed webhook screening call and notifies the alerts topic (#794)', () => {
+    const screeningFailed = { Namespace: 'ABCA/Webhooks', MetricName: 'WebhookScreeningFailed' };
+    // In the maintenance stack, not the root stack: the widest inline deployment
+    // has no root-stack resource to spare under the 490-resource budget.
+    template.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', screeningFailed, 0);
+    concurrencyMaintenance.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', screeningFailed, 1);
+    concurrencyMaintenance.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      ...screeningFailed,
+      // The total is the metric without dimensions; with one, the alarm would read a per-source metric.
+      Dimensions: Match.absent(),
+      Statistic: 'Sum',
+      Period: 300,
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+    });
+    // Its one action is the parent's alerts topic, handed down as a stack parameter.
+    const [alarm] = Object.values(concurrencyMaintenance.findResources('AWS::CloudWatch::Alarm', { Properties: screeningFailed }));
+    expect(alarm.Properties.AlarmActions).toHaveLength(1);
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[alarm.Properties.AlarmActions[0].Ref])
+      .toEqual(template.toJSON().Outputs.OperationalAlertsTopicArn.Value);
+  });
+
   test('notifies the alerts topic from every CloudWatch alarm, the Lambda error alarms included (#686)', () => {
     // An alarm without an action is seen only by someone who is already
     // watching the console. The two Lambda error alarms (orchestrator and
