@@ -40,7 +40,7 @@ import {
 import { BEDROCK_GEO_PREFIXES } from './model-id';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
-import { getStackOutput } from './stack-outputs';
+import { getStackOutputs } from './stack-outputs';
 import { makeClient } from './ua';
 
 /**
@@ -131,20 +131,20 @@ export async function runPlatformDoctor(
     bedrockModelIds,
     linearVaultWorkloadName,
     linearProjectMappingTableName,
-  ] = await Promise.all([
-    getStackOutput(region, stackName, 'ApiUrl'),
-    getStackOutput(region, stackName, 'UserPoolId'),
-    getStackOutput(region, stackName, 'AppClientId'),
-    getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
-    getStackOutput(region, stackName, 'RepoTableName'),
-    getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-    getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-    getStackOutput(region, stackName, 'BedrockGeoRegion'),
-    getStackOutput(region, stackName, 'BedrockModelIds'),
+  ] = await getStackOutputs(region, stackName, [
+    'ApiUrl',
+    'UserPoolId',
+    'AppClientId',
+    'GitHubTokenSecretArn',
+    'RepoTableName',
+    'LinearWorkspaceRegistryTableName',
+    'JiraWorkspaceRegistryTableName',
+    'BedrockGeoRegion',
+    'BedrockModelIds',
     // Absent unless the stack was deployed with the Linear identity vault enabled.
     // Its absence is the signal that no workspace here is vault-managed.
-    getStackOutput(region, stackName, 'LinearVaultWorkloadName'),
-    getStackOutput(region, stackName, 'LinearProjectMappingTableName'),
+    'LinearVaultWorkloadName',
+    'LinearProjectMappingTableName',
   ]);
 
   const checks: DoctorCheckResult[] = [];

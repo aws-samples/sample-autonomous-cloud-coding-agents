@@ -30,8 +30,11 @@ const PLATFORM = {
   deployment: { stackName: 'backgroundagent-dev', computeSubstrate: null },
   runtimeArn: 'arn:aws:bedrock:us-east-1:123456789012:runtime/test',
   githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:GitHubTokenSecret-AbCdEf',
+  bedrockGeoRegion: null,
 };
 const BLUEPRINT_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:AcmeRepoToken-XyZ123';
+/** The shipped default without its geography (no geography name holds a dot). */
+const BARE_DEFAULT_MODEL = PLATFORM_REPO_DEFAULTS.model_id.slice(PLATFORM_REPO_DEFAULTS.model_id.indexOf('.') + 1);
 
 describe('formatRepoConfigForDisplay', () => {
   test('resolves platform defaults when blueprint fields are absent from RepoTable', () => {
@@ -45,6 +48,40 @@ describe('formatRepoConfigForDisplay', () => {
     expect(display.effective.model_id).toBe(PLATFORM_REPO_DEFAULTS.model_id);
     expect(display.field_sources.compute_type).toBe('platform');
     expect(Object.keys(display.blueprint_overrides)).toHaveLength(0);
+  });
+
+  test.each(['us', 'eu', 'us-gov', 'global'])('shows the default model in the %s geography the stack grants', geo => {
+    // The stack invokes `<BedrockGeoRegion>.<default model>`: on a deployment that is not
+    // `global`, the shipped id names a profile the stack does not grant.
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/default', status: 'active' },
+      { ...PLATFORM, bedrockGeoRegion: geo },
+    );
+
+    expect(display.effective.model_id).toBe(`${geo}.${BARE_DEFAULT_MODEL}`);
+    expect(display.field_sources.model_id).toBe('platform');
+    expect(buildRepoShowLines(display).find(line => line.key === 'model_id')?.text)
+      .toBe(`(platform default) ${geo}.${BARE_DEFAULT_MODEL}`);
+  });
+
+  test.each([null, '', '  '])('keeps the shipped default model when the stack exports no geography (%p)', geo => {
+    // null is a stack that predates the BedrockGeoRegion output; a blank value is no answer either.
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/default', status: 'active' },
+      { ...PLATFORM, bedrockGeoRegion: geo },
+    );
+
+    expect(display.effective.model_id).toBe(PLATFORM_REPO_DEFAULTS.model_id);
+  });
+
+  test('shows a per-blueprint model as stored, whatever geography the stack grants', () => {
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/pinned', status: 'active', model_id: 'eu.anthropic.claude-haiku-5-5' },
+      { ...PLATFORM, bedrockGeoRegion: 'us' },
+    );
+
+    expect(display.effective.model_id).toBe('eu.anthropic.claude-haiku-5-5');
+    expect(display.field_sources.model_id).toBe('blueprint');
   });
 
   test.each(['agentcore', 'ecs', 'lambda-microvm'] as const)(

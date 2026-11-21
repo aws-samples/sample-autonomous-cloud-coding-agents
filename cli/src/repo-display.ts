@@ -24,6 +24,7 @@ import {
   type ComputeDeploymentStatus,
 } from './compute-substrate';
 import type { GithubTokenSecretSource } from './github-token';
+import { geoPrefixOf } from './model-id';
 import { redactSecretArn } from './operator-context';
 import { RepoConfigRow } from './repo-lookup';
 
@@ -34,6 +35,8 @@ export interface PlatformStackContext {
   readonly deployment: ComputeDeployment;
   readonly runtimeArn: string | null;
   readonly githubTokenSecretArn: string | null;
+  /** The stack's `BedrockGeoRegion` output; null on a stack that predates it. */
+  readonly bedrockGeoRegion: string | null;
 }
 
 /**
@@ -47,7 +50,8 @@ export const PLATFORM_REPO_DEFAULTS = {
    * the runtime actually invokes (see the agent's ``ANTHROPIC_MODEL`` fallback and
    * the Bedrock grant list it must appear in).
    *
-   * Keep these three in step. This is not only what ``repo show`` prints:
+   * Keep these three in step. This is not only what ``repo show`` prints (in the
+   * deployment's own geography, see {@link platformDefaultModelId}):
    * ``platform doctor`` derives the model it probes for ACCESS from this value, so
    * if it names a different model than the runtime invokes, doctor can report a
    * healthy stack while every task fails at turn 0 with AccessDenied.
@@ -57,6 +61,22 @@ export const PLATFORM_REPO_DEFAULTS = {
   poll_interval_ms: 30_000,
   approval_gate_cap: 50,
 } as const;
+
+/**
+ * The model a repository with no pin runs on this deployment.
+ *
+ * The stack tells every substrate to invoke the platform default through the inference
+ * profiles of its own geography, so the geography of the literal gives way to the one the
+ * stack exports. A stack that predates the `BedrockGeoRegion` output, or exports it blank,
+ * keeps the literal: the same degradation as `repo onboard --model`.
+ */
+function platformDefaultModelId(bedrockGeoRegion: string | null): string {
+  const literal = PLATFORM_REPO_DEFAULTS.model_id;
+  const deployedGeo = bedrockGeoRegion?.trim();
+  const literalGeo = geoPrefixOf(literal);
+  if (!deployedGeo || !literalGeo) return literal;
+  return `${deployedGeo}.${literal.slice(literalGeo.length + 1)}`;
+}
 
 /** How `repo show` resolved the effective GitHub token (subset of the resolver's sources). */
 export type GithubTokenSource = Exclude<GithubTokenSecretSource, 'explicit'>;
@@ -152,7 +172,7 @@ export function formatRepoConfigForDisplay(
       compute_type: compute.compute_type,
       runtime_arn: compute.compute_available && compute.compute_type === 'agentcore'
         ? config.runtime_arn ?? platform.runtimeArn ?? undefined : undefined,
-      model_id: config.model_id ?? PLATFORM_REPO_DEFAULTS.model_id,
+      model_id: config.model_id ?? platformDefaultModelId(platform.bedrockGeoRegion),
       max_turns: config.max_turns ?? PLATFORM_REPO_DEFAULTS.max_turns,
       max_budget_usd: config.max_budget_usd !== undefined
         ? String(config.max_budget_usd)

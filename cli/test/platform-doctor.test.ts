@@ -24,15 +24,20 @@
 // linear-auth-health; this file only covers the pass/warn/fail decision.
 
 const healthMock = jest.fn();
+const vaultMinterMock = jest.fn();
 jest.mock('../src/linear-auth-health', () => ({
   checkLinearWorkspaceAuth: (...args: unknown[]) => healthMock(...args),
+  makeLinearVaultTokenMinter: (...args: unknown[]) => vaultMinterMock(...args),
 }));
 
 // Only the Linear registry output is wanted; every other check short-circuits on
 // a missing stack output rather than reaching AWS.
 const stackOutputMock = jest.fn();
+// The doctor asks for all its outputs in one batch; each key is answered by the per-key mock above.
+const stackOutputsMock = jest.fn((region: string, stack: string, keys: readonly string[]) =>
+  Promise.all(keys.map((key) => stackOutputMock(region, stack, key))));
 jest.mock('../src/stack-outputs', () => ({
-  getStackOutput: (...args: unknown[]) => stackOutputMock(...args),
+  getStackOutputs: (...args: [string, string, readonly string[]]) => stackOutputsMock(...args),
 }));
 
 const ddbSendMock = jest.fn();
@@ -74,6 +79,36 @@ beforeEach(() => {
   ddbSendMock.mockResolvedValue({ Items: [] });
   stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
     (output === 'LinearWorkspaceRegistryTableName' ? REGISTRY : null));
+});
+
+describe('doctor stack outputs', () => {
+  test('reads every output it needs with one stack read', async () => {
+    // One DescribeStacks call answers all of them: a read per output is a throttled
+    // control-plane call per output, and the count grows with every check added.
+    await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+
+    // The module double offers no read of a single output, so this call is all the doctor read.
+    expect(stackOutputsMock).toHaveBeenCalledTimes(1);
+    expect(stackOutputsMock).toHaveBeenCalledWith('us-east-1', 'Abca', expect.any(Array));
+  });
+
+  test('hands the vault workload and the project mapping table to their own checks', async () => {
+    stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) => ({
+      LinearWorkspaceRegistryTableName: REGISTRY,
+      LinearVaultWorkloadName: 'vault-workload',
+      LinearProjectMappingTableName: 'ProjectMapping',
+    } as Record<string, string>)[output] ?? null);
+    healthMock.mockResolvedValue([]);
+
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+
+    expect(vaultMinterMock).toHaveBeenCalledWith('us-east-1', 'vault-workload');
+    // Neither assertion is enough alone: every table check scans the name it is given, so the
+    // scan shows the name reached one of them, the verdict that the mapping check had a table.
+    const scanned = ddbSendMock.mock.calls.map(([command]) => (command as { input: { TableName?: string } }).input.TableName);
+    expect(scanned).toContain('ProjectMapping');
+    expect(checks.find((c) => c.id === 'linear_project_workspaces')?.detail).toBe('No active Linear project mappings yet.');
+  });
 });
 
 describe('doctor verdict for Linear signing-secret provenance', () => {

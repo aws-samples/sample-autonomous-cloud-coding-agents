@@ -22,7 +22,7 @@ import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
 import { assertRepoFormat } from '../repo-lookup';
 import { buildRuntimeStatusReport } from '../runtime-status';
-import { getStackOutput } from '../stack-outputs';
+import { getStackOutputs } from '../stack-outputs';
 
 const REPO_WIDTH = 36;
 const COMPUTE_WIDTH = 12;
@@ -41,12 +41,14 @@ export function makeRuntimeCommand(): Command {
       .action(async (opts) => {
         if (opts.repo) assertRepoFormat(opts.repo);
         const { region, stackName } = resolveOperatorContext(opts);
-        const [repoTableName, platformRuntimeArn, computeSubstrate, computeDeploymentMode, computeTypes] = await Promise.all([
-          getStackOutput(region, stackName, 'RepoTableName'),
-          getStackOutput(region, stackName, 'RuntimeArn'),
-          getStackOutput(region, stackName, 'ComputeSubstrate'),
-          getStackOutput(region, stackName, 'ComputeDeploymentMode'),
-          getStackOutput(region, stackName, 'ComputeTypes'),
+        const [
+          repoTableName, platformRuntimeArn, computeSubstrate, computeDeploymentMode, computeTypes,
+        ] = await getStackOutputs(region, stackName, [
+          'RepoTableName',
+          'RuntimeArn',
+          'ComputeSubstrate',
+          'ComputeDeploymentMode',
+          'ComputeTypes',
         ]);
         if (!repoTableName) {
           throw new CliError(

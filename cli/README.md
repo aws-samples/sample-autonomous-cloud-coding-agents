@@ -263,7 +263,7 @@ bgagent repo list \
 
 ### `bgagent repo show <owner/repo>`
 
-Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token.
+Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token. When no per-blueprint model is configured, the **platform default** model is shown as this deployment invokes it: with the geography of the stack's `BedrockGeoRegion` output (`us.anthropic.…` on a stack deployed with `-c bedrockGeoRegion=us`). A stack that predates that output shows the shipped `global.` profile.
 
 ```
 bgagent repo show owner/repo \
