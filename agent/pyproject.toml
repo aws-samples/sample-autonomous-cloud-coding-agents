@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3==1.44.0", #https://pypi.org/project/boto3/ (botocore 1.44.0 makes "standard" the default retry mode; src/aws_session.py names "legacy", the mode every client ran with before)
+    "boto3==1.44.3", #https://pypi.org/project/boto3/ (botocore 1.44.0 makes "standard" the default retry mode; src/aws_session.py names "legacy", the mode every client ran with before)
     # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
     # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
     # Secrets Manager because AgentCore Identity's USER_FEDERATION
@@ -24,9 +24,9 @@ dependencies = [
     # turns such a mod on, and a task gives it nobody to ask. Move on once it is
     # shown that a mod written in a session cannot act outside those hooks, or
     # that the CLI can be told not to load one.
-    "claude-agent-sdk==0.2.179", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.179 (bundles claude CLI 2.1.319; kept in lockstep with the npm CLI pin in the Dockerfile, #215. Claude 5.5 models need CLI >= 2.1.280, #953)
+    "claude-agent-sdk==0.2.182", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.179 (bundles claude CLI 2.1.319; kept in lockstep with the npm CLI pin in the Dockerfile, #215. Claude 5.5 models need CLI >= 2.1.280, #953)
     "requests==2.34.2", #https://pypi.org/project/requests/
-    "fastapi==0.162.4", #https://pypi.org/project/fastapi/
+    "fastapi==0.162.7", #https://pypi.org/project/fastapi/
     "uvicorn==0.54.0", #https://pypi.org/project/uvicorn/
     "aws-opentelemetry-distro==0.22.0", #https://pypi.org/project/aws-opentelemetry-distro/ (0.22.0 clears GHSA-xcq7-p3pf-p88h and GHSA-f5m9-jfrj-jjj7)
     "mcp==2.3.0", #https://pypi.org/project/mcp/ (GHSA-84m7-p3x7-pcfv is fixed since 1.30.0; 2.x replaces httpx with httpx2, which src/gateway_tools.py imports)
@@ -89,8 +89,8 @@ exclude_dirs = ["tests", ".venv"]
 [dependency-groups]
 dev = [
     "bandit==1.9.4",  # security:bandit task — exact pin: the scan runs this version, on the project's Python
-    "ruff==0.17.4",  # lint and format tasks — exact pin: the rules and the formatting change only with a reviewed bump
-    "ty==0.0.100",  # typecheck task — exact pin: each ty release changes what it reports (0.0.100 found 39 errors that 0.0.56 did not), so that changes only with a reviewed bump
+    "ruff==0.17.5",  # lint and format tasks — exact pin: the rules and the formatting change only with a reviewed bump
+    "ty==0.0.104",  # typecheck task — exact pin: each ty release changes what it reports (0.0.100 found 39 errors that 0.0.56 did not), so that changes only with a reviewed bump
     "pytest==9.2.0",  # test task — exact pin: strict mode and filterwarnings = error turn a new pytest's deprecations into failures, so it moves only with a reviewed bump
     "pygments==2.21.0",
     "pytest-cov==7.1.0",
