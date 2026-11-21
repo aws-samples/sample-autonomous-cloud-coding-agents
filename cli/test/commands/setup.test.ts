@@ -425,12 +425,13 @@ describe('failures and cancellation', () => {
   });
 
   test('a failing diff writes and deploys nothing and shows the error line, not the whole output', async () => {
-    const diff = 'Bundling asset...\nlots of noise\nError: Deployment profile is not deployable in us-east-1\n';
+    const diff = 'Bundling asset...\nlots of noise\nError: Deployment profile is not deployable in us-east-1\n[//cdk:diff] ERROR task failed\n';
     await expect(setup({ features: 'slack', yes: true }, deps({ diffCode: 1, diff })))
       .rejects.toThrow(/Nothing was written or deployed/);
     expect(text()).toContain('✗ Checking what will change  could not compute the changes');
     expect(text()).toContain('Error: Deployment profile is not deployable in us-east-1');
     expect(text()).not.toContain('lots of noise');
+    expect(text()).not.toContain('ERROR task failed');
     expect(profileOnDisk()).toBeUndefined();
   });
 
@@ -464,6 +465,28 @@ describe('failures and cancellation', () => {
     await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
     expect(text()).toContain('✗ Preparing deployment');
     expect(text()).toContain('ERROR: failed to build asset');
+  });
+
+  test('a deploy stopped by a preflight shows the preflight message, not the closing line of mise', async () => {
+    // What mise prints when the first command of //cdk:deploy exits non-zero.
+    const deployLines = [
+      '[//cdk:deploy] bootstrap preflight: FAIL: CDKToolkit is a default CDK bootstrap (no BootstrapPolicyVersion output).',
+      '[//cdk:deploy] To bypass at your own risk: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.',
+      'Finished in 547.1ms',
+      '[//cdk:deploy] ERROR task failed',
+    ];
+    await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
+    expect(text()).toContain('bootstrap preflight: FAIL: CDKToolkit is a default CDK bootstrap');
+    // FAIL counts as an error; without that, the last raw lines are listed, mise's timing line among them.
+    expect(text()).not.toContain('Finished in');
+    expect(text()).not.toContain('ERROR task failed');
+  });
+
+  test('a failed deploy with no error-looking line shows the last lines of the output', async () => {
+    const deployLines = ['Building agent image', 'Killed', '[//cdk:deploy] ERROR task failed'];
+    await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
+    expect(text()).toContain('Killed');
+    expect(text()).not.toContain('ERROR task failed');
   });
 
   test('shows deploy progress per component and finishes every component with a check mark', async () => {

@@ -125,6 +125,8 @@ const BOOTSTRAP_UPDATE_TIMEOUT_S = 900;
 export const SETUP_CANCELLED_EXIT_CODE = 130;
 /** Failures listed on the result screen; the log has the rest. */
 const MAX_FAILURES_SHOWN = 3;
+/** The line mise ends a failed task with (`[//cdk:deploy] ERROR task failed`): it names the task, not the cause. */
+const MISE_TASK_FAILED = /^\[[^\]]+\] ERROR task failed$/;
 /** Width of the header's label column (`Account` plus a gap). */
 const FIELD_LABEL_WIDTH = 9;
 /** Width of the deployment picker's name column. */
@@ -619,8 +621,10 @@ function displayLogPath(file: string): string {
 
 /** The most useful lines of raw output when CloudFormation reported no reason. */
 function errorLines(output: string | readonly string[]): string[] {
-  const lines = (typeof output === 'string' ? stripAnsi(output).split('\n') : [...output]).map(line => line.trim()).filter(Boolean);
-  const errors = lines.filter(line => /error|failed|❌|denied|not authorized|exception/i.test(line));
+  const lines = (typeof output === 'string' ? stripAnsi(output).split('\n') : [...output])
+    .map(line => line.trim()).filter(line => line !== '' && !MISE_TASK_FAILED.test(line));
+  // `fail` also matches the `FAIL:` of the bootstrap preflight and the `fail:` of CDK's asset build and publish.
+  const errors = lines.filter(line => /error|fail|❌|denied|not authorized|exception/i.test(line));
   return (errors.length > 0 ? errors : lines).slice(-MAX_FAILURES_SHOWN);
 }
 
