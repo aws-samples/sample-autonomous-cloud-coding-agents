@@ -1257,6 +1257,56 @@ class TestPostToolUseEgressBlocker:
         # …but the terminal carry-path was NOT latched (no host captured).
         assert last_blocker_reason() is None
 
+    # The last is no name at all: no latch for it either, and no exception,
+    # which would make the hook's wrapper blank the output of the tool.
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "Read",
+            "Grep",
+            "Edit",
+            "mcp__abca_gateway__repo_config",
+            pytest.param(["Bash"], id="a name that is no string"),
+        ],
+    )
+    def test_a_host_in_the_output_of_a_tool_that_opens_no_connection_does_not_latch(
+        self, progress, tool_name
+    ):
+        # #551: such a tool returns content, here a log that quotes a failed
+        # download. The event is written, but a task that later fails for
+        # another reason must not be reported as egress denied, with the remedy
+        # to allowlist a host that the task never called.
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_response": "ci.log:7: curl: (6) Could not resolve host: registry.example.com",
+        }
+        _run(post_tool_use_hook(hook_input, "t-content", {}, progress=progress))
+        assert last_blocker_reason() is None
+        blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert [b["resource"] for b in blocked] == ["registry.example.com"]
+
+    def test_a_host_in_the_page_that_a_fetch_brought_back_does_not_latch(self, progress):
+        # A fetch that completed reached its host, and what it returns is the
+        # page: content as well, here an article that quotes the error. A fetch
+        # that cannot connect is a call that failed (TestPostToolUseFailure).
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "WebFetch",
+            "tool_response": {
+                "bytes": 20480,
+                "code": 200,
+                "codeText": "OK",
+                "result": "`Could not resolve host: registry.example.com` is a DNS error.",
+                "durationMs": 812,
+                "url": "https://docs.example.org/troubleshooting",
+            },
+        }
+        _run(post_tool_use_hook(hook_input, "t-page", {}, progress=progress))
+        assert last_blocker_reason() is None
+        blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert [b["resource"] for b in blocked] == ["registry.example.com"]
+
 
 def _failed_bash(command: str, error: str) -> dict:
     """The PostToolUseFailure event of a Bash command that exits non-zero."""
@@ -1382,6 +1432,28 @@ class TestPostToolUseFailure:
         assert last_blocker_reason() is None
         blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
         assert [b["resource"] for b in blocked] == [host]
+
+    # WebFetch opens its connection itself, as a command does. A file tool
+    # opens none, and an MCP tool hands on what a server answered.
+    @pytest.mark.parametrize(
+        ("tool_name", "latched"),
+        [("WebFetch", True), ("Read", False), ("mcp__abca_gateway__repo_config", False)],
+    )
+    def test_a_failed_call_latches_the_host_only_for_a_tool_that_opens_connections(
+        self, progress, tool_name, latched
+    ):
+        event = {
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": tool_name,
+            "tool_input": {},
+            "tool_use_id": "tu-1",
+            "error": "getaddrinfo ENOTFOUND docs.example.com",
+            "is_interrupt": False,
+        }
+        _run(self._callback(progress)(event, "tu-1", {}))
+        assert ("(resource: docs.example.com)" in (last_blocker_reason() or "")) is latched
+        blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert [b["resource"] for b in blocked] == ["docs.example.com"]
 
     def test_third_identical_failure_returns_the_steer_to_the_model(self, progress):
         callback = self._callback(progress)

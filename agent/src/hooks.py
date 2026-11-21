@@ -170,6 +170,13 @@ _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 # one it listens on.
 _LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNORECASE)
 
+# The built-in tools through which a task opens outbound connections. Of all
+# tool output, only theirs can make a blocked host the terminal reason, and
+# that of a fetch only when the fetch failed. The rest is content: a file, a
+# search hit, a fetched page or an MCP server's answer can quote a failed
+# connection that this task never attempted.
+_NETWORK_TOOLS = frozenset(("Bash", "WebFetch"))
+
 
 # The most recent agent-detected blocker, as a canonical ``BLOCKED[<kind>]: …``
 # reason string (see ``format_blocker_reason``). Blockers are detected mid-turn
@@ -180,6 +187,10 @@ _LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNO
 # surfaces a precise remedy. Process-lifetime (== one task) like
 # ``_INJECTED_NUDGES``; last-writer-wins is fine — the most recent blocker is
 # the most relevant to a terminal failure.
+# Correct only while a process runs one task at a time, which holds because
+# every task gets its own compute session (``docs/design/COMPUTE.md``). Tasks
+# that share a process would read each other's blocker: if the execution model
+# ever allows that, key the latch by task id first, as ``_INJECTED_NUDGES`` is.
 _LAST_BLOCKER_REASON: str | None = None
 
 
@@ -1556,8 +1567,10 @@ def _observe_tool_result(
     *response* is the response of a call that completed (PostToolUse) or the
     error of a call that failed (PostToolUseFailure, which is what a failing
     Bash command fires instead of PostToolUse). Best-effort observability.
-    *failed* tells the stuck guard how the call ended where the caller knows;
-    with ``None`` the guard reads the response for the signs of a failure.
+    *failed* tells the observers how the call ended where the caller knows.
+    From a call known not to have failed (``False``) the detector latches no
+    host; with ``None`` the guard reads the response for the signs of a
+    failure.
 
     Returns the stuck guard's advisory when this result completes a spin, for
     the caller to hand to the model as ``additionalContext`` with the result:
@@ -1589,7 +1602,16 @@ def _observe_tool_result(
         # and is clearly a heuristic signal in the live stream).
         # A loopback host is the same localhost race with a name on it (curl:
         # "Failed to connect to localhost port 3000"): no latch either.
-        if host and not _LOOPBACK_HOST_RE.fullmatch(host):
+        # Nor for a tool that opens no connection (see ``_NETWORK_TOOLS``): the
+        # host it shows is quoted from a file or a server's answer. Nor for a
+        # call known not to have failed: in the pinned CLI a fetch that cannot
+        # connect fails, so a completed one returns the page, content as well.
+        if (
+            host
+            and not _LOOPBACK_HOST_RE.fullmatch(host)
+            and str(tool_name) in _NETWORK_TOOLS
+            and failed is not False
+        ):
             _record_blocker_reason("egress_denied", detail, host)
         _try_progress(
             progress,
