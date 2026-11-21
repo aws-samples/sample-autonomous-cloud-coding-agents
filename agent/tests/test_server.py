@@ -1119,8 +1119,8 @@ class TestMicrovmReadyHookWarmUp:
         assert r.status_code == 503
         assert r.json()["status"] == "not_ready"
         assert any("claude" in f for f in r.json()["failed_warmups"])
-        # The attempt is logged (stdout only — build role has no Logs grant), or a
-        # failed build gives the operator nothing to read.
+        # The attempt is logged (stdout only — a build hook makes no AWS call, its
+        # own logging included), or a failed build gives the operator nothing to read.
         out = capfd.readouterr().out
         assert "warm-up of 'claude' FAILED" in out
         assert "TimeoutExpired" in out
@@ -1173,10 +1173,12 @@ class TestMicrovmReadyHookWarmUp:
     def test_the_warm_up_makes_no_aws_call_even_with_a_log_group_baked(
         self, client, monkeypatch, capfd, warm_ready
     ):
-        # /ready runs under the BUILD role: a Logs write can only fail (and each
-        # failure pollutes the shared _debug_cw_failures alarm), and any boto3
-        # client built here freezes the build role's credential chain and the build
-        # region into the snapshot. Adding a subprocess must not have changed that.
+        # /ready runs under the BUILD role, whose only Logs grant is the service's
+        # /aws/lambda-microvms/* namespace: a write to any other group, like the one
+        # baked here, can only fail (and each failure pollutes the shared
+        # _debug_cw_failures alarm), and any boto3 client built here freezes the
+        # build role's credential chain into the snapshot (the region is re-resolved
+        # per client). Adding a subprocess must not have changed that.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -2331,9 +2333,10 @@ class TestInstallPlatformConfig:
 
     def test_a_cross_region_arn_in_the_SAME_account_is_allowed(self, env_guard):
         # Region is deliberately NOT pinned: IAM ARNs are region-less and a
-        # cross-Region secret is a supported shape, while the execution role's grants
-        # are account-scoped — so an in-account cross-Region ARN reaches nothing the
-        # in-Region one does not. Pinning it would reject valid deployments.
+        # cross-Region secret is a supported shape, while the execution role's
+        # Secrets Manager grants are Region-scoped — so IAM already refuses an
+        # in-account ARN in a Region no grant names. Pinning it would reject valid
+        # deployments.
         installed = server._install_platform_config(
             _platform_config(
                 github_token_secret_arn=(
@@ -2788,8 +2791,9 @@ class TestMicrovmValidateHook:
         # The whole point. _debug_cw / _warn_cw build a CloudWatch Logs client
         # whenever LOG_GROUP_NAME is set, so a build hook must not use them; and
         # boto3.client() would populate boto3.DEFAULT_SESSION — a module global
-        # holding the BUILD role's resolved credentials and region — which the
-        # snapshot would then freeze in for every MicroVM launched from it.
+        # holding the BUILD role's resolved credentials — which the snapshot would
+        # then freeze in for every MicroVM launched from it (credentials only: the
+        # region is re-resolved per client).
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -2814,9 +2818,10 @@ class TestMicrovmValidateHook:
         self, client, monkeypatch, capfd, warm_ready
     ):
         # /ready runs under the same build role, so the same rule applies. It used
-        # to route through _debug_cw, whose write can only FAIL under a role with
-        # no Logs grant — and each failure bumps the shared _debug_cw_failures
-        # counter, poisoning the "debug path is blind" signal on every build.
+        # to route through _debug_cw, whose write to a group outside that role's
+        # /aws/lambda-microvms/* Logs grant can only FAIL — and each failure bumps
+        # the shared _debug_cw_failures counter, poisoning the "debug path is blind"
+        # signal on every build of an image that bakes such a group.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -3133,8 +3138,9 @@ class TestSnapshotCredentialHygiene:
     The MicroVM image is a SNAPSHOT: whatever module state exists when the
     snapshot is taken is replayed by every MicroVM launched from that image
     version. A boto3 session created during import or a build hook would freeze
-    the BUILD role's resolved credential chain and the BUILD-time region into the
-    image — inherited, stale and cross-role, by every task.
+    the BUILD role's resolved credential chain into the image — inherited, stale
+    and cross-role, by every task. (Credentials only: the region is re-resolved
+    per client, see ``server._aws_silent_log``.)
 
     Runs in a SUBPROCESS because the assertion is about process-global state
     (``sys.modules``, ``boto3.DEFAULT_SESSION``, ``aws_session._session``) that

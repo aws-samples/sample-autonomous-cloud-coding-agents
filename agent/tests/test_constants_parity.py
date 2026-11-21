@@ -35,6 +35,12 @@ _OWNED = [
     (jira_reactions, "FORGE_WEBTRIGGER_SUFFIX", ("jira_app_actor", "forge_webtrigger_suffix")),
     (server, "MICROVM_PLATFORM_CONFIG_ENV_BY_KEY", ("microvm_platform_config", "env_by_key")),
     (server, "MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS", ("microvm_platform_config", "required")),
+    (server, "MICROVM_PLATFORM_CONFIG_ARN_KEYS", ("microvm_platform_config", "arn_keys")),
+    (
+        server,
+        "MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY",
+        ("microvm_platform_config", "account_anchor_key"),
+    ),
     (
         server,
         "_READY_WARMUP_TOTAL_BUDGET_SECONDS",

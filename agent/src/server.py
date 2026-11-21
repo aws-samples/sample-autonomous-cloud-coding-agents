@@ -899,7 +899,7 @@ _S3_URI_SCHEME = "s3://"
 # compile-time enforcement of the key names via ``resolveJsonModule``) rather
 # than re-declaring the key names. ``mise run check:constants-sync``
 # (``scripts/check-constants-sync.ts``) validates this block's shape and rejects a
-# literal re-declaration of either constant below in the Python consumers.
+# literal re-declaration of any of the four constants below in the Python consumers.
 _PLATFORM_CONFIG_CONTRACT: dict[str, Any] = SHARED_CONSTANTS["microvm_platform_config"]
 
 #: ``platform_config`` key (snake_case) → environment variable it becomes.
@@ -1182,8 +1182,9 @@ def _reject_foreign_arns(resolved: dict[str, str]) -> None:
     differ on that axis in this system — IAM is global (empty region field), and a
     cross-Region secret is a supported deployment shape — so requiring agreement
     would reject valid configurations while adding nothing: the execution role's
-    grants are account-scoped, so an in-account cross-Region ARN reaches nothing
-    the in-Region one does not. Partition + account is the boundary this checks.
+    Secrets Manager grants are Region-scoped (each names the Region of the secrets
+    it covers), so IAM already refuses an in-account ARN in a Region no grant
+    names. Partition + account is the boundary this checks.
     """
     anchor_value = resolved.get(MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY, "")
     # The anchor is contract-guaranteed REQUIRED (asserted at import), so by the
@@ -1905,10 +1906,10 @@ def microvm_validate():
 
     It must also not touch credential resolution: ``platform_config`` has not
     arrived yet (it comes with ``/run``), and any client built here would leave a
-    resolved boto3 session — with the build role's credentials and the build
-    region — frozen in the snapshot for every MicroVM launched from it. Hence
-    ``_build_hook_log`` instead of ``_debug_cw``, and no import of
-    ``aws_session``.
+    resolved boto3 session — with the build role's credentials — frozen in the
+    snapshot for every MicroVM launched from it (credentials only: the region is
+    re-resolved per client, see ``_aws_silent_log``). Hence ``_build_hook_log``
+    instead of ``_debug_cw``, and no import of ``aws_session``.
 
     What it CAN prove, all in-process:
 

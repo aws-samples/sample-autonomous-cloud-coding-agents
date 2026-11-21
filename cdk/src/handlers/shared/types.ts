@@ -495,8 +495,9 @@ export interface TaskDetail {
   readonly completed_at: string | null;
   /**
    * ISO timestamp of the agent's last heartbeat, written by the in-guest pipeline
-   * every 45 s on every compute backend (``agent/src/server.py``
-   * ``_heartbeat_worker``). ``null`` before the first beat, on tasks that never
+   * every 45 s on the agentcore and lambda-microvm backends (``agent/src/server.py``
+   * ``_heartbeat_worker``) and once at start on ecs, which runs the pipeline
+   * without that server. ``null`` before the first beat, on tasks that never
    * ran, and on records predating the field.
    *
    * Surfaced (ADR-021 P2r2-F11) because it was the platform's only in-guest
