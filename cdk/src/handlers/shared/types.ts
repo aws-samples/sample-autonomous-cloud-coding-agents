@@ -1140,6 +1140,11 @@ export interface CreateWebhookResponse {
   readonly webhook_id: string;
   readonly name: string;
   readonly secret: string;
+  /**
+   * URL that external systems post tasks to (`POST /webhooks/tasks`). It belongs to the
+   * API deployment, not to the webhook: every webhook of a deployment gets the same URL.
+   */
+  readonly webhook_url: string;
   readonly created_at: string;
 }
 

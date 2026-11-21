@@ -164,6 +164,8 @@ bgagent events <task-id> \
 
 Create a new webhook integration. The HMAC secret is displayed once at creation time — store it securely.
 
+The output also shows the webhook URL (`webhook_url` in JSON output): the endpoint to enter in the external system. It belongs to the API deployment, not to the webhook, so it is the same for every webhook and there is no need to fetch it again.
+
 ```
 bgagent webhook create \
   --name <name>                Webhook name (required)
@@ -416,7 +418,7 @@ bgagent admin reset-password <email> \
 - `status` and `submit` show a key-value detail view
 - `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, HEARTBEAT, DESCRIPTION)
 - `events` shows a timeline (TIMESTAMP, EVENT TYPE, METADATA)
-- `webhook create` shows webhook details and the one-time HMAC secret
+- `webhook create` shows webhook details, the URL to post tasks to, and the one-time HMAC secret
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)
 - `webhook revoke` shows the revoked webhook details
 

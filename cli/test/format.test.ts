@@ -522,6 +522,7 @@ describe('format', () => {
         webhook_id: 'wh-abc',
         name: 'My CI Pipeline',
         secret: 'whsec_supersecret123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
         created_at: '2026-01-01T00:00:00Z',
       };
       const output = formatWebhookCreated(res);
@@ -530,6 +531,39 @@ describe('format', () => {
       expect(output).toContain('Created:     2026-01-01T00:00:00Z');
       expect(output).toContain('Secret (store securely — shown only once):');
       expect(output).toContain('whsec_supersecret123');
+    });
+
+    test('shows the URL to post tasks to, with a hint, above the secret', () => {
+      const output = formatWebhookCreated({
+        webhook_id: 'wh-abc',
+        name: 'My CI Pipeline',
+        secret: 'whsec_supersecret123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+      expect(output.split('\n')).toEqual([
+        'Webhook:     wh-abc',
+        'Name:        My CI Pipeline',
+        'Created:     2026-01-01T00:00:00Z',
+        'URL:         https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
+        '             (the endpoint to enter in the webhook settings of the external system)',
+        '',
+        'Secret (store securely — shown only once):',
+        'whsec_supersecret123',
+      ]);
+    });
+
+    test('leaves the URL out when the API returned none', () => {
+      // An API deployed before the field existed: no URL row, and no "undefined" in its place.
+      const older = { webhook_id: 'wh-abc', name: 'My CI Pipeline', secret: 'whsec_supersecret123', created_at: '2026-01-01T00:00:00Z' };
+      expect(formatWebhookCreated(older as CreateWebhookResponse).split('\n')).toEqual([
+        'Webhook:     wh-abc',
+        'Name:        My CI Pipeline',
+        'Created:     2026-01-01T00:00:00Z',
+        '',
+        'Secret (store securely — shown only once):',
+        'whsec_supersecret123',
+      ]);
     });
   });
 

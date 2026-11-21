@@ -43,7 +43,7 @@ import { handler } from '../../src/handlers/create-webhook';
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {
     body: JSON.stringify({ name: 'My CI Webhook' }),
-    headers: {},
+    headers: { Host: 'abc123.execute-api.us-east-1.amazonaws.com' },
     multiValueHeaders: {},
     httpMethod: 'POST',
     isBase64Encoded: false,
@@ -105,8 +105,26 @@ describe('create-webhook handler', () => {
     expect(body.data.name).toBe('My CI Webhook');
     expect(body.data.secret).toBeDefined();
     expect(body.data.secret.length).toBe(64); // 32 bytes hex
+    expect(body.data.webhook_url).toBe('https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks');
     expect(mockSmSend).toHaveBeenCalledTimes(1); // CreateSecret (with inline tags)
     expect(mockDdbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('builds webhook_url from the host and stage the request came in on', async () => {
+    // A Regional API passes header names on as sent, and another deployment has another stage.
+    const event = makeEvent({ headers: { host: 'api.example.com' } });
+    event.requestContext.stage = 'prod';
+    const result = await handler(event);
+    expect(result.statusCode).toBe(201);
+    expect(JSON.parse(result.body).data.webhook_url).toBe('https://api.example.com/prod/webhooks/tasks');
+  });
+
+  test('returns 500 and creates nothing when the request has no Host header', async () => {
+    const result = await handler(makeEvent({ headers: {} }));
+    expect(result.statusCode).toBe(500);
+    expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
+    expect(mockSmSend).not.toHaveBeenCalled();
+    expect(mockDdbSend).not.toHaveBeenCalled();
   });
 
   describe('the "Webhook created" log line', () => {

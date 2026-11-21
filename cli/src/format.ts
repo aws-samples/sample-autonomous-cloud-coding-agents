@@ -393,14 +393,20 @@ export function formatEvents(events: TaskEvent[]): string {
 
 /** Format a newly created webhook (includes the one-time secret). */
 export function formatWebhookCreated(res: CreateWebhookResponse): string {
-  return [
+  const lines = [
     `Webhook:     ${res.webhook_id}`,
     `Name:        ${res.name}`,
     `Created:     ${res.created_at}`,
-    '',
-    'Secret (store securely — shown only once):',
-    res.secret,
-  ].join('\n');
+  ];
+  // An API deployed before `webhook_url` existed does not return it.
+  if (res.webhook_url) {
+    lines.push(
+      `URL:         ${res.webhook_url}`,
+      '             (the endpoint to enter in the webhook settings of the external system)',
+    );
+  }
+  lines.push('', 'Secret (store securely — shown only once):', res.secret);
+  return lines.join('\n');
 }
 
 /** Format a list of WebhookDetail as an aligned table. */

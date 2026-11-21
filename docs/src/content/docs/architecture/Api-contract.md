@@ -495,7 +495,7 @@ External systems (CI pipelines, GitHub Actions, custom automation) can create ta
 POST /v1/webhooks
 ```
 
-Creates a webhook and returns the shared secret (shown only once).
+Creates a webhook and returns the shared secret (shown only once) and the URL to post tasks to.
 
 **Request:** `{ "name": "My CI Pipeline" }` (1-64 chars, alphanumeric + spaces/hyphens/underscores).
 
@@ -507,12 +507,15 @@ Creates a webhook and returns the shared secret (shown only once).
     "webhook_id": "01HYX...",
     "name": "My CI Pipeline",
     "secret": "<64-hex-characters>",
+    "webhook_url": "https://{api-id}.execute-api.{region}.amazonaws.com/v1/webhooks/tasks",
     "created_at": "2025-03-15T10:30:00Z"
   }
 }
 ```
 
 Store the `secret` securely. It cannot be retrieved again.
+
+`webhook_url` is the address of [Create task via webhook](#create-task-via-webhook), built from the host and stage that served the request. It belongs to the API deployment, not to the webhook: every webhook of a deployment gets the same URL, so the list and revoke responses do not repeat it.
 
 **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`.
 

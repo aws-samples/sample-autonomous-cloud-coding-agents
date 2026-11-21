@@ -22,7 +22,7 @@ import { CreateSecretCommand, DeleteSecretCommand, SecretsManagerClient } from '
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { extractUserId } from './shared/gateway';
+import { extractUserId, getHeader } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { CreateWebhookRequest, CreateWebhookResponse, WebhookRecord } from './shared/types';
@@ -36,6 +36,19 @@ const SECRET_PREFIX = 'bgagent/webhook/';
 
 /** Webhook HMAC secret entropy (bytes; 256-bit). */
 const WEBHOOK_SECRET_BYTES = 32;
+
+/**
+ * URL that external systems post tasks to (`POST /webhooks/tasks`). API Gateway serves every
+ * route of this API on one host and stage, so those of the request give it: the URL is the
+ * same for every webhook of a deployment.
+ * @param event - the API Gateway proxy event.
+ * @returns the absolute URL of the webhook task route.
+ */
+function webhookTasksUrl(event: APIGatewayProxyEvent): string {
+  const host = getHeader(event.headers, 'Host');
+  if (!host) throw new Error('The request has no Host header: cannot build the webhook URL.');
+  return `https://${host}/${event.requestContext.stage}/webhooks/tasks`;
+}
 
 /**
  * POST /v1/webhooks — Create a new webhook integration.
@@ -62,6 +75,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         requestId,
       );
     }
+
+    // Built before anything is created, so a request it cannot be built from leaves nothing behind.
+    const webhookUrl = webhookTasksUrl(event);
 
     const webhookId = ulid();
     const secret = crypto.randomBytes(WEBHOOK_SECRET_BYTES).toString('hex');
@@ -129,6 +145,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       webhook_id: webhookId,
       name: body.name,
       secret,
+      webhook_url: webhookUrl,
       created_at: now,
     };
 

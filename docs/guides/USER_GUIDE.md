@@ -986,10 +986,13 @@ The response includes a `secret` field  - **store it securely, it is only shown 
     "webhook_id": "01HYX...",
     "name": "My CI Pipeline",
     "secret": "<webhook-secret-64-hex-characters>",
+    "webhook_url": "https://<api-id>.execute-api.<region>.amazonaws.com/v1/webhooks/tasks",
     "created_at": "2025-03-15T10:30:00Z"
   }
 }
 ```
+
+`webhook_url` is the endpoint to enter in the external system: the URL that [Submitting tasks via webhook](#submitting-tasks-via-webhook) posts to. It belongs to the deployment, not to the webhook, so every webhook gets the same one. `bgagent webhook create` prints it as `URL:`.
 
 Webhook names must be 1-64 characters: alphanumeric, spaces, hyphens, or underscores, starting and ending with an alphanumeric character.
 

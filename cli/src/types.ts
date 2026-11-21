@@ -554,6 +554,8 @@ export interface CreateWebhookResponse {
   readonly webhook_id: string;
   readonly name: string;
   readonly secret: string;
+  /** URL that external systems post tasks to; the same for every webhook of a deployment. */
+  readonly webhook_url: string;
   readonly created_at: string;
 }
 
