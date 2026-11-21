@@ -881,7 +881,12 @@ def _apply_delivery_gate(
     ``commit_landed`` (from :func:`_branch_has_new_commits`) distinguishes
     "a commit reached the branch but the PR failed to open" (``deliverable=no_pr``
     — recoverable, the work is safe on the branch) from "no commit ever landed"
-    (``deliverable=lost`` — the work is gone) so the failure copy is honest.
+    (``deliverable=lost``) so the failure copy is honest.
+
+    ``deliverable=lost`` covers two runs this gate cannot tell apart (#751), because
+    both end with agent-success, no commit and no PR: the work is gone, or the
+    agent correctly changed nothing (the repository already met the request). The
+    agent has no way to report the second, so the reason names both.
     Returns the (possibly unchanged) ``(overall_status, result_error)``.
     """
     delivery_expected = (
@@ -902,8 +907,8 @@ def _apply_delivery_gate(
         reason = (
             "Task did not succeed (agent_status=success, deliverable=lost): the "
             "coding task reported success but no commit reached the branch and no "
-            "PR was opened — the agent's changes did not land in the task's "
-            "repository."
+            "PR was opened — either the agent made no change, or its changes did "
+            "not land in the task's repository."
         )
     log("WARN", f"Delivery gate: {reason}")
     return "error", reason

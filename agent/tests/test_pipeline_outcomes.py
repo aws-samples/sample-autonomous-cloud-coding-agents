@@ -294,6 +294,15 @@ class TestDeliveryGate:
         assert "agent_status=success" in err
         assert "deliverable=lost" in err
 
+    def test_lost_reason_names_both_lost_work_and_a_run_that_changed_nothing(self):
+        # The gate sees the same thing for work that was lost and for a run that
+        # correctly changed nothing (#751). Slack and the CLI print this reason
+        # as it is, so it must not state that there were changes.
+        _, err = self._gate()
+        assert err is not None
+        assert "the agent made no change" in err
+        assert "its changes did not land" in err
+
 
 class TestChainPriorAgentError:
     def test_none_agent_result_returns_exception_only(self):

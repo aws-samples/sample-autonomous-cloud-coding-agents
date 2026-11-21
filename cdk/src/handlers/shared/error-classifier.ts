@@ -747,21 +747,27 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // A new-work coding task reported agent-success but no commit
-    // reached the branch and no PR was opened — the agent's changes were LOST
-    // (observed cause: a stacked child edited a nested working tree that was never
-    // the branch's tree, so nothing committed). This is an environment/infra
-    // fault, not the user's code, and a fresh run usually lands the work — so
-    // it reads as retryable, NOT the non-retryable "your task didn't succeed".
+    // A new-work coding task reported agent-success, but no commit reached the
+    // branch and no PR was opened. The delivery gate (``_apply_delivery_gate`` in
+    // ``agent/src/pipeline.py``) sees the same thing for two different runs and
+    // cannot tell them apart (#751): the agent's changes were LOST (observed
+    // cause: a stacked child edited a nested working tree that was never the
+    // branch's tree, so nothing committed), or the agent correctly changed
+    // NOTHING (the repository already had what the request asked for). The copy
+    // names both. Retryable, because a fresh run usually lands lost work.
     // Ordered before the generic ``agent_status=`` catch-all so it wins.
     pattern: /deliverable=lost/i,
     classification: {
       category: ErrorCategory.AGENT,
-      title: 'The change was not saved',
-      description: 'The agent finished, but none of its changes were committed to the branch and no pull request was opened — the work did not land in the repository. This is usually a transient workspace fault (e.g. the clone ended up in an unexpected directory), not a problem with your request.',
-      remedy: 'Reply here to try again — a fresh run normally saves the work correctly. If it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
+      title: 'No change was delivered',
+      description: 'The agent finished and reported success, but no commit reached the branch and no pull request was opened. Either the agent found nothing to change (for example, the repository already has what the request asked for), or it made changes that were lost before they reached the branch. The platform cannot tell the two apart.',
+      remedy: 'Check whether the repository already has what you asked for: if it does, nothing more is needed, and a retry would end the same way. If a change was expected, reply here to try again; if it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
       retryable: true,
-      errorClass: ErrorClass.TRANSIENT,
+      // Intentionally USER, not TRANSIENT: a retry cannot help a run that
+      // correctly changed nothing, so the reader decides. TRANSIENT makes
+      // ``retryGuidance`` call it a temporary infrastructure issue and ask for
+      // a plain retry. Do not "fix" this to TRANSIENT.
+      errorClass: ErrorClass.USER,
     },
   },
   {

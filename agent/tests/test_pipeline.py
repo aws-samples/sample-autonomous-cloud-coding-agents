@@ -2848,7 +2848,7 @@ class TestHoldForInput:
     )
     def test_task_is_held_whatever_the_question_says(self, tmp_path, recorded_question, answer):
         # No pull request and nothing pushed (tmp_path is not a repository): a run
-        # that is not held ends as "the change was not saved".
+        # that is not held ends as "no change was delivered" (deliverable=lost).
         run = _run_pipeline(
             _agent_succeeded(
                 clarification_question=recorded_question,
