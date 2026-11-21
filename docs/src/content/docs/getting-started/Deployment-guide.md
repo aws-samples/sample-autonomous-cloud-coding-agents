@@ -279,6 +279,8 @@ CLI commands for an omitted feature (for example `bgagent slack setup`) fail wit
 
 `contracts/deployment-capabilities.json` records the services each capability needs, the Regions that support it, and the source and date of the last verification. Its `compute` section lists the compute backends in the same way; Lambda MicroVMs is the only Region-limited one. `source` and `lastVerified` describe core and the features only: the Lambda MicroVMs Regions come from the launch list of [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend#regional-availability-enforcement) (2026-06-22). CDK synthesis enforces the catalog for a concrete Region, so a CI or manual deploy fails before CloudFormation runs, not only in the wizard. Environment-agnostic synthesis is not checked.
 
+A Region listed in the catalog has the required services; the list says nothing more. It includes `us-gov-west-1` for the core platform, but ABCA's least-privilege bootstrap, which `bgagent setup` installs when the account and Region have no `CDKToolkit` stack, covers the commercial `aws` partition only and cannot deploy ABCA in another one. See [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles#using-these-policies).
+
 To update the data when AWS expands coverage:
 
 1. Check the [supported AgentCore Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page. For `compute.lambda-microvm`, check the Regions where AWS Lambda MicroVMs has launched.

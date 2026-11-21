@@ -31,6 +31,8 @@ The policies are split into six IAM managed policies (each under the 6,144-chara
 | `IaCRole-ABCA-Compute-LambdaMicrovms` | Lambda MicroVM image + network-connector operations | Only when `lambda-microvm` is in `ComputeTypes` |
 
 > **Placeholder substitution**: Replace `ACCOUNT_ID` with your 12-digit AWS account ID and `REGION` with your deployment region (e.g., `us-east-1`) throughout this document.
+>
+> **Partition scope**: Every resource ARN in the six managed policies names the commercial `aws` partition (`arn:aws:...`), so the policies work in that partition only: they cannot authorize an ABCA deployment in another one, such as `aws-us-gov` or `aws-cn`. The inline policy `PassExecutionRoleToCloudFormation` (described below) resolves the partition of the account being bootstrapped, which does not change that. Partition support is an open question ([#928](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/928)).
 
 These policies are not created or attached manually. The repository generates them and a custom bootstrap template that attaches the selected policies to the CloudFormation execution role:
 
