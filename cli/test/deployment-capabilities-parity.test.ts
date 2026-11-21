@@ -59,6 +59,14 @@ describe('deployment capability parity', () => {
     expect(/export const BOOTSTRAP_VERSION = '([^']+)'/.exec(source)?.[1]).toBe(REQUIRED_BOOTSTRAP_VERSION);
   });
 
+  test('the CLI reads the Region override context that the CDK gate reads', () => {
+    const cdk = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'constructs', 'lambda-microvm-compute.ts'), 'utf-8');
+    const cli = fs.readFileSync(path.join(REPO_ROOT, 'cli', 'src', 'commands', 'setup.ts'), 'utf-8');
+    const declared = (text: string) => /MICROVM_REGION_OVERRIDE_CONTEXT = '([^']+)'/.exec(text)?.[1];
+    expect(declared(cdk)).toBeDefined();
+    expect(declared(cli)).toBe(declared(cdk));
+  });
+
   test('the CLI compute backends match the CDK resolver', () => {
     const source = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'handlers', 'shared', 'compute-backend.ts'), 'utf-8');
     const declared = /export type ComputeBackend = ([^;]+);/.exec(source)?.[1] ?? '';

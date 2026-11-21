@@ -184,7 +184,8 @@ export function microvmNoIngressConnectorArn(scope: Construct): string {
 
 /**
  * Escape hatch for Regions launched after the static support list was updated.
- * This bypasses only synth validation; live service checks still apply.
+ * This bypasses only the static check, at synth and in `bgagent setup`; live
+ * service checks still apply.
  */
 export const MICROVM_REGION_OVERRIDE_CONTEXT = 'microvm_region_override';
 
@@ -208,7 +209,7 @@ export function assertLambdaMicrovmRegionSupported(scope: Construct): void {
       `The lambda-microvm compute backend is enabled in ${region}, which is not in the ABCA `
       + `supported-Region list (${LAMBDA_MICROVM_SUPPORTED_REGIONS.join(', ')}). Proceeding because `
       + `--context ${MICROVM_REGION_OVERRIDE_CONTEXT} is set. If AWS has launched Lambda MicroVMs in `
-      + `${region}, add it to LAMBDA_MICROVM_SUPPORTED_REGIONS (cdk/src/handlers/shared/microvm-regions.ts) `
+      + `${region}, add it to compute.lambda-microvm.regions in contracts/deployment-capabilities.json `
       + 'and drop the flag.',
     );
     return;
@@ -221,7 +222,7 @@ export function assertLambdaMicrovmRegionSupported(scope: Construct): void {
     + 'Region, drop the backend (--context compute_type=agentcore or ecs), or — if AWS has since '
     + `launched Lambda MicroVMs in ${region} — bypass this static check with `
     + `--context ${MICROVM_REGION_OVERRIDE_CONTEXT}=true and add ${region} to `
-    + 'LAMBDA_MICROVM_SUPPORTED_REGIONS in cdk/src/handlers/shared/microvm-regions.ts.',
+    + 'compute.lambda-microvm.regions in contracts/deployment-capabilities.json.',
   );
 }
 

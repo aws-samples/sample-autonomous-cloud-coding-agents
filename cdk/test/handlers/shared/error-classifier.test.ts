@@ -746,7 +746,7 @@ describe('classifyError', () => {
         expect(result.remedy).toContain(region);
       }
       expect(result.remedy).toContain('--compute-type agentcore');
-      expect(result.remedy).toContain('microvm-regions.ts');
+      expect(result.remedy).toContain('contracts/deployment-capabilities.json');
     });
 
     test('classifies regional unavailability from the raw (unwrapped) SDK error too', () => {

@@ -118,7 +118,7 @@ completing the [resource migration](https://github.com/aws-samples/sample-autono
 
    Bundle 1.6.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles#iacrole-abca-compute-lambdamicrovms).
 
-3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent platform doctor` probes it live.
+3. Regional availability is limited (5 Regions at launch; the list is the `compute.lambda-microvm` entry of the [capability catalog](#regional-availability)). Synth fails fast with the supported list if the stack's Region is not among them, and `bgagent setup` rejects the backend before it runs the diff; `bgagent platform doctor` probes it live.
 
 Operational notes specific to this backend:
 
@@ -219,7 +219,7 @@ The wizard works in this order:
 2. Reads the existing stack (`--stack-name`, default `backgroundagent-dev`). It preselects the features listed in the stack's `DeploymentFeatures` output, or infers them for stacks that predate profiles. Accepting the defaults never removes anything. A new stack defaults to the minimal profile.
    - The wizard passes only `stackName`, the profile and any `-c/--context key=value` you supply to CDK, alongside whatever `cdk/cdk.json` already holds.
    - It refuses to continue if a `${stackName}-network` stack exists and `networkTopology=split` is missing from `--context` and `cdk/cdk.json`, because dropping it would rebuild the VPC rather than change features. Compute comes from the stack itself (see step 3).
-3. **New installations only:** asks where agents run: AgentCore Runtime (recommended), ECS Fargate, or both (`--compute agentcore|ecs|agentcore,ecs` when scripted). The first backend is the repository default. An existing stack keeps its deployed backends (`ComputeTypes` output; stacks from before it that report a non-AgentCore `ComputeSubstrate` must pass `--compute`). `--compute` may add a backend, and setup warns before changing which one is first, but it refuses to remove one (see the [backend transition procedure](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend)). Lambda MicroVMs are experimental and are selected only with `--compute`.
+3. **New installations only:** asks where agents run: AgentCore Runtime (recommended), ECS Fargate, or both (`--compute agentcore|ecs|agentcore,ecs` when scripted). The first backend is the repository default. An existing stack keeps its deployed backends (`ComputeTypes` output; stacks from before it that report a non-AgentCore `ComputeSubstrate` must pass `--compute`). `--compute` may add a backend, and setup warns before changing which one is first, but it refuses to remove one (see the [backend transition procedure](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend)). Lambda MicroVMs are experimental and are selected only with `--compute`. Setup rejects a backend that the [capability catalog](#regional-availability) does not list for the Region (only Lambda MicroVMs is Region-limited) before it asks about features or runs the diff, whether the backend comes from `--compute`, the existing stack or the profile.
 4. Marks features that the Region does not support as unavailable and does not offer them. A scripted request for one fails with the supported Regions.
 5. Plans any one-time account preparation and lists it on the review screen:
    - **No `CDKToolkit` stack:** installs ABCA's least-privilege CDK bootstrap (`mise //cdk:bootstrap`). For ECS it also sets the bootstrap's `ComputeTypes` parameter, which `cdk bootstrap` cannot set.
@@ -277,16 +277,16 @@ CLI commands for an omitted feature (for example `bgagent slack setup`) fail wit
 
 ### Regional availability
 
-`contracts/deployment-capabilities.json` records the services each capability needs, the Regions that support it, and the source and date of the last verification. CDK synthesis enforces it for a concrete Region, so a CI or manual deploy fails before CloudFormation runs, not only in the wizard. Environment-agnostic synthesis is not checked.
+`contracts/deployment-capabilities.json` records the services each capability needs, the Regions that support it, and the source and date of the last verification. Its `compute` section lists the compute backends in the same way; Lambda MicroVMs is the only Region-limited one. `source` and `lastVerified` describe core and the features only: the Lambda MicroVMs Regions come from the launch list of [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend#regional-availability-enforcement) (2026-06-22). CDK synthesis enforces the catalog for a concrete Region, so a CI or manual deploy fails before CloudFormation runs, not only in the wizard. Environment-agnostic synthesis is not checked.
 
 To update the data when AWS expands coverage:
 
-1. Check the [supported AgentCore Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page.
-2. Edit `regions` and set `lastVerified` in `contracts/deployment-capabilities.json`.
+1. Check the [supported AgentCore Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page. For `compute.lambda-microvm`, check the Regions where AWS Lambda MicroVMs has launched.
+2. Edit `regions` in `contracts/deployment-capabilities.json`. Set `lastVerified` only when you have checked the AgentCore page again: the date speaks for that page.
 3. Mirror the change into `cli/src/deployment-capabilities.ts`.
 4. Run `mise //cdk:test` and `mise //cli:build`. The parity test fails if the mirror drifts, and the census fails if a footprint estimate drifts by more than 15%.
 
-A stale entry blocks a newly supported Region until it is updated. The check fails closed by design, and there is no context override: editing the catalog is the only way to unblock a Region. Stacks that synthesize without a concrete Region (for example CI without credentials) are not checked; synthesis fails before any AWS lookup when a Region is known.
+A stale entry blocks a newly supported Region until it is updated. The check fails closed by design, and for core and the features there is no context override: editing the catalog is the only way to unblock a Region. Lambda MicroVMs keeps the escape hatch of ADR-021: `-c microvm_region_override=true` (or the same key in `cdk/cdk.json`) lifts its check, at synthesis and in `bgagent setup`, until the catalog lists the Region. Stacks that synthesize without a concrete Region (for example CI without credentials) are not checked; synthesis fails before any AWS lookup when a Region is known.
 
 ### Optional operator console
 

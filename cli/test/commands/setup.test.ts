@@ -352,6 +352,70 @@ describe('compute changes on the review screen', () => {
   });
 });
 
+describe('compute the Region does not support', () => {
+  // eu-central-1 has the core AgentCore services but no Lambda MicroVMs.
+  const UNAVAILABLE = /Lambda MicroVMs \('lambda-microvm'\) is unavailable in eu-central-1 \(supported: us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1\)/;
+  const withMicrovm = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore,lambda-microvm' }) });
+  const inUnlistedRegion = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'eu-central-1', stackName: 'backgroundagent-dev', ...opts }, d);
+  /** A scripted run that selects the backend with --compute. */
+  const SCRIPTED: SetupOptions = { features: 'none', compute: 'agentcore,lambda-microvm', yes: true };
+
+  test('rejects --compute lambda-microvm before the diff, naming the Regions and the override', async () => {
+    const rejection = inUnlistedRegion(SCRIPTED, deps({ interactive: false }));
+    await expect(rejection).rejects.toThrow(UNAVAILABLE);
+    await expect(rejection).rejects.toThrow('-c microvm_region_override=true');
+    expect(profileOnDisk()).toBeUndefined();
+    expect(runs).toEqual([]);
+  });
+
+  test('rejects before asking about any feature', async () => {
+    // One answer (the account): a feature prompt would run out of answers and cancel instead.
+    await expect(inUnlistedRegion({ compute: 'lambda-microvm' }, deps({ answers: [ACCOUNT_OK] }))).rejects.toThrow(UNAVAILABLE);
+  });
+
+  test('rejects the backend of an existing stack and of a repository profile alike', async () => {
+    await expect(inUnlistedRegion({ yes: true }, deps({ interactive: false, describeStack: withMicrovm }))).rejects.toThrow(UNAVAILABLE);
+    fs.writeFileSync(
+      path.join(root, DEPLOYMENT_PROFILE_FILE),
+      serializeDeploymentProfile({ features: MINIMAL_DEPLOYMENT_FEATURES, compute: ['agentcore', 'lambda-microvm'] }),
+    );
+    await expect(inUnlistedRegion({ yes: true, deploy: false }, deps({ interactive: false }))).rejects.toThrow(UNAVAILABLE);
+    expect(runs).toEqual([]);
+  });
+
+  test('accepts the backend in a Region the catalog lists', async () => {
+    await setup(SCRIPTED, deps({ interactive: false }));
+    expect(profileFile().compute).toEqual(['agentcore', 'lambda-microvm']);
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+  });
+
+  test('the context that lifts the synthesis check lifts this one, from --context or cdk.json', async () => {
+    await inUnlistedRegion({ yes: true, context: ['microvm_region_override=true'] }, deps({ interactive: false, describeStack: withMicrovm }));
+    expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'microvm_region_override=true']));
+    fs.writeFileSync(path.join(root, 'cdk', 'cdk.json'), JSON.stringify({ context: { microvm_region_override: true } }));
+    await inUnlistedRegion(SCRIPTED, deps({ interactive: false }));
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy', '//cdk:diff', '//cdk:deploy']);
+  });
+
+  test('an empty --context value switches a persistent override off, as it does for CDK', async () => {
+    fs.writeFileSync(path.join(root, 'cdk', 'cdk.json'), JSON.stringify({ context: { microvm_region_override: true } }));
+    await expect(inUnlistedRegion({ ...SCRIPTED, context: ['microvm_region_override='] }, deps({ interactive: false })))
+      .rejects.toThrow(UNAVAILABLE);
+  });
+
+  test('cdk.json decides over cdk.context.json, as it does for CDK', async () => {
+    const persist = (cdkJson: boolean, cdkContextJson: boolean) => {
+      fs.writeFileSync(path.join(root, 'cdk', 'cdk.json'), JSON.stringify({ context: { microvm_region_override: cdkJson } }));
+      fs.writeFileSync(path.join(root, 'cdk', 'cdk.context.json'), JSON.stringify({ microvm_region_override: cdkContextJson }));
+    };
+    persist(true, false);
+    await inUnlistedRegion(SCRIPTED, deps({ interactive: false }));
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+    persist(false, true);
+    await expect(inUnlistedRegion(SCRIPTED, deps({ interactive: false }))).rejects.toThrow(UNAVAILABLE);
+  });
+});
+
 describe('non-interactive operation', () => {
   test('deploys the requested features with --yes and no prompts', async () => {
     const d = deps({ interactive: false, ask: async () => { throw new Error('must not prompt'); } });

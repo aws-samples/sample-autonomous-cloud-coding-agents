@@ -1311,19 +1311,22 @@ describe('assertLambdaMicrovmRegionSupported — Region gate', () => {
     }
 
     expect(error).toBeDefined();
-    // One instantiation, three assertions on its message — the remedy has to
-    // name the Region, the supported list, and the escape hatch, or an operator
-    // in a just-launched Region is stuck.
+    // One instantiation, four assertions on its message — the remedy has to
+    // name the Region, the supported list, the escape hatch, and the catalog
+    // that holds the list, or an operator in a just-launched Region is stuck.
     expect(error!.message).toMatch(/AWS Lambda MicroVMs are not available in eu-central-1/);
     expect(error!.message).toContain(MICROVM_REGION_OVERRIDE_CONTEXT);
     expect(error!.message).toContain('us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1');
+    expect(error!.message).toContain('contracts/deployment-capabilities.json');
   });
 
   test('the context escape hatch unblocks an unsupported Region', () => {
     overridden.template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
-    // Still surfaced as a warning — the operator is ahead of the constant.
-    expect(JSON.stringify(overridden.construct.node.metadata))
-      .toContain('abca:microvm-region-override');
+    // Still surfaced as a warning — the operator is ahead of the constant, so
+    // it names the catalog to update before the flag can be dropped.
+    const warning = JSON.stringify(overridden.construct.node.metadata);
+    expect(warning).toContain('abca:microvm-region-override');
+    expect(warning).toContain('contracts/deployment-capabilities.json');
   });
 
   test('skips the check for a region-agnostic (token) Region rather than rejecting it', () => {

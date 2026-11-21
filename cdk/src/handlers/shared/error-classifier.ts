@@ -406,7 +406,7 @@ const PATTERNS: readonly ErrorPattern[] = [
         + '. Either redeploy the platform in a supported Region, or move this repo to a backend that is available here '
         + '(bgagent repo onboard <repo> --compute-type agentcore, or --compute-type ecs for large repos). '
         + 'If AWS has since launched MicroVMs in this Region, update the supported-Region list in '
-        + 'cdk/src/handlers/shared/microvm-regions.ts. Retrying as-is will not help.',
+        + 'contracts/deployment-capabilities.json. Retrying as-is will not help.',
       retryable: false,
       errorClass: ErrorClass.SERVICE,
     },

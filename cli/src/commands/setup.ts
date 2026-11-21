@@ -34,7 +34,7 @@ import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { Command } from 'commander';
 import { clearCredentials, getConfigDir, saveConfig, tryLoadConfig } from '../config';
 import { debug } from '../debug';
-import { CAPABILITY_CATALOG, isAvailableIn } from '../deployment-capabilities';
+import { Capability, CAPABILITY_CATALOG, isAvailableIn } from '../deployment-capabilities';
 import {
   ComputeBackend,
   DEPLOYMENT_FEATURES,
@@ -83,6 +83,9 @@ const RESERVED_CONTEXT_KEYS = new Set([
   'stackName', 'deploymentProfile', 'compute_types', 'compute_type', ...Object.values(FEATURE_CONTEXT_KEYS),
 ]);
 
+/** Lifts the Lambda MicroVMs Region check at synthesis; mirrors `cdk/src/constructs/lambda-microvm-compute.ts` (parity-tested). */
+const MICROVM_REGION_OVERRIDE_CONTEXT = 'microvm_region_override';
+
 /** CDK's bootstrap stack; ABCA's least-privilege variant publishes `BootstrapPolicyVersion`. */
 const BOOTSTRAP_STACK = 'CDKToolkit';
 /**
@@ -90,12 +93,6 @@ const BOOTSTRAP_STACK = 'CDKToolkit';
  * `BOOTSTRAP_VERSION` in `cdk/src/bootstrap/version.ts` (parity-tested).
  */
 export const REQUIRED_BOOTSTRAP_VERSION = '1.12.0';
-
-const COMPUTE_LABELS: Readonly<Record<ComputeBackend, string>> = {
-  'agentcore': 'AgentCore Runtime',
-  'ecs': 'ECS Fargate',
-  'lambda-microvm': 'Lambda MicroVMs',
-};
 
 /** One-time account changes a deploy needs, in execution order. */
 type AccountPreparation = 'bootstrap' | 'rebootstrap' | 'computeTypes';
@@ -241,13 +238,13 @@ function repoCdkDir(repoRoot: string): string {
   return path.join(repoRoot, 'cdk');
 }
 
-/** Persistent CDK context sources, in the order CDK reads them. */
+/** Persistent CDK context sources, lowest precedence first: where two set a key, CDK uses the later one. */
 function persistentContext(repoRoot: string): Array<{ source: string; context: Record<string, unknown> }> {
   const cdkDir = repoCdkDir(repoRoot);
   const sources = [
     { source: '~/.cdk.json', file: `${os.homedir()}${path.sep}.cdk.json`, nested: true },
-    { source: 'cdk/cdk.json', file: `${cdkDir}${path.sep}cdk.json`, nested: true },
     { source: 'cdk/cdk.context.json', file: `${cdkDir}${path.sep}cdk.context.json`, nested: false },
+    { source: 'cdk/cdk.json', file: `${cdkDir}${path.sep}cdk.json`, nested: true },
   ];
   const result: Array<{ source: string; context: Record<string, unknown> }> = [];
   for (const { source, file, nested } of sources) {
@@ -330,13 +327,38 @@ async function confirm(deps: SetupDeps, question: string, defaultYes: boolean): 
   return answer === 'y' || answer === 'yes';
 }
 
+function unavailableMessage(capability: Capability, name: string, region: string): string {
+  return `${capability.label} ('${name}') is unavailable in ${region} (supported: ${capability.regions?.join(', ')}). ${capability.remediation}`;
+}
+
 function unavailableIn(region: string, selection: DeploymentFeatures): string[] {
   return enabledFeatures(selection)
     .filter(feature => !isAvailableIn(CAPABILITY_CATALOG.features[feature], region))
-    .map(feature => {
-      const capability = CAPABILITY_CATALOG.features[feature];
-      return `${capability.label} ('${feature}') is unavailable in ${region} (supported: ${capability.regions?.join(', ')}). ${capability.remediation}`;
-    });
+    .map(feature => unavailableMessage(CAPABILITY_CATALOG.features[feature], feature, region));
+}
+
+/**
+ * Reject a compute backend the catalog does not list for the Region, as synthesis would,
+ * before any feature prompt or diff. The override context lifts the Lambda MicroVMs check
+ * at synthesis (ADR-021), so it lifts it here: `--context` wins over the persistent sources.
+ */
+function assertComputeAvailable(
+  region: string,
+  compute: readonly ComputeBackend[],
+  context: ReadonlyMap<string, string>,
+  repoRoot: string,
+): void {
+  const effective = new Map<string, unknown>([
+    ...persistentContext(repoRoot).flatMap(({ context: values }) => Object.entries(values)),
+    ...context,
+  ]);
+  const overridden = Boolean(effective.get(MICROVM_REGION_OVERRIDE_CONTEXT));
+  const unavailable = compute
+    .filter(backend => !isAvailableIn(CAPABILITY_CATALOG.compute[backend], region))
+    .filter(backend => !(overridden && backend === 'lambda-microvm'));
+  if (unavailable.length > 0) {
+    throw new CliError(unavailable.map(backend => unavailableMessage(CAPABILITY_CATALOG.compute[backend], backend, region)).join('\n'));
+  }
 }
 
 /** Writes text lines and styles them consistently. */
@@ -497,7 +519,7 @@ async function chooseDeployment(
 }
 
 function computeLabel(compute: readonly ComputeBackend[]): string {
-  return compute.map(backend => COMPUTE_LABELS[backend]).join(' + ');
+  return compute.map(backend => CAPABILITY_CATALOG.compute[backend].label).join(' + ');
 }
 
 async function chooseInteractively(
@@ -776,7 +798,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     }
     // The first backend is the repository default; reordering moves every repository without an explicit one.
     if (deployedCompute && compute[0] !== deployedCompute[0]) {
-      ui.line(`  ${style.yellow('⚠')} The repository default changes from ${COMPUTE_LABELS[deployedCompute[0]]} to ${COMPUTE_LABELS[compute[0]]}.`);
+      ui.line(`  ${style.yellow('⚠')} The repository default changes from ${CAPABILITY_CATALOG.compute[deployedCompute[0]].label} to ${CAPABILITY_CATALOG.compute[compute[0]].label}.`);
       if (prompting && !(await confirm(deps, '  Change the default backend?', false))) throw setupCancelled();
     }
   } else if (deployedCompute) {
@@ -786,6 +808,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   } else {
     compute = [...(profile?.compute ?? ['agentcore'])];
   }
+  assertComputeAvailable(region, compute, extraContext, repoRoot);
 
   // 6. Features, validated against the Region whatever their source.
   let selection: DeploymentFeatures;
