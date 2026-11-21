@@ -144,11 +144,23 @@ run = "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, re
 
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
+# The pipeline does not run this task. The deploy job of .github/workflows/deploy.yml runs
+# `npx cdk deploy` on the assembly that build.yml synthesized, so nothing listed here
+# happens there unless the workflow has a step of its own for it (#843):
+#   :clean:disk             local only: it deletes cdk.out, which the pipeline deploys.
+#   //web:bundle            done by the build: synth:quiet depends on it, and build.yml
+#                           uploads the assembly that task writes.
+#   preflight-bootstrap     not run by the pipeline (#127).
+#   preflight-log-delivery  reported, not applied: the diff job runs it with --check-only.
+# A new entry of `depends` or `run` needs the same decision:
+# test/scripts/deploy-workflow.test.ts fails until the entry is recorded there, and checks
+# the workflow for each step it records.
+#
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
 # several GB of working space, and uv/Docker caches accumulate across runs.
 # The operator console stack packages web/dist, so bundle it first.
 depends = [":clean:disk", "//web:bundle"]
-# The log-delivery preflight runs as the FIRST command of this task rather than as a
+# The log-delivery preflight runs as a command of this task rather than as a
 # `depends`, so that the arguments after `--` reach BOTH it and `cdk deploy`. As a
 # `depends` it could not see them: mise forwards `--` args only to the invoked task's own
 # `run`, so `mise //cdk:deploy -- -c stackName=x` deployed stack `x` while the preflight
@@ -156,7 +168,7 @@ depends = [":clean:disk", "//web:bundle"]
 # is a step that DELETES resources, so the two must not be able to disagree about which
 # stack, account, or region they are operating on.
 #
-# A non-zero exit from the first command aborts the task, which is the intended
+# A non-zero exit from that command aborts the task, which is the intended
 # fail-closed behaviour: the deploy must not proceed into a known-bad migration state.
 #
 # `required=false` is load-bearing — without it a bare `mise //cdk:deploy` (the common
