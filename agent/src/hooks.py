@@ -68,6 +68,7 @@ POLL_SLOW_INTERVAL_S: float = 5.0
 POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this many consecutive failures
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this many consecutive failures
 TOOL_INPUT_PREVIEW_MAX: int = 256  # cap for the strip-ANSI, truncated input preview
+PERMISSION_REASON_MAX: int = 500  # cap for the reason a denied tool call returns
 ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
 
 
@@ -283,14 +284,16 @@ def _deny_response(reason: str) -> dict:
     """Build a PreToolUse DENY response with a sanitized reason.
 
     Guaranteed surface: ``permissionDecisionReason`` is ANSI-stripped and
-    truncated to 500 chars so it can never carry terminal-escape injection
-    or overflow a log line.
+    truncated to ``PERMISSION_REASON_MAX`` chars so it can never carry
+    terminal-escape injection or overflow a log line.
     """
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": _truncate(_strip_ansi(reason or "denied"), 500),
+            "permissionDecisionReason": _truncate(
+                _strip_ansi(reason or "denied"), PERMISSION_REASON_MAX
+            ),
         }
     }
 
@@ -1085,13 +1088,23 @@ async def _handle_require_approval(  # noqa: C901 -- 24, down from 35 when the c
             if decision.matching_rule_ids
             else ""
         )
-        reason_text = (
-            f"AUTHORITATIVE DENY from human reviewer: {raw_reason}{rule_hint}. "
-            "Do NOT retry this class of action with trivial variations; "
+        prefix = "AUTHORITATIVE DENY from human reviewer: "
+        stop_language = (
+            ". Do NOT retry this class of action with trivial variations; "
             "the same rule will fast-deny subsequent attempts. Find an "
             "alternative task strategy or report back to the user explaining "
             "why progress is blocked."
         )
+        # ``_deny_response`` cuts the text at PERMISSION_REASON_MAX, and that cut
+        # must not fall in the stop-language: the room beside the fixed text
+        # goes to the rule names first, and the reviewer's reason is shortened
+        # to the rest. ANSI is stripped before the cut: a cut inside an escape
+        # sequence leaves a fragment that the strip in ``_deny_response`` does
+        # not recognise.
+        room = PERMISSION_REASON_MAX - len(prefix) - len(stop_language)
+        rule_hint = _truncate(rule_hint, room)
+        reason = _truncate(_strip_ansi(raw_reason), room - len(rule_hint))
+        reason_text = prefix + reason + rule_hint + stop_language
     else:
         reason_text = raw_reason
     return _deny_response(reason_text)

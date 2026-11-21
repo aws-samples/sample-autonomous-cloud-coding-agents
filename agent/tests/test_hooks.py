@@ -2751,6 +2751,8 @@ class TestTimedOutPath:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        # A timeout is not a refusal: the model gets no stop-language.
+        assert result["hookSpecificOutput"]["permissionDecisionReason"] == "User timed_out"
         assert fake_task_state.update_calls  # TIMED_OUT write attempted
         assert fake_task_state.update_calls[-1][2] == "TIMED_OUT"
         assert "write_approval_timed_out" in progress.milestones()
@@ -3457,6 +3459,17 @@ class TestTimeoutCapping:
 
 
 class TestPermissionDecisionReasonSanitization:
+    # What the model reads after the reviewer's reason when a gated call is
+    # denied: the rule (here that of ``engine_with_soft_gate``), then the
+    # instruction.
+    STOP_LANGUAGE = (
+        ". Do NOT retry this class of action with trivial variations; "
+        "the same rule will fast-deny subsequent attempts. Find an "
+        "alternative task strategy or report back to the user explaining "
+        "why progress is blocked."
+    )
+    RULE_AND_STOP_LANGUAGE = " (matching rule: test_bash_foo)" + STOP_LANGUAGE
+
     def test_ansi_is_stripped_on_deny(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
@@ -3488,28 +3501,88 @@ class TestPermissionDecisionReasonSanitization:
         assert reason.startswith("AUTHORITATIVE DENY from human reviewer:")
         assert "forbidden" in reason
 
-    def test_long_reason_truncated_to_500(
-        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
-    ):
+    def _denied_reason(self, fake_task_state, progress, engine, monkeypatch, deny_reason):
+        """The reason the model receives when the reviewer denies ``echo foo``."""
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state,
-            {"status": "DENIED", "deny_reason": "x" * 2000, "decided_at": "t1"},
+            {"status": "DENIED", "deny_reason": deny_reason, "decided_at": "t1"},
         )
-
         result = _run(
             pre_tool_use_hook(
                 _hook_input(),
                 "tu-1",
                 {},
-                engine=engine_with_soft_gate,
+                engine=engine,
                 task_id="01KTASK",
                 user_id="u-1",
                 progress=progress,
                 task_state_module=fake_task_state,
             )
         )
-        assert len(result["hookSpecificOutput"]["permissionDecisionReason"]) <= 500
+        return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_denied_reason_names_the_rule_and_tells_the_agent_not_to_retry(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # Compared whole, on purpose: the text is an instruction to the model,
+        # and a change of its wording is a decision that has to show here. Given
+        # a bare reason, an agent retries the denied rule with variations (#113).
+        reason = self._denied_reason(
+            fake_task_state, progress, engine_with_soft_gate, monkeypatch, "build makefile first"
+        )
+        assert reason == (
+            "AUTHORITATIVE DENY from human reviewer: build makefile first"
+            + self.RULE_AND_STOP_LANGUAGE
+        )
+
+    @pytest.mark.parametrize("length", [223, 2000])
+    def test_a_long_reason_is_shortened_and_the_stop_language_is_kept(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, length
+    ):
+        # The reason that a denied call returns is capped at 500 characters: the
+        # cut falls in the reviewer's text, never in what follows it. 223 is the
+        # shortest reason that does not fit here, 2000 the longest the API accepts.
+        reason = self._denied_reason(
+            fake_task_state, progress, engine_with_soft_gate, monkeypatch, "x" * length
+        )
+        assert len(reason) == 500
+        assert reason.startswith("AUTHORITATIVE DENY from human reviewer: xxx")
+        assert reason.endswith("x..." + self.RULE_AND_STOP_LANGUAGE)
+
+    def test_a_cut_inside_an_escape_sequence_leaves_no_escape_character(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # With this rule a shortened reason keeps 219 characters, and the 219th
+        # is the ESC: cut there, it is left without the rest of its sequence,
+        # and the strip of escape sequences does not recognise it.
+        ansi_reason = "x" * 218 + "\x1b[31m" + "y" * 300
+        reason = self._denied_reason(
+            fake_task_state, progress, engine_with_soft_gate, monkeypatch, ansi_reason
+        )
+        assert "\x1b" not in reason
+        assert reason.endswith("y..." + self.RULE_AND_STOP_LANGUAGE)
+
+    def test_rule_names_that_do_not_fit_are_shortened_and_the_stop_language_is_kept(
+        self, fake_task_state, progress, monkeypatch
+    ):
+        # Two rules gate the call, and their names alone take more room than the
+        # stop-language leaves: nothing is left for the reviewer's reason.
+        soft_rules = "\n".join(
+            f'@tier("soft")\n@rule_id("{rule_id}")\n'
+            'forbid (principal, action == Agent::Action::"execute_bash", resource) '
+            'when { context.command like "*foo*" };'
+            for rule_id in ("a" * 150, "b" * 150)
+        )
+        engine = PolicyEngine(
+            task_type="new_task", repo="owner/repo", blueprint_soft_policies=soft_rules
+        )
+        reason = self._denied_reason(
+            fake_task_state, progress, engine, monkeypatch, "build makefile first"
+        )
+        assert len(reason) == 500
+        assert reason.endswith("..." + self.STOP_LANGUAGE)
+        assert reason.startswith("AUTHORITATIVE DENY from human reviewer:  (matching rules: ")
 
 
 # --- Denial-injection hook ----------------------------------------------
