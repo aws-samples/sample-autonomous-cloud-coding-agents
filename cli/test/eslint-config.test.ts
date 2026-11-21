@@ -22,10 +22,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
- * The rules below are selectors written by hand in eslint.config.mjs. One that matches
- * nothing is still valid and lint passes, so each row lints a snippet as the named file
- * with the real config and lists the rules that must report it: none where the snippet
- * has to stay legal.
+ * The rules below are selectors and import zones written by hand in eslint.config.mjs.
+ * One that matches nothing is still valid and lint passes, so each row lints a snippet as
+ * the named file with the real config and lists the rules that must report it: none where
+ * the snippet has to stay legal.
  */
 const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // An AWS SDK client built outside the ua factory (#319).
@@ -37,6 +37,18 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // md5 from node:crypto.
   ['src/a.ts', "export const digest = createHash('md5');", ['no-restricted-syntax']],
   ['test/a.test.ts', "export const digest = crypto.createHash('md5');", ['no-restricted-syntax']],
+  // An import in src of a file outside the package, which the CLI ships without. The
+  // package's own files and its installed dependencies stay legal, and so does a test
+  // that loads a contract.
+  ['src/a.ts', "import '../../cdk/src/handlers/shared/types';", ['import-x/no-restricted-paths']],
+  ['src/a.ts', "import '../../contracts/constants.json';", ['import-x/no-restricted-paths']],
+  ['src/a.ts', "import './types';", []],
+  ['src/a.ts', "import 'commander';", []],
+  ['test/a.test.ts', "import '../../contracts/constants.json';", []],
+  // The same for a package of the workspace imported by its name, through the link Yarn
+  // makes for it in the root node_modules. The rule leaves this package's own link alone.
+  ['src/a.ts', "import '@abca/cdk/package.json';", ['import-x/no-restricted-paths']],
+  ['src/a.ts', "import '@abca/cli/package.json';", []],
   // A comment that takes code out of the coverage report, in each spelling the rule lists.
   ['src/a.ts', '/* istanbul ignore next */', ['no-warning-comments']],
   ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],

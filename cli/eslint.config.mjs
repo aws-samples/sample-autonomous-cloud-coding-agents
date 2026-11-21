@@ -45,6 +45,10 @@ const NO_NAKED_SDK_CLIENT = {
     + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
     + ' the exception in this selector.',
 };
+// Used by the rule for src below.
+const NO_IMPORT_OUTSIDE_PACKAGE = 'The CLI ships only lib/, compiled from cli/src: a file outside the cli package is not part of an'
+  + ' installed CLI. Mirror an API type or constant of the CDK in src/types.ts, which `mise run check:types-sync` compares with the'
+  + ' CDK declaration. Copy any other value into src and pin the copy with a parity test such as test/constants-parity.test.ts.';
 
 export default [
   // Global ignores
@@ -300,14 +304,28 @@ export default [
     },
   },
 
-  // Override: allow console.log in CLI source files (console output is the product)
+  // Override: rules for the source files only
   {
     files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
+      // Console output is the product.
       'no-console': 'off',
       // Every AWS SDK client in src is built by the attributed factory (#319). The whole
       // list again: a later block replaces a rule's options.
       'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
+      // src imports no file of the repository outside this package, the root node_modules
+      // aside: Yarn installs the dependencies there. The compiler (rootDir) refuses only a
+      // TypeScript source: another package's build output and a JSON file both compile.
+      // The second zone is the links Yarn makes in the root node_modules for the packages
+      // of the workspace, this package's own aside: an import by package name may resolve
+      // to a path through such a link, and the first zone lets all of node_modules pass.
+      'import-x/no-restricted-paths': ['error', {
+        basePath: __dirname,
+        zones: [
+          { target: './src', from: '..', except: ['./cli', './node_modules'], message: NO_IMPORT_OUTSIDE_PACKAGE },
+          { target: './src', from: '../node_modules/@abca', except: ['./cli'], message: NO_IMPORT_OUTSIDE_PACKAGE },
+        ],
+      }],
     },
   },
 
