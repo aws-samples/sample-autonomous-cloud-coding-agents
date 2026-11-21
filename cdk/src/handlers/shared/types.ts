@@ -352,8 +352,12 @@ export interface TaskRecord {
   readonly jira_final_comment_event_id?: string;
   /** Durable Jira iteration body, merged with preview metadata by every writer. */
   readonly jira_iteration_status?: { readonly body: Record<string, unknown>; readonly terminal: boolean };
-  /** At-most-once claim for the standalone preview comment POST. */
-  readonly jira_preview_claimed?: boolean;
+  /**
+   * At-most-once claim for the standalone preview comment POST. The claim is
+   * the presence of the attribute (the write is conditional on
+   * ``attribute_not_exists``), so it is never ``false``.
+   */
+  readonly jira_preview_claimed?: true;
   readonly jira_preview_comment_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**

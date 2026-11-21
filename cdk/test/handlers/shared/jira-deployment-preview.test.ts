@@ -20,7 +20,8 @@
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { deliverJiraDeploymentPreview } from '../../../src/handlers/shared/jira-deployment-preview';
 import { postIssueCommentAdf, updateIssueCommentAdf } from '../../../src/handlers/shared/jira-feedback';
-import { updateJiraIterationComment } from '../../../src/handlers/shared/jira-preview';
+import { updateJiraIterationComment } from '../../../src/handlers/shared/jira-iteration-comment';
+import { logger } from '../../../src/handlers/shared/logger';
 import { INTEGRATION_NODE_SUFFIX } from '../../../src/handlers/shared/orchestration-integration-node';
 import type { TaskRecord } from '../../../src/handlers/shared/types';
 
@@ -29,8 +30,8 @@ jest.mock('../../../src/handlers/shared/jira-feedback', () => ({
   postIssueCommentAdf: jest.fn(),
   updateIssueCommentAdf: jest.fn(),
 }));
-jest.mock('../../../src/handlers/shared/jira-preview', () => ({
-  ...jest.requireActual('../../../src/handlers/shared/jira-preview'),
+jest.mock('../../../src/handlers/shared/jira-iteration-comment', () => ({
+  ...jest.requireActual('../../../src/handlers/shared/jira-iteration-comment'),
   updateJiraIterationComment: jest.fn(),
 }));
 const post = jest.mocked(postIssueCommentAdf);
@@ -85,6 +86,8 @@ beforeEach(() => {
   edit.mockResolvedValue({ ok: true });
   iteration.mockResolvedValue({ ok: true });
 });
+
+afterEach(() => jest.restoreAllMocks());
 
 test('standalone Jira task posts ADF screenshot and live links on its stored issue', async () => {
   await deliver();
@@ -189,6 +192,16 @@ test('the standalone claim is conditional on an absent claim attribute', async (
   expect(claim.input.ConditionExpression).toBe('attribute_exists(task_id) AND attribute_not_exists(jira_preview_claimed)');
 });
 
+test('the claim is typed as present, never as false', () => {
+  // Compile-time guard, held by the package type check (jest checks no
+  // types): if the type admits `false`, the directive below is unused, which
+  // is an error. The claim is the presence of the attribute, so a stored
+  // `false` would block every later delivery, as `true` does.
+  // @ts-expect-error -- the claim admits only `true`
+  const invalid: TaskRecord = { ...original, jira_preview_claimed: false };
+  expect(invalid.jira_preview_claimed).toBe(false);
+});
+
 test('an iteration with a synthetic reply target never calls Jira', async () => {
   await deliver({
     ...original,
@@ -204,8 +217,27 @@ test('an iteration with a synthetic reply target never calls Jira', async () => 
 });
 
 test('untrusted screenshots are rejected before claiming or posting', async () => {
+  const warn = jest.spyOn(logger, 'warn');
   await deliverJiraDeploymentPreview(ddb, 'tasks', 'registry', original, 'owner/repo', 'initial', 'https://localhost/a', preview, () => 30_000);
-  expect(send).not.toHaveBeenCalled();
+  expect(records.original.jira_preview_claimed).toBeUndefined();
+  expect(post).not.toHaveBeenCalled();
+  // A refusal is logged: a silent return would leave no trace of a delivery
+  // that posted nothing.
+  expect(warn).toHaveBeenCalledWith('Jira deployment preview feedback failed (non-fatal)', {
+    event: 'screenshot.jira_delivery_failed', task_id: 'original', error: 'Jira screenshot URL is not allowed',
+  });
+});
+
+test('an untrusted screenshot does not keep an iteration from refreshing its status comment', async () => {
+  // The writer is mocked here. The real one renders from the task record and
+  // leaves out a URL that is not allowed: jira-iteration-comment.test.ts holds
+  // that half.
+  const task = {
+    ...original,
+    channel_metadata: { ...original.channel_metadata, trigger_comment_id: 'trigger', iteration_reply_comment_id: '123' },
+  };
+  await deliverJiraDeploymentPreview(ddb, 'tasks', 'registry', task, 'owner/repo', 'initial', 'https://localhost/a', preview, () => 30_000);
+  expect(iteration).toHaveBeenCalledWith(ddb, 'tasks', 'original', expect.anything(), 'ENG-42', '123', undefined, expect.anything());
   expect(post).not.toHaveBeenCalled();
 });
 

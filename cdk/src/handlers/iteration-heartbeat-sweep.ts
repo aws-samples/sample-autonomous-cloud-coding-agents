@@ -40,7 +40,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { planHeartbeat, type HeartbeatTaskView } from './shared/iteration-heartbeat';
 import { terminalReplyClaimed } from './shared/iteration-reply-claim';
 import { buildAdfDocument, parseMarkdownRuns } from './shared/jira-feedback';
-import { updateJiraIterationComment } from './shared/jira-preview';
+import { updateJiraIterationComment } from './shared/jira-iteration-comment';
 import { logger } from './shared/logger';
 import {
   channelForSource,
@@ -142,12 +142,16 @@ export async function handler(): Promise<void> {
     edited_cap: MAX_EDITS_PER_SWEEP,
   });
 
+  // An edit that was tried and an edit that landed are counted apart: a sweep
+  // whose every edit fails must not read like a sweep with nothing to edit.
+  let attempted = 0;
   let edited = 0;
   for (const plan of plans.slice(0, MAX_EDITS_PER_SWEEP)) {
     try {
       if (await terminalReplyClaimed(docDdb, TASK_TABLE, plan.taskId)) continue;
       const channel = channelForSource(plan.channelSource, CHANNEL_REGISTRY_TABLES);
       if (!channel) continue;
+      attempted += 1;
       const issue = { issueId: plan.issueId, credentialsRef: plan.credentialsRef };
       if (plan.channelSource === 'jira') {
         const result = await updateJiraIterationComment(
@@ -156,7 +160,16 @@ export async function handler(): Promise<void> {
           plan.issueId, plan.replyId,
           { body: buildAdfDocument(plan.body.split('\n').map(parseMarkdownRuns)), terminal: false },
         );
-        if (result.ok) edited += 1;
+        if (result.ok) {
+          edited += 1;
+        } else {
+          // The Jira writer returns a failure instead of throwing it: log it
+          // under the message of the catch below, so one filter finds both.
+          logger.warn('Heartbeat sweep: reply edit failed (non-fatal)', {
+            task_id: plan.taskId,
+            retryable: result.retryable,
+          });
+        }
         continue;
       }
       const ref = plan.channelSource === 'linear' && plan.parentCommentId
@@ -194,5 +207,5 @@ export async function handler(): Promise<void> {
       eligible: plans.length, cap: MAX_EDITS_PER_SWEEP,
     });
   }
-  logger.info('Heartbeat sweep complete', { edited });
+  logger.info('Heartbeat sweep complete', { attempted, edited });
 }

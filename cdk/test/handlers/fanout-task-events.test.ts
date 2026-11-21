@@ -163,8 +163,8 @@ afterEach(() => {
   }
   mockIterationStatus.mockClear();
 });
-// Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
-jest.mock('../../src/handlers/shared/jira-preview', () => ({
+// Delivery convergence is exercised with real interleavings in jira-iteration-comment.test.ts.
+jest.mock('../../src/handlers/shared/jira-iteration-comment', () => ({
   updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
     ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) => {
     mockIterationStatus(status);
@@ -2668,7 +2668,8 @@ describe('fanout-task-events: Jira dispatcher', () => {
     // A build that was already red before the iteration does not fail the task
     // (the gate counts regressions only), so it ends COMPLETED with
     // build_passed=false. That is not a clean success: Linear, the reconciler
-    // and the re-render in jira-preview.ts all give it the failure rendering.
+    // and the re-render in jira-iteration-comment.ts all give it the failure
+    // rendering.
     mockGet({
       ...TASK_RECORD_JIRA,
       build_passed: false,
