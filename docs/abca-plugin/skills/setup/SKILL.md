@@ -44,9 +44,8 @@ Run these steps in order, verifying each:
 2. `mise install` — Install tool versions
 3. `corepack enable && corepack prepare yarn@1.22.22 --activate` — Enable Yarn
 4. Verify: `node --version` (should be v22.x), `yarn --version` (should be 1.22.x)
-5. `export MISE_EXPERIMENTAL=1` — Required for namespaced tasks
-6. `mise run install` — Install all workspace dependencies
-7. `mise run build` — Full monorepo build (agent quality + CDK, CLI, web and docs builds + Jira Forge app tests + drift and file-hygiene checks)
+5. `mise run install` — Install all workspace dependencies
+6. `mise run build` — Full monorepo build (agent quality + CDK, CLI, web and docs builds + Jira Forge app tests + drift and file-hygiene checks)
 
 Common Phase 2 snags to pre-empt (don't let these read as a broken environment):
 - "yarn: command not found" → Corepack wasn't activated (step 3).

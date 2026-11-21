@@ -14,8 +14,8 @@
     "web"
   ],
   "scripts": {
-    "install:all": "MISE_EXPERIMENTAL=1 mise run install",
-    "build": "MISE_EXPERIMENTAL=1 mise run build",
+    "install:all": "mise run install",
+    "build": "mise run build",
     "knip": "knip"
   },
   "devDependencies": {

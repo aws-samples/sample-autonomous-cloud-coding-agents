@@ -33,7 +33,6 @@ jobs:
       contents: read
     env:
       CI: "true"
-      MISE_EXPERIMENTAL: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

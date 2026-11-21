@@ -763,7 +763,6 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   }
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    MISE_EXPERIMENTAL: '1',
     AWS_REGION: region,
     AWS_DEFAULT_REGION: region,
     CDK_DEFAULT_REGION: region,

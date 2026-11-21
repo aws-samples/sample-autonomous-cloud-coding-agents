@@ -25,7 +25,6 @@ Before any deployment action, verify:
 
 1. **Build is clean:**
    ```bash
-   export MISE_EXPERIMENTAL=1
    mise run build
    ```
    This runs agent quality checks, CDK compilation + tests, CLI build, and docs build. Do NOT deploy if the build fails. Note: a passing build is noisy — it prints many `ERROR`/`WARN` and cdk-nag lines from test fixtures. Trust the **exit code (0 = pass)**, not the log volume.
@@ -62,7 +61,6 @@ Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `
 ## Diff Workflow
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:diff
 ```
 
@@ -73,7 +71,6 @@ Summarize the changes: new resources, modified resources, removed resources. Fla
 **CRITICAL: Ask for explicit confirmation before destroying.** Use AskUserQuestion to confirm, explaining consequences.
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:destroy
 ```
 
@@ -82,7 +79,6 @@ mise //cdk:destroy
 ## Synth Workflow
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:synth
 ```
 

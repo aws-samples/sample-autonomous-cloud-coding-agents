@@ -50,10 +50,10 @@ To point the default Blueprint at your own repo without editing code, pass it as
 
 ```bash
 # Context variable (preferred)
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
+mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
 
 # Or environment variable
-BLUEPRINT_REPO=your-org/your-repo MISE_EXPERIMENTAL=1 mise //cdk:deploy
+BLUEPRINT_REPO=your-org/your-repo mise //cdk:deploy
 ```
 
 The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that repo and pass your fork (e.g. `-c blueprintRepo=jane-doe/agent-plugins`).
@@ -107,7 +107,7 @@ Redeploy after changing Blueprints: `mise //cdk:deploy`. A redeploy writes the o
 The CDK build and offline census share 142 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, legacy additive selectors, and [deployment-profile](./DEPLOYMENT_GUIDE.md#deployment-profiles) cells (minimal, each optional feature alone, Linear+Jira, Linear+screenshots, all features). The feature cells also assert that disabled features leave no resources, outputs, routes or Lambda permissions, and that each feature's catalogued footprint stays within 15% of synthesis. The census ignores `abca.deployment.json` (`deploymentProfile=none`). Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and of three synthesis warnings (template size, a custom resource left on CDK's default of downloading the latest SDK, a cdk-nag rule that could not be evaluated), backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add synthetic IDs to the platform defaults and assert that CDK generates IAM overflow policies for the SessionRole and for each backend's compute role, and that those policies pass the audit; these fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:census -- --output /tmp/stack-census
+mise //cdk:census -- --output /tmp/stack-census
 ```
 
 Use `--list` to see the profiles and `--profile NAME` to select them. The census runs the production app with fixed account/AZ inputs, CDK metadata enabled and bundling/staging disabled. It records template inventories, counts, bytes, dependencies and source provenance. The production app sets CDK's `@aws-cdk/core:stackResourceLimit` before any stack is constructed, so actual operator configurations outside the census also fail above 490. Context overrides may tighten but cannot raise the limit. `--max-resources` can only tighten the census audit ceiling.
@@ -286,7 +286,6 @@ If `mise run install` fails or versions look wrong:
 | `yarn: command not found` | Activate mise in your shell (`eval "$(mise activate zsh)"`), then `corepack enable && corepack prepare yarn@1.22.22 --activate`. |
 | `node` is not v22 | Activate mise in your shell, then `mise install` from the repo root. |
 | Mise errors about untrusted config | `mise trust` from the repo root, then `mise install` again. |
-| `MISE_EXPERIMENTAL` required | `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`. |
 
 Minimal recovery sequence:
 
@@ -295,7 +294,6 @@ eval "$(mise activate zsh)"   # or bash; add permanently to your shell rc file
 cd /path/to/sample-autonomous-cloud-coding-agents
 mise trust && mise install
 corepack enable && corepack prepare yarn@1.22.22 --activate
-export MISE_EXPERIMENTAL=1
 mise run install
 ```
 

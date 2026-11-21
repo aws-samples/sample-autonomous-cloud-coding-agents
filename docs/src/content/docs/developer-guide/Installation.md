@@ -39,7 +39,6 @@ If `mise run install` fails or versions look wrong:
 | `yarn: command not found` | Activate mise in your shell (`eval "$(mise activate zsh)"`), then `corepack enable && corepack prepare yarn@1.22.22 --activate`. |
 | `node` is not v22 | Activate mise in your shell, then `mise install` from the repo root. |
 | Mise errors about untrusted config | `mise trust` from the repo root, then `mise install` again. |
-| `MISE_EXPERIMENTAL` required | `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`. |
 
 Minimal recovery sequence:
 
@@ -48,7 +47,6 @@ eval "$(mise activate zsh)"   # or bash; add permanently to your shell rc file
 cd /path/to/sample-autonomous-cloud-coding-agents
 mise trust && mise install
 corepack enable && corepack prepare yarn@1.22.22 --activate
-export MISE_EXPERIMENTAL=1
 mise run install
 ```
 

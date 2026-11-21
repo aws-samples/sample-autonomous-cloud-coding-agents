@@ -157,7 +157,7 @@ describe('new installation', () => {
     expect(runs.map(r => path.basename(r.logFile))).toEqual(['setup-changes.log', 'setup-deploy.log']);
     expect(text()).toContain('Deployment complete in');
     expect(text()).toContain(`API      ${BUNDLE.api_url}`);
-    expect(runs[0].env).toMatchObject({ AWS_REGION: 'us-east-1', CDK_DEFAULT_REGION: 'us-east-1', MISE_EXPERIMENTAL: '1' });
+    expect(runs[0].env).toMatchObject({ AWS_REGION: 'us-east-1', CDK_DEFAULT_REGION: 'us-east-1' });
     expect(JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'))).toEqual({ ...BUNDLE, stack_name: 'backgroundagent-dev' });
   });
 
@@ -765,6 +765,19 @@ describe('brand-new accounts', () => {
       expect(runs.every(run => run.env.CDK_DOCKER === undefined)).toBe(true);
     } finally {
       if (saved !== undefined) process.env.CDK_DOCKER = saved;
+    }
+  });
+
+  // The mise that mise.toml requires (min_version) runs `//cdk:*` tasks without experimental mode.
+  test('leaves MISE_EXPERIMENTAL unset', async () => {
+    const saved = process.env.MISE_EXPERIMENTAL;
+    delete process.env.MISE_EXPERIMENTAL;
+    try {
+      await setup({ features: 'none', yes: true }, deps());
+      expect(runs.map(run => run.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+      expect(runs.every(run => run.env.MISE_EXPERIMENTAL === undefined)).toBe(true);
+    } finally {
+      if (saved !== undefined) process.env.MISE_EXPERIMENTAL = saved;
     }
   });
 

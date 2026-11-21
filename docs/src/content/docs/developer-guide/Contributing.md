@@ -84,8 +84,6 @@ Common commands:
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
 | `mise run upgrade` | Upgrade dependencies within declared ranges (Yarn workspaces + agent `uv.lock`) |
 
-Set `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`.
-
 Keep settings for one machine out of the repository: mise reads an untracked `mise.local.toml` next to a `mise.toml`. Committing that file, or a `.mise.toml`, `.miserc.toml`, `.yarnrc`, `.yarnrc.yml` or `.npmrc`, in the repository root or a package directory fails `mise run check:coverage-thresholds-sync`, because such a file can change how a pinned test command runs without changing its text (the exact names and directories are `LAUNCHER_CONFIGS` in `scripts/check-coverage-thresholds-sync.ts`).
 
 ### Dependency upgrades

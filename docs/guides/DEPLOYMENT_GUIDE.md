@@ -32,7 +32,7 @@ The budget covers complete configurations, including multiple backends, Gateway,
 For a **new installation**:
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all \
+mise //cdk:deploy -- --all \
   -c networkTopology=split -c compute_types=agentcore
 ```
 
@@ -61,13 +61,13 @@ A normal `--all` deployment updates the network first, so removing an AZ can fai
 
    ```bash
    APP_STACK=backgroundagent-dev
-   MISE_EXPERIMENTAL=1 mise //cdk:diff -- --all --method template
+   mise //cdk:diff -- --all --method template
    ```
 
 4. Deploy **only the application**, leaving the existing three-zone network in place. `--exclusively` prevents CDK from deploying its network dependency:
 
    ```bash
-   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- "$APP_STACK" --exclusively
+   mise //cdk:deploy -- "$APP_STACK" --exclusively
    ```
 
 5. Copy each removed private-subnet export's exact name from the deployed network outputs. Verify that `list-imports` returns `[]` before changing the network. Any additional consumer stack must also release that export.
@@ -83,7 +83,7 @@ A normal `--all` deployment updates the network first, so removing an AZ can fai
 6. Deploy both stacks with the same persisted target context. The network can now remove the unused export and AZ resources. Verify the remaining subnet physical IDs and CIDRs, DNS/egress behavior and a task before resuming producers and automation.
 
    ```bash
-   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all
+   mise //cdk:deploy -- --all
    ```
 
 To restore the previous three-zone layout, restore its AZ list and reservation count, then deploy the network before the application (`--all` uses this order). The network must recreate the third subnet and export before the application imports it again. Keep active plus reserved slots constant during this recovery too.
@@ -147,7 +147,7 @@ By default, `cdk bootstrap` gives the CloudFormation execution role `Administrat
 **An account and Region with no `CDKToolkit` stack:**
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
+mise //cdk:bootstrap
 ```
 
 The task regenerates the artifacts in `cdk/bootstrap/` and runs `cdk bootstrap` with `cdk/bootstrap/bootstrap-template.yaml`. Arguments after `--` go to `cdk bootstrap`. During the run the CDK CLI prints `Using default execution policy of 'arn:aws:iam::aws:policy/AdministratorAccess'`. That line describes the standard template: this one attaches the ABCA policies, unless `--cloudformation-execution-policies` is passed, which attaches that list in their place.
@@ -157,7 +157,7 @@ The task regenerates the artifacts in `cdk/bootstrap/` and runs `cdk bootstrap` 
 **An account that already has a bootstrap:**
 
 - **An older ABCA bundle:** run `mise //cdk:bootstrap` again from the checkout you deploy. The stack keeps its `ComputeTypes` value.
-- **A standard CDK bootstrap:** every CDK app in the account and Region deploys through the same execution role, so `bgagent setup` leaves it unchanged and skips the preflight below. `MISE_EXPERIMENTAL=1 mise //cdk:bootstrap` replaces it. The execution role then carries the ABCA policies in place of `AdministratorAccess`, so every other CDK app that deploys through it can deploy only what those policies allow. The exception is a standard bootstrap that was given `--cloudformation-execution-policies`: that list stays attached in place of the ABCA policies. The task also replaces a bootstrap whose CDK bootstrap version (the `BootstrapVersion` output) is newer than this template's. [Using these policies](../design/DEPLOYMENT_ROLES.md#using-these-policies) says why the task passes `--force` and how to check the result.
+- **A standard CDK bootstrap:** every CDK app in the account and Region deploys through the same execution role, so `bgagent setup` leaves it unchanged and skips the preflight below. `mise //cdk:bootstrap` replaces it. The execution role then carries the ABCA policies in place of `AdministratorAccess`, so every other CDK app that deploys through it can deploy only what those policies allow. The exception is a standard bootstrap that was given `--cloudformation-execution-policies`: that list stays attached in place of the ABCA policies. The task also replaces a bootstrap whose CDK bootstrap version (the `BootstrapVersion` output) is newer than this template's. [Using these policies](../design/DEPLOYMENT_ROLES.md#using-these-policies) says why the task passes `--force` and how to check the result.
 
 ### Bootstrap preflight
 
@@ -293,7 +293,7 @@ A stale entry blocks a newly supported Region until it is updated. The check fai
 The operator console is a read-only web UI for tasks, approvals and agent health. It deploys as a separate stack, `${stackName}-console`: a private S3 bucket served through CloudFront, plus a Cognito app client and managed-login domain on the platform's existing user pool. Enable it with:
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all -c operatorConsole=true
+mise //cdk:deploy -- --all -c operatorConsole=true
 ```
 
 `--all` is required because the app now has more than one stack. The deploy task builds the bundle (`mise //web:bundle`) first. Open the `ConsoleUrl` stack output and sign in with the same Cognito user as the `bgagent` CLI.

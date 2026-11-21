@@ -47,7 +47,6 @@ corepack enable
 corepack prepare yarn@1.22.22 --activate
 
 # Install dependencies and build
-export MISE_EXPERIMENTAL=1
 mise run install
 mise run build
 ```
@@ -498,7 +497,6 @@ Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 | Error | Cause | Fix |
 |---|---|---|
 | `yarn: command not found` | Corepack not enabled or mise not activated in your shell | Run `eval "$(mise activate zsh)"`, then `corepack enable && corepack prepare yarn@1.22.22 --activate` |
-| `MISE_EXPERIMENTAL required` | Namespaced tasks need the experimental flag | `export MISE_EXPERIMENTAL=1` |
 | `exec /bin/sh: exec format error` during image build | x86 host building the arm64 (Graviton) agent image without QEMU/binfmt. A reboot clears the registration, so the error can come back on a host that deployed before | Run `docker run --privileged --rm tonistiigi/binfmt --install arm64` (again after every reboot), or build from a native arm64 host (see Step 3 caution) |
 | `AccessDeniedException` on `update-trace-segment-destination` | X-Ray → CloudWatch Logs tracing is optional and the call may be SCP-blocked on Org accounts | **Skip it** — tracing is disabled by default and not required to deploy (see Step 3 note) |
 | `mise run build` fails with `ec2:DescribeAvailabilityZones` error | AWS credentials missing or insufficient for CDK synth | Set `AWS_PROFILE` or configure credentials with at least EC2 read access |

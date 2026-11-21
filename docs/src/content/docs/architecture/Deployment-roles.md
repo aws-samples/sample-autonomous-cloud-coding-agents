@@ -39,7 +39,7 @@ These policies are not created or attached manually. The repository generates th
 ```bash
 # Regenerate artifacts (policies JSON + template YAML) and bootstrap.
 # ComputeTypes defaults to "agentcore".
-MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
+mise //cdk:bootstrap
 
 # To ALSO enable the ECS compute backend (attach IaCRole-ABCA-Compute-ECS), set the
 # ComputeTypes CFN *parameter*. cdk bootstrap cannot pass template parameters — it

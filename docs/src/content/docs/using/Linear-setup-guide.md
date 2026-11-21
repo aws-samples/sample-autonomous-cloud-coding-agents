@@ -213,7 +213,7 @@ Linear's [Agents API](https://linear.app/developers/agents) gives an installed a
 1. Deploy the stack with the flag:
 
    ```bash
-   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context enableLinearAgentSessions=true
+   mise //cdk:deploy -- --context enableLinearAgentSessions=true
    ```
 
 2. In the Linear app (*Settings → API → Applications → your app → Webhooks*), tick **Agent session events** under *App events*. Leave **Issues** and **Comments** ticked. Inbox notifications and permission changes stay off.

@@ -31,7 +31,7 @@ Accepting a dependency or image finding that cannot be fixed yet is a maintainer
 
 Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [web/AGENTS.md](./web/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
-Run `mise tasks --all` with `MISE_EXPERIMENTAL=1` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
+Run `mise tasks --all` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
 
 ## Git workflow
 
@@ -77,7 +77,6 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 
 - **No approved issue** — Create issue → `approved` label → self-assign → comment "Starting implementation". See [ADR-003](./docs/decisions/ADR-003-contribution-governance.md).
 - **Branch without issue number** — Unauthorized work.
-- **`MISE_EXPERIMENTAL=1`** — Required for `mise //cdk:build` and other namespaced tasks ([CONTRIBUTING.md](./CONTRIBUTING.md)).
 - **Trailing whitespace, missing final newline, conflict markers, unparseable YAML or JSON** — the build checks these as well as the commit hook: `mise run check:hygiene` (part of `mise run drift-prevention`) runs the hooks `trailing-whitespace`, `end-of-file-fixer`, `check-merge-conflict`, `check-yaml` and `check-json` over all tracked files, with the exclusions of `.pre-commit-config.yaml`. The output names the failed hook and the file. The first two correct the file and fail that run: keep the change and run again. The other three change nothing: they print the line of the marker, or the parser's message.
 - **`prek install` fails** — Another hook manager owns `core.hooksPath`; see [CONTRIBUTING.md](./CONTRIBUTING.md).
 - **Dropping solution UA on a new AWS client (#319)** — every outbound AWS call carries `md/uksb-wt64nei4u6#{component}` (the `app/` segment is SDK-native via `AWS_SDK_UA_APP_ID`, set by `SolutionUaAspect`). Construct clients through the attributed factory: `cdk/src/` and `cli/src/` via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` (`cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`); `agent/src/` via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed). A naked `new XxxClient({})` / `boto3.client(...)` silently loses solution attribution. In the agent, lint enforces it: ruff `TID251` fails on `boto3.client`, `boto3.resource` and any boto3 or botocore session outside `agent/src/aws_session.py` (tests are exempt). Keep the three `ua` modules (`agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`) identical in id/wire-format/sanitization.

@@ -149,7 +149,7 @@ docs/abca-plugin/
 
 ### Manual installation and deployment
 
-Install [mise](https://mise.jdx.dev/getting-started.html) if you want to use repo tasks (`mise run install`, `mise run build`). For monorepo-prefixed tasks (`mise //cdk:build`, etc.), set **`MISE_EXPERIMENTAL=1`** — see [CONTRIBUTING.md](./CONTRIBUTING.md).
+Install [mise](https://mise.jdx.dev/getting-started.html) if you want to use repo tasks (`mise run install`, `mise run build`, and monorepo-prefixed ones such as `mise //cdk:build`) — see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 Follow the [Developer Guide](./docs/guides/DEVELOPER_GUIDE.md) to set up your environment and deploy the application to your AWS account.
 Then, follow the [User Guide](./docs/guides/USER_GUIDE.md) to learn how to use the system.
