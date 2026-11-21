@@ -590,7 +590,7 @@ CloudWatch dashboard shows, per task:
 
 ### 9.5 Alarms
 
-Currently deferred — no operational notification channel exists for this project beyond Slack/email user-facing notifications. When an ops channel is added (SNS/PagerDuty), the alarm plumbing is a small follow-up; the metric data is already flowing.
+The alarms the stack deploys notify one SNS topic, `OperationalAlerts`. For this design that is the DLQ-depth alarm of the fan-out consumer, the signal that the fail-open notification dispatcher of section 9.1 is losing events. The topic has no subscriber until an operator adds one: see [Alarm notifications](./OBSERVABILITY.md#alarm-notifications).
 
 ---
 

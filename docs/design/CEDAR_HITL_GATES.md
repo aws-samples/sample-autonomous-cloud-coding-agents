@@ -2102,7 +2102,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 
 ## 15. Implementation plan
 
-> **Status note (post-implementation):** The v1 core described below is **shipped on `main`** — the 3-outcome engine, hard/soft default policy sets, the approval/deny/pending/policies Lambdas and their API routes, and the cross-engine parity contract all exist and are tested. The task list and scenarios in this section are retained as the historical design-and-build record; treat them as descriptive of what was built rather than as outstanding work. Items still explicitly deferred are tracked in §15.1 ("Future work — polish") and §17 (e.g. CLI inline streaming prompt, `approve --defer` / allowlist revocation, CloudWatch alarm plumbing, persistent recent-decision cache, persistent per-minute rate limit).
+> **Status note (post-implementation):** The v1 core described below is **shipped on `main`** — the 3-outcome engine, hard/soft default policy sets, the approval/deny/pending/policies Lambdas and their API routes, and the cross-engine parity contract all exist and are tested. The task list and scenarios in this section are retained as the historical design-and-build record; treat them as descriptive of what was built rather than as outstanding work. Items still explicitly deferred are tracked in §15.1 ("Future work — polish") and §17 (e.g. CLI inline streaming prompt, `approve --defer` / allowlist revocation, the additional CloudWatch alarms of §11.5, persistent recent-decision cache, persistent per-minute rate limit).
 
 ### 15.1 Milestone structure
 
