@@ -81,7 +81,15 @@ interface BlueprintProps {
 }
 ```
 
-At deploy time, the construct creates a CDK custom resource that writes (PutItem) the `RepoConfig` record with `status: 'active'`. When removed from the stack, it soft-deletes (`status: 'removed'`). Redeploying with updated props overwrites the record.
+At deploy time, the construct creates a CDK custom resource that writes the `RepoConfig` record:
+
+- **Create** (the first deploy of the construct): `PutItem` writes the whole record with `status: 'active'` and every override the Blueprint declares. It replaces a record that already exists for the repo.
+- **Update** (every later deploy): `UpdateItem` sets `status: 'active'`, `updated_at` and every override the Blueprint declares. It removes the registry asset lists (`mcp_servers`, `cedar_policy_modules`, `skills`) that the Blueprint does not declare, and leaves every other attribute as it is.
+- **Delete** (the construct is removed from the stack): `UpdateItem` soft-deletes the record (`status: 'removed'`).
+
+A redeploy therefore does not overwrite the record. An override that was deleted from the Blueprint keeps its last value: a deleted `agent.maxBudgetUsd` is still the repo's default budget, and a deleted `agent.modelId` still selects the old model. This holds for every override except the asset lists: `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd`, `system_prompt_overrides`, `github_token_secret_arn`, `poll_interval_ms`, `build_command`, `lint_command`, `egress_allowlist`, `cedar_policies` and `approval_gate_cap`. An empty string or an empty list does not clear one either.
+
+The update is selective on purpose. `bgagent repo onboard` writes the same record ([ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)), and the update runs on every deploy: if it cleared what the Blueprint does not declare, an unrelated deploy would delete a value an operator set with the CLI, such as a model pin. So a Blueprint owns the attributes it declares, which every deploy writes again, and the three asset lists. Any other attribute stays as its last writer left it. To clear one, see [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
 
 ### RepoConfig schema
 

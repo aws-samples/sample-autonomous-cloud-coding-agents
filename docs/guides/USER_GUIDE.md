@@ -240,6 +240,32 @@ Blueprints can configure per-repository settings that override platform defaults
 
 When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) is used. The same override pattern applies to `--max-budget` / `max_budget_usd`, except there is no platform default  - if neither the task nor the Blueprint specifies a budget, no cost limit is applied.
 
+### Removing a per-repo override
+
+Deleting an override from the Blueprint and redeploying does not remove it. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value: a deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) are removed from the record when the Blueprint stops declaring them.
+
+`bgagent repo onboard` has no option that removes a setting. When you run it again for an onboarded repository, it keeps the stored value of every option you leave out, and a stored `max_budget_usd`.
+
+To change an override, set the new value in the Blueprint and redeploy. To remove one, so that the platform default applies again:
+
+1. Delete the setting from the Blueprint. Otherwise the next deploy writes it back.
+2. Remove the attribute from the repository's record. The table is the `RepoTableName` stack output (`bgagent platform outputs` prints it), and the attribute has the name of the setting in the table above; the design document linked below names the attributes that are not in that table. The condition makes a mistyped repository name fail instead of writing a new, empty record:
+
+   ```bash
+   aws dynamodb update-item \
+     --table-name <RepoTableName> \
+     --key '{"repo": {"S": "owner/repo"}}' \
+     --update-expression "REMOVE max_budget_usd" \
+     --condition-expression "attribute_exists(repo)" \
+     --return-values UPDATED_OLD
+   ```
+
+   The command prints the value it removed. No output means that the record had no attribute of that name.
+
+3. Run `bgagent repo show <owner/repo>`: the setting is no longer marked `(per-blueprint override)`. `bgagent repo show` does not list `build_command` or `lint_command`: for these two, the output of step 2 is the check.
+
+The change applies to tasks submitted after it. A task that is already running keeps the values it started with. [Repository onboarding](../design/REPO_ONBOARDING.md#blueprint-construct) lists every attribute that behaves this way and explains why a redeploy leaves them alone.
+
 ### Where can I set `max_budget_usd`?
 
 Every place a per-task runtime budget can come from:
@@ -264,7 +290,7 @@ new Blueprint(this, 'MyRepo', {
 });
 ```
 
-Run `bgagent repo show <owner/repo>` to see which value is in effect; the `max_budget_usd` line reads `(per-blueprint override)` when the repo pins one and `(platform default) unlimited` when it does not.
+Run `bgagent repo show <owner/repo>` to see which value is in effect; the `max_budget_usd` line reads `(per-blueprint override)` when the repo pins one and `(platform default) unlimited` when it does not. Deleting `agent.maxBudgetUsd` from the Blueprint does not lift the budget: see [Removing a per-repo override](#removing-a-per-repo-override).
 
 ### Per-task budgets are unlimited by default
 
