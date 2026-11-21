@@ -181,7 +181,7 @@ describe('CloudFormation assembly census', () => {
       new CfnResource(producer, 'Bucket', { type: 'AWS::S3::Bucket' });
       const consumer = new Stack(app, 'Consumer');
       new CfnResource(consumer, 'Queue', { type: 'AWS::SQS::Queue' });
-      if (dependent) consumer.addDependency(producer);
+      if (dependent) consumer.addStackDependency(producer);
       app.synth();
     }
     expect(inspectAssembly(path.join(directory, 'second')).stackDependencies).toEqual({

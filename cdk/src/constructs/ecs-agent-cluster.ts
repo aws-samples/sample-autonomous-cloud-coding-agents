@@ -356,7 +356,7 @@ export class EcsAgentCluster extends Construct {
     // ECS Cluster with Fargate capacity provider and container insights
     this.cluster = new ecs.Cluster(this, 'Cluster', {
       vpc: props.vpc,
-      containerInsights: true,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
     // Security group — egress TCP 443 only
@@ -764,7 +764,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(this.cluster, [
       {
         id: 'AwsSolutions-ECS4',
-        reason: 'Container insights is enabled via the containerInsights prop',
+        reason: 'Container insights is enabled via the containerInsightsV2 prop',
       },
     ], true);
   }
