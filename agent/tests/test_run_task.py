@@ -341,7 +341,7 @@ class TestHowAFinishedTaskIsRecorded:
 
 
 # The variables of the process environment that tell git, ``gh``, the agent and
-# the commit hook who a task is.
+# the commit hook who a task is, and which step of its workflow is running.
 _TASK_ENV_VARS = (
     "GIT_AUTHOR_NAME",
     "GIT_AUTHOR_EMAIL",
@@ -351,6 +351,8 @@ _TASK_ENV_VARS = (
     "GH_TOKEN",
     "TASK_ID",
     "PROMPT_VERSION",
+    "WORKFLOW_ID",
+    "WORKFLOW_STEP",
 )
 
 
@@ -361,9 +363,9 @@ def _task_environ(environ=os.environ) -> dict[str, str | None]:
 class TestWhatATaskLeavesInTheEnvironment:
     """git, ``gh`` and the agent are started with the environment of the process,
     so that is where a task puts its commit identity, its GitHub token, and the
-    task id and prompt version of its commit trailers. The process can go on
-    after the task: a server that takes the next one, a script, this test run.
-    ``run_task`` leaves these variables as it found them."""
+    task id, prompt version, workflow id and workflow step of its commit trailers.
+    The process can go on after the task: a server that takes the next one, a
+    script, this test run. ``run_task`` leaves these variables as it found them."""
 
     @pytest.fixture(params=["unset", "set"])
     def before(self, request, monkeypatch) -> dict[str, str | None]:
@@ -388,6 +390,8 @@ class TestWhatATaskLeavesInTheEnvironment:
             "GH_TOKEN": "ghp_test",
             "TASK_ID": "t-1",
             "PROMPT_VERSION": "1c9c10e027a2",
+            "WORKFLOW_ID": "coding/new-task-v1",
+            "WORKFLOW_STEP": "implement",
         }
         assert _task_environ() == before
 

@@ -95,7 +95,7 @@ Cross-session, durable memory with semantic search. The agent writes after each 
 
 ### Code attribution
 
-Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during `setup_repo()`). The prompt version is a SHA-256 hash of deterministic prompt parts only (memory context is excluded because it varies per run). This enables queries like "what prompt led to this code change?" and supports the evaluation pipeline.
+Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during `setup_repo()`; it also names the workflow and its step, see [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability#code-attribution)). The prompt version is a SHA-256 hash of deterministic prompt parts only (memory context is excluded because it varies per run). This enables queries like "what prompt led to this code change?" and supports the evaluation pipeline.
 
 ### Review feedback memory
 

@@ -180,7 +180,16 @@ When an alarm is in `ALARM` and no notification arrives, follow [Troubleshooting
 
 ## Code attribution
 
-Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during repo setup). This links code changes to the task and prompt that produced them, enabling queries like "what prompt led to this change?" and supporting the evaluation pipeline.
+Every agent commit carries attribution trailers (via a git hook installed during repo setup):
+
+| Trailer | Example | Links the commit to |
+|---------|---------|---------------------|
+| `Task-Id:` | `01KRPZ3PF8ZBRZ2600GRJS2VF7` | The task |
+| `Prompt-Version:` | `1c9c10e027a2` | The system prompt the task ran with (a hash of it) |
+| `Workflow-Id:` | `coding/new-task-v1` | The workflow the task ran |
+| `Workflow-Step:` | `implement` | The workflow step that was running when the commit was made: the step's `name`, else its `kind` |
+
+This links code changes to the task, the prompt and the workflow step that produced them, enabling queries like "what prompt led to this change?" and "which step made this commit?" from `git log` alone, and supporting the evaluation pipeline. The safety-net commit of work the agent left uncommitted carries the same trailers and names the agent step, whose work it saves.
 
 Task conversations, tool calls, decisions, and outcomes are persisted with metadata (`task_id`, `session_id`, `repo`, `branch`, `commit SHAs`, `pr_url`) in a searchable store. The agent retrieves relevant past context via memory search at task start. See [MEMORY.md](./MEMORY.md) for the memory lifecycle and retrieval strategy.
 

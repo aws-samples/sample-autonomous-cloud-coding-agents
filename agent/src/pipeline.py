@@ -1036,9 +1036,11 @@ def _write_memory(
 
 #: The variables in ``os.environ`` that tell the processes a task starts (git,
 #: ``gh``, Claude Code, the commit hook) who it is: the commit identity, the
-#: GitHub token, and the task id and prompt version of the commit trailers.
-#: ``run_task`` sets them before the repository setup; the runner sets the token
-#: again before each agent run.
+#: GitHub token, and the task id, prompt version, workflow id and workflow step
+#: of the commit trailers. ``run_task`` sets them before the repository setup,
+#: all but ``WORKFLOW_ID`` and ``WORKFLOW_STEP``, which the workflow step runner
+#: sets when a step starts; the agent runner sets the token again before each
+#: agent run.
 _TASK_ENV_VARS = (
     "GIT_AUTHOR_NAME",
     "GIT_AUTHOR_EMAIL",
@@ -1048,6 +1050,8 @@ _TASK_ENV_VARS = (
     "GH_TOKEN",
     "TASK_ID",
     "PROMPT_VERSION",
+    "WORKFLOW_ID",
+    "WORKFLOW_STEP",
 )
 
 
@@ -1346,7 +1350,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # ~/.gitconfig — harmless in the ephemeral container, but destructive
             # when this pipeline runs on a developer workstation (#622).
             # These six and the two below last as long as this call: they are
-            # the names in _TASK_ENV_VARS, which _task_environ_restored puts
+            # among the names in _TASK_ENV_VARS, which _task_environ_restored puts
             # back when run_task is left (#635). A variable added here goes
             # there too.
             os.environ["GIT_AUTHOR_NAME"] = "bgagent"

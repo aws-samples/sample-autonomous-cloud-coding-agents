@@ -9,6 +9,7 @@ tested independently of the real (SDK/git/boto3-backed) handlers.
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -199,6 +200,37 @@ def test_milestone_uses_kind_when_name_absent():
     progress = _RecordingProgress()
     run_workflow(wf, _ctx(wf, progress), handlers={"run_agent": _ok()})
     assert "step:run_agent:start" in progress.milestones
+
+
+def test_running_step_is_named_in_the_environment_of_the_commit_hook(monkeypatch):
+    # prepare-commit-msg.sh writes WORKFLOW_ID and WORKFLOW_STEP on a commit as its
+    # Workflow-Id and Workflow-Step trailers (#560). Whatever commits while a step
+    # runs, the agent's git or a handler, inherits them from this process.
+    monkeypatch.setenv("WORKFLOW_ID", "default/agent-v1")  # left by an earlier run
+    monkeypatch.setenv("WORKFLOW_STEP", "deliver")
+    named: list[tuple[str, str]] = []
+
+    def record(step: Step, ctx: StepContext) -> StepOutcome:
+        named.append((os.environ["WORKFLOW_ID"], os.environ["WORKFLOW_STEP"]))
+        return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
+
+    wf = _workflow(
+        [
+            {"kind": "clone_repo", "name": "setup"},
+            {"kind": "run_agent", "name": "implement"},
+            {"kind": "ensure_pr", "strategy": "create"},  # no name: named by its kind
+        ]
+    )
+    handlers: dict[str, StepHandler] = dict.fromkeys(
+        ("clone_repo", "run_agent", "ensure_pr"), record
+    )
+    run_workflow(wf, _ctx(wf), handlers=handlers)
+
+    assert named == [
+        ("coding/new-task-v1", "setup"),
+        ("coding/new-task-v1", "implement"),
+        ("coding/new-task-v1", "ensure_pr"),
+    ]
 
 
 class TestCheckpointResume:

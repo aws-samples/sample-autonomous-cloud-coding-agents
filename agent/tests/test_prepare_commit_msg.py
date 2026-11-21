@@ -1,10 +1,12 @@
 """The ``prepare-commit-msg`` hook, run by git in a repository under ``tmp_path``.
 
 The agent installs the hook into every repository it works on (``repo.py``). It
-puts a ``Task-Id`` and a ``Prompt-Version`` trailer on each commit. Git reads the
-trailers of a message from its LAST paragraph only, so where the hook writes its
-two decides whether the trailers the message already ends with, such as
-``Co-Authored-By``, are still trailers afterwards.
+puts a ``Task-Id`` and a ``Prompt-Version`` trailer on each commit, and a
+``Workflow-Id`` and a ``Workflow-Step`` trailer on a commit made while a workflow
+step is named in the environment. Git reads the trailers of a message from its
+LAST paragraph only, so where the hook writes its own decides whether the trailers
+the message already ends with, such as ``Co-Authored-By``, are still trailers
+afterwards.
 """
 
 import os
@@ -17,6 +19,8 @@ from repo import _install_commit_hook
 _CO_AUTHOR = "Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 _TASK_ID = "Task-Id: 01KRPZ3PF8ZBRZ2600GRJS2VF7"
 _PROMPT_VERSION = "Prompt-Version: 1c9c10e027a2"
+_WORKFLOW_ID = "Workflow-Id: coding/new-task-v1"
+_WORKFLOW_STEP = "Workflow-Step: implement"
 
 
 def _git(repo, *args, **env) -> str:
@@ -40,8 +44,9 @@ def repo(tmp_path):
     return tmp_path
 
 
-def _commit(repo, *args, prompt_version="1c9c10e027a2") -> None:
-    """Commit as the agent does: the task and the prompt version are in the environment."""
+def _commit(repo, *args, prompt_version="1c9c10e027a2", workflow_id="", workflow_step="") -> None:
+    """Commit as the agent does: the task and the prompt version are in the
+    environment, and so are the workflow and its step while a step runs."""
     _git(
         repo,
         "commit",
@@ -50,6 +55,8 @@ def _commit(repo, *args, prompt_version="1c9c10e027a2") -> None:
         *args,
         TASK_ID="01KRPZ3PF8ZBRZ2600GRJS2VF7",
         PROMPT_VERSION=prompt_version,
+        WORKFLOW_ID=workflow_id,
+        WORKFLOW_STEP=workflow_step,
     )
 
 
@@ -87,3 +94,29 @@ def test_rule_in_the_body_is_not_taken_for_the_end_of_the_message(repo):
     _commit(repo, "-m", "docs: describe the flow\n\nBefore the rule.\n\n---\n\nAfter the rule.")
 
     assert _message(repo).endswith(f"After the rule.\n\n{_TASK_ID}\n{_PROMPT_VERSION}")
+
+
+def test_commit_of_a_workflow_step_names_the_workflow_and_the_step(repo):
+    _commit(
+        repo,
+        "-m",
+        f"fix: handle empty input\n\n{_CO_AUTHOR}",
+        workflow_id="coding/new-task-v1",
+        workflow_step="implement",
+    )
+
+    assert _trailers(repo) == [_CO_AUTHOR, _TASK_ID, _PROMPT_VERSION, _WORKFLOW_ID, _WORKFLOW_STEP]
+
+
+def test_amended_commit_keeps_the_step_it_was_made_in(repo):
+    _commit(
+        repo,
+        "-m",
+        "fix: handle empty input",
+        workflow_id="coding/new-task-v1",
+        workflow_step="implement",
+    )
+
+    _commit(repo, "--amend", "--no-edit", workflow_id="coding/new-task-v1", workflow_step="build")
+
+    assert _trailers(repo) == [_TASK_ID, _PROMPT_VERSION, _WORKFLOW_ID, _WORKFLOW_STEP]
