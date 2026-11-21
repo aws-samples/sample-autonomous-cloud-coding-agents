@@ -18,6 +18,7 @@
  */
 
 import { App, AppProps, AspectPriority, Aspects, STACK_RESOURCE_LIMIT_CONTEXT, Stack, Tags } from 'aws-cdk-lib';
+import { AWS_CUSTOM_RESOURCE_LATEST_SDK_DEFAULT } from 'aws-cdk-lib/cx-api';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { BlueprintDefinition, blueprintEgressDomains, resolveBlueprintDefinitions } from './blueprints/definitions';
 import {
@@ -91,6 +92,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   }
   // Apply to every parent and nested template, including newly extracted stacks.
   app.node.setContext('@aws-cdk/core:suppressTemplateIndentation', true);
+  // Each AwsCustomResource calls AWS with the SDK of the Lambda runtime. The CDK default has
+  // it npm-install the latest SDK at deploy time, on every cold start of its provider.
+  app.node.setContext(AWS_CUSTOM_RESOURCE_LATEST_SDK_DEFAULT, false);
   // Enforce the same ceiling on actual deploy inputs, including operator overrides
   // outside the census. CDK applies this context to parent and nested stacks.
   const configuredLimit: unknown = app.node.tryGetContext(STACK_RESOURCE_LIMIT_CONTEXT);

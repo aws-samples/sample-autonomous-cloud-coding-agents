@@ -144,6 +144,14 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
     expect(warnings).toEqual([]);
   });
 
+  test('emits no warning for a custom resource on the latest-SDK default or a rule that cdk-nag could not evaluate', () => {
+    const warnings = assembly.stacks.flatMap(stack => stack.messages
+      .filter(message => message.level === 'warning'
+        && /installLatestAwsSdk|CdkNagValidationFailure/.test(String(message.entry.data)))
+      .map(message => `${stack.stackName}/${message.id}: ${String(message.entry.data)}`));
+    expect(warnings).toEqual([]);
+  });
+
   test('keeps API Gateway Lambda permissions method-scoped without console test-invoke grants', () => {
     expect(apiPermissions.length).toBeGreaterThan(0);
     const offenders = apiPermissions.filter(({ sourceArn }) => {
