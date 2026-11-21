@@ -523,7 +523,7 @@ Submitted with the task (optional) or resolved from repo defaults:
 ### 7.4 Event table privacy
 
 - Previews truncate to 200 chars → low risk of accidental secret capture in common cases.
-- Agent-side output scanners redact secrets before calling `ProgressWriter`.
+- The runner screens the text of its events before `ProgressWriter` cuts it to a preview: the model's thinking and text, tool input, tool output and the message of a session error. What the output scanner (`agent/src/output_scanner.py`) or the redaction of log lines takes for a credential is replaced by a marker such as `[REDACTED-AWS_KEY]`.
 - `--trace` flag opts into larger previews + S3 trajectory dumps; S3 objects are written to a user-scoped prefix with short TTL.
 
 ---
