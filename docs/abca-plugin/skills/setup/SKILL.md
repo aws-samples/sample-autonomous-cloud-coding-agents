@@ -56,15 +56,17 @@ Common Phase 2 snags to pre-empt (don't let these read as a broken environment):
 - "config not trusted" for `~/.config/mise/config.toml` → run `mise trust` on the user-global config too, not just the project one.
 - In a non-interactive/spawned shell, `mise` may not be on `PATH` → use `~/.local/bin/mise` or `mise exec --`.
 
-## Phase 3: One-Time Host Setup (build architecture)
+## Phase 3: Host Setup (build architecture)
 
-The agent image is built for **linux/arm64** (AgentCore runs on Graviton). On an **x86_64** build host this is the most common first-deploy blocker — the image build dies with `exec /bin/sh: exec format error`. Register QEMU emulation once per host:
+The agent image is built for **linux/arm64** (AgentCore runs on Graviton). On an **x86_64** build host this is the most common first-deploy blocker — the image build dies with `exec /bin/sh: exec format error`. Register QEMU emulation:
 
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install arm64
 ```
 
-If `docker run --privileged` is blocked (security-managed hosts), deploy from a **native arm64 host** (Graviton EC2 / Apple Silicon) instead. On Apple Silicon / arm64 hosts, skip this phase.
+The registration does not survive a reboot: it is kernel state (`binfmt_misc`), not saved on disk, and stopping and starting a cloud dev box is a reboot. Run the command again whenever the host has restarted (repeating it is harmless), and tell the user, so that an `exec format error` on a host that deployed before is no surprise.
+
+If `docker run --privileged` is blocked (security-managed hosts), or the user would rather not register again after every reboot, deploy from a **native arm64 host** (Graviton EC2 / Apple Silicon) instead. On Apple Silicon / arm64 hosts, skip this phase.
 
 **X-Ray tracing is OPTIONAL — do not gate deployment on it.** The stack ships with X-Ray→CloudWatch-Logs export disabled (`tracingEnabled` in `agent.ts`), so it deploys and runs fully without any X-Ray setup. Do NOT run `aws xray update-trace-segment-destination` as a prerequisite — on a security-managed AWS Org account an SCP can make that call fail with `AccessDeniedException` no matter what, dead-ending the user on a step the platform doesn't use. Mention tracing only as an opt-in extra.
 

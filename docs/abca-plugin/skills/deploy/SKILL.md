@@ -31,7 +31,7 @@ Before any deployment action, verify:
    This runs agent quality checks, CDK compilation + tests, CLI build, and docs build. Do NOT deploy if the build fails. Note: a passing build is noisy — it prints many `ERROR`/`WARN` and cdk-nag lines from test fixtures. Trust the **exit code (0 = pass)**, not the log volume.
 
 2. **Docker is running** — Required for CDK asset bundling.
-3. **Build host architecture** — The agent image targets `linux/arm64` (AgentCore is Graviton). On an **x86_64** host without QEMU/binfmt, the deploy fails partway with `exec /bin/sh: exec format error`. Register emulation once with `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or deploy from a native arm64 host (Graviton / Apple Silicon). Skip on arm64 hosts.
+3. **Build host architecture** — The agent image targets `linux/arm64` (AgentCore is Graviton). On an **x86_64** host without QEMU/binfmt, the deploy fails partway with `exec /bin/sh: exec format error`. Register emulation with `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or deploy from a native arm64 host (Graviton / Apple Silicon). The registration is kernel state and does not survive a reboot (stopping and starting a cloud dev box counts), so a host that deployed before can fail again: run the command again after a restart; repeating it is harmless. Skip on arm64 hosts.
 4. **AWS credentials are configured** — `aws sts get-caller-identity` (confirm it's the intended account/region).
 
 ## Deploy Workflow

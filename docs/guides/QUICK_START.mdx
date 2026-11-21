@@ -167,7 +167,9 @@ The agent runs on AgentCore (**Graviton / arm64**), so the container image is bu
 docker run --privileged --rm tonistiigi/binfmt --install arm64
 ```
 
-If `docker run --privileged` is blocked on your host (common on security-managed machines), build from a **native arm64 host** instead (Graviton EC2 or Apple Silicon) — no emulation needed. Apple Silicon and other arm64 hosts can skip this step entirely. Note that the emulated build is noticeably slower than a native one.
+The registration does **not** survive a reboot. It is kernel state (`binfmt_misc`), not a setting saved on disk, so it is gone after the host restarts, and stopping and starting a cloud dev box is a restart. If a deploy that worked before fails with `exec format error` again, run the command again; repeating it is harmless.
+
+If `docker run --privileged` is blocked on your host (common on security-managed machines), or you would rather not register again after every reboot, build from a **native arm64 host** instead (Graviton EC2 or Apple Silicon) — no emulation needed. Apple Silicon and other arm64 hosts can skip this step entirely. Note that the emulated build is noticeably slower than a native one.
 
 :::
 
@@ -497,7 +499,7 @@ Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 |---|---|---|
 | `yarn: command not found` | Corepack not enabled or mise not activated in your shell | Run `eval "$(mise activate zsh)"`, then `corepack enable && corepack prepare yarn@1.22.22 --activate` |
 | `MISE_EXPERIMENTAL required` | Namespaced tasks need the experimental flag | `export MISE_EXPERIMENTAL=1` |
-| `exec /bin/sh: exec format error` during image build | x86 host building the arm64 (Graviton) agent image without QEMU/binfmt | Run `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or build from a native arm64 host (see Step 3 caution) |
+| `exec /bin/sh: exec format error` during image build | x86 host building the arm64 (Graviton) agent image without QEMU/binfmt. A reboot clears the registration, so the error can come back on a host that deployed before | Run `docker run --privileged --rm tonistiigi/binfmt --install arm64` (again after every reboot), or build from a native arm64 host (see Step 3 caution) |
 | `AccessDeniedException` on `update-trace-segment-destination` | X-Ray → CloudWatch Logs tracing is optional and the call may be SCP-blocked on Org accounts | **Skip it** — tracing is disabled by default and not required to deploy (see Step 3 note) |
 | `mise run build` fails with `ec2:DescribeAvailabilityZones` error | AWS credentials missing or insufficient for CDK synth | Set `AWS_PROFILE` or configure credentials with at least EC2 read access |
 | CDK deploy prompts for approval and hangs | `mise //cdk:deploy` in a non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` (the Step 3 advanced note uses it), or use `bgagent setup`, which asks for confirmation itself |
