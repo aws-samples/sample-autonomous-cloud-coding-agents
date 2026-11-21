@@ -422,6 +422,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     model_id: repoConfig?.model_id,
     max_turns: repoConfig?.max_turns,
     max_budget_usd: repoConfig?.max_budget_usd,
+    memory_token_budget: repoConfig?.memory_token_budget,
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
     poll_interval_ms: pollIntervalMs,
@@ -580,11 +581,13 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 
   // One GitHub token for all that hydration fetches, the URL attachments included:
   // the repository's own where its blueprint sets one, else the platform's
-  // (loadBlueprintConfig has merged the two).
-  const githubTokenSecretArn = blueprintConfig?.github_token_secret_arn;
+  // (loadBlueprintConfig has merged the two). The memory token budget is the
+  // repository's own, or undefined, which hydration reads as the platform default.
+  const { github_token_secret_arn: githubTokenSecretArn, memory_token_budget: memoryTokenBudget } = blueprintConfig ?? {};
   const hydratedContext = await hydrateContext(task, {
     githubTokenSecretArn,
     memoryId: MEMORY_ID,
+    memoryTokenBudget,
   });
 
   // If guardrail screening blocked the hydrated context, emit audit event and throw

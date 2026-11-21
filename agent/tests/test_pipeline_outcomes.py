@@ -294,6 +294,15 @@ class TestDeliveryGate:
         assert "agent_status=success" in err
         assert "deliverable=lost" in err
 
+    def test_lost_reason_names_both_lost_work_and_a_run_that_changed_nothing(self):
+        # The gate sees the same thing for work that was lost and for a run that
+        # correctly changed nothing (#751). Slack and the CLI print this reason
+        # as it is, so it must not state that there were changes.
+        _, err = self._gate()
+        assert err is not None
+        assert "the agent made no change" in err
+        assert "its changes did not land" in err
+
 
 class TestChainPriorAgentError:
     def test_none_agent_result_returns_exception_only(self):
@@ -335,13 +344,14 @@ class TestComputeTurnsCompleted:
         # and no invented turns.
         assert _compute_turns_completed(turns, max_turns=10) == turns
 
-    def test_clamps_when_sdk_overreports(self):
-        # SDK reports max_turns + 1 when the cap fires; clamp to the declared
-        # ceiling so ``turns_completed`` reflects what actually executed.
+    def test_count_above_the_cap_is_clamped(self):
+        # The runner's count, or the CLI's where it stands in, can pass the cap;
+        # clamp to the declared ceiling so ``turns_completed`` reflects what
+        # actually executed.
         assert _compute_turns_completed(11, max_turns=10) == 10
 
     def test_exact_max_passes_through(self):
-        # Edge case: attempted == max_turns; min() is a no-op.
+        # Edge case: the count equals max_turns; min() is a no-op.
         assert _compute_turns_completed(10, max_turns=10) == 10
 
     def test_limit_of_zero_is_no_cap(self):
@@ -350,12 +360,12 @@ class TestComputeTurnsCompleted:
         # agent.maxTurns 0 on ECS) has no turn limit. Its turns are not zero.
         assert _compute_turns_completed(37, max_turns=0) == 37
 
-    def test_none_turns_attempted_round_trips(self):
-        # Missing SDK count must round-trip as None so writers can detect
+    def test_missing_count_round_trips(self):
+        # A missing count must round-trip as None so writers can detect
         # "no turn counter available" vs "zero turns".
         assert _compute_turns_completed(None, max_turns=10) is None
 
-    def test_zero_turns_attempted_round_trips(self):
+    def test_zero_count_round_trips(self):
         # Zero is treated the same as None (falsy) so we don't clamp it to a
         # negative / nonsensical value.
         assert _compute_turns_completed(0, max_turns=10) == 0

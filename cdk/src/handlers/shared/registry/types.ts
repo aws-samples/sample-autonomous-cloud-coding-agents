@@ -96,7 +96,8 @@ export interface RegistryRecord {
   readonly storageMode: StorageMode;
   /** Discovery descriptor (server.json / SKILL.md / arbitrary) — validated body. */
   readonly discovery: Readonly<Record<string, unknown>>;
-  /** ABCA runtime payload (from `_meta` or the CUSTOM body). */
+  /** ABCA runtime payload (from the MCP `_meta` block, the SKILL.md frontmatter, or
+   *  the CUSTOM body). */
   readonly runtime: RuntimePayload;
   readonly publisher?: string;
   readonly createdAt?: string;
@@ -221,7 +222,8 @@ export interface PublishInput {
   readonly publisher?: string;
   /** Force CUSTOM storage (verbatim) instead of a native descriptor. */
   readonly custom?: boolean;
-  /** Dev convenience: drive create → submit → approve so the record resolves. */
+  /** Dev convenience: also approve the record, so it resolves at once. Create and
+   *  submit happen either way; this gates only the final transition to APPROVED. */
   readonly autoApprove?: boolean;
 }
 

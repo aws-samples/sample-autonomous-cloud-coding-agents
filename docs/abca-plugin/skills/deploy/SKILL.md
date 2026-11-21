@@ -25,13 +25,12 @@ Before any deployment action, verify:
 
 1. **Build is clean:**
    ```bash
-   export MISE_EXPERIMENTAL=1
    mise run build
    ```
    This runs agent quality checks, CDK compilation + tests, CLI build, and docs build. Do NOT deploy if the build fails. Note: a passing build is noisy — it prints many `ERROR`/`WARN` and cdk-nag lines from test fixtures. Trust the **exit code (0 = pass)**, not the log volume.
 
 2. **Docker is running** — Required for CDK asset bundling.
-3. **Build host architecture** — The agent image targets `linux/arm64` (AgentCore is Graviton). On an **x86_64** host without QEMU/binfmt, the deploy fails partway with `exec /bin/sh: exec format error`. Register emulation once with `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or deploy from a native arm64 host (Graviton / Apple Silicon). Skip on arm64 hosts.
+3. **Build host architecture** — The agent image targets `linux/arm64` (AgentCore is Graviton). On an **x86_64** host without QEMU/binfmt, the deploy fails partway with `exec /bin/sh: exec format error`. Register emulation with `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or deploy from a native arm64 host (Graviton / Apple Silicon). The registration is kernel state and does not survive a reboot (stopping and starting a cloud dev box counts), so a host that deployed before can fail again: run the command again after a restart; repeating it is harmless. Skip on arm64 hosts.
 4. **AWS credentials are configured** — `aws sts get-caller-identity` (confirm it's the intended account/region).
 
 ## Deploy Workflow
@@ -62,7 +61,6 @@ Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `
 ## Diff Workflow
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:diff
 ```
 
@@ -73,16 +71,14 @@ Summarize the changes: new resources, modified resources, removed resources. Fla
 **CRITICAL: Ask for explicit confirmation before destroying.** Use AskUserQuestion to confirm, explaining consequences.
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:destroy
 ```
 
-**Teardown can stall in `DELETE_FAILED`** on a security group / private subnet: AgentCore injects service-managed (Hyperplane) ENIs into the VPC, and AWS reclaims them **asynchronously (~20–40 min)** after the runtime is gone. Wait for the ENIs to clear, then retry `mise //cdk:destroy`. Do **not** force-delete past the stuck VPC resources (`--deletion-mode FORCE_DELETE_STACK` / retaining them) — that orphans the VPC, and VPCs are quota-capped per Region. Also note: a first-create failure leaves the stack in `ROLLBACK_COMPLETE`, which can't be updated — destroy and redeploy fresh.
+**Teardown can stall in `DELETE_FAILED`** on a security group / private subnet: AgentCore injects service-managed (Hyperplane) ENIs into the VPC, and AWS reclaims them **asynchronously, with no fixed delay**, after the runtime is gone: it can take hours. Do not promise the user a wait time, and do not try to force-detach the ENIs: they belong to `amazon-aws`. While they exist, a retry of `mise //cdk:destroy` fails on the same security group and subnets, so before a retry check that they are gone, with the inspection commands under "Teardown blocked by AgentCore network interfaces" in `docs/guides/DEPLOYMENT_GUIDE.md`. Do **not** use `--deletion-mode FORCE_DELETE_STACK`, and do not retain the stuck VPC resources on your own initiative: what is left behind stays in the account, outside CloudFormation, and VPCs are quota-capped per Region. If the user cannot wait, show them that section: it has the command to finish the deletion with `--retain-resources`, and says what that leaves them to clean up. Also note: a first-create failure leaves the stack in `ROLLBACK_COMPLETE`, which can't be updated — destroy and redeploy fresh.
 
 ## Synth Workflow
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:synth
 ```
 

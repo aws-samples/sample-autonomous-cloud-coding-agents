@@ -50,10 +50,10 @@ To point the default Blueprint at your own repo without editing code, pass it as
 
 ```bash
 # Context variable (preferred)
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
+mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
 
 # Or environment variable
-BLUEPRINT_REPO=your-org/your-repo MISE_EXPERIMENTAL=1 mise //cdk:deploy
+BLUEPRINT_REPO=your-org/your-repo mise //cdk:deploy
 ```
 
 The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that repo and pass your fork (e.g. `-c blueprintRepo=jane-doe/agent-plugins`).
@@ -98,16 +98,16 @@ Before opening a PR, the agent runs a **build** and **lint** command in its clou
 
 The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set `pipeline.buildCommand`** (and optionally `lintCommand`) to its real command — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
 
-Redeploy after changing Blueprints: `mise //cdk:deploy`.
+Redeploy after changing Blueprints: `mise //cdk:deploy`. A redeploy writes the overrides a definition declares. It does not clear one that was deleted from the definition: see [Removing a per-repo override](./USER_GUIDE.md#removing-a-per-repo-override).
 
 ### Stack decomposition and synthesis budgets
 
 `networkTopology` defaults to `inline`, preserving existing network ownership. For a new installation, `split` puts AgentVpc and DnsFirewall in `${stackName}-network`; the application consumes VPC, subnet and security-group exports. The network has no application dependencies. Plain Blueprint definitions are resolved once in `cdk/src/blueprints/definitions.ts` so DNS and repository provisioning use the same domains without cross-stack coupling. Task API routes, authorizers, permissions, CORS and deployment remain together in `AgentStack`.
 
-The CDK build and offline census share 142 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, legacy additive selectors, and [deployment-profile](./DEPLOYMENT_GUIDE.md#deployment-profiles) cells (minimal, each optional feature alone, Linear+Jira, Linear+screenshots, all features). The feature cells also assert that disabled features leave no resources, outputs, routes or Lambda permissions, and that each feature's catalogued footprint stays within 15% of synthesis. The census ignores `abca.deployment.json` (`deploymentProfile=none`). Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and template-size warnings, backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add eight synthetic IDs to the platform defaults and assert that the SessionRole's generated IAM overflow policies pass the audit; these fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
+The CDK build and offline census share 142 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, legacy additive selectors, and [deployment-profile](./DEPLOYMENT_GUIDE.md#deployment-profiles) cells (minimal, each optional feature alone, Linear+Jira, Linear+screenshots, all features). The feature cells also assert that disabled features leave no resources, outputs, routes or Lambda permissions, and that each feature's catalogued footprint stays within 15% of synthesis. The census ignores `abca.deployment.json` (`deploymentProfile=none`). Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and of three synthesis warnings (template size, a custom resource left on CDK's default of downloading the latest SDK, a cdk-nag rule that could not be evaluated), backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add synthetic IDs to the platform defaults and assert that CDK generates IAM overflow policies for the SessionRole and for each backend's compute role, and that those policies pass the audit; these fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:census -- --output /tmp/stack-census
+mise //cdk:census -- --output /tmp/stack-census
 ```
 
 Use `--list` to see the profiles and `--profile NAME` to select them. The census runs the production app with fixed account/AZ inputs, CDK metadata enabled and bundling/staging disabled. It records template inventories, counts, bytes, dependencies and source provenance. The production app sets CDK's `@aws-cdk/core:stackResourceLimit` before any stack is constructed, so actual operator configurations outside the census also fail above 490. Context overrides may tighten but cannot raise the limit. `--max-resources` can only tighten the census audit ceiling.
@@ -141,7 +141,7 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 
 | # | Layer | What it controls | Where | ID form |
 |---|---|---|---|---|
-| 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (default `us`) | **Bare** (`anthropic.claude-…`) |
+| 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (`global` in the shipped `cdk.json`, `us` if no context is supplied at all) | **Bare** (`anthropic.claude-…`) |
 | 2 | **Platform default model** | The model used when nothing narrower is set. Injected by the stack as `ANTHROPIC_MODEL`, derived from `bedrockGeoRegion`; the Python literal is the fallback a run with no env reaches. | `PLATFORM_DEFAULT_MODEL_ID` (`cdk/src/handlers/shared/bedrock-model-constants.ts`) — the value actually injected, so the one to change; then the no-env fallbacks `agent/src/config.py` and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
 | 3 | **Auxiliary / fast model** | The small model Claude Code uses for auxiliary work (WebFetch page summarization, the pre-flight safety check). | Stack env `ANTHROPIC_DEFAULT_HAIKU_MODEL` (`cdk/src/stacks/agent.ts` (the runtime environment block)); agent-side fallback at `agent/src/config.py` | Prefixed (`<geo>.anthropic.…`) |
 | 4 | **Per-repo override** | One repository's model, with no agent redeploy. | Blueprint `agent.modelId` (`cdk/src/constructs/blueprint.ts`, `BlueprintProps.agent.modelId`) → RepoTable `model_id` (`cdk/src/handlers/shared/repo-config.ts`) → ECS injects `ANTHROPIC_MODEL` (`cdk/src/handlers/shared/strategies/ecs-strategy.ts`) | Prefixed (`<geo>.anthropic.…`) |
@@ -237,7 +237,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 
 **Per-task runtime budgets are unlimited by default.** Because no platform-wide per-task runtime ceiling applies, the documented mitigation for cost is choosing a lighter-token model rather than relying only on a cap:
 
-- **Per repo:** Blueprint `agent.modelId` — no code change, no agent redeploy. Prefix it with the geography the stack grants, read from its `BedrockGeoRegion` output; a `us.` prefix on a `global` deployment is granted nothing and fails at turn 0.
+- **Per repo:** Blueprint `agent.modelId` — no code change, no agent redeploy. Prefix it with the geography the stack grants, read from its `BedrockGeoRegion` output. Synth accepts only the `<geo>.<model>` ID form, with the deployment's geography and a granted model: a bare ID, an ARN, another geography's prefix (a `us.` prefix on a `global` deployment is granted nothing) or a model outside the grant list fails it. `bgagent repo onboard --model` refuses the same values.
 - **Per task:** `model_id` in the task payload
 - **Platform-wide:** `PLATFORM_DEFAULT_MODEL_ID` (what every substrate is told to invoke) plus the `bedrockModels` context (what it is granted) — both, or the deploy fails at synth for disagreeing
 
@@ -286,7 +286,6 @@ If `mise run install` fails or versions look wrong:
 | `yarn: command not found` | Activate mise in your shell (`eval "$(mise activate zsh)"`), then `corepack enable && corepack prepare yarn@1.22.22 --activate`. |
 | `node` is not v22 | Activate mise in your shell, then `mise install` from the repo root. |
 | Mise errors about untrusted config | `mise trust` from the repo root, then `mise install` again. |
-| `MISE_EXPERIMENTAL` required | `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`. |
 
 Minimal recovery sequence:
 
@@ -295,7 +294,6 @@ eval "$(mise activate zsh)"   # or bash; add permanently to your shell rc file
 cd /path/to/sample-autonomous-cloud-coding-agents
 mise trust && mise install
 corepack enable && corepack prepare yarn@1.22.22 --activate
-export MISE_EXPERIMENTAL=1
 mise run install
 ```
 
@@ -434,6 +432,8 @@ mise //cdk:deploy
 
 A full deploy takes approximately 10 minutes. Expect variation by region and whether container layers are cached.
 
+Deleting a stack (`mise //cdk:destroy`) can end in `DELETE_FAILED` on the runtime's security group and the VPC's private subnets: AgentCore releases the runtime's network interfaces some time after the runtime is deleted, with no fixed delay (it can take hours). [Teardown blocked by AgentCore network interfaces](./DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentcore-network-interfaces) in the deployment guide shows how to inspect the stack, when to retry, and how to finish the deletion by retaining the blocked resources.
+
 ### Stack outputs
 
 After deployment, the stack emits these outputs (retrieve with `aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table`):
@@ -454,7 +454,7 @@ After deployment, the stack emits these outputs (retrieve with `aws cloudformati
 | `CedarWasmLayerArn` | Lambda layer ARN for the Cedar WASM policy engine |
 | `TraceArtifactsBucketName` | S3 bucket for agent trace artifacts (7-day lifecycle) |
 | `GitHubTokenSecretArn` | Secrets Manager secret ARN for the GitHub PAT |
-| `OperationalAlertsTopicArn` | SNS topic for DLQ and monthly-budget alarms |
+| `OperationalAlertsTopicArn` | SNS topic that every CloudWatch alarm of the stack notifies (Lambda errors, DLQ depth, monthly budgets, webhook screening) |
 
 When the Slack or Linear integrations are enabled, the stack emits additional outputs (e.g. `Slack*` and `Linear*` secret ARNs and integration table names).
 

@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { Annotations, Duration } from 'aws-cdk-lib';
+import { Annotations, Duration, Token } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
@@ -27,6 +27,13 @@ import { Construct, IValidation } from 'constructs';
 // the construct layer stays decoupled from runtime-side types.
 import sharedConstants from '../../../contracts/constants.json';
 import { parseRef } from '../handlers/shared/registry/ref';
+import {
+  BEDROCK_GEO_REGION_CONTEXT_KEY,
+  BEDROCK_MODELS_CONTEXT_KEY,
+  geoPrefixOf,
+  resolveBedrockGeoRegion,
+  resolveBedrockModelIds,
+} from './bedrock-models';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
@@ -92,7 +99,13 @@ export interface BlueprintProps {
    */
   readonly agent?: {
     /**
-     * Foundation model ID override.
+     * Model override, as a Bedrock inference-profile ID: ``<geo>.<model>``, for
+     * example ``global.anthropic.claude-opus-5-5``.
+     *
+     * Checked at synth. Only that form is accepted, with the deployment's
+     * geography (``bedrockGeoRegion`` context) and a model the deployment grants
+     * (``bedrockModels`` context). A bare foundation-model ID, an ARN, another
+     * geography's prefix or a model outside the grant list fails the synth.
      */
     readonly modelId?: string;
 
@@ -113,6 +126,21 @@ export interface BlueprintProps {
      * would have rejected. Out-of-range values fail at synth.
      */
     readonly maxBudgetUsd?: number;
+
+    /**
+     * Token budget for the memory context (repository knowledge and past task
+     * episodes) that context hydration loads into the agent's system prompt
+     * for tasks against this repo (#447). Hydration retrieves at most five
+     * knowledge records and three episodes; the budget decides how many of
+     * them are kept. Knowledge is kept first, then episodes, and the first
+     * record of a kind that does not fit ends that list. A larger budget never
+     * loads more than those eight records.
+     *
+     * Must be a positive integer, at most ``Number.MAX_SAFE_INTEGER``; any
+     * other value fails at synth. A repo whose RepoTable row holds no budget
+     * gets the platform default of 2000 tokens. There is no per-task override.
+     */
+    readonly memoryTokenBudget?: number;
 
     /**
      * Additional system prompt instructions appended to the platform default.
@@ -257,6 +285,12 @@ export class Blueprint extends Construct {
   public readonly maxBudgetUsd?: number;
 
   /**
+   * Per-repo memory token budget from the agent.memoryTokenBudget prop (#447),
+   * exposed for inspection. Undefined when the blueprint did not configure one.
+   */
+  public readonly memoryTokenBudget?: number;
+
+  /**
    * Registry ``registry://`` refs for MCP servers (#246), exposed for inspection.
    */
   public readonly mcpServerRefs: readonly string[];
@@ -273,7 +307,9 @@ export class Blueprint extends Construct {
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
-    this.maxBudgetUsd = props.agent?.maxBudgetUsd;
+    const { maxBudgetUsd, memoryTokenBudget } = props.agent ?? {};
+    this.maxBudgetUsd = maxBudgetUsd;
+    this.memoryTokenBudget = memoryTokenBudget;
     this.mcpServerRefs = [...(props.assets?.mcpServers ?? [])];
     this.cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
     this.skillRefs = [...(props.assets?.skills ?? [])];
@@ -296,6 +332,7 @@ export class Blueprint extends Construct {
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
     this.node.addValidation(new MaxBudgetUsdValidation(this.maxBudgetUsd));
+    this.node.addValidation(new MemoryTokenBudgetValidation(this.memoryTokenBudget));
     this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs, 'mcp_server'));
     this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs, 'cedar_policy_module'));
     this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs, 'skill'));
@@ -318,12 +355,23 @@ export class Blueprint extends Construct {
     }
     if (props.agent?.modelId) {
       item.model_id = { S: props.agent.modelId };
+      // Registered here, next to the write, so that a model is checked exactly when
+      // it is written (the onUpdate builders apply this same test) and a Blueprint
+      // that pins none does not read the model context.
+      this.node.addValidation(new ModelIdValidation(
+        props.agent.modelId,
+        resolveBedrockGeoRegion(this.node),
+        resolveBedrockModelIds(this.node),
+      ));
     }
     if (props.agent?.maxTurns !== undefined) {
       item.max_turns = { N: String(props.agent.maxTurns) };
     }
     if (this.maxBudgetUsd !== undefined) {
       item.max_budget_usd = { N: String(this.maxBudgetUsd) };
+    }
+    if (this.memoryTokenBudget !== undefined) {
+      item.memory_token_budget = { N: String(this.memoryTokenBudget) };
     }
     if (props.agent?.systemPromptOverrides) {
       item.system_prompt_overrides = { S: props.agent.systemPromptOverrides };
@@ -426,6 +474,7 @@ export class Blueprint extends Construct {
     if (props.agent?.modelId) fields.push(', #model_id = :model_id');
     if (props.agent?.maxTurns !== undefined) fields.push(', #max_turns = :max_turns');
     if (this.maxBudgetUsd !== undefined) fields.push(', #max_budget_usd = :max_budget_usd');
+    if (this.memoryTokenBudget !== undefined) fields.push(', #memory_token_budget = :memory_token_budget');
     if (props.agent?.systemPromptOverrides) fields.push(', #system_prompt_overrides = :system_prompt_overrides');
     if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
@@ -449,6 +498,7 @@ export class Blueprint extends Construct {
     if (props.agent?.modelId) names['#model_id'] = 'model_id';
     if (props.agent?.maxTurns !== undefined) names['#max_turns'] = 'max_turns';
     if (this.maxBudgetUsd !== undefined) names['#max_budget_usd'] = 'max_budget_usd';
+    if (this.memoryTokenBudget !== undefined) names['#memory_token_budget'] = 'memory_token_budget';
     if (props.agent?.systemPromptOverrides) names['#system_prompt_overrides'] = 'system_prompt_overrides';
     if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
@@ -470,6 +520,7 @@ export class Blueprint extends Construct {
     if (props.agent?.modelId) values[':model_id'] = { S: props.agent.modelId };
     if (props.agent?.maxTurns !== undefined) values[':max_turns'] = { N: String(props.agent.maxTurns) };
     if (this.maxBudgetUsd !== undefined) values[':max_budget_usd'] = { N: String(this.maxBudgetUsd) };
+    if (this.memoryTokenBudget !== undefined) values[':memory_token_budget'] = { N: String(this.memoryTokenBudget) };
     if (props.agent?.systemPromptOverrides) values[':system_prompt_overrides'] = { S: props.agent.systemPromptOverrides };
     if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
@@ -595,6 +646,116 @@ class MaxBudgetUsdValidation implements IValidation {
         `Invalid agent.maxBudgetUsd: ${this.budget}. ` +
         `Must be between ${MAX_BUDGET_USD_MIN} and ${MAX_BUDGET_USD_MAX}.`,
       ];
+    }
+    return [];
+  }
+}
+
+/**
+ * #447 — validates the per-repo memory token budget is a positive integer, so
+ * a value that is no token count (zero, negative, fractional, non-finite)
+ * fails at synth rather than reaching the RepoTable row. The only upper bound
+ * is ``Number.MAX_SAFE_INTEGER``: the orchestrator's DynamoDB client returns a
+ * larger number as a BigInt. Below that there is none, because context
+ * hydration retrieves a fixed number of memory records and the budget only
+ * decides how many of them are kept. ``undefined`` is allowed: the Blueprint
+ * then writes no budget.
+ */
+class MemoryTokenBudgetValidation implements IValidation {
+  constructor(private readonly budget: number | undefined) {}
+
+  public validate(): string[] {
+    if (this.budget === undefined) {
+      return [];
+    }
+    if (!Number.isSafeInteger(this.budget) || this.budget <= 0) {
+      return [`Invalid agent.memoryTokenBudget: ${this.budget}. Must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}.`];
+    }
+    return [];
+  }
+}
+
+/**
+ * Validates ``agent.modelId`` with the rules ``bgagent repo onboard --model``
+ * applies before it writes the same RepoTable column (``assertModelIdUsable`` in
+ * ``cli/src/model-id.ts``). The Blueprint and the CLI both write ``model_id``
+ * (ADR-017), so a value that only one of them rejects still reaches a task,
+ * which then fails at turn 0 with an error that does not name the model.
+ *
+ * One form is accepted: ``<geo>.<model>``, with the geography and a model that
+ * the grant sites resolve (``resolveBedrockGeoRegion``,
+ * ``resolveBedrockModelIds``), so an ID that passes names a profile this
+ * deployment grants.
+ *
+ * Two rules have no CLI counterpart. Surrounding whitespace is rejected: the
+ * CLI trims ``--model`` and writes the trimmed value, while the Blueprint writes
+ * the prop as given. A CDK token is rejected rather than skipped: its value is
+ * unknown at synth, so it would reach the RepoTable unchecked.
+ */
+class ModelIdValidation implements IValidation {
+  constructor(
+    private readonly modelId: string,
+    private readonly geoRegion: string,
+    private readonly grantedModelIds: readonly string[],
+  ) {}
+
+  public validate(): string[] {
+    const { modelId, geoRegion, grantedModelIds } = this;
+    const invalid = (reason: string): string[] => [`Invalid agent.modelId: '${modelId}'. ${reason}`];
+
+    if (modelId !== modelId.trim()) {
+      return invalid('Remove the surrounding whitespace: the value is written to the RepoTable as given.');
+    }
+    // A token and an ARN have no geography prefix either. Left to the rule after
+    // these two, they would be reported as a bare ID, with a suggestion built from them.
+    if (Token.isUnresolved(modelId)) {
+      return invalid('It contains an unresolved token: agent.modelId must be a literal, so that it can be checked at synth.');
+    }
+    if (modelId.startsWith('arn:')) {
+      return invalid(
+        `It is an ARN. Use the inference-profile ID '${geoRegion}.<model-id>' `
+        + '(for a system-defined profile, the last path segment of its ARN).',
+      );
+    }
+    const geo = geoPrefixOf(modelId);
+    if (geo === undefined) {
+      // With the prefix added, a value that is not a granted model (an alias, an ungranted
+      // ID) still fails the next synth, so no value to use is built from it.
+      if (!grantedModelIds.includes(modelId)) {
+        return invalid(
+          `It has no geography prefix. Use '${geoRegion}.<model-id>' with a model this deployment grants `
+          + `(${grantedModelIds.join(', ')}).`,
+        );
+      }
+      return invalid(
+        'It has no geography prefix, and a bare foundation-model ID cannot be invoked on demand. '
+        + `Use the inference-profile ID '${geoRegion}.${modelId}'.`,
+      );
+    }
+    const bare = modelId.slice(geo.length + 1);
+    if (!bare) {
+      return invalid(`It is a geography prefix with no model after it. Use '${geoRegion}.<model-id>'.`);
+    }
+    const secondGeo = geoPrefixOf(bare);
+    if (secondGeo !== undefined) {
+      // As for a value without a prefix: a value to use is named only when it passes.
+      const rest = bare.slice(secondGeo.length + 1);
+      return invalid(
+        `It carries two geography prefixes ('${geo}.' then '${secondGeo}.'). `
+        + `Use one: '${geoRegion}.${grantedModelIds.includes(rest) ? rest : '<model-id>'}'.`,
+      );
+    }
+    if (!grantedModelIds.includes(bare)) {
+      return invalid(
+        `'${bare}' is not a model this deployment grants (${grantedModelIds.join(', ')}). `
+        + `Add it to the '${BEDROCK_MODELS_CONTEXT_KEY}' context, or pin a granted model.`,
+      );
+    }
+    if (geo !== geoRegion) {
+      return invalid(
+        `It is a '${geo}' inference profile, but this deployment grants '${geoRegion}' profiles `
+        + `('${BEDROCK_GEO_REGION_CONTEXT_KEY}' context). Use '${geoRegion}.${bare}'.`,
+      );
     }
     return [];
   }

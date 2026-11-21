@@ -31,7 +31,7 @@
 #      is configured; that is expected — the artifact bucket must exist before
 #      you can upload to it.
 #
-#        MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE
+#        mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE
 #
 #   2. Package + upload the artifact (this script). It reads the bucket name and
 #      base object key from stack outputs, uploads an immutable hash-suffixed
@@ -51,7 +51,7 @@
 #   4. Redeploy with the base image pinned. THIS is the step that creates the
 #      image resource and injects MICROVM_IMAGE_IDENTIFIER into the orchestrator:
 #
-#        MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \
+#        mise //cdk:deploy -- \
 #          --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \
 #          --context microvm_base_image_arn=<baseImageArn> \
 #          --context microvm_base_image_version=<version> \
@@ -72,7 +72,7 @@
 # to the orchestrator without CDK owning it (pass the image ARN the script prints
 # — `run-microvm` rejects a bare name):
 #
-#   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \
+#   mise //cdk:deploy -- \
 #     --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \
 #     --context microvm_image_identifier=<imageArn>
 #
@@ -236,7 +236,7 @@ error: stack '${STACK_NAME}' has no MicrovmArtifactBucketName/MicrovmArtifactObj
 That means this stack was not deployed with the lambda-microvm compute backend.
 Deploy it first:
 
-  MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE
+  mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE
 EOF
   exit 1
 fi
@@ -338,7 +338,7 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
 
     aws cloudformation describe-stacks --stack-name CDKToolkit \\
       --query 'Stacks[0].Outputs[?OutputKey==\`BootstrapPolicyVersion\`].OutputValue' --output text
-    MISE_EXPERIMENTAL=1 mise //cdk:bootstrap   # ComputeTypes must include lambda-microvm
+    mise //cdk:bootstrap   # ComputeTypes must include lambda-microvm
 
   An older bundle may deny iam:PassRole for the image's build role. Updating the
   source bundle alone does not update the account's installed policies.
@@ -351,7 +351,7 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
   For a new nested deployment (or a completed migration):
 
     aws lambda-microvms list-managed-microvm-images
-    MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\
+    mise //cdk:deploy -- \\
       --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \\
       --context microvm_base_image_arn=<baseImageArn> \\
       --context microvm_base_image_version=<version> \\
@@ -481,7 +481,7 @@ cat <<EOF
 
 Once the version reports status ACTIVE, point the orchestrator at it:
 
-  MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\
+  mise //cdk:deploy -- \\
     --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \\
     --context microvm_image_identifier=${IMAGE_ARN:-${IMAGE_NAME}} \\
     --context microvm_image_version=${IMAGE_VERSION:-1.0}

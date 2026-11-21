@@ -215,7 +215,6 @@ jobs:
       contents: read
     env:
       CI: "true"
-      MISE_EXPERIMENTAL: "1"
     steps:
       - name: Checkout PR head (incl. forks)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -246,8 +245,13 @@ jobs:
         with:
           node-version: 22.x
 
+      # Yarn 1 installs this repository and ignores Yarn Berry's --immutable. Its
+      # own flag, --frozen-lockfile, fails when a dependency of the root
+      # package.json is not in yarn.lock. It does not notice a changed
+      # `resolutions` entry or workspace manifest: "Fail on lockfile drift" in
+      # build.yml catches those.
       - name: Install dependencies
-        run: yarn install --immutable
+        run: yarn install --frozen-lockfile
 
       # Teardown: integ-runner forces `cdk destroy` on success and failure (via
       # the CDK bootstrap roles, which hold the CloudFormation permissions). No
@@ -264,6 +268,12 @@ jobs:
       # is the resolved PR head (or dispatched ref) and RUN_NUMBER is a positive
       # integer, so both are already lowercase-alphanumeric — no sanitizing
       # needed to stay CloudFormation-valid.
+      #
+      # The log of this step first shows integ-runner's snapshot check listing
+      # the test as NEW and counting it as failed. No snapshot is committed, so
+      # that is expected on every run and is not a test failure: the task says
+      # so in the log, and the deploy-then-verify run under "Test Results"
+      # decides the step (#569).
       - name: Run integ tests (deploy → assert → destroy)
         env:
           HEAD_SHA: ${{ needs.resolve.outputs.commit_sha }}

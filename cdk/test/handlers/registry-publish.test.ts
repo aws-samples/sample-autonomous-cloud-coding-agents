@@ -20,6 +20,7 @@
 import { ConflictException, ValidationException } from '@aws-sdk/client-agent-registry-control';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { handler } from '../../src/handlers/registry-publish';
+import { RegistryPublishIncompleteError } from '../../src/handlers/shared/registry/types';
 
 // The handler gets a fake registry client (no AWS), as in registry-handlers.test.ts,
 // which holds the authentication, validation and happy-path cases of this handler.
@@ -107,6 +108,23 @@ describe('registry-publish handler: what a refused publish tells the publisher',
     const { error } = JSON.parse(res.body);
     expect(error.code).toBe('VALIDATION_ERROR');
     expect(error.message).toContain("not in compliance with schema version '2025-12-11'");
+  });
+
+  test('502 with the record id and what to do with it when the publish stops after the record is created', async () => {
+    // What the adapter throws when a step after the create fails, here the wait for a
+    // record that stays in CREATING. The record occupies the version, so a retry is
+    // refused while it exists; approving or deleting it in Agent Registry takes its id.
+    mockPublish.mockRejectedValue(new RegistryPublishIncompleteError(
+      'rec-1',
+      'record mcp_server/acme/pdf-tools@1.0.0 was created (id rec-1) but could not be driven to a resolvable state; approve or delete it before retrying',
+      new Error('record rec-1 did not leave CREATING within 10 polls'),
+    ));
+    const res = await publish(validBody);
+    expect(res.statusCode).toBe(502);
+    const { error } = JSON.parse(res.body);
+    expect(error.code).toBe('REGISTRY_PUBLISH_INCOMPLETE');
+    expect(error.message).toContain('approve or delete it before retrying');
+    expect(error.message).toContain('record id: rec-1');
   });
 });
 

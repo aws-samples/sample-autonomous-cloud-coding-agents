@@ -57,7 +57,7 @@ import {
   buildAdfDocument,
   postIssueCommentAdf,
 } from './shared/jira-feedback';
-import { updateJiraIterationComment } from './shared/jira-preview';
+import { updateJiraIterationComment } from './shared/jira-iteration-comment';
 import {
   jiraIterationFrame,
   renderJiraFinalStatusComment,

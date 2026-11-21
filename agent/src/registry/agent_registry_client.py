@@ -44,6 +44,17 @@ _SKILL_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
 _RESOLVABLE_STATUSES = ("APPROVED", "DEPRECATED")
 
 
+def _json_loads(data: str) -> Any:
+    """``json.loads`` held to what ``JSON.parse`` accepts in agent-registry-client.ts.
+    Left alone it also reads ``NaN``, ``Infinity`` and ``-Infinity``, which are not
+    JSON: a payload the API side rejects as MALFORMED would resolve here (#781)."""
+
+    def reject(literal: str) -> Any:
+        raise ValueError(f"{literal} is not a JSON value")
+
+    return json.loads(data, parse_constant=reject)
+
+
 def _decode_descriptor_json(data: str, what: str) -> dict[str, Any]:
     """json.loads a CUSTOM/MCP descriptor body into a dict, boxing any failure as a
     malformed marker (not a raw ValueError/AttributeError) so a corrupt body
@@ -54,12 +65,26 @@ def _decode_descriptor_json(data: str, what: str) -> dict[str, Any]:
     here rather than raising an unboxed AttributeError that would escape resolve()
     as an opaque error (#837 review)."""
     try:
-        parsed = json.loads(data)
+        parsed = _json_loads(data)
     except (ValueError, TypeError) as exc:
         raise RegistryRecordMalformedError(f"{what} is not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise RegistryRecordMalformedError(f"{what} is not a JSON object")
     return parsed
+
+
+def _descriptor_text(descriptors: Any, *path: str, default: str) -> Any:
+    """Follow ``path`` into a record's ``descriptors`` and return what is there, or
+    ``default`` when a level on the way is missing, an explicit null or not a mapping:
+    the ``?.`` chain closed by ``?? default`` in extractPayload of
+    agent-registry-client.ts. Such a payload is absent, not corrupt, so the record
+    reads as empty and resolve() rejects it as REMOVED on both sides. Chained
+    ``.get(key, {})`` covers only the missing key: a null raises an AttributeError
+    that resolve() does not box (#781)."""
+    node = descriptors
+    for key in path:
+        node = node.get(key) if isinstance(node, dict) else None
+    return default if node is None else node
 
 
 class AgentRegistryClient:
@@ -74,8 +99,10 @@ class AgentRegistryClient:
     # --- name (Option A) decode -------------------------------------------------
 
     @staticmethod
-    def _decode_name(record_name: str) -> tuple[str, str, str]:
-        parts = record_name.split(_NAME_SEP)
+    def _decode_name(record_name: str | None) -> tuple[str, str, str]:
+        # A null name decodes like a missing one, to no coordinates (`?? ''` in the TS
+        # adapter): the `.get("name", "")` of the callers covers only the missing key.
+        parts = (record_name or "").split(_NAME_SEP)
         kind = parts[0] if parts else ""
         namespace = parts[1] if len(parts) > 1 else ""
         name = _NAME_SEP.join(parts[_NAME_MIN_PARTS:]) if len(parts) > _NAME_MIN_PARTS else ""
@@ -88,21 +115,24 @@ class AgentRegistryClient:
     # --- record extraction ------------------------------------------------------
 
     def _extract_runtime(self, raw: dict[str, Any]) -> dict[str, Any]:
-        descriptors = raw.get("descriptors", {}) or {}
+        descriptors = raw.get("descriptors")
         record_type = raw.get("recordType")
         if record_type == "CUSTOM":
             body = _decode_descriptor_json(
-                descriptors.get("custom", {}).get("data", "{}"), "CUSTOM record body"
+                _descriptor_text(descriptors, "custom", "data", default="{}"),
+                "CUSTOM record body",
             )
             return body.get("runtime", {})
         if record_type == "SKILL":
             # SKILL.md is Markdown frontmatter, not JSON — recover the runtime
             # from the `x-abca-runtime` frontmatter key (mirrors the TS adapter).
-            skill_md = (
-                descriptors.get("agentSkillsDefinition", {})
-                .get("additionalData", {})
-                .get("skillMd", {})
-                .get("data", "")
+            skill_md = _descriptor_text(
+                descriptors,
+                "agentSkillsDefinition",
+                "additionalData",
+                "skillMd",
+                "data",
+                default="",
             )
             m = _SKILL_FRONTMATTER_RE.search(skill_md)
             if not m:
@@ -137,8 +167,8 @@ class AgentRegistryClient:
             # ValueError) so resolve() rejects it the same way it does bad YAML.
             try:
                 if raw_value.lstrip().startswith("{"):
-                    return json.loads(raw_value)
-                return json.loads(base64.b64decode(raw_value).decode("utf-8"))
+                    return _json_loads(raw_value)
+                return _json_loads(base64.b64decode(raw_value).decode("utf-8"))
             except (ValueError, TypeError) as exc:
                 raise RegistryRecordMalformedError(
                     f"SKILL.md {_SKILL_RUNTIME_FM_KEY} is not decodable base64/JSON: {exc}"
@@ -147,7 +177,7 @@ class AgentRegistryClient:
         # server.json may carry a non-object `_meta` (or none); guard the shape so
         # `{"_meta": "x"}` does not raise an unboxed AttributeError — mirrors the
         # dict guard in extractPayload in agent-registry-client.ts (#837 review).
-        inline = descriptors.get("mcpServer", {}).get("data") or "{}"
+        inline = _descriptor_text(descriptors, "mcpServer", "data", default="{}")
         body = _decode_descriptor_json(inline, "MCP server.json body")
         meta = body.get("_meta")
         if not isinstance(meta, dict):
@@ -210,7 +240,8 @@ class AgentRegistryClient:
             if self._decode_name(r.get("name", ""))[2] == ref.name
             and r.get("status") in _RESOLVABLE_STATUSES
         ]
-        by_version = {r.get("recordVersion", ""): r for r in candidates}
+        # A null recordVersion is no version (`?? ''` in the TS adapter): it never wins.
+        by_version = {r.get("recordVersion") or "": r for r in candidates}
         winning = select_highest(list(by_version.keys()), ref.constraint)
         if winning is None:
             raise RegistryResolutionError(

@@ -13,6 +13,7 @@ The workflow files, the configuration and the system prompt are the real ones.
 
 import hashlib
 import io
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,8 @@ def _run_task(
     agent_result: AgentResult | None = None,
     *,
     setup: RepoSetup | None = None,
+    setup_error: Exception | None = None,
+    agent_env: dict[str, str] | None = None,
     build: VerifyOutcome | None = None,
     agent_notes: str | None = None,
     **task_fields,
@@ -53,9 +56,12 @@ def _run_task(
     ``agent_result`` is what the agent returns (a success by default), ``build``
     what the post-agent build returns (passed by default) and ``agent_notes`` the
     "Agent notes" section of the pull request. ``ensure_pr`` answers ``_PR_URL``.
+    ``setup_error`` is what the repository setup raises instead of returning.
+    ``agent_env`` is what the agent run puts into the environment, as the runner
+    does with the token before it starts the agent.
     ``task_fields`` go to ``run_task`` as they are. Returns the result, the stubs
-    the tests assert on, and the prompt, system prompt, working directory and
-    configuration the agent was started with."""
+    the tests assert on, and the prompt, system prompt, working directory,
+    configuration and environment the agent was started with."""
     run = SimpleNamespace()
     task: dict[str, Any] = {
         "repo_url": "o/r",
@@ -68,6 +74,8 @@ def _run_task(
 
     async def run_agent(prompt, system_prompt, config, cwd=None, trajectory=None):
         run.prompt, run.system_prompt, run.cwd, run.config = prompt, system_prompt, cwd, config
+        os.environ.update(agent_env or {})
+        run.environ = dict(os.environ)
         return agent_result or _agent_succeeded()
 
     span = MagicMock()
@@ -78,6 +86,7 @@ def _run_task(
         patch(
             "repo.setup_repo",
             return_value=setup or RepoSetup(repo_dir=_CLONE, branch="bgagent/test/branch"),
+            side_effect=setup_error,
         ) as run.setup_repo,
         patch("pipeline.task_span", return_value=span),
         patch("pipeline.task_state") as task_state,
@@ -329,3 +338,101 @@ class TestHowAFinishedTaskIsRecorded:
         finished = run.react_task_finished.call_args.kwargs
         assert finished["success"] is False
         assert finished["started_reaction_id"] == "reaction-42"
+
+
+# The variables of the process environment that tell git, ``gh``, the agent and
+# the commit hook who a task is, and which step of its workflow is running.
+_TASK_ENV_VARS = (
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "TASK_ID",
+    "PROMPT_VERSION",
+    "WORKFLOW_ID",
+    "WORKFLOW_STEP",
+)
+
+
+def _task_environ(environ=os.environ) -> dict[str, str | None]:
+    return {name: environ.get(name) for name in _TASK_ENV_VARS}
+
+
+class TestWhatATaskLeavesInTheEnvironment:
+    """git, ``gh`` and the agent are started with the environment of the process,
+    so that is where a task puts its commit identity, its GitHub token, and the
+    task id, prompt version, workflow id and workflow step of its commit trailers.
+    The process can go on after the task: a server that takes the next one, a
+    script, this test run. ``run_task`` leaves these variables as it found them."""
+
+    @pytest.fixture(params=["unset", "set"])
+    def before(self, request, monkeypatch) -> dict[str, str | None]:
+        """The variables as the task finds them: none of them set, or each one
+        set by whoever calls ``run_task``."""
+        for name in _TASK_ENV_VARS:
+            if request.param == "unset":
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, f"the caller's {name}")
+        return _task_environ()
+
+    def test_agent_sees_the_values_of_the_task_and_the_caller_gets_its_own_back(self, before):
+        run = _run_task(prompt_version="1c9c10e027a2")
+
+        assert _task_environ(run.environ) == {
+            "GIT_AUTHOR_NAME": "bgagent",
+            "GIT_AUTHOR_EMAIL": "bgagent@noreply.github.com",
+            "GIT_COMMITTER_NAME": "bgagent",
+            "GIT_COMMITTER_EMAIL": "bgagent@noreply.github.com",
+            "GITHUB_TOKEN": "ghp_test",
+            "GH_TOKEN": "ghp_test",
+            "TASK_ID": "t-1",
+            "PROMPT_VERSION": "1c9c10e027a2",
+            "WORKFLOW_ID": "coding/new-task-v1",
+            "WORKFLOW_STEP": "implement",
+        }
+        assert _task_environ() == before
+
+    def test_task_that_fails_leaves_them_as_it_found_them(self, before):
+        # The clone fails after the variables were set for it; run_task records
+        # the failure and re-raises it.
+        with pytest.raises(RuntimeError, match="clone failed"):
+            _run_task(setup_error=RuntimeError("clone failed"), prompt_version="1c9c10e027a2")
+
+        assert _task_environ() == before
+
+    def test_task_without_a_repository_leaves_them_as_it_found_them(self, before, monkeypatch):
+        # It returns before run_task sets any of the variables: its token is put
+        # into the environment by the runner, when the agent is started.
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        with patch("aws_session.tenant_client"):  # the upload of the answer
+            run = _run_task(
+                _agent_succeeded(result_text="Token buckets suit this API."),
+                repo_url="",
+                resolved_workflow=_workflow("knowledge/web-research-v1"),
+                agent_env={"GITHUB_TOKEN": "ghp_test", "GH_TOKEN": "ghp_test"},
+            )
+
+        assert run.result["status"] == "success"
+        run.setup_repo.assert_not_called()
+        assert _task_environ() == before
+
+    def test_token_the_configuration_fetched_is_gone_after_the_task(self, monkeypatch):
+        # A payload without a token, as on ECS: the configuration reads the token
+        # from Secrets Manager and keeps it in GITHUB_TOKEN, before run_task sets
+        # any of the variables itself.
+        fetched = "ghp_from_secrets_manager"
+        secrets_manager = MagicMock()
+        secrets_manager.get_secret_value.return_value = {"SecretString": fetched}
+        monkeypatch.setenv(
+            "GITHUB_TOKEN_SECRET_ARN",
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token",
+        )
+
+        with patch("aws_session.platform_client", return_value=secrets_manager):
+            run = _run_task(github_token="")
+
+        assert _task_environ(run.environ)["GITHUB_TOKEN"] == fetched
+        assert _task_environ()["GITHUB_TOKEN"] is None

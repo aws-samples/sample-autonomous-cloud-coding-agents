@@ -28,7 +28,6 @@ Determine which area the issue falls into:
 ## Build/Compilation Issues
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:compile 2>&1 | tail -50  # TypeScript errors
 mise //cdk:test 2>&1 | tail -50     # Test failures
 ```

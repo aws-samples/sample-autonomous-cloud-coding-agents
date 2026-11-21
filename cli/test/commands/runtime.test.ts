@@ -19,13 +19,19 @@
 
 import { makeRuntimeCommand } from '../../src/commands/runtime';
 import { buildRuntimeStatusReport } from '../../src/runtime-status';
-import { getStackOutput } from '../../src/stack-outputs';
+import { getStackOutput, getStackOutputs } from '../../src/stack-outputs';
 
 jest.mock('../../src/runtime-status');
-jest.mock('../../src/stack-outputs', () => ({
-  ...jest.requireActual('../../src/stack-outputs'),
-  getStackOutput: jest.fn(),
-}));
+jest.mock('../../src/stack-outputs', () => {
+  const perKey = jest.fn();
+  return {
+    ...jest.requireActual('../../src/stack-outputs'),
+    getStackOutput: perKey,
+    // `status` asks for its outputs in one batch; each key is answered by the per-key mock.
+    getStackOutputs: jest.fn((region: string, stack: string, keys: readonly string[]) =>
+      Promise.all(keys.map((key) => perKey(region, stack, key)))),
+  };
+});
 
 const COMPUTE_DEPLOYMENT = {
   stack_name: 'backgroundagent-dev',
@@ -167,6 +173,14 @@ describe('runtime status command', () => {
     expect(output).toContain('n/a — Lambda MicroVMs are platform-managed');
     expect(output).toContain('Lambda MicroVM compute substrates');
     expect(output).toContain('Lambda MicroVM sessions are platform-managed.');
+  });
+
+  test('reads all its stack outputs with one stack read', async () => {
+    await makeRuntimeCommand().parseAsync(['node', 'test', 'status', '--region', 'us-east-1']);
+
+    expect(getStackOutputs).toHaveBeenCalledTimes(1);
+    // Every per-key answer came from that one batch: no output was read on its own.
+    expect(getStackOutput).toHaveBeenCalledTimes((getStackOutputs as jest.Mock).mock.calls[0][2].length);
   });
 
   test('fails when RepoTable output is missing', async () => {

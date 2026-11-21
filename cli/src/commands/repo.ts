@@ -34,7 +34,7 @@ import {
 } from '../repo-lookup';
 import { offboardRepo, onboardRepo } from '../repo-onboard';
 import { buildRepoOnboardNotes } from '../repo-onboard-notes';
-import { getStackOutput } from '../stack-outputs';
+import { getStackOutput, getStackOutputs } from '../stack-outputs';
 
 /**
  * Redact the per-repo secret ARN before a `RepoConfigRow` is serialized to JSON.
@@ -116,7 +116,18 @@ export function makeRepoCommand(): Command {
       .action(async (repoId: string, opts) => {
         assertRepoFormat(repoId);
         const { region, stackName } = resolveOperatorContext(opts);
-        const tableName = await getStackOutput(region, stackName, 'RepoTableName');
+        const [
+          tableName, platformTokenArn, runtimeArn, computeSubstrate, computeDeploymentMode, computeTypes,
+          bedrockGeoRegion,
+        ] = await getStackOutputs(region, stackName, [
+          'RepoTableName',
+          'GitHubTokenSecretArn',
+          'RuntimeArn',
+          'ComputeSubstrate',
+          'ComputeDeploymentMode',
+          'ComputeTypes',
+          'BedrockGeoRegion',
+        ]);
         if (!tableName) {
           throw new CliError(
             `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
@@ -124,16 +135,10 @@ export function makeRepoCommand(): Command {
         }
 
         const config = await loadRepoConfig(region, tableName, repoId);
-        const [platformTokenArn, runtimeArn, computeSubstrate, computeDeploymentMode, computeTypes] = await Promise.all([
-          getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
-          getStackOutput(region, stackName, 'RuntimeArn'),
-          getStackOutput(region, stackName, 'ComputeSubstrate'),
-          getStackOutput(region, stackName, 'ComputeDeploymentMode'),
-          getStackOutput(region, stackName, 'ComputeTypes'),
-        ]);
         const display = formatRepoConfigForDisplay(config, {
           githubTokenSecretArn: platformTokenArn,
           runtimeArn,
+          bedrockGeoRegion,
           deployment: { stackName, computeSubstrate, computeDeploymentMode, computeTypes },
         });
 
@@ -178,15 +183,15 @@ export function makeRepoCommand(): Command {
         const [
           tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate, deployedGeo,
           grantedModelIds, computeDeploymentMode, computeTypes,
-        ] = await Promise.all([
-          getStackOutput(region, stackName, 'RepoTableName'),
-          getStackOutput(region, stackName, 'RuntimeArn'),
-          getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
-          getStackOutput(region, stackName, 'ComputeSubstrate'),
-          getStackOutput(region, stackName, 'BedrockGeoRegion'),
-          getStackOutput(region, stackName, 'BedrockModelIds'),
-          getStackOutput(region, stackName, 'ComputeDeploymentMode'),
-          getStackOutput(region, stackName, 'ComputeTypes'),
+        ] = await getStackOutputs(region, stackName, [
+          'RepoTableName',
+          'RuntimeArn',
+          'GitHubTokenSecretArn',
+          'ComputeSubstrate',
+          'BedrockGeoRegion',
+          'BedrockModelIds',
+          'ComputeDeploymentMode',
+          'ComputeTypes',
         ]);
         if (!tableName) {
           throw new CliError(

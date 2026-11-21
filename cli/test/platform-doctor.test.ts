@@ -24,15 +24,20 @@
 // linear-auth-health; this file only covers the pass/warn/fail decision.
 
 const healthMock = jest.fn();
+const vaultMinterMock = jest.fn();
 jest.mock('../src/linear-auth-health', () => ({
   checkLinearWorkspaceAuth: (...args: unknown[]) => healthMock(...args),
+  makeLinearVaultTokenMinter: (...args: unknown[]) => vaultMinterMock(...args),
 }));
 
 // Only the Linear registry output is wanted; every other check short-circuits on
 // a missing stack output rather than reaching AWS.
 const stackOutputMock = jest.fn();
+// The doctor asks for all its outputs in one batch; each key is answered by the per-key mock above.
+const stackOutputsMock = jest.fn((region: string, stack: string, keys: readonly string[]) =>
+  Promise.all(keys.map((key) => stackOutputMock(region, stack, key))));
 jest.mock('../src/stack-outputs', () => ({
-  getStackOutput: (...args: unknown[]) => stackOutputMock(...args),
+  getStackOutputs: (...args: [string, string, readonly string[]]) => stackOutputsMock(...args),
 }));
 
 const ddbSendMock = jest.fn();
@@ -47,6 +52,7 @@ jest.mock('@aws-sdk/client-bedrock', () => ({
   GetInferenceProfileCommand: jest.fn((input: unknown) => ({ _type: 'GetInferenceProfile', input })),
 }));
 
+import { BEDROCK_GEO_PREFIXES } from '../src/model-id';
 import {
   checkJiraAppIdentity,
   checkLinearProjectWorkspaces,
@@ -74,6 +80,36 @@ beforeEach(() => {
   ddbSendMock.mockResolvedValue({ Items: [] });
   stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
     (output === 'LinearWorkspaceRegistryTableName' ? REGISTRY : null));
+});
+
+describe('doctor stack outputs', () => {
+  test('reads every output it needs with one stack read', async () => {
+    // One DescribeStacks call answers all of them: a read per output is a throttled
+    // control-plane call per output, and the count grows with every check added.
+    await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+
+    // The module double offers no read of a single output, so this call is all the doctor read.
+    expect(stackOutputsMock).toHaveBeenCalledTimes(1);
+    expect(stackOutputsMock).toHaveBeenCalledWith('us-east-1', 'Abca', expect.any(Array));
+  });
+
+  test('hands the vault workload and the project mapping table to their own checks', async () => {
+    stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) => ({
+      LinearWorkspaceRegistryTableName: REGISTRY,
+      LinearVaultWorkloadName: 'vault-workload',
+      LinearProjectMappingTableName: 'ProjectMapping',
+    } as Record<string, string>)[output] ?? null);
+    healthMock.mockResolvedValue([]);
+
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+
+    expect(vaultMinterMock).toHaveBeenCalledWith('us-east-1', 'vault-workload');
+    // Neither assertion is enough alone: every table check scans the name it is given, so the
+    // scan shows the name reached one of them, the verdict that the mapping check had a table.
+    const scanned = ddbSendMock.mock.calls.map(([command]) => (command as { input: { TableName?: string } }).input.TableName);
+    expect(scanned).toContain('ProjectMapping');
+    expect(checks.find((c) => c.id === 'linear_project_workspaces')?.detail).toBe('No active Linear project mappings yet.');
+  });
 });
 
 describe('doctor verdict for Linear signing-secret provenance', () => {
@@ -403,11 +439,11 @@ describe('doctor Bedrock catalog check', () => {
     // This regressed once: the strip matched `us|eu|apac` only, and when the
     // platform default moved to a `global.` profile it silently stopped stripping.
     // Asserting every geography the CDK models means a future default on any of
-    // them cannot reopen the hole.
+    // them cannot reopen the hole. The list is the CLI's own, which
+    // test/model-id.test.ts holds to the CDK's.
     const { PLATFORM_REPO_DEFAULTS } = await import('../src/repo-display');
-    const GEOS = ['global', 'us-gov', 'us', 'eu', 'apac', 'jp', 'au'];
 
-    for (const geo of GEOS) {
+    for (const geo of BEDROCK_GEO_PREFIXES) {
       jest.clearAllMocks();
       jest.resetModules();
       jest.doMock('../src/repo-display', () => ({
@@ -464,7 +500,13 @@ describe('doctor Bedrock catalog check error classification', () => {
   it('warns on a denial — a least-privilege caller says nothing about the model', async () => {
     const denied = new Error('User: … is not authorized to perform: bedrock:GetFoundationModel');
     denied.name = 'AccessDeniedException';
-    expect((await catalogCheck(denied)).status).toBe('warn');
+    const check = await catalogCheck(denied);
+    expect(check.status).toBe('warn');
+    // The remedy is the caller's missing permission. The console remedy is a conclusion
+    // about the MODEL, which a denial does not support.
+    expect(check.detail).toMatch(/permissions gap on the caller/);
+    expect(check.detail).toMatch(/re-run with credentials holding bedrock:GetFoundationModel/);
+    expect(check.detail).not.toMatch(/Enable model access/);
   });
 
   it('FAILS, with the console remedy, when the model is definitively absent', async () => {
@@ -700,6 +742,22 @@ describe('doctor granted-model profile check', () => {
     const check = await grantedCheck(null, 'global');
     expect(check.status).toBe('warn');
     expect(check.detail).toMatch(/BedrockModelIds/);
+    // The geography IS exported here, so the detail must not say otherwise.
+    expect(check.detail).not.toMatch(/BedrockGeoRegion/);
+  });
+
+  it('names only the geography when that is the output the stack lacks', async () => {
+    // A partially updated stack: the granted set is exported, the geography is not.
+    const check = await grantedCheck('anthropic.claude-opus-5', null);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/does not export BedrockGeoRegion,/);
+    expect(check.detail).not.toMatch(/BedrockModelIds/);
+  });
+
+  it('names both outputs when the stack exports neither', async () => {
+    const check = await grantedCheck(null, null);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/does not export BedrockModelIds and BedrockGeoRegion,/);
   });
 
   // A list that is non-empty as a STRING but yields zero models after trimming.

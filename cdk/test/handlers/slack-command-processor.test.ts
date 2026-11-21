@@ -490,6 +490,8 @@ describe('slack-command-processor handler', () => {
       ['with an issue number', 'fix other/web#7 the way acme/api does it', { repo: 'other/web', issue_number: 7, task_description: 'fix the way acme/api does it' }],
       // Under the owner of the onboarded repo: its sibling, or a typo of it.
       ['of the same owner', 'update acme/web like acme/api', { repo: 'acme/web', issue_number: undefined, task_description: 'update like acme/api' }],
+      // Given as a GitHub link: it is a repo, whoever owns it.
+      ['given as a link', 'fix <https://github.com/other/web> the way acme/api does it', { repo: 'other/web', issue_number: undefined, task_description: 'fix the way acme/api does it' }],
     ])('a repo %s that is not onboarded is not passed over for an onboarded repo behind it', async (_what, message, expected) => {
       givenTables(['acme/api']);
       givenNotOnboardedAnswer();
@@ -524,6 +526,85 @@ describe('slack-command-processor handler', () => {
       await handler(mention({ text: 'submit fix the CI/CD pipeline' }));
 
       expect(submitted()).toEqual([{ repo: 'CI/CD', issue_number: undefined, task_description: 'fix the pipeline' }]);
+    });
+
+    // ─── A pasted link ───────────────────────────────────────────────────────
+
+    const LINKED_ISSUE = { repo: 'aws-samples/sample-interview-assistant-serverless', issue_number: 24, task_description: 'fix' };
+
+    test.each([
+      // One issue, written three ways.
+      ['an issue link as Slack delivers it', 'fix <https://github.com/aws-samples/sample-interview-assistant-serverless/issues/24>', LINKED_ISSUE],
+      ['an issue link as typed', 'fix https://github.com/aws-samples/sample-interview-assistant-serverless/issues/24', LINKED_ISSUE],
+      ['the short form', 'fix aws-samples/sample-interview-assistant-serverless#24', LINKED_ISSUE],
+      ['an issue link as typed, with text after it', 'fix https://github.com/other/web/issues/7 before the release', { repo: 'other/web', issue_number: 7, task_description: 'fix before the release' }],
+      ['a pull request link', 'review <https://github.com/other/web/pull/7> again', { repo: 'other/web', issue_number: 7, task_description: 'review again' }],
+      // What GitHub puts behind the number: a tab of the pull request, a comment of the issue.
+      ['a link into a pull request', 'fix <https://github.com/other/web/pull/7/files#diff-0> too', { repo: 'other/web', issue_number: 7, task_description: 'fix too' }],
+      ['a repo link', 'update the README in <https://github.com/other/web>', { repo: 'other/web', issue_number: undefined, task_description: 'update the README in' }],
+      // Slack makes a link of an address typed without "https://" and keeps the typed text as its label.
+      ['a repo link with a label', 'update the README in <http://github.com/other/web|github.com/other/web>', { repo: 'other/web', issue_number: undefined, task_description: 'update the README in' }],
+      ['a repo link with www, a closing slash and a query', '<https://www.github.com/other/web/?tab=readme-ov-file> needs a license', { repo: 'other/web', issue_number: undefined, task_description: 'needs a license' }],
+      ['a repo link with a fragment', 'follow <https://github.com/other/web#readme> to the letter', { repo: 'other/web', issue_number: undefined, task_description: 'follow to the letter' }],
+      // What the Code button of GitHub copies. Only the suffix ".git" is no part of the name.
+      ['a clone address', 'update the README in <https://github.com/other/web.git>', { repo: 'other/web', issue_number: undefined, task_description: 'update the README in' }],
+      ['a link to a repo whose name ends in git', 'update the README in <https://github.com/other/web-git>', { repo: 'other/web-git', issue_number: undefined, task_description: 'update the README in' }],
+      // Scheme and host names compare without case.
+      ['a link written in capitals', 'fix <HTTPS://GITHUB.COM/other/web/issues/7>', { repo: 'other/web', issue_number: 7, task_description: 'fix' }],
+      // The label is dropped with the link, also when the user wrote it.
+      ['an issue link with a label', 'fix <https://github.com/other/web/issues/7|the login timeout> before Friday', { repo: 'other/web', issue_number: 7, task_description: 'fix before Friday' }],
+    ])('%s names its repo, onboarded or not, and its issue number', async (_what, message, expected) => {
+      // The channel default is another repo, and the linked repo is not onboarded:
+      // createTaskCore is asked for the linked repo and answers for it.
+      givenTables(['acme/api'], 'acme/api');
+      givenNotOnboardedAnswer();
+
+      await handler(mention({ text: `submit ${message}` }));
+
+      expect(submitted()).toEqual([expected]);
+      // No part of a link is looked up as a word.
+      expect(repoLookups()).toEqual([]);
+    });
+
+    test('an onboarded repo named before a link is the repo, and the link stays in the description', async () => {
+      givenTables(['acme/api']);
+
+      await handler(mention({ text: 'submit in acme/api do what <https://github.com/other/web/pull/9> did' }));
+
+      expect(submitted()).toEqual([{
+        repo: 'acme/api',
+        issue_number: undefined,
+        task_description: 'in do what <https://github.com/other/web/pull/9> did',
+      }]);
+    });
+
+    test.each([
+      // Another site. One part of the address stands under the owner of the channel default.
+      'fix what <https://example.com/teams/acme/board> describes',
+      'fix what https://example.com/teams/acme/board describes',
+      // GitHub, but a file: not a repo, an issue or a pull request.
+      'fix the typo in <https://github.com/acme/acme/blob/main/README.md>',
+      // Not github.com: a gist has an address of the same shape on another host.
+      'apply <https://gist.github.com/acme/notes> to the config',
+      // Another site whose address carries a GitHub address.
+      'fix what <https://example.com/go?to=https://github.com/other/web/issues/3> says',
+    ])('a link that names no repo leaves the channel default in charge of the whole message: %s', async (message) => {
+      givenTables(['acme/api'], 'acme/api');
+
+      await handler(mention({ text: `submit ${message}` }));
+
+      expect(submitted()).toEqual([{ repo: 'acme/api', issue_number: undefined, task_description: message }]);
+    });
+
+    test('without a channel default a link that names no repo is not taken for one', async () => {
+      givenTables(['acme/api']);
+
+      await handler(mention({ text: 'submit fix what <https://example.com/reports/latest> says' }));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(slackCalls('chat.postMessage')).toEqual([
+        expect.objectContaining({ text: expect.stringContaining('Please include a repo') }),
+      ]);
     });
 
     // ─── The description keeps the user's lines ──────────────────────────────

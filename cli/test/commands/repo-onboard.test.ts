@@ -201,6 +201,7 @@ describe('repo onboard/offboard', () => {
       cedar_policies: ['policy'],
       approval_gate_cap: 10,
       max_budget_usd: 5,
+      memory_token_budget: 4000,
     });
 
     await onboardRepo('us-east-1', 'RepoTable', 'acme/a');
@@ -208,6 +209,17 @@ describe('repo onboard/offboard', () => {
     const put = ddbSend.mock.calls[0][0] as PutCommand;
     expect(put.input.Item?.onboarded_at).toBe('2025-01-01T00:00:00Z');
     expect(put.input.Item?.cedar_policies).toEqual(['policy']);
+    // Blueprint-only settings have no flag here: a re-onboard must not drop them.
+    expect(put.input.Item).toMatchObject({ approval_gate_cap: 10, max_budget_usd: 5, memory_token_budget: 4000 });
+  });
+
+  test('onboardRepo writes no Blueprint-only setting the existing row does not have', async () => {
+    await onboardRepo('us-east-1', 'RepoTable', 'acme/a');
+
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    for (const key of ['approval_gate_cap', 'max_budget_usd', 'memory_token_budget']) {
+      expect(put.input.Item).not.toHaveProperty(key);
+    }
   });
 
   test('onboardRepo persists --poll-interval override', async () => {

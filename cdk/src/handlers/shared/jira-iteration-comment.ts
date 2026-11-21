@@ -45,7 +45,7 @@ export function jiraPreviewDocument(screenshotUrl: unknown, previewUrl: unknown)
   ]);
 }
 
-function render(task: TaskRecord): Record<string, unknown> {
+function renderIterationComment(task: TaskRecord): Record<string, unknown> {
   const terminal = TERMINAL_STATUSES.includes(task.status);
   const saved = task.jira_iteration_status;
   // Only build a fallback when no usable status was persisted. Runtime result
@@ -115,12 +115,12 @@ export async function updateJiraIterationComment(
       return { ok: false, retryable: false };
     }
     for (let attempt = 0; task && attempt < MAX_CONVERGENCE_ATTEMPTS; attempt += 1) {
-      const body = render(task);
+      const body = renderIterationComment(task);
       const result = await run(() => updateIssueCommentAdf(ctx, issueId, commentId, body));
       if (!result.ok) return result;
       wrote = true;
       task = await load();
-      if (!task || JSON.stringify(render(task)) === JSON.stringify(body)) return { ok: true };
+      if (!task || JSON.stringify(renderIterationComment(task)) === JSON.stringify(body)) return { ok: true };
     }
     logger.warn('Jira iteration comment did not converge', { event: 'jira.preview.convergence_failed', task_id: taskId });
     return { ok: true };

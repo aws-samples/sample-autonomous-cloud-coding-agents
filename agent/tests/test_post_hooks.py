@@ -1099,6 +1099,54 @@ class TestIsVerifyCommandInert:
         # not exist: its own error line.
         assert post_hooks.is_verify_command_inert(1, "mise ERROR task not found: compile") is True
 
+    def test_a_task_missing_from_a_repository_that_has_other_tasks_is_inert(self):
+        # `mise run build` where mise.toml defines tasks, but no `build`
+        # (mise 2026.11.6, exit 1). mise ends every error with its version.
+        log = (
+            "mise ERROR no task build found\n"
+            "\n"
+            "Available tasks:\n"
+            "  Name  Description\n"
+            "  test  \n"
+            "mise ERROR Version: 2026.11.6 linux-arm64 (2026-11-10)\n"
+            "mise ERROR Run with --verbose or MISE_VERBOSE=1 for more information"
+        )
+        assert post_hooks.is_verify_command_inert(1, log) is True
+
+    def test_a_missing_task_named_like_a_mise_command_is_inert(self):
+        # `mise run lint` in a repository without any mise task (issue #749, mise
+        # 2026.8.4, exit 1): `lint` resembles commands of mise, so mise suggests
+        # those where it says "no tasks defined" for `build`.
+        log = (
+            "mise ERROR unknown command: lint\n"
+            "\n"
+            "Did you mean:\n"
+            "  mise install-into\n"
+            "  mise plugin-list\n"
+            "mise ERROR Version: 2026.8.4 macos-arm64"
+        )
+        assert post_hooks.is_verify_command_inert(1, log) is True
+
+    def test_the_words_of_a_missing_task_in_the_output_of_a_task_are_a_failed_build(self):
+        # The task ran and printed the words itself: pip about one of its own
+        # commands, a script about a task. mise's line says that the task failed.
+        for said in ('ERROR: unknown command "biuld"', "no task lint found"):
+            log = f"[build] $ ./build.sh\n{said}\n[build] ERROR task failed"
+            assert post_hooks.is_verify_command_inert(1, log) is False, said
+
+    def test_a_task_file_that_mise_made_executable_and_ran_is_a_failed_build(self):
+        # A task file without the executable bit: mise warns in the words of its
+        # error, sets the bit (the image runs mise with MISE_YES=1) and runs the
+        # task, whose tests fail (mise 2026.11.6, exit 3).
+        log = (
+            "mise WARN  no task build found, but a non-executable file exists at "
+            "/repo/mise-tasks/build\n"
+            "mise marked as executable\n"
+            "[build] $ /repo/mise-tasks/build\n"
+            "[build] ERROR task failed"
+        )
+        assert post_hooks.is_verify_command_inert(3, log) is False
+
 
 class TestVerifyCommandThatCannotStart:
     """``verify_build`` when the command cannot even be started. (The older tests

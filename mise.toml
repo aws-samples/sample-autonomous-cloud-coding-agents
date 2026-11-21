@@ -15,9 +15,6 @@ min_version = "2026.7.11"
 
 monorepo_root = true
 
-[settings]
-experimental = true
-
 [tools]
 # An exact Node, here and in the cdk, cli, web and docs mise.toml: astro 7.4.10
 # declares node >=22.23.4 and yarn refuses to install on less, while `node = "22"`
@@ -41,6 +38,7 @@ semgrep = "1.185.0"
 osv-scanner = "2.7.1"
 "grype" = "0.121.3"
 "aqua:zizmorcore/zizmor" = "1.32.0"
+shellcheck = "0.11.0"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs", "web"]
@@ -86,10 +84,10 @@ run = [
 description = "Monorepo quality checks: agent quality, then ESLint with --fix for cdk, cli and web, then the docs check"
 depends = ["//agent:quality"]
 run = [
-  "MISE_EXPERIMENTAL=1 mise //cdk:eslint",
-  "MISE_EXPERIMENTAL=1 mise //cli:eslint",
-  "MISE_EXPERIMENTAL=1 mise //web:eslint",
-  "MISE_EXPERIMENTAL=1 mise //docs:check",
+  "mise //cdk:eslint",
+  "mise //cli:eslint",
+  "mise //web:eslint",
+  "mise //docs:check",
 ]
 
 # What an ABCA agent runs by default to verify lint before and after its change
@@ -192,12 +190,45 @@ done
 exit "$rc"
 '''
 
+# Shell scripts are code too: one is copied into the agent image and one deletes
+# CloudFormation stacks (#278). shellcheck reads every `*.sh` file that git tracks or
+# would add (new and not ignored): a script is checked before its first `git add`, and
+# generated trees (node_modules, cdk.out) are left out because git ignores them. A
+# tracked script that was deleted but not staged is still listed by git: it is skipped.
+# --severity=warning: errors and warnings fail, `info` and `style` notes are not
+# reported. `error` alone would not report what this gate is for (an unquoted command
+# substitution, SC2046, and a `cd` whose failure goes unnoticed, SC2164, are warnings).
+# --norc and the unset: shellcheck would otherwise read a `.shellcheckrc` from the
+# checkout, from a directory above it or from the home directory, and options from
+# SHELLCHECK_OPTS. Either can switch checks off or on, so the answer would depend on
+# the machine and a dotfile could change what this task enforces. The only way to
+# accept a finding is a directive in the script:
+# `# shellcheck disable=SC<code> # <reason>` on the line above the command.
+# With no script listed the task fails: `xargs` on macOS would run nothing and exit 0.
+# The script is POSIX sh, because mise runs it with `sh`, which is dash on the CI
+# runner: hence `xargs -0 sh -c` to read the NUL-separated list, not a `read -d ''` loop.
+[tasks."check:shell"]
+description = "Shell script lint (#278): shellcheck, errors and warnings, over every shell script (*.sh) that git tracks or would add"
+run = '''
+unset SHELLCHECK_OPTS
+list="$(mktemp)"
+trap 'rm -f "$list"' EXIT
+git ls-files -z --cached --others --exclude-standard -- '*.sh' |
+  xargs -0 sh -c 'for file in "$@"; do [ ! -e "$file" ] || printf "%s\0" "$file"; done' sh > "$list"
+if [ ! -s "$list" ]; then
+  echo 'check:shell: git listed no shell script, so nothing was checked.' >&2
+  exit 1
+fi
+xargs -0 shellcheck --norc --severity=warning -- < "$list"
+'''
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
   { task = "check:hygiene" },
   { task = "check:scripts" },
+  { task = "check:shell" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
@@ -291,11 +322,17 @@ description = "Scan the checked-out history for secrets with gitleaks (scheduled
 run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="HEAD"'
 
 [tasks."security:secrets:range"]
-description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
+description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD; unset or empty, it scans the history of HEAD"
 # Range-scoped scan: only the commits a branch/PR introduces, not full history.
-# Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
-# to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
-run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-}"'
+# The per-PR CI job sets GITLEAKS_RANGE (security-pr.yml).
+#
+# Unset or empty, the range is `HEAD`: the scope of security:secrets above, for
+# the reasons given there, so the task is safe to run anywhere. An empty
+# --log-opts is not "no range": gitleaks then walks every ref of the clone and
+# fails on what other branches hold (#329). `origin/main..HEAD` is no default
+# either: on main it is empty, and where origin/main is missing gitleaks scans
+# nothing and still exits 0.
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-HEAD}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
@@ -401,6 +438,7 @@ run = [
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },
+    { task = "check:shell" },
     { task = "//agent:security" },
 ]
 
@@ -426,9 +464,9 @@ run = "mise run security"
 [tasks."hooks:pre-push:tests"]
 description = "Pre-push tests in cdk, cli, web and agent"
 run = [
-  "MISE_EXPERIMENTAL=1 mise //cdk:test",
-  "MISE_EXPERIMENTAL=1 mise //cli:test",
-  "MISE_EXPERIMENTAL=1 mise //web:test",
+  "mise //cdk:test",
+  "mise //cli:test",
+  "mise //web:test",
   "cd agent && mise run test",
 ]
 

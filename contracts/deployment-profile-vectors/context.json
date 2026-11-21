@@ -1,0 +1,83 @@
+{
+  "description": "Context switch vectors (#1016). `features` is the selection of a profile and `context` is CDK context. resolveDeploymentFeatures in cdk/src/deployment/features.ts must return `expected.features`, or throw `expected.error`. conflictingContextOverrides in cli/src/commands/setup.ts, reading the same context from cdk/cdk.context.json, must report exactly the switches in `expected.conflicts`, in that order: the ones that make synthesis differ from the profile. See README.md.",
+  "cases": [
+    {
+      "name": "no-switch-keeps-the-profile",
+      "features": { "slack": true, "linear": false, "jira": true, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": {},
+      "expected": { "features": { "slack": true, "linear": false, "jira": true, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": [] }
+    },
+    {
+      "name": "unrelated-context-is-ignored",
+      "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "networkTopology": "split" },
+      "expected": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": [] }
+    },
+    {
+      "name": "enableSlack-turns-slack-off",
+      "features": { "slack": true, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableSlack": false },
+      "expected": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": ["enableSlack"] }
+    },
+    {
+      "name": "enableLinear-turns-linear-off",
+      "features": { "slack": false, "linear": true, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableLinear": "false" },
+      "expected": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": ["enableLinear"] }
+    },
+    {
+      "name": "enableJira-turns-jira-off",
+      "features": { "slack": false, "linear": false, "jira": true, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableJira": false },
+      "expected": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": ["enableJira"] }
+    },
+    {
+      "name": "enableDeployPreviewScreenshots-turns-deployPreviewScreenshots-off",
+      "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": true, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableDeployPreviewScreenshots": "false" },
+      "expected": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": ["enableDeployPreviewScreenshots"] }
+    },
+    {
+      "name": "enableAgentRegistry-turns-agentRegistry-off",
+      "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": true, "toolGateway": false },
+      "context": { "enableAgentRegistry": false },
+      "expected": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": ["enableAgentRegistry"] }
+    },
+    {
+      "name": "enableToolGateway-turns-toolGateway-off",
+      "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": true },
+      "context": { "enableToolGateway": "false" },
+      "expected": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": ["enableToolGateway"] }
+    },
+    {
+      "name": "switches-turn-features-on",
+      "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableSlack": true, "enableAgentRegistry": "true" },
+      "expected": { "features": { "slack": true, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": true, "toolGateway": false }, "conflicts": ["enableSlack", "enableAgentRegistry"] }
+    },
+    {
+      "name": "agreeing-switches-are-not-conflicts",
+      "features": { "slack": true, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableSlack": "true", "enableJira": false, "enableToolGateway": "false" },
+      "expected": { "features": { "slack": true, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "conflicts": [] }
+    },
+    {
+      "name": "malformed-switch-value",
+      "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableToolGateway": "yes" },
+      "expected": { "error": "enableToolGateway must be true or false, got 'yes'", "conflicts": ["enableToolGateway"] }
+    },
+    {
+      "name": "upper-case-switch-value",
+      "features": { "slack": true, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableSlack": "TRUE" },
+      "expected": { "error": "enableSlack must be true or false, got 'TRUE'", "conflicts": ["enableSlack"] }
+    },
+    {
+      "name": "numeric-switch-value",
+      "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false },
+      "context": { "enableJira": 0 },
+      "expected": { "error": "enableJira must be true or false, got '0'", "conflicts": ["enableJira"] }
+    }
+  ]
+}

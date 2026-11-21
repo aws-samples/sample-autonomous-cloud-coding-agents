@@ -73,6 +73,18 @@ class VerifyOutcome:
 # configured verify command isn't installed), not a genuine build failure.
 SHELL_COMMAND_NOT_FOUND = 127
 
+# What mise says, lower-cased, on its own error line (``mise ERROR ...``) when a
+# task it was asked for does not exist. The wording depends on what else the
+# repository defines:
+#   task not found: <name>    a task that the requested one depends on
+#   no task <name> found      other tasks exist, this one does not
+#   unknown command: <name>   no task at all, and a name that resembles one of
+#                             mise's own commands, as ``lint`` does (for any
+#                             other name mise says "no tasks defined")
+# The name is one word, ``\S+``, which keeps the search linear in the length of
+# the line: a line of build output is as long as the build makes it.
+_MISE_NO_SUCH_TASK = re.compile(r"not found|no task \S+ found|unknown command")
+
 
 def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     """True when a verify command did not actually RUN (vs ran-and-failed).
@@ -85,11 +97,13 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
       - exit 127: shell "command not found" (e.g. ``gradle`` not installed).
         mise exits with the status of the task that failed, so a tool missing
         inside a task is a 127 as well.
-      - mise "no tasks defined" / "no task named", or "not found" on one of
-        mise's own error lines (``mise ERROR task not found: <name>``): the
+      - mise "no tasks defined" / "no task named", or one of mise's own error
+        lines that says a task does not exist (``_MISE_NO_SUCH_TASK``): the
         configured (or default ``mise run build``) task does not exist in the
-        repo. The two words anywhere in the log are no signal: a build log
-        names mise, and a failed test is titled "... is not found".
+        repo. The same words anywhere else in the log are no signal: a build
+        log names mise, a failed test is titled "... is not found", and mise
+        itself warns "no task <name> found, but a non-executable file exists"
+        before it makes that file executable and runs it.
     A repo that genuinely fails its build returns some other non-zero code with
     real compiler/test output, which this does NOT flag.
     """
@@ -99,7 +113,7 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     return (
         "no tasks defined" in s
         or "no task named" in s
-        or any("mise error" in line and "not found" in line for line in s.splitlines())
+        or any("mise error" in line and _MISE_NO_SUCH_TASK.search(line) for line in s.splitlines())
     )
 
 
@@ -170,12 +184,23 @@ def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     operators/assignment are passed as literal args to (or AS) the first program
     and mis-run (chained build commands would silently no-op; an env-prefixed
     lint command would exec ``VAR=value`` as the binary and crash).
+
+    A command that ``shlex`` cannot split, one with a quote that is never closed
+    or with a trailing backslash, is wrapped the same way.
     """
     cmd = (command or "").strip() or default
     needs_shell = any(op in cmd for op in _SHELL_OPERATORS) or bool(_ENV_ASSIGN_PREFIX.match(cmd))
     if needs_shell:
         return ["bash", "-lc", cmd]
-    return shlex.split(cmd)
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        # No argv can be made of the text, and an exception here ends the task:
+        # before the agent starts when the baseline resolves the command, after
+        # its work when the gate does. The shell gets the text as written, as it
+        # does for the same text beside a shell operator, and its exit status is
+        # the result of the gate.
+        return ["bash", "-lc", cmd]
 
 
 def _run_verify(repo_dir: str, command: str, default: str, label: str) -> VerifyOutcome:

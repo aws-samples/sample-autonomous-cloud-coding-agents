@@ -130,6 +130,18 @@ export const BEDROCK_GEO_REGIONS: readonly string[] = [
 ];
 
 /**
+ * The `<geo>.` prefix on a model id, or undefined for a bare foundation-model id.
+ *
+ * Matches `<geo>` followed by a literal `.`, so `us` cannot claim `us-gov.…`, and a
+ * vendor name that merely starts with a geography word (`august-labs.…`) is not a
+ * prefix. The CLI keeps its own copy (`geoPrefixOf` in `cli/src/model-id.ts`): it is a
+ * separate package and does not depend on this one.
+ */
+export function geoPrefixOf(modelId: string): string | undefined {
+  return BEDROCK_GEO_REGIONS.find((geo) => modelId.startsWith(`${geo}.`));
+}
+
+/**
  * The geo-prefixed inference-profile id for a bare model id, in the geography a
  * deploy grants. The single place that prefix is applied.
  *
@@ -138,7 +150,25 @@ export const BEDROCK_GEO_REGIONS: readonly string[] = [
  * geography change does not touch. A deploy then granted one set of profiles while
  * the agent asked for another, and every task with no per-repo override failed at
  * turn 0 with AccessDenied.
+ *
+ * Throws when an argument cannot be what its name says: a `geoRegion` that is not in
+ * {@link BEDROCK_GEO_REGIONS} (the arguments swapped, or a typo), or a `bareModelId`
+ * that already carries a geography prefix. Both are plain strings, so the compiler
+ * accepts either mistake, and the result (`global.global.anthropic.…`) is a
+ * well-formed id of a profile that does not exist.
  */
 export function inferenceProfileId(geoRegion: string, bareModelId: string): string {
+  if (!BEDROCK_GEO_REGIONS.includes(geoRegion)) {
+    throw new Error(
+      `inferenceProfileId: '${geoRegion}' is not an inference-profile geography `
+      + `(one of ${BEDROCK_GEO_REGIONS.join(', ')}).`,
+    );
+  }
+  if (geoPrefixOf(bareModelId) !== undefined) {
+    throw new Error(
+      `inferenceProfileId: expected a bare foundation-model id, but '${bareModelId}' `
+      + 'already carries a geography prefix.',
+    );
+  }
   return `${geoRegion}.${bareModelId}`;
 }

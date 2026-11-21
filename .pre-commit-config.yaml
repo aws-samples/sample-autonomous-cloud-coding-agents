@@ -40,7 +40,7 @@ repos:
 
       - id: cdk-eslint
         name: eslint (cdk)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cdk:eslint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cdk:eslint'
         language: system
         pass_filenames: false
         files: ^cdk/.*\.(ts|tsx|mts|cts|cjs|mjs|js)$
@@ -49,7 +49,7 @@ repos:
 
       - id: cli-eslint
         name: eslint (cli)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cli:eslint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cli:eslint'
         language: system
         pass_filenames: false
         files: ^cli/.*\.(ts|tsx|mts|cts|cjs|mjs|js)$
@@ -57,10 +57,43 @@ repos:
 
       - id: web-eslint
         name: eslint (web)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //web:eslint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //web:eslint'
         language: system
         pass_filenames: false
         files: ^web/.*\.(ts|tsx|mts|cts|cjs|mjs|js)$
+        stages: [pre-commit]
+
+      # ESLint reads the types but does not report the compiler's errors, and jest and
+      # vitest transpile the tests without checking them: without these hooks a type
+      # error passes every commit hook and only the build finds it. Each hook runs the
+      # type check of its whole package: tsc cannot check one file under the settings
+      # of its project (it refuses a file named next to -p, and without -p it does not
+      # load the tsconfig). About 9 s for cdk, 5 s for cli and 2 s for web. The build
+      # runs the same tasks and stays the gate: a hook can be skipped, and a commit
+      # that only deletes files starts none of these.
+      - id: cdk-typecheck
+        name: type check (cdk)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cdk:typecheck'
+        language: system
+        pass_filenames: false
+        files: ^cdk/.*\.(ts|tsx|mts|cts)$
+        exclude: ^cdk/cdk\.out/
+        stages: [pre-commit]
+
+      - id: cli-typecheck
+        name: type check (cli)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cli:typecheck'
+        language: system
+        pass_filenames: false
+        files: ^cli/.*\.(ts|tsx|mts|cts)$
+        stages: [pre-commit]
+
+      - id: web-typecheck
+        name: type check (web)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //web:typecheck'
+        language: system
+        pass_filenames: false
+        files: ^web/.*\.(ts|tsx|mts|cts)$
         stages: [pre-commit]
 
       - id: agent-quality
@@ -71,9 +104,17 @@ repos:
         files: ^agent/.*\.py$
         stages: [pre-commit]
 
+      - id: shellcheck
+        name: shellcheck (shell scripts)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:shell'
+        language: system
+        pass_filenames: false
+        files: \.sh$
+        stages: [pre-commit]
+
       - id: docs-sync
         name: sync docs → Starlight mirrors
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:sync && git add docs/src/content/docs/'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:sync && git add docs/src/content/docs/'
         language: system
         pass_filenames: false
         files: ^(docs/(design|guides)/.*\.md$|CONTRIBUTING\.md$)
@@ -94,7 +135,7 @@ repos:
 
       - id: docs-markdown-lint
         name: markdown structure lint (all tracked Markdown)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:markdown-lint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:markdown-lint'
         language: system
         pass_filenames: false
         files: \.(md|mdx)$
@@ -102,7 +143,7 @@ repos:
 
       - id: docs-script-tests
         name: docs script tests (generator, markdown lint)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:test'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:test'
         language: system
         pass_filenames: false
         files: ^docs/scripts/

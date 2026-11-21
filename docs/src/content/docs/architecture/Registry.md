@@ -39,6 +39,12 @@ A **registry asset** is a versioned, immutable-per-version runtime artifact that
 
 **Cedar parity.** Registry Cedar text reaches the agent through the **same** `cedar_policies` payload field as inline blueprint policies, so it is byte-identical from the `PolicyEngine`'s view. **Skills** are prompt text only: a skill cannot invoke tools; its `tool_hints` are advisory prose referencing tools an MCP server separately provides (no transitive dependency — the operator attaches both).
 
+### 2.1 Runtime network restriction for MCP servers
+
+The agent connects to an `mcp_server` asset from inside the task's compute session, so the session's egress rules decide whether the server can be reached. On every compute backend (AgentCore, ECS and Lambda MicroVMs) the runtime security group allows outbound TCP 443 only; [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute#network-architecture) describes that rule and the DNS Firewall allowlist. An `http` or `sse` server therefore has to be served on port 443, the default of an `https://` URL: a server on another port is not supported on any backend. A `stdio` server starts inside the session, and the calls it makes are bound by the same rules.
+
+Neither publish (§7.1) nor resolution (§8) looks at the port or tests connectivity. A pin to a server the session cannot reach resolves and loads like any other: the task starts, and the agent cannot use the server's tools.
+
 ## 3. Substrate mapping (the core design)
 
 Agent Registry answers *"what servers/skills exist, find me one"* (discovery metadata + semantic search). ABCA needs *"give me the exact runtime config to load this pinned asset."* These are two different objects, and the service validates the discovery object against the official schemas (an MCP record's body must be a valid MCP `server.json`, not our `.mcp.json`). So **every record carries BOTH a discovery descriptor AND ABCA's runtime payload.**
@@ -96,7 +102,8 @@ So the port's **`publish` is a multi-call operation**, not one SDK call:
 
 ```
 CreateRegistryRecord → poll until not CREATING
-  → (if autoApprove) SubmitRegistryRecordForApproval → UpdateRegistryRecordStatus(APPROVED)
+  → SubmitRegistryRecordForApproval
+  → (if autoApprove) UpdateRegistryRecordStatus(APPROVED)
 ```
 
 "Dev auto-approve" therefore means *ABCA orchestrating these calls under an approver identity*, not the Agent Registry `autoApproval` flag. This maps cleanly onto the two Cognito groups (§9): a `RegistryPublisher` publishes (record lands `PENDING_APPROVAL` after submit); a `RegistryApprover` drives the final `UpdateRegistryRecordStatus`.
@@ -159,7 +166,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 |--------|-----------|----------|
 | `APPROVED` | yes | silent |
 | `DEPRECATED` | yes | resolves + `warnings: ["DEPRECATED"]` |
-| `DRAFT`, `PENDING_APPROVAL`, `REJECTED`, `CREATING` | no | not a candidate; if the only match → `NO_MATCHING_VERSION` |
+| any other (`DRAFT`, `PENDING_APPROVAL`, `REJECTED`, `CREATING`, `UPDATING`, `CREATE_FAILED`, `UPDATE_FAILED`), including a status the service adds later | no | not a candidate; if the only match → `NO_MATCHING_VERSION` |
 
 **Fail-closed:** any unresolved ref fails task admission with `REGISTRY_RESOLUTION_FAILED`. A running task never re-resolves or substitutes. A candidate whose descriptor is present but unparseable rejects the ref with `MALFORMED` — it is never silently skipped in favour of a lower valid version, so a corrupt payload cannot cause a stale downgrade (#791).
 
@@ -191,6 +198,8 @@ The strict grammar is implemented by `parseRef` (TS) and `parse_ref` (Python), k
 **PR 1 (this work)** ships the resolver library, port, adapter, provisioning, API, and CLI — purely additive; nothing in the orchestrator/agent calls it yet.
 
 **PR 2** wired the resolve step in the orchestrator (not create-task — see note below): it collects `registry://` refs from the Blueprint, resolves them via the `RegistryClient` (fail-closed — an unresolved ref fails the task), stamps `resolved_assets: [{kind, id, version}]` on the `TaskRecord`, threads the bundle into the agent payload, and loads `mcp_server` assets (merge into `.mcp.json`). An `mcp_server` asset whose key (`<namespace>__<name>`) or connection config contains `linear`, in any letter case, cannot be loaded: the agent runtime removes every such server from `.mcp.json` ([ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth): the agent must have no Linear tools), and the task fails with `RegistryAssetLoadError` before the agent starts.
+
+The merged `.mcp.json` may hold secrets (bearer headers, a token in a URL, an API-key argument), so the agent runtime makes git leave the file out of the commits made in the clone: through the clone's `.git/info/exclude` when the repository does not track `.mcp.json`, and with git's `skip-worktree` flag when it does, or when the exclude file does not make git ignore the file (for example because the repository's own `.gitignore` re-includes it). Where that cannot be established the task fails with `RegistryAssetLoadError` before the agent starts: the repository's `.mcp.json` is a symbolic link (the config is not written through it), or the flag cannot be read back from the index (another git process holds `index.lock`, `.mcp.json` has an unresolved merge conflict, or sparse checkout is enabled in the clone). A file that the exclude file covers needs no index entry, so a held `index.lock` or sparse checkout does not fail its task. For the length of a task that loads a registry `mcp_server`, the file is platform-managed: a change the agent itself makes to `.mcp.json` is not committed either, git reports the path as ignored or as outside the sparse-checkout definition, and the agent log records the cause in a `Registry: … is platform-managed for this task` line ([#760](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/760) tracks lifting that limit).
 
 **PR 3** added the `cedar_policy_module` and `skill` loaders: resolved Cedar text is concatenated into the **same** `cedar_policies` payload field as inline blueprint policies (byte-identical from the `PolicyEngine`'s view — cedar-parity holds by construction), and resolved skill `prompt_fragment`s are appended to the system prompt (`prompt_builder.py`, after channel guidance).
 

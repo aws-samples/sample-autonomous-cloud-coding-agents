@@ -46,13 +46,12 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   ...jest.requireActual('../../src/handlers/shared/jira-feedback'),
 }));
 
-jest.mock('../../src/handlers/shared/jira-preview', () => ({
+jest.mock('../../src/handlers/shared/jira-iteration-comment', () => ({
   updateJiraIterationComment: (...args: unknown[]) => updateIssueCommentMock(...args),
 }));
 
-jest.mock('../../src/handlers/shared/logger', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
-}));
+const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+jest.mock('../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 
 const REGISTRY = 'LinearWorkspaceRegistry';
 process.env.TASK_TABLE_NAME = 'TaskTable';
@@ -107,7 +106,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.spyOn(Date, 'now').mockReturnValue(NOW);
   upsertThreadedReplyMock.mockResolvedValue('reply-1');
-  updateIssueCommentMock.mockResolvedValue(true);
+  updateIssueCommentMock.mockResolvedValue({ ok: true });
   ddbSend.mockImplementation((command: { _type?: string }) => (
     command._type === 'Query'
       ? Promise.resolve({ Items: [runningTask()] })
@@ -177,6 +176,8 @@ describe('iteration heartbeat sweep', () => {
     await handler();
 
     expect(updateIssueCommentMock).not.toHaveBeenCalled();
+    // A reply that is left alone is not an attempt.
+    expect(mockLogger.info).toHaveBeenCalledWith('Heartbeat sweep complete', { attempted: 0, edited: 0 });
   });
 
   test('one task\'s edit failure does not stop the rest of the sweep', async () => {
@@ -191,6 +192,7 @@ describe('iteration heartbeat sweep', () => {
 
     await expect(handler()).resolves.toBeUndefined();
     expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(2);
+    expect(mockLogger.info).toHaveBeenCalledWith('Heartbeat sweep complete', { attempted: 2, edited: 1 });
   });
 
   test('one Jira task edit failure does not stop the rest of the sweep', async () => {
@@ -205,6 +207,46 @@ describe('iteration heartbeat sweep', () => {
 
     await expect(handler()).resolves.toBeUndefined();
     expect(updateIssueCommentMock).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([false, true])('a Jira edit that comes back failed is logged for its task and counted as attempted, not as edited (retryable: %s)', async (retryable) => {
+    const second = runningJiraTask();
+    second.task_id.S = 'task-jira-2';
+    ddbSend.mockImplementation((command: { _type?: string }) => (
+      command._type === 'Query'
+        ? Promise.resolve({ Items: [runningJiraTask(), second] })
+        : Promise.resolve({})
+    ));
+    // The Jira writer does not throw: a failed edit comes back as a result
+    // that carries its retry class.
+    updateIssueCommentMock.mockResolvedValueOnce({ ok: false, retryable });
+
+    await handler();
+
+    expect(updateIssueCommentMock).toHaveBeenCalledTimes(2);
+    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn).toHaveBeenCalledWith('Heartbeat sweep: reply edit failed (non-fatal)', {
+      task_id: 'task-jira', retryable,
+    });
+    expect(mockLogger.info).toHaveBeenCalledWith('Heartbeat sweep complete', { attempted: 2, edited: 1 });
+  });
+
+  test('a task whose channel has no credentials registry is skipped, not attempted', async () => {
+    // The handler reads the registries at module load: load it again without Jira's.
+    jest.resetModules();
+    delete process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+    const { handler: withoutJira } = await import('../../src/handlers/iteration-heartbeat-sweep');
+    process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
+    ddbSend.mockImplementation((command: { _type?: string }) => (
+      command._type === 'Query'
+        ? Promise.resolve({ Items: [runningJiraTask()] })
+        : Promise.resolve({})
+    ));
+
+    await withoutJira();
+
+    expect(updateIssueCommentMock).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledWith('Heartbeat sweep complete', { attempted: 0, edited: 0 });
   });
 
   test('a query failure is swallowed — a cosmetic sweep never throws', async () => {

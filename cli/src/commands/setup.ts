@@ -34,7 +34,7 @@ import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { Command } from 'commander';
 import { clearCredentials, getConfigDir, saveConfig, tryLoadConfig } from '../config';
 import { debug } from '../debug';
-import { CAPABILITY_CATALOG, isAvailableIn } from '../deployment-capabilities';
+import { Capability, CAPABILITY_CATALOG, isAvailableIn } from '../deployment-capabilities';
 import {
   ComputeBackend,
   DEPLOYMENT_FEATURES,
@@ -54,8 +54,9 @@ import {
 } from '../deployment-profile';
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME } from '../operator-context';
+import { AccountPreparation, bootstrapNameProblem, planAccountPreparation, REQUIRED_BOOTSTRAP_VERSION } from '../setup-account';
+import { describeDataLoss, parseStateBearingChanges } from '../setup-diff';
 import {
-  componentForPath,
   DeployProgress,
   formatDuration,
   Screen,
@@ -83,40 +84,13 @@ const RESERVED_CONTEXT_KEYS = new Set([
   'stackName', 'deploymentProfile', 'compute_types', 'compute_type', ...Object.values(FEATURE_CONTEXT_KEYS),
 ]);
 
+/** Lifts the Lambda MicroVMs Region check at synthesis; mirrors `cdk/src/constructs/lambda-microvm-compute.ts` (parity-tested). */
+const MICROVM_REGION_OVERRIDE_CONTEXT = 'microvm_region_override';
+
 /** CDK's bootstrap stack; ABCA's least-privilege variant publishes `BootstrapPolicyVersion`. */
 const BOOTSTRAP_STACK = 'CDKToolkit';
-/**
- * Minimum ABCA bootstrap bundle this CLI deploys against. Mirrors
- * `BOOTSTRAP_VERSION` in `cdk/src/bootstrap/version.ts` (parity-tested).
- */
-export const REQUIRED_BOOTSTRAP_VERSION = '1.12.0';
-
-const COMPUTE_LABELS: Readonly<Record<ComputeBackend, string>> = {
-  'agentcore': 'AgentCore Runtime',
-  'ecs': 'ECS Fargate',
-  'lambda-microvm': 'Lambda MicroVMs',
-};
-
-/** One-time account changes a deploy needs, in execution order. */
-type AccountPreparation = 'bootstrap' | 'rebootstrap' | 'computeTypes';
-
-/** Resource types whose deletion, replacement or orphaning loses data, installations or ownership. */
-const STATE_BEARING_TYPES: ReadonlyMap<string, string> = new Map([
-  ['AWS::DynamoDB::Table', 'table'],
-  ['AWS::DynamoDB::GlobalTable', 'table'],
-  ['AWS::SecretsManager::Secret', 'secret'],
-  ['AWS::S3::Bucket', 'bucket'],
-  ['AWS::Cognito::UserPool', 'user pool'],
-  ['AWS::KMS::Key', 'encryption key'],
-  ['AWS::Logs::LogGroup', 'log group'],
-  ['AWS::CloudFormation::Stack', 'nested stack'],
-  ['AWS::BedrockAgentCore::Memory', 'agent memory'],
-  ['AWS::EC2::VPC', 'VPC'],
-]);
 
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
-/** ABCA's least-privilege bootstrap scopes its deploy role to these names (cdk/src/bootstrap/policies/*). */
-const BOOTSTRAP_STACK_NAME_PATTERN = new RegExp(`^${DEFAULT_STACK_NAME}(-[A-Za-z0-9-]+)?$`);
 const REGION_PATTERN = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
 const CONTEXT_PATTERN = /^([A-Za-z][\w:.-]*)=(.*)$/s;
 /** Upper bound for the bootstrap parameter update (IAM policy changes only). */
@@ -125,6 +99,8 @@ const BOOTSTRAP_UPDATE_TIMEOUT_S = 900;
 export const SETUP_CANCELLED_EXIT_CODE = 130;
 /** Failures listed on the result screen; the log has the rest. */
 const MAX_FAILURES_SHOWN = 3;
+/** The line mise ends a failed task with (`[//cdk:deploy] ERROR task failed`): it names the task, not the cause. */
+const MISE_TASK_FAILED = /^\[[^\]]+\] ERROR task failed$/;
 /** Width of the header's label column (`Account` plus a gap). */
 const FIELD_LABEL_WIDTH = 9;
 /** Width of the deployment picker's name column. */
@@ -206,32 +182,8 @@ export interface SetupOptions {
   readonly repoRoot?: string;
 }
 
-export interface StateBearingChange {
-  readonly change: 'delete' | 'replace' | 'orphan';
-  readonly type: string;
-  /** Construct path when CDK prints one, else the logical ID. */
-  readonly id: string;
-}
-
 export function setupCancelled(): CliError {
   return new CliError('Setup cancelled; nothing was written or deployed.', SETUP_CANCELLED_EXIT_CODE);
-}
-
-/**
- * State-bearing deletions, replacements and orphanings in `cdk diff` output.
- * CDK ends each resource line with its impact (`destroy`, `orphan`, `replace`,
- * `may be replaced`); `(requires replacement)` appears only on property lines.
- */
-export function parseStateBearingChanges(diffOutput: string): StateBearingChange[] {
-  const changes: StateBearingChange[] = [];
-  for (const raw of stripAnsi(diffOutput).split('\n')) {
-    const match = /^\s*\[([-~])\]\s+(\S+)\s+(\S+)(.*)$/.exec(raw);
-    if (!match || !STATE_BEARING_TYPES.has(match[2])) continue;
-    const [, marker, type, id, impact] = match;
-    if (marker === '-') changes.push({ change: /\borphan\b/.test(impact) ? 'orphan' : 'delete', type, id });
-    else if (/\b(replace|may be replaced)\s*$/.test(impact)) changes.push({ change: 'replace', type, id });
-  }
-  return changes;
 }
 
 function repoCdkDir(repoRoot: string): string {
@@ -239,13 +191,13 @@ function repoCdkDir(repoRoot: string): string {
   return path.join(repoRoot, 'cdk');
 }
 
-/** Persistent CDK context sources, in the order CDK reads them. */
+/** Persistent CDK context sources, lowest precedence first: where two set a key, CDK uses the later one. */
 function persistentContext(repoRoot: string): Array<{ source: string; context: Record<string, unknown> }> {
   const cdkDir = repoCdkDir(repoRoot);
   const sources = [
     { source: '~/.cdk.json', file: `${os.homedir()}${path.sep}.cdk.json`, nested: true },
-    { source: 'cdk/cdk.json', file: `${cdkDir}${path.sep}cdk.json`, nested: true },
     { source: 'cdk/cdk.context.json', file: `${cdkDir}${path.sep}cdk.context.json`, nested: false },
+    { source: 'cdk/cdk.json', file: `${cdkDir}${path.sep}cdk.json`, nested: true },
   ];
   const result: Array<{ source: string; context: Record<string, unknown> }> = [];
   for (const { source, file, nested } of sources) {
@@ -328,13 +280,38 @@ async function confirm(deps: SetupDeps, question: string, defaultYes: boolean): 
   return answer === 'y' || answer === 'yes';
 }
 
+function unavailableMessage(capability: Capability, name: string, region: string): string {
+  return `${capability.label} ('${name}') is unavailable in ${region} (supported: ${capability.regions?.join(', ')}). ${capability.remediation}`;
+}
+
 function unavailableIn(region: string, selection: DeploymentFeatures): string[] {
   return enabledFeatures(selection)
     .filter(feature => !isAvailableIn(CAPABILITY_CATALOG.features[feature], region))
-    .map(feature => {
-      const capability = CAPABILITY_CATALOG.features[feature];
-      return `${capability.label} ('${feature}') is unavailable in ${region} (supported: ${capability.regions?.join(', ')}). ${capability.remediation}`;
-    });
+    .map(feature => unavailableMessage(CAPABILITY_CATALOG.features[feature], feature, region));
+}
+
+/**
+ * Reject a compute backend the catalog does not list for the Region, as synthesis would,
+ * before any feature prompt or diff. The override context lifts the Lambda MicroVMs check
+ * at synthesis (ADR-021), so it lifts it here: `--context` wins over the persistent sources.
+ */
+function assertComputeAvailable(
+  region: string,
+  compute: readonly ComputeBackend[],
+  context: ReadonlyMap<string, string>,
+  repoRoot: string,
+): void {
+  const effective = new Map<string, unknown>([
+    ...persistentContext(repoRoot).flatMap(({ context: values }) => Object.entries(values)),
+    ...context,
+  ]);
+  const overridden = Boolean(effective.get(MICROVM_REGION_OVERRIDE_CONTEXT));
+  const unavailable = compute
+    .filter(backend => !isAvailableIn(CAPABILITY_CATALOG.compute[backend], region))
+    .filter(backend => !(overridden && backend === 'lambda-microvm'));
+  if (unavailable.length > 0) {
+    throw new CliError(unavailable.map(backend => unavailableMessage(CAPABILITY_CATALOG.compute[backend], backend, region)).join('\n'));
+  }
 }
 
 /** Writes text lines and styles them consistently. */
@@ -354,37 +331,6 @@ class Ui {
   field(label: string, value: string): void {
     this.line(`  ${this.style.dim(label.padEnd(FIELD_LABEL_WIDTH))}${value}`);
   }
-}
-
-function versionAtLeast(actual: string, required: string): boolean {
-  const parse = (value: string) => value.split('.').map(part => Number.parseInt(part, 10) || 0);
-  const [a, r] = [parse(actual), parse(required)];
-  for (let index = 0; index < Math.max(a.length, r.length); index += 1) {
-    if ((a[index] ?? 0) !== (r[index] ?? 0)) return (a[index] ?? 0) > (r[index] ?? 0);
-  }
-  return true;
-}
-
-/**
- * What the account needs before ABCA can deploy. A standard CDK bootstrap (no
- * ABCA policy outputs) is shared with other apps and is never modified.
- */
-function planAccountPreparation(
-  bootstrap: ExistingStack | null,
-  compute: readonly ComputeBackend[],
-): { steps: AccountPreparation[]; computeTypes: ComputeBackend[]; standardBootstrap: boolean } {
-  if (!bootstrap) {
-    // AgentCore stays in the list: Memory and the Gateway are AgentCore resources on every backend.
-    const computeTypes = [...new Set<ComputeBackend>(['agentcore', ...compute])];
-    return { steps: computeTypes.length > 1 ? ['bootstrap', 'computeTypes'] : ['bootstrap'], computeTypes, standardBootstrap: false };
-  }
-  const policyVersion = bootstrap.outputs.get('BootstrapPolicyVersion');
-  if (policyVersion === undefined) return { steps: [], computeTypes: [], standardBootstrap: true };
-  const steps: AccountPreparation[] = versionAtLeast(policyVersion, REQUIRED_BOOTSTRAP_VERSION) ? [] : ['rebootstrap'];
-  const configured = (bootstrap.parameters.get('ComputeTypes') ?? 'agentcore').split(',').map(value => value.trim()).filter(Boolean);
-  const computeTypes = [...new Set([...configured, ...compute])] as ComputeBackend[];
-  if (computeTypes.length !== configured.length) steps.push('computeTypes');
-  return { steps, computeTypes, standardBootstrap: false };
 }
 
 async function chooseCompute(deps: SetupDeps, ui: Ui, defaults: readonly ComputeBackend[]): Promise<ComputeBackend[]> {
@@ -422,13 +368,6 @@ function suggestStackName(taken: ReadonlySet<string>): string {
     const candidate = `${DEFAULT_STACK_NAME}-${suffix}`;
     if (!taken.has(candidate)) return candidate;
   }
-}
-
-/** Why ABCA's least-privilege bootstrap cannot deploy `stackName`, or `undefined` when it can. */
-function bootstrapNameProblem(stackName: string): string | undefined {
-  if (BOOTSTRAP_STACK_NAME_PATTERN.test(stackName)) return undefined;
-  return `ABCA's least-privilege bootstrap only deploys stacks named ${DEFAULT_STACK_NAME} or ${DEFAULT_STACK_NAME}-<suffix>; `
-    + `try ${DEFAULT_STACK_NAME}-${stackName.toLowerCase()}.`;
 }
 
 async function askNewStackName(
@@ -495,7 +434,7 @@ async function chooseDeployment(
 }
 
 function computeLabel(compute: readonly ComputeBackend[]): string {
-  return compute.map(backend => COMPUTE_LABELS[backend]).join(' + ');
+  return compute.map(backend => CAPABILITY_CATALOG.compute[backend].label).join(' + ');
 }
 
 async function chooseInteractively(
@@ -597,20 +536,6 @@ function printNextSteps(
   });
 }
 
-/** "Slack: 3 tables and 1 secret" from state-bearing changes, grouped by component. */
-function describeDataLoss(changes: readonly StateBearingChange[], stackNames: readonly string[]): string[] {
-  const byComponent = new Map<string, Map<string, number>>();
-  for (const change of changes) {
-    const component = componentForPath(change.id, stackNames);
-    const nouns = byComponent.get(component) ?? new Map<string, number>();
-    const noun = STATE_BEARING_TYPES.get(change.type)!;
-    nouns.set(noun, (nouns.get(noun) ?? 0) + 1);
-    byComponent.set(component, nouns);
-  }
-  return [...byComponent].map(([component, nouns]) => `${component}: ${[...nouns]
-    .map(([noun, count]) => `${count} ${noun}${count === 1 ? '' : 's'}`).join(', ')}`);
-}
-
 /** `~/.bgagent/logs/x` rather than a long absolute path. */
 function displayLogPath(file: string): string {
   const home = os.homedir();
@@ -619,8 +544,10 @@ function displayLogPath(file: string): string {
 
 /** The most useful lines of raw output when CloudFormation reported no reason. */
 function errorLines(output: string | readonly string[]): string[] {
-  const lines = (typeof output === 'string' ? stripAnsi(output).split('\n') : [...output]).map(line => line.trim()).filter(Boolean);
-  const errors = lines.filter(line => /error|failed|❌|denied|not authorized|exception/i.test(line));
+  const lines = (typeof output === 'string' ? stripAnsi(output).split('\n') : [...output])
+    .map(line => line.trim()).filter(line => line !== '' && !MISE_TASK_FAILED.test(line));
+  // `fail` also matches the `FAIL:` of the bootstrap preflight and the `fail:` of CDK's asset build and publish.
+  const errors = lines.filter(line => /error|fail|❌|denied|not authorized|exception/i.test(line));
   return (errors.length > 0 ? errors : lines).slice(-MAX_FAILURES_SHOWN);
 }
 
@@ -772,7 +699,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     }
     // The first backend is the repository default; reordering moves every repository without an explicit one.
     if (deployedCompute && compute[0] !== deployedCompute[0]) {
-      ui.line(`  ${style.yellow('⚠')} The repository default changes from ${COMPUTE_LABELS[deployedCompute[0]]} to ${COMPUTE_LABELS[compute[0]]}.`);
+      ui.line(`  ${style.yellow('⚠')} The repository default changes from ${CAPABILITY_CATALOG.compute[deployedCompute[0]].label} to ${CAPABILITY_CATALOG.compute[compute[0]].label}.`);
       if (prompting && !(await confirm(deps, '  Change the default backend?', false))) throw setupCancelled();
     }
   } else if (deployedCompute) {
@@ -782,6 +709,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   } else {
     compute = [...(profile?.compute ?? ['agentcore'])];
   }
+  assertComputeAvailable(region, compute, extraContext, repoRoot);
 
   // 6. Features, validated against the Region whatever their source.
   let selection: DeploymentFeatures;
@@ -835,7 +763,6 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   }
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    MISE_EXPERIMENTAL: '1',
     AWS_REGION: region,
     AWS_DEFAULT_REGION: region,
     CDK_DEFAULT_REGION: region,

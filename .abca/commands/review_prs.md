@@ -121,7 +121,9 @@ the **array** as the Workflow's `args`. Then invoke `Workflow` with a self-conta
 
 - reads the descriptors from `args` and fans out **one agent per PR concurrently** (`parallel()`
   over the descriptors, or `pipeline()` if you add a downstream stage); the tool caps real
-  concurrency, so pass all PRs — they queue and drain automatically.
+  concurrency, so pass all PRs — they queue and drain automatically. The script must normalize
+  `args` first: it can arrive as a JSON-encoded string instead of the array, and `.map` on a
+  string throws before any agent spawns.
 - has each agent execute the full [`review_pr`](./review_pr.md) workflow for its PR and **submit**
   the review (inline suggestions + an Approve / Comment / Request-changes decision) via the Stage-3
   mechanism. The agent prompt must include that PR's `worktreePath`, `diffPath`, `headSha` (the
@@ -151,7 +153,9 @@ const RESULT = { type: 'object', required: ['number', 'verdict', 'rationale', 'r
   rationale: { type: 'string' },
   reviewUrl: { type: 'string' },
 } }
-const results = await parallel(args.map((pr) => () =>
+// Workflow may deliver `args` as a JSON string; tolerate either form.
+const prs = typeof args === 'string' ? JSON.parse(args) : args
+const results = await parallel(prs.map((pr) => () =>
   agent(
     `Run the /review_pr workflow for PR #${pr.number} and SUBMIT the review with inline ` +
     `suggestions. Worktree: ${pr.worktreePath}. Diff: ${pr.diffPath}. commit_id: ${pr.headSha}. ` +

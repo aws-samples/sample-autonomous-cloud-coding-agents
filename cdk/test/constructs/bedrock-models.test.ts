@@ -27,6 +27,8 @@ import {
   BEDROCK_MODELS_CONTEXT_KEY,
   DEFAULT_BEDROCK_GEO_REGION,
   DEFAULT_BEDROCK_MODEL_IDS,
+  geoPrefixOf,
+  inferenceProfileId,
   resolveBedrockGeoRegion,
   resolveBedrockModelIds,
 } from '../../src/constructs/bedrock-models';
@@ -221,6 +223,51 @@ describe('resolveBedrockGeoRegion', () => {
     expect(() => resolveBedrockGeoRegion(nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: ['us'] })))
       .toThrow(/must be one of/);
   });
+});
+
+describe('geoPrefixOf', () => {
+  it.each([...BEDROCK_GEO_REGIONS])('recognizes the %s prefix', (geo) => {
+    expect(geoPrefixOf(`${geo}.anthropic.claude-opus-5`)).toBe(geo);
+  });
+
+  it('returns undefined for a bare id, and for a name that merely starts with a geography word', () => {
+    expect(geoPrefixOf('anthropic.claude-opus-5')).toBeUndefined();
+    // Keyed on the `<geo>.` separator: `au` must not claim `august-labs.…`.
+    expect(geoPrefixOf('august-labs.model-1')).toBeUndefined();
+  });
+});
+
+/**
+ * Both arguments are plain strings, so the compiler accepts them swapped or already
+ * prefixed. Either mistake would build a well-formed id of a profile that does not
+ * exist (`global.global.anthropic.…`), which a grant or an env var then carries to a
+ * turn-0 failure.
+ */
+describe('inferenceProfileId', () => {
+  it.each([...BEDROCK_GEO_REGIONS])('prefixes a bare model id with the %s geography', (geo) => {
+    expect(inferenceProfileId(geo, 'anthropic.claude-opus-5')).toBe(`${geo}.anthropic.claude-opus-5`);
+  });
+
+  it('accepts a bare id whose vendor name starts with a geography word', () => {
+    expect(inferenceProfileId('au', 'august-labs.model-1')).toBe('au.august-labs.model-1');
+  });
+
+  it('throws when the arguments are swapped', () => {
+    expect(() => inferenceProfileId('anthropic.claude-opus-5', 'global'))
+      .toThrow(/'anthropic\.claude-opus-5' is not an inference-profile geography/);
+  });
+
+  it('throws on a geography the platform does not model', () => {
+    expect(() => inferenceProfileId('usa', 'anthropic.claude-opus-5'))
+      .toThrow(/'usa' is not an inference-profile geography/);
+  });
+
+  it.each(['global.anthropic.claude-opus-5', 'us-gov.anthropic.claude-opus-5'])(
+    'throws on %s, which already carries a geography prefix',
+    (prefixed) => {
+      expect(() => inferenceProfileId('global', prefixed)).toThrow(/already carries a geography prefix/);
+    },
+  );
 });
 
 /**

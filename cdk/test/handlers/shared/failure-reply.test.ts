@@ -123,6 +123,24 @@ describe('renderFailureReply — failure is a conversation', () => {
       expect(body).not.toMatch(/extra guidance/i);
     });
 
+    test('nothing delivered (deliverable=lost) → asks for guidance, not "temporary infrastructure issue, try again"', () => {
+      // The delivery gate cannot tell lost work from a run that correctly changed
+      // nothing (#751), and a retry cannot help the second: neither the reply nor
+      // the epic panel line may send the reader into a retry loop.
+      const input = {
+        status: TaskStatus.FAILED,
+        errorMessage: 'Task did not succeed (agent_status=success, deliverable=lost): the coding task reported success '
+          + 'but no commit reached the branch and no PR was opened — either the agent made no change, or its changes '
+          + "did not land in the task's repository.",
+        taskId: 'task-nothing',
+      };
+      for (const reply of [renderFailureReply(input), renderPanelFailureReason(input)]) {
+        expect(reply).toMatch(/No change was delivered/);
+        expect(reply).toMatch(/reply here with any extra guidance/i);
+        expect(reply).not.toMatch(/temporary infrastructure issue/i);
+      }
+    });
+
     test('not-retryable auth failure → says a retry won\'t help + names the admin', () => {
       const body = renderFailureReply({
         status: TaskStatus.FAILED,

@@ -34,7 +34,6 @@ jobs:
     outputs:
       patch_created: ${{ steps.create_patch.outputs.patch_created }}
     env:
-      MISE_EXPERIMENTAL: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

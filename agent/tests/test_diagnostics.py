@@ -33,8 +33,11 @@ def _exit_status(script: str) -> int:
     return 0
 
 
-def _sdk_smoke(monkeypatch, *messages) -> int:
-    """Exit status of the SDK smoke test when the CLI yields ``messages``."""
+def _sdk_smoke(monkeypatch, *messages, raises: Exception | None = None) -> int:
+    """Exit status of the SDK smoke test when the CLI yields ``messages``.
+
+    With ``raises``, the stream raises it after the last message.
+    """
 
     class Client:
         def __init__(self, options):
@@ -49,6 +52,8 @@ def _sdk_smoke(monkeypatch, *messages) -> int:
         async def receive_response(self):
             for message in messages:
                 yield message
+            if raises is not None:
+                raise raises
 
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
     monkeypatch.setenv("AWS_REGION", "us-east-1")
@@ -96,6 +101,59 @@ def test_sdk_smoke_fails_when_the_model_call_is_rejected(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "PASS" not in out
     assert "FAIL" in out
+    assert status == 1
+
+
+def test_sdk_smoke_fails_when_the_run_raises_after_its_result(monkeypatch, capsys):
+    # A complete answer and a clean result, then an exception from the stream: judged
+    # by its messages alone, this run is a PASS.
+    status = _sdk_smoke(
+        monkeypatch,
+        SystemMessage(subtype="init", data={}),
+        AssistantMessage(content=[TextBlock(text="Hello world")], model="claude-opus-5-5"),
+        _result(is_error=False, result="Hello world"),
+        raises=RuntimeError("stream closed"),
+    )
+
+    out = capsys.readouterr().out
+    assert "PASS" not in out
+    assert "raised an exception" in out
+    # The result arrived, so the verdict for a run that has none would be false.
+    assert "INDETERMINATE" not in out
+    assert out.index("Errors:") < out.index("FAIL")
+    assert status == 1
+
+
+@pytest.mark.parametrize(
+    ("messages", "verdict"),
+    [
+        pytest.param((), "Zero messages at all", id="before any message"),
+        pytest.param(
+            (SystemMessage(subtype="init", data={}),),
+            "Got init but zero AssistantMessages",
+            id="after init",
+        ),
+        pytest.param(
+            (
+                SystemMessage(subtype="init", data={}),
+                AssistantMessage(content=[TextBlock(text="Hello")], model="claude-opus-5-5"),
+            ),
+            "INDETERMINATE",
+            id="after the answer",
+        ),
+    ],
+)
+def test_sdk_smoke_keeps_its_verdict_when_the_run_raises_before_its_result(
+    monkeypatch, capsys, messages, verdict
+):
+    # Each of these runs fails on its messages alone, with a verdict that says where to
+    # look. The exception is reported above that verdict and does not replace it.
+    status = _sdk_smoke(monkeypatch, *messages, raises=RuntimeError("stream closed"))
+
+    out = capsys.readouterr().out
+    assert "PASS" not in out
+    assert verdict in out
+    assert out.index("Errors:") < out.index(verdict)
     assert status == 1
 
 

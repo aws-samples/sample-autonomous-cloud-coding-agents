@@ -49,7 +49,7 @@ flowchart LR
 
 ### Phase 1: Load (context hydration)
 
-Before the agent touches code, the orchestrator loads external memory via two parallel `RetrieveMemoryRecordsCommand` calls (semantic + episodic, 5-second timeout). Results are trimmed to a 2,000-token budget and injected into the agent's system prompt.
+Before the agent touches code, the orchestrator loads external memory via two parallel `RetrieveMemoryRecordsCommand` calls (semantic + episodic, 5-second timeout). Results are trimmed to a token budget and injected into the agent's system prompt. The budget is 2,000 tokens unless the repository's `RepoConfig` record holds a `memory_token_budget`, which a Blueprint sets with `agent.memoryTokenBudget` (see [Repository onboarding](./REPO_ONBOARDING.md#platform-defaults)).
 
 | Retrieval | Strategy | Namespace | What it returns |
 |---|---|---|---|
@@ -93,7 +93,7 @@ Cross-session, durable memory with semantic search. The agent writes after each 
 
 ### Code attribution
 
-Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during `setup_repo()`). The prompt version is a SHA-256 hash of deterministic prompt parts only (memory context is excluded because it varies per run). This enables queries like "what prompt led to this code change?" and supports the evaluation pipeline.
+Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during `setup_repo()`; it also names the workflow and its step, see [OBSERVABILITY.md](./OBSERVABILITY.md#code-attribution)). The prompt version is a SHA-256 hash of deterministic prompt parts only (memory context is excluded because it varies per run). This enables queries like "what prompt led to this code change?" and supports the evaluation pipeline.
 
 ### Review feedback memory
 

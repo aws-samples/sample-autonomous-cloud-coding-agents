@@ -48,8 +48,12 @@ describe('evaluateBootstrap', () => {
     expect(evaluateBootstrap(null, EXPECTED)).toEqual({ status: 'FAIL', message: expect.stringMatching(/not bootstrapped/) });
   });
 
-  it('FAILs on a default CDK bootstrap without ABCA outputs', () => {
-    expect(evaluateBootstrap(outputs(), EXPECTED)).toEqual({ status: 'FAIL', message: expect.stringMatching(/default CDK bootstrap/) });
+  it('FAILs on a default CDK bootstrap without ABCA outputs, and says what the remedy replaces', () => {
+    const verdict = evaluateBootstrap(outputs(), EXPECTED);
+    expect(verdict.status).toBe('FAIL');
+    expect(verdict.message).toMatch(/default CDK bootstrap/);
+    // The remedy replaces the bootstrap that every CDK app of the account and Region deploys through.
+    expect(verdict.message).toMatch(/`mise \/\/cdk:bootstrap` replaces this one, for every CDK app/);
   });
 
   it('FAILs fast on an older policy bundle, naming both versions and the fix', () => {

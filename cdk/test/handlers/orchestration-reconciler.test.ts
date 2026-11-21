@@ -88,8 +88,8 @@ afterEach(() => {
   }
   mockIterationStatus.mockClear();
 });
-// Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
-jest.mock('../../src/handlers/shared/jira-preview', () => ({
+// Delivery convergence is exercised with real interleavings in jira-iteration-comment.test.ts.
+jest.mock('../../src/handlers/shared/jira-iteration-comment', () => ({
   updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
     ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) => {
     mockIterationStatus(status);

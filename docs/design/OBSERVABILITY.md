@@ -127,6 +127,7 @@ All events carry `task_id` for filtering; the events the orchestrator and the ag
 | Token usage per task | Cost | Cost attribution and budget enforcement |
 | `ABCA/Budgets:BudgetThresholdCrossed` | Cost | Claimed 80%/100% monthly user/team budget crossings; retries can rarely duplicate a metric |
 | `ABCA/Budgets:BudgetTeamMembershipUnresolved` | Correctness | Count of admissions where Cognito could not resolve a mapped user, so team-budget enforcement was skipped |
+| `ABCA/Webhooks:WebhookScreeningFailed` | Availability | Count of Jira or Linear comment blocks and Linear project-document blocks dropped because the Bedrock Guardrail call that screens them failed. The `source` dimension (`jira-comments`, `linear-comments`, `linear-docs`) names the content; the metric without dimensions is the total |
 | Cold start duration | Latency | Image optimization signal |
 | Active tasks (RUNNING count) | Capacity | Admission control and capacity planning |
 | Pending tasks (SUBMITTED count) | Capacity | Backlog depth and throughput monitoring |
@@ -164,10 +165,31 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 | Monthly budget warning | Estimated spend crosses 80% | Notify the shared `OperationalAlerts` SNS topic; inspect `OrchestrationReconciler` logs for scope details. |
 | Monthly budget exceeded | Estimated spend crosses 100% | Notify the shared topic. Scopes configured with hard stop reject new tasks. |
 | Budget team membership unresolved | Cognito cannot resolve a mapped task owner | Inspect create-task logs for `budget_team_membership_user_missing`, then repair the stale mapping or federated identity configuration. User-budget enforcement remains active, but team-budget enforcement was skipped. |
+| Webhook screening failed | A guardrail call that screens Jira or Linear comments or Linear project documents failed, once or more in 5 minutes | Notify the shared topic. The content was dropped, and a task created from the event runs without it; in a full guardrail outage the task is rejected at submission as well (Guardrail screening failures, above). Search the Jira and Linear webhook processor logs for `screening unavailable` to find the issue and the error. Deployed only with Linear or Jira. |
+
+### Alarm notifications
+
+Every CloudWatch alarm the stack deploys publishes to one SNS topic when it goes into `ALARM`: the orchestrator's Lambda-error alarm, the DLQ-depth alarms of the two task-event stream consumers (`FanOutConsumer` and `ApprovalMetricsPublisherConsumer`), the three budget alarms and, where deploy-preview screenshots are deployed, the screenshot processor's Lambda-error and DLQ-depth alarms and, where Linear or Jira is deployed, the webhook-screening alarm. The `OperationalAlerts` construct creates the topic, and the stack output `OperationalAlertsTopicArn` holds its ARN. Nothing is sent when an alarm returns to `OK`.
+
+The topic has no subscriber until an operator adds one:
+
+- **Email, at deploy time.** Deploy with `-c alertEmail=ops@example.com`. AWS sends a confirmation link to that address and delivers nothing until it is clicked. The subscription belongs to the stack: a later deploy that does not set `alertEmail` removes it.
+- **Any other destination.** Subscribe it to the exported topic ARN (Slack, PagerDuty, another address). The stack does not manage such a subscription.
+
+When an alarm is in `ALARM` and no notification arrives, follow [Troubleshooting missing alarm notifications](../guides/COST_ATTRIBUTION.md#troubleshooting-missing-alarm-notifications).
 
 ## Code attribution
 
-Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during repo setup). This links code changes to the task and prompt that produced them, enabling queries like "what prompt led to this change?" and supporting the evaluation pipeline.
+Every agent commit carries attribution trailers (via a git hook installed during repo setup):
+
+| Trailer | Example | Links the commit to |
+|---------|---------|---------------------|
+| `Task-Id:` | `01KRPZ3PF8ZBRZ2600GRJS2VF7` | The task |
+| `Prompt-Version:` | `1c9c10e027a2` | The system prompt the task ran with (a hash of it) |
+| `Workflow-Id:` | `coding/new-task-v1` | The workflow the task ran |
+| `Workflow-Step:` | `implement` | The workflow step that was running when the commit was made: the step's `name`, else its `kind` |
+
+This links code changes to the task, the prompt and the workflow step that produced them, enabling queries like "what prompt led to this change?" and "which step made this commit?" from `git log` alone, and supporting the evaluation pipeline. The safety-net commit of work the agent left uncommitted carries the same trailers and names the agent step, whose work it saves.
 
 Task conversations, tool calls, decisions, and outcomes are persisted with metadata (`task_id`, `session_id`, `repo`, `branch`, `commit SHAs`, `pr_url`) in a searchable store. The agent retrieves relevant past context via memory search at task start. See [MEMORY.md](./MEMORY.md) for the memory lifecycle and retrieval strategy.
 

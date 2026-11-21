@@ -12,8 +12,8 @@ Cognito managed login); see "Optional operator console" in
 ## Run it locally (no AWS account needed)
 
 ```bash
-mise run install                       # once, from the repo root
-MISE_EXPERIMENTAL=1 mise //web:dev:mock
+mise run install   # once, from the repo root
+mise //web:dev:mock
 # open http://127.0.0.1:5173
 ```
 
@@ -31,10 +31,10 @@ reloads on every save and talks to your deployed API.
 
 ```bash
 # once: allow sign-in redirects to http://localhost:5173 on the console's app client
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all -c operatorConsole=true -c operatorConsoleDevOrigins=http://localhost:5173
+mise //cdk:deploy -- --all -c operatorConsole=true -c operatorConsoleDevOrigins=http://localhost:5173
 
 export AWS_PROFILE=<your profile> AWS_REGION=<region>
-MISE_EXPERIMENTAL=1 mise //web:dev:live
+mise //web:dev:live
 # open http://localhost:5173 (use "localhost", not 127.0.0.1: it must match the redirect)
 ```
 
@@ -63,12 +63,12 @@ tasks. A fleet-wide operator view needs admin-scoped endpoints (next increments)
 ## Commands
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //web:build      # typecheck + test + lint + bundle (part of `mise run build`)
-MISE_EXPERIMENTAL=1 mise //web:test       # Vitest + Testing Library against the same MSW handlers
-MISE_EXPERIMENTAL=1 mise //web:eslint     # ESLint --fix
-MISE_EXPERIMENTAL=1 mise //web:eslint:check  # ESLint without --fix: reports only; a warning fails too
-MISE_EXPERIMENTAL=1 mise //web:dev:mock   # local mock mode
-MISE_EXPERIMENTAL=1 mise //web:dev:live   # local dev server against your deployment
+mise //web:build      # typecheck + test + lint + bundle (part of `mise run build`)
+mise //web:test       # Vitest + Testing Library against the same MSW handlers
+mise //web:eslint     # ESLint --fix
+mise //web:eslint:check  # ESLint without --fix: reports only; a warning fails too
+mise //web:dev:mock   # local mock mode
+mise //web:dev:live   # local dev server against your deployment
 ```
 
 ## How mock code stays out of production

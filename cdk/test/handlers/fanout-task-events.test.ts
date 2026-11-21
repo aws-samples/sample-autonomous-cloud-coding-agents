@@ -163,8 +163,8 @@ afterEach(() => {
   }
   mockIterationStatus.mockClear();
 });
-// Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
-jest.mock('../../src/handlers/shared/jira-preview', () => ({
+// Delivery convergence is exercised with real interleavings in jira-iteration-comment.test.ts.
+jest.mock('../../src/handlers/shared/jira-iteration-comment', () => ({
   updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
     ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) => {
     mockIterationStatus(status);
@@ -403,7 +403,9 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     expect(f.has('task_stranded')).toBe(false);
   });
 
-  test('GitHub subscribes to pr_created + terminal (edit-in-place surface)', () => {
+  test('GitHub subscribes to pr_created + terminal events + task_timed_out (edit-in-place surface)', () => {
+    // A timeout ends a task like the other four outcomes. Without it the
+    // comment of a timed-out task stays at its last edit, or is never posted.
     const f = CHANNEL_DEFAULTS.github;
     expect([...f].sort()).toEqual([
       'pr_created',
@@ -411,6 +413,7 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
       'task_completed',
       'task_failed',
       'task_stranded',
+      'task_timed_out',
     ]);
   });
 
@@ -551,12 +554,13 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
     expect([...outcome.dispatched].sort()).toEqual(['github', 'jira', 'linear', 'slack']);
   });
 
-  test('task_timed_out routes to Slack + Jira + Linear (all three now subscribe)', async () => {
+  test('task_timed_out routes to Slack + GitHub + Jira + Linear', async () => {
     // ``task_timed_out`` is a distinct terminal event the orchestrator emits.
-    // Slack + Jira always had it; Linear does too, so a timed-out standalone
-    // iteration settles. Email excludes it.
+    // It reaches the same channels as a cancellation or a strand: a timed-out
+    // standalone iteration settles on Linear, and the GitHub comment shows
+    // the timeout. Email excludes it.
     const outcome = await routeEvent(mk('task_timed_out'));
-    expect([...outcome.dispatched].sort()).toEqual(['jira', 'linear', 'slack']);
+    expect([...outcome.dispatched].sort()).toEqual(['github', 'jira', 'linear', 'slack']);
   });
 
   test('agent_error routes only to Slack', async () => {
@@ -1343,6 +1347,31 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     });
 
     expect(mockRenderCommentBody.mock.calls[0][0].prUrl).toBeNull();
+  });
+
+  // ---- Timeout (#583) ----
+
+  test('a timed-out task gets its comment updated', async () => {
+    // The orchestrator ends a task that exceeds the maximum duration with
+    // ``task_timed_out``, not ``task_failed``.
+    mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
+      if (cmd?._type === 'Get') {
+        return Promise.resolve({
+          Item: { ...TASK_RECORD_BASE, status: 'TIMED_OUT', github_comment_id: 555 },
+        });
+      }
+      return Promise.resolve({});
+    });
+    mockUpsertTaskComment.mockResolvedValueOnce({ commentId: 555, created: false });
+
+    await handler({ Records: [mkEvent('task_timed_out', 't-gh')] });
+
+    expect(mockUpsertTaskComment).toHaveBeenCalledTimes(1);
+    expect(mockUpsertTaskComment.mock.calls[0][0].existingCommentId).toBe(555);
+    expect(mockRenderCommentBody.mock.calls[0][0]).toMatchObject({
+      status: 'TIMED_OUT',
+      latestEventType: 'task_timed_out',
+    });
   });
 
   // ---- Number-coercion regression (found in deploy validation) ----
@@ -2668,7 +2697,8 @@ describe('fanout-task-events: Jira dispatcher', () => {
     // A build that was already red before the iteration does not fail the task
     // (the gate counts regressions only), so it ends COMPLETED with
     // build_passed=false. That is not a clean success: Linear, the reconciler
-    // and the re-render in jira-preview.ts all give it the failure rendering.
+    // and the re-render in jira-iteration-comment.ts all give it the failure
+    // rendering.
     mockGet({
       ...TASK_RECORD_JIRA,
       build_passed: false,

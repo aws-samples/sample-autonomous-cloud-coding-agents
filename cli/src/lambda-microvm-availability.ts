@@ -21,17 +21,9 @@ import {
   LambdaMicrovmsClient,
   ListManagedMicrovmImagesCommand,
 } from '@aws-sdk/client-lambda-microvms';
+import { CAPABILITY_CATALOG } from './deployment-capabilities';
 import { CliError } from './errors';
 import { makeClient } from './ua';
-
-/** Informational copy; keep in sync with cdk/src/handlers/shared/microvm-regions.ts. */
-const LAMBDA_MICROVM_LAUNCH_REGIONS: readonly string[] = [
-  'us-east-1',
-  'us-east-2',
-  'us-west-2',
-  'eu-west-1',
-  'ap-northeast-1',
-];
 
 interface LambdaMicrovmProbeClient {
   send(command: ListManagedMicrovmImagesCommand): Promise<unknown>;
@@ -40,7 +32,7 @@ interface LambdaMicrovmProbeClient {
 export type LambdaMicrovmProbeClientFactory = (region: string) => LambdaMicrovmProbeClient;
 
 export const LAMBDA_MICROVM_REMEDY =
-  `Launch regions: ${LAMBDA_MICROVM_LAUNCH_REGIONS.join(', ')}. `
+  `Launch regions: ${CAPABILITY_CATALOG.compute['lambda-microvm'].regions?.join(', ')}. `
   + 'Use --compute-type agentcore or --compute-type ecs in other regions.';
 
 /** Probe the read-only image catalog used to detect regional service availability. */

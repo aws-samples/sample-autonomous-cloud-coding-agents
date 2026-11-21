@@ -198,8 +198,9 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
-  /** ISO timestamp of the agent's last heartbeat (45 s cadence, every compute
-   *  backend); ``null`` before the first beat or on tasks that never ran. The
+  /** ISO timestamp of the agent's last heartbeat (45 s cadence on agentcore and
+   *  lambda-microvm, once at start on ecs); ``null`` before the first beat or on
+   *  tasks that never ran. The
    *  platform's only in-guest liveness signal, surfaced through the API as of
    *  ADR-021 P2r2-F11 — it was written and consumed internally but hidden from
    *  every operator, which produced a wrong live-verification conclusion. Mirrors
@@ -215,14 +216,16 @@ export interface TaskDetail {
   readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
-  /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
-   *  when `agent_status='error_max_turns'` — the aborted attempt is
-   *  counted). Required to match ``cdk/src/handlers/shared/types.ts``
-   *  (server always emits the field, defaulted to ``null`` in
-   *  ``toTaskDetail`` when absent on the record). */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept for
+   *  debugging. Not the count `max_turns` limits, and it can exceed the
+   *  limit on a task that never reached it: see ``TaskResult`` in
+   *  ``agent/src/models.py``. Required to match
+   *  ``cdk/src/handlers/shared/types.ts`` (server always emits the field,
+   *  defaulted to ``null`` in ``toTaskDetail`` when absent on the record). */
   readonly turns_attempted: number | null;
-  /** Rev-5 DATA-1: turns that actually completed (clamped to
-   *  `max_turns` when the cap tripped). Required; see
+  /** Rev-5 DATA-1: turns that actually completed: the model's answers,
+   *  which is what `max_turns` limits (clamped to it). ``bgagent status``
+   *  shows it against the limit once the task has finished. Required; see
    *  ``turns_attempted`` above. */
   readonly turns_completed: number | null;
   /** Whether the task was submitted with ``--trace``. Surfaces in
@@ -553,6 +556,8 @@ export interface CreateWebhookResponse {
   readonly webhook_id: string;
   readonly name: string;
   readonly secret: string;
+  /** URL that external systems post tasks to; the same for every webhook of a deployment. */
+  readonly webhook_url: string;
   readonly created_at: string;
 }
 

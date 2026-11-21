@@ -25,7 +25,7 @@ import type { CloudAssembly } from 'aws-cdk-lib/cx-api';
 import { AGENTCORE_AZS_CONTEXT_KEY, AUTO_PIN_AZ_COUNT } from '../../src/constructs/agentcore-azs';
 import { CAPABILITY_CATALOG } from '../../src/deployment/capabilities';
 import { DEPLOYMENT_FEATURES, DeploymentFeature, FEATURE_CONTEXT_KEYS, LEGACY_DEPLOYMENT_FEATURES } from '../../src/deployment/features';
-import { resolveComputeBackends } from '../../src/handlers/shared/compute-backend';
+import { ComputeBackend, resolveComputeBackends } from '../../src/handlers/shared/compute-backend';
 import { buildApp } from '../../src/main';
 import { AssemblyCensus, inspectAssembly } from '../../src/synthesis/assembly';
 import { auditProfile, DEFAULT_BUDGETS, WorkerResult } from '../../src/synthesis/audit';
@@ -43,6 +43,12 @@ const FEATURE_MARKERS: Readonly<Record<DeploymentFeature, { output?: string; pat
   toolGateway: { path: '/ToolGateway/' },
 };
 const APPLICATION_TEMPLATE = 'backgroundagent-dev.template.json';
+/** The role each backend's agent runs as: it carries the model grants. */
+const COMPUTE_ROLES: Readonly<Record<ComputeBackend, string>> = {
+  'agentcore': '/Runtime/ExecutionRole',
+  'ecs': '/EcsAgentCluster/TaskRole',
+  'lambda-microvm': '/LambdaMicrovmCompute/ExecutionRole',
+};
 /**
  * Census cell that synthesizes the legacy topology (no profile): what every stack
  * deployed before ADR-024 runs today.
@@ -123,10 +129,14 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
   if (profile.expectedError) return;
 
   if (profile.context.bedrockModels) {
-    test('exercises the SessionRole model grants after CDK creates an overflow policy', () => {
-      const resources = census.templates.flatMap(template => template.inventory);
-      expect(resources.some(resource => resource.type === 'AWS::IAM::ManagedPolicy'
-        && resource.constructPath?.includes('/AgentSessionRole/Role/OverflowPolicy'))).toBe(true);
+    test('exercises the model grants after CDK splits the policy of the SessionRole and of each compute role', () => {
+      const overflow = census.templates.flatMap(template => template.inventory)
+        .filter(resource => resource.type === 'AWS::IAM::ManagedPolicy')
+        .map(resource => resource.constructPath ?? '');
+      const backends = resolveComputeBackends(profile.context.compute_types, profile.context.compute_type);
+      for (const role of ['/AgentSessionRole/Role', ...backends.map(backend => COMPUTE_ROLES[backend])]) {
+        expect([role, overflow.some(constructPath => constructPath.includes(`${role}/OverflowPolicy`))]).toEqual([role, true]);
+      }
     });
   }
 
@@ -140,6 +150,14 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
   test('emits no CDK template-size warnings, including nested stacks', () => {
     const warnings = assembly.stacks.flatMap(stack => stack.messages
       .filter(message => message.level === 'warning' && String(message.entry.data).includes('Template size'))
+      .map(message => `${stack.stackName}/${message.id}: ${String(message.entry.data)}`));
+    expect(warnings).toEqual([]);
+  });
+
+  test('emits no warning for a custom resource on the latest-SDK default or a rule that cdk-nag could not evaluate', () => {
+    const warnings = assembly.stacks.flatMap(stack => stack.messages
+      .filter(message => message.level === 'warning'
+        && /installLatestAwsSdk|CdkNagValidationFailure/.test(String(message.entry.data)))
       .map(message => `${stack.stackName}/${message.id}: ${String(message.entry.data)}`));
     expect(warnings).toEqual([]);
   });
@@ -206,7 +224,7 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
       expect([feature, paths.some(constructPath => constructPath.includes(marker.path))]).toEqual([feature, enabled]);
     }
     const trackers = profile.context.enableLinear === true || profile.context.enableJira === true;
-    for (const shared of ['/IterationHeartbeat/', '/StrandedOrchestrationReconciler/']) {
+    for (const shared of ['/IterationHeartbeat/', '/StrandedOrchestrationReconciler/', '/WebhookScreeningFailedAlarm/']) {
       expect([shared, paths.some(constructPath => constructPath.includes(shared))]).toEqual([shared, trackers]);
     }
   });

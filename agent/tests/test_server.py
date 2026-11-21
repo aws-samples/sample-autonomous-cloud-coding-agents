@@ -24,7 +24,7 @@ def reset_server_state():
     """Reset the pipeline registry, joining any thread still running on the way out.
 
     `/run` and `/invocations` answer while the pipeline thread is only just starting,
-    so that thread usually looks up `server.run_task` AFTER the test body has
+    so that thread can look up `server.run_task` AFTER the test body has
     returned. Clearing the registry without joining orphans it: the stubs are then
     undone, and the thread goes on to run a REAL pipeline — task-state writes, a
     heartbeat, a clone — inside whichever test happens to be running next. That is a
@@ -41,7 +41,7 @@ def reset_server_state():
     The CloudWatch writer threads (`debug-cw-write`, `warn-cw-write`) are joined for
     the same reason, after the pipeline threads that can still start one. Each
     builds a real CloudWatch Logs client; left running, it makes its call during
-    some later test and bumps the shared failure counter there. A thread that is
+    some later test and prints its failure line there. A thread that is
     still alive after the join fails the test that started it instead of leaking
     quietly into the next one.
     """
@@ -64,6 +64,83 @@ def reset_server_state():
         if thread.name.startswith("pipeline-") or thread.name.endswith("-cw-write")
     ]
     assert not leaked, f"threads outlived the test that started them (10 s join): {leaked}"
+
+
+# The fixture above acts once a test has ended, so no test of this file can watch it
+# work. The test below runs pytest on this throwaway module of two tests, with the
+# fixture and `conftest.py` loaded as they are for this file. The first test ends
+# while its pipeline thread has not looked up `run_task` yet. `/run` allows that: it
+# answers as soon as the thread is started. Here it is certain, because the thread
+# goes on only once something joins it. The second test checks that the thread ran
+# the first test's stub and never its own (#841).
+_TWO_TESTS_AROUND_A_LATE_PIPELINE = """
+import threading
+from unittest.mock import MagicMock
+
+import server
+from tests.test_server import reset_server_state  # the fixture under test, autouse here too
+
+first_stub = MagicMock(name="the first test's run_task")
+release = threading.Event()
+pipeline = None
+
+
+def test_first_ends_before_its_pipeline_has_looked_up_run_task(monkeypatch):
+    global pipeline
+    monkeypatch.setattr(server, "run_task", first_stub)
+
+    def body(**kwargs):
+        if not release.wait(timeout=30):
+            return  # nothing released it: end, rather than run whatever run_task is by then
+        server.run_task(**kwargs)  # looked up when executed, as in _run_task_background
+
+    monkeypatch.setattr(server, "_run_task_background", body)
+    pipeline = server._spawn_background({"task_id": "first"})
+    join = pipeline.join
+
+    def join_and_release(timeout=None):
+        release.set()  # the thread reaches run_task only once something waits for it
+        join(timeout)
+
+    monkeypatch.setattr(pipeline, "join", join_and_release)
+
+
+def test_second_is_not_reached_by_the_first_tests_pipeline(monkeypatch):
+    second_stub = MagicMock(name="the second test's run_task")
+    monkeypatch.setattr(server, "run_task", second_stub)
+    release.set()  # only a thread that nothing joined still waits: it runs into this test
+    pipeline.join(timeout=10)
+
+    second_stub.assert_not_called()
+    first_stub.assert_called_once_with(task_id="first")
+"""
+
+
+def test_a_pipeline_thread_never_reaches_the_run_task_stub_of_the_next_test(tmp_path):
+    (tmp_path / "test_late_pipeline.py").write_text(_TWO_TESTS_AROUND_A_LATE_PIPELINE)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            "pyproject.toml",  # the suite's own settings, so `src` is importable
+            "-p",
+            "tests.conftest",  # its autouse fixtures, for a file outside tests/
+            "-p",
+            "no:cacheprovider",
+            str(tmp_path),
+        ],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        # without the caller's PYTEST_ADDOPTS: a `-k` in it would deselect both tests
+        env={name: value for name, value in os.environ.items() if name != "PYTEST_ADDOPTS"},
+        capture_output=True,
+        text=True,
+        timeout=110,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "2 passed" in proc.stdout, proc.stdout + proc.stderr
 
 
 @pytest.fixture
@@ -535,21 +612,15 @@ def test_debug_cw_exc_appends_the_traceback(monkeypatch, capfd):
     assert "Traceback" in out
 
 
-def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch):
-    """On boto errors the failure counter increments so operators can alarm.
+def test_debug_cw_write_blocking_reports_a_boto_error_on_stdout(monkeypatch, capfd):
+    """A failed write is swallowed and reported on stdout, nowhere else.
 
-    AgentCore doesn't forward container stdout to APPLICATION_LOGS, so a
-    broken ``_debug_cw`` is invisible except for this counter. If the
-    counter ever stops bumping on error the blind-debug alarm breaks
-    silently.
+    The line names the error, not the text that could not be written. It is
+    all a broken ``_debug_cw`` leaves behind: no counter, metric or alarm
+    records the failure.
     """
-    # Seed the counter to a known value so we can assert the delta without
-    # being sensitive to other tests.
-    with server._debug_cw_failures_lock:
-        server._debug_cw_failures = 0
 
-    # Stub ``boto3.client`` to raise so the except branch (which bumps
-    # the counter) runs.
+    # Stub ``boto3.client`` to raise so the except branch runs.
     class _BrokenBoto3:
         @staticmethod
         def client(*args, **kwargs):
@@ -563,8 +634,11 @@ def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch
         stamped="2026-01-01T00:00:00Z hello",
     )
 
-    with server._debug_cw_failures_lock:
-        assert server._debug_cw_failures == 1
+    out = capfd.readouterr().out
+    assert (
+        "[server/debug/self] CloudWatch write failed: RuntimeError: simulated boto failure" in out
+    )
+    assert "hello" not in out
 
 
 # Chunk 7c — _warn_cw parallels _debug_cw so warn-level invocation-payload
@@ -621,15 +695,8 @@ def test_warn_cw_no_log_group_is_noop(monkeypatch):
     )
 
 
-def test_warn_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch):
-    """Warn-path boto errors bump the same failure counter as debug.
-
-    A single alarm surface is intentional (§server.py comment on
-    ``_debug_cw_failures``). If the counter ever stops bumping on a
-    warn write failure the blind-warn alarm breaks silently.
-    """
-    with server._debug_cw_failures_lock:
-        server._debug_cw_failures = 0
+def test_warn_cw_write_blocking_reports_a_boto_error_on_stdout(monkeypatch, capfd):
+    """The warn writer reports a failed write the same way, under its own tag."""
 
     class _BrokenBoto3:
         @staticmethod
@@ -644,8 +711,9 @@ def test_warn_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch)
         stamped="[server/warn] malformed payload",
     )
 
-    with server._debug_cw_failures_lock:
-        assert server._debug_cw_failures == 1
+    out = capfd.readouterr().out
+    assert "[server/warn/self] CloudWatch write failed: RuntimeError: simulated boto failure" in out
+    assert "malformed payload" not in out
 
 
 def test_warn_cw_write_blocking_uses_server_warn_stream(monkeypatch):
@@ -1119,8 +1187,8 @@ class TestMicrovmReadyHookWarmUp:
         assert r.status_code == 503
         assert r.json()["status"] == "not_ready"
         assert any("claude" in f for f in r.json()["failed_warmups"])
-        # The attempt is logged (stdout only — build role has no Logs grant), or a
-        # failed build gives the operator nothing to read.
+        # The attempt is logged (stdout only — a build hook makes no AWS call, its
+        # own logging included), or a failed build gives the operator nothing to read.
         out = capfd.readouterr().out
         assert "warm-up of 'claude' FAILED" in out
         assert "TimeoutExpired" in out
@@ -1173,10 +1241,11 @@ class TestMicrovmReadyHookWarmUp:
     def test_the_warm_up_makes_no_aws_call_even_with_a_log_group_baked(
         self, client, monkeypatch, capfd, warm_ready
     ):
-        # /ready runs under the BUILD role: a Logs write can only fail (and each
-        # failure pollutes the shared _debug_cw_failures alarm), and any boto3
-        # client built here freezes the build role's credential chain and the build
-        # region into the snapshot. Adding a subprocess must not have changed that.
+        # /ready runs under the BUILD role, whose only Logs grant is the service's
+        # /aws/lambda-microvms/* namespace: a write to any other group, like the one
+        # baked here, can only fail, and any boto3 client built here freezes the
+        # build role's credential chain into the snapshot (the region is re-resolved
+        # per client). Adding a subprocess must not have changed that.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -2331,9 +2400,10 @@ class TestInstallPlatformConfig:
 
     def test_a_cross_region_arn_in_the_SAME_account_is_allowed(self, env_guard):
         # Region is deliberately NOT pinned: IAM ARNs are region-less and a
-        # cross-Region secret is a supported shape, while the execution role's grants
-        # are account-scoped — so an in-account cross-Region ARN reaches nothing the
-        # in-Region one does not. Pinning it would reject valid deployments.
+        # cross-Region secret is a supported shape, while the execution role's
+        # Secrets Manager grants are Region-scoped — so IAM already refuses an
+        # in-account ARN in a Region no grant names. Pinning it would reject valid
+        # deployments.
         installed = server._install_platform_config(
             _platform_config(
                 github_token_secret_arn=(
@@ -2462,7 +2532,7 @@ class TestMicrovmRunHookPlatformConfig:
             RUN_HOOK,
             json=_run_hook_body(
                 {
-                    "agent_payload": self._payload(),
+                    "agent_payload": self._payload(task_id="t-pc-inline"),
                     "platform_config": _platform_config(log_group_name="/abca/agent"),
                 }
             ),
@@ -2492,7 +2562,7 @@ class TestMicrovmRunHookPlatformConfig:
         monkeypatch.setattr(server, "run_task", MagicMock())
         monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
 
-        payload = self._payload()
+        payload = self._payload(task_id="t-pc-order")
         payload.pop("github_token")  # force the resolver to run
         r = client.post(
             RUN_HOOK,
@@ -2573,7 +2643,10 @@ class TestMicrovmRunHookPlatformConfig:
         monkeypatch.setattr(server, "run_task", MagicMock())
         monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
 
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload": self._payload(task_id="t-pc-baked")}),
+        )
 
         assert r.status_code == 200
         # Still pre-install (nothing was installed), so the warning is stdout-only:
@@ -2788,8 +2861,9 @@ class TestMicrovmValidateHook:
         # The whole point. _debug_cw / _warn_cw build a CloudWatch Logs client
         # whenever LOG_GROUP_NAME is set, so a build hook must not use them; and
         # boto3.client() would populate boto3.DEFAULT_SESSION — a module global
-        # holding the BUILD role's resolved credentials and region — which the
-        # snapshot would then freeze in for every MicroVM launched from it.
+        # holding the BUILD role's resolved credentials — which the snapshot would
+        # then freeze in for every MicroVM launched from it (credentials only: the
+        # region is re-resolved per client).
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -2814,9 +2888,8 @@ class TestMicrovmValidateHook:
         self, client, monkeypatch, capfd, warm_ready
     ):
         # /ready runs under the same build role, so the same rule applies. It used
-        # to route through _debug_cw, whose write can only FAIL under a role with
-        # no Logs grant — and each failure bumps the shared _debug_cw_failures
-        # counter, poisoning the "debug path is blind" signal on every build.
+        # to route through _debug_cw, whose write to a group outside that role's
+        # /aws/lambda-microvms/* Logs grant can only FAIL.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -3133,8 +3206,9 @@ class TestSnapshotCredentialHygiene:
     The MicroVM image is a SNAPSHOT: whatever module state exists when the
     snapshot is taken is replayed by every MicroVM launched from that image
     version. A boto3 session created during import or a build hook would freeze
-    the BUILD role's resolved credential chain and the BUILD-time region into the
-    image — inherited, stale and cross-role, by every task.
+    the BUILD role's resolved credential chain into the image — inherited, stale
+    and cross-role, by every task. (Credentials only: the region is re-resolved
+    per client, see ``server._aws_silent_log``.)
 
     Runs in a SUBPROCESS because the assertion is about process-global state
     (``sys.modules``, ``boto3.DEFAULT_SESSION``, ``aws_session._session``) that

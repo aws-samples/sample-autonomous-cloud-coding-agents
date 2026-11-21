@@ -98,9 +98,10 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
   /** CloudWatch alarm that fires when the DLQ has at least one
-   *  poison-pill record. Concrete {@link cloudwatch.Alarm} so an
-   *  ``addAlarmAction`` (SNS) can be attached once a notification
-   *  channel is provisioned (#117). */
+   *  poison-pill record. Concrete {@link cloudwatch.Alarm} because
+   *  ``AgentStack`` attaches the ``OperationalAlerts`` SNS topic to it
+   *  with ``addAlarmAction`` — declared on ``Alarm``, not the
+   *  ``IAlarm`` interface (#629). */
   public readonly dlqAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: ApprovalMetricsPublisherConsumerProps) {
@@ -111,9 +112,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
     this.dlq = new sqs.Queue(this, 'ApprovalMetricsPublisherDlq', {
       // Persistent failures (malformed records the handler's
       // per-record try/catch throws on three times in a row) land
-      // here for operator inspection. Depth is alarmed below (#117);
-      // an SNS action can be attached to ``dlqAlarm`` once a
-      // notification channel is provisioned.
+      // here for operator inspection. Depth is alarmed below (#117).
       retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });

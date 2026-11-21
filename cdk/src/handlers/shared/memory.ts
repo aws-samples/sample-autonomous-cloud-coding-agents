@@ -56,7 +56,8 @@ export interface MemoryContext {
 // ---------------------------------------------------------------------------
 
 const MEMORY_READ_TIMEOUT_MS = 5_000;
-const MEMORY_TOKEN_BUDGET = 2_000;
+/** The budget of a task whose repository has no `memory_token_budget` on its RepoTable row, and of a repo-less task. */
+const DEFAULT_MEMORY_TOKEN_BUDGET = 2_000;
 
 /** Rough token estimate: ~4 chars per token. */
 const CHARS_PER_TOKEN_ESTIMATE = 4;
@@ -180,19 +181,21 @@ function getClient(): BedrockAgentCoreClient {
  * records live at `/{actorId}/episodes/{sessionId}/`, which is below the read path.
  * (`namespace` is an exact match: it would return none of them.)
  *
- * Results are trimmed to a 2000-token budget (knowledge is prioritized before episodes;
+ * Results are trimmed to `tokenBudget` (knowledge is prioritized before episodes;
  * entries beyond the budget are dropped).
  * Returns `undefined` on any error (fail-open).
  *
  * @param memoryId - the AgentCore Memory resource ID.
  * @param repo - the "owner/repo" string used as namespace key (maps to actorId).
  * @param taskDescription - optional task description for semantic search query.
+ * @param tokenBudget - token budget of the returned context (estimated at ~4 chars per token).
  * @returns memory context or undefined on failure.
  */
 export async function loadMemoryContext(
   memoryId: string,
   actorNamespace: string,
   taskDescription?: string,
+  tokenBudget: number = DEFAULT_MEMORY_TOKEN_BUDGET,
 ): Promise<MemoryContext | undefined> {
   try {
     const client = getClient();
@@ -258,14 +261,14 @@ export async function loadMemoryContext(
 
     for (const text of repoKnowledge) {
       const tokens = estimateTokens(text);
-      if (totalTokens + tokens > MEMORY_TOKEN_BUDGET) break;
+      if (totalTokens + tokens > tokenBudget) break;
       totalTokens += tokens;
       budgetedKnowledge.push(text);
     }
 
     for (const text of pastEpisodes) {
       const tokens = estimateTokens(text);
-      if (totalTokens + tokens > MEMORY_TOKEN_BUDGET) break;
+      if (totalTokens + tokens > tokenBudget) break;
       totalTokens += tokens;
       budgetedEpisodes.push(text);
     }

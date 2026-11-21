@@ -330,6 +330,7 @@ describe('AgentRegistryClient', () => {
     expect(err).toBeInstanceOf(RegistryPublishIncompleteError);
     // The orphan's id is surfaced so an operator can find + delete/approve it.
     expect((err as RegistryPublishIncompleteError).recordId).toBeTruthy();
+    expect((err as RegistryPublishIncompleteError).message).toContain('approve or delete it before retrying');
     // Create + submit were attempted; submit failed before approve.
     expect(fake.sent).toEqual(['create', 'submit']);
   });
@@ -722,6 +723,9 @@ describe('AgentRegistryClient', () => {
     ['a number', 123],
     ['an array', ['cognito-sub']],
     ['an object', { sub: 'x' }],
+    // An explicit null is present, not absent. These rows have no twin in the agent's
+    // tests: its reader does not read the publisher (its port has none).
+    ['null', null],
   ])('getRecord rejects a healthy record whose publisher is %s (MALFORMED, not silent drop)', async (_label, badPublisher) => {
     const fake = new FakeClient();
     const client = makeClient(fake);
@@ -898,6 +902,176 @@ describe('AgentRegistryClient', () => {
     const parsed = parseRef('registry://skill/acme/readme-helper@1.0.0');
     if (!parsed.ok) throw new Error('fixture ref should parse');
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  test('a SKILL.md that repeats a frontmatter key is read with the last value, as the agent reads it', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    const b64 = (runtime: unknown): string => Buffer.from(JSON.stringify(runtime)).toString('base64');
+    // Hand-written frontmatter. js-yaml under `json: true` keeps the last value of a
+    // repeated key and so does PyYAML: the two readers must agree on which runtime and
+    // publisher such a record carries. Neither rejects it. What keeps a second key from
+    // being smuggled in is the writer (`buildSkillMd`), which quotes every value.
+    seedSkillMd(fake, [
+      '---',
+      'name: acme-readme-helper',
+      `x-abca-runtime: ${b64({ prompt_fragment: 'FIRST' })}`,
+      'x-abca-publisher: first-sub',
+      `x-abca-runtime: ${b64({ prompt_fragment: 'SECOND' })}`,
+      'x-abca-publisher: second-sub',
+      '---',
+      '# body',
+    ].join('\n'));
+
+    const record = await client.getRecord('skill', 'acme', 'readme-helper', '1.0.0');
+    expect(record?.runtime).toEqual({ prompt_fragment: 'SECOND' });
+    expect(record?.publisher).toBe('second-sub');
+  });
+
+  // --- an absent payload is an empty record, not a corrupt one ----------------
+
+  // A descriptor level, or its `data`, that is null or not an object. The record reads
+  // as empty, without a malformed marker, and cannot resolve. The agent's reader gives
+  // every row the same answer, so both adapters reject such a pin as REMOVED (#781).
+  test.each([
+    ['CUSTOM', 'descriptors is null', null],
+    ['CUSTOM', 'custom is null', { custom: null }],
+    ['CUSTOM', 'data is null', { custom: { data: null } }],
+    ['CUSTOM', 'descriptors is a string', 'text'],
+    ['CUSTOM', 'custom is a string', { custom: 'text' }],
+    ['MCP', 'descriptors is null', null],
+    ['MCP', 'mcpServer is null', { mcpServer: null }],
+    ['MCP', 'data is null', { mcpServer: { data: null } }],
+    ['MCP', 'mcpServer is a list', { mcpServer: ['x'] }],
+    ['SKILL', 'descriptors is null', null],
+    ['SKILL', 'agentSkillsDefinition is null', { agentSkillsDefinition: null }],
+    ['SKILL', 'additionalData is null', { agentSkillsDefinition: { additionalData: null } }],
+    ['SKILL', 'skillMd is null', { agentSkillsDefinition: { additionalData: { skillMd: null } } }],
+    ['SKILL', 'data is null', { agentSkillsDefinition: { additionalData: { skillMd: { data: null } } } }],
+    ['SKILL', 'skillMd is a string', { agentSkillsDefinition: { additionalData: { skillMd: 'text' } } }],
+    // The body parses and the null sits where the runtime should be.
+    ['CUSTOM', 'body holds a null runtime', { custom: { data: '{"runtime": null}' } }],
+    ['MCP', 'body holds a null _meta', { mcpServer: { data: '{"_meta": null}' } }],
+    ['MCP', 'body holds a null runtime in _meta', { mcpServer: { data: `{"_meta": {"${RUNTIME_META_KEY}": null}}` } }],
+  ])('%s record whose %s reads as an empty record and fails to resolve as REMOVED', async (recordType, _what, descriptors) => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // The adapter goes by the record type, so one name serves every row.
+    fake.seed({ name: 'mcp_server/acme/pdf-tools', recordType, descriptors, recordVersion: '1.0.0', status: 'APPROVED' });
+
+    const record = await client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0');
+    expect(record).toMatchObject({ name: 'pdf-tools', version: '1.0.0' });
+    expect(record?.runtime ?? {}).toEqual({});
+    expect(record?.publisher).toBeUndefined();
+
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'REMOVED' });
+  });
+
+  // Present, unlike a null, and not a JSON object. `??` stands in for null and
+  // undefined only: an empty string, 0 and false reach JSON.parse, which rejects the
+  // first and reads the other two as a number and a boolean. It also rejects NaN,
+  // Infinity and -Infinity, which the agent's reader has to be told to refuse
+  // (json.loads reads them by default).
+  test.each([
+    ['CUSTOM', 'is an empty string', { custom: { data: '' } }],
+    ['MCP', 'is an empty string', { mcpServer: { data: '' } }],
+    ['CUSTOM', 'is the number 0', { custom: { data: 0 } }],
+    ['MCP', 'is the number 0', { mcpServer: { data: 0 } }],
+    ['CUSTOM', 'is false', { custom: { data: false } }],
+    ['MCP', 'is false', { mcpServer: { data: false } }],
+    ['CUSTOM', 'holds NaN', { custom: { data: '{"runtime": {"limit": NaN}}' } }],
+    ['MCP', 'holds Infinity', { mcpServer: { data: `{"_meta": {"${RUNTIME_META_KEY}": {"limit": Infinity}}}` } }],
+  ])('resolve fails closed (MALFORMED) when the %s body %s', async (recordType, _what, descriptors) => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    fake.seed({ name: 'mcp_server/acme/pdf-tools', recordType, descriptors, recordVersion: '1.0.0', status: 'APPROVED' });
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  test.each([
+    ['base64', Buffer.from('{"limit": -Infinity}').toString('base64')],
+    ['legacy JSON', '\'{"limit": NaN}\''],
+  ])('resolve fails closed (MALFORMED) when a %s x-abca-runtime holds a number literal that is not JSON', async (_form, value) => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedSkillMd(fake, `---\nname: acme-readme-helper\nx-abca-runtime: ${value}\n---\n# body`);
+    const parsed = parseRef('registry://skill/acme/readme-helper@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  // --- what else is in the namespace does not decide a healthy record ---------
+
+  const healthyMcp = (version: string, status: string): Record<string, unknown> => ({
+    name: 'mcp_server/acme/pdf-tools',
+    recordType: 'MCP',
+    descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/pdf-tools', version, _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: 'https://x' } } }) } },
+    recordVersion: version,
+    status,
+  });
+
+  test('resolve returns a healthy record that shares its namespace with corrupt ones', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // Corrupt records of another asset and of a lower version of this asset.
+    fake.seed({
+      name: 'mcp_server/acme/other',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: '{bad json' } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    seedCorruptMcp(fake);
+    fake.seed(healthyMcp('1.1.0', 'APPROVED'));
+
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@^1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).resolves.toMatchObject({ name: 'pdf-tools', version: '1.1.0' });
+  });
+
+  test('a record whose status this code does not know is not a resolution candidate', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // The service can add a status. Such a record is treated like every status other
+    // than APPROVED and DEPRECATED: it does not resolve, and it does not hide a lower
+    // approved version.
+    fake.seed(healthyMcp('1.0.0', 'APPROVED'));
+    fake.seed(healthyMcp('1.1.0', 'SOME_FUTURE_STATUS'));
+
+    const range = parseRef('registry://mcp_server/acme/pdf-tools@^1.0.0');
+    const exact = parseRef('registry://mcp_server/acme/pdf-tools@1.1.0');
+    if (!range.ok || !exact.ok) throw new Error('fixture refs should parse');
+    await expect(client.resolve(range.ref)).resolves.toMatchObject({ version: '1.0.0' });
+    await expect(client.resolve(exact.ref)).rejects.toMatchObject({ reason: 'NO_MATCHING_VERSION' });
+  });
+
+  // A null in the envelope takes that record out, not its neighbours: a null name
+  // belongs to no asset and a null version cannot win. The agent's reader agrees.
+  test('a record without a name does not stop the others', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    fake.seed({ ...healthyMcp('2.0.0', 'APPROVED'), name: null });
+    fake.seed(healthyMcp('1.0.0', 'APPROVED'));
+
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@^1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).resolves.toMatchObject({ version: '1.0.0' });
+    await expect(client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0')).resolves.toMatchObject({ version: '1.0.0' });
+  });
+
+  test('a record without a version does not stop its siblings', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    fake.seed({ ...healthyMcp('1.1.0', 'APPROVED'), recordVersion: null });
+    fake.seed(healthyMcp('1.0.0', 'APPROVED'));
+
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@^1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).resolves.toMatchObject({ version: '1.0.0' });
   });
 
   // --- 422 body must not echo raw descriptor bytes ----------------------------
