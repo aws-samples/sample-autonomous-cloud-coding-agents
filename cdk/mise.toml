@@ -192,11 +192,22 @@ run = [
 # docs/design/DEPLOYMENT_ROLES.md. They name every other parameter of the stack with
 # UsePreviousValue: an update that names ComputeTypes alone resets the others to the
 # template defaults.
+#
+# --force (#701): the CDK CLI does not overwrite a CDKToolkit stack whose BootstrapVariant
+# parameter differs from the template's. It warns, changes nothing and exits 0. A standard
+# `cdk bootstrap` records another variant, and the stack can keep that value after this
+# template has replaced the standard bootstrap (the CLI keeps previous parameter values),
+# so without the flag the task would do nothing on such an account, on every run. With it
+# the task replaces the bootstrap it finds: a standard one (other CDK apps in the account
+# and Region then deploy through ABCA's scoped execution role), another variant, or a
+# newer CDK bootstrap version. On a bootstrap that is already current, the CLI warns that
+# --force made no changes; that is expected. The flag stays in front of the pass-through
+# arguments, so that `-- --no-force` cancels it for a run.
 [tasks.bootstrap]
-description = "Bootstrap CDK with least-privilege policies (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
+description = "Bootstrap CDK with least-privilege policies, replacing an existing bootstrap (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
 depends = [":install", ":bootstrap:generate"]
 # Args after `--` (e.g. `aws://<account>/<region>`) pin the environment; `bgagent setup` passes one.
-run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml {{arg(name='cdkargs', var=true, required=false)}}"
+run = "npx cdk bootstrap --force --template bootstrap/bootstrap-template.yaml {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks."bootstrap:generate"]
 description = "Regenerate all bootstrap artifacts (policies JSON, template YAML, version/hash files)"

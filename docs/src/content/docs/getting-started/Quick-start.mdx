@@ -155,7 +155,7 @@ mise //cdk:bootstrap
 mise //cdk:deploy -- --require-approval never
 ```
 
-With no `abca.deployment.json`, this deploys the legacy topology, with every optional feature (about 463 resources against the minimal profile's 317). It has no Region check and no data-loss confirmation. Once setup has written `abca.deployment.json`, `mise //cdk:deploy` uses it. `--require-approval never` lets the deploy run unattended; drop it to review IAM and security-group changes.
+With no `abca.deployment.json`, this deploys the legacy topology, with every optional feature (about 463 resources against the minimal profile's 317). It has no Region check and no data-loss confirmation, and `mise //cdk:bootstrap` replaces a CDK bootstrap that is already in the account and Region: see [Bootstrap with least-privilege](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#bootstrap-with-least-privilege). Once setup has written `abca.deployment.json`, `mise //cdk:deploy` uses it. `--require-approval never` lets the deploy run unattended; drop it to review IAM and security-group changes.
 
 :::
 

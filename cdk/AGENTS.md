@@ -14,7 +14,7 @@ mise //cdk:synth            # synth to cdk/cdk.out/
 mise //cdk:eslint           # ESLint --fix (run after merging main)
 mise //cdk:eslint:check     # ESLint without --fix: reports only; a warning fails too
 mise //cdk:bootstrap:generate # regenerate cdk/bootstrap/ from src/bootstrap/ (policies JSON, template YAML, version and hash files)
-mise //cdk:bootstrap        # bootstrap:generate, then cdk bootstrap with the least-privilege template (requires AWS creds)
+mise //cdk:bootstrap        # bootstrap:generate, then cdk bootstrap --force with the least-privilege template: replaces the bootstrap it finds (requires AWS creds)
 mise //cdk:preflight        # read-only: check the account's bootstrap against this checkout; deploy runs it first (requires AWS creds)
 mise //cdk:deploy           # deploy stack (requires AWS creds)
 mise //cdk:diff             # diff vs deployed

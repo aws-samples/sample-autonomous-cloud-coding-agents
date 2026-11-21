@@ -59,7 +59,23 @@ keep=($(aws cloudformation describe-stacks --stack-name CDKToolkit --output text
 aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 ```
 
-Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --force --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+
+**An account that is already bootstrapped.** The task replaces the bootstrap it finds, which is why it passes `--force`. Without the flag, the CDK CLI does not overwrite a `CDKToolkit` stack whose `BootstrapVariant` parameter differs from the template's: it prints `Not overwriting it with a template containing 'ABCA: Least-Privilege Bootstrap' (use --force if you intend to overwrite)`, changes nothing and exits 0 ([#701](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/701)). A standard `cdk bootstrap` records `AWS CDK: Default Resources`, and the stack can keep that value after this template has replaced the standard one, because the CLI keeps previous parameter values. A later standard `cdk bootstrap` makes the same comparison: on such a stack it finds no difference and puts the standard template back, and `mise //cdk:preflight` then reports a standard bootstrap. Know what the task changes before you run it on an account that already has a bootstrap:
+
+- **Other CDK apps in the account and Region deploy through the same execution role.** Once the task has replaced a standard bootstrap, CloudFormation deploys them with the ABCA policies only. This is why `bgagent setup` leaves a standard bootstrap unchanged, and why replacing it is a command you run yourself. In a script that must not replace one, cancel the flag: `mise //cdk:bootstrap -- --no-force`.
+- **`--force` also lifts the CLI's refusal to replace a newer CDK bootstrap version** (the `BootstrapVersion` output) with this template's.
+- **An execution-policy list set by the earlier bootstrap stays.** If that bootstrap passed `--cloudformation-execution-policies`, the CLI sends the same list again, and the template attaches it in place of the ABCA policies. Pass an empty list to drop it: `mise //cdk:bootstrap -- --cloudformation-execution-policies ""`. The CLI rejects an empty list for a bootstrap that trusts another account (`--trust`).
+
+Check the result on the execution role, not on the `BootstrapVariant` parameter. Every policy name the command prints contains `IaCRole-ABCA-`, and `AdministratorAccess` is not among them:
+
+```bash
+aws iam list-attached-role-policies \
+  --role-name cdk-hnb659fds-cfn-exec-role-ACCOUNT_ID-REGION \
+  --query 'AttachedPolicies[].PolicyName'
+```
+
+On a bootstrap that is already current, the task changes nothing and the CLI prints `You used the --force flag, but CloudFormation reported that the deployment would not make any changes`. That is expected.
 
 **Re-bootstrap to bundle 1.7.0 or later before deploying nested stacks.** The
 execution role also needs the generated inline policy
