@@ -111,7 +111,10 @@ Mention Shoof with a repo and description:
 ```
 @Shoof fix the login bug in org/repo#42
 @Shoof update the README in org/repo
+@Shoof fix https://github.com/org/repo/issues/42
 ```
+
+A pasted GitHub link to a repo, an issue or a pull request names the repo like `org/repo` or `org/repo#42` does. The link that names the repo is taken out of the task description, together with any words you turned into the link: the agent gets the repo, the issue or pull request number and the rest of your message, so say in words what a linked comment asks for.
 
 For private submissions, DM Shoof directly:
 ```
@@ -151,7 +154,7 @@ Run `/bgagent link` in Slack, then `bgagent slack link <code>` in your terminal.
 
 The repo must be registered with a Blueprint before submitting tasks. See the [User guide](./USER_GUIDE.md).
 
-In a channel that has a default repo (`bgagent slack onboard-channel`) you get this answer only for a repo that is written with an issue number (`org/repo#42`) or that has the same owner as the repo the task would otherwise run on: the channel's default, or an onboarded repo named in the same message. Any other `word/word`, a repo of another owner included, is read as part of the description. A pasted GitHub link is not read as its repo either, also when it points to an onboarded repo or to one of the default's owner: its parts are slash words like any other (`github.com/acme` and `api/pull` in a link to `acme/api`), so the task normally starts on the channel's default. A part that has the default's owner gets the answer above: a link to `acme/acme` holds the word `acme/pull`. The "Task submitted" message names the repo the task runs on; if that is not what you meant, click **Cancel Task** on the "Agent started working" message.
+In a channel that has a default repo (`bgagent slack onboard-channel`) you get this answer only for a repo that is given as a GitHub link, that is written with an issue number (`org/repo#42`), or that has the same owner as the repo the task would otherwise run on: the channel's default, or an onboarded repo named in the same message. Any other `word/word`, a repo of another owner included, is read as part of the description. A GitHub link to a repo, an issue or a pull request names its repo wherever it stands in the message, also in pasted output, so a link to an issue of a repo that is not onboarded gets this answer too: to refer to such an issue in a task for another repo, write the onboarded repo the task is for before the link. A link to anything else (another site, or a file, a branch or a workflow run on GitHub) names no repo and stays in the description. The "Task submitted" message names the repo the task runs on; if that is not what you meant, click **Cancel Task** on the "Agent started working" message.
 
 ### OAuth install fails (bad_client_secret)
 
