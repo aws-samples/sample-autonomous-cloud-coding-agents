@@ -19,13 +19,14 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { App, Stack } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { App, Aspects, Stack } from 'aws-cdk-lib';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AwsSolutionsChecks } from 'cdk-nag';
 import sharedConstants from '../../../contracts/constants.json';
 import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
@@ -200,6 +201,29 @@ test('keeps main\'s execution role description byte-for-byte', () => {
     Description: 'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
       + 'lifecycle hooks; writes logs and reads out-of-band /run payloads.',
   });
+});
+
+test('the execution role\'s IAM5 exception follows the policies CDK splits off for a large model list', () => {
+  // Forty ids put the Bedrock statement alone above the inline-policy limit, so
+  // CDK moves it into a managed policy during synthesis: a policy that does not
+  // exist yet when the construct declares the role's exception.
+  const { stack } = instantiate({
+    context: { bedrockModels: Array.from({ length: 40 }, (_, index) => `anthropic.claude-audit-${index}-v1:0`) },
+  });
+  Aspects.of(stack).add(new AwsSolutionsChecks());
+  const template = Template.fromStack(stack);
+  const policiesOf = (type: string, role: string) => Object.entries(template.findResources(type))
+    .filter(([id]) => id.includes(role)).map(([, policy]) => policy);
+  const overflow = policiesOf('AWS::IAM::ManagedPolicy', 'ExecutionRoleOverflowPolicy');
+  expect(overflow.length).toBeGreaterThan(0);
+  expect(Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-IAM5'))
+    .filter(finding => finding.id.includes('/LambdaMicrovmCompute/ExecutionRole/'))
+    .map(finding => String(finding.entry.data))).toEqual([]);
+  // Exactly the IAM5 exception of the default policy and no other rule: nothing wider reaches the overflow.
+  const iam5 = (policy: Record<string, any>) => policy.Metadata.cdk_nag.rules_to_suppress
+    .filter((rule: { id: string }) => rule.id === 'AwsSolutions-IAM5');
+  const [defaultPolicy] = policiesOf('AWS::IAM::Policy', 'ExecutionRoleDefaultPolicy');
+  for (const policy of overflow) expect(policy.Metadata.cdk_nag.rules_to_suppress).toEqual(iam5(defaultPolicy));
 });
 
 describe('LambdaMicrovmCompute — image provisioned from a managed base image', () => {
