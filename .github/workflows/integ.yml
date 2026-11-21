@@ -246,8 +246,13 @@ jobs:
         with:
           node-version: 22.x
 
+      # Yarn 1 installs this repository and ignores Yarn Berry's --immutable. Its
+      # own flag, --frozen-lockfile, fails when a dependency of the root
+      # package.json is not in yarn.lock. It does not notice a changed
+      # `resolutions` entry or workspace manifest: "Fail on lockfile drift" in
+      # build.yml catches those.
       - name: Install dependencies
-        run: yarn install --immutable
+        run: yarn install --frozen-lockfile
 
       # Teardown: integ-runner forces `cdk destroy` on success and failure (via
       # the CDK bootstrap roles, which hold the CloudFormation permissions). No
