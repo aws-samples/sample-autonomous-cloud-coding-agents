@@ -73,6 +73,12 @@ export default [
         ecmaVersion: 2018,
         sourceType: 'module',
         project: './tsconfig.dev.json',
+        // Run without --fix, the parser would take each file's syntax tree from the copy on
+        // disk instead of the text ESLint hands it. A shebang is a comment only in that
+        // text, so the license-header rule would report the header below the shebang of
+        // src/bin/bgagent.ts as misplaced (#172). With this, a run reads the same text with
+        // and without --fix.
+        disallowAutomaticSingleRunInference: true,
       },
     },
     plugins: {
@@ -310,14 +316,6 @@ export default [
     files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
-    },
-  },
-
-  // Override: shebang files can't have the license header at line 1
-  {
-    files: ['src/bin/**/*.{ts,tsx,mts,cts}'],
-    rules: {
-      'license-header/header': 'off',
     },
   },
 ];

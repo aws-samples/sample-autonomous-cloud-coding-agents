@@ -17,7 +17,8 @@
  *  SOFTWARE.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
@@ -53,6 +54,25 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/a.ts', "import cfg from './cfg.json' with { type: /* c */  'json' };", ['@stylistic/no-multi-spaces']],
 ];
 
+const SHEBANG = '#!/usr/bin/env node';
+const HEADER = fs.readFileSync(path.resolve(__dirname, '..', 'header.js'), 'utf-8').trim();
+
+/**
+ * A file that starts with a shebang carries the license header like any other (#172). The
+ * rule takes the shebang as the one line allowed above the header and wants the header
+ * right below it, one blank line apart. A table of its own: every rule named in a table
+ * runs on every row of it, and the snippets above carry no header.
+ */
+const SHEBANG_CASES: typeof CASES = [
+  ['src/bin/a.ts', `${SHEBANG}\n\n${HEADER}\n\nexport const a = 1;\n`, []],
+  // No header.
+  ['src/bin/a.ts', `${SHEBANG}\n\nexport const a = 1;\n`, ['license-header/header']],
+  // Two blank lines between the shebang and the header.
+  ['src/bin/a.ts', `${SHEBANG}\n\n\n${HEADER}\n\nexport const a = 1;\n`, ['license-header/header']],
+  // A comment between the shebang and the header.
+  ['src/bin/a.ts', `${SHEBANG}\n\n// a comment\n\n${HEADER}\n\nexport const a = 1;\n`, ['license-header/header']],
+];
+
 /**
  * Runs in a child process, because Jest cannot import() the ES module config that ESLint
  * loads. Only the rules under test run and the parser gets no project: the snippets are
@@ -75,14 +95,35 @@ const LINT_CASES = `
   console.log(JSON.stringify(reported));
 `;
 
-test('eslint.config.mjs reports each snippet with exactly the rules listed', () => {
-  const stdout = execFileSync(process.execPath, ['--input-type=module', '--eval', LINT_CASES, JSON.stringify(CASES)], {
+test.each([
+  ['each snippet', CASES],
+  ['each file that starts with a shebang', SHEBANG_CASES],
+])('eslint.config.mjs reports %s with exactly the rules listed', (_name, cases) => {
+  const stdout = execFileSync(process.execPath, ['--input-type=module', '--eval', LINT_CASES, JSON.stringify(cases)], {
     cwd: path.resolve(__dirname, '..'),
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const reported = JSON.parse(stdout) as string[][];
-  expect(CASES.map(([file, code], index) => [file, code, reported[index]])).toEqual(CASES);
+  expect(cases.map(([file, code], index) => [file, code, reported[index]])).toEqual(cases);
+}, 60_000);
+
+/**
+ * The check-only lint (`mise //cli:eslint:check`, part of `mise run lint`) of the files that
+ * start with a shebang. Run without --fix, the parser would take each file's syntax tree
+ * from the copy on disk, where a shebang is not a comment, and the license-header rule
+ * would report the header below it as misplaced: eslint.config.mjs tells the parser not to.
+ * Only this run shows it: the build lints with --fix and the tests above lint without a
+ * project, and the parser does that in neither.
+ */
+test('eslint without --fix passes the files that start with a shebang', () => {
+  const eslint = path.resolve(__dirname, '..', '..', 'node_modules', '.bin', 'eslint');
+  const { status, stdout } = spawnSync(process.execPath, [eslint, '--config', 'eslint.config.mjs', '--max-warnings', '0', 'src/bin'], {
+    cwd: path.resolve(__dirname, '..'),
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  expect({ status, stdout }).toEqual({ status: 0, stdout: '' });
 }, 60_000);
 
 /**
