@@ -54,8 +54,9 @@ import {
 } from '../deployment-profile';
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME } from '../operator-context';
+import { AccountPreparation, bootstrapNameProblem, planAccountPreparation, REQUIRED_BOOTSTRAP_VERSION } from '../setup-account';
+import { describeDataLoss, parseStateBearingChanges } from '../setup-diff';
 import {
-  componentForPath,
   DeployProgress,
   formatDuration,
   Screen,
@@ -88,32 +89,8 @@ const MICROVM_REGION_OVERRIDE_CONTEXT = 'microvm_region_override';
 
 /** CDK's bootstrap stack; ABCA's least-privilege variant publishes `BootstrapPolicyVersion`. */
 const BOOTSTRAP_STACK = 'CDKToolkit';
-/**
- * Minimum ABCA bootstrap bundle this CLI deploys against. Mirrors
- * `BOOTSTRAP_VERSION` in `cdk/src/bootstrap/version.ts` (parity-tested).
- */
-export const REQUIRED_BOOTSTRAP_VERSION = '1.12.0';
-
-/** One-time account changes a deploy needs, in execution order. */
-type AccountPreparation = 'bootstrap' | 'rebootstrap' | 'computeTypes';
-
-/** Resource types whose deletion, replacement or orphaning loses data, installations or ownership. */
-const STATE_BEARING_TYPES: ReadonlyMap<string, string> = new Map([
-  ['AWS::DynamoDB::Table', 'table'],
-  ['AWS::DynamoDB::GlobalTable', 'table'],
-  ['AWS::SecretsManager::Secret', 'secret'],
-  ['AWS::S3::Bucket', 'bucket'],
-  ['AWS::Cognito::UserPool', 'user pool'],
-  ['AWS::KMS::Key', 'encryption key'],
-  ['AWS::Logs::LogGroup', 'log group'],
-  ['AWS::CloudFormation::Stack', 'nested stack'],
-  ['AWS::BedrockAgentCore::Memory', 'agent memory'],
-  ['AWS::EC2::VPC', 'VPC'],
-]);
 
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
-/** ABCA's least-privilege bootstrap scopes its deploy role to these names (cdk/src/bootstrap/policies/*). */
-const BOOTSTRAP_STACK_NAME_PATTERN = new RegExp(`^${DEFAULT_STACK_NAME}(-[A-Za-z0-9-]+)?$`);
 const REGION_PATTERN = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
 const CONTEXT_PATTERN = /^([A-Za-z][\w:.-]*)=(.*)$/s;
 /** Upper bound for the bootstrap parameter update (IAM policy changes only). */
@@ -205,32 +182,8 @@ export interface SetupOptions {
   readonly repoRoot?: string;
 }
 
-export interface StateBearingChange {
-  readonly change: 'delete' | 'replace' | 'orphan';
-  readonly type: string;
-  /** Construct path when CDK prints one, else the logical ID. */
-  readonly id: string;
-}
-
 export function setupCancelled(): CliError {
   return new CliError('Setup cancelled; nothing was written or deployed.', SETUP_CANCELLED_EXIT_CODE);
-}
-
-/**
- * State-bearing deletions, replacements and orphanings in `cdk diff` output.
- * CDK ends each resource line with its impact (`destroy`, `orphan`, `replace`,
- * `may be replaced`); `(requires replacement)` appears only on property lines.
- */
-export function parseStateBearingChanges(diffOutput: string): StateBearingChange[] {
-  const changes: StateBearingChange[] = [];
-  for (const raw of stripAnsi(diffOutput).split('\n')) {
-    const match = /^\s*\[([-~])\]\s+(\S+)\s+(\S+)(.*)$/.exec(raw);
-    if (!match || !STATE_BEARING_TYPES.has(match[2])) continue;
-    const [, marker, type, id, impact] = match;
-    if (marker === '-') changes.push({ change: /\borphan\b/.test(impact) ? 'orphan' : 'delete', type, id });
-    else if (/\b(replace|may be replaced)\s*$/.test(impact)) changes.push({ change: 'replace', type, id });
-  }
-  return changes;
 }
 
 function repoCdkDir(repoRoot: string): string {
@@ -380,37 +333,6 @@ class Ui {
   }
 }
 
-function versionAtLeast(actual: string, required: string): boolean {
-  const parse = (value: string) => value.split('.').map(part => Number.parseInt(part, 10) || 0);
-  const [a, r] = [parse(actual), parse(required)];
-  for (let index = 0; index < Math.max(a.length, r.length); index += 1) {
-    if ((a[index] ?? 0) !== (r[index] ?? 0)) return (a[index] ?? 0) > (r[index] ?? 0);
-  }
-  return true;
-}
-
-/**
- * What the account needs before ABCA can deploy. A standard CDK bootstrap (no
- * ABCA policy outputs) is shared with other apps and is never modified.
- */
-function planAccountPreparation(
-  bootstrap: ExistingStack | null,
-  compute: readonly ComputeBackend[],
-): { steps: AccountPreparation[]; computeTypes: ComputeBackend[]; standardBootstrap: boolean } {
-  if (!bootstrap) {
-    // AgentCore stays in the list: Memory and the Gateway are AgentCore resources on every backend.
-    const computeTypes = [...new Set<ComputeBackend>(['agentcore', ...compute])];
-    return { steps: computeTypes.length > 1 ? ['bootstrap', 'computeTypes'] : ['bootstrap'], computeTypes, standardBootstrap: false };
-  }
-  const policyVersion = bootstrap.outputs.get('BootstrapPolicyVersion');
-  if (policyVersion === undefined) return { steps: [], computeTypes: [], standardBootstrap: true };
-  const steps: AccountPreparation[] = versionAtLeast(policyVersion, REQUIRED_BOOTSTRAP_VERSION) ? [] : ['rebootstrap'];
-  const configured = (bootstrap.parameters.get('ComputeTypes') ?? 'agentcore').split(',').map(value => value.trim()).filter(Boolean);
-  const computeTypes = [...new Set([...configured, ...compute])] as ComputeBackend[];
-  if (computeTypes.length !== configured.length) steps.push('computeTypes');
-  return { steps, computeTypes, standardBootstrap: false };
-}
-
 async function chooseCompute(deps: SetupDeps, ui: Ui, defaults: readonly ComputeBackend[]): Promise<ComputeBackend[]> {
   const options: Array<{ label: string; detail: string; compute: ComputeBackend[] }> = [
     { label: 'AgentCore Runtime', detail: 'recommended — managed, starts in seconds', compute: ['agentcore'] },
@@ -446,13 +368,6 @@ function suggestStackName(taken: ReadonlySet<string>): string {
     const candidate = `${DEFAULT_STACK_NAME}-${suffix}`;
     if (!taken.has(candidate)) return candidate;
   }
-}
-
-/** Why ABCA's least-privilege bootstrap cannot deploy `stackName`, or `undefined` when it can. */
-function bootstrapNameProblem(stackName: string): string | undefined {
-  if (BOOTSTRAP_STACK_NAME_PATTERN.test(stackName)) return undefined;
-  return `ABCA's least-privilege bootstrap only deploys stacks named ${DEFAULT_STACK_NAME} or ${DEFAULT_STACK_NAME}-<suffix>; `
-    + `try ${DEFAULT_STACK_NAME}-${stackName.toLowerCase()}.`;
 }
 
 async function askNewStackName(
@@ -619,20 +534,6 @@ function printNextSteps(
     ui.line(`  ${index + 1}. ${label}`);
     ui.line(`     ${style.cyan(command)}`);
   });
-}
-
-/** "Slack: 3 tables and 1 secret" from state-bearing changes, grouped by component. */
-function describeDataLoss(changes: readonly StateBearingChange[], stackNames: readonly string[]): string[] {
-  const byComponent = new Map<string, Map<string, number>>();
-  for (const change of changes) {
-    const component = componentForPath(change.id, stackNames);
-    const nouns = byComponent.get(component) ?? new Map<string, number>();
-    const noun = STATE_BEARING_TYPES.get(change.type)!;
-    nouns.set(noun, (nouns.get(noun) ?? 0) + 1);
-    byComponent.set(component, nouns);
-  }
-  return [...byComponent].map(([component, nouns]) => `${component}: ${[...nouns]
-    .map(([noun, count]) => `${count} ${noun}${count === 1 ? '' : 's'}`).join(', ')}`);
 }
 
 /** `~/.bgagent/logs/x` rather than a long absolute path. */

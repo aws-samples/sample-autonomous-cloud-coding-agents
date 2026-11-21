@@ -19,9 +19,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { REQUIRED_BOOTSTRAP_VERSION } from '../src/commands/setup';
 import { CAPABILITY_CATALOG } from '../src/deployment-capabilities';
 import { COMPUTE_BACKENDS } from '../src/deployment-profile';
+import { REQUIRED_BOOTSTRAP_VERSION } from '../src/setup-account';
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 

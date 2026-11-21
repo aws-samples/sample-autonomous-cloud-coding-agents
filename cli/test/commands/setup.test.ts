@@ -27,7 +27,6 @@ import {
   identityLabel,
   makeSetupCommand,
   parseContextArgs,
-  parseStateBearingChanges,
   runSetup,
   SETUP_CANCELLED_EXIT_CODE,
   setupCancelled,
@@ -641,41 +640,6 @@ describe('data-loss gate and post-deploy state', () => {
 });
 
 describe('helpers', () => {
-  test('parseStateBearingChanges finds exactly the data a real cdk diff removes', () => {
-    // Captured from aws-cdk 2.1129 `cdk diff` of the legacy topology without Linear (IAM tables trimmed).
-    const diff = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'cdk-diff-remove-linear.txt'), 'utf-8');
-    expect(parseStateBearingChanges(diff)).toEqual([
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/ProjectMappingTable/Table' },
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/UserMappingTable/Table' },
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/WorkspaceRegistryTable/Table' },
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/WebhookDedupTable' },
-      { change: 'delete', type: 'AWS::SecretsManager::Secret', id: 'LinearIntegration/WebhookSecret' },
-    ]);
-  });
-
-  test('parseStateBearingChanges reads the impact word on resource lines', () => {
-    const diff = [
-      'Stack backgroundagent-dev',
-      '\u001b[31m[-]\u001b[39m AWS::SecretsManager::Secret JiraIntegration/WebhookSecret JiraSecret destroy',
-      '[~] AWS::DynamoDB::Table TaskTable TaskTable123 replace',
-      ' └─ [~] KeySchema (requires replacement)',
-      '[~] AWS::S3::Bucket ScreenshotBucket Bucket1 may be replaced',
-      '[~] AWS::Logs::LogGroup Logs Logs1',
-      '[-] AWS::Cognito::UserPool Pool Pool1 orphan',
-      '[-] AWS::Lambda::Function Fn Fn1 destroy',
-      '[+] AWS::DynamoDB::Table New New1',
-      'Stack backgroundagent-dev/AgentRegistryStack',
-      '[-] AWS::CloudFormation::Stack AgentRegistryStack.NestedStack/AgentRegistryStack.NestedStackResource Nested1 destroy',
-    ].join('\n');
-    expect(parseStateBearingChanges(diff)).toEqual([
-      { change: 'delete', type: 'AWS::SecretsManager::Secret', id: 'JiraIntegration/WebhookSecret' },
-      { change: 'replace', type: 'AWS::DynamoDB::Table', id: 'TaskTable' },
-      { change: 'replace', type: 'AWS::S3::Bucket', id: 'ScreenshotBucket' },
-      { change: 'orphan', type: 'AWS::Cognito::UserPool', id: 'Pool' },
-      { change: 'delete', type: 'AWS::CloudFormation::Stack', id: 'AgentRegistryStack.NestedStack/AgentRegistryStack.NestedStackResource' },
-    ]);
-  });
-
   test('conflictingContextOverrides ignores agreeing switches', () => {
     fs.writeFileSync(path.join(root, 'cdk', 'cdk.context.json'), JSON.stringify({ enableSlack: 'false', compute_type: 'ecs' }));
     expect(conflictingContextOverrides(root, MINIMAL_DEPLOYMENT_FEATURES)).toEqual([]);
