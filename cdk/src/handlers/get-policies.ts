@@ -150,25 +150,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return successResponse(200, cached.response, requestId);
     }
 
-    // Repos without custom policies still get the built-in set. A
-    // Blueprint entry that carries no annotations runs in the agent as
-    // a soft rule named ``legacy_extra_<n>``, n counting such entries
-    // (``agent/src/policy.py``). List it the same way: that id is what
-    // an approval request shows and what a ``rule:<id>`` scope takes.
-    let legacyCount = 0;
-    const blueprintText = (config?.cedar_policies ?? [])
-      .map((p) => (p.includes('@tier(') || p.includes('@rule_id(')
-        ? p
-        : `@tier("soft")\n@rule_id("legacy_extra_${legacyCount++}")\n${p}`))
-      .join('\n');
-    const hardText = BUILTIN_HARD_DENY_POLICIES;
-    const softText = concatPolicies(BUILTIN_SOFT_DENY_POLICIES, blueprintText);
-
-    let hardRules;
-    let softRules;
+    let rules;
     try {
-      hardRules = parseRules(hardText);
-      softRules = parseRules(softText);
+      rules = parseRules(concatPolicies(BUILTIN_HARD_DENY_POLICIES, BUILTIN_SOFT_DENY_POLICIES));
+      // Approval requests use these same IDs, counting only legacy entries.
+      let legacyCount = 0;
+      const nextLegacyRuleId = () => `legacy_extra_${legacyCount++}`;
+      for (const entry of config?.cedar_policies ?? []) {
+        rules.push(...parseRules(entry, nextLegacyRuleId));
+      }
     } catch (err) {
       if (err instanceof CedarPolicyParseError) {
         logger.error('Cedar parse failure for repo policies', {
@@ -185,9 +175,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
-    // A rule's own @tier decides where it is listed: a Blueprint entry
-    // annotated @tier("hard") was parsed with the soft text above.
-    const rules = [...hardRules, ...softRules];
     const response: GetPoliciesResponse = {
       repo_id: repoId,
       policies: {
