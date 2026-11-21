@@ -4,7 +4,7 @@ title: "ADR-013: Tiered validation pyramid for agentic-first development"
 
 **Status:** proposed
 **Date:** 2026-05-19
-**Last-updated:** 2026-11-15
+**Last-updated:** 2026-11-20
 
 ## Context
 
@@ -80,12 +80,13 @@ Each tier is **necessary but not sufficient** — passing a lower tier is requir
 - Merge conflict markers
 - Secrets scan (gitleaks)
 - ESLint for cdk, cli and web, each when one of its source files is staged
+- Type check (`tsc --noEmit`) of cdk, cli and web, each when one of its TypeScript files is staged
 - Agent quality task, when a Python file under `agent/` is staged
 - Docs sync and `astro check`, the Markdown structure lint when a Markdown file is staged, and the docs script tests when the docs scripts are staged
 - Drift checks for API types and shared constants when one of their inputs is staged, and the coverage contract check on every commit
 - YAML/JSON syntax validation
 
-Status: **Implemented** (prek hooks). A commit runs the hooks that match what is staged, so there is no single duration. Measured when the newer hooks were added: the coverage contract check takes about 1 s on every commit, the Markdown structure lint about 3 s on a commit with Markdown, and web ESLint 6 to 13 s on a commit with web sources.
+Status: **Implemented** (prek hooks). A commit runs the hooks that match what is staged, so there is no single duration. Measured when the newer hooks were added: the coverage contract check takes about 1 s on every commit, the Markdown structure lint about 3 s on a commit with Markdown, and web ESLint 6 to 13 s on a commit with web sources. The type checks take about 9 s (cdk), 5 s (cli) and 2 s (web) on a commit with TypeScript files of that package.
 
 **Tier 1 — Local build (30–90s, gates push)**
 
@@ -238,3 +239,4 @@ Escape hatches must be explicit (noted in PR description, not silent).
 ## Changelog
 
 - 2026-11-15 — Phase 2a is implemented, on the AWS Emulator instead of LocalStack, as an advisory check (`mise run test:integration` and the `emulator` workflow). Replaced the estimate that it would eliminate "60%+ of CI-only failures" with what was measured, added the graduation criteria this ADR asks for, and stated that phase 2c needs a real AWS account because the emulator cannot show a missing permission (decision otherwise unchanged).
+- 2026-11-20 — Tier 0 also runs the type check of cdk, cli and web when one of their TypeScript files is staged (#260). The build runs the same checks and stays the gate (decision unchanged).

@@ -29,6 +29,10 @@
  * every mise task, which makes mise put its tools first, and no `node` called
  * without mise.
  *
+ * It also holds that a commit type-checks the TypeScript it changes: every package
+ * that has an ESLint hook has a hook that runs its `typecheck` task when one of its
+ * TypeScript files is staged. ESLint does not report the compiler's errors.
+ *
  * Same placement rationale as `check-constants-sync.test.ts`: `cdk/test/` is the
  * Jest tree that can reach the repository root.
  */
@@ -55,5 +59,39 @@ describe('git hooks that start through a login shell', () => {
 
   test('call no `node` of their own, which would be the one of the machine', () => {
     expect(COMMANDS.filter((command) => /(^|&&|\|\||[;|]) *node /.test(command))).toEqual([]);
+  });
+});
+
+/** The text of every hook of the configuration, from its id to the next hook, by id. */
+const HOOKS = new Map(
+  CONFIG.split(/^ {6}- id: /m).slice(1).map((hook) => [hook.slice(0, hook.indexOf('\n')), hook] as const),
+);
+
+describe('type-check hooks', () => {
+  /** The packages that have an ESLint hook: the TypeScript packages. */
+  const packages = [...HOOKS.keys()].filter((id) => id.endsWith('-eslint')).map((id) => id.slice(0, -'-eslint'.length));
+  /** The text of the type-check hook of a package, empty when it has none. */
+  const hook = (pkg: string): string => HOOKS.get(`${pkg}-typecheck`) ?? '';
+
+  test('exist for every package that has an ESLint hook, and run its typecheck task', () => {
+    const command = (pkg: string): string => /^ +entry: bash -lc '(.*)'$/m.exec(hook(pkg))?.[1] ?? '';
+
+    expect(packages).not.toHaveLength(0);
+    expect(packages.filter((pkg) => !command(pkg).endsWith(` && mise //${pkg}:typecheck`))).toEqual([]);
+  });
+
+  test('start at commit for a staged TypeScript file of their package and for no other file', () => {
+    for (const pkg of packages) {
+      const files = /^ +files: (.*)$/m.exec(hook(pkg))?.[1];
+      const exclude = /^ +exclude: (.*)$/m.exec(hook(pkg))?.[1];
+      /** prek starts a hook for a file that matches its `files` and does not match its `exclude`. */
+      const starts = (file: string): boolean =>
+        files !== undefined && new RegExp(files).test(file) && (exclude === undefined || !new RegExp(exclude).test(file));
+
+      expect([`${pkg}/src/a.ts`, `${pkg}/test/a.test.tsx`, `${pkg}/a.mts`, `${pkg}/a.cts`].filter((file) => !starts(file))).toEqual([]);
+      expect([`${pkg}/src/a.js`, `${pkg}/eslint.config.mjs`, `${pkg}/package.json`, `docs/${pkg}/a.ts`].filter(starts)).toEqual([]);
+      expect(hook(pkg)).toMatch(/^ +pass_filenames: false$/m);
+      expect(hook(pkg)).toMatch(/^ +stages: \[pre-commit\]$/m);
+    }
   });
 });
