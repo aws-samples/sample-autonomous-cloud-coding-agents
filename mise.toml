@@ -291,11 +291,17 @@ description = "Scan the checked-out history for secrets with gitleaks (scheduled
 run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="HEAD"'
 
 [tasks."security:secrets:range"]
-description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
+description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD; unset or empty, it scans the history of HEAD"
 # Range-scoped scan: only the commits a branch/PR introduces, not full history.
-# Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
-# to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
-run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-}"'
+# The per-PR CI job sets GITLEAKS_RANGE (security-pr.yml).
+#
+# Unset or empty, the range is `HEAD`: the scope of security:secrets above, for
+# the reasons given there, so the task is safe to run anywhere. An empty
+# --log-opts is not "no range": gitleaks then walks every ref of the clone and
+# fails on what other branches hold (#329). `origin/main..HEAD` is no default
+# either: on main it is empty, and where origin/main is missing gitleaks scans
+# nothing and still exits 0.
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-HEAD}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"

@@ -88,6 +88,43 @@ describe('the SAST scans with the rule packs of the semgrep registry', () => {
   });
 });
 
+describe('the secret scans with gitleaks', () => {
+  /** The arguments a task gives gitleaks, with GITLEAKS_RANGE set to `range` or, without one, unset. */
+  const gitleaksArguments = (name: string, range?: string): string[] => {
+    const [, command] = /^run = ['"](gitleaks [^\\;&|<>]*)['"]$/.exec(task(name).find((line) => line.startsWith('run = ')) ?? '') ?? [];
+    if (command === undefined) {
+      throw new Error(`${name}: its command is not one gitleaks call`);
+    }
+    // The command runs as it is written. A shell function stands in for gitleaks and prints
+    // its arguments, one per line. An undefined value takes a GITLEAKS_RANGE that this
+    // process inherited out of the environment.
+    const env = { ...process.env, GITLEAKS_RANGE: range };
+    return spawnSync('sh', ['-c', `gitleaks() { printf '%s\\n' "$@"; }\n${command}`], { encoding: 'utf-8', env }).stdout.trimEnd().split('\n');
+  };
+
+  // An empty --log-opts is not "no range": gitleaks then walks every ref of the clone and fails
+  // on what other branches hold. A workflow step whose range expression has no value passes
+  // an empty variable, not an unset one.
+  test.each([undefined, ''])('security:secrets:range scans the history of HEAD when GITLEAKS_RANGE is %p', (range) => {
+    expect(gitleaksArguments('security:secrets:range', range)).toContain('--log-opts=HEAD');
+  });
+
+  test('security:secrets:range scans the range it is given', () => {
+    expect(gitleaksArguments('security:secrets:range', 'origin/main..HEAD')).toContain('--log-opts=origin/main..HEAD');
+  });
+
+  // Rule file, redaction and output are the same in the three scans, so that the hook, the
+  // pull request check and the sweep cannot disagree about a finding: only what they scan
+  // differs. Without a range, the range scan is the sweep.
+  test('give gitleaks the same arguments, apart from what to scan', () => {
+    const sweep = gitleaksArguments('security:secrets');
+
+    expect(gitleaksArguments('security:secrets:range')).toEqual(sweep);
+    expect(gitleaksArguments('security:secrets:staged').filter((argument) => argument !== '--staged'))
+      .toEqual(sweep.filter((argument) => !argument.startsWith('--log-opts=')));
+  });
+});
+
 describe('the default task, which `mise run` without a task name runs', () => {
   // mise starts the entries of `depends` together, and `build` does not depend on `install`:
   // as dependencies, the build began on a checkout whose packages were still being installed.
