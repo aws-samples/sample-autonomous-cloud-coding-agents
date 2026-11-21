@@ -158,6 +158,10 @@ Then, follow the [User Guide](./docs/guides/USER_GUIDE.md) to learn how to use t
 
 A documentation site is available containing design documents and guides to deploy and use the platform. You can access it [here](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/).
 
+## Known issues
+
+Deployment, upgrade and teardown issues, with their workarounds, are listed under [Known deployment issues](./docs/guides/DEPLOYMENT_GUIDE.md#known-deployment-issues) in the deployment guide. In particular, deleting a stack can stop in `DELETE_FAILED` for hours while AgentCore releases its network interfaces: see [Teardown blocked by AgentCore network interfaces](./docs/guides/DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentcore-network-interfaces).
+
 ## Disclaimer
 
 The example provided in this repository is for experimental and educational purposes only. It demonstrates concepts and techniques but is not intended for direct use in production environments.

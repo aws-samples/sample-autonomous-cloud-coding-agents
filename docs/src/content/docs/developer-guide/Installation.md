@@ -187,6 +187,8 @@ mise //cdk:deploy
 
 A full deploy takes approximately 10 minutes. Expect variation by region and whether container layers are cached.
 
+Deleting a stack (`mise //cdk:destroy`) can end in `DELETE_FAILED` on the runtime's security group and the VPC's private subnets: AgentCore releases the runtime's network interfaces some time after the runtime is deleted, with no fixed delay (it can take hours). [Teardown blocked by AgentCore network interfaces](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#teardown-blocked-by-agentcore-network-interfaces) in the deployment guide shows how to inspect the stack, when to retry, and how to finish the deletion by retaining the blocked resources.
+
 ### Stack outputs
 
 After deployment, the stack emits these outputs (retrieve with `aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table`):
