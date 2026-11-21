@@ -301,13 +301,22 @@ class TestCedarPoliciesInjection:
 
         mock_run_agent.side_effect = fake_run_agent
 
+        seen: dict[str, str] = {}
+
+        def fake_ensure_committed(_repo_dir):
+            # The safety-net commit is the last commit of a task, and git makes
+            # it with the environment of the process. Read here, while the task
+            # runs: run_task puts the earlier values back when it is left (#635).
+            seen.update(os.environ)
+            return False
+
         mock_span = MagicMock()
         mock_span.__enter__ = MagicMock(return_value=mock_span)
         mock_span.__exit__ = MagicMock(return_value=False)
         mock_task_span.return_value = mock_span
 
         with (
-            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.ensure_committed", side_effect=fake_ensure_committed),
             patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
@@ -327,10 +336,10 @@ class TestCedarPoliciesInjection:
                 task_id="test-id",
             )
 
-        assert os.environ["GIT_AUTHOR_NAME"] == "bgagent"
-        assert os.environ["GIT_AUTHOR_EMAIL"] == "bgagent@noreply.github.com"
-        assert os.environ["GIT_COMMITTER_NAME"] == "bgagent"
-        assert os.environ["GIT_COMMITTER_EMAIL"] == "bgagent@noreply.github.com"
+        assert seen["GIT_AUTHOR_NAME"] == "bgagent"
+        assert seen["GIT_AUTHOR_EMAIL"] == "bgagent@noreply.github.com"
+        assert seen["GIT_COMMITTER_NAME"] == "bgagent"
+        assert seen["GIT_COMMITTER_EMAIL"] == "bgagent@noreply.github.com"
 
 
 class TestRepoLessPipeline:
