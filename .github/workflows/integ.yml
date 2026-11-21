@@ -264,6 +264,12 @@ jobs:
       # is the resolved PR head (or dispatched ref) and RUN_NUMBER is a positive
       # integer, so both are already lowercase-alphanumeric — no sanitizing
       # needed to stay CloudFormation-valid.
+      #
+      # The log of this step first shows integ-runner's snapshot check listing
+      # the test as NEW and counting it as failed. No snapshot is committed, so
+      # that is expected on every run and is not a test failure: the task says
+      # so in the log, and the deploy-then-verify run under "Test Results"
+      # decides the step (#569).
       - name: Run integ tests (deploy → assert → destroy)
         env:
           HEAD_SHA: ${{ needs.resolve.outputs.commit_sha }}

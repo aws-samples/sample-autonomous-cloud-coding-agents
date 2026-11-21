@@ -228,6 +228,17 @@ description = "CDK deploy-then-verify integration tests (integ-runner). Needs AW
 depends = [":compile"]
 run = [
   "mkdir -p $TMPDIR",
+  # integ-runner checks snapshots before it deploys, and no option skips that.
+  # A fresh checkout (every CI run) has no snapshot, so the check lists each
+  # test as NEW and counts it as failed, which reads as a failed run (#569).
+  # It is not a test failure: --force deploys and verifies every test whatever
+  # the check found, and with no snapshot the exit code follows that run alone.
+  # The echo says so in the log, above the check's output. Keep it ahead of
+  # integ-runner: mise appends the arguments after `--` to the last command.
+  # Its text does not call the check meaningless: a snapshot left by an earlier
+  # local run is compared for real, and a destructive change then fails the
+  # run even when the tests pass.
+  "echo 'integ: no snapshot is committed, so on a fresh checkout (every CI run) the snapshot check of integ-runner lists each test as NEW and counts it as failed. That is expected and is not a test failure: --force deploys and verifies every test regardless, and that run is reported under Test Results.'",
   # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
   # snapshot to diff against or update. --force re-runs the deploy-then-verify
   # unconditionally, which is what we want in CI.
