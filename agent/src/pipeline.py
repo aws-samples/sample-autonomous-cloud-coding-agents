@@ -910,16 +910,19 @@ def _apply_delivery_gate(
 
 
 def _compute_turns_completed(
-    turns_attempted: int | None,
+    turns: int | None,
     max_turns: int,
 ) -> int | None:
     """Clamp ``turns_completed`` to ``max_turns``.
 
-    The Claude Agent SDK reports ``num_turns = max_turns + 1``
-    on ``error_max_turns`` because the aborted attempt is counted.  Clamping
-    at the final write keeps ``turns_completed`` truthful ("how many turns
-    actually executed") while ``turns_attempted`` keeps the raw SDK value
-    for debugging.
+    ``turns`` is the runner's count of the model's answers, which is what
+    ``max_turns`` limits ("how many turns actually executed"), or the CLI's
+    ``num_turns`` where the runner saw no answer. Either can pass the cap. The
+    runner's does when the CLI asks the model again without counting a turn
+    (in CLI 2.1.319, for example, after an answer that was refused, cut off or
+    empty) or sends a message without an id, which the runner takes for an
+    answer of its own. ``num_turns`` is not the count the cap applies to (see
+    ``models.TaskResult``); ``turns_attempted`` keeps it raw for debugging.
 
     The agent status is not consulted: the CLI marks a max-turns result
     ``is_error``, so the runner reports it as ``error``, not ``error_max_turns``,
@@ -929,12 +932,12 @@ def _compute_turns_completed(
     truthy value) and a negative one is not a count to clamp to, so for both the
     count is returned as it is.
 
-    Returns ``None`` if ``turns_attempted`` is ``None``/falsy so callers can
-    round-trip a missing SDK count without inventing a fake zero.
+    Returns ``turns`` as it is when it is ``None`` or 0, so that a missing
+    count is not turned into a number.
     """
-    if not turns_attempted or max_turns <= 0:
-        return turns_attempted
-    return min(turns_attempted, max_turns)
+    if not turns or max_turns <= 0:
+        return turns
+    return min(turns, max_turns)
 
 
 def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> dict:
@@ -948,6 +951,9 @@ def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> di
     if agent_result is None:
         return {}
     usage = agent_result.usage
+    # The CLI's own count where it reported one: not the count ``max_turns``
+    # limits (see ``TaskResult``). ``turns_completed`` takes the runner's, and
+    # this one only where the runner counted no answer.
     turns_attempted = agent_result.num_turns or agent_result.turns
     return {
         "agent_status": agent_result.status,
@@ -955,7 +961,9 @@ def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> di
         # Legacy field (= turns_attempted) kept for back-compat.
         "turns": turns_attempted,
         "turns_attempted": turns_attempted,
-        "turns_completed": _compute_turns_completed(turns_attempted, max_turns),
+        "turns_completed": _compute_turns_completed(
+            agent_result.turns or turns_attempted, max_turns
+        ),
         "session_id": agent_result.session_id or None,
         "input_tokens": usage.input_tokens if usage else None,
         "output_tokens": usage.output_tokens if usage else None,

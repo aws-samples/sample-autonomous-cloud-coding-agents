@@ -800,14 +800,15 @@ async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 w
                     usage=usage,
                 )
 
-                # Write progress cost update event
+                # Write progress cost update event. Its ``turn`` is the number
+                # the turn and tool events carry, not the CLI's ``num_turns``.
                 input_toks = usage.input_tokens if usage else 0
                 output_toks = usage.output_tokens if usage else 0
                 progress.write_agent_cost_update(
                     cost_usd=result.cost_usd,
                     input_tokens=input_toks,
                     output_tokens=output_toks,
-                    turn=result.num_turns,
+                    turn=result.turns,
                 )
 
             elif isinstance(message, UserMessage):

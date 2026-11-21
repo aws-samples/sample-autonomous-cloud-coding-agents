@@ -2712,9 +2712,10 @@ class TestInertBuildIsNotReportedAsPassed:
 
 class TestTurnsCompletedAtTheCap:
     def test_max_turns_stop_is_clamped_to_the_cap(self):
-        # What the runner hands over when the cap fires: the CLI marks the
-        # max-turns result ``is_error``, so the runner reports status "error" (not
-        # "error_max_turns"), and num_turns counts the attempt that was aborted.
+        # The runner's own count can pass the cap: the CLI may ask the model
+        # again without counting a turn, and that answer is one more for the
+        # runner. The CLI marks the max-turns result ``is_error``, so the runner
+        # reports status "error" (not "error_max_turns").
         run = _run_pipeline(
             AgentResult(
                 status="error",
@@ -2726,6 +2727,54 @@ class TestTurnsCompletedAtTheCap:
         )
 
         assert run.result["turns_attempted"] == 11
+        assert run.result["turns_completed"] == 10
+
+
+class TestTurnsCompletedCountsTheAnswers:
+    """``turns_completed`` is the number of answers of the model, which is what
+    ``max_turns`` limits: the runner's count. The CLI's ``num_turns`` is kept as
+    ``turns_attempted``: it grows with every tool result, so it can pass the cap
+    on a task that never reached it."""
+
+    def test_completed_task_records_its_answers_not_the_cli_count(self):
+        # 62 answers under a cap of 80; several of them called more than one tool.
+        run = _run_pipeline(
+            AgentResult(status="success", turns=62, num_turns=90, cost_usd=0.01),
+            max_turns=80,
+        )
+
+        assert run.result["turns_completed"] == 62
+        assert run.result["turns_attempted"] == 90
+        assert run.result["turns"] == 90
+
+    def test_stop_at_the_cap_records_the_cap_and_the_aborted_attempt(self):
+        # What the runner hands over when the cap fires: ten answers, and a CLI
+        # count that includes the attempt it aborted.
+        run = _run_pipeline(
+            AgentResult(
+                status="error",
+                error="Agent session error (subtype='error_max_turns')",
+                turns=10,
+                num_turns=11,
+            ),
+            max_turns=10,
+        )
+
+        assert run.result["turns_completed"] == 10
+        assert run.result["turns_attempted"] == 11
+
+    def test_cli_count_stands_in_when_the_runner_saw_no_answer(self):
+        # No answer reached the runner, but the CLI reported a count: it is
+        # used, clamped to the cap.
+        run = _run_pipeline(
+            AgentResult(
+                status="error",
+                error="Agent session error (subtype='error_max_turns')",
+                num_turns=11,
+            ),
+            max_turns=10,
+        )
+
         assert run.result["turns_completed"] == 10
 
 

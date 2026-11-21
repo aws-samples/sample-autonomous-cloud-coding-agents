@@ -216,14 +216,16 @@ export interface TaskDetail {
   readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
-  /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
-   *  when `agent_status='error_max_turns'` — the aborted attempt is
-   *  counted). Required to match ``cdk/src/handlers/shared/types.ts``
-   *  (server always emits the field, defaulted to ``null`` in
-   *  ``toTaskDetail`` when absent on the record). */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept for
+   *  debugging. Not the count `max_turns` limits, and it can exceed the
+   *  limit on a task that never reached it: see ``TaskResult`` in
+   *  ``agent/src/models.py``. Required to match
+   *  ``cdk/src/handlers/shared/types.ts`` (server always emits the field,
+   *  defaulted to ``null`` in ``toTaskDetail`` when absent on the record). */
   readonly turns_attempted: number | null;
-  /** Rev-5 DATA-1: turns that actually completed (clamped to
-   *  `max_turns` when the cap tripped). Required; see
+  /** Rev-5 DATA-1: turns that actually completed: the model's answers,
+   *  which is what `max_turns` limits (clamped to it). ``bgagent status``
+   *  shows it against the limit once the task has finished. Required; see
    *  ``turns_attempted`` above. */
   readonly turns_completed: number | null;
   /** Whether the task was submitted with ``--trace``. Surfaces in

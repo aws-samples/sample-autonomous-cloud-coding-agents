@@ -1091,6 +1091,24 @@ class TestTurnCount:
         assert _turns_of(run.progress.write_agent_turn) == [1, 1, 2]
         assert _turns_of(run.progress.write_agent_tool_result) == [1, 1]
 
+    def test_cost_update_is_numbered_like_the_events_around_it(self, monkeypatch):
+        # Two answers and two tool results: the CLI's num_turns is 3, and the
+        # cost update carries the turn of the last answer, as its neighbours do.
+        run = _run_agent(
+            monkeypatch,
+            _assistant(_bash("call_1", "ls src"), answer="msg_1"),
+            _tool_result("call_1", "a.py"),
+            _assistant(_bash("call_2", "ls tests"), answer="msg_1"),
+            _tool_result("call_2", "test_a.py"),
+            _assistant(sdk.TextBlock(text="Two files."), answer="msg_2"),
+            _result(num_turns=3),
+        )
+
+        assert _turns_of(run.progress.write_agent_cost_update) == [2]
+        # The CLI's own count stays on the result: the record keeps it as
+        # turns_attempted.
+        assert run.result.num_turns == 3
+
     def test_run_without_a_result_reports_the_turns_it_saw(self, monkeypatch):
         # No result message (the stream broke off): the task record then takes
         # its turn counts from this number, and clamps it to max_turns.

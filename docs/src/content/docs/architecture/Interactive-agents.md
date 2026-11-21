@@ -296,7 +296,7 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 | `agent_tool_call` | Runner / PreToolUse hook | About to invoke a tool |
 | `agent_tool_result` | Runner / PostToolUse hook | Tool returned |
 | `agent_milestone` | Agent code (pipeline, hooks) | Named checkpoint (`repo_cloned`, `pr_opened`, `nudge_acknowledged`, ...) |
-| `agent_cost_update` | Runner | Cumulative token + dollar cost |
+| `agent_cost_update` | Runner | Cumulative token + dollar cost; its `turn` is the turn number the `agent_turn` events carry |
 | `agent_error` | Runner | Handled exception |
 | `approval_required` (P3) | PreToolUse Cedar hook | Cedar policy requires user decision |
 | `approval_decided` (P3) | Approve/Deny Lambda | User responded |
@@ -336,7 +336,7 @@ Deterministic, templated snapshot. No LLM.
 $ bgagent status abc123
 Task abc123 — RUNNING (3m 14s elapsed)
   Repo: org/repo
-  Turn: 7 / ~12
+  Turn: 7 / 12
   Last milestone: nudge_acknowledged (42s ago)
   Current: Bash tool call
   Cost: $0.18 / budget $2.00
@@ -347,6 +347,7 @@ Implementation:
 - Lambda reads the last N events from `TaskEventsTable` + current `TaskRecord`.
 - Renders from a fixed template. Never calls an LLM. Never hallucinates.
 - Fast (<200 ms P95), free, safe to call repeatedly.
+- `Turn` is the number of answers of the model so far against `max_turns`, which limits that count: the `turn` of the newest `agent_turn` event while the task runs, the record's `turns_completed` once it has finished (the event's `turn` if the record holds no count). The record's `turns_attempted` is the Claude Code CLI's own counter, which grows with every tool result (as of the pinned CLI 2.1.319) and can exceed `max_turns`; it is not shown against the limit.
 
 ### 5.3 `bgagent watch`
 
@@ -386,7 +387,7 @@ Ask the agent a natural-language question that requires its own reasoning. Alway
 ```
 $ bgagent ask abc123 "why did you change the retry logic?"
 ⠋ queued as ask_01JX... — waiting for agent
-⠙ agent is running tool: Bash (turn 7/~12) — 42s elapsed
+⠙ agent is running tool: Bash (turn 7/12) — 42s elapsed
 ✓ agent responded (1m 14s)
 
 The existing retry used exponential backoff with no jitter, causing thundering

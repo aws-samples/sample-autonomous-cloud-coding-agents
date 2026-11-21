@@ -335,13 +335,14 @@ class TestComputeTurnsCompleted:
         # and no invented turns.
         assert _compute_turns_completed(turns, max_turns=10) == turns
 
-    def test_clamps_when_sdk_overreports(self):
-        # SDK reports max_turns + 1 when the cap fires; clamp to the declared
-        # ceiling so ``turns_completed`` reflects what actually executed.
+    def test_count_above_the_cap_is_clamped(self):
+        # The runner's count, or the CLI's where it stands in, can pass the cap;
+        # clamp to the declared ceiling so ``turns_completed`` reflects what
+        # actually executed.
         assert _compute_turns_completed(11, max_turns=10) == 10
 
     def test_exact_max_passes_through(self):
-        # Edge case: attempted == max_turns; min() is a no-op.
+        # Edge case: the count equals max_turns; min() is a no-op.
         assert _compute_turns_completed(10, max_turns=10) == 10
 
     def test_limit_of_zero_is_no_cap(self):
@@ -350,12 +351,12 @@ class TestComputeTurnsCompleted:
         # agent.maxTurns 0 on ECS) has no turn limit. Its turns are not zero.
         assert _compute_turns_completed(37, max_turns=0) == 37
 
-    def test_none_turns_attempted_round_trips(self):
-        # Missing SDK count must round-trip as None so writers can detect
+    def test_missing_count_round_trips(self):
+        # A missing count must round-trip as None so writers can detect
         # "no turn counter available" vs "zero turns".
         assert _compute_turns_completed(None, max_turns=10) is None
 
-    def test_zero_turns_attempted_round_trips(self):
+    def test_zero_count_round_trips(self):
         # Zero is treated the same as None (falsy) so we don't clamp it to a
         # negative / nonsensical value.
         assert _compute_turns_completed(0, max_turns=10) == 0

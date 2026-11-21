@@ -636,16 +636,21 @@ function elapsedDescription(task: TaskDetail, now: number): string {
 }
 
 function describeTurn(task: TaskDetail, turnEvent: TaskEvent | null): string {
-  // Prefer the live ``turn`` from the most recent ``agent_turn`` event
-  // over the persisted ``turns_attempted`` — the former updates mid-task
-  // (the latter is written on terminal completion in most paths).
-  const liveTurn = readNumberField(turnEvent?.metadata, 'turn');
-  const currentTurn = liveTurn ?? task.turns_attempted ?? null;
+  // The left side counts the model's answers, which is what ``max_turns``
+  // limits. A finished task shows the ``turns_completed`` of its record, as
+  // the web console does, so that the line does not depend on which events
+  // are still in the window. A running task shows the ``turn`` of the newest
+  // ``agent_turn`` event, and so does a finished one whose record has no
+  // count (0 stands for none). ``turns_attempted`` is never shown against the
+  // limit: it is the Claude Code CLI's own count, which can exceed it (see
+  // ``TaskDetail``).
+  const recorded = TERMINAL_STATUSES.includes(task.status) ? task.turns_completed : null;
+  const currentTurn = recorded || readNumberField(turnEvent?.metadata, 'turn');
   const maxTurns = task.max_turns ?? null;
   if (currentTurn == null && maxTurns == null) return PLACEHOLDER;
   const left = currentTurn == null ? PLACEHOLDER : String(currentTurn);
   const right = maxTurns == null ? PLACEHOLDER : String(maxTurns);
-  return `${left} / ~${right}`;
+  return `${left} / ${right}`;
 }
 
 function describeMilestone(milestoneEvent: TaskEvent | null, now: number): string {

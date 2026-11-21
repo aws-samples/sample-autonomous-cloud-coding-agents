@@ -278,11 +278,13 @@ export interface TaskRecord {
   /** S3 URI of a repo-less workflow's delivered artifact (deliver_artifact,
    *  #248 Phase 3); absent for coding tasks / comment-only delivery. */
   readonly artifact_uri?: string;
-  /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
-   *  tripped any cap. Equals the legacy `turns` value. */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept raw for
+   *  debugging. Equals the legacy `turns` value. Not the count `max_turns`
+   *  limits, and it can exceed the limit on a task that never reached it:
+   *  see `TaskResult` in `agent/src/models.py`. */
   readonly turns_attempted?: number | string;
-  /** Rev-5 DATA-1: turns that actually completed (clamped to
-   *  `max_turns` when `agent_status='error_max_turns'`). */
+  /** Rev-5 DATA-1: turns that actually completed: the model's answers, which
+   *  is what `max_turns` limits (clamped to it). */
   readonly turns_completed?: number | string;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
@@ -520,11 +522,12 @@ export interface TaskDetail {
   readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
-  /** Rev-5 DATA-1: SDK-attempted turn count (may exceed `max_turns` by 1
-   *  under `agent_status='error_max_turns'`). */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept for debugging.
+   *  Not the count `max_turns` limits, and it can exceed the limit on a task
+   *  that never reached it: see `TaskResult` in `agent/src/models.py`. */
   readonly turns_attempted: number | null;
-  /** Rev-5 DATA-1: actually-completed turns, clamped to `max_turns`
-   *  when the cap tripped. */
+  /** Rev-5 DATA-1: actually-completed turns: the model's answers, which is
+   *  what `max_turns` limits (clamped to it). */
   readonly turns_completed: number | null;
   readonly prompt_version: string | null;
   /** True when the task was submitted with ``--trace`` — surfaces the
