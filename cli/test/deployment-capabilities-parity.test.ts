@@ -21,7 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { REQUIRED_BOOTSTRAP_VERSION } from '../src/commands/setup';
 import { CAPABILITY_CATALOG } from '../src/deployment-capabilities';
-import { COMPUTE_BACKENDS, DEPLOYMENT_FEATURES } from '../src/deployment-profile';
+import { COMPUTE_BACKENDS } from '../src/deployment-profile';
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
@@ -29,29 +29,16 @@ const REPO_ROOT = path.join(__dirname, '..', '..');
  * The CLI cannot import ``contracts/`` at runtime (outside the published
  * ``lib`` files), so it carries literal copies. These tests turn drift between
  * the contract, the CDK resolver and the CLI into a CI failure.
+ *
+ * The profile parser, the feature list, the context-switch names and the
+ * per-stack profile file are not compared here: both suites run the cases of
+ * ``contracts/deployment-profile-vectors/`` against their own copy
+ * (``deployment-profile-vectors.test.ts``).
  */
 describe('deployment capability parity', () => {
   test('the CLI catalog equals contracts/deployment-capabilities.json', () => {
     const contract = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'contracts', 'deployment-capabilities.json'), 'utf-8'));
     expect(CAPABILITY_CATALOG).toEqual(contract);
-  });
-
-  test('the CLI feature list matches the CDK resolver', () => {
-    const source = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'deployment', 'features.ts'), 'utf-8');
-    const declared = /export const DEPLOYMENT_FEATURES = \[([^\]]+)\]/.exec(source)?.[1];
-    expect(declared).toBeDefined();
-    expect([...declared!.matchAll(/'([A-Za-z]+)'/g)].map(m => m[1])).toEqual([...DEPLOYMENT_FEATURES]);
-  });
-
-  test('the CLI context-switch names match the CDK resolver', () => {
-    const cdk = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'deployment', 'features.ts'), 'utf-8');
-    const cli = fs.readFileSync(path.join(REPO_ROOT, 'cli', 'src', 'commands', 'setup.ts'), 'utf-8');
-    const extract = (text: string) => {
-      const block = /FEATURE_CONTEXT_KEYS[^{]*\{([^}]+)\}/.exec(text)?.[1] ?? '';
-      return Object.fromEntries([...block.matchAll(/(\w+): '(\w+)'/g)].map(m => [m[1], m[2]]));
-    };
-    expect(Object.keys(extract(cdk))).toHaveLength(DEPLOYMENT_FEATURES.length);
-    expect(extract(cli)).toEqual(extract(cdk));
   });
 
   test('the CLI requires the bootstrap bundle version CDK generates', () => {
