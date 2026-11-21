@@ -1199,6 +1199,8 @@ export interface HydrateContextOptions {
   readonly githubTokenSecretArn?: string;
   /** AgentCore Memory ID for loading cross-task memory context. */
   readonly memoryId?: string;
+  /** Token budget of the memory context (from per-repo Blueprint config); the platform default when unset. */
+  readonly memoryTokenBudget?: number;
 }
 
 /**
@@ -1214,7 +1216,7 @@ export interface HydrateContextOptions {
  * @throws RequiredContextUnavailableError when the pull request of a PR task, or the issue
  *         of a task that has no description, cannot be fetched.
  */
-// eslint-disable-next-line complexity -- predates the ceiling (47 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (46, down from 47 when it landed); must not grow
 export async function hydrateContext(task: TaskRecord, options?: HydrateContextOptions): Promise<HydratedContext> {
   // The sanitizer results of this hydration only, so the map never outgrows one task's context
   sanitizedTexts.clear();
@@ -1225,6 +1227,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
   try {
     // Fetch GitHub issue, memory context, and PR context in parallel
     const memoryId = options?.memoryId ?? process.env.MEMORY_ID;
+    const memoryTokenBudget = options?.memoryTokenBudget;
     const tokenSecretArn = options?.githubTokenSecretArn ?? GITHUB_TOKEN_SECRET_ARN;
 
     const workflowId = task.resolved_workflow?.id ?? 'coding/new-task-v1';
@@ -1237,9 +1240,8 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     // takes the repo-bound path below. Memory is keyed per-user (user:{user_id})
     // rather than per-repo (ADR-014 addendum 2026-06-08).
     if (!task.repo) {
-      const memId = options?.memoryId ?? process.env.MEMORY_ID;
-      const repolessMemory = memId
-        ? await loadMemoryContext(memId, `user:${task.user_id}`, task.task_description)
+      const repolessMemory = memoryId
+        ? await loadMemoryContext(memoryId, `user:${task.user_id}`, task.task_description, memoryTokenBudget)
         : undefined;
       const repolessSources: string[] = [];
       if (repolessMemory) repolessSources.push('memory');
@@ -1283,7 +1285,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       })(),
       // Memory context load (fail-open)
       memoryId
-        ? loadMemoryContext(memoryId, repo, task.task_description)
+        ? loadMemoryContext(memoryId, repo, task.task_description, memoryTokenBudget)
         : Promise.resolve(undefined),
       // PR fetch (only for PR task types)
       (async () => {

@@ -58,6 +58,8 @@ export const PLATFORM_REPO_DEFAULTS = {
    */
   model_id: 'global.anthropic.claude-opus-5-5',
   max_turns: 200,
+  /** ``DEFAULT_MEMORY_TOKEN_BUDGET`` of ``cdk/src/handlers/shared/memory.ts``; a test holds the two equal. */
+  memory_token_budget: 2_000,
   poll_interval_ms: 30_000,
   approval_gate_cap: 50,
 } as const;
@@ -99,6 +101,7 @@ export interface RepoConfigDisplay {
     readonly model_id: string;
     readonly max_turns: number;
     readonly max_budget_usd: string;
+    readonly memory_token_budget: number;
     readonly poll_interval_ms: number;
     readonly approval_gate_cap: number;
     readonly github_token_source: GithubTokenSource;
@@ -137,13 +140,14 @@ export function formatRepoConfigForDisplay(
   mark('model_id', config.model_id !== undefined);
   mark('max_turns', config.max_turns !== undefined);
   mark('max_budget_usd', config.max_budget_usd !== undefined);
+  mark('memory_token_budget', config.memory_token_budget !== undefined);
   mark('poll_interval_ms', config.poll_interval_ms !== undefined);
   mark('approval_gate_cap', config.approval_gate_cap !== undefined);
   fieldSources.github_token_secret_arn = usesBlueprintToken ? 'blueprint' : 'platform';
 
   const blueprintOverrides: Record<string, unknown> = {};
   for (const key of [
-    'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd',
+    'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd', 'memory_token_budget',
     'poll_interval_ms', 'approval_gate_cap', 'system_prompt_overrides',
     'egress_allowlist', 'cedar_policies', 'github_token_secret_arn',
   ] as const) {
@@ -177,6 +181,7 @@ export function formatRepoConfigForDisplay(
       max_budget_usd: config.max_budget_usd !== undefined
         ? String(config.max_budget_usd)
         : 'unlimited',
+      memory_token_budget: config.memory_token_budget ?? PLATFORM_REPO_DEFAULTS.memory_token_budget,
       poll_interval_ms: config.poll_interval_ms ?? PLATFORM_REPO_DEFAULTS.poll_interval_ms,
       approval_gate_cap: config.approval_gate_cap ?? PLATFORM_REPO_DEFAULTS.approval_gate_cap,
       github_token_source: usesBlueprintToken ? 'blueprint' : 'platform',
@@ -232,6 +237,13 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
       text: display.field_sources.max_budget_usd === 'blueprint'
         ? `${display.effective.max_budget_usd} (per-blueprint override)`
         : '(platform default) unlimited',
+    },
+    {
+      key: 'memory_token_budget',
+      text: formatSourcedValue(
+        String(display.effective.memory_token_budget),
+        display.field_sources.memory_token_budget,
+      ),
     },
     {
       key: 'poll_interval_ms',

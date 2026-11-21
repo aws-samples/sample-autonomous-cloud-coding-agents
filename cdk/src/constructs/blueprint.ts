@@ -128,6 +128,21 @@ export interface BlueprintProps {
     readonly maxBudgetUsd?: number;
 
     /**
+     * Token budget for the memory context (repository knowledge and past task
+     * episodes) that context hydration loads into the agent's system prompt
+     * for tasks against this repo (#447). Hydration retrieves at most five
+     * knowledge records and three episodes; the budget decides how many of
+     * them are kept. Knowledge is kept first, then episodes, and the first
+     * record of a kind that does not fit ends that list. A larger budget never
+     * loads more than those eight records.
+     *
+     * Must be a positive integer, at most ``Number.MAX_SAFE_INTEGER``; any
+     * other value fails at synth. A repo whose RepoTable row holds no budget
+     * gets the platform default of 2000 tokens. There is no per-task override.
+     */
+    readonly memoryTokenBudget?: number;
+
+    /**
      * Additional system prompt instructions appended to the platform default.
      */
     readonly systemPromptOverrides?: string;
@@ -270,6 +285,12 @@ export class Blueprint extends Construct {
   public readonly maxBudgetUsd?: number;
 
   /**
+   * Per-repo memory token budget from the agent.memoryTokenBudget prop (#447),
+   * exposed for inspection. Undefined when the blueprint did not configure one.
+   */
+  public readonly memoryTokenBudget?: number;
+
+  /**
    * Registry ``registry://`` refs for MCP servers (#246), exposed for inspection.
    */
   public readonly mcpServerRefs: readonly string[];
@@ -286,7 +307,9 @@ export class Blueprint extends Construct {
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     this.approvalGateCap = props.security?.approvalGateCap;
-    this.maxBudgetUsd = props.agent?.maxBudgetUsd;
+    const { maxBudgetUsd, memoryTokenBudget } = props.agent ?? {};
+    this.maxBudgetUsd = maxBudgetUsd;
+    this.memoryTokenBudget = memoryTokenBudget;
     this.mcpServerRefs = [...(props.assets?.mcpServers ?? [])];
     this.cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
     this.skillRefs = [...(props.assets?.skills ?? [])];
@@ -309,6 +332,7 @@ export class Blueprint extends Construct {
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
     this.node.addValidation(new MaxBudgetUsdValidation(this.maxBudgetUsd));
+    this.node.addValidation(new MemoryTokenBudgetValidation(this.memoryTokenBudget));
     this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs, 'mcp_server'));
     this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs, 'cedar_policy_module'));
     this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs, 'skill'));
@@ -345,6 +369,9 @@ export class Blueprint extends Construct {
     }
     if (this.maxBudgetUsd !== undefined) {
       item.max_budget_usd = { N: String(this.maxBudgetUsd) };
+    }
+    if (this.memoryTokenBudget !== undefined) {
+      item.memory_token_budget = { N: String(this.memoryTokenBudget) };
     }
     if (props.agent?.systemPromptOverrides) {
       item.system_prompt_overrides = { S: props.agent.systemPromptOverrides };
@@ -447,6 +474,7 @@ export class Blueprint extends Construct {
     if (props.agent?.modelId) fields.push(', #model_id = :model_id');
     if (props.agent?.maxTurns !== undefined) fields.push(', #max_turns = :max_turns');
     if (this.maxBudgetUsd !== undefined) fields.push(', #max_budget_usd = :max_budget_usd');
+    if (this.memoryTokenBudget !== undefined) fields.push(', #memory_token_budget = :memory_token_budget');
     if (props.agent?.systemPromptOverrides) fields.push(', #system_prompt_overrides = :system_prompt_overrides');
     if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
@@ -470,6 +498,7 @@ export class Blueprint extends Construct {
     if (props.agent?.modelId) names['#model_id'] = 'model_id';
     if (props.agent?.maxTurns !== undefined) names['#max_turns'] = 'max_turns';
     if (this.maxBudgetUsd !== undefined) names['#max_budget_usd'] = 'max_budget_usd';
+    if (this.memoryTokenBudget !== undefined) names['#memory_token_budget'] = 'memory_token_budget';
     if (props.agent?.systemPromptOverrides) names['#system_prompt_overrides'] = 'system_prompt_overrides';
     if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
@@ -491,6 +520,7 @@ export class Blueprint extends Construct {
     if (props.agent?.modelId) values[':model_id'] = { S: props.agent.modelId };
     if (props.agent?.maxTurns !== undefined) values[':max_turns'] = { N: String(props.agent.maxTurns) };
     if (this.maxBudgetUsd !== undefined) values[':max_budget_usd'] = { N: String(this.maxBudgetUsd) };
+    if (this.memoryTokenBudget !== undefined) values[':memory_token_budget'] = { N: String(this.memoryTokenBudget) };
     if (props.agent?.systemPromptOverrides) values[':system_prompt_overrides'] = { S: props.agent.systemPromptOverrides };
     if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
@@ -616,6 +646,30 @@ class MaxBudgetUsdValidation implements IValidation {
         `Invalid agent.maxBudgetUsd: ${this.budget}. ` +
         `Must be between ${MAX_BUDGET_USD_MIN} and ${MAX_BUDGET_USD_MAX}.`,
       ];
+    }
+    return [];
+  }
+}
+
+/**
+ * #447 — validates the per-repo memory token budget is a positive integer, so
+ * a value that is no token count (zero, negative, fractional, non-finite)
+ * fails at synth rather than reaching the RepoTable row. The only upper bound
+ * is ``Number.MAX_SAFE_INTEGER``: the orchestrator's DynamoDB client returns a
+ * larger number as a BigInt. Below that there is none, because context
+ * hydration retrieves a fixed number of memory records and the budget only
+ * decides how many of them are kept. ``undefined`` is allowed: the Blueprint
+ * then writes no budget.
+ */
+class MemoryTokenBudgetValidation implements IValidation {
+  constructor(private readonly budget: number | undefined) {}
+
+  public validate(): string[] {
+    if (this.budget === undefined) {
+      return [];
+    }
+    if (!Number.isSafeInteger(this.budget) || this.budget <= 0) {
+      return [`Invalid agent.memoryTokenBudget: ${this.budget}. Must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}.`];
     }
     return [];
   }

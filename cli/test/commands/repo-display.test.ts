@@ -194,6 +194,36 @@ describe('buildRepoShowLines', () => {
     expect(PLATFORM_REPO_DEFAULTS.model_id).toBe(match![1]);
   });
 
+  test('shows the memory token budget in effect and where it comes from', () => {
+    const inherited = formatRepoConfigForDisplay({ repo: 'acme/foo', status: 'active' }, PLATFORM);
+    expect(inherited.effective.memory_token_budget).toBe(PLATFORM_REPO_DEFAULTS.memory_token_budget);
+    expect(inherited.field_sources.memory_token_budget).toBe('platform');
+    expect(inherited.blueprint_overrides).not.toHaveProperty('memory_token_budget');
+    expect(buildRepoShowLines(inherited).find((l) => l.key === 'memory_token_budget')?.text)
+      .toBe(`(platform default) ${PLATFORM_REPO_DEFAULTS.memory_token_budget}`);
+
+    const pinned = formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', memory_token_budget: 4000 },
+      PLATFORM,
+    );
+    expect(pinned.effective.memory_token_budget).toBe(4000);
+    expect(pinned.field_sources.memory_token_budget).toBe('blueprint');
+    expect(pinned.blueprint_overrides.memory_token_budget).toBe(4000);
+    expect(buildRepoShowLines(pinned).find((l) => l.key === 'memory_token_budget')?.text)
+      .toBe('4000 (per-blueprint override)');
+  });
+
+  test('the advertised default memory token budget matches the one hydration applies', () => {
+    // Drift guard: the CLI cannot import the orchestrator's constant, so read it
+    // from the source instead of trusting a second copy of the number.
+    const memoryTs = fs.readFileSync(
+      path.resolve(__dirname, '../../../cdk/src/handlers/shared/memory.ts'), 'utf8',
+    );
+    const match = memoryTs.match(/const DEFAULT_MEMORY_TOKEN_BUDGET = ([\d_]+);/);
+    expect(match).not.toBeNull();
+    expect(PLATFORM_REPO_DEFAULTS.memory_token_budget).toBe(Number(match![1].replace(/_/g, '')));
+  });
+
   test('explains platform default github token in text output', () => {
     const display = formatRepoConfigForDisplay(
       { repo: 'awslabs/agent-plugins', status: 'active' },

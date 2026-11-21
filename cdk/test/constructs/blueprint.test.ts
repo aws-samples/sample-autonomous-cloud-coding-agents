@@ -232,6 +232,52 @@ describe('Blueprint construct', () => {
     expect(serialized).not.toContain('max_budget_usd');
   });
 
+  // --- #447: agent.memoryTokenBudget (mirrors agent.maxBudgetUsd) ---------
+
+  test('maps agent memory token budget prop', () => {
+    const { template } = createStack({
+      agent: { memoryTokenBudget: 4000 },
+    });
+    const serialized = getCreateJoinParts(template).join('');
+    expect(serialized).toContain('"memory_token_budget":{"N":"4000"}');
+  });
+
+  test('onUpdate sets memory_token_budget', () => {
+    const { template } = createStack({
+      agent: { memoryTokenBudget: 4000 },
+    });
+    const serialized = getUpdateJoinParts(template).join('');
+    expect(serialized).toContain('#memory_token_budget = :memory_token_budget');
+    expect(serialized).toContain('"#memory_token_budget":"memory_token_budget"');
+    expect(serialized).toContain('":memory_token_budget":{"N":"4000"}');
+  });
+
+  test('omits memory_token_budget on create and update when memoryTokenBudget is undefined', () => {
+    const { template } = createStack({
+      agent: { maxBudgetUsd: 5 },
+    });
+    expect(getCreateJoinParts(template).join('')).not.toContain('memory_token_budget');
+    expect(getUpdateJoinParts(template).join('')).not.toContain('memory_token_budget');
+  });
+
+  test('exposes memoryTokenBudget as a public property, undefined when absent', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const configured = new Blueprint(stack, 'Configured', {
+      repo: 'org/configured',
+      repoTable,
+      agent: { memoryTokenBudget: 4000 },
+    });
+    const absent = new Blueprint(stack, 'Absent', { repo: 'org/absent', repoTable });
+
+    expect(configured.memoryTokenBudget).toBe(4000);
+    expect(absent.memoryTokenBudget).toBeUndefined();
+  });
+
   test('maps system prompt overrides prop', () => {
     const { template } = createStack({
       agent: { systemPromptOverrides: 'Always use TypeScript.' },
@@ -718,6 +764,35 @@ describe('Blueprint construct', () => {
     // ``contracts/constants.json``, not two hand-copied literals.
     expect(MAX_BUDGET_USD_MIN).toBe(0.01);
     expect(MAX_BUDGET_USD_MAX).toBe(100);
+  });
+
+  // --- #447: agent.memoryTokenBudget must be a positive integer -----------
+
+  // 2 ** 53 is the first integer the orchestrator would read back from the row as a BigInt.
+  test.each([0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53])('rejects memoryTokenBudget %p at synth', (budget) => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      agent: { memoryTokenBudget: budget },
+    });
+
+    expect(() => Template.fromStack(stack)).toThrow(`Invalid agent.memoryTokenBudget: ${budget}. Must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}.`);
+  });
+
+  test.each([
+    [1, '1'],
+    [Number.MAX_SAFE_INTEGER, '9007199254740991'],
+  ])('accepts memoryTokenBudget %p', (budget, written) => {
+    const { template } = createStack({
+      agent: { memoryTokenBudget: budget },
+    });
+    expect(getCreateJoinParts(template).join('')).toContain(`"memory_token_budget":{"N":"${written}"}`);
   });
 
   test('accepts boundary values (min and max)', () => {

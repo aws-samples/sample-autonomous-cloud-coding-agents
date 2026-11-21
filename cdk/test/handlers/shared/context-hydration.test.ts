@@ -695,7 +695,7 @@ describe('hydrateContext', () => {
     const result = await hydrateContext(task as any, { memoryId: 'mem-test-1' });
 
     expect(mockLoadMemoryContext).toHaveBeenCalledWith(
-      'mem-test-1', 'user:cognito-sub-xyz', 'Summarise these papers',
+      'mem-test-1', 'user:cognito-sub-xyz', 'Summarise these papers', undefined,
     );
     expect(result.sources).toContain('memory');
   });
@@ -868,7 +868,20 @@ describe('hydrateContext', () => {
 
     expect(result.memory_context).toEqual(memoryContext);
     expect(result.sources).toContain('memory');
-    expect(mockLoadMemoryContext).toHaveBeenCalledWith('mem-test-1', 'org/repo', 'Fix the bug');
+    // No memoryTokenBudget option: the loader gets undefined and applies its default.
+    expect(mockLoadMemoryContext).toHaveBeenCalledWith('mem-test-1', 'org/repo', 'Fix the bug', undefined);
+  });
+
+  test.each([
+    { name: 'a repo task', repo: 'org/repo', namespace: 'org/repo' },
+    { name: 'a repo-less task', repo: undefined, namespace: 'user:user-123' },
+  ])('passes the memoryTokenBudget option to the memory load of $name (#447)', async ({ repo, namespace }) => {
+    mockLoadMemoryContext.mockResolvedValueOnce({ repo_knowledge: ['prior'], past_episodes: [] });
+
+    const task = { ...baseTask, repo, task_description: 'Fix the bug' };
+    await hydrateContext(task as any, { memoryId: 'mem-test-1', memoryTokenBudget: 4000 });
+
+    expect(mockLoadMemoryContext).toHaveBeenCalledWith('mem-test-1', namespace, 'Fix the bug', 4000);
   });
 
   test('excludes memory_context when memoryId is not provided', async () => {

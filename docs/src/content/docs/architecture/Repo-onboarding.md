@@ -87,7 +87,7 @@ At deploy time, the construct creates a CDK custom resource that writes the `Rep
 - **Update** (every later deploy): `UpdateItem` sets `status: 'active'`, `updated_at` and every override the Blueprint declares. It removes the registry asset lists (`mcp_servers`, `cedar_policy_modules`, `skills`) that the Blueprint does not declare, and leaves every other attribute as it is.
 - **Delete** (the construct is removed from the stack): `UpdateItem` soft-deletes the record (`status: 'removed'`).
 
-A redeploy therefore does not overwrite the record. An override that was deleted from the Blueprint keeps its last value: a deleted `agent.maxBudgetUsd` is still the repo's default budget, and a deleted `agent.modelId` still selects the old model. This holds for every override except the asset lists: `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd`, `system_prompt_overrides`, `github_token_secret_arn`, `poll_interval_ms`, `build_command`, `lint_command`, `egress_allowlist`, `cedar_policies` and `approval_gate_cap`. An empty string or an empty list does not clear one either.
+A redeploy therefore does not overwrite the record. An override that was deleted from the Blueprint keeps its last value: a deleted `agent.maxBudgetUsd` is still the repo's default budget, and a deleted `agent.modelId` still selects the old model. This holds for every override except the asset lists: `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd`, `memory_token_budget`, `system_prompt_overrides`, `github_token_secret_arn`, `poll_interval_ms`, `build_command`, `lint_command`, `egress_allowlist`, `cedar_policies` and `approval_gate_cap`. An empty string or an empty list does not clear one either.
 
 The update is selective on purpose. `bgagent repo onboard` writes the same record ([ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)), and the update runs on every deploy: if it cleared what the Blueprint does not declare, an unrelated deploy would delete a value an operator set with the CLI, such as a model pin. So a Blueprint owns the attributes it declares, which every deploy writes again, and the three asset lists. Any other attribute stays as its last writer left it. To clear one, see [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
 
@@ -133,7 +133,7 @@ From lowest to highest priority:
 | `model_id` | `global.anthropic.claude-opus-5-5` | injected by the stack as `ANTHROPIC_MODEL` from `bedrockGeoRegion`; `agent/src/config.py` holds the no-env fallback — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
 | `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, validated at synth) or per task with `--max-budget` / `max_budget_usd`. See [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the complete list of surfaces a budget can come from |
-| `memory_token_budget` | 2000 | Platform constant |
+| `memory_token_budget` | 2000 | Platform constant (`DEFAULT_MEMORY_TOKEN_BUDGET` in `cdk/src/handlers/shared/memory.ts`). Set a per-repo value with Blueprint `agent.memoryTokenBudget` (a positive integer, validated at synth); there is no per-task override |
 | `github_token_secret_arn` | Stack-level secret | CDK stack props |
 | `poll_interval_ms` | 30000 | Orchestrator constant |
 
@@ -145,7 +145,7 @@ The orchestrator reads `RepoConfig` at task time. Each pipeline step consumes sp
 |---|---|
 | `load-blueprint` | `compute_type`, `custom_steps`, `step_sequence` |
 | `admission-control` | `status` (defense-in-depth) |
-| `hydrate-context` | `github_token_secret_arn`, `system_prompt_overrides` |
+| `hydrate-context` | `github_token_secret_arn`, `system_prompt_overrides`, `memory_token_budget` |
 | `pre-flight` | `github_token_secret_arn` |
 | `start-session` | `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd` |
 | `await-agent-completion` | `poll_interval_ms` |

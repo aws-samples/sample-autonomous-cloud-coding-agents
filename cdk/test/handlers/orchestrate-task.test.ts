@@ -1009,6 +1009,20 @@ describe('loadBlueprintConfig', () => {
     expect(config.cedar_policies).toBeUndefined();
   });
 
+  test('passes memory_token_budget from repo config, undefined when it has none (#447)', async () => {
+    const row = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+    mockLoadRepoConfig.mockResolvedValueOnce({ ...row, memory_token_budget: 4000 });
+    expect((await loadBlueprintConfig(baseTask as any)).memory_token_budget).toBe(4000);
+
+    mockLoadRepoConfig.mockResolvedValueOnce(row);
+    expect((await loadBlueprintConfig(baseTask as any)).memory_token_budget).toBeUndefined();
+  });
+
   // Compute substrate is a per-repo property that applies to ALL workflows: a
   // read-only review task clones + reads the SAME repo, so it needs the
   // SAME compute (a repo big enough to need the 64GB ECS tier to build also OOMs
@@ -1113,6 +1127,20 @@ describe('hydrateAndTransition with blueprint config', () => {
     expect(mockHydrateContext).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:per-repo-token' }),
+    );
+  });
+
+  test('passes the blueprint memory_token_budget to hydrateContext (#447)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      memory_token_budget: 4000,
+    });
+    expect(mockHydrateContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ memoryTokenBudget: 4000 }),
     );
   });
 
