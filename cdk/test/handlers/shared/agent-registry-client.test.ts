@@ -330,6 +330,7 @@ describe('AgentRegistryClient', () => {
     expect(err).toBeInstanceOf(RegistryPublishIncompleteError);
     // The orphan's id is surfaced so an operator can find + delete/approve it.
     expect((err as RegistryPublishIncompleteError).recordId).toBeTruthy();
+    expect((err as RegistryPublishIncompleteError).message).toContain('approve or delete it before retrying');
     // Create + submit were attempted; submit failed before approve.
     expect(fake.sent).toEqual(['create', 'submit']);
   });
