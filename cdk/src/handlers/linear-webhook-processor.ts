@@ -3492,7 +3492,7 @@ async function screenProjectDocsOrDrop(
       linear_workspace_id: workspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return []; // nosemgrep: ts-silent-success-masking -- project docs are advisory enrichment; a screening outage drops them (logged) and the reporter's task still proceeds. Fail-open is the deliberate posture, not a masked bug (#756 Category 3)
+    return []; // nosemgrep: ts-silent-success-masking -- advisory enrichment that cannot be screened is dropped and the task proceeds (ADR-026)
   }
 }
 
@@ -3543,7 +3543,7 @@ async function screenCommentsOrDrop(
       linear_workspace_id: workspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return []; // nosemgrep: ts-silent-success-masking -- comments are advisory enrichment; a screening outage drops them (logged) and the reporter's task still proceeds. Fail-open is the deliberate posture, not a masked bug (#756 Category 3)
+    return []; // nosemgrep: ts-silent-success-masking -- advisory enrichment that cannot be screened is dropped and the task proceeds (ADR-026)
   }
 }
 
