@@ -70,22 +70,33 @@ jobs:
           mise run --continue-on-error security 2>&1 | tee security-log.txt
         continue-on-error: true
 
-      # An osv-scanner ignore stops applying on its ignoreUntil date; from that
-      # day the required dependency scan (security-pr.yml) fails every pull
-      # request. Warn 21 days ahead. A date that cannot be read is reported too,
-      # and so is an expiry written in a form this line reader does not follow.
-      # osv-expiry.md is empty when there is nothing to warn about.
-      - name: Warn about osv-scanner ignores that expire within 21 days
+      # A scan ignore stops applying on its expiry date. From that day the
+      # finding is reported again: for an osv-scanner.toml entry the required
+      # dependency scan (security-pr.yml) fails on every pull request, for a
+      # .trivyignore entry the image scan fails in this suite and in the
+      # pre-push hook. Warn 21 days ahead. A date that cannot be read is
+      # reported too, and so is an osv-scanner expiry written in a form this
+      # line reader does not follow. ignore-expiry.md is empty when there is
+      # nothing to warn about. cdk/test/scripts/security-workflow.test.ts runs
+      # this step and the report below with bash.
+      - name: Warn about scan ignores that expire within 21 days
         id: expiry
         run: |
           set -euo pipefail
-          node - > osv-expiry.md <<'EOF'
+          node - > ignore-expiry.md <<'EOF'
           const { execFileSync } = require('node:child_process');
           const { readFileSync } = require('node:fs');
           const today = Date.parse(new Date().toISOString().slice(0, 10));
-          const files = execFileSync('git', ['ls-files', '--', 'osv-scanner.toml', '*/osv-scanner.toml'], { encoding: 'utf8' });
+          const tracked = (name) => execFileSync('git', ['ls-files', '--', name, `*/${name}`], { encoding: 'utf8' }).split('\n').filter(Boolean);
           const warnings = [];
-          for (const file of files.split('\n').filter(Boolean)) {
+          const warn = (file, index, id, value) => {
+            const date = value.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+            const days = Math.round((Date.parse(date) - today) / 86400000);
+            if (days > 21) return;
+            const state = Number.isNaN(days) ? 'date not readable' : days <= 0 ? 'expired' : `${days} day(s) left`;
+            warnings.push(`- \`${file}:${index + 1}\` ${id || 'entry'}: ignored until ${date ?? value.trim()} (${state})`);
+          };
+          for (const file of tracked('osv-scanner.toml')) {
             let id = '';
             // osv-scanner accepts CRLF line endings and any capitalisation of a
             // key (IgnoreUntil), so both are read here.
@@ -101,23 +112,30 @@ jobs:
                 }
                 return;
               }
-              const date = value.match(/\d{4}-\d{2}-\d{2}/)?.[0];
-              const days = Math.round((Date.parse(date) - today) / 86400000);
-              if (days > 21) return;
-              const state = Number.isNaN(days) ? 'date not readable' : days <= 0 ? 'expired' : `${days} day(s) left`;
-              warnings.push(`- \`${file}:${index + 1}\` ${id || 'entry'}: ignored until ${date ?? value.trim()} (${state})`);
+              warn(file, index, id, value);
+            });
+          }
+          // trivy trims a line and splits it at white space: the first word is
+          // the id, and the first later word that starts with `exp:`, in lower
+          // case, holds the expiry date, even after a `#`. A line that starts
+          // with `#` is a comment.
+          for (const file of tracked('.trivyignore')) {
+            readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+              const [id, ...words] = line.trim().split(/\s+/);
+              const expiry = id.startsWith('#') ? undefined : words.find((word) => word.startsWith('exp:'));
+              if (expiry !== undefined) warn(file, index, id, expiry.slice(4));
             });
           }
           if (warnings.length > 0) {
-            console.log('### osv-scanner ignores that expire within 21 days\n');
+            console.log('### Scan ignores that expire within 21 days\n');
             console.log(warnings.join('\n'));
-            console.log('\nFrom the date shown, the required dependency scan fails every pull request. Fix the dependency, or renew the ignore with a reason that is still true, before that date.');
+            console.log('\nFrom the date shown the finding is reported again: for an `osv-scanner.toml` entry the required dependency scan then fails on every pull request, for a `.trivyignore` entry the image scan fails in the weekly suite and in the pre-push hook. Fix the dependency, or renew the ignore with a reason that is still true, before that date.');
           }
           EOF
-          if [ -s osv-expiry.md ]; then
-            tee -a "$GITHUB_STEP_SUMMARY" < osv-expiry.md
+          if [ -s ignore-expiry.md ]; then
+            tee -a "$GITHUB_STEP_SUMMARY" < ignore-expiry.md
           else
-            echo "No osv-scanner ignore expires within 21 days."
+            echo "No scan ignore expires within 21 days."
           fi
 
       # One rolling issue instead of a new issue per failing run: comment on the
@@ -138,7 +156,7 @@ jobs:
           EXPIRY_OUTCOME: ${{ steps.expiry.outcome }}
         run: |
           set -euo pipefail
-          if [ "${SCAN_OUTCOME}" = "success" ] && [ "${EXPIRY_OUTCOME}" = "success" ] && [ ! -s osv-expiry.md ]; then
+          if [ "${SCAN_OUTCOME}" = "success" ] && [ "${EXPIRY_OUTCOME}" = "success" ] && [ ! -s ignore-expiry.md ]; then
             echo "Suite passed and no ignore expires within 21 days: nothing to report."
             exit 0
           fi
@@ -156,11 +174,11 @@ jobs:
             echo "| Event | \`${GITHUB_EVENT_NAME}\` |"
             if [ "${EXPIRY_OUTCOME}" != "success" ]; then
               echo ""
-              echo "**The check for osv-scanner ignores close to expiry did not finish (step outcome: ${EXPIRY_OUTCOME}).** This run says nothing about ignores that are about to expire. The step \"Warn about osv-scanner ignores that expire within 21 days\" in the workflow run shows why."
+              echo "**The check for scan ignores close to expiry did not finish (step outcome: ${EXPIRY_OUTCOME}).** This run says nothing about ignores that are about to expire. The step \"Warn about scan ignores that expire within 21 days\" in the workflow run shows why."
             fi
-            if [ -s osv-expiry.md ]; then
+            if [ -s ignore-expiry.md ]; then
               echo ""
-              cat osv-expiry.md
+              cat ignore-expiry.md
             fi
             if [ "${SCAN_OUTCOME}" != "success" ]; then
               echo ""
