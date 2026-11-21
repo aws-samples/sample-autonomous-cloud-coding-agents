@@ -165,7 +165,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 |--------|-----------|----------|
 | `APPROVED` | yes | silent |
 | `DEPRECATED` | yes | resolves + `warnings: ["DEPRECATED"]` |
-| `DRAFT`, `PENDING_APPROVAL`, `REJECTED`, `CREATING` | no | not a candidate; if the only match → `NO_MATCHING_VERSION` |
+| any other (`DRAFT`, `PENDING_APPROVAL`, `REJECTED`, `CREATING`, `UPDATING`, `CREATE_FAILED`, `UPDATE_FAILED`), including a status the service adds later | no | not a candidate; if the only match → `NO_MATCHING_VERSION` |
 
 **Fail-closed:** any unresolved ref fails task admission with `REGISTRY_RESOLUTION_FAILED`. A running task never re-resolves or substitutes. A candidate whose descriptor is present but unparseable rejects the ref with `MALFORMED` — it is never silently skipped in favour of a lower valid version, so a corrupt payload cannot cause a stale downgrade (#791).
 

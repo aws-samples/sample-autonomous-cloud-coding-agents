@@ -24,6 +24,44 @@ def _client() -> AgentRegistryClient:
     return AgentRegistryClient("r", None)
 
 
+# A descriptor level, or its `data`, that is an explicit null or not a mapping. Either
+# way the payload is absent, not corrupt: the TS adapter reads every row as an empty
+# runtime (`?.` and `??` in extractPayload), which resolve() then fails as REMOVED (#781).
+_ABSENT_DESCRIPTORS = [
+    pytest.param("CUSTOM", None, id="custom-descriptors-null"),
+    pytest.param("CUSTOM", {"custom": None}, id="custom-custom-null"),
+    pytest.param("CUSTOM", {"custom": {"data": None}}, id="custom-data-null"),
+    pytest.param("CUSTOM", "text", id="custom-descriptors-text"),
+    pytest.param("CUSTOM", {"custom": "text"}, id="custom-custom-text"),
+    pytest.param("MCP", None, id="mcp-descriptors-null"),
+    pytest.param("MCP", {"mcpServer": None}, id="mcp-mcpServer-null"),
+    pytest.param("MCP", {"mcpServer": {"data": None}}, id="mcp-data-null"),
+    pytest.param("MCP", {"mcpServer": ["x"]}, id="mcp-mcpServer-list"),
+    pytest.param("SKILL", None, id="skill-descriptors-null"),
+    pytest.param("SKILL", {"agentSkillsDefinition": None}, id="skill-agentSkillsDefinition-null"),
+    pytest.param(
+        "SKILL",
+        {"agentSkillsDefinition": {"additionalData": None}},
+        id="skill-additionalData-null",
+    ),
+    pytest.param(
+        "SKILL",
+        {"agentSkillsDefinition": {"additionalData": {"skillMd": None}}},
+        id="skill-skillMd-null",
+    ),
+    pytest.param(
+        "SKILL",
+        {"agentSkillsDefinition": {"additionalData": {"skillMd": {"data": None}}}},
+        id="skill-data-null",
+    ),
+    pytest.param(
+        "SKILL",
+        {"agentSkillsDefinition": {"additionalData": {"skillMd": "text"}}},
+        id="skill-skillMd-text",
+    ),
+]
+
+
 class _FakeBoto:
     """Minimal agent-registry-control stand-in: one page of records, and
     get_registry_record echoing the seeded record by id."""
@@ -198,6 +236,77 @@ class TestExtractRuntime:
         }
         assert _client()._extract_runtime(raw) == legit
 
+    @pytest.mark.parametrize(("record_type", "descriptors"), _ABSENT_DESCRIPTORS)
+    def test_absent_descriptor_reads_as_an_empty_payload(self, record_type, descriptors):
+        raw = {"recordType": record_type, "descriptors": descriptors}
+        assert _client()._extract_runtime(raw) == {}
+
+    @pytest.mark.parametrize(
+        ("record_type", "descriptor"), [("CUSTOM", "custom"), ("MCP", "mcpServer")]
+    )
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param("", id="empty-string"),
+            pytest.param(0, id="zero"),
+            pytest.param(False, id="false"),
+        ],
+    )
+    def test_body_that_is_not_json_text_raises_malformed(self, record_type, descriptor, data):
+        # Present, unlike a null, so not an absent payload: the TS adapter's `??` stands
+        # in for null and undefined only. An empty string, 0 and false reach its parser,
+        # and none of them parses to a JSON object, for both record types.
+        raw = {"recordType": record_type, "descriptors": {descriptor: {"data": data}}}
+        with pytest.raises(RegistryRecordMalformedError):
+            _client()._extract_runtime(raw)
+
+    @pytest.mark.parametrize(
+        ("record_type", "descriptor", "body"),
+        [
+            pytest.param("CUSTOM", "custom", '{"runtime": {"limit": NaN}}', id="custom"),
+            pytest.param(
+                "MCP",
+                "mcpServer",
+                '{"_meta": {"dev.abca.runtime": {"limit": Infinity}}}',
+                id="mcp",
+            ),
+        ],
+    )
+    def test_non_json_number_in_body_raises_malformed(self, record_type, descriptor, body):
+        # NaN, Infinity and -Infinity are not JSON: JSON.parse in the TS adapter rejects
+        # a body that holds one. json.loads reads them unless told otherwise, and the
+        # record would resolve here while the API side reports it MALFORMED.
+        raw = {"recordType": record_type, "descriptors": {descriptor: {"data": body}}}
+        with pytest.raises(RegistryRecordMalformedError):
+            _client()._extract_runtime(raw)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(base64.b64encode(b'{"limit": -Infinity}').decode(), id="base64"),
+            pytest.param("""'{"limit": NaN}'""", id="legacy-json"),
+        ],
+    )
+    def test_agent_skills_non_json_number_in_runtime_raises_malformed(self, value):
+        # The same for a SKILL.md runtime, in its base64 form and in the legacy
+        # single-quoted JSON one: each goes through its own json.loads call.
+        with pytest.raises(RegistryRecordMalformedError):
+            _client()._extract_runtime(self._skill_md(f"x-abca-runtime: {value}"))
+
+    def test_agent_skills_duplicate_frontmatter_key_last_value_wins(self):
+        # Hand-written frontmatter that repeats the runtime key. PyYAML keeps the last
+        # value, and so does js-yaml under `json: true` (parseSkillFrontmatter in
+        # agent-registry-client.ts): the two readers must agree on which runtime such
+        # a record carries. Neither rejects it. What keeps a second key from being
+        # smuggled in is the writer, which quotes every value.
+        def b64(runtime: dict) -> str:
+            return base64.b64encode(json.dumps(runtime).encode()).decode()
+
+        first = b64({"prompt_fragment": "FIRST"})
+        second = b64({"prompt_fragment": "SECOND"})
+        raw = self._skill_md(f"x-abca-runtime: {first}\nx-abca-runtime: {second}")
+        assert _client()._extract_runtime(raw) == {"prompt_fragment": "SECOND"}
+
 
 class TestResolveFailClosed:
     """resolve() must never hand back a record with an empty/unreadable runtime —
@@ -366,3 +475,113 @@ class TestResolveFailClosed:
         with pytest.raises(RegistryResolutionError) as exc:
             self._resolve([record], "registry://mcp_server/acme/pdf-tools@1.0.0")
         assert "SUPERSECRETTOKEN" not in str(exc.value)
+
+    def _resolve_payload(self, record_type: str, descriptors: object):
+        # The reader goes by the record type, so one name serves every payload.
+        record = {
+            "recordId": "rec-1.0.0",
+            "name": "mcp_server/acme/pdf-tools",
+            "recordType": record_type,
+            "descriptors": descriptors,
+            "recordVersion": "1.0.0",
+            "status": "APPROVED",
+        }
+        return self._resolve([record], "registry://mcp_server/acme/pdf-tools@1.0.0")
+
+    @pytest.mark.parametrize(("record_type", "descriptors"), _ABSENT_DESCRIPTORS)
+    def test_fails_removed_when_a_descriptor_level_is_absent(self, record_type, descriptors):
+        with pytest.raises(RegistryResolutionError) as exc:
+            self._resolve_payload(record_type, descriptors)
+        assert exc.value.reason == "REMOVED"
+
+    @pytest.mark.parametrize(
+        ("record_type", "descriptors"),
+        [
+            pytest.param("CUSTOM", {"custom": {"data": '{"runtime": null}'}}, id="custom-runtime"),
+            pytest.param("MCP", {"mcpServer": {"data": '{"_meta": null}'}}, id="mcp-meta"),
+            pytest.param(
+                "MCP",
+                {"mcpServer": {"data": '{"_meta": {"dev.abca.runtime": null}}'}},
+                id="mcp-meta-runtime",
+            ),
+        ],
+    )
+    def test_fails_removed_when_the_body_holds_a_null_runtime(self, record_type, descriptors):
+        # The body parses and the null sits where the runtime should be: nothing to load.
+        with pytest.raises(RegistryResolutionError) as exc:
+            self._resolve_payload(record_type, descriptors)
+        assert exc.value.reason == "REMOVED"
+
+    def test_get_record_returns_a_record_whose_descriptor_level_is_null(self):
+        # Parity with TS getRecord: a null payload makes an empty record, not a
+        # malformed one, so the lookup hands the record back instead of raising.
+        record = {
+            "recordId": "rec-1.0.0",
+            "name": "cedar_policy_module/acme/permit",
+            "recordType": "CUSTOM",
+            "descriptors": {"custom": None},
+            "recordVersion": "1.0.0",
+            "status": "DRAFT",
+        }
+        client = AgentRegistryClient("r", _FakeBoto([record]))
+        assert client.get_record("cedar_policy_module", "acme", "permit", "1.0.0") is record
+
+    def test_resolves_beside_unrelated_corrupt_records(self):
+        # Corrupt records of another asset and of a lower version of this asset share
+        # the namespace. Only the winner's payload is read, so neither stands in the
+        # way of the healthy record.
+        def _mcp(record_id: str, name: str, version: str, data: str) -> dict:
+            return {
+                "recordId": record_id,
+                "name": f"mcp_server/acme/{name}",
+                "recordType": "MCP",
+                "descriptors": {"mcpServer": {"data": data}},
+                "recordVersion": version,
+                "status": "APPROVED",
+            }
+
+        healthy = json.dumps({"_meta": {_RUNTIME_META_KEY: {"type": "http", "url": "https://x"}}})
+        asset = self._resolve(
+            [
+                _mcp("rec-other", "other", "1.0.0", "{bad json"),
+                _mcp("rec-lower", "pdf-tools", "1.0.0", "{bad json"),
+                _mcp("rec-healthy", "pdf-tools", "1.1.0", healthy),
+            ],
+            "registry://mcp_server/acme/pdf-tools@^1.0.0",
+        )
+        assert asset.version == "1.1.0"
+
+    def test_unknown_status_is_not_a_resolution_candidate(self):
+        # A status this code has never seen (the service can add one) is treated like
+        # every status other than APPROVED and DEPRECATED: the record does not
+        # resolve, and it does not hide a lower approved version.
+        records = [
+            self._mcp_record("1.0.0", "APPROVED", with_runtime=True),
+            self._mcp_record("1.1.0", "SOME_FUTURE_STATUS", with_runtime=True),
+        ]
+        asset = self._resolve(records, "registry://mcp_server/acme/pdf-tools@^1.0.0")
+        assert asset.version == "1.0.0"
+        with pytest.raises(RegistryResolutionError) as exc:
+            self._resolve(records, "registry://mcp_server/acme/pdf-tools@1.1.0")
+        assert exc.value.reason == "NO_MATCHING_VERSION"
+
+    def test_a_record_without_a_name_does_not_stop_the_others(self):
+        # A null name decodes to no coordinates, as in the TS adapter (`?? ''`): the
+        # record belongs to no asset, and the healthy one listed after it is found.
+        nameless = {**self._mcp_record("2.0.0", "APPROVED", with_runtime=True), "name": None}
+        healthy = self._mcp_record("1.0.0", "APPROVED", with_runtime=True)
+        client = AgentRegistryClient("r", _FakeBoto([nameless, healthy]))
+        asset = client.resolve(parse_ref("registry://mcp_server/acme/pdf-tools@^1.0.0"))
+        assert asset.version == "1.0.0"
+        assert client.get_record("mcp_server", "acme", "pdf-tools", "1.0.0") is healthy
+
+    def test_a_record_without_a_version_does_not_stop_its_siblings(self):
+        # A null recordVersion is no version (`?? ''` in the TS adapter): the record
+        # cannot win, and the versions beside it still resolve.
+        versionless = {
+            **self._mcp_record("1.1.0", "APPROVED", with_runtime=True),
+            "recordVersion": None,
+        }
+        records = [versionless, self._mcp_record("1.0.0", "APPROVED", with_runtime=True)]
+        asset = self._resolve(records, "registry://mcp_server/acme/pdf-tools@^1.0.0")
+        assert asset.version == "1.0.0"
