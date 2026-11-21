@@ -24,7 +24,7 @@ def reset_server_state():
     """Reset the pipeline registry, joining any thread still running on the way out.
 
     `/run` and `/invocations` answer while the pipeline thread is only just starting,
-    so that thread usually looks up `server.run_task` AFTER the test body has
+    so that thread can look up `server.run_task` AFTER the test body has
     returned. Clearing the registry without joining orphans it: the stubs are then
     undone, and the thread goes on to run a REAL pipeline — task-state writes, a
     heartbeat, a clone — inside whichever test happens to be running next. That is a
@@ -64,6 +64,83 @@ def reset_server_state():
         if thread.name.startswith("pipeline-") or thread.name.endswith("-cw-write")
     ]
     assert not leaked, f"threads outlived the test that started them (10 s join): {leaked}"
+
+
+# The fixture above acts once a test has ended, so no test of this file can watch it
+# work. The test below runs pytest on this throwaway module of two tests, with the
+# fixture and `conftest.py` loaded as they are for this file. The first test ends
+# while its pipeline thread has not looked up `run_task` yet. `/run` allows that: it
+# answers as soon as the thread is started. Here it is certain, because the thread
+# goes on only once something joins it. The second test checks that the thread ran
+# the first test's stub and never its own (#841).
+_TWO_TESTS_AROUND_A_LATE_PIPELINE = """
+import threading
+from unittest.mock import MagicMock
+
+import server
+from tests.test_server import reset_server_state  # the fixture under test, autouse here too
+
+first_stub = MagicMock(name="the first test's run_task")
+release = threading.Event()
+pipeline = None
+
+
+def test_first_ends_before_its_pipeline_has_looked_up_run_task(monkeypatch):
+    global pipeline
+    monkeypatch.setattr(server, "run_task", first_stub)
+
+    def body(**kwargs):
+        if not release.wait(timeout=30):
+            return  # nothing released it: end, rather than run whatever run_task is by then
+        server.run_task(**kwargs)  # looked up when executed, as in _run_task_background
+
+    monkeypatch.setattr(server, "_run_task_background", body)
+    pipeline = server._spawn_background({"task_id": "first"})
+    join = pipeline.join
+
+    def join_and_release(timeout=None):
+        release.set()  # the thread reaches run_task only once something waits for it
+        join(timeout)
+
+    monkeypatch.setattr(pipeline, "join", join_and_release)
+
+
+def test_second_is_not_reached_by_the_first_tests_pipeline(monkeypatch):
+    second_stub = MagicMock(name="the second test's run_task")
+    monkeypatch.setattr(server, "run_task", second_stub)
+    release.set()  # only a thread that nothing joined still waits: it runs into this test
+    pipeline.join(timeout=10)
+
+    second_stub.assert_not_called()
+    first_stub.assert_called_once_with(task_id="first")
+"""
+
+
+def test_a_pipeline_thread_never_reaches_the_run_task_stub_of_the_next_test(tmp_path):
+    (tmp_path / "test_late_pipeline.py").write_text(_TWO_TESTS_AROUND_A_LATE_PIPELINE)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            "pyproject.toml",  # the suite's own settings, so `src` is importable
+            "-p",
+            "tests.conftest",  # its autouse fixtures, for a file outside tests/
+            "-p",
+            "no:cacheprovider",
+            str(tmp_path),
+        ],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        # without the caller's PYTEST_ADDOPTS: a `-k` in it would deselect both tests
+        env={name: value for name, value in os.environ.items() if name != "PYTEST_ADDOPTS"},
+        capture_output=True,
+        text=True,
+        timeout=110,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "2 passed" in proc.stdout, proc.stdout + proc.stderr
 
 
 @pytest.fixture
@@ -2465,7 +2542,7 @@ class TestMicrovmRunHookPlatformConfig:
             RUN_HOOK,
             json=_run_hook_body(
                 {
-                    "agent_payload": self._payload(),
+                    "agent_payload": self._payload(task_id="t-pc-inline"),
                     "platform_config": _platform_config(log_group_name="/abca/agent"),
                 }
             ),
@@ -2495,7 +2572,7 @@ class TestMicrovmRunHookPlatformConfig:
         monkeypatch.setattr(server, "run_task", MagicMock())
         monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
 
-        payload = self._payload()
+        payload = self._payload(task_id="t-pc-order")
         payload.pop("github_token")  # force the resolver to run
         r = client.post(
             RUN_HOOK,
@@ -2576,7 +2653,10 @@ class TestMicrovmRunHookPlatformConfig:
         monkeypatch.setattr(server, "run_task", MagicMock())
         monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
 
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
+        r = client.post(
+            RUN_HOOK,
+            json=_run_hook_body({"agent_payload": self._payload(task_id="t-pc-baked")}),
+        )
 
         assert r.status_code == 200
         # Still pre-install (nothing was installed), so the warning is stdout-only:
