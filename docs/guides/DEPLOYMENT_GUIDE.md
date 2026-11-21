@@ -112,14 +112,7 @@ completing the [resource migration](../verification/645-p3-nested-stack.md).
      --query "Stacks[0].Outputs[?OutputKey=='BootstrapPolicyVersion'].OutputValue | [0]" --output text
    ```
 
-2. If it is **below 1.6.0**, re-bootstrap with the backend included in `ComputeTypes`. `cdk bootstrap` cannot pass template parameters, so the parameter goes on the `CDKToolkit` stack directly:
-
-   ```bash
-   aws cloudformation deploy \
-     --template-file cdk/bootstrap/bootstrap-template.yaml \
-     --stack-name CDKToolkit --capabilities CAPABILITY_NAMED_IAM \
-     --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,lambda-microvm
-   ```
+2. If it is **below 1.6.0**, re-bootstrap with the backend included in `ComputeTypes` (for example `agentcore,lambda-microvm`). `cdk bootstrap` cannot pass template parameters, so the parameter goes on the `CDKToolkit` stack directly: see [Bootstrap with least-privilege](#bootstrap-with-least-privilege).
 
    Bundle 1.6.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md#iacrole-abca-compute-lambdamicrovms).
 
@@ -146,6 +139,41 @@ Blueprints without `registry://` asset references continue to work. A remaining 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
 This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. The optional network split preserves that lifecycle; registry retention remains deferred. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
+
+## Bootstrap with least-privilege
+
+By default, `cdk bootstrap` gives the CloudFormation execution role `AdministratorAccess`. ABCA bootstraps with its own template instead, which attaches the scoped `IaCRole-ABCA-*` policies described in [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md). Those policies cover stacks named `backgroundagent-dev` or `backgroundagent-dev-<suffix>` only. `bgagent setup` prepares the bootstrap as part of a deploy (see [Choosing features with `bgagent setup`](#choosing-features-with-bgagent-setup)); the commands here are for deploying with mise directly.
+
+**An account and Region with no `CDKToolkit` stack:**
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
+```
+
+The task regenerates the artifacts in `cdk/bootstrap/` and runs `cdk bootstrap` with `cdk/bootstrap/bootstrap-template.yaml`. Arguments after `--` go to `cdk bootstrap`. During the run the CDK CLI prints `Using default execution policy of 'arn:aws:iam::aws:policy/AdministratorAccess'`. That line describes the standard template: this one attaches the ABCA policies, unless `--cloudformation-execution-policies` is passed, which attaches that list in their place.
+
+**Compute backends.** The AgentCore policy is always in the bootstrap's policy set. ECS Fargate and Lambda MicroVMs each have their own policy, added only when the `ComputeTypes` parameter of the `CDKToolkit` stack lists the backend (`ecs`, `lambda-microvm`). `cdk bootstrap` cannot set that parameter: bootstrap first, then update it as shown under [Using these policies](../design/DEPLOYMENT_ROLES.md#using-these-policies).
+
+**An account that already has a bootstrap:**
+
+- **An older ABCA bundle:** run `mise //cdk:bootstrap` again from the checkout you deploy. The stack keeps its `ComputeTypes` value. A stack that started as a standard CDK bootstrap can still record that variant; the CDK CLI then skips the update unless it is given `--force`, as in the next case.
+- **A standard CDK bootstrap:** every CDK app in the account and Region deploys through the same execution role, so `bgagent setup` leaves it unchanged and skips the preflight below. To replace it, run `MISE_EXPERIMENTAL=1 mise //cdk:bootstrap -- --force`. The execution role then carries the ABCA policies in place of `AdministratorAccess`, so every other CDK app that deploys through it can deploy only what those policies allow. The exception is a standard bootstrap that was given `--cloudformation-execution-policies`: that list stays attached in place of the ABCA policies. Without `--force` the CDK CLI does not replace a bootstrap of another variant: it prints `Not overwriting it with a template containing 'ABCA: Least-Privilege Bootstrap'`, changes nothing and exits 0 (#701). With `--force` it also downgrades a bootstrap whose CDK bootstrap version (the `BootstrapVersion` output) is newer than this template's.
+
+### Bootstrap preflight
+
+Before it runs `cdk deploy`, `mise //cdk:deploy` compares the outputs of the `CDKToolkit` stack with the checkout. A bootstrap the check rejects stops the task there, instead of failing with an IAM `AccessDenied` after every asset is built and uploaded. `mise //cdk:preflight` runs the same check on its own. It is read-only: it needs the AWS CLI on `PATH` and no permission beyond `cloudformation:DescribeStacks`. Arguments after `--` are those of the deploy (`--profile`, `--region`, `-c compute_types=...`), plus `--json` for CI. The compute backends it checks are those of the `compute_types` (or `compute_type`) context, from `-c` arguments and `cdk/cdk.json`. A backend that only the `compute` list of a [deployment profile](#profile-file-and-precedence) selects is not checked. A bare `cdk deploy` and the GitHub Actions pipeline do not run the preflight.
+
+| Result | When | What to do |
+|---|---|---|
+| PASS | The account's bundle is this checkout's version or newer, and its policy set covers the compute backends in `compute_types` | Nothing: the deploy continues |
+| WARN | Same version, different policy hash: the account was bootstrapped from policies that differ from this checkout's | The deploy continues. Bootstrap again if it is denied |
+| FAIL | No `CDKToolkit` stack | `mise //cdk:bootstrap` |
+| FAIL | A standard CDK bootstrap (no `BootstrapPolicyVersion` output) | Replace it, or keep it and set `ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` (see above) |
+| FAIL | An older bundle than this checkout's | Bootstrap again (see above) with the same account, Region and profile, then deploy again |
+| FAIL | The policy of a compute backend named in `compute_types` is missing | Add the backend to `ComputeTypes` (see above) |
+| FAIL | The stack could not be read (no AWS CLI on `PATH`, expired credentials) | Fix the cause and run it again |
+
+The exit code is 1 on FAIL and 0 otherwise. `ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` skips the check. [Versioning](../design/DEPLOYMENT_ROLES.md#versioning) says what the three compared values are, and what they do not show.
 
 ## Deployment profiles
 
@@ -194,7 +222,7 @@ The wizard works in this order:
 5. Plans any one-time account preparation and lists it on the review screen:
    - **No `CDKToolkit` stack:** installs ABCA's least-privilege CDK bootstrap (`mise //cdk:bootstrap`). For ECS it also sets the bootstrap's `ComputeTypes` parameter, which `cdk bootstrap` cannot set.
    - **An older ABCA bootstrap:** updates it to the version this CLI requires, and adds missing backends to `ComputeTypes`.
-   - **A standard CDK bootstrap** (no ABCA policy outputs): left unchanged, because other apps in the account may depend on it. `mise //cdk:deploy` starts with a check that fails on a standard bootstrap, so setup passes `ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` to that deploy, and the review screen says so. To switch to the least-privilege bootstrap instead, run `mise //cdk:bootstrap` before setup.
+   - **A standard CDK bootstrap** (no ABCA policy outputs): left unchanged, because other apps in the account may depend on it. `mise //cdk:deploy` starts with a check that fails on a standard bootstrap, so setup passes `ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` to that deploy, and the review screen says so. To switch to the least-privilege bootstrap instead, run `mise //cdk:bootstrap -- --force` before setup: see [Bootstrap with least-privilege](#bootstrap-with-least-privilege).
 
    Preparation runs only after you confirm the deploy.
 6. Shows a review screen of what you chose, then runs `cdk diff` against a temporary copy of the profile and summarizes it in one line (for example `317 to create · 0 to update · 0 to remove`). The full change list goes to `~/.bgagent/logs/<stack>/setup-changes.log`. Nothing in the repository changes until you confirm.

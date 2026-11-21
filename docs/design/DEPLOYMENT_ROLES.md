@@ -38,12 +38,21 @@ These policies are not created or attached manually. The repository generates th
 MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
 
 # To ALSO enable the ECS compute backend (attach IaCRole-ABCA-Compute-ECS), set the
-# ComputeTypes CFN *parameter*. `cdk bootstrap` cannot pass template parameters — it
+# ComputeTypes CFN *parameter*. cdk bootstrap cannot pass template parameters — it
 # has no --parameters flag, and --context sets CDK construct context, not a CFN
-# parameter — so bootstrap first (above), then update the parameter on CDKToolkit:
-aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs
+# parameter — so bootstrap first (above), then update the parameter on CDKToolkit.
+# The first command below lists the other parameters of the stack, and the update names
+# each with UsePreviousValue, because CloudFormation sets a parameter that an update
+# leaves out to its template default. The update runs only if the list was read. A
+# --profile or --region option goes on every aws command. Keep the single quotes:
+# without them the shell removes the backslash, and the AWS CLI splits the value at the
+# comma and rejects it.
+keep=($(aws cloudformation describe-stacks --stack-name CDKToolkit --output text \
+    --query "Stacks[0].Parameters[?ParameterKey!='ComputeTypes'].[ParameterKey]" \
+  | sed 's/.*/ParameterKey=&,UsePreviousValue=true/'))
+[ ${#keep[@]} -gt 0 ] && aws cloudformation update-stack --stack-name CDKToolkit \
+  --use-previous-template --capabilities CAPABILITY_NAMED_IAM \
+  --parameters 'ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs' "${keep[@]}"
 # verify it took:
 aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 ```
@@ -73,6 +82,20 @@ that deployed permissions match source.
 > - **Each managed-policy `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line. The original fix reduced the body to 45,743 characters from 53,369; subsequent policy additions remain subject to the budget. The small inline self-role policy uses a mapping to resolve its ARN with `Fn::Sub`.
 >
 > `cdk/scripts/generate-bootstrap-template.ts` fails the build when the body exceeds the budget in `cdk/src/bootstrap/template-size.ts`, so adding statements surfaces the problem at generation time rather than against somebody's fresh account. Both the guard and its regression test obtain the size by invoking `cdk bootstrap --show-template` on the committed artifact — the CLI is the component that makes the inline-vs-S3 decision, so asking it directly cannot drift the way a local copy of its serialiser would. No AWS credentials are required.
+
+## Versioning
+
+The bootstrap template publishes three values as outputs of the `CDKToolkit` stack. `mise //cdk:bootstrap:generate` writes them into the template:
+
+| Layer | `CDKToolkit` output | Where it comes from | What it answers |
+|-------|---------------------|---------------------|-----------------|
+| Version | `BootstrapPolicyVersion` | `BOOTSTRAP_VERSION` in `cdk/src/bootstrap/version.ts`, copied to `cdk/bootstrap/BOOTSTRAP_VERSION` | Does the account have to be bootstrapped again? A new policy or statement is a minor bump, because it reaches an account only through a re-bootstrap |
+| Hash | `BootstrapPolicyHash` | `computeBootstrapHash()`: SHA-256 over the six managed policies and the inline `PassExecutionRoleToCloudFormation` policy, copied to `cdk/bootstrap/BOOTSTRAP_HASH` | Was the account bootstrapped from the same policies as this checkout? At an equal version it differs when a policy changed without a version bump |
+| Policy set | `BootstrapPolicySet` | The names of the policies the template selects for the stack's `ComputeTypes` parameter | Which compute policies does the account's bootstrap carry? |
+
+Before `mise //cdk:deploy` deploys, the bootstrap preflight compares the three with the checkout. [Bootstrap preflight](../guides/DEPLOYMENT_GUIDE.md#bootstrap-preflight) in the deployment guide lists the results and what to do about each. The three values come from the template: they say which bundle was deployed and what `ComputeTypes` selects, not what is attached to the execution role. They stay the same when a policy is edited in IAM, and when the stack's `CloudFormationExecutionPolicies` parameter is set, which attaches that list in place of the ABCA policies.
+
+The actions themselves are checked at build time, without an account. `cdk/test/bootstrap/synth-coverage.test.ts` synthesizes the app and fails when a resource type has no entry in `cdk/src/bootstrap/resource-action-map.ts`, or when the policies do not allow an action of its entry.
 
 ## Trust policy
 
@@ -309,16 +332,6 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
 ```
 
 `NestedStackPassRole` (bundle 1.7.0) exists because the app contains nested stacks. CloudFormation creates them *as* the execution role and passes that same role on to each child stack, which needs `iam:PassRole` on the role itself. Without it, every deploy fails at change-set creation with `cfn-exec-role ... is not authorized to perform: iam:PassRole on resource: ...cfn-exec-role...`. The statement is limited to the CDK execution role and to `cloudformation.amazonaws.com`, so it grants nothing the role does not already hold (#865). `test/bootstrap/synth-coverage.test.ts` now walks every nested stack (#757) and pins this statement's resource and condition, which an action-level check cannot distinguish from `IAMPassRole`.
-
-Before deploying, `mise //cdk:deploy` runs the bootstrap preflight (#126; also `mise //cdk:preflight`, read-only, `--json` for CI). It compares the `CDKToolkit` outputs with the checkout and needs only `cloudformation:DescribeStacks`:
-
-| Result | When | Deploy |
-|---|---|---|
-| PASS | `BootstrapPolicyVersion` matches (or is newer) and `BootstrapPolicySet` includes every policy the app's compute backends need | continues |
-| WARN | Same version, different `BootstrapPolicyHash` (console drift, or a policy change without a version bump) | continues |
-| FAIL | No `CDKToolkit`; a default CDK bootstrap (no ABCA outputs); an older bundle; or a missing compute policy | stops, with the fix |
-
-`ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` bypasses it.
 
 ### IaCRole-ABCA-Application
 
