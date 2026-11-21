@@ -352,7 +352,10 @@ export async function resolveJiraOauthToken(
  * (DDB throttle, network) instead of returning null. Use this from the
  * webhook signature-verification path where a `null` return would let
  * a transient throttle silently bypass per-tenant verification by using
- * the stack-wide verifier.
+ * the stack-wide verifier, and from the webhook processor where the row
+ * decides whether a task is created: there a `null` return would drop an
+ * admitted event as "tenant not onboarded" instead of failing the
+ * invocation so that Lambda retries it.
  */
 export async function getRegistryRowStrict(
   ddb: DynamoDBDocumentClient,
@@ -391,7 +394,7 @@ export async function getRegistryRow(
       jira_cloud_id: cloudId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null; // nosemgrep: ts-silent-success-masking -- transient DDB throttle degrades to "tenant not in registry"; the verify path uses getRegistryRowStrict which rethrows
+    return null; // nosemgrep: ts-silent-success-masking -- transient DDB throttle degrades to "tenant not in registry" for best-effort callers (feedback, hydration); the verify path and the webhook processor's admission decision use getRegistryRowStrict which rethrows
   }
 
   return parseRegistryRow(result.Item, cloudId);

@@ -895,6 +895,23 @@ describe('getRegistryRow / parseRegistryRow', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  test('a row read by getRegistryRowStrict is served to getRegistryRow from the cache', async () => {
+    // The webhook processor relies on this (#734): it reads the row strictly to
+    // decide on admission, and resolveJiraOauthToken then reads it leniently.
+    const send = jest.fn()
+      .mockResolvedValueOnce({
+        Item: { site_url: 'https://x.atlassian.net', oauth_secret_arn: 'arn:s', status: 'active' },
+      })
+      .mockRejectedValue(new Error('DDB throttle'));
+    const ddb = asDdb(send);
+    const strict = await getRegistryRowStrict(ddb, REGISTRY_TABLE, 'cloud-handover');
+    expect(strict?.status).toBe('active');
+    // A second query would fail; the lenient read must not make one.
+    const lenient = await getRegistryRow(ddb, REGISTRY_TABLE, 'cloud-handover');
+    expect(lenient).toEqual(strict);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   test('getRegistryRowStrict propagates DDB errors instead of swallowing them', async () => {
     const send = jest.fn().mockRejectedValue(new Error('DDB throttle'));
     await expect(getRegistryRowStrict(asDdb(send), REGISTRY_TABLE, 'cloud-x')).rejects.toThrow(

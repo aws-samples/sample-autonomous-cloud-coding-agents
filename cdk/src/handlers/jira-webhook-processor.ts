@@ -38,7 +38,7 @@ import {
   type RenderedComment,
 } from './shared/jira-attachments';
 import { reportIssueFailure } from './shared/jira-feedback';
-import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
+import { getRegistryRowStrict, resolveJiraOauthToken, type ResolvedJiraToken } from './shared/jira-oauth-resolver';
 import type { JiraSubIssueNode } from './shared/jira-subissue-fetch';
 import {
   resolveTaskByJiraIssue,
@@ -423,9 +423,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Jira OAuth token for the outbound REST progress comments.
   let resolvedJira: Awaited<ReturnType<typeof resolveJiraOauthToken>> = null;
   if (WORKSPACE_REGISTRY_TABLE) {
-    const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
+    const resolved = await resolveOauthTokenForAdmission(cloudId, WORKSPACE_REGISTRY_TABLE, issue.key);
     if (!resolved) {
-      logger.warn('Jira tenant not resolvable from registry — dropping event', {
+      logger.warn('No usable Jira OAuth token for this tenant — dropping event', {
         jira_cloud_id: cloudId,
         issue_key: issue.key,
       });
@@ -979,7 +979,7 @@ async function handleCommentTrigger(
     });
     return;
   }
-  const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
+  const resolved = await resolveOauthTokenForAdmission(cloudId, WORKSPACE_REGISTRY_TABLE, issue.key);
   if (!resolved) {
     logger.warn('Cannot run Jira comment iteration: tenant OAuth is unavailable', {
       jira_cloud_id: cloudId,
@@ -1636,6 +1636,41 @@ async function lookupPlatformUser(cloudId: string, accountId: string): Promise<s
     return null;
   }
   return platformUserId;
+}
+
+/**
+ * Resolve the tenant's OAuth token where the answer decides whether a task is
+ * created. The registry row is read with the strict variant first: a read that
+ * fails (throttling, a timeout, a missing permission) does not mean that the
+ * tenant was never onboarded, so it fails the invocation and Lambda's retry of
+ * the asynchronous invocation delivers the event again (#734). A row that was
+ * read is cached, so the resolver does not query DynamoDB for it a second time.
+ */
+async function resolveOauthTokenForAdmission(
+  cloudId: string,
+  registryTableName: string,
+  issueKey: string,
+): Promise<ResolvedJiraToken | null> {
+  let row: Awaited<ReturnType<typeof getRegistryRowStrict>>;
+  try {
+    row = await getRegistryRowStrict(ddb, registryTableName, cloudId);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    logger.error('Jira workspace registry unreadable — failing the invocation so that it is retried', {
+      jira_cloud_id: cloudId,
+      issue_key: issueKey,
+      error: reason,
+    });
+    throw new Error(`Jira workspace registry unreadable: ${reason}`, { cause: err });
+  }
+  if (!row) {
+    logger.warn('Jira tenant not onboarded: no usable workspace registry row', {
+      jira_cloud_id: cloudId,
+      issue_key: issueKey,
+    });
+    return null;
+  }
+  return resolveJiraOauthToken(cloudId, registryTableName);
 }
 
 async function getActiveProjectMapping(
