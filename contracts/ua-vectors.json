@@ -63,6 +63,11 @@
       "note": "a non-ASCII letter"
     },
     {
+      "input": "a\ud83d\ude00b",
+      "expected": "a-b",
+      "note": "a character outside the Basic Multilingual Plane, as one character"
+    },
+    {
       "input": "",
       "expected": "",
       "note": "the empty string"
