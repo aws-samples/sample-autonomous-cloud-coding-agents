@@ -73,6 +73,17 @@ describe('Bootstrap policy synth coverage', () => {
     expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
   });
 
+  it('maps every custom resource type to the invoke of its provider alone', () => {
+    // The provider's Lambda makes the AWS calls under its own role. An action listed
+    // for a `Custom::*` type is demanded of the bootstrap bundle, where nothing uses it;
+    // when the bundle already holds it, every other test here stays green.
+    const customTypes = Object.keys(RESOURCE_ACTION_MAP).filter((cfnType) => cfnType.startsWith('Custom::'));
+    expect(customTypes.length).toBeGreaterThan(0);
+    for (const cfnType of customTypes) {
+      expect({ cfnType, actions: RESOURCE_ACTION_MAP[cfnType] }).toEqual({ cfnType, actions: ['lambda:InvokeFunction'] });
+    }
+  });
+
   it('walks nested stacks: their resource types are not in the root template', () => {
     const rootTypes = new Set(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).map((r) => r.Type));
     expect(rootTypes.has('AWS::CloudFormation::Stack')).toBe(true);

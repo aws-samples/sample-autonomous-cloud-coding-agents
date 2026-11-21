@@ -162,6 +162,16 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::StepFunctions::StateMachine': ['states:CreateStateMachine'],
   'AWS::WAFv2::WebACL': ['wafv2:CreateWebACL'],
   'AWS::WAFv2::WebACLAssociation': ['wafv2:AssociateWebACL'],
+  // Custom resources: CloudFormation's only call as the execution role is
+  // `lambda:InvokeFunction` on the provider. The provider's Lambda makes the AWS
+  // calls under its own role, so they are deliberately not listed here: on the
+  // execution role nothing would use them. That is why the bootstrap bundle holds
+  // no `agent-registry` action (#878): the registry's control-plane calls are
+  // granted to its two provisioning handlers in `constructs/registry.ts`. This map
+  // and `test/bootstrap/synth-coverage.test.ts` see the execution role only; a
+  // provider's grants are for its construct's own test to pin, as
+  // `test/constructs/registry.test.ts` does. See "Custom resource providers" in
+  // docs/design/DEPLOYMENT_ROLES.md.
   'Custom::AWS': ['lambda:InvokeFunction'],
   'Custom::AgentRegistry': ['lambda:InvokeFunction'],
   // CDK BucketDeployment's custom resource — ships the static Linear vault consent

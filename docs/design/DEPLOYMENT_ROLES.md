@@ -357,7 +357,9 @@ Agent Registry provisioning also uses a Step Functions workflow to wait for
 asynchronous creation and deletion. Its construct explicitly names the workflow
 with the parent stack's `backgroundagent-dev-` prefix so it fits this policy,
 including when deployed in a nested stack. Adopting this name in an existing
-deployment replaces the provider's waiter state machine.
+deployment replaces the provider's waiter state machine. The registry's own API
+calls (`agent-registry` actions) are in none of these policies: see
+[Custom resource providers](#custom-resource-providers).
 
 ```json
 {
@@ -1004,10 +1006,19 @@ These roles are created inside the CloudFormation stack at deploy time, not by t
 | ConcurrencyReconciler Lambda role | Lambda | Scheduled reconciliation; DynamoDB scan + conditional updates |
 | TaskApi Lambda roles (9-10) | Lambda | API handler functions; DynamoDB, Secrets Manager (webhook handlers), Bedrock Guardrail, Lambda invoke |
 | AwsCustomResource Lambda role | Lambda | Blueprint DDB writes, Bedrock logging config, DNS firewall config |
+| Agent Registry provisioning Lambda roles (2, when enabled) | Lambda | Custom resource handlers (`onEvent`, `isComplete`): create, read, update and delete the registry, delete its records first; the registry's service-linked role and workload identity |
 | API Gateway CloudWatch role | API Gateway | Pushes API Gateway access logs |
 | VPC Flow Log role | VPC Flow Logs | Writes flow logs to CloudWatch |
 | ECS task execution role (when enabled) | ECS (pull images) | ECR image pull, CloudWatch Logs write |
 | ECS task role (when enabled) | ECS (container runtime) | DynamoDB, Secrets Manager, Bedrock InvokeModel |
+
+### Custom resource providers
+
+For a custom resource (`Custom::*`), CloudFormation's only call as the execution role is `lambda:InvokeFunction` on the provider function. The AWS calls that do the work are made by the provider's Lambda function under its own role: a runtime role like those above, created by the stack together with its permissions. The execution role needs none of those actions, and adding them to the policies in this document would give it privilege that nothing uses. `RESOURCE_ACTION_MAP` in `cdk/src/bootstrap/resource-action-map.ts` records the rule: it maps every `Custom::*` type to `lambda:InvokeFunction` alone.
+
+This is why no policy here grants an `agent-registry` action, although the stack provisions an AWS Agent Registry ([REGISTRY.md](./REGISTRY.md)). The registry is a `Custom::AgentRegistry` resource: `CreateRegistry`, `GetRegistry`, `UpdateRegistry`, `DeleteRegistry` and the deletion of its records run under the roles of its two handlers, granted in `cdk/src/constructs/registry.ts` and pinned by `cdk/test/constructs/registry.test.ts`. The execution role creates what surrounds it: the nested stack, the handler functions and their roles, and the waiter state machine. `cdk/test/bootstrap/synth-coverage.test.ts` checks that side only; it cannot see a provider's role.
+
+Seven actions in the policies predate this rule: `dynamodb:PutItem`, `dynamodb:UpdateItem`, `bedrock:PutModelInvocationLoggingConfiguration`, `bedrock:DeleteModelInvocationLoggingConfiguration`, `bedrock:GetModelInvocationLoggingConfiguration`, `route53resolver:UpdateFirewallConfig` and `route53resolver:GetFirewallConfig`. They belong to three settings that `AwsCustomResource` providers apply (Blueprint records, Bedrock model invocation logging, DNS Firewall configuration) under the `AwsCustomResource` role, which holds its own grants. They have been here since the first version of these policies and are not a precedent for a new custom resource.
 
 ### CDK bootstrap roles
 
