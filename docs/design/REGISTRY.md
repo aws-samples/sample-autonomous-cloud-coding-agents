@@ -100,7 +100,8 @@ So the port's **`publish` is a multi-call operation**, not one SDK call:
 
 ```
 CreateRegistryRecord → poll until not CREATING
-  → (if autoApprove) SubmitRegistryRecordForApproval → UpdateRegistryRecordStatus(APPROVED)
+  → SubmitRegistryRecordForApproval
+  → (if autoApprove) UpdateRegistryRecordStatus(APPROVED)
 ```
 
 "Dev auto-approve" therefore means *ABCA orchestrating these calls under an approver identity*, not the Agent Registry `autoApproval` flag. This maps cleanly onto the two Cognito groups (§9): a `RegistryPublisher` publishes (record lands `PENDING_APPROVAL` after submit); a `RegistryApprover` drives the final `UpdateRegistryRecordStatus`.
