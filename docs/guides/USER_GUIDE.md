@@ -1194,11 +1194,11 @@ Filter by task ID to find logs for a specific task.
 
 ### Notifications (GitHub edit-in-place)
 
-When a task targets a pull request (`coding/pr-iteration-v1` or `coding/pr-review-v1`), the platform automatically posts a status comment on the PR and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
+When a task targets a pull request (`coding/pr-iteration-v1` or `coding/pr-review-v1`) or was submitted for a GitHub issue (`--issue`, or `issue_number` through the API), the platform automatically posts a status comment on that pull request or issue and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
 
-The notification plane uses DynamoDB Streams to fan out task events to channel-specific dispatchers. Currently the GitHub edit-in-place dispatcher is active; Slack and Email dispatchers are planned.
+The notification plane uses DynamoDB Streams to fan out task events to channel-specific dispatchers: this GitHub comment for every task with a pull request or issue target, and the Slack, Linear and Jira notifications for tasks that came from those channels. Email notifications are not sent yet.
 
-The status comment shows: current phase, last milestone, cost so far, and a link to the task. It updates on key events (`session_started`, `pr_created`, `task_completed`, `task_failed`, `nudge_acknowledged`, and routable agent milestones).
+The status comment shows the task ID, the repository, the status, the last event and, once the agent has opened one, a link to the pull request. A task that the agent finished itself, successfully or not, also shows the duration and the cost of the run. A task that was cancelled or timed out shows neither: the agent records both when it ends the run itself. The comment is posted or updated when the agent opens the pull request and when the task ends, whether it completed, failed, was cancelled or timed out.
 
 ### Preview-deploy screenshots (optional)
 
