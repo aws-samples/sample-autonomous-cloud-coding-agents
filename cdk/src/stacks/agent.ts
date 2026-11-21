@@ -2119,8 +2119,8 @@ export class AgentStack extends Stack {
     // is no RestackProcessor Lambda to wire here.
 
     // --- Operational alerts channel (§11.5 follow-up, issue #629) ---
-    // A single stack-wide SNS topic that the DLQ-depth alarms publish to
-    // on state change, so poison-pill accumulation pushes a notification
+    // A single stack-wide SNS topic that every alarm of this stack publishes
+    // to when it goes into ALARM, so a failure pushes a notification
     // instead of sitting silently in the Alarms console. Delivery target
     // is configurable: pass an email via `-c alertEmail=ops@example.com`
     // (AWS sends a confirmation link that must be clicked), or leave it
@@ -2129,13 +2129,16 @@ export class AgentStack extends Stack {
     const operationalAlerts = new OperationalAlerts(this, 'OperationalAlerts', {
       alertEmail: this.node.tryGetContext('alertEmail') as string | undefined,
     });
-    // Wire the DLQ-depth alarms shipped in #117 (FanOut + approval-metrics
-    // publisher) plus the screenshot processor's async-invoke DLQ alarm —
-    // all three share the threshold-1 "records landed in a DLQ" shape.
+    // Every alarm of the stack is listed here (#686): one without an action
+    // is seen only by someone who is already watching the console. A test in
+    // test/stacks/agent.test.ts fails on an alarm that is left out.
     operationalAlerts.addAlarmActions(
+      orchestrator.errorAlarm,
       fanOutConsumer.dlqDepthAlarm,
       approvalMetricsPublisher.dlqAlarm,
-      ...(githubScreenshot ? [githubScreenshot.processorDlqDepthAlarm] : []),
+      ...(githubScreenshot
+        ? [githubScreenshot.processorDlqDepthAlarm, githubScreenshot.processorErrorAlarm]
+        : []),
       budgetAlerts.warningAlarm,
       budgetAlerts.exceededAlarm,
       budgetAlerts.teamMembershipUnresolvedAlarm,
@@ -2165,7 +2168,7 @@ export class AgentStack extends Stack {
 
     new CfnOutput(this, 'OperationalAlertsTopicArn', {
       value: operationalAlerts.topic.topicArn,
-      description: 'SNS topic for DLQ-depth CloudWatch alarms — subscribe Slack / PagerDuty / email here (#629)',
+      description: 'SNS topic that every CloudWatch alarm of this stack notifies — subscribe Slack / PagerDuty / email here (#629)',
     });
 
     if (githubScreenshot) {

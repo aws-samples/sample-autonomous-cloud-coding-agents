@@ -1143,6 +1143,16 @@ describe('AgentStack', () => {
     }
   });
 
+  test('notifies the alerts topic from every CloudWatch alarm, the Lambda error alarms included (#686)', () => {
+    // An alarm without an action is seen only by someone who is already
+    // watching the console. The two Lambda error alarms (orchestrator and
+    // screenshot processor) are counted first, so the check cannot pass on
+    // a template that lost them.
+    const topicRef = template.toJSON().Outputs.OperationalAlertsTopicArn.Value;
+    template.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', { Namespace: 'AWS/Lambda', MetricName: 'Errors' }, 2);
+    template.allResourcesProperties('AWS::CloudWatch::Alarm', { AlarmActions: Match.arrayWith([topicRef]) });
+  });
+
   test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
     // The default deploy ships the topic with no confirmed target;
     // operators subscribe Slack / PagerDuty / email themselves.

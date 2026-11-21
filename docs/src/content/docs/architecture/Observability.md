@@ -167,6 +167,17 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 | Monthly budget exceeded | Estimated spend crosses 100% | Notify the shared topic. Scopes configured with hard stop reject new tasks. |
 | Budget team membership unresolved | Cognito cannot resolve a mapped task owner | Inspect create-task logs for `budget_team_membership_user_missing`, then repair the stale mapping or federated identity configuration. User-budget enforcement remains active, but team-budget enforcement was skipped. |
 
+### Alarm notifications
+
+Every CloudWatch alarm the stack deploys publishes to one SNS topic when it goes into `ALARM`: the orchestrator's Lambda-error alarm, the DLQ-depth alarms of the two task-event stream consumers (`FanOutConsumer` and `ApprovalMetricsPublisherConsumer`), the three budget alarms and, where deploy-preview screenshots are deployed, the screenshot processor's Lambda-error and DLQ-depth alarms. The `OperationalAlerts` construct creates the topic, and the stack output `OperationalAlertsTopicArn` holds its ARN. Nothing is sent when an alarm returns to `OK`.
+
+The topic has no subscriber until an operator adds one:
+
+- **Email, at deploy time.** Deploy with `-c alertEmail=ops@example.com`. AWS sends a confirmation link to that address and delivers nothing until it is clicked. The subscription belongs to the stack: a later deploy that does not set `alertEmail` removes it.
+- **Any other destination.** Subscribe it to the exported topic ARN (Slack, PagerDuty, another address). The stack does not manage such a subscription.
+
+When an alarm is in `ALARM` and no notification arrives, follow [Troubleshooting missing alarm notifications](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#troubleshooting-missing-alarm-notifications).
+
 ## Code attribution
 
 Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during repo setup). This links code changes to the task and prompt that produced them, enabling queries like "what prompt led to this change?" and supporting the evaluation pipeline.
