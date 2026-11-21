@@ -3285,6 +3285,8 @@ class TestWhatTheAgentStepIsGiven:
         its prompt, system prompt and config, and the servers that ``.mcp.json``
         names at the moment the agent starts."""
         step = SimpleNamespace(ran=False)
+        # A clone is a repository: the registry loader has git keep .mcp.json out of commits.
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
         def servers_in_mcp_json(repo_dir: str) -> list[str]:
             mcp_json = Path(repo_dir, ".mcp.json")

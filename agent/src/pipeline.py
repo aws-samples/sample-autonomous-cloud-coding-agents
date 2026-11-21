@@ -1390,7 +1390,9 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # asset unloaded (missing repo_dir, empty/invalid runtime, structurally
             # invalid config, or a write error) — we let it propagate so the task
             # fails rather than running with a pinned-but-absent asset while the
-            # audit record claims it was loaded.
+            # audit record claims it was loaded. It raises as well where the merged
+            # config, which may hold secrets, could reach a commit: .mcp.json is a
+            # symlink, or git cannot be shown to leave the file out (#758, #759).
             if config.resolved_assets:
                 from registry.loader import RegistryAssetLoadError, apply_resolved_assets
 
