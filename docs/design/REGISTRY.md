@@ -37,6 +37,12 @@ A **registry asset** is a versioned, immutable-per-version runtime artifact that
 
 **Cedar parity.** Registry Cedar text reaches the agent through the **same** `cedar_policies` payload field as inline blueprint policies, so it is byte-identical from the `PolicyEngine`'s view. **Skills** are prompt text only: a skill cannot invoke tools; its `tool_hints` are advisory prose referencing tools an MCP server separately provides (no transitive dependency — the operator attaches both).
 
+### 2.1 Runtime network restriction for MCP servers
+
+The agent connects to an `mcp_server` asset from inside the task's compute session, so the session's egress rules decide whether the server can be reached. On every compute backend (AgentCore, ECS and Lambda MicroVMs) the runtime security group allows outbound TCP 443 only; [COMPUTE.md](./COMPUTE.md#network-architecture) describes that rule and the DNS Firewall allowlist. An `http` or `sse` server therefore has to be served on port 443, the default of an `https://` URL: a server on another port is not supported on any backend. A `stdio` server starts inside the session, and the calls it makes are bound by the same rules.
+
+Neither publish (§7.1) nor resolution (§8) looks at the port or tests connectivity. A pin to a server the session cannot reach resolves and loads like any other: the task starts, and the agent cannot use the server's tools.
+
 ## 3. Substrate mapping (the core design)
 
 Agent Registry answers *"what servers/skills exist, find me one"* (discovery metadata + semantic search). ABCA needs *"give me the exact runtime config to load this pinned asset."* These are two different objects, and the service validates the discovery object against the official schemas (an MCP record's body must be a valid MCP `server.json`, not our `.mcp.json`). So **every record carries BOTH a discovery descriptor AND ABCA's runtime payload.**
