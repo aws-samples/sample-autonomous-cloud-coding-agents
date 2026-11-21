@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@cloudscape-design/components": "^3.0.1412",
+    "@cloudscape-design/components": "^3.0.1413",
     "@cloudscape-design/global-styles": "^1.0.72",
     "@tanstack/react-query": "^5.107.1",
     "react": "^19.3.1",
@@ -34,11 +34,11 @@
     "eslint": "^10",
     "eslint-plugin-license-header": "^0.9.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "jsdom": "^31.0.0",
-    "msw": "^3.0.4",
-    "typescript": "^6.0.3",
+    "jsdom": "^31.0.1",
+    "msw": "^3.0.5",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.72.2",
-    "vite": "^8.3.7",
+    "vite": "^8.3.8",
     "vitest": "^5.0.5"
   }
 }
