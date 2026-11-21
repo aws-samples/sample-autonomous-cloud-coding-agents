@@ -47,7 +47,7 @@ process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 process.env.QUEUE_MAX_AGE_SECONDS = '86400';
 process.env.TASK_RETENTION_DAYS = '90';
 
-import { handler } from '../../src/handlers/reconcile-admission-queue';
+import { handler, isQueueHeartbeatDue } from '../../src/handlers/reconcile-admission-queue';
 
 /** A QUEUED StatusIndex row as the DDB low-level client returns it. */
 function queuedRow(opts: {
@@ -479,5 +479,60 @@ describe('reconcile-admission-queue — #331 regression (fan-out burst)', () => 
     expect(summary.picked_up).toBe(2);
     const flipped = sentDdbCommands('UpdateItem').map(u => u.input.Key.task_id.S);
     expect(flipped).toEqual(['P1', 'P2']);
+  });
+});
+
+describe('reconcile-admission-queue — queue heartbeat (#1066)', () => {
+  test('each 15-minute mark fires once on the 1-minute schedule', () => {
+    expect(isQueueHeartbeatDue(0)).toBe(false);
+    expect(isQueueHeartbeatDue(899)).toBe(false);
+    expect(isQueueHeartbeatDue(900)).toBe(true);
+    expect(isQueueHeartbeatDue(959)).toBe(true);
+    expect(isQueueHeartbeatDue(960)).toBe(false);
+    expect(isQueueHeartbeatDue(1800)).toBe(true);
+  });
+
+  test('a task still waiting past a mark gets an admission_queued event with waited_s', async () => {
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') {
+        return Promise.resolve({
+          Items: [
+            queuedRow({ task_id: 'LONG', user_id: 'u1', created_at: isoAge(920) }),
+            queuedRow({ task_id: 'FRESH', user_id: 'u1', created_at: isoAge(120) }),
+          ],
+        });
+      }
+      if (cmd._type === 'GetItem') return Promise.resolve({ Item: { active_count: { N: '3' } } }); // full
+      return Promise.resolve({});
+    });
+
+    await handler();
+    const puts = sentDdbCommands('PutItem').map(c => c.input.Item);
+    expect(puts).toHaveLength(1);
+    expect(puts[0].task_id).toEqual({ S: 'LONG' });
+    expect(puts[0].event_type).toEqual({ S: 'admission_queued' });
+    expect(puts[0].metadata.M.reason).toEqual({ S: 'concurrency_limit' });
+    expect(Number(puts[0].metadata.M.waited_s.N)).toBeGreaterThanOrEqual(920);
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('picked-up tasks get no heartbeat; the ones left behind do', async () => {
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') {
+        return Promise.resolve({
+          Items: [
+            queuedRow({ task_id: 'FIRST', user_id: 'u1', created_at: isoAge(930) }),
+            queuedRow({ task_id: 'SECOND', user_id: 'u1', created_at: isoAge(920) }),
+          ],
+        });
+      }
+      if (cmd._type === 'GetItem') return Promise.resolve({ Item: { active_count: { N: '2' } } }); // one slot
+      return Promise.resolve({});
+    });
+    mockLambdaSend.mockResolvedValue({ StatusCode: 202 });
+
+    await handler();
+    const heartbeats = sentDdbCommands('PutItem').map(c => c.input.Item).filter(i => i.event_type.S === 'admission_queued');
+    expect(heartbeats.map(i => i.task_id.S)).toEqual(['SECOND']);
   });
 });
