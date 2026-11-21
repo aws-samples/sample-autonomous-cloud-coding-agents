@@ -1528,7 +1528,11 @@ export class AgentStack extends Stack {
     // --- Pull-request outcomes ---
     // Reads from GitHub, once an hour, what became of each new pull request that
     // ABCA follows, and records it on the task for the factory scoreboard.
-    new PrOutcomeSweep(concurrencyMaintenance, 'PrOutcomeSweep', { taskTable: taskTable.table, githubTokenSecret });
+    new PrOutcomeSweep(concurrencyMaintenance, 'PrOutcomeSweep', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      githubTokenSecret,
+    });
 
     // FanOutConsumer is constructed below LinearIntegration so the
     // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.

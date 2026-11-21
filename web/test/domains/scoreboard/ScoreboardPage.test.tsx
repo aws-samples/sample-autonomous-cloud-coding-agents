@@ -128,7 +128,10 @@ describe('ScoreboardPage', () => {
     expect(screen.getByRole('status')).toHaveTextContent(/^52 tasks finished in the last 30 days: 37 asked for a new pull request, 26 delivered a verified one\./);
     expect(screen.getByRole('button', { name: 'Last 30 days' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText(/^Not measured by ABCA: the hours people spent/)).toBeInTheDocument();
-    expect(screen.getByText(/in the "Factory scoreboard" row\.$/)).toBeInTheDocument();
+    // Under the numbers: whose they are, how a period and its spend differ from the Costs page's, and where every user's are.
+    expect(screen.getByText('These numbers cover your own tasks. A period is 7 or 30 times 24 hours back from now and its spend is that of the'
+      + ' tasks that write code, while the Costs page adds every task over whole UTC days, so the same range can show a different spend there.'
+      + ' Numbers for every user are on the CloudWatch dashboard, in the "Factory scoreboard" row.')).toBeInTheDocument();
     // How far the page sees: said under its title, and where the first section ends.
     expect(screen.getByText(/ Your own tasks, up to the merge\.$/)).toBeInTheDocument();
     expect(screen.getByText(/^Not measured by ABCA: deploy, .* The last thing ABCA sees is the merge\.$/)).toBeInTheDocument();

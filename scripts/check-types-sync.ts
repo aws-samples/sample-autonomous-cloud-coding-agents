@@ -140,18 +140,6 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // own API, consumed by web/, never by the CLI; mirrored in web/src/core/api/types.ts):
   'RepoIssueSummary',
   'ListRepoIssuesResponse',
-  // Console-only today (GET /v1/tasks?view=scoreboard, read by web/ and mirrored in
-  // web/src/core/api/types.ts). A CLI consumer, such as the `bgagent stats` of #412,
-  // would move them to cli/src/types.ts and off this list:
-  'TaskOutcome',
-  'TouchpointKind',
-  'PullRequestState',
-  'ScoreboardRange',
-  'Fraction',
-  'Flagged',
-  'DurationSummary',
-  'ScoreboardPeriod',
-  'Scoreboard',
   // Server-side helper / internal contracts:
   'TaskNotificationsConfig',
   'ChannelConfig',

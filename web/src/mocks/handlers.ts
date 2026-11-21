@@ -52,6 +52,7 @@ function toSummary(task: TaskDetail): TaskSummary {
     cost_usd: task.cost_usd,
     completed_at: task.completed_at,
     channel_source: task.channel_source,
+    compute_type: task.compute_type,
   };
 }
 
@@ -119,7 +120,7 @@ function simulatedRun(task: TaskDetail, startMs: number): ScheduledChange[] {
     ({ taskId: task.task_id, dueMs: at(s), eventType, metadata, ...(patch ? { patch } : {}) });
   return [
     step(2, 'hydration_started', {}, { status: 'HYDRATING' }),
-    step(4, 'session_started', {}, { status: 'RUNNING', started_at: new Date(at(4)).toISOString(), agent_heartbeat_at: new Date(at(4)).toISOString() }),
+    step(4, 'session_started', {}, { status: 'RUNNING', compute_type: 'agentcore', started_at: new Date(at(4)).toISOString(), agent_heartbeat_at: new Date(at(4)).toISOString() }),
     step(6, 'agent_milestone', { milestone: 'repo_setup_complete', details: `branch=${task.branch_name} build_before=True` }),
     step(7, 'agent_milestone', { milestone: 'step:implement:start' }),
     step(10, 'agent_tool_call', { tool_name: 'Bash', tool_input_preview: "{'command': 'ls -a && cat package.json', 'description': 'Look at how the project is laid out'}" }),
@@ -190,6 +191,7 @@ function createSimulatedTask(
     started_at: null,
     completed_at: null,
     agent_heartbeat_at: null,
+    compute_type: null,
     duration_s: null,
     cost_usd: null,
     build_passed: null,

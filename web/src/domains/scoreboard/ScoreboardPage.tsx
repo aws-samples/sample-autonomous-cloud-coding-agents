@@ -211,7 +211,9 @@ function ScoreboardBody({ board, stale }: { board: Scoreboard | undefined; stale
             {SECTIONS.map((section) => <Section key={section.title} section={section} board={board} />)}
             <Outcomes period={board?.current} />
             <Box variant="small" color="text-status-inactive">
-              {'These numbers cover your own tasks. Numbers for every user are on the CloudWatch dashboard, in the "Factory scoreboard" row.'}
+              {'These numbers cover your own tasks. A period is 7 or 30 times 24 hours back from now and its spend is that of the tasks that'
+                + ' write code, while the Costs page adds every task over whole UTC days, so the same range can show a different spend there.'
+                + ' Numbers for every user are on the CloudWatch dashboard, in the "Factory scoreboard" row.'}
             </Box>
           </SpaceBetween>
         )}

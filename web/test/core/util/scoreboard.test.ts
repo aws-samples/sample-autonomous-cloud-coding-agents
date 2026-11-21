@@ -179,8 +179,9 @@ describe('the bubbles of the numbers that rest on a read of GitHub', () => {
     [
       'Merged, so far',
       'how',
-      // A pull request in a repository the token cannot read is followed: the line under the number counts it as not read.
-      "Not read: pull requests in a repository ABCA's GitHub token cannot read. Not followed: those of a task that failed, and of an orchestration.",
+      // A pull request the token cannot read, or that GitHub does not have under the recorded number, is followed:
+      // the line under the number counts it as not read.
+      "Not read: pull requests ABCA's token cannot read or GitHub does not have. Not followed: those of a task that failed, and of an orchestration.",
     ],
     ['Merged without being sent back', 'how', 'with no change request by a reviewer with write access and no follow-up task of yours'],
     [

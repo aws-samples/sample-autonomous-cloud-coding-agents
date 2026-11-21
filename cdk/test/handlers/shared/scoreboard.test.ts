@@ -353,6 +353,8 @@ const SHAPES: readonly (readonly [string, TaskRecord, TaskFacts])[] = [
   ['a creation time after the finish', task({ created_at: '2026-11-18T10:30:00.000Z' }), facts({ leadTimeS: null, waitS: null })],
   ['a record without the workflow pin', task({ resolved_workflow: undefined, workflow_ref: `${CODING_WORKFLOW_ID}@1.0.0` }), VERIFIED],
   ['a pull request found open', task({ pr_state: 'open' }), facts({ prState: 'open' })],
+  // GitHub has no pull request of the task under the recorded number: the read says so once, and stops asking.
+  ['a pull request the hourly read did not find', task({ pr_state: 'not_found' }), facts({ prState: 'not_found' })],
   ['a pull request merged without a review', task(MERGED), MERGED_FACTS],
   [
     'a pull request merged after a review and a change request',
@@ -622,6 +624,8 @@ const closedAt = (at: string, overrides: Partial<TaskRecord> = {}): Partial<Task
   ({ pr_state: 'closed', pr_closed_at: at, pr_changes_requested: 0, ...overrides });
 /** What it records the first time it finds the pull request open. */
 const FOUND_OPEN: Partial<TaskRecord> = { pr_state: 'open' };
+/** What it records when GitHub has no pull request of the task under the recorded number. */
+const NOT_FOUND: Partial<TaskRecord> = { pr_state: 'not_found' };
 const NO_PULL_REQUESTS = { merged: 0, closed: 0, open: 0, unread: 0 };
 
 const emptyPeriod = (from: string, to: string): ScoreboardPeriod => ({
@@ -1030,6 +1034,8 @@ describe('buildScoreboard', () => {
 
     test.each([
       ['was never read', 'unread', {}],
+      // ABCA has not read it, and will not: GitHub has no pull request of the task under the number.
+      ['was not found on GitHub', 'unread', NOT_FOUND],
       ['was found open', 'open', FOUND_OPEN],
       ['was merged a millisecond before that end', 'merged', mergedAt(before(7, 0.001))],
       ['was closed a millisecond before that end', 'closed', closedAt(before(7, 0.001))],
@@ -1222,6 +1228,13 @@ describe('buildScoreboard', () => {
       // count, how many are open is not known.
       test.each([
         ['one pull request old enough, never read', null, [finished('never-read', 10)]],
+        ['one pull request old enough, which GitHub does not have', null, [finished('not-found', 10, NOT_FOUND)]],
+        // Not found is not open: beside one that was read, it is in neither the count nor the list.
+        [
+          'two old enough, one that GitHub does not have and one merged',
+          { count: 0, task_ids: [] },
+          [finished('not-found', 12, NOT_FOUND), finished('merged', 10, mergedAt(before(9)))],
+        ],
         ['one old enough and never read, and a younger one found open', null, [finished('never-read', 10), finished('young', 2, FOUND_OPEN)]],
         [
           'two old enough, one of them found open',
@@ -1507,6 +1520,7 @@ describe('prOutcomeMetricLine', () => {
   test.each([
     ['a pull request that no read has recorded', task()],
     ['a pull request found open', task({ pr_state: 'open' })],
+    ['a pull request the hourly read did not find', task({ ...MERGED, pr_state: 'not_found' })],
     // A close time alone is no final state.
     ['an open pull request whose record carries a close time', task({ ...MERGED, pr_state: 'open' })],
     ['a close time on a record without a state', task({ ...MERGED, pr_state: undefined })],

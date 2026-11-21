@@ -36,6 +36,7 @@ describe('bgagent entry point', () => {
   let errorSpy: jest.SpiedFunction<typeof console.error>;
   const mockGetTask = jest.fn();
   const mockListWebhooks = jest.fn();
+  const mockGetScoreboard = jest.fn();
 
   beforeEach(() => {
     // The entry point sets process.exitCode; a value left behind becomes the
@@ -46,9 +47,12 @@ describe('bgagent entry point', () => {
     waitForTaskMock.mockReset();
     mockGetTask.mockReset().mockResolvedValue({ task_id: 't-1', status: 'RUNNING' });
     mockListWebhooks.mockReset().mockResolvedValue({ data: [], pagination: { next_token: null, has_more: false } });
+    // With its `current`: the command takes an answer without one for that of an older stack.
+    mockGetScoreboard.mockReset().mockResolvedValue({ range: '7d', current: {} });
     (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
       getTask: mockGetTask,
       listWebhooks: mockListWebhooks,
+      getScoreboard: mockGetScoreboard,
     }) as unknown as ApiClient);
   });
 
@@ -77,6 +81,13 @@ describe('bgagent entry point', () => {
       expect(isVerbose()).toBe(true);
       expect(process.exitCode).toBeUndefined();
     });
+  });
+
+  test('has the stats command', async () => {
+    await run(['node', 'bgagent', 'stats', '--output', 'json']);
+
+    expect(mockGetScoreboard).toHaveBeenCalledTimes(1);
+    expect(process.exitCode).toBeUndefined();
   });
 
   describe('exit code', () => {

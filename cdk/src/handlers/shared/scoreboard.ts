@@ -29,13 +29,14 @@
  * finished tasks ({@link buildScoreboard}). No AWS client and no clock: a record
  * counts the same wherever it is read.
  *
- * A number is added in six places:
+ * A number is added in seven places:
  *  1. the fact of one task: {@link TaskFacts} and {@link taskFacts} ({@link SCOREBOARD_TASK_FIELDS} when it reads a new field);
  *  2. its aggregate over a period: `buildPeriod`;
- *  3. the wire type `ScoreboardPeriod` in `./types`, and its mirror in `web/src/core/api/types.ts`;
+ *  3. the wire type `ScoreboardPeriod` in `./types`, and its mirrors in `web/src/core/api/types.ts` and `cli/src/types.ts`;
  *  4. the tile list of the console page: `web/src/core/util/scoreboard.ts`;
- *  5. the definitions table of `docs/design/OBSERVABILITY.md`;
- *  6. the field table and the example of `docs/design/API_CONTRACT.md`.
+ *  5. the rows of `bgagent stats`: `cli/src/scoreboard.ts`;
+ *  6. the definitions table of `docs/design/OBSERVABILITY.md`;
+ *  7. the field table and the example of `docs/design/API_CONTRACT.md`.
  * A fact that comes from GitHub starts before the first of these: in the query, the snapshot
  * and the final write of `./pr-outcome`, and as a field of `TaskRecord` in `./types`.
  * A CloudWatch metric is added in {@link FACTORY_METRICS} and in the line builder of the step that
@@ -162,8 +163,12 @@ export interface TaskFacts {
    * not part of an orchestration. The five facts below exist for a followed pull request only.
    */
   readonly prFollowed: boolean;
-  /** The state on GitHub of the followed pull request, as last recorded; null until a read records one. */
-  readonly prState: 'open' | 'merged' | 'closed' | null;
+  /**
+   * What the hourly read last recorded about the followed pull request: its state on GitHub, or
+   * `not_found` when GitHub had no pull request of this task under the recorded number. Null
+   * until a read records one.
+   */
+  readonly prState: 'open' | 'merged' | 'closed' | 'not_found' | null;
   /** Epoch milliseconds of GitHub's merge or close time; null without a usable one. */
   readonly prClosedAtMs: number | null;
   /** Whole seconds from creation to the merge; null unless the pull request is merged and both ends are known. */
@@ -180,13 +185,6 @@ const RESTACK_WORKFLOW_ID = 'coding/restack-v1';
 
 /** The scope that grants every approval in advance. */
 const BLANKET_APPROVAL_SCOPE: ApprovalScope = 'all_session';
-
-/**
- * How much of an `error_message` is classified: the agent stores at most 1,000 characters, and
- * the platform's own reasons carry their marker at the front. A record is read from storage and
- * can hold more; nothing past this length is a reason either of them wrote.
- */
-const CLASSIFIED_MESSAGE_CHARS = 1000;
 
 /**
  * No task costs this much: 100 times the largest budget a task can be given. A plausibility
@@ -289,8 +287,7 @@ function approvalRequests(task: ScoreboardTask): number {
  * the agent reports is its reading of a tool's output, not the act of a control.
  */
 function isGuardrailStop(task: ScoreboardTask): boolean {
-  if (task.status !== TaskStatus.FAILED || typeof task.error_message !== 'string') return false;
-  return classifyError(task.error_message.slice(0, CLASSIFIED_MESSAGE_CHARS))?.category === ErrorCategory.GUARDRAIL;
+  return task.status === TaskStatus.FAILED && classifyError(task.error_message)?.category === ErrorCategory.GUARDRAIL;
 }
 
 /** First-run tasks store `pr_url` without `pr_number`, follow-ups the number: one key for both. */
@@ -319,7 +316,7 @@ const NO_PULL_REQUEST: PullRequestFacts = { prState: null, prClosedAtMs: null, t
 
 /** A record is read from storage: a state that no read records counts as no state. */
 function recordedState(value: unknown): TaskFacts['prState'] {
-  return value === 'open' || value === 'merged' || value === 'closed' ? value : null;
+  return value === 'open' || value === 'merged' || value === 'closed' || value === 'not_found' ? value : null;
 }
 
 function pullRequestFacts(task: ScoreboardTask, createdAtMs: number, finishedAtMs: number): PullRequestFacts {
@@ -460,13 +457,23 @@ function notReworked(finished: readonly TaskFacts[], firstReworkMs: ReadonlyMap<
 }
 
 /**
+ * The state GitHub holds for a followed pull request, as far as ABCA has read it; null when it
+ * has not. A read that found no pull request of the task is not a read of one: nothing is
+ * known of its state, and the read does not ask again.
+ */
+function readState(facts: TaskFacts): Exclude<TaskFacts['prState'], 'not_found'> {
+  return facts.prState === 'not_found' ? null : facts.prState;
+}
+
+/**
  * The state of a followed pull request as it stood at `endMs`. A merge or a close that had not
  * happened by then leaves it open: an earlier period is not judged with more hindsight than
  * the current one.
  */
 function stateAt(facts: TaskFacts, endMs: number): PullRequestState {
-  if (facts.prState === null) return 'unread';
-  return facts.prClosedAtMs !== null && facts.prClosedAtMs < endMs ? facts.prState : 'open';
+  const state = readState(facts);
+  if (state === null) return 'unread';
+  return facts.prClosedAtMs !== null && facts.prClosedAtMs < endMs ? state : 'open';
 }
 
 /** Whether a task reworked the pull request before it was merged or closed. A pull request without a key has no rework to find. */
@@ -504,7 +511,7 @@ function openTooLong(all: readonly TaskFacts[], previousFrom: Date, now: Date): 
   const finishedBeforeMs = now.getTime() - OPEN_OVER_DAYS * MS_PER_DAY;
   const oldEnough = all.filter((facts) =>
     facts.prFollowed && facts.finishedAtMs >= previousFrom.getTime() && facts.finishedAtMs < finishedBeforeMs);
-  if (oldEnough.length > 0 && oldEnough.every((facts) => facts.prState === null)) return null;
+  if (oldEnough.length > 0 && oldEnough.every((facts) => readState(facts) === null)) return null;
   return flagged(oldEnough.filter((facts) => facts.prState === 'open'), 'oldest');
 }
 

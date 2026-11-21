@@ -37,11 +37,11 @@ describe('CostsPage', () => {
 
   it('names each tile with its number', async () => {
     renderRoute('/costs?range=30d');
-    // All eleven fixture tasks changed in the last 30 days. The four that finished with a cost are two done and two
+    // All fourteen fixture tasks changed in the last 30 days. The six that finished with a cost are four done and two
     // failed; the unfinished ones, the cancelled one and the one that ran out of time have none.
-    expect(await screen.findByRole('group', { name: 'Spent last 30 days: $8.54' })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'Tasks: 11' })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'Average per task: $2.14' })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: 'Spent last 30 days: $10.84' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Tasks: 14' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Average per task: $1.81' })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Spent on failed or stopped tasks: $5.11' })).toBeInTheDocument();
   });
 
@@ -59,7 +59,7 @@ describe('CostsPage', () => {
     expect(screen.getByRole('group', { name: 'Spent last 30 days: loading' })).toHaveTextContent(/-$/);
 
     release();
-    expect(await screen.findByRole('group', { name: 'Tasks: 11' })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: 'Tasks: 14' })).toBeInTheDocument();
   });
 
   it('groups the digits of a count and of an amount of a thousand and more', async () => {

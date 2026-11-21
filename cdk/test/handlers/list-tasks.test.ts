@@ -216,6 +216,15 @@ describe('list-tasks handler', () => {
     expect(body.data[0]).toMatchObject({ cost_usd: null, completed_at: null, channel_source: 'api' });
   });
 
+  test('summaries name the compute backend a session started on, and null before one starts', async () => {
+    mockSend.mockResolvedValue({ Items: [{ ...TASK_ITEMS[0], compute_type: 'ecs' }, TASK_ITEMS[1]] });
+
+    const body = JSON.parse((await handler(makeEvent())).body);
+
+    // What a heartbeat says differs by backend, so a list that shows one has to know which it is.
+    expect(body.data.map((summary: { compute_type: string | null }) => summary.compute_type)).toEqual(['ecs', null]);
+  });
+
   test.each(['budgets', 'Scoreboard', ''])('returns 400 for the unknown view "%s" instead of returning tasks', async (view) => {
     const result = await handler(makeEvent({
       queryStringParameters: { view },
@@ -262,12 +271,14 @@ describe('list-tasks handler', () => {
   });
 
   test('applies repo filter', async () => {
-    const event = makeEvent({ queryStringParameters: { repo: 'org/repo' } });
-    await handler(event);
+    // Not the scoreboard's rules: the name as the task holds it, letter for letter, and any value.
+    const event = makeEvent({ queryStringParameters: { repo: 'Org/My Repo' } });
+    const result = await handler(event);
 
     const queryInput = MockQueryCommand.mock.calls[0][0];
+    expect(result.statusCode).toBe(200);
     expect(queryInput.FilterExpression).toContain('#repo');
-    expect(queryInput.ExpressionAttributeValues).toHaveProperty(':repo', 'org/repo');
+    expect(queryInput.ExpressionAttributeValues).toHaveProperty(':repo', 'Org/My Repo');
   });
 
   test('applies limit parameter', async () => {
@@ -473,7 +484,7 @@ describe('list-tasks handler', () => {
       .map(([input]) => input as QueryCommandInput)
       .filter((input) => input.ExpressionAttributeValues?.[':hi'] === `${status}#~`);
 
-    const getScoreboard = (query: { range?: string } = {}): Promise<APIGatewayProxyResult> =>
+    const getScoreboard = (query: { range?: string; repo?: string } = {}): Promise<APIGatewayProxyResult> =>
       handler(makeEvent({ queryStringParameters: { view: 'scoreboard', ...query } }));
     const scoreboardIn = (result: APIGatewayProxyResult): Scoreboard => JSON.parse(result.body).data;
 
@@ -743,6 +754,92 @@ describe('list-tasks handler', () => {
         message: 'Failed to list tasks',
         view: 'scoreboard',
         error: expect.stringContaining('ProvisionedThroughputExceededException'),
+      });
+    });
+
+    describe('for one repository', () => {
+      /** A task of another repository of the same caller, whose name starts with the one asked for: the filter takes whole names. */
+      const elsewhere = (at: string, status: Terminal = 'COMPLETED'): ScoreboardTask =>
+        ({ ...finishedAt(at, status), task_id: `elsewhere-${status}-${at}`, repo: 'org/repo-two' });
+      const sent = (): QueryCommandInput[] => MockQueryCommand.mock.calls.map(([input]) => input as QueryCommandInput);
+
+      test('counts the tasks of that repository only, whatever the letter case of its name, over the same read', async () => {
+        const earlier: ScoreboardTask = { ...finishedAt('2026-10-01T10:30:00Z'), pr_state: 'open' };
+        indexHolds({
+          COMPLETED: [{
+            Items: [
+              finishedAt('2026-11-18T10:24:00Z'),
+              elsewhere('2026-11-17T10:00:00Z'),
+              // Work without a repository belongs to none.
+              { ...finishedAt('2026-11-16T10:00:00Z'), task_id: 'repo-less', repo: undefined },
+              earlier,
+              // A third repository, whose name ends with the one asked for.
+              { ...elsewhere('2026-10-02T10:00:00Z'), repo: 'big-org/repo', pr_state: 'open' },
+            ],
+          }],
+          // A record holds the name as it was submitted: this one in another letter case.
+          FAILED: [{ Items: [{ ...finishedAt('2026-11-05T14:00:03.120Z', 'FAILED'), repo: 'Org/Repo' }, elsewhere('2026-11-06T09:00:00Z', 'FAILED')] }],
+        });
+
+        const board = scoreboardIn(await getScoreboard({ repo: 'ORG/Repo' }));
+
+        expect(board).toMatchObject({
+          truncated: false,
+          current: { finished: 2, outcomes: { verified_pr: 1, no_new_pr: 0, failed: 1 } },
+          previous: { finished: 1, outcomes: { verified_pr: 1 } },
+          open_over_7d: { count: 1, task_ids: [earlier.task_id] },
+        });
+        // Nothing about the repository goes to DynamoDB: the queries are those of a request without it.
+        const withRepository = sent();
+        MockQueryCommand.mockClear();
+        jest.setSystemTime(NOW);
+        await getScoreboard();
+        expect(withRepository).toEqual(sent());
+        expect(withRepository).toHaveLength(4);
+      });
+
+      test('a repository the caller has no finished task in gets a scoreboard of zeros', async () => {
+        indexHolds({ COMPLETED: [{ Items: [finishedAt('2026-11-18T10:24:00Z'), finishedAt('2026-10-01T10:30:00Z')] }] });
+
+        expect(scoreboardIn(await getScoreboard({ repo: 'org/none' }))).toMatchObject({
+          truncated: false,
+          current: { finished: 0 },
+          previous: { finished: 0 },
+          open_over_7d: { count: 0, task_ids: [] },
+        });
+      });
+
+      test('what the response says about the read does not change with the repository', async () => {
+        // The cut is in a status that holds no task of the repository asked for.
+        indexHolds({
+          FAILED: cutAt('FAILED', '2026-11-10T08:30:15Z', [elsewhere('2026-11-12T09:00:00Z', 'FAILED')]),
+          COMPLETED: [{ Items: [finishedAt('2026-11-17T10:00:00Z'), finishedAt('2026-11-01T10:00:00Z')] }],
+        });
+
+        expect(scoreboardIn(await getScoreboard({ repo: 'org/repo' }))).toMatchObject({
+          truncated: true,
+          previous: null,
+          open_over_7d: null,
+          current: { from: '2026-11-10T08:30:16.000Z', finished: 1 },
+        });
+      });
+
+      test('refuses the range before the repository', async () => {
+        const result = await getScoreboard({ range: '90d', repo: 'not-a-repository' });
+
+        expect(JSON.parse(result.body).error.message).toBe('Invalid range value. Expected "7d" or "30d".');
+      });
+
+      // The empty value is a value: the parameter is there, and names no repository.
+      test.each(['not-a-repository', ''])('returns 400 for the repository "%s", and reads nothing', async (repo) => {
+        const result = await getScoreboard({ repo });
+
+        expect(result.statusCode).toBe(400);
+        expect(JSON.parse(result.body).error).toMatchObject({
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid repo value. Expected "owner/name".',
+        });
+        expect(mockSend).not.toHaveBeenCalled();
       });
     });
   });

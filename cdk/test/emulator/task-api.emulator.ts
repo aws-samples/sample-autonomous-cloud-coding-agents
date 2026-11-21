@@ -139,9 +139,10 @@ async function seedTask(userId: string, status: TaskStatusType, at: string, fiel
   return task;
 }
 
-/** GET /v1/tasks?view=scoreboard for the last RANGE_DAYS days, through the real handler. Returns the scoreboard. */
-async function scoreboard(userId: string): Promise<Scoreboard> {
-  const result = await listTasks(apiEvent(userId, { queryStringParameters: { view: 'scoreboard', range: `${RANGE_DAYS}d` } }));
+/** GET /v1/tasks?view=scoreboard for the last RANGE_DAYS days, through the real handler. Returns the scoreboard, of one repository when `repo` names it. */
+async function scoreboard(userId: string, repo?: string): Promise<Scoreboard> {
+  const queryStringParameters = { view: 'scoreboard', range: `${RANGE_DAYS}d`, ...(repo !== undefined && { repo }) };
+  const result = await listTasks(apiEvent(userId, { queryStringParameters }));
   expect(result.statusCode).toBe(200);
   return data(result);
 }
@@ -512,6 +513,25 @@ describe('task API against the AWS Emulator', () => {
     });
     // Every task finished yesterday: no pull request is old enough to have been open for more than 7 days.
     expect(open_over_7d).toEqual({ count: 0, task_ids: [] });
+  });
+
+  test('scoreboard: with a repository, the numbers are those of its tasks, whatever the letter case of its name', async () => {
+    const user = newUser();
+    const hourAgo = platformStamp(Date.now() - 3600 * 1000);
+    const newTask = { id: 'coding/new-task-v1', version: '1.0.0' };
+    const verified = (repo: string, number: number): Partial<TaskRecord> =>
+      ({ repo, resolved_workflow: newTask, pr_url: `https://github.com/${repo}/pull/${number}`, build_passed: true });
+    // Two tasks of one repository, whose name the records hold in two letter cases, and one of
+    // another, whose name starts with it: the filter takes whole names.
+    await seedTask(user, 'COMPLETED', hourAgo, verified(REPO, 21));
+    await seedTask(user, 'FAILED', hourAgo, { repo: 'Acme/Widgets', resolved_workflow: newTask });
+    await seedTask(user, 'COMPLETED', hourAgo, verified('acme/widgets-api', 22));
+
+    const every = await scoreboard(user);
+    const ofWidgets = await scoreboard(user, 'ACME/WIDGETS');
+
+    expect(every.current).toMatchObject({ finished: 3, outcomes: { verified_pr: 2, failed: 1 }, verified: { count: 2, total: 3 } });
+    expect(ofWidgets.current).toMatchObject({ finished: 2, outcomes: { verified_pr: 1, failed: 1 }, verified: { count: 1, total: 2 } });
   });
 
   test('scoreboard: a status that does not fit one page of the index is read whole', async () => {

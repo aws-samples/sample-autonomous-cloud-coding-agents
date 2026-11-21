@@ -17,10 +17,10 @@
  *  SOFTWARE.
  */
 
-import { QueryCommand, type UpdateCommand, type UpdateCommandInput } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, QueryCommand, type PutCommandInput, type UpdateCommand, type UpdateCommandInput } from '@aws-sdk/lib-dynamodb';
 import type { Context } from 'aws-lambda';
 
-// The table is the only AWS service the handler calls itself. GitHub is the `fetch` stub
+// DynamoDB is the only AWS service the handler calls itself. GitHub is the `fetch` stub
 // below: the read of a pull request runs as it is, on answers as GitHub gives them.
 const sendMock = jest.fn();
 jest.mock('../../src/handlers/shared/ua', () => ({
@@ -42,12 +42,14 @@ jest.mock('../../src/handlers/shared/context-hydration', () => ({
 const TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:GitHubTokenSecret-AbCdEf';
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_STATUS_INDEX_NAME = 'StatusIndexOfTheStack';
+process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.GITHUB_TOKEN_SECRET_ARN = TOKEN_SECRET_ARN;
 
 import { TaskStatus } from '../../src/constructs/task-status';
 import { MissingSecretError, SecretUnreadableError } from '../../src/handlers/shared/context-hydration';
 import { formatBlockerReason } from '../../src/handlers/shared/error-classifier';
 import { INTEGRATION_NODE_SUFFIX } from '../../src/handlers/shared/orchestration-integration-node';
+import { emitTaskEvent } from '../../src/handlers/shared/orchestrator';
 import { SCOREBOARD_PROJECTION } from '../../src/handlers/shared/scoreboard';
 import type { TaskRecord } from '../../src/handlers/shared/types';
 import { handler } from '../../src/handlers/sweep-pr-outcomes';
@@ -193,6 +195,8 @@ let fetchMock: jest.SpiedFunction<typeof fetch>;
 let stdout: jest.SpiedFunction<typeof process.stdout.write>;
 /** The answer of the table to each update; nothing by default, as an update that returns no values answers. */
 const updateMock = jest.fn();
+/** The answer of the events table to each event that is put there. */
+const eventMock = jest.fn();
 
 /** GitHub, as far as the sweep asks: an answer per pull-request number. A number without one gets no answer, as from a network that is down. */
 function github(answers: Record<number, Answer>): void {
@@ -206,11 +210,13 @@ function github(answers: Record<number, Answer>): void {
 /** The pull-request numbers GitHub was asked about, in the order of the requests. */
 const asked = (): number[] => fetchMock.mock.calls.map(([, init]) => JSON.parse(init?.body as string).variables.number);
 
-/** The table: the pages of the candidate query in turn, and `updateMock` for every update. */
+/** The tables: the pages of the candidate query in turn, `updateMock` for every update and `eventMock` for every event. */
 function table(...pages: { Items: TaskRecord[]; ScannedCount: number; LastEvaluatedKey?: Record<string, unknown> }[]): void {
   const queue = [...pages];
-  sendMock.mockImplementation(async (command: QueryCommand | UpdateCommand) =>
-    (command instanceof QueryCommand ? queue.shift() : updateMock(command.input)));
+  sendMock.mockImplementation(async (command: QueryCommand | UpdateCommand | PutCommand) => {
+    if (command instanceof QueryCommand) return queue.shift();
+    return command instanceof PutCommand ? eventMock(command.input) : updateMock(command.input);
+  });
 }
 
 /** A table whose candidate query returns `tasks` in one page. */
@@ -218,6 +224,9 @@ const candidates = (...tasks: TaskRecord[]): void => table({ Items: tasks, Scann
 
 /** The inputs of the updates the run sent, in order. */
 const updates = (): UpdateCommandInput[] => updateMock.mock.calls.map(([input]) => input);
+
+/** The inputs of the events the run put, in order. */
+const events = (): PutCommandInput[] => eventMock.mock.calls.map(([input]) => input);
 
 /** A DynamoDB error as the SDK throws it: the name tells the kind. */
 const ddbError = (name: string): Error => Object.assign(new Error(name), { name });
@@ -254,6 +263,7 @@ const lines = (): Record<string, unknown>[] => stdout.mock.calls.map(([chunk]) =
 beforeEach(() => {
   sendMock.mockReset();
   updateMock.mockReset().mockResolvedValue({});
+  eventMock.mockReset().mockResolvedValue({});
   resolveGitHubTokenMock.mockReset().mockResolvedValue(TOKEN);
   jest.spyOn(Date, 'now').mockReturnValue(NOW);
   stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -408,10 +418,73 @@ describe('the token', () => {
       ['PR outcome sweep summary', counted({ scanned: 2, candidates: 2, left_out: 2, stopped: 'secret' })],
     ]);
   });
+
+  /** A made-up token of a kind GitHub issues: its prefix and twenty characters, the fewest that read as one. */
+  const madeUp = (prefix: string): string => `${prefix}Made_up_token_value9`;
+
+  // A token with something around it was meant to be one: a mistake to say, not a stack without a token.
+  test.each([
+    ['in quotes', `"${madeUp('ghp_')}"`],
+    ['as a JSON object', `{"GITHUB_TOKEN":"${madeUp('github_pat_')}"}`],
+    ['after the word Bearer', `Bearer ${madeUp('gho_')}`],
+    ['as a shell assignment', `GITHUB_TOKEN=${madeUp('ghu_')}`],
+    ['with a remark after it', `${madeUp('ghs_')} # production`],
+    ['after the word token', `token ${madeUp('ghr_')}`],
+  ])('a secret that holds a GitHub token %s ends the run with an error that does not hold it, before any request', async (_what, secret) => {
+    candidates(task(12), task(13));
+    resolveGitHubTokenMock.mockResolvedValue(secret);
+
+    await handler(EVENT, context);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(loggerMock.error.mock.calls).toEqual([
+      [
+        'PR outcome sweep: the secret of the platform GitHub token holds no usable token',
+        { error: 'the value holds a GitHub token with other characters around it' },
+      ],
+      ['PR outcome sweep summary', counted({ scanned: 2, candidates: 2, left_out: 2, stopped: 'secret' })],
+    ]);
+  });
+
+  // A stack that was never given a platform token: its secret holds the value it was created with.
+  test.each([
+    ['holds punctuation, as a generated value does', 'generated(value);with=punctuation'],
+    ['holds a space', 'not a token'],
+    ['holds a slash', 'path/like-value'],
+    ['is a note someone left there', '<your token here>'],
+    // One character short of the twenty: the start of a token, and no token.
+    ['holds a GitHub prefix with fewer characters after it than a token has', `"${madeUp('ghp_').slice(0, -1)}"`],
+  ])('no GitHub token is a printable value that %s: the summary alone, as information, and no request', async (_what, secret) => {
+    candidates(task(12), task(13));
+    resolveGitHubTokenMock.mockResolvedValue(secret);
+
+    await handler(EVENT, context);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(loggerMock.warn).not.toHaveBeenCalled();
+    expect(loggerMock.error).not.toHaveBeenCalled();
+    expect(loggerMock.info.mock.calls).toEqual([
+      ['PR outcome sweep summary', counted({ scanned: 2, candidates: 2, left_out: 2, stopped: 'no_token' })],
+    ]);
+  });
+
+  test('a value of letters of both cases, digits, an underscore, a dot and a hyphen is a token and is sent, also when it starts as a GitHub token does', async () => {
+    const token = `${madeUp('ghs_')}.and-more`;
+    candidates(task(12));
+    github({ 12: found(12) });
+    resolveGitHubTokenMock.mockResolvedValue(token);
+
+    await handler(EVENT, context);
+
+    expect(fetchMock.mock.calls.map(([, init]) => init?.headers)).toMatchObject([{ Authorization: `Bearer ${token}` }]);
+    expect(summary().data).toMatchObject({ read: 1, stopped: 'none' });
+  });
 });
 
 describe('a pull request found open', () => {
-  test('is recorded as open on its first read: one conditional write that sets nothing else', async () => {
+  test('is recorded as open on its first read: one conditional write that sets nothing else, and no event', async () => {
     candidates(task(12));
     github({ 12: found(12) });
 
@@ -426,6 +499,7 @@ describe('a pull request found open', () => {
       ExpressionAttributeValues: { ':open': 'open' },
     }]);
     expect(stdout).not.toHaveBeenCalled();
+    expect(eventMock).not.toHaveBeenCalled();
     expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 1, candidates: 1, read: 1, open: 1 }) });
   });
 
@@ -466,10 +540,10 @@ describe('a pull request found open', () => {
 });
 
 describe('a pull request found merged or closed', () => {
-  test('merged: the four fields are written once, and one line is built from the record the write returns', async () => {
+  test('merged: the four fields are written once, and one line and one event are built from the record the write returns', async () => {
     candidates(task(12, { pr_state: 'open' }));
     github({ 12: found(12, MERGED) });
-    // What the candidate query does not project, and what a writer changed since: the line has to come from here.
+    // What the candidate query does not project, and what a writer changed since: the line and the event have to come from here.
     updateMock.mockResolvedValueOnce({ Attributes: task(12, { ...MERGED_FIELDS, user_id: 'user-7', repo: 'Acme/Widgets' }) });
 
     await handler(EVENT, context);
@@ -504,6 +578,25 @@ describe('a pull request found merged or closed', () => {
       repo: 'Acme/Widgets',
       workflow: 'coding/new-task-v1',
     });
+    // The whole event, as the platform's other writers put one: kept 90 days from the run, with what the write recorded.
+    expect(events()).toEqual([{
+      TableName: 'TaskEvents',
+      Item: {
+        task_id: 'task-12',
+        event_id: expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/),
+        event_type: 'pr_outcome_recorded',
+        timestamp: '2026-11-18T00:20:00.000Z',
+        ttl: NOW / SECOND_MS + 90 * 24 * 3600,
+        user_id: 'user-7',
+        repo: 'Acme/Widgets',
+        metadata: {
+          pr_state: 'merged',
+          pr_closed_at: '2026-11-17T10:00:00Z',
+          pr_changes_requested: 1,
+          pr_first_review_at: '2026-11-16T16:24:00Z',
+        },
+      },
+    }]);
     expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 1, candidates: 1, read: 1, merged: 1 }) });
   });
 
@@ -526,6 +619,8 @@ describe('a pull request found merged or closed', () => {
     }]);
     expect(lines()).toMatchObject([{ _aws: { Timestamp: NOW - HOUR_MS }, PrOutcome: 'closed', PullRequestsResolved: 1, task_id: 'task-12' }]);
     expect(lines()[0]).not.toHaveProperty('TimeToMergeSeconds');
+    // Strictly, for the same reason: the event names no first review either.
+    expect(events().map((event) => event.Item?.metadata)).toStrictEqual([{ pr_state: 'closed', pr_closed_at: closedAt, pr_changes_requested: 0 }]);
     expect(summary().data).toMatchObject({ read: 1, closed: 1, merged: 0, not_emitted: 0 });
   });
 
@@ -563,7 +658,7 @@ describe('a pull request found merged or closed', () => {
   test.each([
     ['a second more than 13 days', 13 * DAY_MS + SECOND_MS],
     ['14 days', 14 * DAY_MS],
-  ])('merged %s before the run: recorded, without a line that CloudWatch would drop', async (_when, mergedForMs) => {
+  ])('merged %s before the run: recorded, with its event and without a line that CloudWatch would drop', async (_when, mergedForMs) => {
     const mergedAt = ago(mergedForMs);
     candidates(task(12));
     github({ 12: found(12, { state: 'MERGED', mergedAt, closedAt: mergedAt }) });
@@ -574,10 +669,12 @@ describe('a pull request found merged or closed', () => {
     expect(updates()).toHaveLength(1);
     expect(updates()[0]).toMatchObject({ ExpressionAttributeValues: { ':state': 'merged', ':closed_at': mergedAt } });
     expect(stdout).not.toHaveBeenCalled();
+    // The event is stamped when it is put, which no age rule concerns.
+    expect(events()).toMatchObject([{ Item: { task_id: 'task-12', metadata: { pr_state: 'merged', pr_closed_at: mergedAt } } }]);
     expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 1, candidates: 1, read: 1, merged: 1, not_emitted: 1 }) });
   });
 
-  test('a final write that the table refuses is said and skipped: no metric line, no count', async () => {
+  test('a final write that the table refuses is said and skipped: no metric line, no event, no count', async () => {
     candidates(task(12));
     github({ 12: found(12, MERGED) });
     updateMock.mockRejectedValueOnce(ddbError('ConditionalCheckFailedException'));
@@ -585,25 +682,97 @@ describe('a pull request found merged or closed', () => {
     await handler(EVENT, context);
 
     expect(stdout).not.toHaveBeenCalled();
+    expect(eventMock).not.toHaveBeenCalled();
     expect(loggerMock.warn).not.toHaveBeenCalled();
     expect(loggerMock.info.mock.calls).toEqual([
       ['PR outcome sweep: a final write was refused', { task_id: 'task-12', state: 'merged' }],
       ['PR outcome sweep summary', counted({ scanned: 1, candidates: 1, read: 1 })],
     ]);
   });
+
+  // The helper lives in the orchestrator's module, which this function does not bundle: the
+  // handler puts the item itself, and this holds the two together.
+  test('the event is the item the platform\'s event helper puts for the same outcome: the same members, and none that is undefined', async () => {
+    const closedAt = ago(HOUR_MS);
+    candidates(task(12, { pr_state: 'open' }));
+    github({ 12: found(12, { state: 'CLOSED', closedAt }) });
+    updateMock.mockResolvedValueOnce({ Attributes: task(12, { pr_state: 'closed', pr_closed_at: closedAt, pr_changes_requested: 0 }) });
+
+    await handler(EVENT, context);
+    // The same outcome through the helper, with the first review that this pull request does not have.
+    await emitTaskEvent(
+      'task-12',
+      'pr_outcome_recorded',
+      { pr_state: 'closed', pr_closed_at: closedAt, pr_changes_requested: 0, pr_first_review_at: undefined },
+      { user_id: 'user-1', repo: 'acme/widgets' },
+    );
+
+    const [mine, helpers] = events();
+    // Whole, apart from the id and the instant of the put, which no two events share: of those, that each is text.
+    const comparable = ({ Item }: PutCommandInput) => ({ ...Item, event_id: typeof Item?.event_id, timestamp: typeof Item?.timestamp });
+    expect(mine.TableName).toBe(helpers.TableName);
+    expect(comparable(mine)).toStrictEqual(comparable(helpers));
+  });
+
+  test('the event carries the instant of its put, not the start of the run', async () => {
+    let clock = NOW;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    candidates(task(12, { pr_state: 'open' }));
+    // The read takes a hundred seconds.
+    github({
+      12: () => {
+        clock = NOW + 100 * SECOND_MS;
+        return found(12, MERGED)();
+      },
+    });
+    updateMock.mockResolvedValueOnce({ Attributes: task(12, MERGED_FIELDS) });
+
+    await handler(EVENT, context);
+
+    expect(events().map((event) => event.Item?.timestamp)).toEqual(['2026-11-18T00:21:40.000Z']);
+  });
+
+  test('a final state whose event cannot be written stays recorded: one warning, and no failed pull request', async () => {
+    candidates(task(12), task(13));
+    github({ 12: found(12, MERGED), 13: found(13) });
+    updateMock.mockResolvedValueOnce({ Attributes: task(12, MERGED_FIELDS) });
+    eventMock.mockRejectedValueOnce(ddbError('ProvisionedThroughputExceededException'));
+
+    await handler(EVENT, context);
+
+    // The metric line was written before the event, and the run went on to the next pull request.
+    expect(lines()).toMatchObject([{ PrOutcome: 'merged', task_id: 'task-12' }]);
+    expect(stdout.mock.invocationCallOrder[0]).toBeLessThan(eventMock.mock.invocationCallOrder[0]);
+    expect(asked()).toEqual([12, 13]);
+    expect(loggerMock.warn.mock.calls).toEqual([
+      ['PR outcome sweep: the event of a recorded state was not written', { task_id: 'task-12', error: 'ProvisionedThroughputExceededException' }],
+    ]);
+    expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 2, candidates: 2, read: 2, merged: 1, open: 1 }) });
+  });
 });
 
 describe('a pull request that is not the task\'s', () => {
-  /** The line that names the task, the same in every run until the record expires. */
+  /** The line that names the task. */
   const NOT_THE_TASKS = 'PR outcome sweep: no pull request of the task under the recorded number';
+  /** The write that records it, whole: no `updated_at`, no `ttl`, no other attribute. */
+  const RECORDED_NOT_FOUND = {
+    TableName: 'Tasks',
+    Key: { task_id: 'task-12' },
+    UpdateExpression: 'SET pr_state = :not_found',
+    ConditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(pr_state)',
+    ExpressionAttributeValues: { ':not_found': 'not_found' },
+  };
 
-  test('records nothing, and says which task, when GitHub has no pull request under the number', async () => {
+  // The task of the fixture finished two days before the run.
+  test('is recorded as not found, once, and says which task, when GitHub has no pull request under the number: no line, no event', async () => {
     candidates(task(12));
     github({ 12: PULL_REQUEST_NOT_FOUND });
 
     await handler(EVENT, context);
 
-    expect(updateMock).not.toHaveBeenCalled();
+    expect(updates()).toEqual([RECORDED_NOT_FOUND]);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(eventMock).not.toHaveBeenCalled();
     expect(loggerMock.warn).not.toHaveBeenCalled();
     expect(loggerMock.info.mock.calls).toEqual([
       [NOT_THE_TASKS, { task_id: 'task-12', repo: 'acme/widgets', pr_number: 12, why: 'not_found' }],
@@ -614,7 +783,7 @@ describe('a pull request that is not the task\'s', () => {
   test.each([
     ['open', {}],
     ['merged', MERGED],
-  ])('records nothing, and warns, when the %s pull request under the number was opened from the branch of another task', async (_state, fields) => {
+  ])('is recorded as not found, with a warning, when the %s pull request under the number was opened from the branch of another task', async (_state, fields) => {
     candidates(task(12));
     // The record of task-12 names pull request 12, which task-13 opened.
     github({ 12: found(13, fields) });
@@ -622,13 +791,59 @@ describe('a pull request that is not the task\'s', () => {
     await handler(EVENT, context);
 
     expect(asked()).toEqual([12]);
-    expect(updateMock).not.toHaveBeenCalled();
+    expect(updates()).toEqual([RECORDED_NOT_FOUND]);
     expect(stdout).not.toHaveBeenCalled();
+    expect(eventMock).not.toHaveBeenCalled();
     // The branch is GitHub's text: the line says that it is another one, not which.
     expect(loggerMock.warn.mock.calls).toEqual([
       [NOT_THE_TASKS, { task_id: 'task-12', repo: 'acme/widgets', pr_number: 12, why: 'other_head_branch' }],
     ]);
     expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 1, candidates: 1, read: 1, pr_not_found: 1 }) });
+  });
+
+  test.each<[string, Partial<TaskRecord>]>([
+    ['whose task finished less than an hour ago', { completed_at: ago(HOUR_MS - SECOND_MS), updated_at: ago(HOUR_MS - SECOND_MS) }],
+    ['that an earlier read recorded as open', { pr_state: 'open' }],
+  ])('is counted and named, and not recorded, for a pull request %s', async (_what, fields) => {
+    candidates(task(12, fields));
+    github({ 12: PULL_REQUEST_NOT_FOUND });
+
+    await handler(EVENT, context);
+
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(loggerMock.info.mock.calls).toEqual([
+      [NOT_THE_TASKS, { task_id: 'task-12', repo: 'acme/widgets', pr_number: 12, why: 'not_found' }],
+      ['PR outcome sweep summary', counted({ scanned: 1, candidates: 1, read: 1, pr_not_found: 1 })],
+    ]);
+  });
+
+  test('is counted and named all the same when another run recorded a state first: the write is refused, and nothing fails', async () => {
+    candidates(task(12));
+    github({ 12: PULL_REQUEST_NOT_FOUND });
+    updateMock.mockRejectedValueOnce(ddbError('ConditionalCheckFailedException'));
+
+    await handler(EVENT, context);
+
+    expect(updates()).toEqual([RECORDED_NOT_FOUND]);
+    expect(loggerMock.warn).not.toHaveBeenCalled();
+    expect(loggerMock.info.mock.calls).toEqual([
+      [NOT_THE_TASKS, { task_id: 'task-12', repo: 'acme/widgets', pr_number: 12, why: 'not_found' }],
+      ['PR outcome sweep summary', counted({ scanned: 1, candidates: 1, read: 1, pr_not_found: 1 })],
+    ]);
+  });
+
+  test('fails, and is not counted as not found, when the write that records it fails for another reason than its condition', async () => {
+    candidates(task(12), task(13));
+    github({ 12: PULL_REQUEST_NOT_FOUND, 13: found(13) });
+    updateMock.mockRejectedValueOnce(ddbError('ProvisionedThroughputExceededException'));
+
+    await handler(EVENT, context);
+
+    expect(loggerMock.info.mock.calls.map(([message]) => message)).not.toContain(NOT_THE_TASKS);
+    expect(loggerMock.warn.mock.calls).toEqual([
+      ['PR outcome sweep: a pull request failed', { task_id: 'task-12', error: 'ProvisionedThroughputExceededException' }],
+      ['PR outcome sweep summary', counted({ scanned: 2, candidates: 2, read: 2, open: 1, failed: 1 })],
+    ]);
   });
 });
 
@@ -874,13 +1089,16 @@ describe('what GitHub answers', () => {
       16: NOT_JSON,
       17: BAD_CREDENTIALS,
     });
-    updateMock.mockResolvedValueOnce({ Attributes: task(15, MERGED_FIELDS) });
+    // The write of task-13 records that its pull request is not there; the write of task-15 returns the record of the merge.
+    updateMock.mockImplementation(async (input: UpdateCommandInput) => (input.Key?.task_id === 'task-15' ? { Attributes: task(15, MERGED_FIELDS) } : {}));
 
     await handler(EVENT, context);
 
     expect(asked()).toEqual([12, 13, 14, 15, 16, 17]);
-    expect(summary().data).toMatchObject({ read: 6, merged: 1, repo_not_visible: 1, pr_not_found: 1, failed: 2, stopped: 'token' });
-    const written = JSON.stringify([loggerMock.info.mock.calls, loggerMock.warn.mock.calls, loggerMock.error.mock.calls, stdout.mock.calls]);
+    expect(summary().data).toMatchObject({ read: 6, merged: 1, repo_not_visible: 1, pr_not_found: 1, failed: 2, not_emitted: 0, stopped: 'token' });
+    const written = JSON.stringify([
+      loggerMock.info.mock.calls, loggerMock.warn.mock.calls, loggerMock.error.mock.calls, stdout.mock.calls, updateMock.mock.calls, eventMock.mock.calls,
+    ]);
     // The token, the logins of the author and of a reviewer, and the words of whoever answered.
     for (const text of [
       TOKEN, 'abca-agent', 'octocat', 'Could not resolve', 'Something went wrong', 'C0DE:1F2E3D', 'Sign in to the proxy', 'Bad credentials', 'docs.github.com',

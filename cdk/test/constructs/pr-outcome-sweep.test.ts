@@ -22,6 +22,7 @@ import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { PrOutcomeSweep } from '../../src/constructs/pr-outcome-sweep';
+import { TaskEventsTable } from '../../src/constructs/task-events-table';
 import { TaskTable } from '../../src/constructs/task-table';
 
 /** The logical id of the one resource of `type` whose id starts with `prefix`. */
@@ -35,15 +36,17 @@ describe('PrOutcomeSweep', () => {
   let template: Template;
   let nagFindings: string[];
   let table: string;
+  let eventsTable: string;
   let secret: string;
   let fn: string;
 
   beforeAll(() => {
     const stack = new Stack(new App(), 'TestStack');
-    // The real table construct: the index the sweep is granted is the one the table declares.
+    // The real table constructs: the index the sweep is granted is the one the task table declares.
     const taskTable = new TaskTable(stack, 'TaskTable');
+    const taskEventsTable = new TaskEventsTable(stack, 'TaskEventsTable');
     const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
-    new PrOutcomeSweep(stack, 'PrOutcomeSweep', { taskTable: taskTable.table, githubTokenSecret });
+    new PrOutcomeSweep(stack, 'PrOutcomeSweep', { taskTable: taskTable.table, taskEventsTable: taskEventsTable.table, githubTokenSecret });
     Aspects.of(stack).add(new AwsSolutionsChecks());
 
     template = Template.fromStack(stack);
@@ -51,6 +54,7 @@ describe('PrOutcomeSweep', () => {
       .filter((finding) => finding.id.startsWith('/TestStack/PrOutcomeSweep/'))
       .map((finding) => `${finding.id}: ${String(finding.entry.data)}`);
     table = idOf(template, 'AWS::DynamoDB::Table', 'TaskTable');
+    eventsTable = idOf(template, 'AWS::DynamoDB::Table', 'TaskEventsTable');
     secret = idOf(template, 'AWS::SecretsManager::Secret', 'GitHubTokenSecret');
     fn = idOf(template, 'AWS::Lambda::Function', 'PrOutcomeSweepSweepFn');
   });
@@ -88,21 +92,23 @@ describe('PrOutcomeSweep', () => {
     });
   });
 
-  test('tells the handler its table, its index, the token secret and its component label, and nothing else', () => {
+  test('tells the handler its two tables, its index, the token secret and its component label, and nothing else', () => {
     expect(template.findResources('AWS::Lambda::Function')[fn].Properties.Environment.Variables).toEqual({
       ABCA_COMPONENT: 'orchestr',
       TASK_TABLE_NAME: { Ref: table },
       TASK_STATUS_INDEX_NAME: 'StatusIndex',
+      TASK_EVENTS_TABLE_NAME: { Ref: eventsTable },
       GITHUB_TOKEN_SECRET_ARN: { Ref: secret },
     });
   });
 
-  test('may query the status index, update a task and read the token secret, and nothing else', () => {
+  test('may query the status index, update a task, put an event and read the token secret, and nothing else', () => {
     const policies = Object.values(template.findResources('AWS::IAM::Policy'));
     expect(policies).toHaveLength(1);
     const role = idOf(template, 'AWS::IAM::Role', 'PrOutcomeSweepSweepFnServiceRole');
     expect(policies[0].Properties.Roles).toEqual([{ Ref: role }]);
-    // The whole policy: no Scan, no other index, no creation or deletion of a task, no write to the secret.
+    // The whole policy: no Scan, no other index, no creation or deletion of a task, no read,
+    // change or deletion of an event, no write to the secret.
     expect(policies[0].Properties.PolicyDocument.Statement).toEqual([
       {
         Action: 'dynamodb:Query',
@@ -113,6 +119,11 @@ describe('PrOutcomeSweep', () => {
         Action: 'dynamodb:UpdateItem',
         Effect: 'Allow',
         Resource: { 'Fn::GetAtt': [table, 'Arn'] },
+      },
+      {
+        Action: 'dynamodb:PutItem',
+        Effect: 'Allow',
+        Resource: { 'Fn::GetAtt': [eventsTable, 'Arn'] },
       },
       {
         Action: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],

@@ -93,6 +93,8 @@ export interface TaskSummary {
   readonly created_at: string;
   readonly updated_at: string;
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; null before a session starts and on records that predate the field. */
+  readonly compute_type: 'agentcore' | 'ecs' | 'lambda-microvm' | null;
   /** Estimated spend in USD; null until the agent reports one. */
   readonly cost_usd: number | null;
   readonly completed_at: string | null;
@@ -120,7 +122,7 @@ export type TaskOutcome = 'verified_pr' | 'unverified_pr' | 'no_new_pr' | 'faile
 /** A place the work waited for, or was redirected by, a person. `approve` counts approval requests, whatever the answer. */
 export type TouchpointKind = 'approve' | 'clarify' | 'follow_up' | 'cancel';
 
-/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it; `unread` until one records a state. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
+/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it. `unread`: no read has recorded one yet, or a read found no pull request of the task under the recorded number and does not ask again. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
 export type PullRequestState = 'merged' | 'closed' | 'open' | 'unread';
 
 /** How far back a scoreboard looks: that many days up to now. */
@@ -228,6 +230,8 @@ export interface TaskDetail {
   readonly started_at: string | null;
   readonly completed_at: string | null;
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; null before a session starts and on records that predate the field. */
+  readonly compute_type: 'agentcore' | 'ecs' | 'lambda-microvm' | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;

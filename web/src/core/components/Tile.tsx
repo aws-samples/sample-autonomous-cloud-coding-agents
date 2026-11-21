@@ -43,6 +43,16 @@ export function TileGrid({ columns, children }: { columns: number; children: Rea
 /** The three lines of a tile. In a {@link TileGrid} they are the lines of its row; anywhere else they stack. */
 const LINES: CSSProperties = { display: 'grid', gridTemplateRows: 'subgrid', gridRow: 'span 3', rowGap: 0 };
 
+/** A label with the "i" that explains it. The label's last word keeps the icon beside it, so the icon never wraps onto a line of its own. */
+export function TileLabel({ label, icon }: { label: string; icon: ReactNode }) {
+  const lastWord = label.lastIndexOf(' ') + 1;
+  return (
+    <Box variant="awsui-key-label">
+      {label.slice(0, lastWord)}<span style={{ whiteSpace: 'nowrap' }}>{label.slice(lastWord)} {icon}</span>
+    </Box>
+  );
+}
+
 /**
  * One headline number under its label, with room below for what it rests on.
  * The group is named "<label>: <value>", so a screen reader gets the pair in one
@@ -58,15 +68,11 @@ export function Tile({ label, value, loading = false, explanation, children }: {
   children?: ReactNode;
 }) {
   const [shown, spoken] = loading ? ['-', 'loading'] : value === null ? ['-', 'no data'] : [value, value];
-  // The label's last word keeps the icon beside it, so the icon never wraps onto a line of its own.
-  const lastWord = label.lastIndexOf(' ') + 1;
   return (
     <Explain role="group" aria-label={`${label}: ${spoken}`} style={LINES} title={label} explanation={explanation}>
       {(icon) => (
         <>
-          <Box variant="awsui-key-label">
-            {label.slice(0, lastWord)}<span style={{ whiteSpace: 'nowrap' }}>{label.slice(lastWord)} {icon}</span>
-          </Box>
+          <TileLabel label={label} icon={icon} />
           <Box variant="awsui-value-large">{shown}</Box>
           <div>{children}</div>
         </>

@@ -25,9 +25,9 @@
  * pull request. The rest is pure and takes the clock as an argument: which task
  * is followed ({@link pullRequestCandidate}), in which order a run reads them
  * ({@link selectForRun}), what one read asks of the task record
- * ({@link decideRead}), and the two conditional writes that do it
- * ({@link openStateUpdate}, {@link finalStateUpdate}). The sweep itself, with the
- * table and the token, is `../sweep-pr-outcomes.ts`.
+ * ({@link decideRead}, {@link recordsNotFound}), and the conditional writes that do
+ * it ({@link firstStateUpdate}, {@link finalStateUpdate}). The sweep itself, with
+ * the tables and the token, is `../sweep-pr-outcomes.ts`.
  *
  * Of an answer from GitHub, only the HTTP status and the `type` of a GraphQL error
  * go into an error message, and so into a log: never a message of GitHub's, a
@@ -76,6 +76,13 @@ export const PR_SWEEP_MAX_PULL_REQUESTS = 250;
  * is never read again.
  */
 const MIN_CLOSED_AGE_MS = MS_PER_HOUR;
+
+/**
+ * How long a task has to have been finished before a read that finds no pull request of its
+ * own is recorded: one interval of the sweep. A pull request that was just opened can be
+ * missing from an answer, and a task with a recorded `not_found` is never read again.
+ */
+const MIN_FINISHED_AGE_MS = MS_PER_HOUR;
 
 /**
  * The longest full name a repository has on GitHub: 39 characters of owner, a slash, 100 of
@@ -247,7 +254,10 @@ function readAnswer(body: unknown): { read: PullRequestRead; rateLimitRemaining:
   if (has('NOT_FOUND', 'repository') || has('FORBIDDEN', 'repository') || has('FORBIDDEN', 'repository.pullRequest')) {
     return { read: { kind: 'repo_not_visible' }, rateLimitRemaining };
   }
-  if (has('NOT_FOUND', 'repository.pullRequest')) return { read: { kind: 'pr_not_found' }, rateLimitRemaining };
+  // A miss is recorded for good, so only the answer that says nothing else reads as one.
+  if (errors.length === 1 && has('NOT_FOUND', 'repository.pullRequest') && data?.repository?.pullRequest === null) {
+    return { read: { kind: 'pr_not_found' }, rateLimitRemaining };
+  }
 
   if (errors.length > 0) {
     throw new Error(`GitHub answered with errors: ${[...new Set(errors.map((error) => error.type))].join(', ')}`);
@@ -325,7 +335,7 @@ export async function fetchPullRequest(
   return readAnswer(answered.body);
 }
 
-/** A followed pull request without a final state on record: one that the sweep reads. */
+/** A followed pull request whose record holds no state, or `open`: one that the sweep reads. */
 export interface PullRequestCandidate {
   readonly taskId: string;
   /** `owner/name`, as the task record has it. */
@@ -333,21 +343,25 @@ export interface PullRequestCandidate {
   readonly number: number;
   /** An earlier read recorded the pull request as open. */
   readonly recordedOpen: boolean;
+  /** Epoch milliseconds of the task's finish; NaN when the record has no usable time. */
+  readonly finishedAtMs: number;
 }
 
 /**
  * The pull request to follow for a task; null for a task that has none. Followed: the new
- * pull request of a task that ended normally, until a final state is on record. Not
- * followed: a pull request opened by a task that failed, the pull requests of an
- * orchestration, and a pull request a task only worked on. A record without a repository
- * GitHub can have, or without the number, gives no candidate either.
+ * pull request of a task that ended normally, until a read records what became of it: a
+ * final state, or that GitHub has no such pull request of the task. Not followed: a pull
+ * request opened by a task that failed, the pull requests of an orchestration, and a pull
+ * request a task only worked on. A record without a repository GitHub can have, or without
+ * the number, gives no candidate either.
  */
 export function pullRequestCandidate(task: ScoreboardTask): PullRequestCandidate | null {
   const facts = taskFacts(task);
   const number = prNumberFromTask(task);
   if (!facts?.prFollowed || typeof task.repo !== 'string' || task.repo.length > REPO_FULL_NAME_MAX_LENGTH || number === null) return null;
-  if (facts.prState === 'merged' || facts.prState === 'closed') return null;
-  return { taskId: task.task_id, repo: task.repo, number, recordedOpen: facts.prState === 'open' };
+  // Every recorded state but `open` ends the following.
+  if (facts.prState !== null && facts.prState !== 'open') return null;
+  return { taskId: task.task_id, repo: task.repo, number, recordedOpen: facts.prState === 'open', finishedAtMs: facts.finishedAtMs };
 }
 
 /**
@@ -398,25 +412,36 @@ export function decideRead(candidate: PullRequestCandidate, snapshot: PullReques
 }
 
 /**
- * The write of a first read that found the pull request open. Like the final write, it sets
- * nothing else: `updated_at` is the finish time of a record without `completed_at`, and `ttl`
- * is the record's retention.
+ * Whether a read that found no pull request of the task is recorded. Only on a record
+ * without a state: a pull request that an earlier read recorded as open keeps that state,
+ * and its task stays a candidate.
  */
-export function openStateUpdate(tableName: string, taskId: string): UpdateCommandInput {
+export function recordsNotFound(candidate: PullRequestCandidate, nowMs: number): boolean {
+  return !candidate.recordedOpen && nowMs - candidate.finishedAtMs >= MIN_FINISHED_AGE_MS;
+}
+
+/**
+ * The write on a record without a state: `open` for a pull request found open, `not_found`
+ * when GitHub has no pull request of the task under the recorded number. Like the final
+ * write, it sets nothing else: `updated_at` is the finish time of a record without
+ * `completed_at`, and `ttl` is the record's retention.
+ */
+export function firstStateUpdate(tableName: string, taskId: string, state: 'open' | 'not_found'): UpdateCommandInput {
   return {
     TableName: tableName,
     Key: { task_id: taskId },
-    UpdateExpression: 'SET pr_state = :open',
+    UpdateExpression: `SET pr_state = :${state}`,
     // Without the test on the key, the update of a task that is gone creates an item.
     ConditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(pr_state)',
-    ExpressionAttributeValues: { ':open': 'open' },
+    ExpressionAttributeValues: { [`:${state}`]: state },
   };
 }
 
 /**
  * The write of a final state, for a snapshot that {@link decideRead} found final. It lands
- * once: the condition refuses a record that already holds a final state. It returns the
- * record as the write left it, which is what the metric line is built from.
+ * once: the condition lets it through on a record without a state or with `open`, and
+ * refuses every other. It returns the record as the write left it, which is what the
+ * metric line is built from.
  */
 export function finalStateUpdate(tableName: string, taskId: string, snapshot: PullRequestSnapshot): UpdateCommandInput {
   // The document client rejects `undefined`: a pull request nobody reviewed gets no `pr_first_review_at`.

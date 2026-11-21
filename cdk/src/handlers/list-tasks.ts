@@ -29,7 +29,7 @@ import { ErrorCode, errorResponse, paginatedResponse, successResponse } from './
 import { buildScoreboard, parseScoreboardRange, SCOREBOARD_PROJECTION, type ScoreboardTask, scoreboardWindows } from './shared/scoreboard';
 import { type Scoreboard, type ScoreboardRange, type TaskRecord, toTaskSummary } from './shared/types';
 import { makeDocClient } from './shared/ua';
-import { decodePaginationToken, encodePaginationToken, parseLimit, parseStatusFilter } from './shared/validation';
+import { decodePaginationToken, encodePaginationToken, isValidRepo, parseLimit, parseStatusFilter } from './shared/validation';
 
 const ddb = makeDocClient();
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
@@ -138,8 +138,9 @@ async function readFinishedTasks(
  * The caller's scoreboard: their finished tasks of the range and of the period before it,
  * one read per terminal status.
  * @param now - the time of the request: the windows, the bounds of the read and the response share it.
+ * @param repo - when given, only the tasks of that repository are counted.
  */
-async function loadScoreboard(userId: string, range: ScoreboardRange, now: Date): Promise<Scoreboard> {
+async function loadScoreboard(userId: string, range: ScoreboardRange, now: Date, repo?: string): Promise<Scoreboard> {
   const { previousFrom } = scoreboardWindows(range, now);
   // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism -- one read per terminal status: four
   const reads = await Promise.all(TERMINAL_STATUSES.map((status) => readFinishedTasks(userId, status, previousFrom)));
@@ -151,25 +152,38 @@ async function loadScoreboard(userId: string, range: ScoreboardRange, now: Date)
     // The caller is told through the response; this is how an operator sees who outgrows the cap.
     logger.warn('Scoreboard read stopped at its page cap', { user_id: userId, range, covered_from: coveredFrom.toISOString() });
   }
-  return buildScoreboard(reads.flatMap((read) => read.tasks), range, now, coveredFrom);
+  const tasks = reads.flatMap((read) => read.tasks);
+  // The read is the same whatever repository is asked for, so a cut still describes it. A
+  // repository's name is the same name in any letter case, on GitHub and in this filter.
+  const wanted = repo?.toLowerCase();
+  const counted = wanted === undefined ? tasks : tasks.filter((task) => typeof task.repo === 'string' && task.repo.toLowerCase() === wanted);
+  return buildScoreboard(counted, range, now, coveredFrom);
 }
 
 /**
  * The read models that `?view=` serves on this route in place of a page of tasks. Each is
  * the caller's own.
- * @param range - the `range` of the request, which the scoreboard reads.
+ * @param query - the `range` and the `repo` of the request, which the scoreboard reads.
  * @returns the view, or a 400 that names the values the parameter takes.
  */
-async function viewResponse(view: string, range: string | undefined, userId: string, requestId: string): Promise<APIGatewayProxyResult> {
+async function viewResponse(
+  view: string,
+  query: { range?: string; repo?: string },
+  userId: string,
+  requestId: string,
+): Promise<APIGatewayProxyResult> {
   if (view === 'budget') {
     return successResponse(200, await loadPersonalBudgetStatus(userId), requestId);
   }
   if (view === 'scoreboard') {
-    const scoreboardRange = parseScoreboardRange(range);
-    if (scoreboardRange === null) {
+    const range = parseScoreboardRange(query.range);
+    if (range === null) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid range value. Expected "7d" or "30d".', requestId);
     }
-    return successResponse(200, await loadScoreboard(userId, scoreboardRange, new Date()), requestId);
+    if (query.repo !== undefined && !isValidRepo(query.repo)) {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid repo value. Expected "owner/name".', requestId);
+    }
+    return successResponse(200, await loadScoreboard(userId, range, new Date(), query.repo), requestId);
   }
   return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid view value. Expected "budget" or "scoreboard".', requestId);
 }
@@ -190,7 +204,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // 2. Parse query parameters
     const params = event.queryStringParameters ?? {};
     if (params.view !== undefined) {
-      return await viewResponse(params.view, params.range, userId, requestId);
+      return await viewResponse(params.view, params, userId, requestId);
     }
     const limit = parseLimit(params.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     const statusFilter = params.status !== undefined ? parseStatusFilter(params.status) : null;

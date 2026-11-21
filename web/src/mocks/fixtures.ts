@@ -99,6 +99,9 @@ export const MOCK_IDS = {
   cancelled: mockId('CANCEL01'),
   completedOld: mockId('DONEOLD1'),
   noChanges: mockId('NOCHANGE'),
+  ecs: mockId('ECSQUIET'),
+  prMerged: mockId('PRMERGED'),
+  prClosed: mockId('PRCLOSED'),
 } as const;
 
 function ago(now: Date, seconds: number): string {
@@ -108,6 +111,21 @@ function ago(now: Date, seconds: number): string {
 const MIN = 60;
 const HOUR = 3600;
 const DAY = 24 * HOUR;
+
+/**
+ * The mock's one approval request, as the agent writes it in two places: on the pending
+ * request and in the milestone of its task. The reason is the agent's own text, which names
+ * the rules that held the action; the preview is the tool's input as JSON.
+ */
+const APPROVAL_REQUEST = {
+  request_id: 'req-01JF3KR0APPROVE00000001',
+  tool_name: 'Bash',
+  severity: 'high',
+  reason: 'Soft-deny: terraform_apply',
+  timeout_s: 300,
+  matching_rule_ids: ['terraform_apply'],
+} satisfies Partial<PendingApprovalSummary>;
+const APPROVAL_INPUT = '{"command": "terraform apply -target=module.staging_database", "description": "Apply the staging database change"}';
 
 function task(now: Date, overrides: Partial<TaskDetail> & Pick<TaskDetail, 'task_id' | 'status'>): TaskDetail {
   return {
@@ -125,6 +143,7 @@ function task(now: Date, overrides: Partial<TaskDetail> & Pick<TaskDetail, 'task
     error_classification: null,
     prompt_version: 'v3',
     channel_source: 'api',
+    compute_type: 'agentcore',
     created_at: ago(now, 10 * MIN),
     updated_at: ago(now, 1 * MIN),
     started_at: null,
@@ -206,6 +225,19 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       agent_heartbeat_at: ago(now, 9 * MIN),
       turns_completed: 31,
     }),
+    // On ECS the agent reports once, at its start: a report this old is all there is, and the task is healthy.
+    task(now, {
+      task_id: MOCK_IDS.ecs,
+      status: 'RUNNING',
+      repo: 'acme/infra',
+      task_description: 'Pin the Terraform provider versions',
+      compute_type: 'ecs',
+      created_at: ago(now, 19 * MIN),
+      started_at: ago(now, 18 * MIN),
+      updated_at: ago(now, 18 * MIN),
+      agent_heartbeat_at: ago(now, 18 * MIN),
+      turns_completed: 22,
+    }),
     task(now, {
       task_id: MOCK_IDS.awaiting,
       status: 'AWAITING_APPROVAL',
@@ -217,11 +249,13 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       agent_heartbeat_at: ago(now, 30),
       turns_completed: 8,
       approval_gate_count: 1,
-      awaiting_approval_request_id: 'req-01JF3KR0APPROVE00000001',
+      awaiting_approval_request_id: APPROVAL_REQUEST.request_id,
     }),
     task(now, {
       task_id: MOCK_IDS.queued,
       status: 'QUEUED',
+      // The backend is recorded when a session starts.
+      compute_type: null,
       task_description: 'Use cursor pagination, 50 per page',
       issue_number: 214,
       issue_title: 'Add pagination to GET /invoices',
@@ -234,6 +268,7 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
     task(now, {
       task_id: MOCK_IDS.hydrating,
       status: 'HYDRATING',
+      compute_type: null,
       repo: 'acme/docs',
       task_description: 'Document webhook retry behaviour',
       channel_source: 'slack',
@@ -330,6 +365,38 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       build_passed: true,
       lint_passed: true,
     }),
+    // Two whose pull request has ended, one each way: the last line of their activity says how, on a later day.
+    task(now, {
+      task_id: MOCK_IDS.prMerged,
+      status: 'COMPLETED',
+      repo: 'acme/docs',
+      task_description: 'Fix the broken links in the API reference',
+      pr_number: 212,
+      pr_url: 'https://github.com/acme/docs/pull/212',
+      created_at: ago(now, 9 * DAY + 20 * MIN),
+      started_at: ago(now, 9 * DAY + 19 * MIN),
+      completed_at: ago(now, 9 * DAY),
+      updated_at: ago(now, 9 * DAY),
+      duration_s: 1140,
+      cost_usd: 0.87,
+      build_passed: true,
+      lint_passed: true,
+    }),
+    task(now, {
+      task_id: MOCK_IDS.prClosed,
+      status: 'COMPLETED',
+      task_description: 'Cache the exchange rates for an hour',
+      pr_number: 1071,
+      pr_url: 'https://github.com/acme/payments-api/pull/1071',
+      created_at: ago(now, 6 * DAY + 20 * MIN),
+      started_at: ago(now, 6 * DAY + 19 * MIN),
+      completed_at: ago(now, 6 * DAY),
+      updated_at: ago(now, 6 * DAY),
+      duration_s: 1140,
+      cost_usd: 1.43,
+      build_passed: true,
+      lint_passed: true,
+    }),
   ];
 
   const events: Record<string, TaskEvent[]> = {
@@ -372,7 +439,13 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       [13 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
       [10 * MIN, 'agent_tool_call', tool('Bash', "{'command': 'terraform plan -target=module.staging_database', 'description': 'Preview the staging database change'}")],
       [9 * MIN, 'agent_turn', { turn: 6, text_preview: 'The plan only changes the staging database. Next I need to apply it.' }],
-      [2 * MIN, 'approval_requested', { request_id: 'req-01JF3KR0APPROVE00000001', reason: 'Infrastructure changes require approval' }],
+      // As the agent writes it: a milestone, with the request in its metadata.
+      [2 * MIN, 'agent_milestone', { milestone: 'approval_requested', ...APPROVAL_REQUEST, input_preview: APPROVAL_INPUT }],
+    ]),
+    [MOCK_IDS.ecs]: lifecycle(now, MOCK_IDS.ecs, 18 * MIN, [
+      [17 * MIN, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/ecsquiet/pin-terraform-providers build_before=True' }],
+      [17 * MIN - 5, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [3 * MIN, 'agent_turn', { turn: 22, text_preview: 'Every module now pins its providers. Running terraform validate on each of them.' }],
     ]),
     [MOCK_IDS.completed]: lifecycle(now, MOCK_IDS.completed, 2 * HOUR + 24 * MIN, [
       [2 * HOUR + 20 * MIN, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/donepr01/fix-dark-mode-contrast' }],
@@ -385,6 +458,32 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       [2 * HOUR + 5 * MIN, 'pr_url', { pr_url: 'https://github.com/acme/web-frontend/pull/482' }],
       [2 * HOUR + 3 * MIN, 'task_completed'],
     ]),
+    [MOCK_IDS.prMerged]: lifecycle(now, MOCK_IDS.prMerged, 9 * DAY + 19 * MIN, [
+      [9 * DAY + 18 * MIN, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/prmerged/fix-broken-links' }],
+      [9 * DAY + 17 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [9 * DAY + 2 * MIN, 'agent_milestone', { milestone: 'pr_created' }],
+      [9 * DAY, 'task_completed'],
+      // As ABCA's hourly read of GitHub writes it, once: within the hour after the merge.
+      [8 * DAY + 2 * HOUR, 'pr_outcome_recorded', {
+        pr_state: 'merged',
+        pr_closed_at: ago(now, 8 * DAY + 2 * HOUR + 25 * MIN),
+        pr_changes_requested: 0,
+        pr_first_review_at: ago(now, 8 * DAY + 5 * HOUR),
+      }],
+    ]),
+    [MOCK_IDS.prClosed]: lifecycle(now, MOCK_IDS.prClosed, 6 * DAY + 19 * MIN, [
+      [6 * DAY + 18 * MIN, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/prclosed/cache-exchange-rates' }],
+      [6 * DAY + 17 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [6 * DAY + 2 * MIN, 'agent_milestone', { milestone: 'pr_created' }],
+      [6 * DAY, 'task_completed'],
+      // A close is recorded once it is an hour old, since a closed pull request can be reopened: here 1 h 40 min after it.
+      [4 * DAY + 3 * HOUR, 'pr_outcome_recorded', {
+        pr_state: 'closed',
+        pr_closed_at: ago(now, 4 * DAY + 4 * HOUR + 40 * MIN),
+        pr_changes_requested: 1,
+        pr_first_review_at: ago(now, 5 * DAY + 2 * HOUR),
+      }],
+    ]),
     [MOCK_IDS.failed]: lifecycle(now, MOCK_IDS.failed, 4 * HOUR - 60, [
       [3 * HOUR + 50 * MIN, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/failed01/java-21' }],
       [3 * HOUR + 49 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
@@ -396,15 +495,10 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
   const pending: PendingApprovalSummary[] = [
     {
       task_id: MOCK_IDS.awaiting,
-      request_id: 'req-01JF3KR0APPROVE00000001',
-      tool_name: 'Bash',
-      tool_input_preview: 'terraform apply -target=module.staging_database',
-      severity: 'high',
-      reason: 'Infrastructure changes require approval',
+      ...APPROVAL_REQUEST,
+      tool_input_preview: APPROVAL_INPUT,
       created_at: ago(now, 2 * MIN),
-      timeout_s: 300,
       expires_at: ago(now, -3 * MIN),
-      matching_rule_ids: ['soft:terraform-apply'],
     },
   ];
 

@@ -20,12 +20,12 @@
 /**
  * The hourly sweep of pull-request outcomes against the AWS Emulator (ADR-013 Tier 2a).
  *
- * The real handler runs in-process. Its table is created from the TaskTable construct
- * and its token is a secret the emulator holds, so the candidate query (the status
- * index, the filter, the projection, the pages) and the two conditional writes run as
- * the expressions they are, and the token takes the real way from Secrets Manager to
- * the request. GitHub is outside this tier: `fetch` is a stub that answers per
- * pull-request number, and the tests assert that it was asked.
+ * The real handler runs in-process. Its tables are created from the TaskTable and
+ * TaskEventsTable constructs and its token is a secret the emulator holds, so the
+ * candidate query (the status index, the filter, the projection, the pages), the three
+ * conditional writes and the event run as the expressions they are, and the token takes
+ * the real way from Secrets Manager to the request. GitHub is outside this tier: `fetch`
+ * is a stub that answers per pull-request number, and the tests assert that it was asked.
  *
  * One case takes its task from the real writers: the create-task handler and the status
  * transitions of a run, the last of which carries the pull request the agent reports.
@@ -61,7 +61,7 @@ process.env.GITHUB_TOKEN_SECRET_ARN = `emu-${run}-github-token`;
 import { handler as createTask } from '../../src/handlers/create-task';
 import { INTEGRATION_NODE_SUFFIX } from '../../src/handlers/shared/orchestration-integration-node';
 import { transitionTask } from '../../src/handlers/shared/orchestrator';
-import { finalStateUpdate, openStateUpdate } from '../../src/handlers/shared/pr-outcome';
+import { finalStateUpdate, firstStateUpdate } from '../../src/handlers/shared/pr-outcome';
 import type { TaskRecord } from '../../src/handlers/shared/types';
 import { makeClient, makeDocClient } from '../../src/handlers/shared/ua';
 import { handler } from '../../src/handlers/sweep-pr-outcomes';
@@ -172,6 +172,17 @@ async function storedTask(taskId: string): Promise<Record<string, unknown> | und
     ConsistentRead: true,
   }));
   return Item;
+}
+
+/** The events of a task as the events table holds them, oldest first. */
+async function storedEvents(taskId: string): Promise<Record<string, unknown>[]> {
+  const { Items } = await ddb.send(new QueryCommand({
+    TableName: process.env.TASK_EVENTS_TABLE_NAME,
+    KeyConditionExpression: 'task_id = :task_id',
+    ExpressionAttributeValues: { ':task_id': taskId },
+    ConsistentRead: true,
+  }));
+  return Items ?? [];
 }
 
 /**
@@ -290,13 +301,13 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     expect(second.asked).toContain(number);
     expect(await storedTask(task.task_id)).toEqual(recorded);
     // And the open write itself cannot land a second time.
-    await expect(ddb.send(new UpdateCommand(openStateUpdate(process.env.TASK_TABLE_NAME!, task.task_id))))
+    await expect(ddb.send(new UpdateCommand(firstStateUpdate(process.env.TASK_TABLE_NAME!, task.task_id, 'open'))))
       .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
     expect(await storedTask(task.task_id)).toEqual(recorded);
     expect([...first.lines, ...second.lines].filter((line) => line.task_id === task.task_id)).toEqual([]);
   });
 
-  test('a pull request recorded as open and then merged gets the four fields and one line, and nothing else on its record moves', async () => {
+  test('a pull request recorded as open and then merged gets the four fields, one line and one event, and nothing else on its record moves', async () => {
     const { task, number } = await seedTask();
     pullRequests.set(number, openedBy(task.task_id));
     await sweep();
@@ -340,11 +351,25 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
       repo: REPO,
       workflow: 'coding/new-task-v1',
     }]);
+    // The whole event, in the shape of the platform's other events and kept as long: with what the write recorded.
+    const outcomeEvents = (await storedEvents(task.task_id)).filter((event) => event.event_type === 'pr_outcome_recorded');
+    expect(outcomeEvents).toEqual([{
+      task_id: task.task_id,
+      event_id: expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/),
+      event_type: 'pr_outcome_recorded',
+      timestamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+      ttl: expect.any(Number),
+      user_id: task.user_id,
+      repo: REPO,
+      metadata: { pr_state: 'merged', pr_closed_at: mergedAt, pr_first_review_at: firstReviewAt, pr_changes_requested: 1 },
+    }]);
+    expect(Math.abs((outcomeEvents[0].ttl as number) - (Date.now() / 1000 + RETENTION_S))).toBeLessThan(MINUTE_MS / 1000);
 
     // A final state takes the pull request out of the candidates: it is not asked about again.
     const after = await sweep();
     expect(after.asked).not.toContain(number);
     expect(after.lines.filter((line) => line.task_id === task.task_id)).toEqual([]);
+    expect((await storedEvents(task.task_id)).filter((event) => event.event_type === 'pr_outcome_recorded')).toHaveLength(1);
     // And a final write cannot land on a record that holds a final state.
     const closedLater = {
       state: 'closed' as const,
@@ -377,6 +402,32 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     const mine = lines.filter((line) => line.task_id === task.task_id);
     expect(mine).toMatchObject([{ _aws: { Timestamp: closedAtMs }, PrOutcome: 'closed', PullRequestsResolved: 1 }]);
     expect(mine[0]).not.toHaveProperty('TimeToMergeSeconds');
+  });
+
+  test('a pull request GitHub does not have as the task\'s is recorded as not found, with nothing else, and is not asked about again', async () => {
+    // The record of the first names a number the repository does not have. The pull request
+    // under the number of the second was opened from the branch of another task.
+    const missing = await seedTask();
+    const foreign = await seedTask();
+    pullRequests.set(foreign.number, openedBy(`task-${randomUUID()}`, { state: 'MERGED', mergedAt: wholeSecondStamp(Date.now() - 2 * HOUR_MS) }));
+
+    const first = await sweep();
+
+    expect(first.asked).toEqual(expect.arrayContaining([missing.number, foreign.number]));
+    for (const { task } of [missing, foreign]) {
+      // The whole record: `updated_at` and `ttl` are among what did not move.
+      expect(await storedTask(task.task_id)).toEqual({ ...task, pr_state: 'not_found' });
+      expect(first.lines.filter((line) => line.task_id === task.task_id)).toEqual([]);
+      expect(await storedEvents(task.task_id)).toEqual([]);
+    }
+
+    // The filter takes a record that says so out of the candidates.
+    const second = await sweep();
+    expect(second.asked).not.toContain(missing.number);
+    expect(second.asked).not.toContain(foreign.number);
+    // And the write cannot land on a record that holds a state.
+    await expect(ddb.send(new UpdateCommand(firstStateUpdate(process.env.TASK_TABLE_NAME!, missing.task.task_id, 'not_found'))))
+      .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
   });
 
   test('the tasks whose pull request is not followed are not asked about and not touched, in a run that reads the others', async () => {
@@ -418,7 +469,7 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     };
 
     // An update without the condition on the key creates the item.
-    await expect(ddb.send(new UpdateCommand(openStateUpdate(process.env.TASK_TABLE_NAME!, taskId))))
+    await expect(ddb.send(new UpdateCommand(firstStateUpdate(process.env.TASK_TABLE_NAME!, taskId, 'open'))))
       .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
     await expect(ddb.send(new UpdateCommand(finalStateUpdate(process.env.TASK_TABLE_NAME!, taskId, merged))))
       .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });

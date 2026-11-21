@@ -25,6 +25,7 @@ import {
   GitHubNoAnswerError,
   GitHubStopError,
   pullRequestCandidate,
+  recordsNotFound,
   selectForRun,
   type PullRequestCandidate,
   type PullRequestSnapshot,
@@ -375,6 +376,13 @@ describe('fetchPullRequest', () => {
   describe('fails the read of this one pull request', () => {
     /** What the read says of a pull request that lacks a field the sweep decides by. */
     const INCOMPLETE = 'GitHub answered with a pull request that is missing its state, head branch, fork flag or close time';
+    /** The error with which GitHub says that a repository has no pull request under a number. */
+    const MISS = {
+      type: 'NOT_FOUND',
+      path: ['repository', 'pullRequest'],
+      locations: [{ line: 4, column: 5 }],
+      message: 'Could not resolve to a PullRequest with the number of 12.',
+    };
 
     test('on another status, which is about one request, naming the status and not the message', async () => {
       fetchMock.mockResolvedValueOnce(answer({ message: 'Not Found', documentation_url: 'https://docs.github.com/graphql' }, 404));
@@ -415,6 +423,21 @@ describe('fetchPullRequest', () => {
             { type: 'NOT_FOUND', path: ['repository', 'pullRequest', 'reviews', 'nodes', 0, 'author'], locations: [{ line: 7, column: 54 }], message: 'Could not resolve to a User.' },
           ],
         },
+        'GitHub answered with errors: NOT_FOUND',
+      ],
+      // A miss is recorded for good: an answer that says less than the plain one, or more, is not taken for it.
+      ['the error of a miss in an answer without data', { data: null, errors: [MISS] }, 'GitHub answered with errors: NOT_FOUND'],
+      [
+        'the error of a miss beside a second error',
+        {
+          data: { rateLimit: { remaining: 4980 }, repository: { pullRequest: null } },
+          errors: [MISS, { message: 'Something went wrong while executing your query.' }],
+        },
+        'GitHub answered with errors: NOT_FOUND, untyped',
+      ],
+      [
+        'the error of a miss in an answer that holds the pull request all the same',
+        { data: { rateLimit: { remaining: 4980 }, repository: { pullRequest: pullRequest() } }, errors: [MISS] },
         'GitHub answered with errors: NOT_FOUND',
       ],
       ['a 200 whose repository is null, without an error to say why', { data: { rateLimit: { remaining: 4981 }, repository: null } }, 'GitHub answered without a pull request'],
@@ -624,8 +647,12 @@ const inOrchestration = (subIssueId: string): TaskRecord['channel_metadata'] =>
 const repoOfLength = (length: number): string => `${'o'.repeat(39)}/${'n'.repeat(length - 40)}`;
 
 describe('pullRequestCandidate', () => {
-  test('follows the new pull request of a task that ended normally, under the repository and number of its record', () => {
-    expect(pullRequestCandidate(task())).toEqual({ taskId: 'task-1', repo: 'Acme/Widgets', number: 12, recordedOpen: false });
+  /** When the task of the fixture finished. */
+  const FINISHED_AT_MS = Date.parse('2026-11-18T10:24:00Z');
+
+  test('follows the new pull request of a task that ended normally, under the repository and number of its record, with its finish time', () => {
+    expect(pullRequestCandidate(task()))
+      .toEqual({ taskId: 'task-1', repo: 'Acme/Widgets', number: 12, recordedOpen: false, finishedAtMs: FINISHED_AT_MS });
   });
 
   test('follows it whether or not its build passed', () => {
@@ -634,7 +661,8 @@ describe('pullRequestCandidate', () => {
   });
 
   test('keeps following a pull request that a read recorded as open', () => {
-    expect(pullRequestCandidate(task({ pr_state: 'open' }))).toEqual({ taskId: 'task-1', repo: 'Acme/Widgets', number: 12, recordedOpen: true });
+    expect(pullRequestCandidate(task({ pr_state: 'open' })))
+      .toEqual({ taskId: 'task-1', repo: 'Acme/Widgets', number: 12, recordedOpen: true, finishedAtMs: FINISHED_AT_MS });
   });
 
   test('takes the number from pr_number when the record has one', () => {
@@ -648,6 +676,7 @@ describe('pullRequestCandidate', () => {
   test.each<[string, Partial<TaskRecord>]>([
     ['whose pull request is recorded as merged', { pr_state: 'merged', pr_closed_at: '2026-11-19T09:15:42Z' }],
     ['whose pull request is recorded as closed', { pr_state: 'closed', pr_closed_at: '2026-11-19T09:15:42Z' }],
+    ['whose pull request is recorded as not found', { pr_state: 'not_found' }],
     ['that failed after it opened its pull request', { status: TaskStatus.FAILED }],
     ['that was cancelled', { status: TaskStatus.CANCELLED }],
     ['that is still running', { status: TaskStatus.RUNNING }],
@@ -670,6 +699,7 @@ const candidates = (count: number): PullRequestCandidate[] => Array.from({ lengt
   repo: 'acme/widgets',
   number: index + 1,
   recordedOpen: false,
+  finishedAtMs: NOW - 48 * HOUR_MS,
 }));
 const idsOf = (selected: readonly PullRequestCandidate[]): string[] => selected.map((candidate) => candidate.taskId);
 /** The first millisecond of the hour `hours` hours after an arbitrary one. */
@@ -757,7 +787,8 @@ describe('selectForRun', () => {
   });
 });
 
-const CANDIDATE: PullRequestCandidate = { taskId: 'task-1', repo: 'acme/widgets', number: 12, recordedOpen: false };
+/** The pull request of task-1, which finished two days ago and has no state on record. */
+const CANDIDATE: PullRequestCandidate = { taskId: 'task-1', repo: 'acme/widgets', number: 12, recordedOpen: false, finishedAtMs: NOW - 48 * HOUR_MS };
 const RECORDED_OPEN: PullRequestCandidate = { ...CANDIDATE, recordedOpen: true };
 
 /** A snapshot of the pull request of task-1: open, opened from its branch in the repository itself, not reviewed. */
@@ -814,5 +845,24 @@ describe('decideRead', () => {
   test('takes a pull request opened from a fork as not found, whatever its head branch and its state', () => {
     expect(decideRead(CANDIDATE, snapshot({ crossRepository: true }), NOW)).toBe('pr_not_found');
     expect(decideRead(RECORDED_OPEN, snapshot({ crossRepository: true, state: 'merged', closedAt: ago(HOUR_MS) }), NOW)).toBe('pr_not_found');
+  });
+});
+
+describe('recordsNotFound', () => {
+  // A pull request that was just opened can be missing from an answer: the hour gives it time to show.
+  test.each([
+    ['a second less than an hour ago', false, HOUR_MS - 1000],
+    ['exactly an hour ago', true, HOUR_MS],
+    ['two days ago', true, 48 * HOUR_MS],
+  ])('for a task that finished %s: %s', (_when, recorded, finishedForMs) => {
+    expect(recordsNotFound({ ...CANDIDATE, finishedAtMs: NOW - finishedForMs }, NOW)).toBe(recorded);
+  });
+
+  test('not on a record that holds the state open, however long ago its task finished', () => {
+    expect(recordsNotFound(RECORDED_OPEN, NOW)).toBe(false);
+  });
+
+  test('not for a task whose record has no usable finish time: how long ago it finished is not known', () => {
+    expect(recordsNotFound({ ...CANDIDATE, finishedAtMs: NaN }, NOW)).toBe(false);
   });
 });

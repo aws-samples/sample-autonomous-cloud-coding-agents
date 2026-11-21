@@ -73,7 +73,7 @@ describe('AgentStack', () => {
       .toEqual({ Ref: expect.stringMatching(/^UserConcurrencyTable/) });
   });
 
-  test('the pull-request sweep reads GitHub with the stack\'s own token secret, and is granted that secret only', () => {
+  test('the pull-request sweep works on the stack\'s own tables, reads GitHub with its token secret, and is granted that secret only', () => {
     const sweep = Object.entries(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
       .find(([id]) => id.startsWith('PrOutcomeSweep'))![1];
     const variables = sweep.Properties.Environment.Variables;
@@ -83,6 +83,8 @@ describe('AgentStack', () => {
       .toEqual({ Ref: expect.stringMatching(/^GitHubTokenSecret/) });
     expect(nested.Properties.Parameters[variables.TASK_TABLE_NAME.Ref])
       .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
+    expect(nested.Properties.Parameters[variables.TASK_EVENTS_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskEventsTable/) });
 
     // The secret its role may read is the one its environment names.
     const secretStatements = Object.entries(concurrencyMaintenance.findResources('AWS::IAM::Policy'))

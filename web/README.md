@@ -61,7 +61,9 @@ it or return to its tab. Creating, cancelling or deciding a task happens on
 other pages: it marks the Scoreboard stale, and the next visit reads it again.
 "Needs attention" uses the orchestrator's heartbeat thresholds
 (`src/core/util/task-health.ts`), so the console flags what the platform's
-reconciler would act on.
+reconciler would act on. Like the orchestrator, it does not apply them to a
+task on ECS (`compute_type`), where the agent writes its heartbeat once, at its
+start: such a task is never flagged as quiet.
 
 The API defines every Scoreboard number (`cdk/src/handlers/shared/scoreboard.ts`);
 the page formats them. Its only arithmetic is presentation: a percentage from a

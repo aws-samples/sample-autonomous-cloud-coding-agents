@@ -98,7 +98,9 @@ describe('MicroVM artifact packaging and immutable publication', () => {
       path.join(fixture, 'cdk/scripts/package-microvm-artifact.sh'), ...args,
     ], {
       encoding: 'utf8',
-      timeout: 20_000,
+      // One run takes 7 to 11 seconds on an idle machine and several times that inside a parallel
+      // build on a busy one: a run that is killed at its limit ends with `status: null`.
+      timeout: 120_000,
       env: {
         ...process.env,
         PATH: `${path.join(fixture, 'bin')}${path.delimiter}${process.env.PATH}`,

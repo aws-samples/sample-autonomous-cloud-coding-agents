@@ -37,7 +37,7 @@ describe('AppShell', () => {
 
     await waitFor(() => expect(first('Notifications: 1 approval request')).toBeInTheDocument());
     fireEvent.click(first('Notifications: 1 approval request'));
-    const item = await screen.findByText('Infrastructure changes require approval');
+    const item = await screen.findByText('Soft-deny: terraform_apply');
     fireEvent.click(item);
     await waitFor(() => expect(router.state.location.pathname).toBe(`/tasks/${MOCK_IDS.awaiting}`));
   });

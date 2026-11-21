@@ -448,9 +448,12 @@ export interface TaskRecord {
    * every task whose pull request that read does not follow: one that opened no new
    * pull request, and one that is part of an orchestration. ``merged`` and
    * ``closed`` are final: a pull request recorded as either is not read again.
-   * Internal, like the three fields below: no API mapper exposes them.
+   * ``not_found`` ends the reading as well, without being a final state: GitHub
+   * had no pull request of this task under the recorded number, and nothing else
+   * is written with it. Internal, like the three fields below: no API mapper
+   * exposes them.
    */
-  readonly pr_state?: 'open' | 'merged' | 'closed';
+  readonly pr_state?: 'open' | 'merged' | 'closed' | 'not_found';
   /** GitHub's merge time (``merged``) or close time (``closed``), ISO; written with the final state. */
   readonly pr_closed_at?: string;
   /**
@@ -537,6 +540,10 @@ export interface TaskDetail {
    * operator can see. Keep in sync with ``cli/src/types.ts::TaskDetail``.
    */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. What a heartbeat
+   *  says differs by backend, so a reader of ``agent_heartbeat_at`` needs it. */
+  readonly compute_type: ComputeType | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -630,6 +637,10 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. On the summary beside
+   *  ``agent_heartbeat_at``, because what a heartbeat says differs by backend. */
+  readonly compute_type: ComputeType | null;
   /**
    * Estimated spend in USD (null until the agent reports one). On the summary so a
    * cost view can total a page of tasks without one detail call per task.
@@ -669,7 +680,7 @@ export type TaskOutcome = 'verified_pr' | 'unverified_pr' | 'no_new_pr' | 'faile
 /** A place the work waited for, or was redirected by, a person. `approve` counts approval requests, whatever the answer. */
 export type TouchpointKind = 'approve' | 'clarify' | 'follow_up' | 'cancel';
 
-/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it; `unread` until one records a state. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
+/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it. `unread`: no read has recorded one yet, or a read found no pull request of the task under the recorded number and does not ask again. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
 export type PullRequestState = 'merged' | 'closed' | 'open' | 'unread';
 
 /** How far back a scoreboard looks: that many days up to now. */
@@ -1118,6 +1129,7 @@ export function toTaskDetail(
     // ADR-021 P2r2-F11: written by every backend, consumed by the orchestrator for
     // hang detection, and — until this line — invisible to every API consumer.
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
+    compute_type: record.compute_type ?? null,
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
     cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
@@ -1387,6 +1399,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     created_at: record.created_at,
     updated_at: record.updated_at,
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
+    compute_type: record.compute_type ?? null,
     cost_usd: coerceNumericOrNull(record.cost_usd, { task_id: record.task_id, field: 'cost_usd' }, logger),
     completed_at: record.completed_at ?? null,
     channel_source: record.channel_source,

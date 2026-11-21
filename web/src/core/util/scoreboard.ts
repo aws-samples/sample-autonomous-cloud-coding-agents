@@ -209,7 +209,7 @@ function noneMerged(period: ScoreboardPeriod): string {
   if (mergedOfRead(period).total > 0) return NONE_MERGED;
   const { unread } = period.pull_requests;
   if (unread > 0) {
-    // No "yet": for a repository ABCA's GitHub token cannot read, no read is coming.
+    // No "yet": for a pull request ABCA's token cannot read, or one GitHub does not have, no read is coming.
     const unreadOnes = unread === 1 ? 'the new pull request' : `the ${formatCount(unread)} new pull requests`;
     return `ABCA has not read ${unreadOnes} of this period on GitHub.`;
   }
@@ -435,7 +435,7 @@ export const SECTIONS: readonly SectionSpec[] = [
             + ' for more than 7 days").',
           how: "Merged pull requests divided by this period's new pull requests that ABCA has read. Recent ones have had less"
             + ' time, so it can still rise; the period before is counted as it stood at its own end. ABCA reads GitHub about'
-            + " once an hour. Not read: pull requests in a repository ABCA's GitHub token cannot read. Not followed: those of a"
+            + " once an hour. Not read: pull requests ABCA's token cannot read or GitHub does not have. Not followed: those of a"
             + ' task that failed, and of an orchestration.',
         },
         value: (period) => percent(mergedOfRead(period)),

@@ -43,6 +43,7 @@ describe('format', () => {
     started_at: '2026-01-01T00:01:00Z',
     completed_at: '2026-01-01T01:00:00Z',
     agent_heartbeat_at: '2026-01-01T00:59:48Z',
+    compute_type: null,
     duration_s: 3540,
     cost_usd: 0.1234,
     build_passed: true,
@@ -172,6 +173,18 @@ describe('format', () => {
           agent_heartbeat_at: null,
         };
         expect(formatTaskDetail(running)).not.toContain('Heartbeat:');
+      });
+
+      test('hides it on ecs, where the agent beats once, at its start, and the age only grows', () => {
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          compute_type: 'ecs',
+          agent_heartbeat_at: '2026-08-07T00:00:00.000Z',
+        };
+
+        expect(formatTaskDetail(running, Date.parse('2026-08-07T00:00:12.000Z'))).not.toContain('Heartbeat:');
       });
 
       test('degrades to a placeholder rather than throwing on a malformed value', () => {
@@ -346,6 +359,7 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
         cost_usd: null,
         completed_at: null,
         channel_source: 'api',
@@ -377,6 +391,7 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
         cost_usd: null,
         completed_at: null,
         channel_source: 'api',
@@ -394,6 +409,17 @@ describe('format', () => {
 
       test('shows a placeholder when the agent has not beaten yet', () => {
         expect(formatTaskList([base], now)).toContain('—');
+      });
+
+      /** The HEARTBEAT cell of the one task listed. */
+      const heartbeatCell = (listed: TaskSummary) => formatTaskList([listed], now).split('\n')[2].split(/ {2,}/)[4];
+
+      test.each(['agentcore', 'lambda-microvm'] as const)('renders the age on %s, where the agent keeps beating', (backend) => {
+        expect(heartbeatCell({ ...base, compute_type: backend, agent_heartbeat_at: '2026-08-07T00:05:18.000Z' })).toBe('12s ago');
+      });
+
+      test('shows a placeholder on ecs, where the agent beats once, at its start, and the age only grows', () => {
+        expect(heartbeatCell({ ...base, compute_type: 'ecs', agent_heartbeat_at: '2026-08-07T00:05:18.000Z' })).toBe('—');
       });
 
       test('suppresses it on a terminal task, where the last beat is noise', () => {
@@ -434,6 +460,7 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
         cost_usd: null,
         completed_at: null,
         channel_source: 'api',
@@ -459,6 +486,7 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
         cost_usd: null,
         completed_at: null,
         channel_source: 'api',
@@ -483,6 +511,7 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
         cost_usd: null,
         completed_at: null,
         channel_source: 'api',

@@ -29,7 +29,7 @@ Evaluation consumes the same data that observability and code attribution captur
 | TaskEvents | Audit log: state transitions, step events, guardrail events |
 | Agent logs and traces | CloudWatch logs, X-Ray spans, tool calls, reasoning steps |
 | Code artifacts | PR description, commits, diff, repo/branch/issue links |
-| PR outcome signals | Merged vs. closed-without-merge, read from GitHub once an hour and recorded on the task record (see [Pull-request outcomes](/sample-autonomous-cloud-coding-agents/architecture/observability#pull-request-outcomes)). Writing it as a positive/negative signal on task episodes is a later step. |
+| PR outcome signals | Merged vs. closed-without-merge, read from GitHub once an hour and recorded on the task record and as a `pr_outcome_recorded` task event (see [Pull-request outcomes](/sample-autonomous-cloud-coding-agents/architecture/observability#pull-request-outcomes)). Writing it as a positive/negative signal on task episodes is a later step. |
 | Review feedback | PR review comments captured via the review feedback memory loop (see [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory)) |
 
 ## Agent self-feedback
@@ -42,7 +42,7 @@ Recurring themes (e.g. "I needed to know this repo uses a custom linter") are su
 
 System prompts are treated as versioned, testable artifacts. Each task records the `prompt_version` (SHA-256 hash of deterministic prompt parts) in the task record, enabling correlation: "did merge rates improve after prompt version X?"
 
-- **A/B comparison (planned)** - Run the same task type with two prompt variants and compare outcomes (merge rate, failure rate, token usage). Requires variant assignment, outcome tracking per variant, and a comparison dashboard.
+- **A/B comparison (planned)** - Run the same task type with two prompt variants and compare outcomes (merge rate, failure rate, token usage). Requires variant assignment and a comparison dashboard. The merge or close of a followed pull request is recorded on the task, beside its `prompt_version`; nothing compares by variant yet.
 - **Change tracking** - Prompt diffs between versions are reviewable. Versions stored in a versioned store for audit and rollback.
 
 ## Memory effectiveness metrics
@@ -122,11 +122,41 @@ Risk level is stored in the task record and emitted as a `TaskEvent`, enabling t
 
 The combined output of all three tiers is posted to the PR as a structured validation report (comment or GitHub Check Run).
 
+## PR outcome tracking and `bgagent stats`
+
+Two requests named these things in their own words. What stands for each of them:
+
+| PR outcome tracking (#473) asked for | What is built |
+|--------------------------------------|---------------|
+| Outcomes through GitHub webhooks | A read of GitHub once an hour, from the task's own repository and pull request number (see [Pull-request outcomes](/sample-autonomous-cloud-coding-agents/architecture/observability#pull-request-outcomes)) |
+| `pr_outcome` on the task record: `merged`, `closed` or `abandoned` | `pr_state`: `merged` or `closed`. `abandoned` is not a state: a pull request closed without merging is `closed`, and one that stays open is `open` and shows under "Pull requests open for more than 7 days" |
+| `merged_at` | `pr_closed_at`: GitHub's merge time, or its close time |
+| `revision_count` | `pr_changes_requested`: the reviews that requested changes. `pr_first_review_at` is recorded beside it |
+| The event `pr_outcome_recorded` | Written to the task's events when a merge or a close is recorded |
+| The outcome in `bgagent stats` and in an API | `bgagent stats` (see the [user guide](/sample-autonomous-cloud-coding-agents/using/using-the-cli#reading-your-scoreboard-stats)) and `GET /v1/tasks?view=scoreboard` (see [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract#list-tasks)); for one task, the `pr_outcome_recorded` event of `GET /v1/tasks/{task_id}/events` |
+| Signals that feed the memory systems | Not built: the outcome is not written to task episodes |
+
+| `bgagent stats` (#412) asked for | What answers it |
+|----------------------------------|-----------------|
+| Tasks submitted | Tasks finished, by outcome: a task counts in the period in which it finished |
+| PRs opened | New pull requests: the outcomes `verified_pr` and `unverified_pr` |
+| Merge rate | "Merged, so far" |
+| Median revision cycles | None. "Merged without being sent back" is the nearest, and the change requests of each pull request are recorded |
+| CI pass rate | "Ended in a verified pull request": the repository's build command passed in the agent's session, which is not a check on GitHub |
+| Cost totals | The recorded spend of the coding tasks, and "Spend per verified pull request" |
+| `GET /stats` returning JSON aggregates | `GET /v1/tasks?view=scoreboard` |
+| `--since 30d`, and `--format table` or `json` | `--range 7d` or `30d`, no other length, and `--output text` or `json`, as the other commands spell it |
+| A filter by repository | `--repo owner/repo` |
+| A filter by user | Not built: the numbers are the caller's own. Every user's are the CloudWatch row |
+| Proxy metrics told apart from customer impact | [Not counted and not measured](/sample-autonomous-cloud-coding-agents/architecture/observability#not-counted-and-not-measured) |
+
+[The numbers](/sample-autonomous-cloud-coding-agents/architecture/observability#the-numbers) defines each number that these tables name.
+
 ## Phasing
 
 | Phase | What it adds |
 |-------|-------------|
-| Current | No automated evaluation. Manual inspection of PRs and logs. The state of the new pull requests that ABCA follows (merged, closed, still open) is read from GitHub once an hour and shown on the factory scoreboard. |
+| Current | No automated evaluation. Manual inspection of PRs and logs. The state of the new pull requests that ABCA follows (merged, closed, still open) is read from GitHub once an hour and shown on the factory scoreboard and by `bgagent stats`; a merge or a close is also recorded as a task event. |
 | Next | Agent self-feedback. Prompt versioning (hash stored with task records). Tiered validation pipeline (Tiers 1-3). PR risk level and validation reports. |
-| Later | Review feedback memory loop. The rest of PR outcome tracking: an outcome event, and the outcome as a signal on task episodes. Failure categorization. Memory effectiveness metrics. |
+| Later | Review feedback memory loop. The outcome of a pull request as a signal on task episodes. Failure categorization. Memory effectiveness metrics. |
 | Future | LLM-based trace analysis. A/B prompt comparison. Learned rules from memory in Tier 2. Historical risk correlation in Tier 3. Risk trending dashboards. |

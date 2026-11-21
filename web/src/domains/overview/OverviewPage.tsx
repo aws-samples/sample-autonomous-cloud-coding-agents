@@ -32,6 +32,7 @@ import { Explain, type Explanation } from '../../core/components/Explain';
 import { QueryError } from '../../core/components/QueryError';
 import { RouterLink } from '../../core/components/RouterLink';
 import { StatusBadge } from '../../core/components/StatusBadge';
+import { TileLabel } from '../../core/components/Tile';
 import { formatRelativeTime, repoHref, taskHref, taskTitle } from '../../core/util/format';
 import {
   ATTENTION_LABELS,
@@ -71,7 +72,8 @@ export const COUNTERS: readonly Counter[] = [
     count: (tasks) => tasks.filter((t) => isActive(t.status)).length,
   },
   {
-    label: 'Waiting in line',
+    // Not "in line": a task that waits for its files is counted too, and no limit holds that one back.
+    label: 'Waiting to start',
     href: '/tasks?view=queued',
     explanation: {
       what: 'Tasks that have not started: waiting in line behind the ones you have running, or waiting for their files.',
@@ -103,13 +105,14 @@ export const COUNTERS: readonly Counter[] = [
       why: 'A quiet agent may have hung or crashed, and the task then goes nowhere. Open it from "Needs you" to see how far it'
         + ' got: send it a message, or cancel it and submit the work again.',
       how: 'Tasks with the status "Working" whose agent last reported more than 4 minutes ago, or not once in its first 6'
-        + ' minutes, among your 100 most recent tasks. On AgentCore and Lambda MicroVMs ABCA fails such a task itself; on ECS'
-        + ' the agent reports only once, at its start, so a healthy task shows up here after 4 minutes.',
+        + ' minutes, among your 100 most recent tasks. On AgentCore and Lambda MicroVMs ABCA fails such a task itself. Tasks'
+        + ' on ECS are not counted.',
     },
     count: (tasks, _pendingApprovals, now) => tasks.filter((t) => hasStaleHeartbeat(t, now)).length,
   },
   {
-    label: 'Failed (24h)',
+    // Both statuses in the name: "Failed" alone is one of them everywhere else in the console.
+    label: 'Failed or ran out of time (24h)',
     href: '/tasks?view=unsuccessful',
     explanation: {
       what: 'Tasks that failed or ran out of time in the last 24 hours.',
@@ -175,7 +178,7 @@ export function OverviewPage() {
               <Explain key={counter.label} title={counter.label} explanation={counter.explanation}>
                 {(icon) => (
                   <>
-                    <Box variant="awsui-key-label">{counter.label} {icon}</Box>
+                    <TileLabel label={counter.label} icon={icon} />
                     <Link
                       variant="awsui-value-large"
                       href={counter.href}

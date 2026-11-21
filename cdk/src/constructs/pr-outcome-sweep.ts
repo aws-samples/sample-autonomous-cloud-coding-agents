@@ -44,6 +44,8 @@ const SWEEP_MEMORY_MB = 256;
 export interface PrOutcomeSweepProps {
   /** TaskTable: the sweep queries its StatusIndex for COMPLETED tasks, and updates the ones whose pull request it reads. */
   readonly taskTable: dynamodb.ITable;
+  /** TaskEventsTable: the sweep puts one event there for each final state it records. */
+  readonly taskEventsTable: dynamodb.ITable;
   /** The secret of the platform GitHub token, which the sweep reads pull requests with. */
   readonly githubTokenSecret: secretsmanager.ISecret;
 }
@@ -53,7 +55,8 @@ export interface PrOutcomeSweepProps {
  *
  * A scheduled Lambda that asks GitHub what became of each new pull request that ABCA
  * follows, and records the answer on the task that opened it: the factory scoreboard
- * reads merges, closes and reviews from there.
+ * reads merges, closes and reviews from there. A merge or a close also becomes an event
+ * in the history of the task.
  */
 export class PrOutcomeSweep extends Construct {
   constructor(scope: Construct, id: string, props: PrOutcomeSweepProps) {
@@ -71,6 +74,7 @@ export class PrOutcomeSweep extends Construct {
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_STATUS_INDEX_NAME: TaskTable.STATUS_INDEX,
+        TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
       },
       bundling: {
@@ -78,10 +82,11 @@ export class PrOutcomeSweep extends Construct {
       },
     });
 
-    // The function holds a GitHub token that can write, so it gets the two table actions it
-    // uses, each on the one resource it uses it on. The table's grants are wider: its read and
-    // write grants add Scan and the creation and deletion of tasks, and each of its grants,
-    // `grant` with a single action too, adds every index of the table (`index/*`).
+    // The function holds a GitHub token that can write, so it gets the three table actions it
+    // uses, each on the one resource it uses it on. The tables' grants are wider: the read and
+    // write grants add Scan, the creation and deletion of tasks and the change and deletion of
+    // events, and each grant, `grant` with a single action too, adds every index of a table
+    // that has one (`index/*`).
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:Query'],
       resources: [`${props.taskTable.tableArn}/index/${TaskTable.STATUS_INDEX}`],
@@ -89,6 +94,10 @@ export class PrOutcomeSweep extends Construct {
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:UpdateItem'],
       resources: [props.taskTable.tableArn],
+    }));
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem'],
+      resources: [props.taskEventsTable.tableArn],
     }));
     props.githubTokenSecret.grantRead(fn);
 

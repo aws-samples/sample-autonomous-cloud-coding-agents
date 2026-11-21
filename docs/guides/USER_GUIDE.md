@@ -749,7 +749,7 @@ The table is `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, `DESCRIPTION`.
 While a task is `RUNNING` the agent writes a liveness beat every 45 seconds. `bgagent status` shows it as a `Heartbeat:` line and `bgagent list` as a `HEARTBEAT` column, both as an **age** rather than a timestamp, because the age is the signal:
 
 ```text
-Heartbeat:   2026-04-01T00:41:02.118Z (12s ago)
+  Heartbeat:     12s ago
 ```
 
 - **Under ~1 minute** - healthy; the agent is working.
@@ -827,6 +827,39 @@ node lib/bin/bgagent.js --verbose submit --repo owner/repo --task "Fix the bug"
 ```bash
 node lib/bin/bgagent.js cancel <TASK_ID>
 ```
+
+### Reading your scoreboard (stats)
+
+`bgagent stats` prints the scoreboard of your own finished tasks: how long the work you handed to agents took, how often it ended in a verified and then a merged pull request, how much of your attention and money it needed, and whether it stayed inside the rules.
+
+```bash
+# Your tasks of the last 30 days
+node lib/bin/bgagent.js stats
+
+# The last 7 days, in one repository
+node lib/bin/bgagent.js stats --range 7d --repo owner/repo
+
+# The same numbers as JSON
+node lib/bin/bgagent.js stats --output json
+```
+
+**Options:**
+
+| Flag | Description |
+|---|---|
+| `--range` | Period the numbers cover: `7d` or `30d` (default). It ends at the moment of the request. |
+| `--repo` | Count the tasks of one repository only (`owner/repo`, in any letter case). |
+| `--output` | Output format: `text` (default) or `json`. `json` prints the scoreboard as the API returns it (see [API_CONTRACT.md](../design/API_CONTRACT.md#list-tasks)). |
+
+The numbers stand under four headings, Speed, Quality, Leverage and Trust, and the finished tasks per outcome follow them. Under a number stand the counts it rests on and, for some, the same number for the period of that length before. A number with nothing to compute it from shows `-`, and the line under it says why. The **Scoreboard** page of the operator console shows the same numbers under the same labels.
+
+What a number counts is defined in one document, the observability design: [The numbers](../design/OBSERVABILITY.md#the-numbers) has a row for every number, under the label the command prints, [Words](../design/OBSERVABILITY.md#words) defines the terms those rows use and the six outcomes, and [Not counted and not measured](../design/OBSERVABILITY.md#not-counted-and-not-measured) lists what the scoreboard does not see.
+
+**Limits:**
+
+- **Your own tasks only.** No option shows another user's numbers or a team's; every user's are on the CloudWatch dashboard, in the "Factory scoreboard" row.
+- **7 or 30 days.** The numbers cover the last 7 or 30 days, beside the period of the same length before, and no option reaches further back.
+- **`--repo` filters after the read.** A request reads a bounded number of your task records and then counts those of the repository, so the notice that the numbers cover part of the range can appear for a repository with few tasks.
 
 ## Approval gates (Cedar HITL)
 
@@ -1124,8 +1157,9 @@ Available events:
 - **Orchestration** - `admission_queued`, `queue_pickup`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
 - **Interactive** - `nudge_acknowledged`, `agent_milestone`
-- **Approvals (Cedar HITL)** - `approval_requested`, `approval_recorded`, `approval_timed_out`
+- **Approvals (Cedar HITL)** - `approval_decision_recorded`, written when a request is approved or denied, and milestones of `agent_milestone`, among them `approval_requested`, `approval_granted`, `approval_denied`, `approval_timed_out` and `approval_stranded`
 - **Output** - `pr_created`, `pr_updated`
+- **After the task** - `pr_outcome_recorded`: ABCA read on GitHub that the pull request the task opened was merged or closed, which can be days after the task finished. ABCA reads about once an hour, and the event comes with the read that records it
 
 **Error classifiers** on terminal failure events provide a specific reason:
 
