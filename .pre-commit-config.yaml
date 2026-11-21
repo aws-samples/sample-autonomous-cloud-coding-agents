@@ -104,6 +104,14 @@ repos:
         files: ^agent/.*\.py$
         stages: [pre-commit]
 
+      - id: shellcheck
+        name: shellcheck (shell scripts)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:shell'
+        language: system
+        pass_filenames: false
+        files: \.sh$
+        stages: [pre-commit]
+
       - id: docs-sync
         name: sync docs → Starlight mirrors
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:sync && git add docs/src/content/docs/'

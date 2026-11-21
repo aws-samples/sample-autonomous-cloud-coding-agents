@@ -213,3 +213,120 @@ describe('the git hooks step of the install task', () => {
     expect(run((_, repo) => fs.rmSync(path.join(repo, '.git'), { recursive: true }))).toMatchObject({ status: 0, called: false, stderr: '' });
   });
 });
+
+describe('the shell script lint', () => {
+  /**
+   * The script of the task: the lines between `run = '''` and the closing `'''`. `task` ends a
+   * table at a line that starts with `[`, so no line of the script may start with a `[ ... ]` test.
+   */
+  const script = (): string => {
+    const lines = task('check:shell');
+    const start = lines.indexOf("run = '''");
+    const end = lines.indexOf("'''", start + 1);
+    if (start < 0 || end < 0) {
+      throw new Error('check:shell: its command is not one multi-line script');
+    }
+    return lines.slice(start + 1, end).join('\n');
+  };
+
+  type Files = Record<string, string>;
+
+  /**
+   * Runs the script the way mise runs an inline task, in a repository whose index holds `tracked`
+   * and whose working tree also holds `untracked` and has lost `deleted`. A stand-in for
+   * shellcheck records how it was called and exits with `shellcheckStatus`.
+   */
+  const run = (
+    tracked: Files,
+    { untracked = {}, deleted = [], shellcheckStatus = 0 }: { untracked?: Files; deleted?: string[]; shellcheckStatus?: number } = {},
+  ) => {
+    const source = script();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-shell-lint-'));
+    try {
+      const [repo, bin] = ['repo', 'bin'].map((name) => path.join(root, name));
+      [repo, bin].forEach((dir) => fs.mkdirSync(dir));
+      const write = (files: Files) => Object.entries(files).forEach(([file, text]) => {
+        fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+        fs.writeFileSync(path.join(repo, file), text);
+      });
+      const record = path.join(bin, 'call.json');
+      // Started by the node that runs this suite, not by whichever `node` PATH holds.
+      fs.writeFileSync(path.join(bin, 'shellcheck'), `#!${process.execPath}
+const call = { args: process.argv.slice(2), opts: process.env.SHELLCHECK_OPTS ?? null };
+require('node:fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify(call));
+process.exit(${shellcheckStatus});
+`, { mode: 0o755 });
+
+      // No inherited GIT_* variable: under a git hook they point at the real repository.
+      // SHELLCHECK_OPTS holds an option that the script must keep from shellcheck.
+      const env: NodeJS.ProcessEnv = {
+        ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+        SHELLCHECK_OPTS: '--exclude=SC2164',
+      };
+      const git = (...args: string[]) => expect(spawnSync('git', args, { cwd: repo, env }).status).toBe(0);
+      write(tracked);
+      git('init', '-q');
+      git('add', '--all');
+      write(untracked);
+      deleted.forEach((file) => fs.rmSync(path.join(repo, file)));
+
+      const result = spawnSync('sh', ['-o', 'errexit', '-c', source], { cwd: repo, env, encoding: 'utf-8' });
+      const call: { args: string[]; opts: string | null } | undefined = fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf-8')) : undefined;
+      return { status: result.status, stderr: result.stderr, call };
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test('gives shellcheck the scripts git tracks and the new ones, not an ignored or a deleted one', () => {
+    const result = run(
+      { 'scripts/a.sh': '', 'gone.sh': '', 'notes.txt': '', '.gitignore': 'node_modules/\n' },
+      { untracked: { 'new script.sh': '', 'node_modules/pkg/vendored.sh': '' }, deleted: ['gone.sh'] },
+    );
+
+    expect(result.status).toBe(0);
+    // Sorted: git lists the new files before the tracked ones.
+    expect(result.call?.args.filter((argument) => !argument.startsWith('-')).sort()).toEqual(['new script.sh', 'scripts/a.sh']);
+  });
+
+  // A `.shellcheckrc` in the checkout, in a directory above it or in the home directory, and the
+  // options in SHELLCHECK_OPTS, switch checks off or on: the answer would depend on the machine,
+  // and a committed dotfile would change what the build enforces.
+  test('asks for errors and warnings, and lets neither an rc file nor SHELLCHECK_OPTS change that', () => {
+    expect(run({ 'a.sh': '' }).call).toEqual({ args: ['--norc', '--severity=warning', '--', 'a.sh'], opts: null });
+  });
+
+  test('fails when shellcheck reports a finding', () => {
+    const result = run({ 'a.sh': '' }, { shellcheckStatus: 1 });
+
+    expect(result.call?.args).toContain('a.sh');
+    expect(result.status).not.toBe(0);
+  });
+
+  // `xargs` on macOS runs nothing for an empty list and exits 0: a pathspec that matches no file
+  // would pass with nothing checked.
+  test('fails when git lists no shell script, and does not call shellcheck', () => {
+    const result = run({ 'notes.txt': '' });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('check:shell: git listed no shell script, so nothing was checked.');
+    expect(result.call).toBeUndefined();
+  });
+
+  // The places that start the task. Without them the lint exists and runs nowhere.
+  test('runs in the build, in the security suite and in the commit hook', () => {
+    const hooks = fs.readFileSync(path.resolve(__dirname, '../../../.pre-commit-config.yaml'), 'utf-8').split(/^ {6}- id: /m);
+    const hook = hooks.find((text) => text.startsWith('shellcheck\n')) ?? '';
+
+    for (const name of ['drift-prevention', 'security']) {
+      expect(task(name).map((line) => line.trim())).toContain('{ task = "check:shell" },');
+    }
+    expect(hook).toMatch(/^ +entry: bash -lc '.* && mise run check:shell'$/m);
+    expect(hook).toMatch(/^ +files: \\\.sh\$$/m);
+    expect(hook).toMatch(/^ +stages: \[pre-commit\]$/m);
+    expect(hook).not.toMatch(/^ +exclude: /m);
+    // An exact version: a missing or floating pin would let a runner's own shellcheck answer.
+    expect(fs.readFileSync(path.resolve(__dirname, '../../../mise.toml'), 'utf-8')).toMatch(/^shellcheck = "\d+\.\d+\.\d+"$/m);
+  });
+});

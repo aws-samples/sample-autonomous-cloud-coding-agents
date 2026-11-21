@@ -2,7 +2,7 @@
 
 **Status:** proposed
 **Date:** 2026-05-19
-**Last-updated:** 2026-11-20
+**Last-updated:** 2026-11-21
 
 ## Context
 
@@ -80,6 +80,7 @@ Each tier is **necessary but not sufficient** — passing a lower tier is requir
 - ESLint for cdk, cli and web, each when one of its source files is staged
 - Type check (`tsc --noEmit`) of cdk, cli and web, each when one of its TypeScript files is staged
 - Agent quality task, when a Python file under `agent/` is staged
+- Shell script lint (shellcheck), when a `*.sh` file is staged
 - Docs sync and `astro check`, the Markdown structure lint when a Markdown file is staged, and the docs script tests when the docs scripts are staged
 - Drift checks for API types and shared constants when one of their inputs is staged, and the coverage contract check on every commit
 - YAML/JSON syntax validation
@@ -124,13 +125,13 @@ Progressive build-out:
 **Tier 3 — Remote CI (5–20 min, authoritative, gates merge)**
 
 - Full test matrix (multiple Node versions if applicable)
-- Security scans. The required job `Secrets, deps, and workflow scan` (`.github/workflows/security-pr.yml`) runs on every pull request and merge-queue entry: gitleaks over the commits of the change, the silent-success-masking rules over the whole repository, the Semgrep registry packs for the findings the change adds, OSV deps and zizmor, and it builds the agent image when `agent/Dockerfile`, `.dockerignore` or a file the Dockerfile copies by name (`agent/pyproject.toml`, `agent/uv.lock`, `agent/prepare-commit-msg.sh`, `agent/managed-settings.json`) changed, or when a file under a directory it copies whole (`agent/src`, `agent/policies`, `agent/workflows`, `contracts`) was deleted or renamed. The weekly suite (`.github/workflows/security.yml`) runs every scanner even when an earlier one fails, adds the full Semgrep SAST, Grype, Retire.js, Bandit and the Trivy image scan, and reports to one rolling issue
+- Security scans. The required job `Secrets, deps, and workflow scan` (`.github/workflows/security-pr.yml`) runs on every pull request and merge-queue entry: gitleaks over the commits of the change, the silent-success-masking rules over the whole repository, the Semgrep registry packs for the findings the change adds, OSV deps and zizmor, and it builds the agent image when `agent/Dockerfile`, `.dockerignore` or a file the Dockerfile copies by name (`agent/pyproject.toml`, `agent/uv.lock`, `agent/prepare-commit-msg.sh`, `agent/managed-settings.json`) changed, or when a file under a directory it copies whole (`agent/src`, `agent/policies`, `agent/workflows`, `contracts`) was deleted or renamed. The weekly suite (`.github/workflows/security.yml`) runs every scanner even when an earlier one fails, adds the full Semgrep SAST, Grype, Retire.js, shellcheck (which the build also runs), Bandit and the Trivy image scan, and reports to one rolling issue
 - CDK diff against deployed stack
 - Multi-account deployment verification
 - E2E tests against real AWS services
 - Performance/cost regression checks
 - Documentation mutation check (fail if Starlight mirrors are stale)
-- The Tier 0 file checks (whitespace, end of file, conflict markers, YAML/JSON syntax) over all tracked files (`mise run check:hygiene`, part of `mise run build`): a commit made without the hooks skips Tier 0
+- The Tier 0 file checks (whitespace, end of file, conflict markers, YAML/JSON syntax) over all tracked files (`mise run check:hygiene`, part of `mise run build`) and shellcheck over every shell script (`mise run check:shell`, also part of `mise run build`): a commit made without the hooks skips Tier 0
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
@@ -238,3 +239,4 @@ Escape hatches must be explicit (noted in PR description, not silent).
 
 - 2026-11-15 — Phase 2a is implemented, on the AWS Emulator instead of LocalStack, as an advisory check (`mise run test:integration` and the `emulator` workflow). Replaced the estimate that it would eliminate "60%+ of CI-only failures" with what was measured, added the graduation criteria this ADR asks for, and stated that phase 2c needs a real AWS account because the emulator cannot show a missing permission (decision otherwise unchanged).
 - 2026-11-20 — Tier 0 also runs the type check of cdk, cli and web when one of their TypeScript files is staged (#260). The build runs the same checks and stays the gate (decision unchanged).
+- 2026-11-21 — Tier 0 also runs shellcheck when a shell script is staged (#278). The build and the security suite run the same check over every shell script (decision unchanged).

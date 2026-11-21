@@ -41,6 +41,7 @@ semgrep = "1.185.0"
 osv-scanner = "2.7.1"
 "grype" = "0.121.3"
 "aqua:zizmorcore/zizmor" = "1.32.0"
+shellcheck = "0.11.0"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs", "web"]
@@ -192,12 +193,45 @@ done
 exit "$rc"
 '''
 
+# Shell scripts are code too: one is copied into the agent image and one deletes
+# CloudFormation stacks (#278). shellcheck reads every `*.sh` file that git tracks or
+# would add (new and not ignored): a script is checked before its first `git add`, and
+# generated trees (node_modules, cdk.out) are left out because git ignores them. A
+# tracked script that was deleted but not staged is still listed by git: it is skipped.
+# --severity=warning: errors and warnings fail, `info` and `style` notes are not
+# reported. `error` alone would not report what this gate is for (an unquoted command
+# substitution, SC2046, and a `cd` whose failure goes unnoticed, SC2164, are warnings).
+# --norc and the unset: shellcheck would otherwise read a `.shellcheckrc` from the
+# checkout, from a directory above it or from the home directory, and options from
+# SHELLCHECK_OPTS. Either can switch checks off or on, so the answer would depend on
+# the machine and a dotfile could change what this task enforces. The only way to
+# accept a finding is a directive in the script:
+# `# shellcheck disable=SC<code> # <reason>` on the line above the command.
+# With no script listed the task fails: `xargs` on macOS would run nothing and exit 0.
+# The script is POSIX sh, because mise runs it with `sh`, which is dash on the CI
+# runner: hence `xargs -0 sh -c` to read the NUL-separated list, not a `read -d ''` loop.
+[tasks."check:shell"]
+description = "Shell script lint (#278): shellcheck, errors and warnings, over every shell script (*.sh) that git tracks or would add"
+run = '''
+unset SHELLCHECK_OPTS
+list="$(mktemp)"
+trap 'rm -f "$list"' EXIT
+git ls-files -z --cached --others --exclude-standard -- '*.sh' |
+  xargs -0 sh -c 'for file in "$@"; do [ ! -e "$file" ] || printf "%s\0" "$file"; done' sh > "$list"
+if [ ! -s "$list" ]; then
+  echo 'check:shell: git listed no shell script, so nothing was checked.' >&2
+  exit 1
+fi
+xargs -0 shellcheck --norc --severity=warning -- < "$list"
+'''
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
   { task = "check:hygiene" },
   { task = "check:scripts" },
+  { task = "check:shell" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
@@ -407,6 +441,7 @@ run = [
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },
+    { task = "check:shell" },
     { task = "//agent:security" },
 ]
 
