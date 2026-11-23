@@ -25,6 +25,7 @@ import { CostsPage } from './domains/costs/CostsPage';
 import { OverviewPage } from './domains/overview/OverviewPage';
 import { RepoDetailPage } from './domains/repos/RepoDetailPage';
 import { ReposPage } from './domains/repos/ReposPage';
+import { ScoreboardPage } from './domains/scoreboard/ScoreboardPage';
 import { NewTaskPage } from './domains/tasks/NewTaskPage';
 import { TaskDetailPage } from './domains/tasks/TaskDetailPage';
 import { TaskListPage } from './domains/tasks/TaskListPage';
@@ -40,6 +41,7 @@ export const routes: RouteObject[] = [
       { path: 'repos', element: <ReposPage /> },
       { path: 'repos/:owner/:name', element: <RepoDetailPage /> },
       { path: 'approvals', element: <ApprovalsPage /> },
+      { path: 'scoreboard', element: <ScoreboardPage /> },
       { path: 'costs', element: <CostsPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],

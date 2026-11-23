@@ -34,6 +34,7 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Overview', href: '/' },
   { type: 'link', text: 'Tasks', href: '/tasks' },
   { type: 'link', text: 'Repositories', href: '/repos' },
+  { type: 'link', text: 'Scoreboard', href: '/scoreboard' },
   { type: 'link', text: 'Costs', href: '/costs' },
 ];
 

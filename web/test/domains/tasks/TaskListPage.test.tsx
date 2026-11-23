@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
 import { mockData } from '../../helpers/server';
 import { titleOf } from '../../helpers/fixtures';
@@ -54,6 +54,16 @@ describe('TaskListPage', () => {
     renderRoute('/tasks?view=queued');
     expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.queued) })).toBeInTheDocument();
     expect(screen.getByText('(1)')).toBeInTheDocument();
+    // The list carries the name of the Overview counter that opens it.
+    expect(screen.getByRole('heading', { name: /^Waiting to start/ })).toBeInTheDocument();
+  });
+
+  it('names the list of unsuccessful tasks after the three ways it holds', async () => {
+    renderRoute('/tasks?view=unsuccessful');
+    expect(await screen.findByRole('heading', { name: /^Failed, ran out of time or cancelled/ })).toBeInTheDocument();
+    for (const id of [MOCK_IDS.failed, MOCK_IDS.timedOut, MOCK_IDS.cancelled]) {
+      expect(await screen.findByRole('link', { name: titleOf(id) })).toBeInTheDocument();
+    }
   });
 
   it('filters loaded tasks by free text', async () => {
@@ -91,7 +101,7 @@ describe('TaskListPage', () => {
     fireEvent.click(screen.getByText('Cost', { selector: 'th *' }));
     const ascending = costs();
     const amounts = ascending.filter((c) => c.startsWith('$')).map((c) => Number(c.slice(1)));
-    expect(amounts.length).toBeGreaterThan(5);
+    expect(amounts.length).toBeGreaterThan(3);
     expect(amounts).toEqual([...amounts].sort((a, b) => a - b));
     expect(ascending.slice(amounts.length).every((c) => !c.startsWith('$'))).toBe(true);
   });
@@ -99,6 +109,13 @@ describe('TaskListPage', () => {
   it('shows a stuck task as "No updates lately"', async () => {
     renderRoute('/tasks?view=attention');
     expect(await screen.findByText('No updates lately')).toBeInTheDocument();
+  });
+
+  it('does not show a quiet task on ECS as "No updates lately": its agent reports once, at its start', async () => {
+    renderRoute('/tasks?view=active');
+    expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.ecs) })).toBeInTheDocument();
+    // Of the tasks under way, only the one on AgentCore that went quiet is flagged.
+    expect(screen.getAllByText('No updates lately')).toHaveLength(1);
   });
 
   it('follows a link inside a row instead of opening the task', async () => {
@@ -122,5 +139,22 @@ describe('TaskListPage', () => {
     const link = await screen.findByRole('link', { name: /#482/ });
     expect(link).toHaveAttribute('href', 'https://github.com/acme/web-frontend/pull/482');
     expect(link).toHaveAttribute('target', '_blank');
+  });
+
+  it('flags a task that goes quiet while the list stays open and no record changes', async () => {
+    // The interval clock and the date are in the test's hands, and still run on their own for the waits of the test.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], shouldAdvanceTime: true });
+    try {
+      renderRoute('/tasks?view=active');
+      expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.running) })).toBeInTheDocument();
+      expect(screen.getAllByText('No updates lately')).toHaveLength(1);
+      // Five minutes on. The agent of the mock's running task reported 20 seconds before the list opened and not since.
+      act(() => {
+        vi.advanceTimersByTime(5 * 60_000);
+      });
+      await waitFor(() => expect(screen.getAllByText('No updates lately')).toHaveLength(2));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

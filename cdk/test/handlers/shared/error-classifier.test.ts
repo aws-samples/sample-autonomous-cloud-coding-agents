@@ -46,6 +46,14 @@ describe('classifyError', () => {
     expect(classifyError('')).toBeNull();
   });
 
+  test.each([
+    ['a number', 404],
+    ['a boolean', true],
+    ['a map', { message: 'Guardrail blocked' }],
+  ])('a value that is not text has no classification: %s', (_kind, value) => {
+    expect(classifyError(value as unknown as string)).toBeNull();
+  });
+
   // --- Auth errors ---
 
   describe('auth errors', () => {

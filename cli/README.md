@@ -119,6 +119,8 @@ bgagent list \
   --output <text|json>        Output format (default: text)
 ```
 
+The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+
 ### `bgagent budget status --me`
 
 Show the logged-in user's personal monthly estimated spend and administrator-configured limit:
@@ -129,7 +131,18 @@ bgagent budget status --me [--output text|json]
 
 This path uses Cognito authentication and requires no operator AWS credentials. It is read-only, does not expose team budgets, and reports personal spend even when no personal limit is configured.
 
-The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+### `bgagent stats`
+
+Show the scoreboard of your own finished tasks: how the work you handed to agents turned into verified and merged pull requests, what it took of your attention and money, and whether it stayed inside the rules.
+
+```
+bgagent stats \
+  --range <7d|30d>             Period the scoreboard covers (default: 30d)
+  --repo <owner/repo>          Count the tasks of one repository only
+  --output <text|json>         Output format (default: text)
+```
+
+The numbers are those of the console's Scoreboard page, under its four headings, each with the counts it rests on and, where the page compares, the number of the period before; a number with nothing to compute it from shows `-` and the reason. `--output json` prints the response of `GET /v1/tasks?view=scoreboard`. What each number counts and leaves out: [Factory scoreboard](../docs/design/OBSERVABILITY.md#factory-scoreboard). The command's limits: [Reading your scoreboard (stats)](../docs/guides/USER_GUIDE.md#reading-your-scoreboard-stats).
 
 ### `bgagent status <task-id>`
 

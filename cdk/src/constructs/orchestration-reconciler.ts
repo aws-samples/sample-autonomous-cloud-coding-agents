@@ -48,16 +48,23 @@ export interface OrchestrationReconcilerProps {
   /** Forwarded so released child tasks land in the right tables. */
   readonly taskEventsTable: dynamodb.ITable;
 
-  /** Monthly budget config/rollup table. When set, terminal task costs roll up here. */
+  /**
+   * Monthly budget config/rollup table. When set, terminal task costs roll up here,
+   * and the scoreboard claims each finished task with a marker here. The claim is
+   * not a write on the task table, so the stream does not deliver it again.
+   */
   readonly budgetTable?: dynamodb.ITable;
 }
 
 /**
  * TaskTable terminal-record consumer. It first drives parent/sub-issue
  * orchestration for records that belong to a graph, then rolls up every positive
- * task cost into monthly user/team budgets. This ordering prevents a budget-table
+ * task cost into monthly user/team budgets, and last writes one scoreboard metric
+ * line per finished task. Orchestration before the rollup prevents a budget-table
  * outage from stranding a graph, at the cost of allowing one dependency wave to
- * be admitted before the completed parent's spend is visible.
+ * be admitted before the completed parent's spend is visible. The metric line
+ * holds back neither of the other two: its failure is logged and never reported
+ * for retry.
  *
  * Stream-source rationale: TaskEventsTable's stream is at its 2-consumer
  * limit (FanOutConsumer + ApprovalMetricsPublisher); TaskTable had no
@@ -124,7 +131,8 @@ export class OrchestrationReconciler extends Construct {
     });
 
     // Orchestration child creation/gating reads + writes the DAG table,
-    // reads/writes TaskTable (createTaskCore), and writes task events.
+    // reads/writes TaskTable (createTaskCore), and writes task events. The
+    // scoreboard reads the task and writes its claim on the budget table.
     props.orchestrationTable.grantReadWriteData(this.fn);
     props.taskTable.grantReadWriteData(this.fn);
     props.taskEventsTable.grantReadWriteData(this.fn);
@@ -155,8 +163,11 @@ export class OrchestrationReconciler extends Construct {
       // returning void meant ANY thrown record failed the WHOLE batch — a single
       // poison/throttled record re-drove all its siblings (re-reconciling
       // healthy children) until it aged out. With reportBatchItemFailures the
-      // handler returns only the failed record's sequence number, so just that
-      // record retries + bisects toward the DLQ while its siblings commit.
+      // handler returns the sequence numbers of the records whose orchestration
+      // or budget step failed, and Lambda retries from the first of them on: the
+      // records before it commit, and the batch is bisected there toward the
+      // DLQ. The records after it are re-driven as well, which is why a failed
+      // scoreboard metric line is never reported.
       reportBatchItemFailures: true,
     }));
 

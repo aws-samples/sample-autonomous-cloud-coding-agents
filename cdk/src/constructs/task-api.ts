@@ -703,8 +703,9 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: listTasksEnv,
       bundling: commonBundling,
-      // Task rows are large and a filtered list pages through up to 10 Queries of up to
-      // 1 MB each, so this gets the API-handler settings, not the 3s / 128MB defaults.
+      // Task rows are large: a filtered list pages through up to 10 Queries of up to 1 MB
+      // each, and the scoreboard view through up to 24, four at a time. So this gets the
+      // API-handler settings, not the 3s / 128MB defaults.
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       memorySize: API_HANDLER_MEMORY_MB,
     });

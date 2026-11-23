@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-import { fireEvent, screen } from '@testing-library/react';
+import { act, fireEvent, screen } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
 import { titleOf } from '../../helpers/fixtures';
 import { renderRoute } from '../../helpers/render';
@@ -28,8 +28,12 @@ import { mockData, server, TEST_API_BASE } from '../../helpers/server';
 describe('ApprovalsPage', () => {
   it('shows what the agent wants to do, why it asked, and how risky it is', async () => {
     renderRoute('/approvals');
-    expect(await screen.findByText('terraform apply -target=module.staging_database')).toBeInTheDocument();
-    expect(screen.getByText('Infrastructure changes require approval')).toBeInTheDocument();
+    // The tool's input as the agent stores it: JSON.
+    expect(await screen.findByText(
+      '{"command": "terraform apply -target=module.staging_database", "description": "Apply the staging database change"}',
+    )).toBeInTheDocument();
+    // The agent's own reason: the rules that held the action.
+    expect(screen.getByText('Soft-deny: terraform_apply')).toBeInTheDocument();
     expect(screen.getByText('High risk')).toBeInTheDocument();
     expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.awaiting) })).toHaveAttribute('href', `/tasks/${MOCK_IDS.awaiting}`);
   });
@@ -59,5 +63,34 @@ describe('ApprovalsPage', () => {
     server.use(http.get(`${TEST_API_BASE}/pending`, () => HttpResponse.json({ data: { pending: [] } })));
     renderRoute('/approvals');
     expect(await screen.findByText('No approval requests right now.')).toBeInTheDocument();
+  });
+
+  it('counts the time of a request on while the page stays open and no request changes', async () => {
+    // The interval clock and the date are in the test's hands, and still run on their own for the waits of the test.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], shouldAdvanceTime: true });
+    // The page reads the task list too, for the titles, and each of its answers draws the page again.
+    // It gets no answer here, so that only the requests can move the card.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(http.get(`${TEST_API_BASE}/tasks`, async () => {
+      await held;
+      return undefined;
+    }));
+    try {
+      renderRoute('/approvals');
+      expect(await screen.findByText('2m ago')).toBeInTheDocument();
+      expect(screen.getByText('in 3m')).toBeInTheDocument();
+      // Two minutes on: the request is four minutes old and has one minute left.
+      act(() => {
+        vi.advanceTimersByTime(2 * 60_000);
+      });
+      expect(await screen.findByText('4m ago')).toBeInTheDocument();
+      expect(screen.queryByText('in 3m')).not.toBeInTheDocument();
+    } finally {
+      release();
+      vi.useRealTimers();
+    }
   });
 });
