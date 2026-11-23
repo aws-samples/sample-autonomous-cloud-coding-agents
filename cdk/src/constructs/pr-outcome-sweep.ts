@@ -19,6 +19,7 @@
 
 import * as path from 'path';
 import { Duration } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
@@ -40,6 +41,9 @@ const SWEEP_TIMEOUT_MINUTES = 5;
 /** Sweep Lambda memory (MB). */
 const SWEEP_MEMORY_MB = 256;
 
+/** How long the event of a recorded final state is kept, when a stack sets no `taskRetentionDays`. */
+const DEFAULT_TASK_RETENTION_DAYS = 90;
+
 /** Properties for the PrOutcomeSweep construct. */
 export interface PrOutcomeSweepProps {
   /** TaskTable: the sweep queries its StatusIndex for COMPLETED tasks, and updates the ones whose pull request it reads. */
@@ -48,6 +52,11 @@ export interface PrOutcomeSweepProps {
   readonly taskEventsTable: dynamodb.ITable;
   /** The secret of the platform GitHub token, which the sweep reads pull requests with. */
   readonly githubTokenSecret: secretsmanager.ISecret;
+  /**
+   * How long the event of a recorded final state is kept (days).
+   * @default 90
+   */
+  readonly taskRetentionDays?: number;
 }
 
 /**
@@ -59,6 +68,9 @@ export interface PrOutcomeSweepProps {
  * in the history of the task.
  */
 export class PrOutcomeSweep extends Construct {
+  /** Fires when the sweep throws or times out before its summary. A refused token is not this: the handler logs it and returns. */
+  public readonly errorAlarm: cloudwatch.Alarm;
+
   constructor(scope: Construct, id: string, props: PrOutcomeSweepProps) {
     super(scope, id);
 
@@ -76,6 +88,7 @@ export class PrOutcomeSweep extends Construct {
         TASK_STATUS_INDEX_NAME: TaskTable.STATUS_INDEX,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
+        TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
@@ -106,7 +119,18 @@ export class PrOutcomeSweep extends Construct {
     const rule = new events.Rule(this, 'SweepSchedule', {
       schedule: events.Schedule.rate(Duration.hours(1)),
     });
-    rule.addTarget(new targets.LambdaFunction(fn));
+    // The next hour is the retry. The default two async retries would each repeat the whole read.
+    rule.addTarget(new targets.LambdaFunction(fn, { retryAttempts: 0 }));
+
+    // A throw or a timeout writes no summary, so the scoreboard looks like a quiet hour.
+    this.errorAlarm = new cloudwatch.Alarm(this, 'SweepErrorAlarm', {
+      metric: fn.metricErrors({ period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'Pull-request outcome sweep failed before its summary — the next hour is the retry',
+    });
 
     NagSuppressions.addResourceSuppressions(fn, [
       {

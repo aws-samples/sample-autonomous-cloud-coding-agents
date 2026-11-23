@@ -36,8 +36,9 @@
 
 import { randomUUID } from 'node:crypto';
 import { DescribeTableCommand, GetItemCommand } from '@aws-sdk/client-dynamodb';
-import { PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyResult, DynamoDBRecord, StreamRecord } from 'aws-lambda';
+import { BudgetTable } from '../../src/constructs/budget-table';
 import { RepoTable } from '../../src/constructs/repo-table';
 import { TaskApprovalsTable } from '../../src/constructs/task-approvals-table';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
@@ -51,6 +52,7 @@ process.env.TASK_TABLE_NAME = `emu-${run}-tasks`;
 process.env.TASK_EVENTS_TABLE_NAME = `emu-${run}-events`;
 process.env.REPO_TABLE_NAME = `emu-${run}-repos`;
 process.env.TASK_APPROVALS_TABLE_NAME = `emu-${run}-approvals`;
+process.env.BUDGET_TABLE_NAME = `emu-${run}-budgets`;
 /** A task table as a stack has it before the deploy that adds UserCreatedAtIndex (#51). */
 const TASKS_BEFORE_51 = `emu-${run}-tasks-before-51`;
 
@@ -91,8 +93,6 @@ const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /** A time as the platform stores it, with milliseconds, and as the agent does, in whole seconds. */
 const platformStamp = (ms: number): string => new Date(ms).toISOString();
 const agentStamp = (ms: number): string => platformStamp(ms).replace(/\.\d{3}Z$/, 'Z');
-/** The form of a platform time. */
-const PLATFORM_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /** POST /v1/tasks through the real handler. Returns the HTTP result. */
 function submit(userId: string, idempotencyKey?: string): Promise<APIGatewayProxyResult> {
@@ -176,6 +176,7 @@ describe('task API against the AWS Emulator', () => {
     new TaskEventsTable(stack, 'Events', { tableName: process.env.TASK_EVENTS_TABLE_NAME });
     new RepoTable(stack, 'Repos', { tableName: process.env.REPO_TABLE_NAME });
     new TaskApprovalsTable(stack, 'Approvals', { tableName: process.env.TASK_APPROVALS_TABLE_NAME });
+    new BudgetTable(stack, 'Budgets', { tableName: process.env.BUDGET_TABLE_NAME });
   }, () => {
     // The row a Blueprint writes at deploy time; create-task gates on it.
     const now = new Date().toISOString();
@@ -580,16 +581,20 @@ describe('task API against the AWS Emulator', () => {
     expect(current.outcomes).toMatchObject({ no_new_pr: CUT_TASKS - 1 - stoppedAt, failed: 1 });
   });
 
-  test('scoreboard metrics: a finished task is claimed once, and the claim changes nothing but its marker', async () => {
+  test('scoreboard metrics: a finished task is claimed once, on the budget table, and its own record is left as it was', async () => {
     const user = newUser();
     const taskId: string = data(await submit(user)).task_id;
     expect((await cancelTask(apiEvent(user, byId(taskId)))).statusCode).toBe(200);
     const cancelled = await storedTask(taskId);
 
-    // The record of the cancel, and its redelivery: neither image holds the marker.
+    // The record of the cancel, and its redelivery: neither image is written back.
     const first = await publishMetrics(cancelled);
-    const claimed = await storedTask(taskId);
     const second = await publishMetrics(cancelled);
+    const marker = await ddb.send(new GetCommand({
+      TableName: process.env.BUDGET_TABLE_NAME,
+      Key: { scope_key: `TASK#${taskId}`, period: 'METRICS' },
+      ConsistentRead: true,
+    }));
 
     expect(first.published).toBe(true);
     const line = JSON.parse(first.written);
@@ -606,19 +611,23 @@ describe('task API against the AWS Emulator', () => {
     });
     expect(line).not.toHaveProperty('CostUsd');
     expect(line._aws.CloudWatchMetrics[0].Namespace).toBe('ABCA/Factory');
-    // Nothing else may move: `updated_at` is the finish time of a record without `completed_at`, and `ttl` its retention.
-    expect(claimed).toEqual({ ...cancelled, metrics_emitted_at: { S: expect.stringMatching(PLATFORM_STAMP) } });
+    expect(await storedTask(taskId)).toEqual(cancelled);
+    expect(marker.Item).toMatchObject({ scope_key: `TASK#${taskId}`, period: 'METRICS' });
     expect(second).toEqual({ published: false, written: '' });
-    expect(await storedTask(taskId)).toEqual(claimed);
   });
 
   test('scoreboard metrics: the record of a task that the table does not hold claims nothing and creates no item', async () => {
     const taskId = `task-${randomUUID()}`;
 
     const result = await publishMetrics({ task_id: { S: taskId }, status: { S: 'COMPLETED' }, completed_at: { S: platformStamp(Date.now()) } });
+    const marker = await ddb.send(new GetCommand({
+      TableName: process.env.BUDGET_TABLE_NAME,
+      Key: { scope_key: `TASK#${taskId}`, period: 'METRICS' },
+      ConsistentRead: true,
+    }));
 
     expect(result).toEqual({ published: false, written: '' });
-    // An update without the condition on the key creates the item.
     expect(await storedTask(taskId)).toBeUndefined();
+    expect(marker.Item).toBeUndefined();
   });
 });

@@ -434,15 +434,6 @@ export interface TaskRecord {
    */
   readonly depends_on?: readonly string[];
   /**
-   * ISO timestamp at which this task was claimed for the factory metric stream
-   * (``ABCA/Factory``). The claim comes before the line and is never released:
-   * the field does not prove that a line was written. It is what makes the line
-   * once-only: a terminal record is rewritten for as long as it lives and stream
-   * records are redelivered, and only the write that sets this field goes on to
-   * write the line. Internal: no API mapper exposes it.
-   */
-  readonly metrics_emitted_at?: string;
-  /**
    * The state on GitHub of the pull request this task opened, as the hourly read
    * of pull requests last recorded it. Absent until a read records a state, and on
    * every task whose pull request that read does not follow: one that opened no new

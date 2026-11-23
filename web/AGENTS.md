@@ -28,6 +28,7 @@ Single test file: `cd web && yarn vitest run test/domains/tasks/TaskListPage.tes
 - **Coverage:** ESLint (`no-warning-comments`) rejects a comment that contains `istanbul ignore`, `c8 ignore`, `v8 ignore` or `node:coverage`: vitest would leave that code out of the coverage report. Test the code, or leave it counted as uncovered and say why in a plain comment.
 - **License header:** every `src/` and `test/` file starts with the MIT-0 header (`header.js`); ESLint enforces it.
 - **Complexity:** ESLint (`complexity`) fails any function whose cyclomatic complexity is above 40, the ceiling shared with cdk and cli. Split the component or move logic into a hook or helper; do not add an `eslint-disable`.
+- **Scoreboard wording:** the page and `bgagent stats` say the same sentences. `cli/test/scoreboard.test.ts` loads `src/core/util/scoreboard.ts` and fails when they diverge. Keep that module's runtime imports to `./format` and types: the CLI suite has no JSX bundler, and another import fails the load before the comparison.
 
 ## Boundaries
 

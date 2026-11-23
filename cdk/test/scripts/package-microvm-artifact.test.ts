@@ -98,8 +98,8 @@ describe('MicroVM artifact packaging and immutable publication', () => {
       path.join(fixture, 'cdk/scripts/package-microvm-artifact.sh'), ...args,
     ], {
       encoding: 'utf8',
-      // One run takes 7 to 11 seconds on an idle machine and several times that inside a parallel
-      // build on a busy one: a run that is killed at its limit ends with `status: null`.
+      // Measured idle: 7 to 11 seconds. A parallel build takes several times that, and the
+      // previous 20s cap killed those runs (`status: null`). 120s is about ten times the idle run.
       timeout: 120_000,
       env: {
         ...process.env,

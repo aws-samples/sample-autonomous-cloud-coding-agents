@@ -873,6 +873,19 @@ describe('a repository GitHub does not show to the token', () => {
     expect(updates().map((update) => update.Key)).toEqual([{ task_id: 'task-13' }, { task_id: 'task-16' }]);
     expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 5, candidates: 5, read: 3, open: 2, repo_not_visible: 3 }) });
   });
+
+  test('a name that is not owner/name is the same count and the same warning, and it costs no request', async () => {
+    candidates(task(12, { repo: 'not a repo' }), task(13, { repo: 'not a repo' }), task(14));
+    github({ 14: found(14) });
+
+    await handler(EVENT, context);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(loggerMock.warn.mock.calls).toEqual([
+      ['PR outcome sweep: GitHub does not show a repository to the platform token', { repo: 'not a repo' }],
+    ]);
+    expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 3, candidates: 3, read: 1, open: 1, repo_not_visible: 2 }) });
+  });
 });
 
 describe('the failure of one pull request', () => {

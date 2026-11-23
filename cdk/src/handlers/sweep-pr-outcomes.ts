@@ -60,7 +60,7 @@
  * line, a warning for the others. When nothing stopped the run, the line is an
  * error when every pull request it asked about failed, a warning when some
  * failed, and information otherwise. A run that cannot read its candidates fails
- * without one, and the invocation is retried.
+ * without one, and the next hour is the retry.
  */
 
 import { PutCommand, QueryCommand, UpdateCommand, type UpdateCommandInput, type UpdateCommandOutput } from '@aws-sdk/lib-dynamodb';
@@ -86,7 +86,7 @@ import {
 import { prOutcomeMetricLine, SCOREBOARD_PROJECTION, taskFacts, type ScoreboardTask } from './shared/scoreboard';
 import type { TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
-import { computeTtlEpoch } from './shared/validation';
+import { computeTtlEpoch, isValidRepo } from './shared/validation';
 
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const STATUS_INDEX = process.env.TASK_STATUS_INDEX_NAME!;
@@ -125,11 +125,10 @@ const PR_OUTCOME_METRIC_MAX_AGE_DAYS = 13;
 const PR_OUTCOME_EVENT_TYPE = 'pr_outcome_recorded';
 
 /**
- * How long that event is kept (days). A constant, not a setting: the platform's other event
- * writers take `TASK_RETENTION_DAYS` from their environment, which their constructs set from
- * the `taskRetentionDays` prop or to this number, and no stack gives that prop.
+ * How long that event is kept (days). The construct sets this from `taskRetentionDays`,
+ * or to 90, the same default as the platform's other event writers.
  */
-const TASK_RETENTION_DAYS = 90;
+const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 
 /** A token as a request header can carry it: printable ASCII, from the space to the tilde. */
 const USABLE_TOKEN = /^[ -~]+$/;
@@ -377,6 +376,14 @@ async function readPullRequests(
     const repo = candidate.repo.toLowerCase();
     if (hiddenRepos.has(repo)) {
       counts.repo_not_visible += 1;
+      continue;
+    }
+    // Not `owner/name`: GitHub has nothing under it, and the read would say so without a
+    // request. Counting it as read would spend a place under the cap on a request never sent.
+    if (!isValidRepo(candidate.repo)) {
+      hiddenRepos.add(repo);
+      counts.repo_not_visible += 1;
+      logger.warn('PR outcome sweep: GitHub does not show a repository to the platform token', { repo: candidate.repo });
       continue;
     }
     try {

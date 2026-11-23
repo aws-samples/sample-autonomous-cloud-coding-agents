@@ -27,9 +27,11 @@ jest.mock('../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
 // The step reads the name of the task table when it loads.
 process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.BUDGET_TABLE_NAME = 'Budgets';
 
 import { TaskStatus, TERMINAL_STATUSES } from '../../src/constructs/task-status';
 import { publishTaskMetrics } from '../../src/handlers/scoreboard-metrics';
+import { BUDGET_METRICS_PERIOD, BUDGET_ROLLUP_RETENTION_DAYS, taskBudgetMarkerKey } from '../../src/handlers/shared/budgets';
 import type { TaskRecord } from '../../src/handlers/shared/types';
 
 const NOW = new Date('2026-11-19T12:00:00.000Z');
@@ -80,7 +82,6 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     build_passed: true,
     cost_usd: '3.87',
     approval_gate_count: 0,
-    metrics_emitted_at: NOW.toISOString(),
     ...overrides,
   };
 }
@@ -109,7 +110,6 @@ describe('publishTaskMetrics', () => {
       ['an image without a task id', record({ task_id: undefined })],
       ['an image without a status', record({ status: undefined })],
       ['a task that is still running', record({ status: { S: 'RUNNING' } })],
-      ['a task that is already counted', record({ metrics_emitted_at: { S: ago(MINUTE_MS) } })],
       // The case the age bound is for: a task from before the deployment, rewritten just now.
       ['a task that finished more than 24 hours ago, whatever its last write', record({ completed_at: { S: ago(DAY_MS + 1) } })],
       [
@@ -128,6 +128,11 @@ describe('publishTaskMetrics', () => {
     });
   });
 
+  /** The table holds `item`, and the marker put lands. */
+  function stored(item: TaskRecord = task()): void {
+    sendMock.mockResolvedValueOnce({ Item: item }).mockResolvedValueOnce({});
+  }
+
   describe('claims', () => {
     test.each<[string, DynamoDBRecord]>([
       ...TERMINAL_STATUSES.map((status): [string, DynamoDBRecord] => [`a ${status} task`, record({ status: { S: status } })]),
@@ -137,35 +142,42 @@ describe('publishTaskMetrics', () => {
       ['a task whose finish time is ahead of the clock', record({ completed_at: { S: ago(-MINUTE_MS) } })],
       ['a task whose image has no finish time', record({ completed_at: undefined, updated_at: undefined })],
     ])('%s', async (_what, streamRecord) => {
-      sendMock.mockResolvedValueOnce({ Attributes: task() });
+      stored();
 
       await expect(publishTaskMetrics(streamRecord)).resolves.toBe(true);
 
-      expect(sendMock).toHaveBeenCalledTimes(1);
+      expect(sendMock).toHaveBeenCalledTimes(2);
     });
 
-    test('with one conditional update that sets the marker, and nothing else, and returns the whole record', async () => {
-      sendMock.mockResolvedValueOnce({ Attributes: task() });
+    test('with a read of the task and one conditional put of a marker, and no write to the task', async () => {
+      stored();
 
       await publishTaskMetrics(record());
 
-      expect(sendMock).toHaveBeenCalledTimes(1);
-      const [command] = sendMock.mock.calls[0];
-      expect(command.constructor.name).toBe('UpdateCommand');
-      // The whole input: neither `updated_at` nor `ttl` is written, and no other attribute.
-      expect(command.input).toEqual({
+      expect(sendMock).toHaveBeenCalledTimes(2);
+      const [read, claim] = sendMock.mock.calls.map(([command]) => command);
+      expect(read.constructor.name).toBe('GetCommand');
+      expect(read.input).toEqual({
         TableName: 'Tasks',
         Key: { task_id: 'task-1' },
-        UpdateExpression: 'SET metrics_emitted_at = :now',
-        ConditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(metrics_emitted_at)',
-        ExpressionAttributeValues: { ':now': '2026-11-19T12:00:00.000Z' },
-        ReturnValues: 'ALL_NEW',
+        ConsistentRead: true,
+      });
+      expect(claim.constructor.name).toBe('PutCommand');
+      // The marker only: the task record is not part of the claim, so the stream does not deliver it.
+      expect(claim.input).toEqual({
+        TableName: 'Budgets',
+        Item: {
+          scope_key: taskBudgetMarkerKey('task-1'),
+          period: BUDGET_METRICS_PERIOD,
+          ttl: Math.floor(NOW.getTime() / 1000) + BUDGET_ROLLUP_RETENTION_DAYS * 24 * 3600,
+        },
+        ConditionExpression: 'attribute_not_exists(scope_key)',
       });
     });
   });
 
-  test('writes one line, built from the record the claim returned and not from the image', async () => {
-    sendMock.mockResolvedValueOnce({ Attributes: task() });
+  test('writes one line, built from the record the read returned and not from the image', async () => {
+    stored();
 
     await expect(publishTaskMetrics(record())).resolves.toBe(true);
 
@@ -186,10 +198,8 @@ describe('publishTaskMetrics', () => {
     });
   });
 
-  test('counts what the record holds at the claim: approval requests added after the write that was delivered', async () => {
-    sendMock.mockResolvedValueOnce({
-      Attributes: task({ status: TaskStatus.FAILED, pr_url: undefined, build_passed: undefined, cost_usd: '0.5', approval_gate_count: 2 }),
-    });
+  test('counts what the record holds at the read: approval requests added after the write that was delivered', async () => {
+    stored(task({ status: TaskStatus.FAILED, pr_url: undefined, build_passed: undefined, cost_usd: '0.5', approval_gate_count: 2 }));
 
     await publishTaskMetrics(record({ status: { S: 'FAILED' } }));
 
@@ -198,7 +208,7 @@ describe('publishTaskMetrics', () => {
   });
 
   test('leaves the workflow off the line of a record without a pinned workflow', async () => {
-    sendMock.mockResolvedValueOnce({ Attributes: task({ resolved_workflow: undefined }) });
+    stored(task({ resolved_workflow: undefined }));
 
     await expect(publishTaskMetrics(record())).resolves.toBe(true);
 
@@ -209,7 +219,7 @@ describe('publishTaskMetrics', () => {
   });
 
   test('stamps the line with the time of the claim when the record has no finish time', async () => {
-    sendMock.mockResolvedValueOnce({ Attributes: task({ completed_at: undefined, updated_at: undefined }) });
+    stored(task({ completed_at: undefined, updated_at: undefined }));
 
     await expect(publishTaskMetrics(record({ completed_at: undefined, updated_at: undefined }))).resolves.toBe(true);
 
@@ -217,8 +227,8 @@ describe('publishTaskMetrics', () => {
     expect(JSON.parse(written)._aws.Timestamp).toBe(NOW.getTime());
   });
 
-  test('writes no line and logs nothing when another delivery holds the claim, or the task is gone', async () => {
-    sendMock.mockRejectedValueOnce(ddbError('ConditionalCheckFailedException'));
+  test('writes no line and logs nothing when another delivery holds the claim', async () => {
+    sendMock.mockResolvedValueOnce({ Item: task() }).mockRejectedValueOnce(ddbError('ConditionalCheckFailedException'));
 
     await expect(publishTaskMetrics(record())).resolves.toBe(false);
 
@@ -227,24 +237,24 @@ describe('publishTaskMetrics', () => {
     expect(loggerMock.warn).not.toHaveBeenCalled();
   });
 
-  // The claim is spent for good: a task that leaves the metrics after it must reach the
-  // caller, which logs the task and counts the failure.
   test.each([
-    ['returns no record', {}],
-    ['returns a record that is not finished', { Attributes: task({ status: TaskStatus.RUNNING }) }],
-  ])('fails, and writes no line, when the claim lands and %s', async (_what, claimed) => {
-    sendMock.mockResolvedValueOnce(claimed);
+    ['holds no such task', {}],
+    ['holds a task that is not finished', { Item: task({ status: TaskStatus.RUNNING }) }],
+  ])('claims nothing and writes no line when the table %s', async (_what, read) => {
+    sendMock.mockResolvedValueOnce(read);
 
-    await expect(publishTaskMetrics(record())).rejects.toThrow('Scoreboard claim landed on a record that holds no finished task');
+    await expect(publishTaskMetrics(record())).resolves.toBe(false);
 
     expect(sendMock).toHaveBeenCalledTimes(1);
     expect(stdout).not.toHaveBeenCalled();
   });
 
-  test('lets every other error of the claim reach its caller, and writes no line', async () => {
+  test('lets every other error of the read or the claim reach its caller, and writes no line', async () => {
     const throttled = ddbError('ProvisionedThroughputExceededException');
     sendMock.mockRejectedValueOnce(throttled);
+    await expect(publishTaskMetrics(record())).rejects.toBe(throttled);
 
+    sendMock.mockResolvedValueOnce({ Item: task() }).mockRejectedValueOnce(throttled);
     await expect(publishTaskMetrics(record())).rejects.toBe(throttled);
 
     expect(stdout).not.toHaveBeenCalled();

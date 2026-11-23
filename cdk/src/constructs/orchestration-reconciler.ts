@@ -48,7 +48,11 @@ export interface OrchestrationReconcilerProps {
   /** Forwarded so released child tasks land in the right tables. */
   readonly taskEventsTable: dynamodb.ITable;
 
-  /** Monthly budget config/rollup table. When set, terminal task costs roll up here. */
+  /**
+   * Monthly budget config/rollup table. When set, terminal task costs roll up here,
+   * and the scoreboard claims each finished task with a marker here. The claim is
+   * not a write on the task table, so the stream does not deliver it again.
+   */
   readonly budgetTable?: dynamodb.ITable;
 }
 
@@ -128,8 +132,7 @@ export class OrchestrationReconciler extends Construct {
 
     // Orchestration child creation/gating reads + writes the DAG table,
     // reads/writes TaskTable (createTaskCore), and writes task events. The
-    // scoreboard step needs the TaskTable write too: it claims each finished
-    // task with an update of its record.
+    // scoreboard reads the task and writes its claim on the budget table.
     props.orchestrationTable.grantReadWriteData(this.fn);
     props.taskTable.grantReadWriteData(this.fn);
     props.taskEventsTable.grantReadWriteData(this.fn);

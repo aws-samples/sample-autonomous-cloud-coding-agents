@@ -96,6 +96,10 @@ describe('AgentStack', () => {
       Effect: 'Allow',
       Resource: variables.GITHUB_TOKEN_SECRET_ARN,
     }]);
+
+    const sweepAlarms = Object.values(concurrencyMaintenance.findResources('AWS::CloudWatch::Alarm'));
+    expect(sweepAlarms).toHaveLength(1);
+    expect(JSON.stringify((sweepAlarms[0] as { Properties: unknown }).Properties)).toContain('OperationalAlerts');
   });
 
   test('creates exactly 22 DynamoDB tables', () => {

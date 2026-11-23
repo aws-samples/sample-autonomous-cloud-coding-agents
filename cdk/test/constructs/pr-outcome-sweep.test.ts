@@ -59,11 +59,12 @@ describe('PrOutcomeSweep', () => {
     fn = idOf(template, 'AWS::Lambda::Function', 'PrOutcomeSweepSweepFn');
   });
 
-  test('adds five resources of types the stack already has: the function, its role and policy, the rule and its permission', () => {
+  test('adds the function, its role and policy, the rule and its permission, and an alarm on the function\'s errors', () => {
     const types = Object.entries(template.toJSON().Resources as Record<string, { Type: string }>)
       .filter(([id]) => id.startsWith('PrOutcomeSweep'))
       .map(([, resource]) => resource.Type);
     expect(types.sort()).toEqual([
+      'AWS::CloudWatch::Alarm',
       'AWS::Events::Rule',
       'AWS::IAM::Policy',
       'AWS::IAM::Role',
@@ -83,12 +84,30 @@ describe('PrOutcomeSweep', () => {
     });
   });
 
-  test('runs it once an hour', () => {
+  test('runs it once an hour, and does not retry a failed invocation', () => {
     template.resourceCountIs('AWS::Events::Rule', 1);
     template.hasResourceProperties('AWS::Events::Rule', {
       ScheduleExpression: 'rate(1 hour)',
       State: 'ENABLED',
-      Targets: [Match.objectLike({ Arn: { 'Fn::GetAtt': [fn, 'Arn'] } })],
+      Targets: [Match.objectLike({
+        Arn: { 'Fn::GetAtt': [fn, 'Arn'] },
+        RetryPolicy: { MaximumRetryAttempts: 0 },
+      })],
+    });
+  });
+
+  test('alarms when the function errors, over the hour it runs', () => {
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 1);
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/Lambda',
+      MetricName: 'Errors',
+      Statistic: 'Sum',
+      Period: 3600,
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      DatapointsToAlarm: 1,
+      TreatMissingData: 'notBreaching',
+      Dimensions: [{ Name: 'FunctionName', Value: { Ref: fn } }],
     });
   });
 
@@ -99,6 +118,7 @@ describe('PrOutcomeSweep', () => {
       TASK_STATUS_INDEX_NAME: 'StatusIndex',
       TASK_EVENTS_TABLE_NAME: { Ref: eventsTable },
       GITHUB_TOKEN_SECRET_ARN: { Ref: secret },
+      TASK_RETENTION_DAYS: '90',
     });
   });
 
