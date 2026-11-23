@@ -49,6 +49,14 @@ export interface CoerceLogger {
 }
 
 /**
+ * How much of a value that is not a number the warning quotes. The value is
+ * read from storage, where it can be as long as its record, and the warning
+ * repeats at every read: the first characters are enough to tell what a
+ * writer stored.
+ */
+const RAW_LOG_CHARS = 100;
+
+/**
  * Coerce a value that should be a number but may arrive as a string
  * (the agent stores some task fields as DynamoDB String attributes)
  * into a finite ``number`` or ``null``.
@@ -78,7 +86,7 @@ export function coerceNumericOrNull(
     logger.warn('[numeric] non-finite coercion — dropping field', {
       event: 'numeric.coercion_failed',
       field: context.field,
-      raw: String(value),
+      raw: String(value).slice(0, RAW_LOG_CHARS),
       task_id: context.task_id,
       event_id: context.event_id,
     });

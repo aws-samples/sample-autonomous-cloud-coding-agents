@@ -33,6 +33,9 @@ export function usePendingApprovals() {
     queryKey: approvalKeys.pending,
     queryFn: () => api.listPending(),
     refetchInterval: PENDING_REFRESH_MS,
+    // Every answer is a new object, also one that equals the last: "Asked" and "Expires" are read off the
+    // clock, and are read again only when the answer the page holds changes.
+    structuralSharing: false,
   });
 }
 

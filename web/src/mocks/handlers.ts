@@ -27,6 +27,7 @@ import { delay, http, HttpResponse } from 'msw';
 import type { CreateTaskRequest, LinearAgentState, TaskDetail, TaskStatusType, TaskSummary } from '../core/api/types';
 import { TERMINAL_STATUSES } from '../core/api/types';
 import type { MockData, MockLinearIssue, ScheduledChange } from './fixtures';
+import { mockScoreboard } from './fixtures';
 
 function error(status: number, code: string, message: string) {
   return HttpResponse.json({ error: { code, message, request_id: 'mock-request' } }, { status });
@@ -51,6 +52,7 @@ function toSummary(task: TaskDetail): TaskSummary {
     cost_usd: task.cost_usd,
     completed_at: task.completed_at,
     channel_source: task.channel_source,
+    compute_type: task.compute_type,
   };
 }
 
@@ -118,13 +120,13 @@ function simulatedRun(task: TaskDetail, startMs: number): ScheduledChange[] {
     ({ taskId: task.task_id, dueMs: at(s), eventType, metadata, ...(patch ? { patch } : {}) });
   return [
     step(2, 'hydration_started', {}, { status: 'HYDRATING' }),
-    step(4, 'session_started', {}, { status: 'RUNNING', started_at: new Date(at(4)).toISOString(), agent_heartbeat_at: new Date(at(4)).toISOString() }),
+    step(4, 'session_started', {}, { status: 'RUNNING', compute_type: 'agentcore', started_at: new Date(at(4)).toISOString(), agent_heartbeat_at: new Date(at(4)).toISOString() }),
     step(6, 'agent_milestone', { milestone: 'repo_setup_complete', details: `branch=${task.branch_name} build_before=True` }),
     step(7, 'agent_milestone', { milestone: 'step:implement:start' }),
     step(10, 'agent_tool_call', { tool_name: 'Bash', tool_input_preview: "{'command': 'ls -a && cat package.json', 'description': 'Look at how the project is laid out'}" }),
     step(14, 'agent_tool_call', { tool_name: 'Read', tool_input_preview: `{'file_path': '${file}'}` }),
     step(18, 'agent_turn', { turn: 3, text_preview: 'Found it: the bounds check lets x reach the map width, one past the last column. Fixing the comparison.' }),
-    step(22, 'agent_tool_call', { tool_name: 'Edit', tool_input_preview: `{'file_path': '${file}', 'old_string': 'x <= width'}` }, { cost_usd: 0.18 }),
+    step(22, 'agent_tool_call', { tool_name: 'Edit', tool_input_preview: `{'file_path': '${file}', 'old_string': 'x <= width'}` }),
     step(26, 'agent_tool_call', { tool_name: 'Bash', tool_input_preview: "{'command': 'npm test', 'description': 'Run the tests'}" }),
     step(30, 'agent_milestone', { milestone: 'step:build:start' }),
     step(36, 'agent_milestone', { milestone: 'step:build:succeeded' }, { build_passed: true, lint_passed: true }),
@@ -189,6 +191,7 @@ function createSimulatedTask(
     started_at: null,
     completed_at: null,
     agent_heartbeat_at: null,
+    compute_type: null,
     duration_s: null,
     cost_usd: null,
     build_passed: null,
@@ -248,7 +251,14 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       const denied = await guard(request);
       if (denied) return denied;
       const url = new URL(request.url);
-      if (url.searchParams.get('view') === 'budget') return HttpResponse.json({ data: data.budget });
+      const view = url.searchParams.get('view');
+      if (view === 'budget') return HttpResponse.json({ data: data.budget });
+      if (view === 'scoreboard') {
+        const range = url.searchParams.get('range') ?? '30d';
+        if (range !== '7d' && range !== '30d') return error(400, 'VALIDATION_ERROR', 'Invalid range value. Expected "7d" or "30d".');
+        return HttpResponse.json({ data: mockScoreboard(range, new Date()) });
+      }
+      if (view !== null) return error(400, 'VALIDATION_ERROR', 'Invalid view value. Expected "budget" or "scoreboard".');
       const limit = parseLimit(url.searchParams.get('limit'));
       if (limit === null) return error(400, 'VALIDATION_ERROR', 'limit must be an integer from 1 to 100.');
       const statuses = url.searchParams.get('status')?.split(',').filter(Boolean) as TaskStatusType[] | undefined;

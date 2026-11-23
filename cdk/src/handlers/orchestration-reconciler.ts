@@ -18,7 +18,8 @@
  */
 
 /**
- * Terminal TaskTable reconciler for budget rollups and dependency graphs.
+ * Terminal TaskTable reconciler for budget rollups, dependency graphs and
+ * scoreboard metrics.
  *
  * Consumes the **TaskTable DynamoDB stream**. For graph tasks it first:
  *   1. resolves the task's orchestration via the ChildTaskIndex GSI
@@ -27,11 +28,14 @@
  *   3. computes the gating plan (pure: orchestration-reconcile.ts),
  *   4. persists child-status updates and releases newly-unblocked
  *      children via the shared release helper.
- * It then applies an idempotent user/team monthly cost rollup.
+ * It then applies an idempotent user/team monthly cost rollup. Last, it writes
+ * one scoreboard metric line per finished task (scoreboard-metrics.ts); a
+ * failure there never reports the record for retry.
  *
  * Idempotent: budget rollups use a task marker, status updates are conditional,
- * and releaseChild is idempotency-keyed. Replayed terminal events neither
- * double-count spend, double-release children, nor regress state.
+ * releaseChild is idempotency-keyed, and the metric line is claimed on the task
+ * record. Replayed terminal events neither double-count spend, double-release
+ * children, write a second metric line, nor regress state.
  *
  * Orchestration runs first so a budget-table outage cannot strand a dependency
  * graph. Released children can therefore be admitted against spend that excludes
@@ -47,6 +51,7 @@ import {
 import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 import { rollupTaskCost } from './budget-rollup';
+import { publishTaskMetrics } from './scoreboard-metrics';
 import { createTaskCore } from './shared/create-task-core';
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply, renderPanelFailureReason } from './shared/failure-reply';
@@ -1611,17 +1616,27 @@ async function resolvePrUrl(taskId: string): Promise<LookupResult<string>> {
 /**
  * Lambda entry point — TaskTable stream handler.
  *
- * Processes records sequentially. Orchestration reconciliation and the
- * idempotent budget rollup are attempted independently, so an outage in either
- * subsystem cannot prevent the other from progressing. Either failure still
- * reports the record for retry.
+ * Processes records sequentially, in three steps: orchestration reconciliation,
+ * the idempotent budget rollup, and the scoreboard metric line. Each step is
+ * attempted independently, so an outage in one subsystem cannot prevent the
+ * others from progressing.
+ *
+ * A failure of the first or the second step reports the record for retry. A
+ * failure of the third never does: it is logged and counted, and this delivery
+ * leaves the task out of the metrics. Lambda retries every record from the
+ * first reported one on, so a report would run orchestration and the budget
+ * rollup again, for that record and for those after it, for one metric line;
+ * and once the claim of the step has landed, no retry can write that line.
  */
 export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> {
   let processed = 0;
   let budgetRolledUp = 0;
-  // Per-record isolation. A thrown record is reported as a
-  // batch item failure (by its stream sequence number) so ONLY it retries,
-  // instead of failing the whole batch and re-driving its healthy siblings.
+  let metricsPublished = 0;
+  let metricsFailed = 0;
+  // Per-record isolation. A record whose orchestration or budget step threw is
+  // reported as a batch item failure (by its stream sequence number): Lambda
+  // retries from the first reported record on, instead of failing the whole
+  // batch and re-driving the records before it.
   const batchItemFailures: { itemIdentifier: string }[] = [];
   for (const record of event.Records) {
     const seq = record.dynamodb?.SequenceNumber;
@@ -1650,6 +1665,18 @@ export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatch
       budgetError = err;
     }
 
+    try {
+      if (await publishTaskMetrics(record)) metricsPublished += 1;
+    } catch (err) {
+      // Counted and logged, never reported for retry: see the comment of this function.
+      metricsFailed += 1;
+      logger.error('Scoreboard metrics step failed: task not counted', {
+        sequence_number: seq,
+        task_id: record.dynamodb?.NewImage?.task_id?.S,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     const error = orchestrationError ?? budgetError;
     if (error) {
       logger.error('TaskTable reconciler record failed — reporting for isolated retry', {
@@ -1672,6 +1699,8 @@ export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatch
     records: event.Records.length,
     reconciled: processed,
     budget_rolled_up: budgetRolledUp,
+    metrics_published: metricsPublished,
+    metrics_failed: metricsFailed,
     failed: batchItemFailures.length,
   });
   return { batchItemFailures };

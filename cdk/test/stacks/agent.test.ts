@@ -52,15 +52,16 @@ describe('AgentStack', () => {
 
   test('nests scheduled maintenance while retaining its data in the parent', () => {
     const parentFunctions = Object.keys(template.findResources('AWS::Lambda::Function'));
-    for (const prefix of ['ConcurrencyReconciler', 'AdmissionQueuePickup', 'StrandedTaskReconciler', 'PendingUploadCleanup']) {
+    for (const prefix of ['ConcurrencyReconciler', 'AdmissionQueuePickup', 'StrandedTaskReconciler', 'PendingUploadCleanup', 'PrOutcomeSweep']) {
       expect(parentFunctions.some(id => id.startsWith(prefix))).toBe(false);
       expect(Object.keys(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
         .filter(id => id.startsWith(prefix))).toHaveLength(1);
     }
-    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 4);
-    concurrencyMaintenance.resourceCountIs('AWS::Events::Rule', 4);
+    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 5);
+    concurrencyMaintenance.resourceCountIs('AWS::Events::Rule', 5);
     concurrencyMaintenance.resourceCountIs('AWS::S3::Bucket', 0);
     concurrencyMaintenance.resourceCountIs('AWS::DynamoDB::Table', 0);
+    concurrencyMaintenance.resourceCountIs('AWS::SecretsManager::Secret', 0);
     concurrencyMaintenance.hasResourceProperties('AWS::Events::Rule', {
       ScheduleExpression: 'rate(15 minutes)',
     });
@@ -73,6 +74,37 @@ describe('AgentStack', () => {
       .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
     expect(nested.Properties.Parameters[variables.USER_CONCURRENCY_TABLE_NAME.Ref])
       .toEqual({ Ref: expect.stringMatching(/^UserConcurrencyTable/) });
+  });
+
+  test('the pull-request sweep works on the stack\'s own tables, reads GitHub with its token secret, and is granted that secret only', () => {
+    const sweep = Object.entries(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('PrOutcomeSweep'))![1];
+    const variables = sweep.Properties.Environment.Variables;
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[variables.GITHUB_TOKEN_SECRET_ARN.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^GitHubTokenSecret/) });
+    expect(nested.Properties.Parameters[variables.TASK_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
+    expect(nested.Properties.Parameters[variables.TASK_EVENTS_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskEventsTable/) });
+
+    // The secret its role may read is the one its environment names.
+    const secretStatements = Object.entries(concurrencyMaintenance.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith('PrOutcomeSweep'))
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement as { Action: unknown; Resource: unknown }[])
+      .filter((statement) => JSON.stringify(statement.Action).includes('secretsmanager:'));
+    expect(secretStatements).toEqual([{
+      Action: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+      Effect: 'Allow',
+      Resource: variables.GITHUB_TOKEN_SECRET_ARN,
+    }]);
+
+    const sweepAlarms = Object.entries(concurrencyMaintenance.findResources('AWS::CloudWatch::Alarm'))
+      .filter(([id]) => id.startsWith('PrOutcomeSweep'))
+      .map(([, alarm]) => alarm);
+    expect(sweepAlarms).toHaveLength(1);
+    expect(JSON.stringify((sweepAlarms[0] as { Properties: unknown }).Properties)).toContain('OperationalAlerts');
   });
 
   test('creates exactly 22 DynamoDB tables', () => {
@@ -1881,9 +1913,9 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    // 47 existing handlers (4 scheduled maintenance jobs nested) + 2 registry
+    // 48 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
     // provisioning handlers + 4 registry API handlers in nested stacks.
-    expect(abcaLambdas.length).toBe(53);
+    expect(abcaLambdas.length).toBe(54);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas

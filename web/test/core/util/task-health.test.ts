@@ -48,6 +48,7 @@ function summary(overrides: Partial<TaskSummary>): TaskSummary {
     created_at: ago(600),
     updated_at: ago(600),
     agent_heartbeat_at: ago(10),
+    compute_type: 'agentcore',
     ...overrides,
   };
 }
@@ -71,6 +72,18 @@ describe('hasStaleHeartbeat', () => {
   it('only applies to RUNNING tasks', () => {
     expect(hasStaleHeartbeat(summary({ status: 'COMPLETED', agent_heartbeat_at: ago(9999) }), NOW)).toBe(false);
     expect(hasStaleHeartbeat(summary({ status: 'QUEUED', agent_heartbeat_at: null, updated_at: ago(9999) }), NOW)).toBe(false);
+  });
+
+  it.each([
+    ['agentcore', true],
+    ['lambda-microvm', true],
+    // A running task whose record names no backend was started before the field existed: the heartbeat counts.
+    [null, true],
+    // On ECS the agent reports once, at its start: an old report says nothing, and the orchestrator does not go by it either.
+    ['ecs', false],
+  ] as const)('goes by the heartbeat of a task on %s: %s', (computeType, stale) => {
+    expect(hasStaleHeartbeat(summary({ compute_type: computeType, agent_heartbeat_at: ago(3600) }), NOW)).toBe(stale);
+    expect(hasStaleHeartbeat(summary({ compute_type: computeType, agent_heartbeat_at: null, updated_at: ago(3600) }), NOW)).toBe(stale);
   });
 });
 

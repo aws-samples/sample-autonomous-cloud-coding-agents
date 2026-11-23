@@ -23,11 +23,12 @@ Single test file: `cd web && yarn vitest run test/domains/tasks/TaskListPage.tes
 - **Layers:** `app/` (shell, providers, config) · `core/` (API client, wire types, shared components/utils; no pages) · `domains/<feature>/` (pages + hooks). `core/` must not import from `domains/` (ESLint enforces it, `import()` included).
 - **Server state:** TanStack Query hooks colocated in `domains/<feature>/hooks.ts`. No other state library.
 - **Cloudscape:** import components directly (`@cloudscape-design/components/<name>`; ESLint rejects the package root); no pass-through wrappers. Use `RouterLink`/`ExternalLink` from `core/components/RouterLink.tsx` for links.
-- **Wire types:** `src/core/api/types.ts` mirrors `cli/src/types.ts`. Change both when the API changes. Drift fails `mise run check:types-sync`: an export may leave members out, but each member it declares must match the CDK declaration (the CLI one where the CDK has none), and a new export needs such a declaration or an entry in `WEB_ONLY_ALLOWLIST` in `scripts/check-types-sync.ts`.
+- **Wire types:** `src/core/api/types.ts` mirrors the API's types (`cdk/src/handlers/shared/types.ts`, and `cli/src/types.ts` for the envelopes). Change them together when the API changes. Drift fails `mise run check:types-sync`: an export may leave members out, but each member it declares must match the CDK declaration (the CLI one where the CDK has none), and a new export needs such a declaration or an entry in `WEB_ONLY_ALLOWLIST` in `scripts/check-types-sync.ts`.
 - **Tests:** `test/` mirrors `src/`. Page tests render real routes through `test/helpers/render.tsx` against the MSW server in `test/helpers/server.ts`, which uses the same handlers as mock mode. Add a fixture in `src/mocks/fixtures.ts` for each new state the UI must handle.
 - **Coverage:** ESLint (`no-warning-comments`) rejects a comment that contains `istanbul ignore`, `c8 ignore`, `v8 ignore` or `node:coverage`: vitest would leave that code out of the coverage report. Test the code, or leave it counted as uncovered and say why in a plain comment.
 - **License header:** every `src/` and `test/` file starts with the MIT-0 header (`header.js`); ESLint enforces it.
 - **Complexity:** ESLint (`complexity`) fails any function whose cyclomatic complexity is above 40, the ceiling shared with cdk and cli. Split the component or move logic into a hook or helper; do not add an `eslint-disable`.
+- **Scoreboard wording:** the page and `bgagent stats` say the same sentences. `cli/test/scoreboard.test.ts` loads `src/core/util/scoreboard.ts` and fails when they diverge. Keep that module's runtime imports to `./format` and types: the CLI suite has no JSX bundler, and another import fails the load before the comparison.
 
 ## Boundaries
 

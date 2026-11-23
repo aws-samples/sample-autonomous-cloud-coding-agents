@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   componentForPath,
   DeployProgress,
@@ -41,6 +43,9 @@ describe('componentForPath', () => {
     ['TaskApi/Api', 'Task API & sign-in'],
     ['AgentVpc/Vpc/PublicSubnet1/Subnet', 'Networking'],
     ['AgentRegistryStack.NestedStack/AgentRegistryStack.NestedStackResource', 'AWS Agent Registry'],
+    // The scheduled maintenance jobs: one nested stack, so one resource of the root stack.
+    ['ConcurrencyMaintenance.NestedStack/ConcurrencyMaintenance.NestedStackResource', 'Orchestration'],
+    ['Microvm.NestedStack/Microvm.NestedStackResource', 'Agent runtime'],
     ['AgentPluginsBlueprint/RepoConfigCR', 'Repository onboarding'],
     ['Custom::S3AutoDeleteObjectsCustomResourceProvider/Role', 'Platform helpers'],
   ])('%s → %s', (constructPath, component) => {
@@ -49,6 +54,25 @@ describe('componentForPath', () => {
 
   test('attributes everything in the split network stack to Networking', () => {
     expect(componentForPath(`${STACK}-network/AgentVpc/Vpc`, [STACK, `${STACK}-network`])).toBe('Networking');
+  });
+
+  // The stack is read as text: the CLI must not import the CDK package (same technique as
+  // commands/ops-queries.test.ts). A construct the map does not name shows under "Platform
+  // helpers" in the setup progress: name it under a component of COMPONENTS in src/setup-ui.ts.
+  test('names a component for every construct AgentStack creates at its top level', () => {
+    const stack = fs.readFileSync(path.join(__dirname, '..', '..', 'cdk', 'src', 'stacks', 'agent.ts'), 'utf-8');
+    const created = [...stack.matchAll(/new ([\w.]+)\(\s*this,\s*'(\w+)'/g)]
+      // An output is no resource, with or without its namespace (`cdk.CfnOutput`): it never reaches the progress.
+      .filter(([, constructClass]) => !constructClass.endsWith('CfnOutput'))
+      .map(([, , id]) => id);
+
+    // What the reading has to find, or the check below passes on nothing: a construct on one line, and
+    // one whose arguments start on the next.
+    expect(created).toEqual(expect.arrayContaining(['TaskTable', 'StrandedOrchestrationReconciler']));
+    // An id that is not a literal would go unseen. The one there is, is the id of a Blueprint, which
+    // componentForPath tells by its ending.
+    expect([...stack.matchAll(/new ([\w.]+)\(\s*this,(?!\s*')/g)].map(([, constructClass]) => constructClass)).toEqual(['Blueprint']);
+    expect(created.filter((id) => componentForPath(`${STACK}/${id}/Resource`, [STACK]) === 'Platform helpers')).toEqual([]);
   });
 });
 

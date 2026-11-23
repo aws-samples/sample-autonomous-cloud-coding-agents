@@ -1097,37 +1097,44 @@ const UNKNOWN_CLASSIFICATION: ErrorClassification = {
 };
 
 /**
+ * Bounds what is classified: the agent stores at most 1,000 characters, and the
+ * platform's own reasons carry their marker at the front.
+ */
+const CLASSIFIED_MESSAGE_CHARS = 1000;
+
+/**
  * Classify an error message into a structured category with user-facing guidance.
- * Returns null if the error message is empty or undefined.
+ * Returns null if the error message is empty or undefined. A value that is not
+ * text has no classification.
  *
- * @param errorMessage - the raw error_message string from a task record.
+ * @param errorMessage - the raw error_message string from a task record; its first
+ *   {@link CLASSIFIED_MESSAGE_CHARS} characters are what is classified.
  * @returns the classification, or null if there is no error to classify.
  */
 export function classifyError(errorMessage: string | undefined | null): ErrorClassification | null {
-  if (!errorMessage) {
-    return null;
-  }
+  if (typeof errorMessage !== 'string' || errorMessage === '') return null;
+  const message = errorMessage.slice(0, CLASSIFIED_MESSAGE_CHARS);
 
   // Read the orchestrator's code before scanning any appended service text.
-  const microvmFailure = classifyMicrovmTerminalFailure(errorMessage);
+  const microvmFailure = classifyMicrovmTerminalFailure(message);
   if (microvmFailure) return microvmFailure;
 
   // Environmental blockers carry a canonical ``BLOCKED[<kind>]`` prefix
   // and an extractable resource — check them first so the remedy can name the
   // exact secret / host rather than falling through to a generic pattern.
-  const kindMatch = BLOCKED_KIND.exec(errorMessage);
+  const kindMatch = BLOCKED_KIND.exec(message);
   if (kindMatch) {
-    const resource = BLOCKED_RESOURCE.exec(errorMessage)?.[1];
+    const resource = BLOCKED_RESOURCE.exec(message)?.[1];
     return blockerClassification(kindMatch[1].toLowerCase(), resource);
   }
 
-  const pushRefusal = AGENT_PUSH_REFUSAL.exec(errorMessage);
+  const pushRefusal = AGENT_PUSH_REFUSAL.exec(message);
   if (pushRefusal) {
     return agentPushRefusalClassification(pushRefusal[1], pushRefusal[2], pushRefusal[3]);
   }
 
   for (const { pattern, exclude, classification } of PATTERNS) {
-    if (pattern.test(errorMessage) && (!exclude || !exclude.test(errorMessage))) {
+    if (pattern.test(message) && (!exclude || !exclude.test(message))) {
       return classification;
     }
   }

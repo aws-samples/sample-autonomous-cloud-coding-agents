@@ -439,6 +439,28 @@ export interface TaskRecord {
    * Introduced in PR A1; unused at runtime until A3.
    */
   readonly depends_on?: readonly string[];
+  /**
+   * The state on GitHub of the pull request this task opened, as the hourly read
+   * of pull requests last recorded it. Absent until a read records a state, and on
+   * every task whose pull request that read does not follow: one that opened no new
+   * pull request, and one that is part of an orchestration. ``merged`` and
+   * ``closed`` are final: a pull request recorded as either is not read again.
+   * ``not_found`` ends the reading as well, without being a final state: GitHub
+   * had no pull request of this task under the recorded number, and nothing else
+   * is written with it. Internal, like the three fields below: no API mapper
+   * exposes them.
+   */
+  readonly pr_state?: 'open' | 'merged' | 'closed' | 'not_found';
+  /** GitHub's merge time (``merged``) or close time (``closed``), ISO; written with the final state. */
+  readonly pr_closed_at?: string;
+  /**
+   * ISO time of the first review by a person with write access to the repository,
+   * other than the pull request's author; written with the final state, and absent
+   * when there was none by then.
+   */
+  readonly pr_first_review_at?: string;
+  /** Reviews by such people that requested changes, counted when the final state was recorded. */
+  readonly pr_changes_requested?: number;
 }
 
 /** Per-channel override for one notification channel. See
@@ -516,6 +538,10 @@ export interface TaskDetail {
    * operator can see. Keep in sync with ``cli/src/types.ts::TaskDetail``.
    */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. What a heartbeat
+   *  says differs by backend, so a reader of ``agent_heartbeat_at`` needs it. */
+  readonly compute_type: ComputeType | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -610,6 +636,10 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. On the summary beside
+   *  ``agent_heartbeat_at``, because what a heartbeat says differs by backend. */
+  readonly compute_type: ComputeType | null;
   /**
    * Estimated spend in USD (null until the agent reports one). On the summary so a
    * cost view can total a page of tasks without one detail call per task.
@@ -641,6 +671,97 @@ export interface PersonalBudgetStatus {
   readonly hard_stop: boolean;
   /** Whether the configured hard stop is currently blocking new tasks. */
   readonly hard_stop_active: boolean;
+}
+
+/** What a finished task counts as on the scoreboard. `failed`, `cancelled` and `timed_out` are the statuses of those names; `verified_pr`, `unverified_pr` and `no_new_pr` split the completed tasks. */
+export type TaskOutcome = 'verified_pr' | 'unverified_pr' | 'no_new_pr' | 'failed' | 'cancelled' | 'timed_out';
+
+/** A place the work waited for, or was redirected by, a person. `approve` counts approval requests, whatever the answer. */
+export type TouchpointKind = 'approve' | 'clarify' | 'follow_up' | 'cancel';
+
+/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it. `unread`: no read has recorded one yet, or a read found no pull request of the task under the recorded number and does not ask again. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
+export type PullRequestState = 'merged' | 'closed' | 'open' | 'unread';
+
+/** How far back a scoreboard looks: that many days up to now. */
+export type ScoreboardRange = '7d' | '30d';
+
+/** `count` of `total`. A rate is count / total; with a total of 0 there is none. */
+export interface Fraction {
+  readonly count: number;
+  readonly total: number;
+}
+
+/** A count, with the ids of up to 10 of the tasks behind it. */
+export interface Flagged {
+  readonly count: number;
+  readonly task_ids: readonly string[];
+}
+
+/** The median and the 90th percentile of durations in whole seconds, and how many durations there are. */
+export interface DurationSummary {
+  readonly p50: number;
+  readonly p90: number;
+  readonly count: number;
+}
+
+/** The scoreboard's numbers over the tasks that finished in one period. */
+export interface ScoreboardPeriod {
+  /** ISO bounds: tasks that finished at or after `from` and before `to`. The current period has no upper test: a finish time ahead of the clock belongs to it. */
+  readonly from: string;
+  readonly to: string;
+  /** Tasks that reached a terminal state, and their split. */
+  readonly finished: number;
+  readonly outcomes: Readonly<Record<TaskOutcome, number>>;
+  /** Seconds from task creation to a verified pull request; null when there is none. With fewer than 10 values, `p90` is the largest or close to it. */
+  readonly time_to_verified_pr_s: DurationSummary | null;
+  /** Median seconds from creation to the start of the session, time in the admission queue included, over the verified pull requests above whose start is known; null when there is none. */
+  readonly wait_p50_s: number | null;
+  /** Tasks that waited in the admission queue, of the tasks that waited or ran. */
+  readonly queued: Fraction;
+  /** Verified pull requests, of the tasks that asked for a new pull request. */
+  readonly verified: Fraction;
+  /** New pull requests with no follow-up task before the period's end (a follow-up known to have changed no code is not one), of the new pull requests whose number is known. */
+  readonly not_reworked: Fraction;
+  /** Verified pull requests whose task never stopped for a person, of the tasks that asked for a new pull request. */
+  readonly untouched: Fraction;
+  /** Touchpoints on coding tasks. Shown per verified pull request: divide the sum by `outcomes.verified_pr`. */
+  readonly touchpoints: Readonly<Record<TouchpointKind, number>>;
+  /** Recorded spend of coding tasks, all outcomes, to the micro-dollar. Shown per verified pull request: divide by `outcomes.verified_pr`. */
+  readonly spend_usd: number;
+  /** Coding tasks that ran and recorded no cost: `spend_usd` under-counts by them. */
+  readonly uncosted: number;
+  /** Finished tasks of any kind, not only coding tasks, that a guardrail stopped; newest first. Each is also one of `outcomes.failed`. */
+  readonly guardrail_stops: Flagged;
+  /** Finished tasks of any kind that were submitted with every approval granted in advance; newest first. */
+  readonly blanket_approvals: Flagged;
+  /** Coding tasks that stopped for at least one approval request, of the coding tasks that ran. */
+  readonly gated: Fraction;
+  /** The new pull requests of the period that ABCA follows, by their state at the period's end: the four add up to those pull requests. A pull request opened by a task of an orchestration is not followed, and is in none of them. Shown as the merged share: `merged` of `merged` + `closed` + `open`, with `unread` outside it. */
+  readonly pull_requests: Readonly<Record<PullRequestState, number>>;
+  /** Merged pull requests nobody sent back first (no change request by a reviewer with write access, no reworking follow-up before the merge), of the merged ones. */
+  readonly merged_clean: Fraction;
+  /** Seconds from task creation to the merge, over the pull requests merged before the period's end; null when none was merged. */
+  readonly time_to_merge_s: DurationSummary | null;
+  /** Seconds from the end of the task to the first review of its pull request by a person with write access to the repository, other than the pull request's author, over the merged ones that had one; null when none had. A review before that end counts as 0. */
+  readonly first_review_s: DurationSummary | null;
+}
+
+/** GET /v1/tasks?view=scoreboard: the caller's scoreboard for a range. */
+export interface Scoreboard {
+  readonly range: ScoreboardRange;
+  /** The read hit its cap inside the current period: `current` starts later than the range asked for, and `previous` is null. */
+  readonly truncated: boolean;
+  readonly current: ScoreboardPeriod;
+  /** The period of equal length before `current`; null when the read did not cover it. */
+  readonly previous: ScoreboardPeriod | null;
+  /**
+   * New pull requests that ABCA follows and that were open at its last read more than 7 days
+   * after their task finished, oldest first, over the tasks of both periods. Null when the
+   * count is not known: the read did not cover the earlier period, so the pull requests of
+   * the tasks it left out would be missing; or some pull requests are that old and ABCA has
+   * read none of them on GitHub.
+   */
+  readonly open_over_7d: Flagged | null;
 }
 
 /**
@@ -1007,6 +1128,7 @@ export function toTaskDetail(
     // ADR-021 P2r2-F11: written by every backend, consumed by the orchestrator for
     // hang detection, and — until this line — invisible to every API consumer.
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
+    compute_type: record.compute_type ?? null,
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
     cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
@@ -1281,6 +1403,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     created_at: record.created_at,
     updated_at: record.updated_at,
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
+    compute_type: record.compute_type ?? null,
     cost_usd: coerceNumericOrNull(record.cost_usd, { task_id: record.task_id, field: 'cost_usd' }, logger),
     completed_at: record.completed_at ?? null,
     channel_source: record.channel_source,

@@ -409,7 +409,7 @@ At public US East (N. Virginia) first-tier list rates verified in August 2026, t
 
 | Service | Used By | Scales to Zero |
 |---------|---------|---------------|
-| EventBridge (scheduled rule) | Stranded task reconciler (every 5 min) | Yes (rule is free; Lambda invocation is the cost) |
+| EventBridge (scheduled rule) | Stranded task reconciler (every 5 min), and the other jobs of the scheduled maintenance stack, the hourly read of pull-request outcomes among them | Yes (rule is free; Lambda invocation is the cost) |
 
 ### Observability
 
@@ -472,9 +472,10 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ### Scheduled maintenance stack
 
-Concurrency repair, admission-queue pickup, stranded-task repair and pending-upload
-cleanup run in the `ConcurrencyMaintenance` nested stack. An upgrade recreates the
-stateless functions, roles and schedules; their task tables and storage stay in
+Concurrency repair, admission-queue pickup, stranded-task repair, pending-upload
+cleanup and the hourly read of pull-request outcomes run in the
+`ConcurrencyMaintenance` nested stack. An upgrade recreates the stateless
+functions, roles and schedules of the first four; their task tables and storage stay in
 the parent stack. This applies to every compute backend, including AgentCore,
 and replaces roughly twenty resources, depending on enabled features.
 CloudFormation creates the new schedules before deleting the old ones, so both

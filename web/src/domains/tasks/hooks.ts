@@ -54,6 +54,9 @@ export function useTaskList(status?: readonly TaskStatusType[], repo?: string) {
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => (last.pagination.has_more && last.pagination.next_token ? last.pagination.next_token : undefined),
     refetchInterval: LIST_REFRESH_MS,
+    // Every answer is a new object, also one that equals the last: the pages derive "quiet", the 24-hour
+    // windows and "2m ago" from the clock, and derive them again only when the answer they hold changes.
+    structuralSharing: false,
   });
 }
 
@@ -82,6 +85,9 @@ export function useTask(taskId: string) {
     queryKey: taskKeys.detail(taskId),
     queryFn: () => api.getTask(taskId),
     refetchInterval: (query) => (query.state.data && isTerminal(query.state.data.status) ? false : ACTIVE_TASK_REFRESH_MS),
+    // Every answer is a new object, also one that equals the last: the pages derive "quiet", the 24-hour
+    // windows and "2m ago" from the clock, and derive them again only when the answer they hold changes.
+    structuralSharing: false,
   });
 }
 
@@ -118,7 +124,10 @@ export async function loadTaskEvents(api: ApiClient, taskId: string, previous: T
   return { events: events.slice(0, MAX_TASK_EVENTS), truncated: events.length >= MAX_TASK_EVENTS };
 }
 
-/** Events that close a task's history; once one is loaded nothing more will arrive. */
+/**
+ * Events that end a task's run; once one is loaded the polling stops. The event of its pull
+ * request's merge or close comes later, and the next visit of the page reads it.
+ */
 const TERMINAL_EVENT_TYPES = new Set(['task_completed', 'task_failed', 'task_cancelled', 'task_timed_out']);
 /** After the task reports it finished, keep polling this many times for its final events. */
 const FINAL_EVENT_POLLS = 6;

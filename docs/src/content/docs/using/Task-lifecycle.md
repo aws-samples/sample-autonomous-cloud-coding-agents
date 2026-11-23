@@ -63,8 +63,9 @@ Available events:
 - **Orchestration** - `admission_queued`, `queue_pickup`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
 - **Interactive** - `nudge_acknowledged`, `agent_milestone`
-- **Approvals (Cedar HITL)** - `approval_requested`, `approval_recorded`, `approval_timed_out`
+- **Approvals (Cedar HITL)** - `approval_decision_recorded`, written when a request is approved or denied, and milestones of `agent_milestone`, among them `approval_requested`, `approval_granted`, `approval_denied`, `approval_timed_out` and `approval_stranded`
 - **Output** - `pr_created`, `pr_updated`
+- **After the task** - `pr_outcome_recorded`: ABCA read on GitHub that the pull request the task opened was merged or closed, which can be days after the task finished. ABCA reads about once an hour, and the event comes with the read that records it
 
 **Error classifiers** on terminal failure events provide a specific reason:
 

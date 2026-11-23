@@ -146,6 +146,16 @@ describe('get-task handler', () => {
     expect(body.data.agent_heartbeat_at).toBeNull();
   });
 
+  test('surfaces the compute backend the session started on, and null before one starts', async () => {
+    // What a heartbeat says differs by backend, so the reader of one has to know which it is.
+    expect(JSON.parse((await handler(makeEvent())).body).data.compute_type).toBeNull();
+
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({ Item: { ...TASK_RECORD, compute_type: 'lambda-microvm' } });
+
+    expect(JSON.parse((await handler(makeEvent())).body).data.compute_type).toBe('lambda-microvm');
+  });
+
   test('surfaces the stored issue title, and null before hydration stores it', async () => {
     expect(JSON.parse((await handler(makeEvent())).body).data.issue_title).toBeNull();
 
