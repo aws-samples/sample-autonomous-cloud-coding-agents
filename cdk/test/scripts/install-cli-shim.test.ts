@@ -25,8 +25,8 @@
  * stand-in `cli/lib/bin/bgagent.js` that prints what it was run with, including its
  * working directory) and spawned with `BGAGENT_BIN_DIR` and `HOME` in temp
  * directories, so nothing touches `~/.local/bin`. The written script then runs under
- * `sh` with a PATH that holds a link to node and the system directories, checked to
- * hold no `mise`, except where a stand-in `mise` is placed on purpose.
+ * `sh` with a PATH that holds only links to node and git, so no `mise` is on it except a
+ * stand-in placed on purpose: the script needs nothing else (the rest are sh builtins).
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -36,6 +36,16 @@ import * as path from 'node:path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const SCRIPT_REL = 'scripts/install-cli-shim.ts';
+const TIMEOUT_MS = 20_000;
+const GIT = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).trim();
+const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 't',
+  GIT_AUTHOR_EMAIL: 't@example.com',
+  GIT_COMMITTER_NAME: 't',
+  GIT_COMMITTER_EMAIL: 't@example.com',
+};
 
 // Prints which checkout's CLI ran, from where, its arguments and the name setup will print.
 const FAKE_CLI = 'console.log(JSON.stringify({ file: __filename, cwd: process.cwd(), args: process.argv.slice(2), invokedAs: process.env.BGAGENT_INVOKED_AS }));\n';
@@ -44,13 +54,12 @@ let tmp: string;
 let basePath: string;
 beforeEach(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'abca-cli-shim-')));
-  // A directory holding only node, so a mise installed beside node is not on PATH.
-  const nodeBin = path.join(tmp, 'node-bin');
-  fs.mkdirSync(nodeBin);
-  fs.symlinkSync(process.execPath, path.join(nodeBin, 'node'));
-  basePath = [nodeBin, '/usr/bin', '/bin'].join(path.delimiter);
-  const which = spawnSync('/bin/sh', ['-c', 'command -v mise'], { env: { PATH: basePath } });
-  if (which.status === 0) throw new Error(`a mise is on the test PATH (${which.stdout}); the tests assume none`);
+  // Only node and git: a mise installed beside either is not on PATH.
+  const tools = path.join(tmp, 'tools');
+  fs.mkdirSync(tools);
+  fs.symlinkSync(process.execPath, path.join(tools, 'node'));
+  fs.symlinkSync(GIT, path.join(tools, 'git'));
+  basePath = tools;
 });
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -80,7 +89,7 @@ function install(root: string, args: string[] = [], env: Record<string, string> 
   const r = spawnSync(
     process.execPath,
     ['--experimental-strip-types', '--disable-warning=MODULE_TYPELESS_PACKAGE_JSON', script ?? path.join(root, SCRIPT_REL), ...args],
-    { encoding: 'utf-8', env: { BGAGENT_BIN_DIR: binDir(), PATH: basePath, HOME: tmp, ...env } },
+    { encoding: 'utf-8', timeout: TIMEOUT_MS, env: { BGAGENT_BIN_DIR: binDir(), PATH: basePath, HOME: tmp, ...GIT_ENV, ...env } },
   );
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -90,6 +99,7 @@ function runShim(cwd: string, args: string[] = [], env: Record<string, string> =
   const r = spawnSync('/bin/sh', [shimPath(), ...args], {
     cwd,
     encoding: 'utf-8',
+    timeout: TIMEOUT_MS,
     env: { PATH: basePath, HOME: tmp, PWD: cwd, ...env },
   });
   const last = r.stdout.trim().split('\n').pop();
@@ -119,6 +129,7 @@ describe('installer', () => {
     const a = checkout('a');
     const r = spawnSync(process.execPath, ['--experimental-strip-types', '--disable-warning=MODULE_TYPELESS_PACKAGE_JSON', path.join(a, SCRIPT_REL)], {
       encoding: 'utf-8',
+      timeout: TIMEOUT_MS,
       env: { PATH: basePath, HOME: tmp },
     });
     expect(r.status).toBe(0);
@@ -151,29 +162,58 @@ describe('installer', () => {
     expect(content()).toContain(`INSTALLED='${a}'`);
   });
 
-  test('replaces the bgagent of a checkout that no longer exists, even with --keep-existing', () => {
+  test('never replaces the bgagent of a checkout that no longer exists without --force', () => {
+    // Else the next mise run install anywhere silently re-pins it (#1059 review).
     const a = checkout('a');
     const b = checkout('b');
     install(a);
     fs.rmSync(a, { recursive: true });
 
-    const r = install(b, ['--keep-existing']);
-    expect(r.status).toBe(0);
-    expect(r.out).toContain(`replaced the bgagent of ${a}, which no longer exists`);
+    const kept = install(b, ['--keep-existing']);
+    expect(kept.status).toBe(0);
+    expect(kept.out).toContain(`the bgagent of ${a}, which no longer exists`);
+    expect(kept.out).toContain('mise run cli:install --force');
+    expect(content()).toContain(`INSTALLED='${a}'`);
+    expect(install(b).status).toBe(1);
+
+    expect(install(b, ['--force']).status).toBe(0);
     expect(content()).toContain(`INSTALLED='${b}'`);
+  });
+
+  test('mise run install never pins the command to a linked worktree', () => {
+    // A throwaway issue worktree, or a fork's PR under review (#1059 review).
+    const main = checkout('main');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: main, env: { ...process.env, ...GIT_ENV } });
+    git('init', '-q', '-b', 'main');
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    const wt = path.join(tmp, 'worktree');
+    git('worktree', 'add', '-q', wt);
+
+    const skipped = install(wt, ['--keep-existing']);
+    expect(skipped.status).toBe(0);
+    expect(skipped.out).toContain('linked worktree');
+    expect(skipped.out).toContain('mise run cli:install --force');
+    expect(fs.existsSync(shimPath())).toBe(false);
+
+    // The main checkout itself is not a linked worktree.
+    expect(install(main, ['--keep-existing']).status).toBe(0);
+    expect(content()).toContain(`INSTALLED='${main}'`);
+
+    // Explicitly, a worktree can be made the one bgagent runs.
+    expect(install(wt, ['--force']).status).toBe(0);
+    expect(content()).toContain(`INSTALLED='${fs.realpathSync(wt)}'`);
   });
 
   test('updates an older bgagent of the same checkout without --force', () => {
     const a = checkout('a');
     install(a);
-    fs.writeFileSync(shimPath(), content().replace('exec "', '# an older body\nexec "'));
+    const fresh = content();
+    fs.writeFileSync(shimPath(), fresh.replace('exec "', '# an older body\nexec "'));
 
     const r = install(a, ['--keep-existing']);
+    expect(r.status).toBe(0);
     expect(r.out).toContain('updated');
-    fs.rmSync(shimPath());
-    install(a);
-    const fresh = content();
-    install(a);
     expect(content()).toBe(fresh);
   });
 
@@ -214,14 +254,35 @@ describe('installer', () => {
     expect(content()).toContain(`INSTALLED='${a}'`);
   });
 
-  test('a dangling symlink is not followed either', () => {
+  test('a dangling symlink is not followed either, even with --force', () => {
     const a = checkout('a');
+    fs.mkdirSync(path.join(tmp, 'nowhere'));
     const target = path.join(tmp, 'nowhere', 'bgagent');
     fs.mkdirSync(binDir(), { recursive: true });
     fs.symlinkSync(target, shimPath());
 
-    expect(install(a, ['--keep-existing']).status).toBe(0);
+    expect(install(a, ['--force']).status).toBe(0);
     expect(fs.existsSync(target)).toBe(false);
+    expect(fs.lstatSync(shimPath()).isSymbolicLink()).toBe(false);
+    expect(content()).toContain(`INSTALLED='${a}'`);
+  });
+
+  test('refuses a directory at the target, even with --force, and leaves no temporary file', () => {
+    const a = checkout('a');
+    fs.mkdirSync(shimPath(), { recursive: true });
+
+    const r = install(a, ['--force']);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain('it is a directory');
+    expect(fs.readdirSync(binDir()).filter(f => f.startsWith('.bgagent.'))).toEqual([]);
+  });
+
+  test('refuses a checkout path holding a control character', () => {
+    const odd = checkout('a\nb');
+    const r = install(odd);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain('control character');
+    expect(fs.existsSync(shimPath())).toBe(false);
   });
 
   test('a write that fails fails the task, except during mise run install', () => {
@@ -247,10 +308,27 @@ describe('installer', () => {
     expect(fs.existsSync(shimPath())).toBe(true);
   });
 
+  test('--force wins over CI', () => {
+    const a = checkout('a');
+    expect(install(a, ['--keep-existing', '--force'], { CI: 'true' }).status).toBe(0);
+    expect(fs.existsSync(shimPath())).toBe(true);
+  });
+
   test('says how to put the directory on PATH, only when it is not', () => {
     const a = checkout('a');
     expect(install(a).out).toContain(`export PATH="${binDir()}:$PATH"`);
     expect(install(a, [], { PATH: `${binDir()}${path.delimiter}${basePath}` }).out).not.toContain('export PATH');
+  });
+
+  test('gives no PATH advice about a command it kept that is not this checkout\'s', () => {
+    const a = checkout('a');
+    fs.mkdirSync(binDir(), { recursive: true });
+    fs.writeFileSync(shimPath(), '#!/bin/sh\necho someone else\n');
+    fs.chmodSync(shimPath(), 0o755);
+
+    const r = install(a, ['--keep-existing']);
+    expect(r.out).not.toContain('export PATH');
+    expect(r.out).not.toContain('comes first');
   });
 
   test('warns when another bgagent comes first on PATH', () => {
@@ -340,17 +418,19 @@ describe('the bgagent command', () => {
     install(a);
     const fakeBin = path.join(tmp, 'fake-mise');
     fs.mkdirSync(fakeBin);
-    // `mise which node` run in the installed checkout: records where it ran, answers node.
-    fs.writeFileSync(
-      path.join(fakeBin, 'mise'),
-      `#!/bin/sh\necho "$PWD $*" > "${tmp}/mise-args"\necho "${process.execPath}"\n`,
-    );
+    // A node of its own, which marks that it ran: a script ignoring mise's answer would not.
+    const pinnedNode = path.join(fakeBin, 'pinned-node');
+    fs.writeFileSync(pinnedNode, `#!/bin/sh\n: > "${tmp}/pinned-node-ran"\nexec "${process.execPath}" "$@"\n`);
+    fs.chmodSync(pinnedNode, 0o755);
+    // `mise which node` run in the installed checkout: records where it ran, answers that node.
+    fs.writeFileSync(path.join(fakeBin, 'mise'), `#!/bin/sh\necho "$PWD $*" > "${tmp}/mise-args"\necho "${pinnedNode}"\n`);
     fs.chmodSync(path.join(fakeBin, 'mise'), 0o755);
     const elsewhere = path.join(tmp, 'elsewhere');
     fs.mkdirSync(elsewhere);
 
     const r = runShim(elsewhere, ['--help'], { PATH: `${fakeBin}${path.delimiter}${basePath}` });
     expect(fs.readFileSync(path.join(tmp, 'mise-args'), 'utf-8').trim()).toBe(`${a} which node`);
+    expect(fs.existsSync(path.join(tmp, 'pinned-node-ran'))).toBe(true);
     expect(r.ran.cwd).toBe(elsewhere);
     expect(r.ran.args).toEqual(['--help']);
   });
@@ -366,6 +446,8 @@ describe('the bgagent command', () => {
     const r = runShim(tmp, [], { PATH: `${fakeBin}${path.delimiter}${basePath}` });
     expect(r.status).toBe(0);
     expect(r.ran.file).toBe(path.join(a, 'cli/lib/bin/bgagent.js'));
+    // Not silently: the node on PATH may be outside the CLI's engines.
+    expect(r.stderr).toContain(`mise has no Node for ${a}`);
   });
 
   test('quotes a checkout path with spaces and quotes', () => {
@@ -378,34 +460,42 @@ describe('the bgagent command', () => {
 });
 
 describe('mise tasks (#913)', () => {
-  function taskRun(name: string): unknown[] {
-    const out = execFileSync('mise', ['tasks', 'info', name, '--json'], {
-      cwd: REPO_ROOT,
-      encoding: 'utf-8',
-      env: { ...process.env, MISE_EXPERIMENTAL: '1' },
-    });
-    return (JSON.parse(out) as { run: unknown[] }).run;
+  /** The entries of a task's `run` array in the root mise.toml, in order, as written. */
+  function taskRun(header: string): string[] {
+    const toml = fs.readFileSync(path.join(REPO_ROOT, 'mise.toml'), 'utf-8');
+    const start = toml.indexOf(`${header}\n`);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const section = toml.slice(start, toml.indexOf('\n[', start + header.length));
+    const run = section.slice(section.indexOf('run = ['), section.indexOf('\n]', section.indexOf('run = [')));
+    return [...run.matchAll(/^\s*(?:"([^"\n]*)"|'{3}([^\n]*?)'{3}|(\{[^}\n]*\}))/gm)].map(m => m[1] ?? m[2] ?? m[3]);
   }
 
   test('mise run install writes the command with --keep-existing, last', () => {
-    const run = taskRun('install');
-    expect(String(run[run.length - 1])).toMatch(/scripts\/install-cli-shim\.ts --keep-existing$/);
+    const run = taskRun('[tasks.install]');
+    expect(run[run.length - 1]).toMatch(/scripts\/install-cli-shim\.ts --keep-existing$/);
   });
 
   test('cli:install compiles the CLI, then runs the installer, which takes the task\'s arguments', () => {
-    const run = taskRun('cli:install');
-    expect(run[0]).toEqual({ task: '//cli:compile' });
-    expect(String(run[run.length - 1])).toMatch(/scripts\/install-cli-shim\.ts$/);
+    const run = taskRun('[tasks."cli:install"]');
+    expect(run[0]).toBe('{ task = "//cli:compile" }');
+    expect(run[run.length - 1]).toMatch(/scripts\/install-cli-shim\.ts$/);
   });
 });
 
 describe('docs (#913)', () => {
-  test('no tracked Markdown file tells anyone to install the CLI from a registry', () => {
+  test('no command block in a tracked Markdown file installs or runs the CLI from a registry', () => {
+    // Fenced code only: prose may warn against the command.
+    const command = /(\bnpx\b|\bnpm\s+(i|install|add)\b|\bpnpm\s+(add|dlx)\b|\byarn\s+(global\s+)?(add|dlx)\b)[^\n]*@(backgroundagent|abca)\/cli/;
     const tracked = execFileSync('git', ['ls-files', '*.md', '*.mdx'], { cwd: REPO_ROOT, encoding: 'utf-8' })
       .split('\n')
       .filter(Boolean);
-    const offenders = tracked.filter(f => /(npm|pnpm|yarn)\b[^\n]*(-g\b|--global|global add)[^\n]*@(backgroundagent|abca)\/cli/
-      .test(fs.readFileSync(path.join(REPO_ROOT, f), 'utf-8')));
+    const offenders = tracked.filter(f => {
+      const blocks = fs.readFileSync(path.join(REPO_ROOT, f), 'utf-8').match(/^```[^\n]*\n[\s\S]*?^```/gm) ?? [];
+      return blocks.some(block => command.test(block));
+    });
     expect(offenders).toEqual([]);
+    for (const line of ['npm install -g @backgroundagent/cli', 'npm i @abca/cli -g', 'npx @abca/cli list']) {
+      expect(command.test(line)).toBe(true);
+    }
   });
 });

@@ -10,7 +10,7 @@ allowed-tools:
 
 Check the current state of the ABCA platform and report a concise status summary.
 
-> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, the shell may not have `~/.local/bin` on `PATH`: try `~/.local/bin/bgagent …`, or `node cli/lib/bin/bgagent.js …` from the repo root (prefixed with `mise exec --` in a non-interactive or mise-managed shell). If it says the CLI is not built, run `mise //cli:compile` from the repo root. Never pass `--force` to `mise run cli:install` without asking the user: it changes which checkout their `bgagent` runs.
+> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, the shell may not have `~/.local/bin` on `PATH`: try `~/.local/bin/bgagent …`, or `node cli/lib/bin/bgagent.js …` from the repo root (prefixed with `mise exec --` in a non-interactive or mise-managed shell). If it says the CLI is not built, run `mise //cli:compile` in the checkout the message names. Never pass `--force` to `mise run cli:install` without asking the user: it changes which checkout their `bgagent` runs.
 
 ## Checks to Run
 

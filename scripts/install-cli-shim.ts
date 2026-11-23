@@ -36,9 +36,10 @@
  *   mise run cli:install --force    replace another checkout's bgagent, or a file
  *                                   this installer did not write
  *   (mise run install)              runs this with --keep-existing: writes the command
- *                                   only when there is none (or it is this checkout's,
- *                                   or its checkout is gone), never when CI is set, and
- *                                   never fails the install over a file-system error
+ *                                   only when there is none or it is this checkout's
+ *                                   own (then updates it), never from a linked worktree
+ *                                   or when CI is set, and never fails the install over
+ *                                   a file-system error
  *
  * `BGAGENT_BIN_DIR` overrides the directory (default `~/.local/bin`).
  */
@@ -75,8 +76,15 @@ fi
 BGAGENT_INVOKED_AS=bgagent
 export BGAGENT_INVOKED_AS
 # The Node that checkout pins, found in a subshell: the caller's working directory stays,
-# so relative paths resolve where they were typed. Without mise, or that Node, plain node.
-node_bin=$(cd "$INSTALLED" 2>/dev/null && mise which node 2>/dev/null) || node_bin=
+# so relative paths resolve where they were typed. Without mise, plain node; with mise but
+# without that Node, plain node too, and a line saying so (it may be outside engines).
+node_bin=
+if command -v mise >/dev/null 2>&1; then
+  node_bin=$(cd "$INSTALLED" 2>/dev/null && mise which node 2>/dev/null) || {
+    node_bin=
+    echo "bgagent: mise has no Node for $INSTALLED (run: mise install, in $INSTALLED); using node from PATH" >&2
+  }
+fi
 exec "\${node_bin:-node}" "$INSTALLED/cli/lib/bin/bgagent.js" "$@"
 `;
 }
@@ -91,12 +99,15 @@ function installedCheckout(content: string): string | undefined {
   return quoted.slice(1, -1).replace(/'\\''/g, "'");
 }
 
+/** A directory at the target path: never replaced, even with --force. */
+const DIRECTORY = Symbol('directory');
+
 /**
- * What is at the target path: undefined when nothing is, null when it is not a regular
- * file (a symlink, even a dangling one, or a directory), else its content. lstat, so a
- * symlink is never followed: writing through one would overwrite what it points to.
+ * What is at the target path: undefined when nothing is, DIRECTORY for a directory, null
+ * when it is not a regular file (a symlink, even a dangling one), else its content. lstat,
+ * so a symlink is never followed: writing through one would overwrite what it points to.
  */
-function readExisting(target: string): string | null | undefined {
+function readExisting(target: string): string | null | typeof DIRECTORY | undefined {
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(target);
@@ -104,6 +115,7 @@ function readExisting(target: string): string | null | undefined {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw err;
   }
+  if (stat.isDirectory()) return DIRECTORY;
   return stat.isFile() ? fs.readFileSync(target, 'utf-8') : null;
 }
 
@@ -114,11 +126,12 @@ type Plan =
 
 /** What to do with what is already at the target path. `force` wins over `keepExisting`. */
 function planInstall(
-  existing: string | null | undefined,
+  existing: string | null | typeof DIRECTORY | undefined,
   checkout: string,
   options: { readonly force: boolean; readonly keepExisting: boolean; readonly executable: boolean },
 ): Plan {
   if (existing === undefined) return { action: 'write', reason: 'installed' };
+  if (existing === DIRECTORY) return { action: 'refuse', reason: 'it is a directory; remove it first' };
   if (existing === renderShim(checkout)) {
     return options.executable
       ? { action: 'keep', reason: 'already installed' }
@@ -126,14 +139,16 @@ function planInstall(
   }
   const other = existing === null ? undefined : installedCheckout(existing);
   if (other === checkout) return { action: 'write', reason: 'updated' };
-  if (other !== undefined && !fs.existsSync(path.join(other, 'cli', 'package.json'))) {
-    return { action: 'write', reason: `replaced the bgagent of ${other}, which no longer exists` };
-  }
-  const what = other === undefined ? 'a bgagent that this installer did not write' : `the bgagent of ${other}`;
+  const gone = other !== undefined && !fs.existsSync(path.join(other, 'cli', 'package.json'));
+  const what =
+    other === undefined
+      ? 'a bgagent that this installer did not write'
+      : `the bgagent of ${other}${gone ? ', which no longer exists' : ''}`;
   const hint = 'Run `mise run cli:install --force` from the repo root of this checkout to replace it';
   if (options.force) return { action: 'write', reason: `replaced ${what}` };
   if (options.keepExisting) {
-    const runs = other === undefined ? 'it does not run this checkout' : 'it runs that checkout\'s CLI';
+    const runs =
+      other === undefined ? 'it does not run this checkout' : gone ? 'it does not run' : 'it runs that checkout\'s CLI';
     return { action: 'keep', reason: `left ${what} in place; ${runs}. ${hint}` };
   }
   return { action: 'refuse', reason: `it holds ${what}. ${hint}` };
@@ -145,12 +160,18 @@ function writeAtomic(binDir: string, target: string, content: string): void {
   const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
   const fd = fs.openSync(tmp, flags, 0o700);
   try {
-    fs.writeSync(fd, content);
-    fs.fchmodSync(fd, 0o755);
-  } finally {
-    fs.closeSync(fd);
+    try {
+      fs.writeSync(fd, content);
+      fs.fchmodSync(fd, 0o755);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    // Never leave an executable temporary file behind.
+    fs.rmSync(tmp, { force: true });
+    throw err;
   }
-  fs.renameSync(tmp, target);
 }
 
 /** The first executable `bgagent` on a PATH value, if any. */
@@ -176,6 +197,18 @@ function sameFile(a: string, b: string): boolean {
   }
 }
 
+/**
+ * True when `checkout` is a linked worktree: its `.git` is a file (`gitdir: …`) where a main
+ * checkout's is a directory. `mise run install` runs in every new worktree, often a throwaway
+ * issue worktree or a fork's PR under review: the command must not get pinned to one of
+ * those. Read from the file system, so a missing or broken git cannot make a worktree look
+ * like a main checkout. Outside git (a tarball), false.
+ */
+function isLinkedWorktree(checkout: string): boolean {
+  const dotGit = path.join(checkout, '.git');
+  return fs.existsSync(dotGit) && fs.lstatSync(dotGit).isFile();
+}
+
 function main(argv: readonly string[], env: NodeJS.ProcessEnv): number {
   const force = argv.includes('--force');
   const keepExisting = argv.includes('--keep-existing');
@@ -184,11 +217,24 @@ function main(argv: readonly string[], env: NodeJS.ProcessEnv): number {
     console.error(`install-cli-shim: unknown argument ${unknown.join(' ')} (use --force or --keep-existing)`);
     return 2;
   }
-  if (keepExisting && env.CI && env.CI !== 'false' && env.CI !== '0') {
+  const automatic = keepExisting && !force;
+  if (automatic && env.CI && env.CI !== 'false' && env.CI !== '0') {
     console.log('bgagent: CI is set; not writing the bgagent command (run `mise run cli:install` to write it).');
     return 0;
   }
   const checkout = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
+  // A control character (a newline, say) would break reading the path back from the script.
+  if ([...checkout].some(c => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)) {
+    console.error('bgagent: the checkout path contains a control character; move the checkout and run this again.');
+    return keepExisting ? 0 : 1;
+  }
+  if (automatic && isLinkedWorktree(checkout)) {
+    console.log(
+      'bgagent: this is a linked worktree; not writing the bgagent command. Run ' +
+        '`mise run cli:install --force` from its repo root to make bgagent run this worktree.',
+    );
+    return 0;
+  }
   const binDir = env.BGAGENT_BIN_DIR || path.join(os.homedir(), '.local', 'bin');
   const target = path.join(binDir, 'bgagent');
 
@@ -212,9 +258,11 @@ function main(argv: readonly string[], env: NodeJS.ProcessEnv): number {
       writeAtomic(binDir, target, renderShim(checkout));
     }
     console.log(`bgagent: ${target}: ${plan.reason}.`);
+    // A kept command is another checkout's or not this installer's: no PATH advice for it.
+    if (plan.action === 'keep' && plan.reason !== 'already installed') return 0;
   } catch (err) {
     // Only file-system errors: anything else is a bug in this script and must fail loudly.
-    if (!(err instanceof Error && 'code' in err)) throw err;
+    if (!(err instanceof Error && 'code' in err && 'syscall' in err)) throw err;
     console.error(
       `bgagent: the bgagent command was not installed: ${err.message}. Fix that and run ` +
         '`mise run cli:install` from the repo root, or run `node cli/lib/bin/bgagent.js` there.',

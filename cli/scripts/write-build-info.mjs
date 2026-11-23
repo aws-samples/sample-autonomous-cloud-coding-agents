@@ -19,7 +19,7 @@
 
 // Records what was compiled, for `bgagent --version` (#913): lib/build-info.json holds the
 // package version and the commit of the checkout (12 characters of its SHA, never a tag
-// name), with `-dirty` when tracked files had uncommitted changes. Runs after `tsc` in the
+// name), with `-dirty` when tracked files under cli/ had uncommitted changes. Runs after `tsc` in the
 // compile script. When no commit can be read (not a git checkout, git missing, a repository
 // git refuses), the version alone is recorded and the reason printed.
 
@@ -36,7 +36,8 @@ const git = (...args) => execFileSync('git', args, { cwd: cliDir, encoding: 'utf
 let commit;
 try {
   const sha = git('rev-parse', '--short=12', 'HEAD');
-  const dirty = git('status', '--porcelain', '--untracked-files=no') !== '';
+  // Only the CLI's own files: an edit to a doc elsewhere in the repository does not mark it.
+  const dirty = git('status', '--porcelain', '--untracked-files=no', '--', '.') !== '';
   commit = `${sha}${dirty ? '-dirty' : ''}`;
 } catch (err) {
   const reason = (err.stderr || err.message || String(err)).toString().trim().split('\n')[0];

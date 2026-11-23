@@ -45,7 +45,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 2. Commit any auto-fixes (CI "Fail build on mutation" rejects uncommitted lint output)
 3. `mise run build`
 
-**Worktrees:** `node_modules/` and `agent/.venv/` are per-tree. Run `mise run install` in each new worktree.
+**Worktrees:** `node_modules/` and `agent/.venv/` are per-tree. Run `mise run install` in each new worktree. In a linked worktree it does not write the `bgagent` command, which stays pinned to the checkout that installed it; to make `bgagent` run a worktree, run `mise run cli:install --force` from its root.
 
 ## Where to make changes
 
