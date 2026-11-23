@@ -18,8 +18,9 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Duration, Fn, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -48,8 +49,15 @@ const API_HANDLER_TIMEOUT_SECONDS = 15;
 
 /**
  * Confirm-uploads Lambda timeout (seconds). Downloads + screens up to
- * five attachments (Guardrail image scan, PDF text extraction) in one
+ * ten attachments (Guardrail image scan, PDF text extraction) in one
  * invocation, so it gets a much larger budget than the standard handlers.
+ *
+ * After a gateway timeout `bgagent submit` waits before it confirms again,
+ * and derives that wait from this value (`CONFIRM_MAX_POLLS` in
+ * `cli/src/commands/submit.ts`: this long, less the gateway's 29 s, plus room
+ * for a cold start). Change the two together: with a longer timeout here and
+ * the same wait there, the second confirmation can run beside the first and
+ * screen every upload again.
  */
 const CONFIRM_UPLOADS_TIMEOUT_SECONDS = 180;
 
@@ -65,6 +73,12 @@ const HEAVY_ATTACHMENT_HANDLER_MEMORY_MB = 1024;
 /** Webhook routes that bypass the body-size rule; each is HMAC-verified in its Lambda. */
 const LARGE_BODY_WEBHOOK_PATHS = ['/v1/linear/webhook', '/v1/jira/webhook', '/v1/github/webhook'] as const;
 export type LargeBodyWebhookPath = typeof LARGE_BODY_WEBHOOK_PATHS[number];
+
+/** Metric (and rule) name of the count rule for XSS matches let through on signed webhook routes. */
+const SIGNED_WEBHOOK_XSS_METRIC = 'SignedWebhookXssCounted';
+
+/** XSS-shaped bodies per hour on the signed webhook routes that raise the alarm. */
+const SIGNED_WEBHOOK_XSS_ALARM_PER_HOUR = 20;
 
 const uriPathMatch = (positionalConstraint: 'STARTS_WITH' | 'EXACTLY', searchString: string) => ({
   byteMatchStatement: {
@@ -264,6 +278,96 @@ export interface TaskApiProps {
 }
 
 /**
+ * WAF rules for the HMAC-signed webhook routes (#1063). Their bodies carry user-written
+ * issue and PR text, and a Linear agent session opened by an @-mention adds XML-like
+ * `promptContext` (`<issue identifier=…>`), so CrossSiteScripting_BODY blocked them with a
+ * 403 before the receiver ran and the task or session never started. Here that rule (and
+ * SizeRestrictions_BODY: payloads > 8 KB) only counts. That is safe on these routes alone:
+ * each receiver verifies the signature over the raw body before it dispatches the event
+ * (Linear and Jira first read the tenant id from the body to choose the signing secret),
+ * and nothing renders a webhook body as HTML. Every other rule of the set still blocks, every other
+ * route still blocks XSS, and the priority-4 rate limit still applies. The second rule
+ * counts the XSS matches let through under their own metric, which signedWebhookXssAlarm
+ * watches (a counted rule inside a managed group has no metric of its own).
+ * @param paths - the deployed signed webhook routes.
+ * @returns the rules, or none when no webhook route is deployed.
+ */
+function signedWebhookRules(paths: readonly string[]): wafv2.CfnWebACL.RuleProperty[] {
+  if (paths.length === 0) return [];
+  return [
+    {
+      name: 'AWSManagedRulesCommonRuleSet-SignedWebhooks',
+      priority: 5,
+      overrideAction: { none: {} },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name: 'AWSManagedRulesCommonRuleSet',
+          // WAF rejects `excludedRules` alongside `ruleActionOverrides`, and an excluded
+          // rule is a count override, so both rules are overrides here.
+          ruleActionOverrides: [
+            { name: 'SizeRestrictions_BODY', actionToUse: { count: {} } },
+            { name: 'CrossSiteScripting_BODY', actionToUse: { count: {} } },
+          ],
+          scopeDownStatement: anyOf(paths.map(webhookPath => uriPathMatch('EXACTLY', webhookPath))),
+        },
+      },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: 'CommonRuleSetSignedWebhooks',
+        sampledRequestsEnabled: true,
+      },
+    },
+    {
+      name: SIGNED_WEBHOOK_XSS_METRIC,
+      priority: 6,
+      action: { count: {} },
+      statement: {
+        labelMatchStatement: { scope: 'LABEL', key: 'awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body' },
+      },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: SIGNED_WEBHOOK_XSS_METRIC,
+        sampledRequestsEnabled: true,
+      },
+    },
+  ];
+}
+
+/**
+ * The alarm on XSS-shaped bodies let through on the signed webhook routes. One now and
+ * then is expected (issue text with HTML, a session's prompt context); a sustained run is
+ * worth a look.
+ * @param scope - the construct to create the alarm in.
+ * @param webAcl - the web ACL whose count rule the alarm reads.
+ * @param paths - the deployed signed webhook routes.
+ * @returns the alarm, or undefined when no webhook route is deployed.
+ */
+function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths: readonly string[]): cloudwatch.Alarm | undefined {
+  if (paths.length === 0) return undefined;
+  return new cloudwatch.Alarm(scope, 'SignedWebhookXssCountedAlarm', {
+    metric: new cloudwatch.Metric({
+      namespace: 'AWS/WAFV2',
+      metricName: 'CountedRequests',
+      // The ACL's Ref is `name|id|scope`. WAF dimensions its metrics by the web ACL's
+      // name (here generated, e.g. `TaskApiWebAcl28D7DCC9-…`), not its visibilityConfig
+      // metric name: observed on a deployed stack, where every CountedRequests series
+      // carries the name and none carries `TaskApiWebAcl`.
+      dimensionsMap: { WebACL: Fn.select(0, Fn.split('|', webAcl.ref)), Rule: SIGNED_WEBHOOK_XSS_METRIC, Region: Stack.of(scope).region },
+      statistic: 'Sum',
+      period: Duration.hours(1),
+    }),
+    threshold: SIGNED_WEBHOOK_XSS_ALARM_PER_HOUR,
+    evaluationPeriods: 1,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    alarmDescription: 'Many XSS-shaped bodies reached a signed webhook route (Linear, Jira, GitHub) in an hour. '
+      + 'The WAF counts rather than blocks them there (each receiver verifies the HMAC first); check the '
+      + `WAF sampled requests for rule ${SIGNED_WEBHOOK_XSS_METRIC}.`,
+  });
+}
+
+/**
  * CDK construct that creates the Task API — an API Gateway REST API backed by
  * Cognito User Pool authentication and Lambda handler integrations.
  *
@@ -303,7 +407,14 @@ export class TaskApi extends Construct {
    */
   public readonly appClientId: string;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (53 when it landed); must not grow
+  /**
+   * Raised when many XSS-shaped bodies reach the signed webhook routes, where
+   * the WAF counts rather than blocks them. Undefined when no webhook route is
+   * deployed.
+   */
+  public readonly webhookXssCountedAlarm?: cloudwatch.Alarm;
+
+  // eslint-disable-next-line complexity -- predates the ceiling (55; 53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -336,8 +447,7 @@ export class TaskApi extends Construct {
     // Suppress Cognito rules not applicable for dev environment
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
-      { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
-      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment (advanced security)' },
     ]);
 
     // --- REST API ---
@@ -368,6 +478,7 @@ export class TaskApi extends Construct {
 
     // --- WAF Web ACL ---
     const largeBodyWebhookPaths: readonly string[] = props.largeBodyWebhookPaths ?? LARGE_BODY_WEBHOOK_PATHS;
+    const signedWebhookPaths = LARGE_BODY_WEBHOOK_PATHS.filter(webhookPath => largeBodyWebhookPaths.includes(webhookPath));
     const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
       defaultAction: { allow: {} },
       scope: 'REGIONAL',
@@ -376,21 +487,26 @@ export class TaskApi extends Construct {
         metricName: 'TaskApiWebAcl',
         sampledRequestsEnabled: true,
       },
+      // Sampling keeps the name and value of every header of a sampled request
+      // for three hours, readable with wafv2:GetSampledRequests. Two headers are
+      // a complete credential: `Authorization` (the Cognito token) and
+      // `X-API-Key` (the platform stores only the hash of that key). WAF writes
+      // REDACTED in their place; the rules still inspect the real request, and
+      // the header names match in any letter case.
+      dataProtectionConfig: {
+        dataProtections: [{
+          action: 'SUBSTITUTION',
+          field: { fieldType: 'SINGLE_HEADER', fieldKeys: ['authorization', 'x-api-key'] },
+        }],
+      },
       rules: [
         {
           // CRS for task paths that accept large bodies (inline base64
           // attachments up to 3 MB, presigned upload metadata). Excludes
-          // SizeRestrictions_BODY only; all other CRS rules apply. Payload
-          // size is bounded by API GW (10 MB) and validateAttachments().
-          //
-          // NOTE (known limitation, tracked as backlog): CrossSiteScripting_BODY here BLOCKS a
-          // Linear/Jira webhook whose issue body contains HTML markup
-          // (``<head>``, ``<meta>``, ``<div>``) at the WAF edge with a 403
-          // before the Lambda runs — the task silently never starts and the
-          // sender gets an opaque 403. XSS protection is intentionally kept ON
-          // for now (a real defense-in-depth layer); the false-positive is
-          // tracked as a backlog item to fix deliberately (e.g. a considered
-          // per-route exclusion + operator alarm) rather than weaken WAF here.
+          // SizeRestrictions_BODY only; all other CRS rules apply, XSS
+          // included. Payload size is bounded by API GW (10 MB) and
+          // validateAttachments(). The signed webhook routes have their own
+          // rule (AWSManagedRulesCommonRuleSet-SignedWebhooks, below).
           name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
@@ -399,16 +515,7 @@ export class TaskApi extends Construct {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
               excludedRules: [{ name: 'SizeRestrictions_BODY' }],
-              // Linear/Jira payloads > 8 KB (issue field sets, attachment
-              // metadata); GitHub deployment_status payloads (workflow history +
-              // deploy URLs) tripped SizeRestrictions_BODY, not RFI. Each route
-              // HMAC-verifies the raw body and the priority-4 rule rate-limits it.
-              scopeDownStatement: anyOf([
-                uriPathMatch('STARTS_WITH', '/v1/tasks'),
-                ...LARGE_BODY_WEBHOOK_PATHS
-                  .filter(webhookPath => largeBodyWebhookPaths.includes(webhookPath))
-                  .map(webhookPath => uriPathMatch('EXACTLY', webhookPath)),
-              ]),
+              scopeDownStatement: uriPathMatch('STARTS_WITH', '/v1/tasks'),
             },
           },
           visibilityConfig: {
@@ -472,8 +579,10 @@ export class TaskApi extends Construct {
             sampledRequestsEnabled: true,
           },
         },
+        ...signedWebhookRules(signedWebhookPaths),
       ],
     });
+    this.webhookXssCountedAlarm = signedWebhookXssAlarm(this, webAcl, signedWebhookPaths);
 
     new wafv2.CfnWebACLAssociation(this, 'WebAclAssociation', {
       resourceArn: this.api.deploymentStage.stageArn,

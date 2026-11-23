@@ -3,6 +3,6 @@
 # finding is re-reviewed; remove an entry as soon as a fixed release is available.
 
 [[IgnoredVulns]]
-id = "GHSA-g3hv-75wg-m249"
-ignoreUntil = 2026-12-16
-reason = "minimatch globparts DoS (7.0.0 and later, fixed in 11.0.1). Two affected copies are left, both in build tooling and never deployed. 10.2.5 is bundled inside aws-cdk-lib 2.261.0 (bundleDependencies, which resolutions cannot replace) and matches only patterns from CDK code and the cdk command line, at synth time. On 2026-11-16 no aws-cdk-lib release had the fix: 2.277.0 bundles 10.2.6, and the bump to 11.0.8 (aws/aws-cdk#39595, merged 2026-11-13) is not in it. 10.2.6 serves eslint-plugin-import-x 4.17.1 (lint only, patterns from the eslint configs), which imports makeRe, removed in minimatch 11. 4.18.0, the first release that accepts minimatch 11, also sorts parent imports before sibling imports in import-x/order, which fails lint on existing files; that bump is left to the dependency update that re-sorts them."
+id = "GHSA-fc5q-39xc-vjpf"
+effectiveUntil = 2026-12-16
+reason = "picomatch regular-expression denial of service on a crafted glob pattern (every release through 4.0.7; reviewed by GitHub on 2026-11-17, and on 2026-11-18 no fixed release exists). Both locked copies, 2.3.2 and 4.0.7, belong to build and test tooling only (jest, vitest, vite, astro, knip, the ESLint stylistic plugin) and are never deployed. They match only patterns from this repository's own configuration, never a pattern from a request."

@@ -25,13 +25,39 @@
 
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { isLookupAbsent, isLookupFailure } from '../../../src/handlers/shared/lookup-result';
-import { readTaskPrNumber } from '../../../src/handlers/shared/task-pr-number';
+import { prNumberFromTask, readTaskPrNumber } from '../../../src/handlers/shared/task-pr-number';
 
 /** Minimal doc-client stub: only `send` is exercised. */
 const ddbWith = (impl: jest.Mock): DynamoDBDocumentClient =>
   ({ send: impl } as unknown as DynamoDBDocumentClient);
 
 const resolving = (Item?: Record<string, unknown>) => jest.fn().mockResolvedValue({ Item });
+
+// One rule for every reader of a task's PR: the Linear and Jira comment paths,
+// the terminal reply of an iteration and `readTaskPrNumber` below.
+describe('prNumberFromTask', () => {
+  test.each([
+    ['the numeric pr_number', { pr_number: 12 }, 12],
+    ['pr_number before pr_url', { pr_number: 7, pr_url: 'https://github.com/o/r/pull/9' }, 7],
+    ['the number in pr_url', { pr_url: 'https://github.com/o/r/pull/123' }, 123],
+    ['the number in a pr_url that goes on', { pr_url: 'https://github.com/o/r/pull/99/files' }, 99],
+    ['pr_url when pr_number is not a PR number', { pr_number: 0, pr_url: 'https://github.com/o/r/pull/8' }, 8],
+  ])('returns %s', (_what, task, expected) => {
+    expect(prNumberFromTask(task)).toBe(expected);
+  });
+
+  test.each([
+    ['no PR fields', {}],
+    ['a pr_url without /pull/<n>', { pr_url: 'https://github.com/o/r/tree/main' }],
+    ['a pr_number of 0', { pr_number: 0, pr_url: 'not-a-pr' }],
+    ['a negative pr_number', { pr_number: -1 }],
+    ['a fractional pr_number', { pr_number: 1.5 }],
+    ['/pull/0', { pr_url: 'https://github.com/o/r/pull/0' }],
+    ['a number too large to be exact', { pr_url: 'https://github.com/o/r/pull/99999999999999999999' }],
+  ])('returns null for %s', (_what, task) => {
+    expect(prNumberFromTask(task)).toBeNull();
+  });
+});
 
 describe('readTaskPrNumber', () => {
   test('reads the numeric pr_number by task id', async () => {
@@ -92,6 +118,13 @@ describe('readTaskPrNumber', () => {
 
   test('reports ABSENT when pr_url is a non-string (malformed row)', async () => {
     const r = await readTaskPrNumber(ddbWith(resolving({ pr_url: 12 })), 'tasks', 'task-1');
+
+    expect(isLookupAbsent(r)).toBe(true);
+  });
+
+  test('reports ABSENT when pr_number is not a PR number (0) and there is no pr_url', async () => {
+    // PR #0 does not exist: handed on, the restack cascade would ask task creation for it and be refused.
+    const r = await readTaskPrNumber(ddbWith(resolving({ pr_number: 0 })), 'tasks', 'task-1');
 
     expect(isLookupAbsent(r)).toBe(true);
   });

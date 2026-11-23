@@ -108,6 +108,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const statusFilter = params.status !== undefined ? parseStatusFilter(params.status) : null;
     const repoFilter = params.repo;
     let startKey = decodePaginationToken(params.next_token);
+    if (startKey === null) {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid next_token.', requestId);
+    }
 
     // Validate status filter — returns null for invalid values
     if (params.status !== undefined && statusFilter === null) {

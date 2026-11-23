@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import type { AdfParagraph, AdfTextRun } from './jira-feedback';
+import { parseMarkdownBlocks, type AdfBlock, type AdfParagraph, type AdfTextRun } from './jira-feedback';
 
 export interface JiraFinalStatusInput {
   readonly eventType: string;
@@ -28,6 +28,25 @@ export interface JiraFinalStatusInput {
   readonly durationS: number | null;
   readonly taskId: string;
   readonly errorTitle: string | null;
+  /** What the agent said in a run that made no commit; shown on a completed run. */
+  readonly answerText?: string | null;
+}
+
+/**
+ * The frame of an iteration's terminal comment and the reason it names. An
+ * iteration that completes with a red build is not a clean success: it gets
+ * the failure frame, and a fixed reason, because such a run stores no error
+ * message. The words are the error classifier's title for a task that its
+ * build gate failed.
+ */
+export function jiraIterationFrame(
+  eventType: string,
+  buildPassed: boolean | null | undefined,
+  errorTitle: string | null,
+): Pick<JiraFinalStatusInput, 'eventType' | 'errorTitle'> {
+  return eventType === 'task_completed' && buildPassed === false
+    ? { eventType: 'task_failed', errorTitle: 'Build or tests did not pass' }
+    : { eventType, errorTitle };
 }
 
 export type JiraFinishedPointerKind = 'result' | 'details' | 'answer';
@@ -55,16 +74,22 @@ function formatDuration(seconds: number): string {
     : `${minutes}m ${remainingSeconds}s`;
 }
 
-/** Render a Jira terminal status as ADF paragraphs. */
+/** Render a Jira terminal status as ADF blocks. */
 export function renderJiraFinalStatusComment(
   args: JiraFinalStatusInput,
-): ReadonlyArray<AdfParagraph> {
+): ReadonlyArray<AdfBlock> {
   const isCompleted = args.eventType === 'task_completed';
   const shippedDespiteFailure = !isCompleted && args.prUrl != null;
 
   let headerRuns: AdfTextRun[];
   if (isCompleted) {
-    headerRuns = [{ text: '✅ Task completed', strong: true }];
+    // This comment can carry the agent's own text (the answer below), which
+    // may spell out the ``@bgagent`` mention, and Jira attributes it to the
+    // setup user on a site without the Forge app. The webhook processor tells
+    // ABCA's comments by their leading marker (``isKnownAbcaComment``): the
+    // emoji stays outside the bold run so the marker survives a wiki-text
+    // body, where bold is an asterisk.
+    headerRuns = [{ text: '✅ ' }, { text: 'Task completed', strong: true }];
   } else if (shippedDespiteFailure) {
     const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';
     headerRuns = [
@@ -85,8 +110,14 @@ export function renderJiraFinalStatusComment(
     ? formatDuration(args.durationS)
     : '—';
 
-  const paragraphs: AdfParagraph[] = [
+  // A completed run without a commit answered a question (an ``@bgagent``
+  // question on an open PR): the answer goes under the header, rendered from
+  // the Markdown the agent wrote it in. The agent stores its last message
+  // for a failed run too; that is not an answer.
+  const answer = isCompleted ? (args.answerText ?? '').trim() : '';
+  const paragraphs: AdfBlock[] = [
     headerRuns,
+    ...(answer ? parseMarkdownBlocks(answer) : []),
     [{ text: `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}` }],
   ];
   if (args.prUrl) {
@@ -102,8 +133,10 @@ export function renderJiraFinalStatusComment(
 /** Plain-text equivalent for the channel adapter's string comment contract. */
 export function renderJiraFinalStatusText(args: JiraFinalStatusInput): string {
   return renderJiraFinalStatusComment(args)
-    .map((paragraph) => paragraph
-      .map((run) => run.href ? `[${run.text}](${run.href})` : run.text)
-      .join(''))
+    .map((block) => ('code' in block
+      ? ['```', block.code, '```'].join('\n')
+      : block
+        .map((run) => run.href ? `[${run.text}](${run.href})` : run.text)
+        .join('')))
     .join('\n');
 }

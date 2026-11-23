@@ -5,7 +5,6 @@
   ],
   "ignoreBinaries": [
     "mise",
-    "python3",
     "semgrep"
   ],
   "ignoreExportsUsedInFile": {
@@ -18,11 +17,10 @@
     },
     "cdk": {
       "entry": [
-        "src/main.ts!", "src/handlers/*.ts!", "scripts/*.ts", "test/integ/integ.*.ts",
+        "src/{main,handlers/*}.ts!", "scripts/*.ts", "test/integ/integ.*.ts",
         "jest.emulator.config.js", "test/emulator/*.emulator.ts", "test/emulator/trace-api-shim.ts"
       ],
-      "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"],
-      "ignoreDependencies": ["tsx", "@aws-cdk/integ-runner"]
+      "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"]
     },
     "cli": {
       "entry": ["jest.emulator.config.js", "test/emulator/*.emulator.ts", "scripts/*.mjs"],
@@ -30,8 +28,8 @@
     },
     "docs": {
       "entry": ["src/components/**/*.astro", "scripts/*.mjs"],
-      "project": ["src/**/*.{astro,ts,tsx}", "scripts/**/*.mjs", "plugins/**/*.mjs"],
-      "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui", "jest"]
+      "project": ["src/**/*.{astro,mdx,ts,tsx}", "scripts/**/*.mjs", "plugins/**/*.mjs"],
+      "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui"]
     },
     "integrations/jira-forge-app": {
       "entry": ["src/index.js!", "test/**/*.test.js"],

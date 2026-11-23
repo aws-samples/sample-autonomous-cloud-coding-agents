@@ -29,6 +29,7 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/li
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { TaskStatus } from '../../constructs/task-status';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { checkBudgetAdmission } from './budgets';
@@ -62,7 +63,6 @@ import {
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
-import { TaskStatus } from '../../constructs/task-status';
 
 /**
  * Context for task creation — abstracts the auth source (Cognito vs. webhook).
@@ -137,7 +137,7 @@ function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; one
  * @param requestId - unique request ID for tracing.
  * @returns the API Gateway proxy result.
  */
-// eslint-disable-next-line complexity -- predates the ceiling (140 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (145; 140 when it landed); must not grow
 export async function createTaskCore(
   body: CreateTaskRequest,
   context: TaskCreationContext,
@@ -253,6 +253,11 @@ export async function createTaskCore(
   // A pr_* workflow resolves an existing PR rather than opening a new branch.
   const isPrTask = workflow.requiredInputs.allOf?.includes('pr_number') ?? false;
 
+  // The body is parsed JSON: the checks below read a description as text.
+  if (body.task_description != null && typeof body.task_description !== 'string') {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid task_description. Must be a string.', requestId);
+  }
+
   if (!hasTaskSpec(body, workflow.requiredInputs)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requires ${describeRequiredInputs(workflow.requiredInputs)}.`, requestId);
   }
@@ -267,6 +272,14 @@ export async function createTaskCore(
   }
   if (!isPrTask && prNumberResult !== undefined) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed for a pull-request workflow (e.g. coding/pr-iteration-v1, coding/pr-review-v1).', requestId);
+  }
+
+  // An issue number follows the rule of a pull request number. Hydration puts
+  // the stored value into the path of a GitHub request, where a text with dot
+  // segments would name another repository.
+  const issueNumber = validatePrNumber(body.issue_number);
+  if (issueNumber === null) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid issue_number. Must be a positive integer.', requestId);
   }
 
   if (body.task_description && !isValidTaskDescriptionLength(body.task_description)) {
@@ -372,39 +385,11 @@ export async function createTaskCore(
     }
     const normalized: string[] = [];
     for (const entry of body.initial_approvals) {
-      const parseResult = parseApprovalScope(String(entry));
-      if (!parseResult.ok) {
-        return errorResponse(
-          400,
-          ErrorCode.VALIDATION_ERROR,
-          `Invalid initial_approvals entry "${String(entry)}": ${parseResult.message}.`,
-          requestId,
-        );
+      const checked = checkInitialApproval(entry);
+      if (!checked.ok) {
+        return errorResponse(400, ErrorCode.VALIDATION_ERROR, checked.message, requestId);
       }
-      // Degenerate-pattern guard for bash_pattern:/write_path: scopes
-      // (§7.4). Rejecting at submit is kinder than silently letting a
-      // degenerate pattern through and having it match every tool call.
-      if (
-        parseResult.scope.startsWith('bash_pattern:')
-        || parseResult.scope.startsWith('write_path:')
-      ) {
-        // Take everything after the first colon — the value itself may
-        // contain colons (e.g. ``bash_pattern:git log --format=%h:%s``), so a
-        // ``split(':', 2)`` would truncate it and could turn a legitimate
-        // pattern into a degenerate-looking fragment, producing a spurious 400.
-        const value = parseResult.scope.slice(parseResult.scope.indexOf(':') + 1);
-        if (isDegeneratePattern(value)) {
-          return errorResponse(
-            400,
-            ErrorCode.VALIDATION_ERROR,
-            `Invalid initial_approvals entry "${parseResult.scope}": `
-              + 'pattern is too broad. Use a more specific pattern, or '
-              + '"all_session" if you intend to allow everything.',
-            requestId,
-          );
-        }
-      }
-      normalized.push(parseResult.scope);
+      normalized.push(checked.scope);
     }
     initialApprovals = normalized;
   }
@@ -459,7 +444,7 @@ export async function createTaskCore(
           user_id: context.userId,
           request_id: requestId,
         });
-        return successResponse(200, toTaskDetail(existingRecord), requestId, { 'Idempotent-Replay': 'true' });
+        return replayResponse(existingRecord, requestId);
       }
       logger.warn('Idempotency key matched GSI but task record is gone (TTL/deletion race)', {
         idempotency_key: context.idempotencyKey,
@@ -790,7 +775,7 @@ export async function createTaskCore(
     ...(budgetAdmission.teamIds.length > 0 && { team_ids: budgetAdmission.teamIds }),
     status: initialStatus,
     ...(body.repo ? { repo: body.repo } : {}),
-    ...(body.issue_number !== undefined && { issue_number: body.issue_number }),
+    ...(issueNumber !== undefined && { issue_number: issueNumber }),
     ...(body.workflow_ref !== undefined && { workflow_ref: body.workflow_ref }),
     resolved_workflow: resolvedWorkflow,
     ...(prNumberResult !== undefined && { pr_number: prNumberResult }),
@@ -859,7 +844,7 @@ export async function createTaskCore(
         ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
         metadata: {
           repo: body.repo ?? null,
-          issue_number: body.issue_number ?? null,
+          issue_number: issueNumber ?? null,
           channel_source: context.channelSource,
         },
       },
@@ -916,9 +901,7 @@ export async function createTaskCore(
     // Generate presigned POST policies for presigned attachments
     let uploadInstructions: AttachmentUploadInstruction[];
     try {
-      uploadInstructions = await generateUploadInstructions(
-        taskRecord, validatedAttachments, context.userId, taskId, s3Client,
-      );
+      uploadInstructions = await generateUploadInstructions(taskRecord, s3Client);
     } catch (presignErr) {
       logger.error('Failed to generate presigned upload instructions — transitioning task to FAILED', {
         task_id: taskId,
@@ -962,6 +945,51 @@ export async function createTaskCore(
   return successResponse(201, toTaskDetail(taskRecord), requestId);
 }
 
+/**
+ * Check one entry of initial_approvals (§7.3 step 4).
+ * @param entry - the entry as the request body holds it.
+ * @returns the parsed scope, or the message of the 400 that refuses the entry.
+ */
+function checkInitialApproval(entry: unknown): { ok: true; scope: string } | { ok: false; message: string } {
+  const parseResult = parseApprovalScope(String(entry));
+  if (!parseResult.ok) {
+    return { ok: false, message: `Invalid initial_approvals entry "${String(entry)}": ${parseResult.message}.` };
+  }
+  // These three stand for the call that is waiting for a decision. Before
+  // the task starts there is none: the agent cannot seed its allowlist
+  // from them, and the task would fail when the agent starts.
+  if (['this_call', 'tool_type_session', 'tool_group_session'].includes(parseResult.scope)) {
+    return {
+      ok: false,
+      message: `Invalid initial_approvals entry "${parseResult.scope}": it stands for a call that is `
+        + 'waiting for approval, so it cannot be granted in advance. '
+        + 'Name the tool or the group, for example "tool_type:Bash".',
+    };
+  }
+  // Degenerate-pattern guard for bash_pattern:/write_path: scopes
+  // (§7.4). Rejecting at submit is kinder than silently letting a
+  // degenerate pattern through and having it match every tool call.
+  if (
+    parseResult.scope.startsWith('bash_pattern:')
+    || parseResult.scope.startsWith('write_path:')
+  ) {
+    // Take everything after the first colon — the value itself may
+    // contain colons (e.g. ``bash_pattern:git log --format=%h:%s``), so a
+    // ``split(':', 2)`` would truncate it and could turn a legitimate
+    // pattern into a degenerate-looking fragment, producing a spurious 400.
+    const value = parseResult.scope.slice(parseResult.scope.indexOf(':') + 1);
+    if (isDegeneratePattern(value)) {
+      return {
+        ok: false,
+        message: `Invalid initial_approvals entry "${parseResult.scope}": `
+          + 'pattern is too broad. Use a more specific pattern, or '
+          + '"all_session" if you intend to allow everything.',
+      };
+    }
+  }
+  return { ok: true, scope: parseResult.scope };
+}
+
 /** Auto-cancel window for tasks awaiting presigned uploads (minutes). */
 const PENDING_UPLOAD_EXPIRY_MINUTES = 30;
 
@@ -981,27 +1009,37 @@ function isValidBase64(data: string): boolean {
 const PRESIGNED_POST_EXPIRY_SECONDS = 600;
 
 /**
- * Generate presigned POST upload instructions for presigned-delivery attachments.
+ * Answer a replayed Idempotency-Key with the task as it is now. A task that still
+ * waits for its uploads comes with new upload instructions: the answer to the
+ * creating request held the only copy, and a client that sends the request again
+ * after a failed upload or confirmation cannot finish the task without them.
+ */
+async function replayResponse(record: TaskRecord, requestId: string): Promise<APIGatewayProxyResult> {
+  let detail: CreateTaskResponse = toTaskDetail(record);
+  if (record.status === TaskStatus.PENDING_UPLOADS && s3Client) {
+    detail = {
+      ...detail,
+      upload_instructions: await generateUploadInstructions(record, s3Client),
+      // The cleanup counts from the creation of the task, not from this answer.
+      task_expires_at: new Date(Date.parse(record.created_at) + PENDING_UPLOAD_EXPIRY_MINUTES * 60 * 1000).toISOString(),
+    };
+  }
+  return successResponse(200, detail, requestId, { 'Idempotent-Replay': 'true' });
+}
+
+/**
+ * Generate presigned POST upload instructions for the uploads a task waits for:
+ * its pending attachment records that are not fetched from a URL.
  */
 async function generateUploadInstructions(
   taskRecord: TaskRecord,
-  validatedAttachments: readonly import('./types').ValidatedAttachment[],
-  userId: string,
-  taskId: string,
   client: S3Client,
 ): Promise<AttachmentUploadInstruction[]> {
   const instructions: AttachmentUploadInstruction[] = [];
   const presignedRecords = taskRecord.attachments?.filter(a => a.screening.status === 'pending' && !a.source_url) ?? [];
 
-  // Match validated presigned attachments with their records (same order as created)
-  const presignedValidated = validatedAttachments.filter(a => a.delivery === 'presigned') as PresignedAttachment[];
-
-  for (let i = 0; i < presignedValidated.length; i++) {
-    const att = presignedValidated[i];
-    const record = presignedRecords[i];
-    if (!record) continue;
-
-    const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${userId}/${taskId}/${record.attachment_id}/${att.filename}`;
+  for (const record of presignedRecords) {
+    const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${taskRecord.user_id}/${taskRecord.task_id}/${record.attachment_id}/${record.filename}`;
     // Type assertion: @aws-sdk/s3-presigned-post bundles a nested @aws-sdk/client-s3
     // with divergent @smithy/types declarations. The runtime is compatible; only the
     // type declarations conflict. Cast to `any` at the boundary.
@@ -1010,10 +1048,10 @@ async function generateUploadInstructions(
       Key: s3Key,
       Conditions: [
         ['content-length-range', 1, MAX_ATTACHMENT_SIZE_BYTES],
-        ['eq', '$Content-Type', att.content_type],
+        ['eq', '$Content-Type', record.content_type],
       ],
       Fields: {
-        'Content-Type': att.content_type,
+        'Content-Type': record.content_type,
       },
       Expires: PRESIGNED_POST_EXPIRY_SECONDS,
     });
@@ -1021,7 +1059,7 @@ async function generateUploadInstructions(
     const expiresAt = new Date(Date.now() + PRESIGNED_POST_EXPIRY_SECONDS * 1000).toISOString();
     instructions.push({
       attachment_id: record.attachment_id,
-      filename: att.filename,
+      filename: record.filename,
       upload_url: url,
       upload_fields: fields,
       upload_expires_at: expiresAt,

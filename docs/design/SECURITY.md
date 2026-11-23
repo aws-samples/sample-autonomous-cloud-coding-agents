@@ -110,7 +110,7 @@ The platform is self-hosted in the customer's AWS account. No code or repo data 
 
 | Layer | Mechanism | What it protects against |
 |-------|-----------|------------------------|
-| Edge | AWS WAFv2 (common rules, known bad inputs, rate limit: 1,000 req/5 min/IP) | Web exploits, volumetric abuse |
+| Edge | AWS WAFv2 (common rules, known bad inputs, rate limit: 1,000 req/5 min/IP). On the HMAC-signed webhook routes, `CrossSiteScripting_BODY` and `SizeRestrictions_BODY` count instead of block (their bodies carry user text and markup); counted XSS matches are alarmed | Web exploits, volumetric abuse |
 | Network | DNS Firewall domain allowlist (GitHub, npm, PyPI, AWS services) | Agent reaching unauthorized domains |
 | Network | Security group egress restricted to TCP 443 | Non-HTTPS traffic |
 | Compute | MicroVM isolation per session | Cross-session compromise |
@@ -157,6 +157,7 @@ flowchart LR
 | Pre-flight | GitHub access, PAT permissions, PR access | `preflight.ts` | `preflight_failed` event |
 | Hydration | Guardrail prompt screening | `context-hydration.ts` | `guardrail_blocked` event |
 | Hydration | Budget/quota resolution | `orchestrator.ts` | Persisted on task record |
+| Repo setup | GitHub token may push (dry-run push, skipped for read-only workflows) | `agent/src/repo.py` | `agent_blocked` event, task `FAILED` before the agent runs |
 | Execution | Tool-call policy (Cedar) | `agent/src/hooks.py`, `agent/src/policy.py` | `POLICY_DECISION` telemetry |
 | Execution | Output secret screening | `agent/src/output_scanner.py` | `OUTPUT_SCREENING` telemetry |
 | Execution | Turn/cost budget | Claude Agent SDK | Cost in task result |

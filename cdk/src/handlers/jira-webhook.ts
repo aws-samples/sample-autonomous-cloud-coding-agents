@@ -122,6 +122,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
+    // `null` parses, but reading a field of it throws: answer as for unparseable JSON.
+    if (payload === null) {
+      return jsonResponse(400, { error: 'Invalid JSON' });
+    }
 
     // Per-tenant verification first. Uses the stack-wide verifier if (a) registry
     // table not configured, (b) no cloudId in body, (c) tenant not in registry,

@@ -238,12 +238,66 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    pattern: /PR_FROM_FORK/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'Pull request from a fork',
+      description: 'The pull request comes from a fork: its branch is in another repository, where the agent cannot check it out or push to it.',
+      remedy: 'Open the pull request from a branch of the repository itself (push the branch there first), then submit the task for that pull request.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
+    // The agent's push preflight (agent/src/repo.py): SAML SSO or an IP allow list
+    // blocks the token, which scopes would not fix.
+    pattern: /GitHub organization policy blocks pushes to/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'GitHub organization policy blocks the token',
+      description: 'The organization that owns the repository enforces SAML single sign-on or an IP allow list, and the GitHub token does not satisfy it.',
+      remedy: 'Do what the error detail names: authorize the token for the organization\'s SAML single sign-on, or add the agent\'s egress IP addresses to the organization\'s IP allow list. Then resubmit.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    // The agent's push preflight: no token change makes an archived repository writable.
+    pattern: /is archived on GitHub, so it is read-only/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'Repository is archived',
+      description: 'The repository is archived on GitHub, so nothing can be pushed to it.',
+      remedy: 'Unarchive the repository on GitHub, or submit the task against another repository.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /Token cannot (push to|interact with pull requests on)/i,
     classification: {
       category: ErrorCategory.AUTH,
       title: 'Insufficient GitHub token scopes',
       description: 'The GitHub token is missing required scopes for the requested operation.',
       remedy: 'Update the PAT with Contents (Read and write), Pull requests (Read and write), and Issues (Read) scopes.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    // GitHub was reached and refused the credential: the stored token is
+    // invalid, expired or revoked.
+    //
+    // ORDERING: this entry MUST stay ABOVE `GITHUB_UNREACHABLE`. Pre-flight
+    // files every non-2xx answer of its reachability probe under that reason, so
+    // the 401 arrives in the same message and would read as a network outage
+    // that a retry clears.
+    pattern: /GitHub API returned HTTP 401/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'GitHub token rejected',
+      description: 'GitHub answered 401 during pre-flight checks: the configured token is invalid, expired or revoked.',
+      remedy: 'Store a valid token (bgagent github set-token, with --repo <owner/repo> when the repository has its own token secret), then resubmit the task.',
       retryable: false,
       errorClass: ErrorClass.SERVICE,
     },
@@ -301,6 +355,29 @@ const PATTERNS: readonly ErrorPattern[] = [
       remedy: 'This is a transient deploy-timing race, not a problem with your request. Retry the task; it will pick up the current task definition. If it persists, an admin should check for a stuck/failed deployment.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // The repository is on a compute backend this stack cannot run it on. Either
+    // the pin is refused when the blueprint loads (`resolveRepositoryBackend` in
+    // compute-backend.ts), or the stack selects the backend but its strategy has
+    // nothing to start a session with (the "deployed without the … substrate"
+    // throw of the ECS and MicroVM strategies; for lambda-microvm that is the
+    // state between the first deploy and the one that adds the image).
+    //
+    // ORDERING: this entry MUST stay ABOVE the generic `Session start failed` and
+    // `Blueprint config load failed` entries. The messages are persisted under
+    // those two prefixes, and both entries offer a retry that cannot work.
+    pattern: /compute_type '[\w-]+' is not deployed|deployed without the (?:ECS|Lambda MicroVMs) substrate/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'The repository\'s compute backend is not deployed in this stack',
+      description: 'The repository is configured for a compute backend that this deployment does not provide, or provides without what a session needs (for lambda-microvm: its image).',
+      remedy:
+        'Retrying will not help. An admin either redeploys the stack with that backend in compute_types (for lambda-microvm, with its image configured), '
+        + 'or moves the repository to a backend the stack deploys (bgagent repo onboard <repo> --compute-type <backend>).',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
     },
   },
   {
@@ -534,6 +611,22 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // The two messages of the stranded-task reconciler
+    // (`reconcile-stranded-tasks.ts`): a task that nothing was driving any more.
+    // For a task still HYDRATING it is the condition the orchestrator reports as
+    // `Session never started` above, found by the sweep because the orchestrator
+    // was gone. Without this entry they read "Unexpected error", not retryable.
+    pattern: /Stranded: (?:SUBMITTED|HYDRATING) for \d+s|Approval stranded:/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The platform lost track of this task',
+      description: 'The task was waiting to start, or paused for an approval, past the stranded-task timeout: its orchestrator or its agent container most likely stopped unexpectedly.',
+      remedy: 'Retry the task. If it repeats, an admin should check the orchestrator and stranded-task reconciler logs for the task id.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
     pattern: /Agent session lost.*heartbeat/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -687,6 +780,37 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.TRANSIENT,
     },
   },
+  // The agent finished cleanly and the post-agent build gate is what stopped
+  // the task (``agent/src/pipeline.py`` ``_resolve_overall_task_status``): the
+  // verify command ran past its time limit (``build_ok=timeout``) or failed
+  // (``build_ok=False``). ``failure-reply.ts`` tells the two apart for the
+  // replies it renders; without these entries every other reader got the generic
+  // catch-all below, "the agent reported a non-success status", not retryable.
+  {
+    pattern: /agent_status=['"]?(?:success|end_turn)['"]?.*build_ok=timeout/i,
+    classification: {
+      category: ErrorCategory.TIMEOUT,
+      title: 'Build/tests didn\'t finish in time (timed out)',
+      description: 'The agent finished its change, but the configured build/verify command was still running when it hit the time limit and was stopped — it did not fail, it ran too long.',
+      remedy: 'This is usually a slow build, not broken code — retry, since a one-off may just have been slow. If a repo\'s build is legitimately long, its build environment likely needs more time or capacity; contact your ABCA admin.',
+      retryable: true,
+      // Intentionally USER (no auto-retry): re-running an unchanged slow build
+      // just times out again, so this must NOT be TRANSIENT — a human decides
+      // whether to retry or right-size the build. Do not "fix" this to TRANSIENT.
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
+    pattern: /agent_status=['"]?(?:success|end_turn)['"]?.*build_ok=False/i,
+    classification: {
+      category: ErrorCategory.AGENT,
+      title: 'Build or tests did not pass',
+      description: 'The agent finished its change, but the repository\'s build or verify command failed on the result.',
+      remedy: 'Read the build log in CloudWatch for the task id, then retry with guidance on what to fix.',
+      retryable: true,
+      errorClass: ErrorClass.USER,
+    },
+  },
   {
     pattern: /Task did not succeed.*agent_status=/i,
     classification: {
@@ -779,23 +903,19 @@ const PATTERNS: readonly ErrorPattern[] = [
     // otherwise surfaces as a bare "Unexpected error". This is NOT a code
     // failure — the command didn't fail, it ran too long — so name it precisely
     // and point at "slow, retry", not the diff. NOTE: this matches only
-    // UNCAUGHT ``run_cmd`` timeouts (clone/setup/etc.); the post-agent build/lint
-    // VERIFY path catches ``TimeoutExpired`` itself and returns a plain build
-    // failure, so it does not reach here. The remedy is deliberately generic
-    // ("retry / it may be slow") rather than naming a specific env knob — on
-    // ``main`` the verify timeout is not operator-tunable, so promising a lever
-    // here would misdirect (the tunable ``BUILD_VERIFY_TIMEOUT_S`` + larger ECS
-    // build compute live on the ECS-substrate track, not this branch).
+    // UNCAUGHT ``run_cmd`` timeouts, and the build and lint commands catch their
+    // own: a timed-out build gate arrives as ``build_ok=timeout`` (Agent block
+    // above). What reaches this entry is a command around the agent's work —
+    // clone, fetch, ``mise install``, push — so the copy must not name the build.
     pattern: /TimeoutExpired.*timed out after \d+(?:\.\d+)? ?s(econds)?|Command .*build.* timed out/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
-      title: 'Build/tests didn\'t finish in time (timed out)',
-      description: 'The configured build/verify command was still running when it hit the time limit and was stopped — it did not fail, it ran too long.',
-      remedy: 'This is usually a slow build, not broken code — retry, since a one-off may just have been slow. If a repo\'s build is legitimately long, its build environment likely needs more time or capacity; contact your ABCA admin.',
+      title: 'A setup or git command timed out',
+      description: 'A command the agent runs around its work (cloning the repository, fetching a branch, installing tools, pushing) was still running when it hit its time limit and was stopped — it did not fail, it ran too long.',
+      remedy: 'Usually a slow network or a very large repository — retry. If it keeps happening on this repo, contact your ABCA admin with the task id.',
       retryable: true,
-      // Intentionally USER (no auto-retry): re-running an unchanged slow build
-      // just times out again, so this must NOT be TRANSIENT — a human decides
-      // whether to retry or right-size the build. Do not "fix" this to TRANSIENT.
+      // USER, not TRANSIENT: a clone or install that needs more than its time
+      // limit hits it again, so the next step is a deliberate retry.
       errorClass: ErrorClass.USER,
     },
   },
@@ -807,11 +927,35 @@ const PATTERNS: readonly ErrorPattern[] = [
       description: 'The orchestrator polling window expired before the agent completed.',
       remedy: 'The task may be too large for the configured turn/budget limits. Consider breaking it into smaller tasks or increasing max_turns.',
       retryable: false,
-      errorClass: ErrorClass.TRANSIENT,
+      errorClass: ErrorClass.USER,
     },
   },
 
 ];
+
+/**
+ * The agent's push preflight refusal (``PushCapabilityError`` in agent/src/repo.py):
+ * ``Token cannot push to <repo>: GitHub refused the <token type> write access (<git
+ * line>). To fix it, <fix>. The task stopped before the agent ran …``. The fix
+ * depends on the token type (scope for a classic PAT, repository access and
+ * Contents for a fine-grained one, installation for a GitHub App), so the
+ * classification carries the agent's own fix rather than the generic remedy of
+ * the ``Token cannot push`` pattern, which the orchestrator's preflight shares.
+ * The fix is matched up to the sentence that follows it, so a period inside it (a
+ * repository named ``a.b``) does not cut it short.
+ */
+const AGENT_PUSH_REFUSAL = /Token cannot push to (\S+): GitHub refused the (.+?) write access \(.*?\)\. To fix it, (.+?)\. The task stopped before the agent ran/;
+
+function agentPushRefusalClassification(repo: string, tokenType: string, fix: string): ErrorClassification {
+  return {
+    category: ErrorCategory.AUTH,
+    title: 'Insufficient GitHub token scopes',
+    description: `GitHub refused the ${tokenType} write access to ${repo}.`,
+    remedy: `${fix.charAt(0).toUpperCase()}${fix.slice(1)}. Then resubmit. The permissions each token type needs are in agent/README.md, GitHub PAT — Minimal Permissions.`,
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  };
+}
 
 /**
  * Canonical blocker-reason contract. Matches ``BLOCKED[<kind>]`` and,
@@ -969,6 +1113,11 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
   if (kindMatch) {
     const resource = BLOCKED_RESOURCE.exec(errorMessage)?.[1];
     return blockerClassification(kindMatch[1].toLowerCase(), resource);
+  }
+
+  const pushRefusal = AGENT_PUSH_REFUSAL.exec(errorMessage);
+  if (pushRefusal) {
+    return agentPushRefusalClassification(pushRefusal[1], pushRefusal[2], pushRefusal[3]);
   }
 
   for (const { pattern, exclude, classification } of PATTERNS) {

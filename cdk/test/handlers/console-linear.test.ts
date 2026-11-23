@@ -39,6 +39,7 @@ jest.mock('../../src/handlers/shared/linear-console', () => {
   const actual = jest.requireActual('../../src/handlers/shared/linear-console');
   return {
     LinearApiError: actual.LinearApiError,
+    START_CLAIM_TTL_SECONDS: actual.START_CLAIM_TTL_SECONDS,
     listOpenProjectIssues: (...a: unknown[]) => linear.listOpenProjectIssues(...a),
     getIssueForStart: (...a: unknown[]) => linear.getIssueForStart(...a),
     findTriggerLabelId: (...a: unknown[]) => linear.findTriggerLabelId(...a),
@@ -59,6 +60,12 @@ import { handler } from '../../src/handlers/console-linear';
 const ISSUE = '11111111-1111-4111-8111-111111111111';
 const PROJECT = '22222222-2222-4222-8222-222222222222';
 const MAPPING = { linear_project_id: PROJECT, repo: 'acme/game', label_filter: 'bgagent', linear_workspace_id: 'w1', status: 'active' };
+/**
+ * A row written before `onboard-project` recorded the owning workspace. Its label holds
+ * what a shell would expand or end a quoted word at: the printed command must carry it whole.
+ */
+const LEGACY_MAPPING = { linear_project_id: PROJECT, repo: 'acme/game', label_filter: 'say "go" $5 it\'s', status: 'active' };
+const LEGACY_COMMAND = `\`bgagent linear onboard-project ${PROJECT} --repo acme/game --label 'say "go" $5 it'\\''s'\``;
 
 function event(method: string, resource: string, params: Record<string, string>, body?: unknown, sub: string | null = 'user-1'): APIGatewayProxyEvent {
   return {
@@ -73,9 +80,10 @@ const list = (repo = 'acme%2Fgame') => event('GET', '/repos/{repo_id}/linear-iss
 const start = (body: unknown = { project_id: PROJECT }, issueId = ISSUE) => event('POST', '/linear-issues/{issue_id}/start', { issue_id: issueId }, body);
 const json = (r: { body: string }) => JSON.parse(r.body);
 
-function issue(id: string, labels: string[] = []) {
-  return { id, identifier: `MON-${id}`, title: `Issue ${id}`, url: `https://linear.app/x/${id}`, state: 'Todo', state_type: 'unstarted', priority_label: '', labels, assignee: null, updated_at: '2026-10-29T10:00:00Z' };
+function issue(id: string, labels: string[] = [], updatedAt = '2026-10-29T10:00:00Z') {
+  return { id, identifier: `MON-${id}`, title: `Issue ${id}`, url: `https://linear.app/x/${id}`, state: 'Todo', state_type: 'unstarted', priority_label: '', labels, assignee: null, updated_at: updatedAt };
 }
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -110,9 +118,19 @@ describe('GET /repos/{repo_id}/linear-issues', () => {
   });
 
   test('shows a labeled issue without a task yet as starting', async () => {
-    linear.listOpenProjectIssues.mockResolvedValue([issue('a', ['bgagent'])]);
+    linear.listOpenProjectIssues.mockResolvedValue([issue('a', ['bgagent'], minutesAgo(9))]);
     lookupTask.mockResolvedValue({ kind: 'none' });
     expect(json(await handler(list())).data.projects[0].issues[0].agent).toEqual({ kind: 'starting' });
+  });
+
+  test('stops calling a labeled issue starting once its webhook can no longer be on the way', async () => {
+    // The label stays on an epic whose sub-issues carry the tasks, and on an issue whose
+    // start was refused: neither ever gets a task of its own. Reported like work the
+    // caller cannot open, so the page neither shows a spinner nor polls for one.
+    linear.listOpenProjectIssues.mockResolvedValue([issue('a', ['bgagent'], minutesAgo(11)), issue('b', ['bgagent'], minutesAgo(180))]);
+    lookupTask.mockResolvedValue({ kind: 'none' });
+    const withTheAgent = { kind: 'task', task_id: null, status: null, pr_url: null, mine: false };
+    expect(json(await handler(list())).data.projects[0].issues.map((i: { agent: unknown }) => i.agent)).toEqual([withTheAgent, withTheAgent]);
   });
 
   test('says how to fix a workspace ABCA can no longer reach, instead of failing the page', async () => {
@@ -120,6 +138,19 @@ describe('GET /repos/{repo_id}/linear-issues', () => {
     const res = await handler(list());
     expect(res.statusCode).toBe(200);
     expect(json(res).data.projects[0]).toMatchObject({ issues: [], problem: expect.stringMatching(/re-authorize/) });
+  });
+
+  test('gives the command that records the workspace for a project mapped before it was recorded', async () => {
+    // Re-running setup does not touch the mapping; onboard-project rewrites it, so the
+    // command carries the mapping's own repository and label.
+    send.mockResolvedValue({ Items: [LEGACY_MAPPING] });
+    const res = await handler(list());
+    expect(res.statusCode).toBe(200);
+    const [project] = json(res).data.projects;
+    expect(project.issues).toEqual([]);
+    expect(project.problem).toContain(LEGACY_COMMAND);
+    expect(project.problem).not.toMatch(/linear setup/);
+    expect(resolveToken).not.toHaveBeenCalled();
   });
 
   test('returns no projects for a repo that is not mapped to Linear', async () => {
@@ -166,6 +197,14 @@ describe('POST /linear-issues/{issue_id}/start', () => {
   test('refuses a project that is not mapped', async () => {
     send.mockResolvedValue({ Item: undefined });
     expect((await handler(start())).statusCode).toBe(422);
+  });
+
+  test('refuses a project mapped before its workspace was recorded, with the command that records it', async () => {
+    send.mockResolvedValue({ Item: LEGACY_MAPPING });
+    const res = await handler(start());
+    expect(res.statusCode).toBe(503);
+    expect(json(res).error.message).toContain(LEGACY_COMMAND);
+    expect(linear.writeStartClaim).not.toHaveBeenCalled();
   });
 
   test('refuses to start an issue someone else is starting, without touching the label', async () => {

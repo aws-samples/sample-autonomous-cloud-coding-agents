@@ -100,6 +100,63 @@ def masked_multi_except():
         return None
 
 
+# The handler's type as a tuple, without `as`.
+def masked_tuple_except() -> list:
+    try:
+        return fetch_items()
+    except (KeyError, ValueError):
+        # ruleid: py-silent-success-masking
+        return []
+
+
+def masked_tuple_except_with_finally():
+    try:
+        return fetch_items()
+    except (KeyError, ValueError, TypeError):
+        # ruleid: py-silent-success-masking
+        return None
+    finally:
+        print("done")
+
+
+# A try statement with an `else:` clause, whatever its handlers.
+def masked_with_else() -> list:
+    try:
+        items = fetch_items()
+    except ValueError as exc:
+        print(exc)
+        # ruleid: py-silent-success-masking
+        return []
+    except (KeyError, TypeError):
+        # ruleid: py-silent-success-masking
+        return []
+    else:
+        return items
+
+
+def masked_with_else_and_finally() -> list:
+    try:
+        items = fetch_items()
+    except (KeyError, ValueError):
+        # ruleid: py-silent-success-masking
+        return []
+    else:
+        return items
+    finally:
+        print("done")
+
+
+# What the `else:` clause returns is the success path, not a fallback.
+def ok_return_in_else() -> None:
+    try:
+        fetch_items()
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError("fetch failed") from exc
+    else:
+        # ok: py-silent-success-masking
+        return None
+
+
 # A conditional re-raise does not clear the fallthrough default: callers that
 # hit the non-fatal path still cannot distinguish failure from empty success.
 def masked_conditional_reraise(fatal: bool) -> list:
@@ -124,6 +181,16 @@ def ok_classify_then_reraise(fetch, is_not_found):
         if is_not_found(exc):
             return None  # genuine empty success
         raise  # everything else fails closed
+
+
+def ok_tuple_classify_then_reraise(fetch, is_not_found):
+    try:
+        return fetch()
+    except (KeyError, ValueError) as exc:
+        if is_not_found(exc):
+            # ok: py-silent-success-masking
+            return None
+        raise
 
 
 def ok_return_in_try_body(items: list) -> list:

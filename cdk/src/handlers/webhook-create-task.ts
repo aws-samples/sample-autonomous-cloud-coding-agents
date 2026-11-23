@@ -22,7 +22,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-sec
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { createTaskCore } from './shared/create-task-core';
-import { buildWebhookChannelMetadata, extractWebhookContext } from './shared/gateway';
+import { buildWebhookChannelMetadata, extractWebhookContext, getHeader } from './shared/gateway';
 import { isUsableHmacSecret } from './shared/hmac-secret';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse } from './shared/response';
@@ -118,7 +118,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // 2. Verify HMAC-SHA256 signature
-    const signature = event.headers['X-Webhook-Signature'] ?? event.headers['x-webhook-signature'];
+    const signature = getHeader(event.headers, 'X-Webhook-Signature');
     if (!signature) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing X-Webhook-Signature header.', requestId);
     }
@@ -144,7 +144,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // 4. Extract idempotency key
-    const idempotencyKey = event.headers['Idempotency-Key'] ?? event.headers['idempotency-key'];
+    const idempotencyKey = getHeader(event.headers, 'Idempotency-Key');
 
     // 5. Delegate to shared core
     return await createTaskCore(body, {

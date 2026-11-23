@@ -40,8 +40,10 @@ Go to GitHub > **Settings** > **Developer settings** > **Personal access tokens*
 
 | Scope | Reason |
 |-------|--------|
-| `repo` | Full repository access (clone, push, PRs, issues) |
+| `public_repo` (public repositories) or `repo` (private repositories) | Clone, push, PRs and issues. `public_repo` reaches public repositories only; `repo` grants every private repository the token's owner can reach, so use it only when a target repository is private |
 | `read:org` | Resolve org membership for org-owned repos |
+
+A token acts for its owner: whatever the scopes, the owner needs write access to the repository (collaborator or team role) for the agent to push.
 
 Set an expiration (90 days recommended) and store it in Secrets Manager the same way as a fine-grained token.
 
@@ -53,6 +55,22 @@ Set an expiration (90 days recommended) and store it in Secrets Manager the same
 | Collaborator on another user's repo | Classic |
 | Org has not opted in to fine-grained tokens | Classic |
 | Targeting repos across multiple orgs | Classic (single token covers all) |
+
+#### Push check before the agent runs
+
+A token can read a repository and still be refused every push. A classic PAT with no scopes, for instance, still reads public repositories. Once the clone's remote and credential helper are set, the agent runs `git push --dry-run` through the same helper the final push uses. When GitHub refuses it, the task fails within seconds instead of at the final push after the agent's work:
+
+| GitHub's answer | Task error |
+|-----------------|------------|
+| The token may not write | `Token cannot push to <repo>`, naming the token type and the permission to add |
+| No credential accepted (the token was revoked or expired after the clone; an invalid one already fails at `preflight_failed`) | `BLOCKED[auth_failure]`: replace the token secret |
+| The repository is archived | `Repository <repo> is archived on GitHub`: unarchive it or target another repository |
+| The organization enforces SAML single sign-on, or an IP allow list | `GitHub organization policy blocks pushes to <repo>`, naming the policy and its fix |
+| No answer: GitHub or the network down after retries, or no reply within 120 s | `BLOCKED[dependency_unreachable]`, retryable |
+
+The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Tasks that never push skip the check: read-only workflows (`coding/pr-review-v1`) and repository-bound workflows that deliver an artifact instead of a PR.
+
+Setup also makes every push from the clone use the task's token over HTTPS. It pins the push URL to `https://github.com/<owner>/<repo>.git`, which git's `pushInsteadOf` rules do not rewrite, and stops with an error if an `insteadOf` rule in the machine's git configuration still would. It clears the `github.com` credential helpers the clone would inherit (a saved GitHub login, for instance) before adding `gh`; helpers for other hosts keep working. Tasks whose workflow only looks up an existing pull request (`ensure_pr` with the `resolve` strategy) skip the check, as they never push.
 
 ### AWS Credentials
 
@@ -68,7 +86,7 @@ export AWS_SESSION_TOKEN="..."   # if using temporary credentials
 export AWS_REGION="us-east-1"
 ```
 
-**Option B** — AWS CLI resolution (recommended for SSO): `run.sh` runs `aws configure export-credentials` when the AWS CLI is installed, so you can use `aws sso login` and optionally `AWS_PROFILE` without mounting `~/.aws`.
+**Option B** — AWS CLI resolution (recommended for SSO): `run.sh` runs `aws configure export-credentials` when AWS CLI v2 is installed, so you can use `aws sso login` and optionally `AWS_PROFILE` without mounting `~/.aws`. AWS CLI v1 has no such command: with it, `run.sh` mounts `~/.aws` (Option C).
 
 **Option C** — Mount `~/.aws` read-only (static access keys in files; SSO often does not work inside the container):
 ```bash
@@ -122,9 +140,9 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `ANTHROPIC_MODEL` | No | `global.anthropic.claude-opus-5-5` | Bedrock **inference profile** ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)). Must be a geo-prefixed profile ID matching the deployment's `bedrockGeoRegion`, not a bare foundation-model ID — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
-| `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
+| `DRY_RUN` | No | | Set to `1` to validate config and print the length and hash of the prompts without running the agent |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `global.anthropic.claude-haiku-5-5` | Bedrock **inference profile** ID for the small/fast auxiliary model — the pre-flight safety check and WebFetch summarization (see below). Set by the CDK stack (`cdk/src/stacks/agent.ts` (the runtime environment block)), which derives the prefix from `bedrockGeoRegion` — a geo prefix is required |
-| `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on both AgentCore runtimes. |
+| `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on every compute backend: in the AgentCore runtime environment, in the ECS task definitions, and for a Lambda MicroVM through `platform_config`. |
 | `JIRA_APP_ACTOR_PROXY_URL` | No | | Resolved per-task from the Jira tenant secret. Forge v2 web-trigger URL used for app-authored Jira comments and transitions. |
 | `JIRA_APP_ACTOR_SHARED_SECRET` | No | | Resolved per-task from the Jira tenant secret. HMAC key for the Forge proxy; redacted from agent diagnostics. |
 | `JIRA_API_TOKEN` | No | | Legacy per-task Jira 3LO token. Used for outbound writes only when no app actor is configured. |
@@ -142,7 +160,7 @@ tenant's OAuth or Forge credential to the next task.
 ### Examples
 
 ```bash
-# Dry run — validate config, fetch issue, print assembled prompt, then exit
+# Dry run — validate config, fetch issue, print the length and hash of the prompts, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 
 # Run with a specific model (overrides the global.anthropic.claude-opus-5-5 default).
@@ -420,8 +438,9 @@ These map to AgentCore Runtime constraints:
 ## Building Manually
 
 ```bash
-# Build for ARM64 (AgentCore Runtime target)
-docker buildx build --platform linux/arm64 -t bgagent-local --load ./agent
+# Build for ARM64 (AgentCore Runtime target). Run from the repository root:
+# the Dockerfile copies agent/ and contracts/ from there.
+docker buildx build --platform linux/arm64 -f agent/Dockerfile -t bgagent-local --load .
 
 # Check image size
 docker images bgagent-local --format "{{.Size}}"
@@ -473,13 +492,16 @@ agent/
 │   ├── test_hooks.py        PreToolUse hook and hook matcher tests
 │   ├── test_models.py       Pydantic model tests (construction, validation, frozen enforcement, model_dump)
 │   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)
-│   ├── test_pipeline.py     Pipeline tests (cedar_policies injection, _resolve_overall_task_status, _chain_prior_agent_error)
+│   ├── test_pipeline.py     Pipeline tests (run_task with the agent, the repository setup and the post-hooks stubbed)
+│   ├── test_pipeline_outcomes.py  Outcome tests (_resolve_overall_task_status, _chain_prior_agent_error, delivery gate)
 │   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
 │   └── ...
 ├── tests_emulator/      Emulator-backed tests: real agent code against a local AWS Emulator (`mise run test:integration`; not collected by the unit run)
 ```
 
 The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.
+
+The image sets `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS`, so the `requests` and `urllib3` instrumentation stays off: it would copy the trace context and the task's correlation baggage into the headers of the agent's requests to Linear and Atlassian. A value given at run time replaces the image's; keep both names in it.
 
 **Diagnostics:** `scripts/diagnostics/` holds optional smoke tests for local AgentCore debugging. They are not copied into the production Docker image.
 

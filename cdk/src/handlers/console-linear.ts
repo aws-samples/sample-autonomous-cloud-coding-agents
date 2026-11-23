@@ -29,6 +29,7 @@ import {
   LinearApiError,
   listOpenProjectIssues,
   releaseStartClaim,
+  START_CLAIM_TTL_SECONDS,
   writeStartClaim,
 } from './shared/linear-console';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
@@ -68,6 +69,7 @@ export type AgentState =
   | { readonly kind: 'available' }
   /** Labeled, but no task yet (just started, or the webhook is still on its way). */
   | { readonly kind: 'starting' }
+  /** With the agent. Every field is null for a labeled issue that is past starting and has no task of its own. */
   | { readonly kind: 'task'; readonly task_id: string | null; readonly status: string | null; readonly pr_url: string | null; readonly mine: boolean };
 
 export interface ConsoleLinearIssueWithAgent extends ConsoleLinearIssue {
@@ -97,9 +99,17 @@ async function mappingsForRepo(repo: string): Promise<Mapping[]> {
 
 async function agentState(issue: ConsoleLinearIssue, label: string, userId: string): Promise<AgentState> {
   if (!issue.labels.some((l) => l.toLowerCase() === label.toLowerCase())) return { kind: 'available' };
-  if (!TASK_TABLE) return { kind: 'starting' };
+  // Labeled, without a task of its own. That is "starting" only while the label's webhook
+  // can still be on its way: the issue was last updated within the life of a start claim.
+  // An older one is an epic, whose tasks belong to its sub-issues, or a start that was
+  // refused on the issue. It is reported like work the caller cannot open, so the console
+  // neither shows a spinner nor polls for a task.
+  const noTask: AgentState = Date.now() - Date.parse(issue.updated_at) < START_CLAIM_TTL_SECONDS * 1000
+    ? { kind: 'starting' }
+    : { kind: 'task', task_id: null, status: null, pr_url: null, mine: false };
+  if (!TASK_TABLE) return noTask;
   const found = await lookupTaskByLinearIssue(ddb, TASK_TABLE, issue.id);
-  if (found.kind !== 'found') return { kind: 'starting' };
+  if (found.kind !== 'found') return noTask;
   const mine = found.task.user_id === userId;
   // Someone else's task: say it is being worked on, without linking into their task.
   return {
@@ -117,6 +127,20 @@ async function tokenFor(workspaceId: string | undefined): Promise<string | null>
   return resolved?.accessToken ?? null;
 }
 
+/**
+ * What to do about a mapping {@link tokenFor} has no token for. A row written before
+ * `onboard-project` recorded the owning workspace still triggers tasks from the webhook,
+ * but leaves the console no workspace to ask. `setup` does not touch the mapping;
+ * `onboard-project` rewrites the whole row, so the command names its repository and label.
+ * The label is free text: it is printed in POSIX single quotes, so that a pasted command
+ * writes the same label whatever characters it holds.
+ */
+function workspaceProblem(m: Mapping): string {
+  if (m.linear_workspace_id) return 'ABCA cannot reach this Linear workspace. Re-run `bgagent linear setup` to re-authorize it.';
+  return 'This project was connected before ABCA recorded which Linear workspace it belongs to. Re-run '
+    + `\`bgagent linear onboard-project ${m.linear_project_id} --repo ${m.repo} --label '${triggerLabel(m).replace(/'/g, "'\\''")}'\` to record it.`;
+}
+
 async function listIssues(event: APIGatewayProxyEvent, userId: string, requestId: string): Promise<APIGatewayProxyResult> {
   const repo = decodeURIComponent(event.pathParameters?.repo_id ?? '');
   if (!isValidRepo(repo)) {
@@ -128,7 +152,7 @@ async function listIssues(event: APIGatewayProxyEvent, userId: string, requestId
     const base = { project_id: mapping.linear_project_id, trigger_label: label };
     const token = await tokenFor(mapping.linear_workspace_id);
     if (!token) {
-      projects.push({ ...base, problem: 'ABCA cannot reach this Linear workspace. Re-run `bgagent linear setup` to re-authorize it.', issues: [] });
+      projects.push({ ...base, problem: workspaceProblem(mapping), issues: [] });
       continue;
     }
     try {
@@ -164,7 +188,7 @@ async function startIssue(event: APIGatewayProxyEvent, userId: string, requestId
   }
   const token = await tokenFor(mapping.linear_workspace_id);
   if (!token || !mapping.linear_workspace_id) {
-    return errorResponse(503, ErrorCode.SERVICE_UNAVAILABLE, 'ABCA cannot reach this Linear workspace. Re-run `bgagent linear setup` to re-authorize it.', requestId);
+    return errorResponse(503, ErrorCode.SERVICE_UNAVAILABLE, workspaceProblem(mapping), requestId);
   }
   const label = triggerLabel(mapping);
   try {

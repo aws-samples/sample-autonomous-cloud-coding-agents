@@ -168,16 +168,20 @@ def _rule_3_repo_less_steps(data: dict[str, Any]) -> list[str]:
 
 
 def _rule_4_read_only_no_pr_create(data: dict[str, Any]) -> list[str]:
-    """read_only ⇒ no ensure_pr that creates/pushes (writes the tree)."""
+    """read_only ⇒ no ensure_pr that creates/pushes (writes the tree).
+
+    A step without a strategy counts as ``create``: that is what the runtime
+    runs it as.
+    """
     if not data.get("read_only", False):
         return []
     return [
-        f"read_only workflow may not ensure_pr with strategy {s.get('strategy')!r}"
+        f"read_only workflow may not ensure_pr with strategy {strategy!r}"
         for s in data.get("steps", [])
         if (
             isinstance(s, dict)
             and s.get("kind") == "ensure_pr"
-            and s.get("strategy") in ("create", "push_resolve")
+            and (strategy := s.get("strategy") or "create") in ("create", "push_resolve")
         )
     ]
 

@@ -222,6 +222,9 @@ class Workflow(BaseModel):
     repo_config: RepoConfig | None = None
     required_inputs: RequiredInputs | None = None
     steps: list[Step]
+    # Reserved: the schema allows the key and pins it to empty, and nothing
+    # reads it. Post-agent gates are steps.
+    post_hooks: list[str] = Field(default_factory=list, max_length=0)
     terminal_outcomes: TerminalOutcomes
     convergence: Convergence | None = None
     limits: Limits | None = None
@@ -239,3 +242,28 @@ class Workflow(BaseModel):
         if self.requires_repo is not None:
             return self.requires_repo
         return self.domain == "coding"
+
+    @property
+    def ensure_pr_strategy(self) -> EnsurePrStrategy:
+        """The strategy of the workflow's ``ensure_pr`` step: ``create`` when it has none.
+
+        The pipeline's post-hooks and the push preflight in ``repo.setup_repo`` both
+        read it: ``resolve`` only looks up an existing PR, so it never pushes.
+        """
+        return next(
+            (s.strategy for s in self.steps if s.kind == "ensure_pr" and s.strategy),
+            "create",
+        )
+
+    @property
+    def delivers_repo_artifact(self) -> bool:
+        """A repository-bound workflow whose terminal outcome is a document, not a PR.
+
+        It clones the repository for context, skips the build and PR post-hooks and
+        delivers the agent's result as an artifact, so it never pushes. Both
+        conditions matter: ``default/agent-v1`` declares ``primary: artifact`` but
+        ``requires_repo: false``, and run with a repository it still opens a PR.
+        Uses ``resolved_requires_repo``, as ``build_config`` does: a ``coding``
+        workflow may leave ``requires_repo`` out, and the raw field is then None.
+        """
+        return self.terminal_outcomes.primary == "artifact" and self.resolved_requires_repo

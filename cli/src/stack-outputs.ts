@@ -127,3 +127,28 @@ export async function getStackOutput(
   const stack = await describeStack(region, stackName);
   return stack.Outputs?.find((o) => o.OutputKey === outputKey)?.OutputValue ?? null;
 }
+
+/**
+ * Read a single stack output: null when the stack has no such output, or does not exist.
+ *
+ * Where {@link getStackOutput} fails on a missing stack, this takes it as an answer: the
+ * integration commands also run before the stack, or the part of it they ask about, is
+ * deployed. Any other failure (credentials, permissions, region) is rethrown as the SDK
+ * raised it, so that it cannot pass for "not deployed".
+ */
+export async function findStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
+  try {
+    const cfn = makeClient(CloudFormationClient, { region });
+    const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
+    const outputs = result.Stacks?.[0]?.Outputs ?? [];
+    const output = outputs.find((o) => o.OutputKey === outputKey);
+    return output?.OutputValue ?? null;
+  } catch (err) {
+    const name = (err as Error)?.name ?? '';
+    const message = (err as Error)?.message ?? '';
+    if (name === 'ValidationError' && /does not exist/i.test(message)) {
+      return null; // "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
+    }
+    throw err;
+  }
+}

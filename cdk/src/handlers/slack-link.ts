@@ -51,7 +51,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const body = parseBody<LinkRequest>(event.body ?? null);
-    if (!body?.code) {
+    if (typeof body?.code !== 'string' || !body.code) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must include a "code" field.', requestId);
     }
 

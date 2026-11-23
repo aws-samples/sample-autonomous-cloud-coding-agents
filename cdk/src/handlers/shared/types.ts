@@ -17,15 +17,15 @@
  *  SOFTWARE.
  */
 
-import { classifyError, type ErrorClassification } from './error-classifier';
-import { logger } from './logger';
-import { coerceNumericOrNull } from './numeric';
-import type { ComputeType } from './repo-config';
 // Cross-language constants — see ``contracts/constants.md``. Imported at
 // TypeScript compile time (resolveJsonModule); esbuild inlines the values
 // into the bundled Lambda artifact, so no runtime FS read is needed.
 import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
+import { classifyError, type ErrorClassification } from './error-classifier';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
+import type { ComputeType } from './repo-config';
 
 /**
  * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
@@ -325,6 +325,21 @@ export interface TaskRecord {
    * the mid-run PR notification. Absent until the first successful post.
    */
   readonly linear_pr_comment_event_id?: string;
+  /**
+   * ISO timestamp of the last keep-alive activity the fan-out plane emitted
+   * into this task's Linear agent session (ADR-018 Phase 2). Throttles the
+   * per-turn heartbeat to one activity per window so a long run never lets
+   * the session go ``stale`` (30 min idle) without flooding it. Absent for
+   * non-session tasks.
+   */
+  readonly linear_session_heartbeat_at?: string;
+  /**
+   * Event id of the ``pr_created`` whose PR link was attached to the Linear
+   * agent session's header. Separate from ``linear_pr_comment_event_id``
+   * (the "Opened pull request" activity) so each is retried on its own and the
+   * appended link is never duplicated.
+   */
+  readonly linear_session_pr_link_event_id?: string;
   /**
    * Event ID of the terminal event whose ordinary Jira final-status comment
    * was successfully posted (fan-out plane). This marker makes that create

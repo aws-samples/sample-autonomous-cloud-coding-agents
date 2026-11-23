@@ -20,7 +20,6 @@
 import { Duration } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import type * as iam from 'aws-cdk-lib/aws-iam';
-import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
 /** Default short-term memory event expiration (days). */
@@ -90,13 +89,6 @@ export class AgentMemory extends Construct {
         }),
       ],
     });
-
-    NagSuppressions.addResourceSuppressions(this.memory, [
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'AgentCore Memory execution role requires wildcard permissions for Bedrock model invocation used by memory extraction strategies',
-      },
-    ], true);
   }
 
   /**

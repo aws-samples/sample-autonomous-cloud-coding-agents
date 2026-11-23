@@ -1,31 +1,29 @@
-# bgagent CLI (`@abca/cli`)
+# bgagent CLI
 
 Command-line interface for the ABCA platform. Submit coding tasks, monitor their status, and manage results — all through the deployed REST API with Cognito authentication.
 
 ## Installation
 
-The CLI is not published to npm, by design: it belongs to the checkout you deploy the stack from (it checks the bootstrap version, reads the stack's `DeploymentFeatures` output, and shares API shapes with the handlers). Run it from your checkout.
-
-From the repository root:
+The CLI is not published to npm: its package (`@abca/cli`) is private, and it belongs to the checkout you deploy the stack from (it checks the bootstrap version, reads the stack's `DeploymentFeatures` output, and shares API shapes with the handlers). From the repository root:
 
 ```bash
-mise run install       # dependencies; also writes the bgagent command
+mise run install       # dependencies; also writes the bgagent command when there is none
 mise run cli:install   # compiles the CLI and writes the bgagent command
 ```
 
-`mise run cli:install` writes `~/.local/bin/bgagent` (`BGAGENT_BIN_DIR` sets another directory) and prints the line to add to your shell profile when that directory is not on your `PATH`. `mise run install` writes it too, without compiling: `mise run build` or `mise //cli:compile` compiles the CLI.
+`mise run cli:install` (run it from the repository root: `mise //cli:install` is a different task) compiles the CLI and writes `~/.local/bin/bgagent` (`BGAGENT_BIN_DIR` sets another directory). It prints the line to add to your shell profile when that directory is not on your `PATH`, and warns when another `bgagent` comes first on it; remove any `alias bgagent=…` an older guide had you add. `mise run install` writes the command too, only when there is none and never in CI, and does not compile: run `mise run build` or `mise //cli:compile` before the first `bgagent`.
 
-**Which checkout runs.** Inside any ABCA checkout or worktree, at its root or below, `bgagent` runs that checkout's CLI and prints one line on stderr naming it (`BGAGENT_SHIM_QUIET=1` turns the line off). Anywhere else it runs the checkout that installed it. To make another checkout that fallback, run `mise run cli:install --force` there; without `--force` the task never replaces a `bgagent` it did not write or one that another checkout installed, and `mise run install` only reports it.
+**Which checkout runs.** `bgagent` always runs the CLI of the checkout that installed it, from whatever directory you run it in, and keeps that directory, so relative paths such as `--attachment` resolve where you typed them. It never runs code from the directory you are in: typing `bgagent` inside a fork's pull request checked out for review does not run that fork's code with your credentials. To use another checkout or worktree, run `mise run cli:install --force` from its repository root; without `--force` the task never replaces a `bgagent` it did not write or one that another checkout installed.
 
-**Configuration is per user, not per checkout.** `~/.bgagent/` (stack, API URL, tokens) is shared by every checkout, so changing directory changes the CLI code that runs, not the stack it talks to. Use `bgagent configure` or `--stack-name` to switch stacks, or set `BGAGENT_CONFIG_DIR` per worktree.
+**Configuration is per user, not per checkout.** `~/.bgagent/` (stack, API URL, tokens) is shared by every checkout. Use `bgagent configure --stack-name …` to switch stacks (operator commands also take `--stack-name`), or set `BGAGENT_CONFIG_DIR` per worktree.
 
-Without the command, run the entrypoint directly once it is compiled:
+Without the command, run the entrypoint from the repository root once it is compiled:
 
 ```bash
 node cli/lib/bin/bgagent.js <command>
 ```
 
-`bgagent --version` prints the package version and the commit the CLI was compiled from (`-dirty` when the checkout had uncommitted changes).
+The examples below write `bgagent` for that command. `bgagent --version` prints the package version and the commit the CLI was compiled from (`-dirty` when tracked files had uncommitted changes).
 
 ## Quick start
 
@@ -74,6 +72,8 @@ bgagent configure \
 
 First-time configure needs all four core fields. The easiest paths are `--stack-name backgroundagent-dev --region …` (same outputs as `bgagent platform outputs`) or `--from-bundle` after `admin invite-user`. Individual flags override stack-derived values.
 
+Pointing the CLI at another user pool removes the cached login (`~/.bgagent/credentials.json`): its tokens belong to the previous deployment. Run `bgagent login` again.
+
 ### `bgagent login`
 
 Authenticate with Cognito and cache tokens locally.
@@ -118,7 +118,7 @@ At least one of `--issue` or `--task` is required.
 
 The repository must be onboarded to the platform via a `Blueprint` CDK construct. If the repo is not onboarded, the API returns a `REPO_NOT_ONBOARDED` error.
 
-When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise.
+When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise. If the CLI stops waiting before that (the API keeps failing, or the maximum wait is reached), it exits with code 2: the task may still be running.
 
 ### `bgagent list`
 

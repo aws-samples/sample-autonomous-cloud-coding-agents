@@ -635,6 +635,34 @@ class TestCloneAndHydrateHandlers:
         assert ctx.system_prompt == ""
         assert outcome.data["system_prompt_built"] is False
 
+    @staticmethod
+    def _hydrate_user_prompt(**ctx_fields) -> str:
+        """The user prompt after the hydrate_context step, whose context was
+        hydrated by the orchestrator with the prompt ``HYDRATED``."""
+        from models import HydratedContext
+        from workflow.runner import _handle_hydrate_context
+
+        wf = _workflow(
+            [
+                {"kind": "hydrate_context"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
+        )
+        ctx = _real_ctx(wf, hydrated=HydratedContext(user_prompt="HYDRATED"), **ctx_fields)
+        _handle_hydrate_context(wf.steps[0], ctx)
+        return ctx.user_prompt
+
+    def test_hydrate_context_takes_the_hydrated_prompt(self):
+        assert self._hydrate_user_prompt() == "HYDRATED"
+
+    def test_hydrate_context_keeps_a_prompt_the_caller_built(self):
+        # The pipeline hands the step the hydrated prompt with the attachment
+        # references appended. The step must not put the bare one back.
+        built = "HYDRATED\n\nAttachments: `Read /workspace/.attachments/att-1/report.txt`"
+
+        assert self._hydrate_user_prompt(user_prompt=built) == built
+
 
 class TestRunAgentHandler:
     def test_empty_system_prompt_fails_loud(self):

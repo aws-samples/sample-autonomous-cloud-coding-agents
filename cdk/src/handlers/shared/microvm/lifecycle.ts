@@ -19,13 +19,13 @@
 
 import { randomUUID } from 'node:crypto';
 import { GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import type { SessionControlOptions, SessionHandle } from '../compute-strategy';
-import { readMicrovmImageMetadata, supportsMicrovmLifecycle } from './image-capability';
 import { APPROVAL_STATUSES, ApprovalStatusValue, TaskStatus, type TaskStatusType } from '../../../constructs/task-status';
+import type { SessionControlOptions, SessionHandle } from '../compute-strategy';
 import { logger } from '../logger';
 import type { ApprovalStatus } from '../types';
 import { makeDocClient } from '../ua';
 import { microvmErrorIdentity } from './control';
+import { readMicrovmImageMetadata, supportsMicrovmLifecycle } from './image-capability';
 
 type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
 export type LifecycleAction = 'suspend' | 'resume';

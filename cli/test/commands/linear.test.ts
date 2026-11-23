@@ -17,18 +17,16 @@
  *  SOFTWARE.
  */
 
-import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
-  autoLinkTokenOwner,
   chooseSetupRedirect,
   findReusableOauthAppCredentials,
   findWorkspaceRowBySlug,
-  isWebhookSecretConfigured,
+  readStackWideWebhookSecret,
   queryLinearTeamKeys,
   parsePastedAuthorization,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
-import * as config from '../../src/config';
 import { generateInviteCode, INVITE_CODE_ALPHABET } from '../../src/invite-code';
 
 jest.mock('@aws-sdk/lib-dynamodb', () => {
@@ -42,120 +40,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
 });
 
 const ddbSend = jest.fn();
-
-// Build a fake JWT with a `sub` claim; the CLI only base64url-decodes the payload.
-function fakeIdToken(sub: string): string {
-  const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({ sub })).toString('base64url');
-  return `${header}.${payload}.sig`;
-}
-
-describe('autoLinkTokenOwner', () => {
-  const originalFetch = global.fetch;
-  let consoleLogSpy: jest.SpiedFunction<typeof console.log>;
-  let loadCredentialsSpy: jest.SpiedFunction<typeof config.loadCredentials>;
-
-  beforeEach(() => {
-    ddbSend.mockReset();
-    ddbSend.mockResolvedValue({});
-    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-    loadCredentialsSpy = jest.spyOn(config, 'loadCredentials');
-  });
-
-  afterEach(() => {
-    global.fetch = originalFetch;
-    consoleLogSpy.mockRestore();
-    loadCredentialsSpy.mockRestore();
-  });
-
-  test('writes an active mapping row when Linear responds and user is authenticated', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        data: {
-          viewer: { id: 'linear-user-uuid', name: 'Jean', email: 'jean@example.com' },
-          organization: { id: 'linear-org-uuid', name: 'ACME' },
-        },
-      }),
-    }) as unknown as typeof fetch;
-    loadCredentialsSpy.mockReturnValue({
-      id_token: fakeIdToken('cognito-sub-123'),
-      refresh_token: 'r',
-      token_expiry: new Date(Date.now() + 60_000).toISOString(),
-    });
-
-    await autoLinkTokenOwner({
-      region: 'us-east-1',
-      apiToken: 'lin_api_xyz',
-      userMappingTable: 'test-LinearUserMappingTable',
-    });
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://api.linear.app/graphql',
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: 'lin_api_xyz' }),
-      }),
-    );
-    expect(ddbSend).toHaveBeenCalledTimes(1);
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
-    expect(putCmd.input.TableName).toBe('test-LinearUserMappingTable');
-    expect(putCmd.input.Item).toEqual(expect.objectContaining({
-      linear_identity: 'linear-org-uuid#linear-user-uuid',
-      platform_user_id: 'cognito-sub-123',
-      linear_workspace_id: 'linear-org-uuid',
-      linear_user_id: 'linear-user-uuid',
-      status: 'active',
-      link_method: 'auto_setup',
-    }));
-  });
-
-  test('skips gracefully with a warning when Linear API errors', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: false,
-      status: 401,
-      json: async () => ({}),
-    }) as unknown as typeof fetch;
-    loadCredentialsSpy.mockReturnValue({
-      id_token: fakeIdToken('cognito-sub-123'),
-      refresh_token: 'r',
-      token_expiry: new Date(Date.now() + 60_000).toISOString(),
-    });
-
-    await autoLinkTokenOwner({
-      region: 'us-east-1',
-      apiToken: 'lin_api_bad',
-      userMappingTable: 'test-LinearUserMappingTable',
-    });
-
-    expect(ddbSend).not.toHaveBeenCalled();
-    const msgs = consoleLogSpy.mock.calls.map(c => String(c[0]));
-    expect(msgs.some(m => m.includes('Could not auto-link'))).toBe(true);
-  });
-
-  test('skips gracefully when user is not logged in', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        data: {
-          viewer: { id: 'linear-user-uuid' },
-          organization: { id: 'linear-org-uuid' },
-        },
-      }),
-    }) as unknown as typeof fetch;
-    loadCredentialsSpy.mockReturnValue(null);
-
-    await autoLinkTokenOwner({
-      region: 'us-east-1',
-      apiToken: 'lin_api_xyz',
-      userMappingTable: 'test-LinearUserMappingTable',
-    });
-
-    expect(ddbSend).not.toHaveBeenCalled();
-    const msgs = consoleLogSpy.mock.calls.map(c => String(c[0]));
-    expect(msgs.some(m => m.includes('Could not resolve your platform user'))).toBe(true);
-    expect(msgs.some(m => m.includes('bgagent login'))).toBe(true);
-  });
-});
 
 /**
  * Just the Redirect URIs block. The invariant is about what goes in that FIELD, not
@@ -355,6 +239,8 @@ describe('renderLinearAppTemplate', () => {
   test('says to leave App events OFF, and why', () => {
     const out = renderLinearAppTemplate();
     expect(out).toMatch(/App events \(agent session/);
+    // The opt-in native agent-session channel (ADR-018 Phase 2) is the one exception.
+    expect(out).toContain('enableLinearAgentSessions=true');
     expect(out).toMatch(/OFF/);
     expect(out).toMatch(/comment thread/);
   });
@@ -485,44 +371,46 @@ describe('renderLinearAppTemplate', () => {
   });
 });
 
-describe('isWebhookSecretConfigured', () => {
+describe('readStackWideWebhookSecret', () => {
   const mockSend = jest.fn();
-  const mockClient = { send: mockSend } as unknown as Parameters<typeof isWebhookSecretConfigured>[0];
+  const mockClient = { send: mockSend } as unknown as Parameters<typeof readStackWideWebhookSecret>[0];
 
   beforeEach(() => {
     mockSend.mockReset();
   });
 
-  test('returns true for a Linear-shaped lin_wh_ secret', async () => {
-    mockSend.mockResolvedValueOnce({ SecretString: 'lin_wh_AbCdEfGhIjKlMnOpQrStUvWxYz' });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(true);
+  test('returns a Linear-shaped lin_wh_ secret, trimmed', async () => {
+    // The caller compares it with the secret a workspace stores, so it is the value
+    // itself that comes back, not only whether there is one.
+    mockSend.mockResolvedValueOnce({ SecretString: 'lin_wh_AbCdEfGhIjKlMnOpQrStUvWxYz\n' });
+    expect(await readStackWideWebhookSecret(mockClient, 'arn:secret')).toBe('lin_wh_AbCdEfGhIjKlMnOpQrStUvWxYz');
   });
 
-  test('returns false for the CDK-autogenerated placeholder', async () => {
+  test('returns undefined for the CDK-autogenerated placeholder', async () => {
     // CDK's default Secret value is a JSON-encoded random string — does
     // NOT start with lin_wh_. The check is a heuristic, not authoritative,
-    // but good enough to avoid re-prompting on every setup re-run.
+    // but good enough to tell a real secret from the placeholder.
     mockSend.mockResolvedValueOnce({ SecretString: '{"":"abcd"}' });
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
+    expect(await readStackWideWebhookSecret(mockClient, 'arn:secret')).toBeUndefined();
   });
 
-  test('returns false on ResourceNotFoundException (secret has not been created yet)', async () => {
+  test('returns undefined on ResourceNotFoundException (secret has not been created yet)', async () => {
     const err = new Error('Secrets Manager cannot find the specified secret.');
     err.name = 'ResourceNotFoundException';
     mockSend.mockRejectedValueOnce(err);
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
+    expect(await readStackWideWebhookSecret(mockClient, 'arn:secret')).toBeUndefined();
   });
 
-  test('throws on AccessDenied so operators see the IAM gap instead of a confusing re-prompt', async () => {
+  test('throws on AccessDenied so operators see the IAM gap instead of the secret being read as absent', async () => {
     const err = new Error('User is not authorized to perform: secretsmanager:GetSecretValue');
     err.name = 'AccessDeniedException';
     mockSend.mockRejectedValueOnce(err);
-    await expect(isWebhookSecretConfigured(mockClient, 'arn:secret')).rejects.toThrow(/IAM permission gap/);
+    await expect(readStackWideWebhookSecret(mockClient, 'arn:secret')).rejects.toThrow(/IAM permission gap/);
   });
 
-  test('returns false when SecretString is missing', async () => {
+  test('returns undefined when SecretString is missing', async () => {
     mockSend.mockResolvedValueOnce({});
-    expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
+    expect(await readStackWideWebhookSecret(mockClient, 'arn:secret')).toBeUndefined();
   });
 });
 
@@ -565,6 +453,38 @@ describe('findWorkspaceRowBySlug', () => {
     });
     expect(await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb')).toBeUndefined();
   });
+
+  // `remove-workspace` keeps the row of the registration it ends, and another workspace can be
+  // registered with the slug afterwards. Which of the two rows a Scan returns first is not
+  // the caller's to choose.
+  const removed = { workspace_slug: 'acme', linear_workspace_id: 'ws-gone', status: 'revoked', revoked_reason: 'admin_removed' };
+
+  test('finds the workspace that is registered with the slug now, behind the row of one that was removed', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [removed, { workspace_slug: 'acme', linear_workspace_id: 'ws-now', status: 'active' }],
+    });
+    const row = await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'acme');
+    expect(row?.linear_workspace_id).toBe('ws-now');
+  });
+
+  const dead = { workspace_slug: 'acme', linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' };
+
+  // The rule of the removal endpoint: an active row is the registration the slug names. Then
+  // one whose grant died, which still has its bundle, before the record of a removed one.
+  test.each([
+    ['the active workspace, behind the row of one whose grant died', [dead, { workspace_slug: 'acme', linear_workspace_id: 'ws-now', status: 'active' }], 'ws-now'],
+    ['a workspace whose grant died, behind the row of one that was removed', [removed, dead], 'ws-dead'],
+  ])('finds %s', async (_which, Items, found) => {
+    ddbSend.mockResolvedValueOnce({ Items });
+    const row = await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'acme');
+    expect(row?.linear_workspace_id).toBe(found);
+  });
+
+  test('still returns the row of a removed workspace when no other carries the slug', async () => {
+    // `setup` reads from it the vault binding of a workspace that is set up again.
+    ddbSend.mockResolvedValueOnce({ Items: [removed] });
+    expect(await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'acme')).toEqual(removed);
+  });
 });
 
 describe('findReusableOauthAppCredentials', () => {
@@ -581,13 +501,13 @@ describe('findReusableOauthAppCredentials', () => {
   });
 
   test('returns null when registry has no active rows', async () => {
-    ddbSend.mockResolvedValueOnce({ Items: [] });
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ workspace_slug: 'gone', oauth_secret_arn: 'arn:secret:gone', status: 'revoked' }],
+    });
     const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
     expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toBeNull();
-    // Verify the scan filter is the active-status one, not a full table scan.
-    const scanCmd = ddbSend.mock.calls[0][0] as ScanCommand;
-    expect(scanCmd.input.FilterExpression).toBe('#status = :active');
-    expect(scanCmd.input.Limit).toBe(1);
+    // A removed workspace's credentials are not offered for reuse, nor read.
+    expect(smSend).not.toHaveBeenCalled();
   });
 
   test('returns credentials from the first active workspace', async () => {
@@ -615,6 +535,30 @@ describe('findReusableOauthAppCredentials', () => {
       clientSecret: 'csec-acme',
       sourceSlug: 'acme',
     });
+  });
+
+  test('finds the active workspace when a removed one is read first', async () => {
+    // `remove-workspace` keeps the row with status `revoked`. The double answers as DynamoDB
+    // does: `Limit` rows are read, then the filter is applied to them. A scan for one active
+    // row that reads the removed one first therefore returns nothing, and `add-workspace`
+    // reported that no workspace was installed — the bug findWorkspaceRowBySlug records above.
+    const rows = [
+      { workspace_slug: 'gamma', oauth_secret_arn: 'arn:secret:gamma', status: 'revoked' },
+      { workspace_slug: 'alpha', oauth_secret_arn: 'arn:secret:alpha', status: 'active' },
+    ];
+    ddbSend.mockImplementationOnce(async (cmd: ScanCommand) => ({
+      Items: rows.slice(0, cmd.input.Limit).filter((row) => !cmd.input.FilterExpression || row.status === 'active'),
+    }));
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify({ client_id: 'cid-alpha', client_secret: 'csec-alpha' }),
+    });
+    const ddbClient = { send: ddbSend } as unknown as Parameters<typeof findReusableOauthAppCredentials>[0];
+    expect(await findReusableOauthAppCredentials(ddbClient, smClient, 'TestRegistry')).toEqual({
+      clientId: 'cid-alpha',
+      clientSecret: 'csec-alpha',
+      sourceSlug: 'alpha',
+    });
+    expect(smSend.mock.calls[0][0].input.SecretId).toBe('arn:secret:alpha');
   });
 
   test('throws CliError on corrupted SecretString JSON (distinct from "no active workspace")', async () => {

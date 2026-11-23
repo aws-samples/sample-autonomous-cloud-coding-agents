@@ -322,6 +322,23 @@ class _TrajectoryWriter:
             }
         )
 
+    def write_tool_result(self, turn: int, tool_name: str, is_error: bool, content: str) -> None:
+        """Write a TRAJECTORY_TOOL_RESULT event for the result of one tool call.
+
+        An event of its own: the result reaches the runner after the message of
+        the model that asked for it, which ``write_turn`` has recorded by then.
+        """
+        self._put_event(
+            {
+                "event": "TRAJECTORY_TOOL_RESULT",
+                "task_id": self._task_id,
+                "turn": turn,
+                "tool_name": tool_name,
+                "is_error": is_error,
+                "content": self._truncate_field(content, 2000),
+            }
+        )
+
     def write_result(
         self,
         subtype: str,
@@ -547,8 +564,10 @@ def print_metrics(metrics: dict):
     human-readable table to stdout for operator console inspection.
 
     Native types (int, float, bool, None) are preserved in the JSON payload.
-    None values become JSON ``null`` and are excluded by ``ispresent()``
-    filters in the dashboard queries. Raw ``error`` text is never logged verbatim.
+    None values become JSON ``null``. The ``parse`` patterns of the dashboard
+    queries match a real value only, so their ``ispresent()`` filters leave an
+    event with a ``null`` out. ``error`` text is logged after a scan that
+    replaces secret patterns (see ``_metrics_payload_for_logging``).
     """
     safe = _metrics_payload_for_logging(metrics)
     json_payload: dict = {"event": "METRICS_REPORT", **safe}

@@ -206,6 +206,43 @@ class TestLinearPath:
             assert post.call_args.kwargs["json"]["variables"]["emoji"] == EMOJI_SUCCESS
 
 
+class TestAgentSessionTasks:
+    """A task started from a native Linear agent session posts no reactions —
+    the session shows its state — but still moves the issue's workflow state."""
+
+    SESSION_METADATA: ClassVar[dict[str, str]] = {
+        "linear_issue_id": "issue-1",
+        "linear_agent_session_id": "session-1",
+    }
+
+    def test_start_skips_reaction_but_transitions_state(self, monkeypatch):
+        graphql = MagicMock()
+        transition = MagicMock()
+        monkeypatch.setattr(linear_reactions, "_graphql", graphql)
+        monkeypatch.setattr(linear_reactions, "_transition_issue_state", transition)
+
+        rid = linear_reactions.react_task_started(
+            "linear", self.SESSION_METADATA, transition_state=True
+        )
+
+        assert rid is None
+        graphql.assert_not_called()
+        transition.assert_called_once_with("issue-1", "started", ["In Progress"])
+
+    def test_finish_skips_reactions_but_transitions_state(self, monkeypatch):
+        graphql = MagicMock()
+        transition = MagicMock()
+        monkeypatch.setattr(linear_reactions, "_graphql", graphql)
+        monkeypatch.setattr(linear_reactions, "_transition_issue_state", transition)
+
+        linear_reactions.react_task_finished(
+            "linear", self.SESSION_METADATA, success=True, transition_state=True
+        )
+
+        graphql.assert_not_called()
+        transition.assert_called_once_with("issue-1", "started", ["In Review"])
+
+
 class TestFailureIsSwallowed:
     """Reactions are advisory — network/API failures never propagate."""
 
@@ -243,6 +280,26 @@ class TestFailureIsSwallowed:
         with patch("linear_reactions.requests.post") as post:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
             post.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"<html><body>Sign in</body></html>", b"null", b"[]", b"42", b'"scalar"'],
+        ids=["html", "null", "list", "number", "string"],
+    )
+    def test_200_without_a_json_object_does_not_raise(self, monkeypatch, body):
+        """A 200 whose body is a proxy's HTML page, or JSON that is not an object,
+        is one more failure: raised out of the hook, it would turn a finished task
+        into FAILED. A real ``requests.Response``, so it fails the way requests does."""
+        import requests as rq
+
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        resp = rq.Response()
+        resp.status_code = 200
+        resp._content = body
+        with patch("linear_reactions.requests.post", return_value=resp):
+            # must not raise
+            react_task_finished("linear", {"linear_issue_id": "issue-1"}, success=True)
+            assert linear_reactions._graphql("query Q { x }", {}) is None
 
 
 class TestSweepStaleReactions:

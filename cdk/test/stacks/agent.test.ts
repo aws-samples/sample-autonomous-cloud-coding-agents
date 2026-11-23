@@ -1001,6 +1001,33 @@ describe('AgentStack', () => {
     expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
+  test('every function that reads the per-user concurrency cap gets the one the orchestrator admits against', () => {
+    // The stack declares the cap once. A construct it does not pass the cap to falls
+    // back to a default of its own, and that shows only on the day the stack's value
+    // changes: the orchestrator then admits against one number while the admission-queue
+    // pickup and the task API count against another.
+    // The scheduled jobs, the pickup among them, are in a nested stack with a template of its own.
+    const functions = {
+      ...template.findResources('AWS::Lambda::Function'),
+      ...concurrencyMaintenance.findResources('AWS::Lambda::Function'),
+    };
+    const caps = Object.entries(functions)
+      .map(([id, fn]) => [id, fn.Properties.Environment?.Variables?.MAX_CONCURRENT_TASKS_PER_USER] as const)
+      .filter(([, cap]) => cap !== undefined);
+    const admissionCap = caps.find(([id]) => id.startsWith('TaskOrchestratorOrchestratorFn'))?.[1];
+
+    expect(admissionCap).toBeDefined();
+    expect(caps.filter(([, cap]) => cap !== admissionCap)).toEqual([]);
+    // The functions this is here for. One that stops carrying the variable, or that
+    // moves into another nested stack (whose template then has to be read here as
+    // well), would otherwise drop out of the comparison above without being noticed.
+    expect(caps.map(([id]) => id)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^TaskApiGetTaskFn/),
+      expect.stringMatching(/^TaskApiConfirmUploadsFn/),
+      expect.stringMatching(/^AdmissionQueuePickupPickupFn/),
+    ]));
+  });
+
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',
@@ -1187,7 +1214,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    // Two task defs — the 64 GB build def and the 8 GB read-only planning def
+    // Two task defs — the 16 GB build def and the 8 GB read-only planning def
     // (a read-only workflow runs on the smaller one). See
     // docs/design/ECS_RIGHTSIZED_PLANNING.md.
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
@@ -1195,6 +1222,21 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
+  });
+
+  test('both ECS task definitions receive the same approval table as AgentCore', () => {
+    const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskApprovalsTable'));
+    expect(approvalId).toBeDefined();
+    const approvalTable = { Ref: approvalId };
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'TASK_APPROVALS_TABLE_NAME',
+        Value: approvalTable,
+      });
+    }
   });
 
   test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {
@@ -1249,6 +1291,29 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
       Cpu: '4096',
       Memory: '16384',
     });
+  });
+
+  test('both ECS task definitions name the nudges table, so a nudge reaches an ECS agent', () => {
+    // Without NUDGES_TABLE_NAME the agent's nudge reader switches itself off:
+    // `bgagent nudge` answers 202, the row is written, and nothing reads it.
+    const nudgesTable = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskNudgesTable'));
+    expect(nudgesTable).toBeDefined();
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'NUDGES_TABLE_NAME',
+        Value: { Ref: nudgesTable },
+      });
+    }
+    // The agent reads the table with the per-task SessionRole, as it does the
+    // other task tables: the task role itself gets no statement on it.
+    const rolesGrantedTheTable = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([, policy]) => JSON.stringify(policy).includes(nudgesTable!))
+      .map(([id]) => id.replace(/DefaultPolicy.*$/, ''));
+    expect(rolesGrantedTheTable).toContain('AgentSessionRole');
+    expect(rolesGrantedTheTable).not.toContain('EcsAgentClusterTaskRole');
   });
 });
 
@@ -2146,5 +2211,50 @@ describe('AgentStack Agent Registry gate', () => {
     expect(() => new AgentStack(app, 'InvalidAgentRegistryContext', {
       env: { account: '123456789012', region: 'us-east-1' },
     })).toThrow("enableAgentRegistry must be true or false, got 'fasle'");
+  });
+});
+
+describe('AgentStack — Linear agent sessions gate (ADR-018 Phase 2, #990)', () => {
+  const envVarsWith = (template: Template, marker: string): Array<Record<string, unknown>> =>
+    Object.values(template.findResources('AWS::Lambda::Function'))
+      .map((fn) => (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {})
+      .filter((vars) => vars.LINEAR_AGENT_SESSIONS_ENABLED === marker);
+
+  test('flag on: receiver, processor and fan-out consumer carry the gate; the processor can forward nudges', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsOn', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const gated = envVarsWith(template, 'true');
+    expect(gated).toHaveLength(3);
+    expect(gated.some((vars) => 'NUDGES_TABLE_NAME' in vars && 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)).toBe(true);
+  });
+
+  test('flag on: the processor can stop the default backend\'s compute on a session stop', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsStop', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const processor = envVarsWith(template, 'true').find((vars) => 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)!;
+    // AgentCore is the default compute: its runtime ARN is the stop fallback.
+    expect(processor.RUNTIME_ARN).toBeDefined();
+  });
+
+  test('flag on: the nudge API and the session path are given the same rate limit', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsRate', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const limits = Object.values(template.findResources('AWS::Lambda::Function'))
+      .map((fn) => (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {})
+      .filter((vars) => 'NUDGE_RATE_LIMIT_PER_MINUTE' in vars)
+      .map((vars) => vars.NUDGE_RATE_LIMIT_PER_MINUTE);
+    // The nudge Lambda and the Linear processor spend one counter row.
+    expect(limits).toHaveLength(2);
+    expect(new Set(limits).size).toBe(1);
+  });
+
+  test('flag off (default): no Lambda carries the gate', () => {
+    const template = Template.fromStack(new AgentStack(new App(), 'LinearSessionsOff', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    expect(envVarsWith(template, 'true')).toHaveLength(0);
   });
 });

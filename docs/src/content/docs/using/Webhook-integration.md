@@ -76,7 +76,7 @@ Use the webhook endpoint with HMAC-SHA256 authentication instead of a JWT:
 ```bash
 WEBHOOK_ID="01HYX..."
 WEBHOOK_SECRET="a1b2c3d4..."
-BODY='{"repo": "owner/repo", "task_description": "Fix the login bug"}'
+BODY='{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "task_description": "Fix the login bug"}'
 
 # Compute HMAC-SHA256 signature
 SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | cut -d' ' -f2)

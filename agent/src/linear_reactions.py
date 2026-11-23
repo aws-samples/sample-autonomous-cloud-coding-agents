@@ -159,6 +159,17 @@ def _enabled(channel_source: str, channel_metadata: dict[str, str] | None) -> st
     return channel_metadata.get("linear_issue_id") or None
 
 
+def _is_agent_session(channel_metadata: dict[str, str] | None) -> bool:
+    """Whether the task was started from a native Linear agent session.
+
+    A session shows the run's state itself (ADR-018 Phase 2), so the 👀/✅/❌
+    issue reactions would only repeat it and notify the issue's subscribers a
+    second time. Workflow-state transitions still apply: the session does not
+    move the issue.
+    """
+    return bool(channel_metadata and channel_metadata.get("linear_agent_session_id"))
+
+
 def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
     """POST a GraphQL query. Return parsed data on success, None on any failure.
 
@@ -226,7 +237,17 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
     with _auth_state_lock:
         _consecutive_auth_failures = 0
 
-    body = resp.json() if resp.content else {}
+    # A 200 whose body is not a JSON object (a proxy's HTML page, ``null``, a list)
+    # is one more failure of an advisory call. Raised out of here, the parse error
+    # or the ``.get`` below leaves the pipeline hook and the task is written FAILED.
+    try:
+        body = resp.json() if resp.content else {}
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        log("WARN", "linear_reactions: HTTP 200 from Linear without a JSON object in the body")
+        return None
+
     if body.get("errors"):
         log("WARN", f"linear_reactions: GraphQL errors: {body['errors']}")
         return None
@@ -411,6 +432,10 @@ def react_task_started(
     issue_id = _enabled(channel_source, channel_metadata)
     if not issue_id:
         return None
+    if _is_agent_session(channel_metadata):
+        if transition_state:
+            _transition_issue_state(issue_id, "started", ["In Progress"])
+        return None
     log("TASK", f"linear_reactions: react_task_started ENTER issue_id={issue_id}")
     started_at = time.monotonic()
 
@@ -473,12 +498,13 @@ def react_task_finished(
     issue_id = _enabled(channel_source, channel_metadata)
     if not issue_id:
         return
-    if started_reaction_id:
-        _graphql(_DELETE_MUTATION, {"id": started_reaction_id})
-    _graphql(
-        _CREATE_MUTATION,
-        {"issueId": issue_id, "emoji": EMOJI_SUCCESS if success else EMOJI_FAILURE},
-    )
+    if not _is_agent_session(channel_metadata):
+        if started_reaction_id:
+            _graphql(_DELETE_MUTATION, {"id": started_reaction_id})
+        _graphql(
+            _CREATE_MUTATION,
+            {"issueId": issue_id, "emoji": EMOJI_SUCCESS if success else EMOJI_FAILURE},
+        )
     # Workflow-state transition: on a clean finish, a writeable single task
     # moves the issue to
     # In Review (work done, awaiting human merge) — the same target the

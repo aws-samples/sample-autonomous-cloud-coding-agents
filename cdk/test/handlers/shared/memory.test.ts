@@ -69,7 +69,7 @@ describe('loadMemoryContext', () => {
     expect(result!.repo_knowledge[0]).toContain('Jest');
   });
 
-  test('uses namespace prefix (hierarchical retrieval) for both queries', async () => {
+  test('uses namespacePath (hierarchical retrieval) for both queries', async () => {
     const { RetrieveMemoryRecordsCommand } = jest.requireMock('@aws-sdk/client-bedrock-agentcore');
     mockAgentCoreSend
       .mockResolvedValueOnce({ memoryRecordSummaries: [] })
@@ -80,7 +80,7 @@ describe('loadMemoryContext', () => {
     // Semantic search uses /{repo}/knowledge/ as a namespace prefix.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespace: '/owner/repo/knowledge/',
+        namespacePath: '/owner/repo/knowledge/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'Fix the build',
         }),
@@ -90,11 +90,16 @@ describe('loadMemoryContext', () => {
     // under all task sessions plus the cross-task reflection records.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespace: '/owner/repo/episodes/',
+        namespacePath: '/owner/repo/episodes/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'recent task episodes',
         }),
       }),
+    );
+    // `namespace` is an exact match in the AgentCore Memory API: it leaves out
+    // the per-task records at /{repo}/episodes/{sessionId}/ and logs nothing.
+    expect(RetrieveMemoryRecordsCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ namespace: expect.anything() }),
     );
   });
 

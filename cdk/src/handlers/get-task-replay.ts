@@ -49,6 +49,8 @@ export const MAX_REPLAY_EVENTS = 5000;
  * Gateway 502 for exactly the long/expensive trace tasks operators most need to
  * inspect. We stop paging (+ WARN) once accumulated event bytes cross this
  * threshold, leaving headroom under 6 MB for the surrounding bundle fields.
+ * An event is counted at the size it has in the Lambda response (see
+ * ``collectEvents``), which for a preview of JSON is well above its stored size.
  *
  * The loop includes an event *before* checking the cap, so the total can
  * overshoot by at most one event. That is safe here because a single event is
@@ -143,7 +145,10 @@ async function collectEvents(
       ExclusiveStartKey: startKey,
     }));
     for (const item of (page.Items ?? []) as EventRecord[]) {
-      bytes += Buffer.byteLength(JSON.stringify(item), 'utf8');
+      // Stringified twice: the bundle travels as the `body` string of the proxy
+      // result, which the Lambda runtime serializes again, so each quote and
+      // backslash of an event costs two bytes of the 6 MB response, not one.
+      bytes += Buffer.byteLength(JSON.stringify(JSON.stringify(item)), 'utf8');
       events.push(item);
       if (bytes >= MAX_REPLAY_EVENT_BYTES) {
         byteCapped = true;

@@ -903,11 +903,12 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     } catch (err) {
       // A MicroVM that the control plane no longer knows about is gone, not
       // broken — treat NotFound as terminal (``completed``) rather than
-      // ``failed``. This deliberately DIVERGES from ecs-strategy's
-      // "DescribeTasks returned no task ⇒ failed": ECS keeps stopped tasks
-      // describable for ~1 h, so a missing task there really is anomalous,
-      // whereas a MicroVM is eventually reaped from the control plane by design
-      // and would otherwise fail every task that finished cleanly.
+      // ``failed``. This deliberately DIVERGES from ecs-strategy, which throws
+      // when DescribeTasks returns no task (a failed poll; three in a row fail
+      // the task): ECS keeps stopped tasks describable for ~1 h, so a task that
+      // stays missing there really is anomalous, whereas a MicroVM is eventually
+      // reaped from the control plane by design and would otherwise fail every
+      // task that finished cleanly.
       //
       // NOTE (live 2026-07-31): this is a LATE signal, not the near-term one. A
       // terminated MicroVM reported ``TERMINATED`` at +3 s and was STILL

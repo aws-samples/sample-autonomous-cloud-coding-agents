@@ -121,6 +121,77 @@ describe('api-key command', () => {
       expect(mockList).toHaveBeenCalledWith({ includeRevoked: true, limit: 5 });
       expect(consoleSpy.mock.calls[0][0]).toContain('k-1');
     });
+
+    const apiKey = (id: string) => ({
+      key_id: id,
+      name: 'CI',
+      scopes: ['webhooks:manage'],
+      status: 'active',
+      expires_at: null,
+      created_at: 'c',
+      updated_at: 'u',
+      revoked_at: null,
+    });
+
+    test('follows next_token when a page holds fewer keys than asked for', async () => {
+      // The API reads a bounded number of rows per request: revoked ones can take all of them.
+      mockList
+        .mockResolvedValueOnce({ data: [], pagination: { next_token: 'T1', has_more: true } })
+        .mockResolvedValueOnce({ data: [apiKey('k-0')], pagination: { next_token: null, has_more: false } });
+
+      const cmd = makeApiKeyCommand();
+      await cmd.parseAsync(['node', 'test', 'list']);
+
+      expect(mockList).toHaveBeenCalledTimes(2);
+      expect(mockList).toHaveBeenLastCalledWith({ includeRevoked: undefined, limit: 20, nextToken: 'T1' });
+      const calls = consoleSpy.mock.calls.map((c) => c[0] as string);
+      expect(calls[0]).toContain('k-0');
+      expect(calls.some((c) => c.includes('More results available'))).toBe(false);
+    });
+
+    test('stops at --limit, asking each further page only for the keys still missing', async () => {
+      mockList
+        .mockResolvedValueOnce({ data: [apiKey('k-1')], pagination: { next_token: 'T1', has_more: true } })
+        .mockResolvedValueOnce({ data: [apiKey('k-2'), apiKey('k-3')], pagination: { next_token: 'T2', has_more: true } });
+
+      const cmd = makeApiKeyCommand();
+      await cmd.parseAsync(['node', 'test', 'list', '--limit', '3', '--output', 'json']);
+
+      expect(mockList).toHaveBeenCalledTimes(2);
+      expect(mockList).toHaveBeenLastCalledWith({ includeRevoked: undefined, limit: 2, nextToken: 'T1' });
+      // No key is dropped, so the last token resumes right after the last one printed.
+      expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify({
+        data: [apiKey('k-1'), apiKey('k-2'), apiKey('k-3')],
+        pagination: { next_token: 'T2', has_more: true },
+      }, null, 2));
+    });
+
+    test('stops after 100 requests when every page is empty and promises more', async () => {
+      mockList.mockResolvedValue({ data: [], pagination: { next_token: 'tok', has_more: true } });
+
+      const cmd = makeApiKeyCommand();
+      await cmd.parseAsync(['node', 'test', 'list']);
+
+      expect(mockList).toHaveBeenCalledTimes(100);
+      const calls = consoleSpy.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((c) => c.includes('More results available'))).toBe(true);
+    });
+
+    test('gives every further request --include-revoked and the token of the page before it', async () => {
+      mockList
+        .mockResolvedValueOnce({ data: [apiKey('k-1')], pagination: { next_token: 'T1', has_more: true } })
+        .mockResolvedValueOnce({ data: [apiKey('k-2')], pagination: { next_token: 'T2', has_more: true } })
+        .mockResolvedValueOnce({ data: [apiKey('k-3')], pagination: { next_token: null, has_more: false } });
+
+      const cmd = makeApiKeyCommand();
+      await cmd.parseAsync(['node', 'test', 'list', '--include-revoked', '--limit', '3']);
+
+      expect(mockList.mock.calls).toEqual([
+        [{ includeRevoked: true, limit: 3 }],
+        [{ includeRevoked: true, limit: 2, nextToken: 'T1' }],
+        [{ includeRevoked: true, limit: 1, nextToken: 'T2' }],
+      ]);
+    });
   });
 
   describe('api-key revoke', () => {

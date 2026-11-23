@@ -17,16 +17,16 @@
  *  SOFTWARE.
  */
 
-import { debug, isVerbose, redactSensitive, setVerbose } from '../src/debug';
+import { debug, isVerbose, redactedJson, setVerbose } from '../src/debug';
 
-describe('redactSensitive', () => {
+describe('redactedJson', () => {
   test('redacts the one-time webhook secret in a response body', () => {
     const body = {
       webhook_id: 'wh-1',
       secret: 'whsec_supersecret',
       url: 'https://api.example.com/webhooks/wh-1',
     };
-    expect(redactSensitive(body)).toEqual({
+    expect(JSON.parse(redactedJson(body))).toEqual({
       webhook_id: 'wh-1',
       secret: '[REDACTED]',
       url: 'https://api.example.com/webhooks/wh-1',
@@ -38,32 +38,32 @@ describe('redactSensitive', () => {
       data: [{ access_token: 'tok-1', name: 'a' }, { refresh_token: 'tok-2' }],
       oauth: { client_secret: 'cs-1', client_id: 'ci-1' },
     };
-    expect(redactSensitive(body)).toEqual({
+    expect(JSON.parse(redactedJson(body))).toEqual({
       data: [{ access_token: '[REDACTED]', name: 'a' }, { refresh_token: '[REDACTED]' }],
       oauth: { client_secret: '[REDACTED]', client_id: 'ci-1' },
     });
   });
 
   test('matches field names case-insensitively', () => {
-    expect(redactSensitive({ Authorization: 'Bearer abc' })).toEqual({
+    expect(JSON.parse(redactedJson({ Authorization: 'Bearer abc' }))).toEqual({
       Authorization: '[REDACTED]',
     });
   });
 
   test('does not redact non-sensitive fields like next_token', () => {
     const body = { next_token: 'page-cursor', items: [] };
-    expect(redactSensitive(body)).toEqual({ next_token: 'page-cursor', items: [] });
+    expect(JSON.parse(redactedJson(body))).toEqual({ next_token: 'page-cursor', items: [] });
   });
 
   test('passes through primitives and null unchanged', () => {
-    expect(redactSensitive('plain')).toBe('plain');
-    expect(redactSensitive(42)).toBe(42);
-    expect(redactSensitive(null)).toBeNull();
+    expect(JSON.parse(redactedJson('plain'))).toBe('plain');
+    expect(JSON.parse(redactedJson(42))).toBe(42);
+    expect(JSON.parse(redactedJson(null))).toBeNull();
   });
 
   test('does not mutate the input object', () => {
     const body = { secret: 'keep-me' };
-    redactSensitive(body);
+    redactedJson(body);
     expect(body.secret).toBe('keep-me');
   });
 });

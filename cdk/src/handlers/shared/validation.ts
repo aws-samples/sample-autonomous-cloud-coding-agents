@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { TaskStatus } from '../../constructs/task-status';
 import {
   type CreateTaskRequest,
   type AttachmentType,
@@ -28,7 +29,6 @@ import {
   MAX_BUDGET_USD_MAX,
 } from './types';
 import { type WorkflowRequiredInputs } from './workflows';
-import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */
 export const DEFAULT_MAX_TURNS = 100;
@@ -43,7 +43,9 @@ export const MAX_TASK_DESCRIPTION_LENGTH = 10_000;
 // dots (`owner/..`, `./repo`) is a path token, not a repo name — the
 // lookaheads reject those so URL/key interpolation never sees `.`/`..`.
 const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
-const IDEMPOTENCY_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+/** Longest idempotency key createTaskCore accepts; synthesized keys are sliced to fit. */
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+const IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[a-zA-Z0-9_-]{1,${MAX_IDEMPOTENCY_KEY_LENGTH}}$`);
 const WEBHOOK_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,62}[a-zA-Z0-9]$/;
 // ULID format: 26 chars, Crockford Base32 alphabet (0-9, A-Z excluding I, L, O, U).
 // Matches the ``_generate_ulid`` output in ``agent/src/progress_writer.py``.
@@ -157,15 +159,18 @@ export function parseLimit(limitParam: string | undefined, defaultLimit: number,
 /**
  * Decode a base64-encoded pagination token to a DynamoDB ExclusiveStartKey.
  * @param token - the base64 pagination token.
- * @returns the decoded key object, or undefined if token is absent or invalid.
+ * @returns the decoded key object, undefined if there is no token, or null if the
+ *   token is no cursor (the caller answers 400: taken for no token, a damaged one
+ *   would restart the list at its first page).
  */
-export function decodePaginationToken(token: string | undefined): Record<string, unknown> | undefined {
+export function decodePaginationToken(token: string | undefined): Record<string, unknown> | null | undefined {
   if (!token) return undefined;
   try {
-    const json = Buffer.from(token, 'base64').toString('utf-8');
-    return JSON.parse(json) as Record<string, unknown>;
+    const key: unknown = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
+    // DynamoDB takes nothing but an object for a start key.
+    return typeof key === 'object' && key !== null && !Array.isArray(key) ? key as Record<string, unknown> : null;
   } catch {
-    return undefined; // nosemgrep: ts-silent-success-masking -- invalid pagination token is rejected; undefined is the decode contract, not masked infra failure
+    return null; // nosemgrep: ts-silent-success-masking -- null is the answer for a token that cannot be decoded, and every caller refuses it with a 400
   }
 }
 
@@ -196,10 +201,11 @@ export function isValidUlid(value: string): boolean {
 /**
  * Validate a webhook name (2-64 characters, alphanumeric, spaces, hyphens, underscores).
  * Must start and end with an alphanumeric character.
- * @param name - the webhook name to validate.
- * @returns true if the name is valid.
+ * @param name - the raw value from the request.
+ * @returns true if the name is a string and valid.
  */
-export function isValidWebhookName(name: string): boolean {
+export function isValidWebhookName(name: unknown): boolean {
+  if (typeof name !== 'string') return false;
   if (name.length === 1) return /^[a-zA-Z0-9]$/.test(name);
   return WEBHOOK_NAME_PATTERN.test(name);
 }
@@ -252,7 +258,7 @@ export function computeTtlEpoch(retentionDays: number): number {
 }
 
 /**
- * Validate a pr_number value from a request body.
+ * Validate a pr_number or issue_number value from a request body.
  * @param value - the raw value from the request.
  * @returns the valid number, null if invalid (caller should return 400), or undefined if absent.
  */
@@ -271,11 +277,11 @@ export function validatePrNumber(value: unknown): number | null | undefined {
 /** Maximum attachments per task. */
 export const MAX_ATTACHMENTS_PER_TASK = 10;
 /** Maximum decoded size for inline attachments. */
-const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
+export const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
 /** Maximum total decoded inline size per request (MiB). */
 const MAX_TOTAL_INLINE_SIZE_MB = 3;
 /** Maximum total decoded inline size per request. */
-const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+export const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
 /** Maximum total attachment size per task (MiB). */
 const MAX_TOTAL_ATTACHMENT_SIZE_MB = 50;
 /** Maximum size per attachment (inline or presigned, decoded). */
@@ -541,8 +547,11 @@ export type AttachmentValidationResult =
 export function validateAttachments(
   attachments: unknown[] | undefined,
 ): AttachmentValidationResult {
-  if (!attachments || !Array.isArray(attachments) || attachments.length === 0) {
+  if (!attachments) {
     return { valid: true, parsed: [] };
+  }
+  if (!Array.isArray(attachments)) {
+    return { valid: false, error: 'attachments must be an array' };
   }
   if (attachments.length > MAX_ATTACHMENTS_PER_TASK) {
     return { valid: false, error: `Maximum ${MAX_ATTACHMENTS_PER_TASK} attachments per task` };
@@ -553,8 +562,8 @@ export function validateAttachments(
   const parsed: ValidatedAttachment[] = [];
 
   for (const [i, att] of (attachments as Record<string, unknown>[]).entries()) {
-    // Type validation
-    if (!att.type || typeof att.type !== 'string' || !VALID_ATTACHMENT_TYPES.has(att.type)) {
+    // Type validation (an entry of null has no type either)
+    if (!att || !att.type || typeof att.type !== 'string' || !VALID_ATTACHMENT_TYPES.has(att.type)) {
       return { valid: false, error: `attachments[${i}].type must be 'image', 'file', or 'url'` };
     }
 
@@ -571,17 +580,22 @@ export function validateAttachments(
       if (!isValidHttpsUrl(att.url)) {
         return { valid: false, error: `attachments[${i}]: must be a valid HTTPS URL` };
       }
-    } else {
-      if (att.data && att.url) {
-        return { valid: false, error: `attachments[${i}]: provide data or url, not both` };
-      }
+    } else if (att.url) {
+      // Only type 'url' is fetched. Without this, an image or a file with a url and
+      // no data passed for a presigned upload that declares no size.
+      const reason = att.data ? 'provide data or url, not both' : "url is only allowed for type 'url'";
+      return { valid: false, error: `attachments[${i}]: ${reason}` };
     }
 
     // Decode inline data
     let decoded: Buffer | undefined;
 
-    if (att.data && typeof att.data === 'string') {
-      decoded = Buffer.from(att.data as string, 'base64');
+    if (att.data) {
+      // Data of another JSON type passed for a presigned upload in the same way.
+      if (typeof att.data !== 'string') {
+        return { valid: false, error: `attachments[${i}]: data must be a base64 string` };
+      }
+      decoded = Buffer.from(att.data, 'base64');
       if (decoded.length > MAX_INLINE_ATTACHMENT_SIZE_BYTES) {
         return { valid: false, error: `attachments[${i}]: inline data exceeds 500 KB limit. Use presigned upload for larger files.` };
       }
@@ -690,4 +704,82 @@ export function validateAttachments(
   }
 
   return { valid: true, parsed };
+}
+
+// ---------------------------------------------------------------------------
+// Private and reserved addresses (SSRF guard of the attachment downloads)
+// ---------------------------------------------------------------------------
+
+/** RFC 1918 172.16.0.0/12 — second-octet bounds (inclusive). */
+const RFC1918_172_SECOND_OCTET_MIN = 16;
+const RFC1918_172_SECOND_OCTET_MAX = 31;
+
+/** RFC 6598 100.64.0.0/10 (CGN) — second-octet bounds (inclusive). */
+const RFC6598_CGN_SECOND_OCTET_MIN = 64;
+const RFC6598_CGN_SECOND_OCTET_MAX = 127;
+
+/** RFC 1918 + link-local + loopback + CGN + IPv6 equivalents + IPv4-mapped IPv6. */
+const PRIVATE_IP_RANGES = [
+  // IPv4
+  { prefix: '10.', mask: null },
+  {
+    prefix: '172.',
+    mask: (ip: string) => {
+      const second = parseInt(ip.split('.')[1], 10);
+      return second >= RFC1918_172_SECOND_OCTET_MIN && second <= RFC1918_172_SECOND_OCTET_MAX;
+    },
+  },
+  { prefix: '192.168.', mask: null },
+  { prefix: '169.254.', mask: null },
+  { prefix: '127.', mask: null },
+  { prefix: '0.', mask: null },
+  {
+    prefix: '100.',
+    mask: (ip: string) => {
+      const second = parseInt(ip.split('.')[1], 10);
+      return second >= RFC6598_CGN_SECOND_OCTET_MIN && second <= RFC6598_CGN_SECOND_OCTET_MAX; // 100.64.0.0/10 (RFC 6598)
+    },
+  },
+  // IPv6
+  { prefix: '::1', mask: null },
+  { prefix: '::', mask: (ip: string) => ip === '::' }, // Unspecified address (could route to localhost)
+  { prefix: 'fc', mask: null },
+  { prefix: 'fd', mask: null },
+  // Link-local is the whole of fe80::/10: a first group from fe80 to febf.
+  { prefix: 'fe8', mask: null },
+  { prefix: 'fe9', mask: null },
+  { prefix: 'fea', mask: null },
+  { prefix: 'feb', mask: null },
+  // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) — prevents SSRF bypass
+  // by attackers returning mapped addresses from DNS that embed private IPv4.
+  { prefix: '::ffff:', mask: null },
+  { prefix: '0:0:0:0:0:ffff:', mask: null },
+] as const;
+
+/**
+ * Check if an IP address belongs to a private/internal range.
+ * Returns a reason string if private, undefined if public.
+ */
+export function isPrivateIp(ip: string): string | undefined {
+  const normalized = ip.toLowerCase();
+
+  // An IPv6 address written with an IPv4 address inside (::ffff:10.0.0.1,
+  // ::10.0.0.1, 64:ff9b::10.0.0.1) is refused whatever it embeds. A resolver
+  // writes only the mapped and the deprecated compatible form this way, and
+  // neither is the address of a public host.
+  if (normalized.includes(':') && normalized.includes('.')) {
+    return `IP ${ip} is in private/reserved range`;
+  }
+
+  for (const range of PRIVATE_IP_RANGES) {
+    if (typeof range.mask === 'function') {
+      if (normalized.startsWith(range.prefix) && range.mask(normalized)) {
+        return `IP ${ip} is in private range (${range.prefix}x)`;
+      }
+    } else if (normalized.startsWith(range.prefix) || normalized === range.prefix) {
+      return `IP ${ip} is in private/reserved range`;
+    }
+  }
+
+  return undefined;
 }

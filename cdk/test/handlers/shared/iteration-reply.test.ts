@@ -104,6 +104,17 @@ describe('renderMaturingReply — the edit-in-place states', () => {
     expect(r).toContain('[![preview](https://cdn/x.png)](https://app.vercel.app)');
   });
 
+  // The agent stores duration_s with one decimal. The last half second of a
+  // minute belongs to the next minute: "60s" and "1m 60s" are not durations.
+  test.each([
+    [59.4, '59s'],
+    [59.6, '1m'],
+    [119.6, '2m'],
+  ])('rounds a duration of %s seconds once, before splitting off the minutes: %s', (durationS, expected) => {
+    expect(renderMaturingReply({ state: 'updated', prNumber: 7, durationS }))
+      .toBe(`✅ Updated — PR #7.\n_${expected}_`);
+  });
+
   test('a KNOWN-INCOMPLETE running total renders as "at least", not as the settled figure', () => {
     // The sum comes from a paginated query plus a per-task read, either of which can
     // be capped or fail. When it is short, saying so is the whole point: a number

@@ -259,7 +259,7 @@ function listStackResources(stackName: string): StackResource[] | null {
   } catch (err) {
     const stderr = errText(err);
     if (stderr.includes('does not exist')) return null; // null is not an empty success: it is the documented fresh-install signal, and main() branches on it explicitly
-    throw new Error(`could not list resources of stack '${stackName}': ${stderr.trim()}`);
+    throw new Error(`could not list resources of stack '${stackName}': ${stderr.trim()}`, { cause: err });
   }
 }
 
@@ -285,7 +285,7 @@ function deleteResource(type: DeliveryType, physicalId: string): void {
       console.log(`  already gone:   ${type} ${physicalId}`);
       return; // delete target already absent IS the goal state; treating it as success is what makes an interrupted migration safely re-runnable
     }
-    throw new Error(`failed to delete ${type} '${physicalId}': ${stderr.trim()}`);
+    throw new Error(`failed to delete ${type} '${physicalId}': ${stderr.trim()}`, { cause: err });
   }
   console.log(`  deleted:        ${type} ${physicalId}`);
 }
