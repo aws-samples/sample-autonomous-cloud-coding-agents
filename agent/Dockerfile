@@ -1,5 +1,9 @@
 ARG TARGETPLATFORM=linux/arm64
 ARG GH_VERSION=2.103.3
+# SHA-256 of gh_${GH_VERSION}_linux_<arch>.tar.gz, copied from the release's
+# gh_${GH_VERSION}_checksums.txt. Bump these with GH_VERSION.
+ARG GH_SHA256_AMD64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
+ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
 
 # Every external image is pinned by DIGEST, not by tag.
 #
@@ -23,17 +27,10 @@ ARG GH_VERSION=2.103.3
 # Keep the tag alongside the digest; it documents what the digest is meant to be.
 FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.6@sha256:d4de1845114f6d73e90e15f7642885f74f3ca93074491038a2b9c43e4b897f21 AS mise
 
-# Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
-FROM --platform=$TARGETPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS gh-builder
-ARG GH_VERSION
-# The Go module proxy retains pinned dependencies whose Git repositories become unavailable.
-RUN GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
-
 FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
-COPY --from=gh-builder /out/gh /usr/local/bin/gh
 
 # Install system dependencies in multiple layers:
 #   - Node.js 24 LTS (required by Claude Code CLI)
@@ -57,6 +54,27 @@ RUN apt-get update && \
     # Cleanup early to keep peak disk usage low during builds.
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# GitHub CLI from the official release, checked against the SHA-256 pinned above.
+# A build from source needs proxy.golang.org: github.com/microsoft/dev-tunnels
+# v0.2.0 has no Go tags left, and many corporate networks block the proxy (#1077).
+ARG GH_VERSION
+ARG GH_SHA256_AMD64
+ARG GH_SHA256_ARM64
+ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH:-arm64}" in \
+        amd64) arch=amd64; sum="${GH_SHA256_AMD64}" ;; \
+        arm64) arch=arm64; sum="${GH_SHA256_ARM64}" ;; \
+        *) echo "no pinned gh checksum for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    archive="gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
+    curl -fsSLo "/tmp/${archive}" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${archive}"; \
+    echo "${sum}  /tmp/${archive}" | sha256sum -c -; \
+    tar -xzf "/tmp/${archive}" -C /tmp; \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "/tmp/${archive}" "/tmp/gh_${GH_VERSION}_linux_${arch}"; \
+    gh --version
 
 # Node.js 24 LTS (https://nodejs.org/en/about/previous-releases)
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
