@@ -52,6 +52,8 @@ If the repo needs config the CLI can't provision (per-repo egress, Cedar policie
 
 ## Path A — CLI operator onboarding (default)
 
+> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, the shell may not have `~/.local/bin` on `PATH`: try `~/.local/bin/bgagent …`, or `node cli/lib/bin/bgagent.js …` from the repo root (prefixed with `mise exec --` in a non-interactive or mise-managed shell). If it says the CLI is not built, run `mise //cli:compile` from the repo root. Never pass `--force` to `mise run cli:install` without asking the user: it changes which checkout their `bgagent` runs.
+
 `bgagent repo onboard` writes (or re-activates) the repository's `RepoConfig` row in
 the deployed RepoTable directly. It takes effect immediately — **no `agent.ts` edit,
 no `cdk deploy`.**

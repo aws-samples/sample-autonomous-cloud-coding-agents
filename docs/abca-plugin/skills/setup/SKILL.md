@@ -77,7 +77,7 @@ Deploy with `bgagent setup`, not `mise //cdk:deploy`. Setup chooses the minimal 
    - optional features: none (recommended for a first deployment) or any of `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`;
    - compute: `agentcore` (recommended), `ecs` or `agentcore,ecs`.
 2. Confirm the account with `aws sts get-caller-identity` and show it to the user before deploying.
-3. Run setup with `bgagent`. If it is not found, run `mise run cli:install` from the repo root, or call `node cli/lib/bin/bgagent.js …` there instead, prefixed with `mise exec --` in a non-interactive or mise-managed shell. Your shell has no terminal, so pass `--features` and `--yes`. Deploying takes about 10 minutes; run it in the background and report progress from the log under `~/.bgagent/logs/<stack>/`.
+3. Run setup with `bgagent`. If it is not found, try `~/.local/bin/bgagent`, or `node cli/lib/bin/bgagent.js …` from the repo root, prefixed with `mise exec --` in a non-interactive or mise-managed shell; if it says the CLI is not built, run `mise //cli:compile`. Your shell has no terminal, so pass `--features` and `--yes`. Deploying takes about 10 minutes; run it in the background and report progress from the log under `~/.bgagent/logs/<stack>/`.
    ```bash
    bgagent setup --region <region> --features none --compute agentcore --yes
    ```

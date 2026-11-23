@@ -529,7 +529,7 @@ Returns the chronological event log for a task (e.g., `task_created`, `preflight
 
 The `bgagent` CLI is the recommended way to interact with the platform. It authenticates via Cognito, manages token caching, and provides formatted output.
 
-The CLI is not published to npm; it runs from your checkout of **this repository**. `mise run install` writes the `bgagent` command to `~/.local/bin`, and `mise run build` (or `mise run cli:install`, which also writes the command) compiles the CLI it runs. Inside any ABCA checkout or worktree, `bgagent` runs that checkout's CLI. Without the command, `node cli/lib/bin/bgagent.js` from the repo root takes the same subcommands. The [CLI README](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cli/README.md#installation) has the details.
+The CLI is not published to npm; it runs from your checkout of **this repository**. `mise run install` writes the `bgagent` command to `~/.local/bin`, and `mise run build` (or `mise run cli:install`, which also writes the command) compiles the CLI it runs. `bgagent` always runs the CLI of the checkout that installed it, from any directory, and keeps that directory, so relative paths such as `--attachment` resolve where you typed them; `mise run cli:install --force` from another checkout switches it. Without the command, `node cli/lib/bin/bgagent.js` from the repo root takes the same subcommands. The [CLI README](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cli/README.md#installation) has the details.
 
 ### Setup
 
@@ -574,7 +574,7 @@ The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook 
 ### Submitting a task
 
 ```bash
-# From cli/  - from a GitHub issue
+# From a GitHub issue
 bgagent submit --repo owner/repo --issue 42
 
 # From a text description
@@ -700,8 +700,6 @@ All attachments are screened before reaching the agent:
 If any attachment fails screening, the entire task is rejected with a clear error identifying the problematic file. Re-submit without the flagged attachment.
 
 ### Checking task status
-
-Run these from the `cli/` directory (same as in **Setup**).
 
 #### Single task
 

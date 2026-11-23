@@ -12,7 +12,7 @@ description: >-
 
 You are diagnosing an issue with the ABCA platform. Follow a systematic approach: gather symptoms, check the most common causes, and apply targeted fixes.
 
-> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, run `mise run cli:install` from the repo root, or call `node cli/lib/bin/bgagent.js …` there instead (in a non-interactive or mise-managed shell, prefix it with `mise exec --`).
+> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, the shell may not have `~/.local/bin` on `PATH`: try `~/.local/bin/bgagent …`, or `node cli/lib/bin/bgagent.js …` from the repo root (prefixed with `mise exec --` in a non-interactive or mise-managed shell). If it says the CLI is not built, run `mise //cli:compile` from the repo root. Never pass `--force` to `mise run cli:install` without asking the user: it changes which checkout their `bgagent` runs.
 
 ## Step 1: Identify the Problem Category
 

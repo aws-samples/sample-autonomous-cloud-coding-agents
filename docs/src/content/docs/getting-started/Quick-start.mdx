@@ -52,7 +52,7 @@ mise run install
 mise run build
 ```
 
-`mise run install` installs all JavaScript and Python dependencies across the monorepo and writes the `bgagent` command to `~/.local/bin`. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
+`mise run install` installs all JavaScript and Python dependencies across the monorepo and writes the `bgagent` command to `~/.local/bin`, which works once `mise run build` has compiled the CLI. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
 
 :::note[Expect noisy build output — trust the exit code]
 
@@ -64,11 +64,12 @@ mise run build
 
 The ABCA CLI is not published to npm; it runs from your checkout. `mise run install` (Step 1) writes the `bgagent` command, which runs the CLI that `mise run build` compiled, so the **ABCA CLI** tabs below call `bgagent <command> …` from any directory.
 
-- If `bgagent` is not found, `~/.local/bin` is not on your `PATH`: `mise run install` printed the line to add to your shell profile. Or run `mise run cli:install` from the repo root, which compiles the CLI and writes the command again.
+- If `bgagent` is not found, add the `export PATH=…` line that `mise run install` printed to your shell profile and open a new shell. If `mise run install` printed nothing about `bgagent`, run `mise run cli:install` from the repo root.
 - If it says the CLI is not built, run `mise //cli:compile` from the repo root.
+- If an older guide had you add `alias bgagent=…` to your shell profile, remove it: the alias would run instead of the command.
 - Without the command, `node cli/lib/bin/bgagent.js <command> …` from the repo root does the same.
 
-See the [CLI README](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cli/README.md#installation) for which checkout `bgagent` runs when you have several.
+See the [CLI README](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cli/README.md#installation) for which checkout `bgagent` runs when you have several: always the one that installed it.
 
 :::
 

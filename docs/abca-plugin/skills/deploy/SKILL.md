@@ -39,7 +39,7 @@ Before any deployment action, verify:
 Deploy and update with `bgagent setup`. It reads the stack's deployed features, checks Region support, reviews `cdk diff`, gates data loss, prepares the bootstrap and configures the CLI. A bare `mise //cdk:deploy` has none of those checks.
 
 1. Ask the user which optional features the stack should have: `none`, or any of `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. For an existing stack, read its `DeploymentFeatures` output first and offer that as the default, so nothing is removed by accident.
-2. Run setup with `bgagent`. If it is not found, run `mise run cli:install` from the repo root, or call `node cli/lib/bin/bgagent.js …` there instead, prefixed with `mise exec --` in a non-interactive or mise-managed shell. Your shell has no terminal, so pass `--features` and `--yes`. Run it in the background (about 10 minutes); the log is under `~/.bgagent/logs/<stack>/setup-deploy.log`.
+2. Run setup with `bgagent`. If it is not found, try `~/.local/bin/bgagent`, or `node cli/lib/bin/bgagent.js …` from the repo root, prefixed with `mise exec --` in a non-interactive or mise-managed shell; if it says the CLI is not built, run `mise //cli:compile`. Your shell has no terminal, so pass `--features` and `--yes`. Run it in the background (about 10 minutes); the log is under `~/.bgagent/logs/<stack>/setup-deploy.log`.
    ```bash
    bgagent setup --region <region> --stack-name <stack> --features <list|none> --yes
    ```
