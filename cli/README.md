@@ -4,13 +4,26 @@ Command-line interface for the ABCA platform. Submit coding tasks, monitor their
 
 ## Installation
 
-The CLI is not published to npm: its package (`@abca/cli`) is private. Build it in the monorepo (`mise run install`, then `mise //cli:build`) and run it from there:
+The CLI is not published to npm: its package (`@abca/cli`) is private, and it belongs to the checkout you deploy the stack from (it checks the bootstrap version, reads the stack's `DeploymentFeatures` output, and shares API shapes with the handlers). From the repository root:
 
 ```bash
-node cli/lib/bin/bgagent.js
+mise run install       # dependencies; also writes the bgagent command when there is none
+mise run cli:install   # compiles the CLI and writes the bgagent command
 ```
 
-The examples below write `bgagent` for that command.
+`mise run cli:install` (run it from the repository root: `mise //cli:install` is a different task) compiles the CLI and writes `~/.local/bin/bgagent` (`BGAGENT_BIN_DIR` sets another directory). It prints the line to add to your shell profile when that directory is not on your `PATH`, and warns when another `bgagent` comes first on it; remove any `alias bgagent=…` an older guide had you add. `mise run install` writes the command too, but only from a main checkout, never a linked worktree (a throwaway issue worktree or a fork's pull request under review must not become what `bgagent` runs), only when there is none or to update this checkout's own, and never in CI. It does not compile: run `mise run build` or `mise //cli:compile` before the first `bgagent`.
+
+**Which checkout runs.** `bgagent` always runs the CLI of the checkout that installed it, from whatever directory you run it in, and keeps that directory, so relative paths such as `--attachment` resolve where you typed them. It never runs code from the directory you are in: typing `bgagent` inside a fork's pull request checked out for review does not run that fork's code with your credentials. To use another checkout or worktree, run `mise run cli:install --force` from its repository root; without `--force` the task never replaces a `bgagent` it did not write or one that another checkout installed, even when that checkout has since been deleted (`bgagent` then says so).
+
+**Configuration is per user, not per checkout.** `~/.bgagent/` (stack, API URL, tokens) is shared by every checkout. Use `bgagent configure --stack-name …` to switch stacks (operator commands also take `--stack-name`), or set `BGAGENT_CONFIG_DIR` per worktree.
+
+Without the command, run the entrypoint from the repository root once it is compiled:
+
+```bash
+node cli/lib/bin/bgagent.js <command>
+```
+
+The examples below write `bgagent` for that command. `bgagent --version` prints the package version and the commit the CLI was compiled from (`-dirty` when tracked files had uncommitted changes).
 
 ## Quick start
 

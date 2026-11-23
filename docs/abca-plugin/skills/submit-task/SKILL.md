@@ -13,7 +13,7 @@ argument-hint: <repo> [description]
 
 You are helping the user submit a well-crafted coding task to the ABCA platform. Good prompts are critical — the agent works autonomously without asking clarifying questions.
 
-> **Running the CLI:** examples below call `node cli/lib/bin/bgagent.js …` from the repo root. In a **non-interactive or mise-managed shell** `node` may not be on `PATH` (`command not found`) — prefix with `mise exec --` (e.g. `mise exec -- node cli/lib/bin/bgagent.js submit …`), or use a global `bgagent` if installed. If `cli/lib/bin/bgagent.js` is missing, run `mise run build` first.
+> **Running the CLI:** commands below call `bgagent …`, the command `mise run cli:install` writes. If `bgagent` is not found, the shell may not have `~/.local/bin` on `PATH`: try `~/.local/bin/bgagent …`, or `node cli/lib/bin/bgagent.js …` from the repo root (prefixed with `mise exec --` in a non-interactive or mise-managed shell). If it says the CLI is not built, run `mise //cli:compile` in the checkout the message names. Never pass `--force` to `mise run cli:install` without asking the user: it changes which checkout their `bgagent` runs.
 
 **Quick mode:** If the user provided a repo and description inline (e.g. "submit task to owner/repo: fix the login bug"), infer the workflow from the description and skip to Step 5:
 - PR number or "review PR" → `--review-pr`
@@ -88,7 +88,7 @@ Recommend appropriate limits based on task complexity:
 **Via CLI (preferred):**
 ```bash
 # From the repo root
-node cli/lib/bin/bgagent.js submit \
+bgagent submit \
   --repo owner/repo \
   --issue 42 \
   --max-turns 100 \
@@ -131,22 +131,22 @@ curl -X POST "$API_URL/tasks" \
 After submission, show how to monitor and steer the task:
 ```bash
 # Watch progress in real time (adaptive polling, auto-exits on terminal state)
-node cli/lib/bin/bgagent.js watch <TASK_ID>
+bgagent watch <TASK_ID>
 
 # Check status snapshot
-node cli/lib/bin/bgagent.js status <TASK_ID>
+bgagent status <TASK_ID>
 
 # Steer the agent mid-run (combined-turn acknowledgement)
-node cli/lib/bin/bgagent.js nudge <TASK_ID> "Focus on the auth module first"
+bgagent nudge <TASK_ID> "Focus on the auth module first"
 
 # View event log
-node cli/lib/bin/bgagent.js events <TASK_ID>
+bgagent events <TASK_ID>
 
 # Download execution trace (requires --trace on submit)
-node cli/lib/bin/bgagent.js trace download <TASK_ID>
+bgagent trace download <TASK_ID>
 
 # List running tasks
-node cli/lib/bin/bgagent.js list --status RUNNING
+bgagent list --status RUNNING
 ```
 
 Task states: SUBMITTED -> HYDRATING -> RUNNING -> COMPLETED/FAILED/CANCELLED/TIMED_OUT

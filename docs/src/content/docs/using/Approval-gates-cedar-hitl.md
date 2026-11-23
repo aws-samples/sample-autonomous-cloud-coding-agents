@@ -23,7 +23,7 @@ A decision is recorded at most once per request. Replaying approve/deny on the s
 ### Listing pending approvals
 
 ```bash
-node lib/bin/bgagent.js pending
+bgagent pending
 ```
 
 Lists every approval across your tasks that is currently awaiting your decision. The default text output gives you the `request_id`, tool, severity, the reason the rule matched, the tool-input preview, the expiry time, and ready-to-run `approve` / `deny` command lines. Pipe through `--output json` for scripting.
@@ -46,10 +46,10 @@ Lists every approval across your tasks that is currently awaiting your decision.
 ### Approving a gate
 
 ```bash
-node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID>
-node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope tool_type:Bash
-node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope rule:force_push_any
-node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope all_session --yes
+bgagent approve <TASK_ID> <REQUEST_ID>
+bgagent approve <TASK_ID> <REQUEST_ID> --scope tool_type:Bash
+bgagent approve <TASK_ID> <REQUEST_ID> --scope rule:force_push_any
+bgagent approve <TASK_ID> <REQUEST_ID> --scope all_session --yes
 ```
 
 The `--scope` flag controls how long the approval carries forward within the running task:
@@ -70,9 +70,9 @@ Approvals only affect the current task; they do not persist across tasks.
 ### Denying a gate
 
 ```bash
-node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID>
-node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason "run the migration dry-run first"
-node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
+bgagent deny <TASK_ID> <REQUEST_ID>
+bgagent deny <TASK_ID> <REQUEST_ID> --reason "run the migration dry-run first"
+bgagent deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
 ```
 
 The optional `--reason` text is sanitized and truncated server-side, then best-effort injected into the agent's Stop-hook context so it can adapt (try a different approach, ask you a question, or stop gracefully) instead of retrying blindly. Use `--reason-file` when the reason is multi-line and would otherwise require careful shell quoting.
@@ -82,9 +82,9 @@ The optional `--reason` text is sanitized and truncated server-side, then best-e
 Before submitting a task you can list the rules that apply to the target repository:
 
 ```bash
-node lib/bin/bgagent.js policies list --repo owner/repo
-node lib/bin/bgagent.js policies list --repo owner/repo --tier soft
-node lib/bin/bgagent.js policies show --repo owner/repo --rule force_push_any
+bgagent policies list --repo owner/repo
+bgagent policies list --repo owner/repo --tier soft
+bgagent policies show --repo owner/repo --rule force_push_any
 ```
 
 `policies list` prints both tiers: **hard-deny** rules are absolute (even `--pre-approve` cannot bypass them), **soft-deny** rules are the approvable ones. `policies show` prints the full detail for a specific rule (severity, timeout, category, summary).
@@ -94,12 +94,12 @@ node lib/bin/bgagent.js policies show --repo owner/repo --rule force_push_any
 If you trust a task to make a certain class of changes without interactive confirmation, pre-approve them up front:
 
 ```bash
-node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
+bgagent submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
   --pre-approve 'write_path:tests/**'
 
 # Per-task timeout override (platform default is 300s)
-node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
+bgagent submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
 `--pre-approve` can be repeated up to 20 times. Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.

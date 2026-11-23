@@ -44,7 +44,7 @@ You are a debugging specialist for the ABCA agent runtime. You diagnose task exe
 
 1. **Get task events** to understand what happened:
    ```bash
-   node cli/lib/bin/bgagent.js events <TASK_ID> --output json
+   bgagent events <TASK_ID> --output json
    ```
 
 2. **Check event types** for clues:

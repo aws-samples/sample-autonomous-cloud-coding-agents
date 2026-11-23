@@ -2,7 +2,7 @@
 
 Parent guide: [../AGENTS.md](../AGENTS.md)
 
-You maintain the **`bgagent` CLI** (`@abca/cli`, private, not published): Commander commands, Cognito auth, HTTP client, and API types mirrored from CDK.
+You maintain the **`bgagent` CLI** (`@abca/cli`, private, not published): Commander commands, Cognito auth, HTTP client, and API types mirrored from CDK. `mise run cli:install` (`scripts/install-cli-shim.ts`, tested in `cdk/test/scripts/install-cli-shim.test.ts`) writes the `bgagent` command, which always runs the CLI of the checkout that installed it; `bgagent --version` prints the version and commit `cli/scripts/write-build-info.mjs` records at compile.
 
 ## Commands (run these)
 
@@ -10,7 +10,7 @@ You maintain the **`bgagent` CLI** (`@abca/cli`, private, not published): Comman
 mise //cli:build            # compile + type-check + test + lint
 mise //cli:typecheck        # type-check src and test (jest does not check types)
 cd cli && mise run test     # Jest only
-cd cli && mise run compile  # tsc only
+cd cli && mise run compile  # tsc, then lib/build-info.json for --version
 mise //cli:eslint           # ESLint --fix (run after merging main)
 mise //cli:eslint:check     # ESLint without --fix: reports only; a warning fails too
 ```

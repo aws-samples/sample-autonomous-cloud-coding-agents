@@ -13,7 +13,7 @@ Deeper design: [Developer guide](./docs/guides/DEVELOPER_GUIDE.md), [Architectur
 ## Commands (run these)
 
 ```bash
-mise run install          # yarn workspaces + agent Python (uv)
+mise run install          # yarn workspaces + agent Python (uv) + the bgagent command (~/.local/bin; it works once `mise run build` has compiled the CLI)
 mise run build            # agent quality + cdk, cli, web and docs builds + Forge tests + drift and file-hygiene checks (parallel)
 mise run lint             # lint + type checks of agent, cdk, cli and web, plus the agent's dead-code check; rewrites nothing (what ABCA agents run by default)
 mise run check:fast       # lint + drift-prevention (drift and file-hygiene checks), no test run; not check-only: it fixes trailing whitespace and final newlines and regenerates the command stubs
@@ -45,7 +45,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 2. Commit any auto-fixes (CI "Fail build on mutation" rejects uncommitted lint output)
 3. `mise run build`
 
-**Worktrees:** `node_modules/` and `agent/.venv/` are per-tree. Run `mise run install` in each new worktree.
+**Worktrees:** `node_modules/` and `agent/.venv/` are per-tree. Run `mise run install` in each new worktree. In a linked worktree it does not write the `bgagent` command, which stays pinned to the checkout that installed it; to make `bgagent` run a worktree, run `mise run cli:install --force` from its root.
 
 ## Where to make changes
 

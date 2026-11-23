@@ -53,13 +53,15 @@ import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
 import { CliError } from '../errors';
 import { applyDefaultAppId } from '../ua';
+import { cliVersion } from '../version';
 
-const program = new Command();
+/** The CLI's command tree; exported so tests can inspect it without running it. */
+export const program = new Command();
 
 program
   .name('bgagent')
   .description('Background Agent CLI — submit and manage coding tasks')
-  .version('0.0.0')
+  .version(cliVersion())
   .option('--verbose', 'Enable debug output')
   .hook('preAction', (thisCommand) => {
     // thisCommand is the root program, which owns --verbose, whatever subcommand runs

@@ -745,6 +745,26 @@ describe('cliInvocation', () => {
   test('keeps the absolute path when the script is outside the working directory', () => {
     expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/elsewhere')).toBe('node /repo/cli/lib/bin/bgagent.js');
   });
+
+  test('uses the name the bgagent command sets, though it runs node with the script (#913)', () => {
+    // `mise run cli:install` writes a bgagent that runs node <checkout>/cli/lib/bin/bgagent.js
+    // and sets BGAGENT_INVOKED_AS, so next steps print `bgagent`, not the long node form.
+    expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/elsewhere', 'bgagent')).toBe('bgagent');
+    expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/repo/cli', '')).toBe('node lib/bin/bgagent.js');
+  });
+
+  test('reads BGAGENT_INVOKED_AS from the environment by default, as setup calls it (#913)', () => {
+    const saved = process.env.BGAGENT_INVOKED_AS;
+    try {
+      process.env.BGAGENT_INVOKED_AS = 'bgagent';
+      expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/repo/cli')).toBe('bgagent');
+      delete process.env.BGAGENT_INVOKED_AS;
+      expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/repo/cli')).toBe('node lib/bin/bgagent.js');
+    } finally {
+      if (saved === undefined) delete process.env.BGAGENT_INVOKED_AS;
+      else process.env.BGAGENT_INVOKED_AS = saved;
+    }
+  });
 });
 
 describe('account and deployment selection', () => {

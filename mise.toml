@@ -52,12 +52,30 @@ config_roots = ["cdk", "agent", "cli", "docs", "web"]
 # One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`, `web`).
 # `//cdk:install`, `//cli:install`, `//docs:install` and `//web:install` are thin wrappers around the same command.
 [tasks.install]
-description = "Yarn workspaces (cdk, cli, docs, web) + agent Python (uv) + prek git hooks when inside a Git repo whose core.hooksPath prek may use"
+description = "Yarn workspaces (cdk, cli, docs, web) + agent Python (uv) + prek git hooks when inside a Git repo whose core.hooksPath prek may use + the bgagent command"
 run = [
   "yarn install --check-files",
   "cd agent && mise run install",
   # prek refuses a core.hooksPath set only outside local or worktree scope (prek install.rs); skip it there, as outside a checkout
   '''bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; if git config --includes --get core.hooksPath >/dev/null && ! git config --includes --local --get core.hooksPath >/dev/null && ! git config --includes --worktree --get core.hooksPath >/dev/null 2>&1; then echo "install: git hooks not installed: core.hooksPath is set outside this repository (global, system or command line git config), so prek refuses to install them. Dependencies are installed. To get the hooks, see CONTRIBUTING.md, then run mise run hooks:install." >&2; exit 0; fi; prek install --prepare-hooks' ''',
+  # The `bgagent` command (#913), without compiling: `mise run build`, the Quick Start's
+  # next step, compiles the CLI. --keep-existing writes it only when there is none, or
+  # updates this checkout's own; never from a linked worktree (a throwaway issue
+  # worktree, a fork's PR under review), never when CI is set, and never fails the install.
+  "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/install-cli-shim.ts --keep-existing",
+]
+
+# The CLI is not published to npm: it is tied to the checkout the stack was deployed
+# from. This writes ~/.local/bin/bgagent (BGAGENT_BIN_DIR overrides the directory), a sh
+# script that always runs the CLI of this checkout, from any directory, and never code
+# from the directory it is run in. `mise run cli:install --force` from another checkout
+# makes the command run that one instead. Run it from the repo root: //cli:install is a
+# different task.
+[tasks."cli:install"]
+description = "Compile the CLI and install the bgagent command into ~/.local/bin (--force replaces another checkout's)"
+run = [
+  { task = "//cli:compile" },
+  "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/install-cli-shim.ts",
 ]
 
 # Dependency upgrades for the scheduled upgrade-main workflow (and local use).

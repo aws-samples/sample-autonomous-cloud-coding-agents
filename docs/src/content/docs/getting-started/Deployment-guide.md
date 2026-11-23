@@ -174,7 +174,7 @@ Linear and Jira share the stranded-orchestration sweep and the iteration heartbe
 
 ### Choosing features with `bgagent setup`
 
-Run the wizard from your ABCA checkout. The examples use the short `bgagent` form. Without a global install, run `node lib/bin/bgagent.js setup …` from `cli/` instead, as the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) Step 3 does. Setup prints its next steps in whichever form you launched it with.
+Run the wizard from your ABCA checkout. `bgagent` is the command `mise run install` writes (see the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) Step 1); without it, run `node cli/lib/bin/bgagent.js setup …` from the repo root. Setup prints its next steps in whichever form you launched it with.
 
 ```bash
 bgagent setup                                   # interactive

@@ -39,14 +39,13 @@ Before any deployment action, verify:
 Deploy and update with `bgagent setup`. It reads the stack's deployed features, checks Region support, reviews `cdk diff`, gates data loss, prepares the bootstrap and configures the CLI. A bare `mise //cdk:deploy` has none of those checks.
 
 1. Ask the user which optional features the stack should have: `none`, or any of `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. For an existing stack, read its `DeploymentFeatures` output first and offer that as the default, so nothing is removed by accident.
-2. Run setup from `cli/`. Your shell has no terminal, so pass `--features` and `--yes`. Run it in the background (about 10 minutes); the log is under `~/.bgagent/logs/<stack>/setup-deploy.log`.
+2. Run setup with `bgagent`. If it is not found, try `~/.local/bin/bgagent`, or `node cli/lib/bin/bgagent.js …` from the repo root, prefixed with `mise exec --` in a non-interactive or mise-managed shell; if it says the CLI is not built, run `mise //cli:compile` in the checkout the message names. Never pass `--force` to `mise run cli:install` without asking the user: it changes which checkout their `bgagent` runs. Your shell has no terminal, so pass `--features` and `--yes`. Run it in the background (about 10 minutes); the log is under `~/.bgagent/logs/<stack>/setup-deploy.log`.
    ```bash
-   cd cli
-   node lib/bin/bgagent.js setup --region <region> --stack-name <stack> --features <list|none> --yes
+   bgagent setup --region <region> --stack-name <stack> --features <list|none> --yes
    ```
    - A new installation also takes `--compute agentcore` (or `ecs`, `agentcore,ecs`). An existing stack keeps its backends.
    - Pass any context the stack was deployed with, for example `-c networkTopology=split`.
-   - **Never pass `--accept-data-loss`.** If setup refuses because the change would delete state-bearing resources (tables, secrets, buckets), stop. Tell the user what would be removed, and ask them to run `node lib/bin/bgagent.js setup` themselves in a terminal, where they confirm by typing the stack name.
+   - **Never pass `--accept-data-loss`.** If setup refuses because the change would delete state-bearing resources (tables, secrets, buckets), stop. Tell the user what would be removed, and ask them to run `bgagent setup` themselves in a terminal, where they confirm by typing the stack name.
 3. To change code without changing features, run the same command with the stack's current features.
 
 Use `mise //cdk:deploy -- --require-approval never` only when the user asks for it explicitly (for example, to reproduce CI). It applies `abca.deployment.json` if that file exists, and otherwise deploys every optional feature.

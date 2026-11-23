@@ -4,23 +4,22 @@ title: "Using the CLI"
 
 The `bgagent` CLI is the recommended way to interact with the platform. It authenticates via Cognito, manages token caching, and provides formatted output.
 
-**This repository** builds the CLI under `cli/`; after compile, run the entrypoint as `node lib/bin/bgagent.js` from the `cli` directory (the path `package.json` exposes as `bin`). If you install a published package or link `bgagent` onto your `PATH`, you can call `bgagent` directly  - the subcommands are the same.
+The CLI is not published to npm; it runs from your checkout of **this repository**. `mise run install` writes the `bgagent` command to `~/.local/bin`, and `mise run build` (or `mise run cli:install`, which also writes the command) compiles the CLI it runs. `bgagent` always runs the CLI of the checkout that installed it, from any directory, and keeps that directory, so relative paths such as `--attachment` resolve where you typed them; `mise run cli:install --force` from another checkout switches it. Without the command, `node cli/lib/bin/bgagent.js` from the repo root takes the same subcommands. The [CLI README](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cli/README.md#installation) has the details.
 
 ### Setup
 
 ```bash
-cd cli
-mise run build
+mise run cli:install   # from the repo root: compile the CLI, write the bgagent command
 
-# Configure with your stack outputs (run from cli/)
-node lib/bin/bgagent.js configure \
+# Configure with your stack outputs
+bgagent configure \
   --api-url $API_URL \
   --region "$REGION" \
   --user-pool-id $USER_POOL_ID \
   --client-id $APP_CLIENT_ID
 
 # Log in
-node lib/bin/bgagent.js login --username user@example.com
+bgagent login --username user@example.com
 ```
 
 ### Operator commands (stack admin)
@@ -50,44 +49,44 @@ The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook 
 ### Submitting a task
 
 ```bash
-# From cli/  - from a GitHub issue
-node lib/bin/bgagent.js submit --repo owner/repo --issue 42
+# From a GitHub issue
+bgagent submit --repo owner/repo --issue 42
 
 # From a text description
-node lib/bin/bgagent.js submit --repo owner/repo --task "Add input validation to the /users POST endpoint"
+bgagent submit --repo owner/repo --task "Add input validation to the /users POST endpoint"
 
 # Iterate on an existing pull request (address review feedback)
-node lib/bin/bgagent.js submit --repo owner/repo --pr 42
+bgagent submit --repo owner/repo --pr 42
 
 # Iterate on a PR with additional instructions
-node lib/bin/bgagent.js submit --repo owner/repo --pr 42 --task "Focus on the null check Alice flagged"
+bgagent submit --repo owner/repo --pr 42 --task "Focus on the null check Alice flagged"
 
 # Review an existing pull request (read-only  - posts structured review comments)
-node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55
+bgagent submit --repo owner/repo --review-pr 55
 
 # Review a PR with a specific focus area
-node lib/bin/bgagent.js submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
+bgagent submit --repo owner/repo --review-pr 55 --task "Focus on security and error handling"
 
 # Select an explicit workflow (overrides the one --pr/--review-pr would imply)
-node lib/bin/bgagent.js submit --repo owner/repo --task "Research the tradeoffs" --workflow knowledge/web-research-v1
+bgagent submit --repo owner/repo --task "Research the tradeoffs" --workflow knowledge/web-research-v1
 
 # Submit with attachments (local files)
-node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this bug" \
+bgagent submit --repo owner/repo --task "Fix this bug" \
   --attachment screenshot.png \
   --attachment error.log
 
 # Submit with a URL attachment
-node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+bgagent submit --repo owner/repo --task "Implement this design" \
   --attachment https://figma.com/file/abc123/export.png
 
 # Submit and wait for completion
-node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
+bgagent submit --repo owner/repo --issue 42 --wait
 ```
 
 **Example** (default `text` output immediately after a successful submit  - task is `SUBMITTED`, branch name reserved):
 
 ```bash
-node lib/bin/bgagent.js submit --repo awslabs/agent-plugins --task "add codeowners field to RFC issue template"
+bgagent submit --repo awslabs/agent-plugins --task "add codeowners field to RFC issue template"
 ```
 
 ```text
@@ -146,16 +145,16 @@ Attachments let you provide non-text context to the agent — screenshots of bug
 
 ```bash
 # Local file (the MIME type comes from the file extension)
-node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this layout" \
+bgagent submit --repo owner/repo --task "Fix this layout" \
   --attachment screenshot.png
 
 # Multiple attachments
-node lib/bin/bgagent.js submit --repo owner/repo --task "Analyze these logs" \
+bgagent submit --repo owner/repo --task "Analyze these logs" \
   --attachment error.log \
   --attachment metrics.csv
 
 # URL attachment (fetched during task hydration)
-node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" \
+bgagent submit --repo owner/repo --task "Implement this design" \
   --attachment https://example.com/mockup.png
 ```
 
@@ -177,21 +176,19 @@ If any attachment fails screening, the entire task is rejected with a clear erro
 
 ### Checking task status
 
-Run these from the `cli/` directory (same as in **Setup**).
-
 #### Single task
 
 ```bash
-node lib/bin/bgagent.js status <TASK_ID>
+bgagent status <TASK_ID>
 
 # Poll until completion
-node lib/bin/bgagent.js status <TASK_ID> --wait
+bgagent status <TASK_ID> --wait
 ```
 
 **Example** (default `text` output once the task has finished  - `COMPLETED`, with session id, PR link, duration, and cost):
 
 ```bash
-node lib/bin/bgagent.js status 01KN37PZ77P1W19D71DTZ15X6X
+bgagent status 01KN37PZ77P1W19D71DTZ15X6X
 ```
 
 ```text
@@ -212,9 +209,9 @@ Cost:        $0.1751
 #### All tasks
 
 ```bash
-node lib/bin/bgagent.js list
-node lib/bin/bgagent.js list --status RUNNING,SUBMITTED
-node lib/bin/bgagent.js list --repo owner/repo --limit 10
+bgagent list
+bgagent list --status RUNNING,SUBMITTED
+bgagent list --repo owner/repo --limit 10
 ```
 
 The table is `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, `DESCRIPTION`.
@@ -234,9 +231,9 @@ Heartbeat:   2026-04-01T00:41:02.118Z (12s ago)
 ### Viewing task events
 
 ```bash
-node lib/bin/bgagent.js events <TASK_ID>
-node lib/bin/bgagent.js events <TASK_ID> --limit 20
-node lib/bin/bgagent.js events <TASK_ID> --output json
+bgagent events <TASK_ID>
+bgagent events <TASK_ID> --limit 20
+bgagent events <TASK_ID> --output json
 ```
 
 Use **`--output json`** to see the full payload for **`preflight_failed`** (`reason`, `detail`, and per-check metadata). See **Task events** under **Task lifecycle** for how to interpret common `reason` values.
@@ -246,10 +243,10 @@ Use **`--output json`** to see the full payload for **`preflight_failed`** (`rea
 Stream progress events (turns, tool calls, tool results, milestones, cost updates) from a running task and exit automatically when it reaches a terminal state.
 
 ```bash
-node lib/bin/bgagent.js watch <TASK_ID>
+bgagent watch <TASK_ID>
 
 # JSON output (one event per line) — useful for scripting
-node lib/bin/bgagent.js watch <TASK_ID> --output json
+bgagent watch <TASK_ID> --output json
 ```
 
 Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`, `2` when the CLI gives up because the API kept failing (the task may still be running: run the command again to resume). Press Ctrl+C to exit early without affecting the task.
@@ -259,10 +256,10 @@ Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`, `2`
 Send a mid-run message to the agent while it is working. The agent emits a `nudge_acknowledged` milestone before incorporating your guidance into its next turn.
 
 ```bash
-node lib/bin/bgagent.js nudge <TASK_ID> "Focus on the auth module first"
+bgagent nudge <TASK_ID> "Focus on the auth module first"
 
 # Example: redirect scope mid-task
-node lib/bin/bgagent.js nudge <TASK_ID> "Skip the docs update, just fix the handler"
+bgagent nudge <TASK_ID> "Skip the docs update, just fix the handler"
 ```
 
 Nudges are delivered between turns — the agent finishes its current tool call before reading the message. You can send multiple nudges; each one is acknowledged in order.
@@ -273,19 +270,19 @@ Submit a task with `--trace` to enable detailed tracing. This raises the progres
 
 ```bash
 # Submit with tracing enabled
-node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace
+bgagent submit --repo owner/repo --issue 42 --trace
 
 # Download the trace after the task completes
-node lib/bin/bgagent.js trace download <TASK_ID>
+bgagent trace download <TASK_ID>
 
 # Pipe to jq for analysis
-node lib/bin/bgagent.js trace download <TASK_ID> | jq -s .
+bgagent trace download <TASK_ID> | jq -s .
 
 # Save raw gzip to a file
-node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz
+bgagent trace download <TASK_ID> -o trace.ndjson.gz
 
 # Overwrite existing file
-node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz --force
+bgagent trace download <TASK_ID> -o trace.ndjson.gz --force
 ```
 
 ### Debug output
@@ -293,12 +290,12 @@ node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz --force
 Add `--verbose` to any `bgagent` command to emit the full HTTP request/response cycle on stderr. This is useful for diagnosing auth, network, or API contract issues.
 
 ```bash
-node lib/bin/bgagent.js --verbose status <TASK_ID>
-node lib/bin/bgagent.js --verbose submit --repo owner/repo --task "Fix the bug"
+bgagent --verbose status <TASK_ID>
+bgagent --verbose submit --repo owner/repo --task "Fix the bug"
 ```
 
 ### Cancelling a task
 
 ```bash
-node lib/bin/bgagent.js cancel <TASK_ID>
+bgagent cancel <TASK_ID>
 ```

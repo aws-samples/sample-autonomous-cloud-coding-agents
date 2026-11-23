@@ -10,7 +10,7 @@
     "node": "^22.23.4 || ^24.15.0"
   },
   "scripts": {
-    "compile": "tsc --build tsconfig.json",
+    "compile": "tsc --build tsconfig.json && node scripts/write-build-info.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.dev.json",
     "test": "jest --ci",
     "test:watch": "jest --watch",
