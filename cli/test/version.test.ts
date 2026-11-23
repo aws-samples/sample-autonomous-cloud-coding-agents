@@ -49,7 +49,14 @@ describe('cliVersion (#913)', () => {
   test('reports an unreadable build-info.json instead of hiding it, without throwing', () => {
     // It runs at start-up: a throw would stop every command.
     expect(cliVersion(cliDir({ packageJson: '{"version":"4.5.6"}', buildInfo: 'not json' })))
-      .toBe('4.5.6 (build info unreadable)');
+      .toMatch(/^4\.5\.6 \(build info unreadable: .+\)$/);
+    // JSON that is not an object is unreadable too, not silently empty.
+    expect(cliVersion(cliDir({ packageJson: '{"version":"4.5.6"}', buildInfo: 'null' })))
+      .toBe('4.5.6 (build info unreadable: not a JSON object)');
+  });
+
+  test('says why when package.json is unreadable and nothing else names a version', () => {
+    expect(cliVersion(cliDir({ packageJson: '{broken' }))).toMatch(/^unknown \(package\.json unreadable: .+\)$/);
   });
 
   test('says unknown rather than inventing a version', () => {
@@ -60,5 +67,21 @@ describe('cliVersion (#913)', () => {
     // Under ts-jest the module runs from src/, whose sibling is the same package.json as lib/'s.
     const { version } = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
     expect(cliVersion().startsWith(version)).toBe(true);
+  });
+});
+
+describe('bgagent --version (#913)', () => {
+  test('is what cliVersion() returns, not a hard-coded copy', async () => {
+    jest.resetModules();
+    jest.doMock('../src/version', () => ({ cliVersion: () => '9.9.9-probe (cafe00000000)' }));
+    try {
+      await jest.isolateModulesAsync(async () => {
+        // Importing the entry point does not run it (it parses only as the main module).
+        const { program } = await import('../src/bin/bgagent');
+        expect(program.version()).toBe('9.9.9-probe (cafe00000000)');
+      });
+    } finally {
+      jest.dontMock('../src/version');
+    }
   });
 });

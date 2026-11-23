@@ -20,11 +20,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-/** A JSON file's content; `undefined` when the file does not exist; the error when it cannot be read. */
+/**
+ * A JSON object file's content; `undefined` when the file does not exist; the error when
+ * it cannot be read or does not hold an object, so callers can say why without throwing.
+ */
 function readJson(file: string): { version?: unknown; commit?: unknown } | Error | undefined {
   if (!fs.existsSync(file)) return undefined;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const value: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) return value;
+    return new Error('not a JSON object');
   } catch (err) {
     return err instanceof Error ? err : new Error(String(err));
   }
@@ -53,6 +58,7 @@ export function cliVersion(files: { buildInfo: string; packageJson: string } = C
   const fromInfo = info instanceof Error ? undefined : info?.version;
   const fromPkg = pkg instanceof Error ? undefined : pkg?.version;
   const version = typeof fromInfo === 'string' ? fromInfo : typeof fromPkg === 'string' ? fromPkg : 'unknown';
-  if (info instanceof Error) return `${version} (build info unreadable)`;
+  if (info instanceof Error) return `${version} (build info unreadable: ${info.message})`;
+  if (version === 'unknown' && pkg instanceof Error) return `unknown (package.json unreadable: ${pkg.message})`;
   return typeof info?.commit === 'string' ? `${version} (${info.commit})` : version;
 }

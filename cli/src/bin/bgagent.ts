@@ -55,7 +55,8 @@ import { CliError } from '../errors';
 import { applyDefaultAppId } from '../ua';
 import { cliVersion } from '../version';
 
-const program = new Command();
+/** The CLI's command tree; exported so tests can inspect it without running it. */
+export const program = new Command();
 
 program
   .name('bgagent')
