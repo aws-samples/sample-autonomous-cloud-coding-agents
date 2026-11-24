@@ -164,7 +164,8 @@ function webhookScreeningAlarms(scope: Construct, trackerDeployed: boolean): clo
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     alarmDescription:
-      'Guardrail screening of Jira or Linear comments or project documents failed, so that content was dropped. '
+      'Guardrail screening of Jira or Linear comments, Linear project documents or the session context of a '
+      + 'Linear agent session failed, so that content was dropped. '
       + 'A task created from the event runs without it. '
       + 'Search the Jira and Linear webhook processor logs for "screening unavailable" (#794).',
   })];
