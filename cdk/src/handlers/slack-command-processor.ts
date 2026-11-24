@@ -201,20 +201,30 @@ function buildMentionReply(event: MentionEvent): ReplyFn {
 
 /**
  * What can name a repo in a message. A link, as Slack delivers it (`<url>` or
- * `<url|label>`: group 1 is the url) or as typed (group 2), is read whole, so
- * that its parts are not taken for words. Otherwise `owner/repo` or
- * `owner/repo#42` as a word: group 3 is the repo, group 4 the issue number.
+ * `<url|label>`) or as typed, is read whole, so that its parts are not taken
+ * for words. Otherwise `owner/repo` or `owner/repo#42` as a word. A word is
+ * tried from its first letter, digit or underscore only: with a start at every
+ * dot and hyphen, a long word takes quadratic time.
  */
-const REPO_REFERENCE = /<(https?:\/\/[^\s<>|]+)(?:\|[^<>]*)?>|(https?:\/\/[^\s<>|]+)|\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)(?:#(\d+))?\b/gi;
+const REPO_REFERENCE = /<(?<slackLink>https?:\/\/[^\s<>|]+)(?:\|[^<>]*)?>|(?<typedLink>https?:\/\/[^\s<>|]*[^\s<>|.,;:!?)])|(?=\w)(?<!\w[.-]*)(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)(?:#(?<issueNumber>\d+))?\b/gi;
 
 /**
- * A GitHub link to a repo, or to one of its issues or pull requests: group 1 is
- * `owner/repo`, group 2 the number of the issue or pull request. A clone
+ * A GitHub link to a repo, or to one of its issues or pull requests. A clone
  * address (`.../owner/repo.git`) names the repo without the suffix. Without a
  * number only a query or a fragment may follow the repo, so a link to a file,
- * a branch or another page of GitHub is not one of these.
+ * a branch or another page of the repo is not one of these.
  */
-const GITHUB_LINK = /^https?:\/\/(?:www\.)?github\.com\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+?)(?:\.git)?(?:\/(?:issues|pull)\/(\d+)|\/?(?:[?#].*)?$)/i;
+const GITHUB_LINK = /^https?:\/\/(?:www\.)?github\.com\/(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+?)(?:\.git)?(?:\/(?:issues|pull)\/(?<issueNumber>\d+)|\/?(?:[?#].*)?$)/i;
+
+/**
+ * What a github.com path begins with, in lower case, when it is a page of the site.
+ * A name that an account has must stay out, or links to its repos are ignored.
+ */
+const GITHUB_SITE_PAGES = new Set([
+  'about', 'account', 'advisories', 'apps', 'codespaces', 'collections', 'enterprise', 'enterprises', 'features',
+  'issues', 'login', 'marketplace', 'notifications', 'organizations', 'orgs', 'pulls', 'readme', 'resources',
+  'search', 'security', 'settings', 'site', 'solutions', 'sponsors', 'stars', 'topics', 'trending',
+]);
 
 /** A repo named in a message, and where the word or link that names it stands. */
 interface RepoReference {
@@ -234,9 +244,10 @@ interface RepoReference {
 function repoReferences(message: string): RepoReference[] {
   const references: RepoReference[] = [];
   for (const match of message.matchAll(REPO_REFERENCE)) {
-    const link = match[1] ?? match[2];
-    const [repo, issueNumber] = link ? (GITHUB_LINK.exec(link)?.slice(1) ?? []) : [match[3], match[4]];
-    if (repo) {
+    const groups = match.groups ?? {};
+    const link = groups.slackLink ?? groups.typedLink;
+    const { repo, issueNumber } = link ? (GITHUB_LINK.exec(link)?.groups ?? {}) : groups;
+    if (repo && !(link && GITHUB_SITE_PAGES.has(ownerOf(repo)))) {
       references.push({
         repo,
         issueNumber: issueNumber ? parseInt(issueNumber, 10) : undefined,
@@ -305,7 +316,7 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
   const repo = reference?.repo ?? defaultRepo;
   // The message without the word or link that named the repo and the blanks in front of it.
   const description = reference
-    ? (message.slice(0, reference.start).replace(/[ \t]+$/, '') + message.slice(reference.end)).trim()
+    ? (message.slice(0, reference.start).replace(/(?<![ \t])[ \t]+$/, '') + message.slice(reference.end)).trim()
     : message;
   if (!repo) {
     await reply('Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`. Or ask an admin to set a default with `bgagent slack onboard-channel`.');
