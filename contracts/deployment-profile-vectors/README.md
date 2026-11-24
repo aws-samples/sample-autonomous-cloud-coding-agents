@@ -55,8 +55,8 @@ A profile, and what parsing it gives.
   is a `CliError`.
 
 The message of the `unknown-feature` case quotes the whole feature list, in
-order. Together with the rule that a profile names every feature, that holds
-the two lists to each other: a feature added to one copy alone fails these
+order. Together with the rule that a profile names every feature, that keeps
+the two lists the same: a feature added to one copy alone fails these
 cases.
 
 The two `-reported-before-` cases break two rules at once: both parsers must
@@ -107,7 +107,7 @@ that changes in one copy fails a case.
   compares the two declarations.
 - **The regional capability catalog**
   ([`contracts/deployment-capabilities.json`](../deployment-capabilities.json))
-  **and the bootstrap version.** The same parity test holds them.
+  **and the bootstrap version.** The same parity test covers them.
 - **What only one copy starts to accept.** The cases are examples of what is
   accepted and what is rejected today. When one copy alone starts to accept
   something new, such as another top-level key or a profile that leaves out a

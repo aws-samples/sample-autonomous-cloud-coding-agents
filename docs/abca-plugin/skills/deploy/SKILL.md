@@ -74,7 +74,14 @@ Summarize the changes: new resources, modified resources, removed resources. Fla
 mise //cdk:destroy
 ```
 
-**Teardown can stall in `DELETE_FAILED`** on a security group / private subnet: AgentCore injects service-managed (Hyperplane) ENIs into the VPC, and AWS reclaims them **asynchronously, with no fixed delay**, after the runtime is gone: it can take hours. Do not promise the user a wait time, and do not try to force-detach the ENIs: they belong to `amazon-aws`. While they exist, a retry of `mise //cdk:destroy` fails on the same security group and subnets, so before a retry check that they are gone, with the inspection commands under "Teardown blocked by AgentCore network interfaces" in `docs/guides/DEPLOYMENT_GUIDE.md`. Do **not** use `--deletion-mode FORCE_DELETE_STACK`, and do not retain the stuck VPC resources on your own initiative: what is left behind stays in the account, outside CloudFormation, and VPCs are quota-capped per Region. If the user cannot wait, show them that section: it has the command to finish the deletion with `--retain-resources`, and says what that leaves them to clean up. Also note: a first-create failure leaves the stack in `ROLLBACK_COMPLETE`, which can't be updated — destroy and redeploy fresh.
+**Teardown can stall in `DELETE_FAILED`** on a security group / private subnet: AgentCore injects service-managed (Hyperplane) ENIs into the VPC, and AWS reclaims them **asynchronously, with no fixed delay**, after the runtime is gone. It can take hours.
+
+- Do not promise the user a wait time, and do not try to force-detach the ENIs. They belong to `amazon-aws`.
+- While the ENIs exist, a retry of `mise //cdk:destroy` fails on the same security group and subnets. Before a retry, check that they are gone, with the inspection commands under "Teardown blocked by AgentCore network interfaces" in `docs/guides/DEPLOYMENT_GUIDE.md`.
+- Do **not** use `--deletion-mode FORCE_DELETE_STACK`, and do not retain the stuck VPC resources on your own initiative. What is left behind stays in the account, outside CloudFormation, and VPCs are quota-capped per Region.
+- If the user cannot wait, show them that section of the deployment guide. It has the command to finish the deletion with `--retain-resources`, and says what that leaves them to clean up.
+
+Also note: a first-create failure leaves the stack in `ROLLBACK_COMPLETE`, which can't be updated — destroy and redeploy fresh.
 
 ## Synth Workflow
 

@@ -967,7 +967,11 @@ node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
 
 The optional `--reason` text is sanitized and truncated server-side, then best-effort injected into the agent's Stop-hook context so it can adapt (try a different approach, ask you a question, or stop gracefully) instead of retrying blindly. Use `--reason-file` when the reason is multi-line and would otherwise require careful shell quoting.
 
-A deny tells the agent to stop trying that kind of action, not only that one call. With the refused call the agent gets your reason, the name of the rule that gated the call, and an instruction not to retry the action with variations: it has to find another way to do the task, or report why it is blocked. Put what matters most first: with the refused call the agent sees only about the first 200 characters of a long reason (that message is limited to 500 characters); the full text is in the Stop-hook injection described above. For the next 60 seconds, any other call of the same tool that the same rule gates is refused at once, without a new approval request; `bgagent watch` shows each such refusal as a `policy_decision` milestone. After that window a new attempt opens a new request. A gate that times out does less: the agent gets no such instruction, and only the identical call is refused for 60 seconds.
+A deny tells the agent to stop trying that kind of action, not only that one call. With the refused call the agent gets your reason, the name of the rule that gated the call, and an instruction not to retry the action with variations. It has to find another way to do the task, or report why it is blocked.
+
+Put what matters most first. With the refused call the agent sees only about the first 200 characters of a long reason (that message is limited to 500 characters). The full text is in the Stop-hook injection described above.
+
+For the next 60 seconds, any other call of the same tool that the same rule gates is refused at once, without a new approval request. `bgagent watch` shows each such refusal as a `policy_decision` milestone. After that window a new attempt opens a new request. A gate that times out does less. The agent then gets no such instruction, and only the identical call is refused for 60 seconds.
 
 If you want the action to go through this time and be asked again the next time, approve it with the default scope `this_call` instead of denying. To stop being asked about a rule for the rest of the task, approve with `--scope rule:<rule_id>`.
 

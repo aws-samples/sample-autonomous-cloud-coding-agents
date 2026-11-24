@@ -161,7 +161,11 @@ The task regenerates the artifacts in `cdk/bootstrap/` and runs `cdk bootstrap` 
 
 ### Bootstrap preflight
 
-Before it runs `cdk deploy`, `mise //cdk:deploy` compares the outputs of the `CDKToolkit` stack with the checkout. A bootstrap the check rejects stops the task there, instead of failing with an IAM `AccessDenied` after every asset is built and uploaded. `mise //cdk:preflight` runs the same check on its own. It is read-only: it needs the AWS CLI on `PATH` and no permission beyond `cloudformation:DescribeStacks`. Arguments after `--` are those of the deploy (`--profile`, `--region`, `-c compute_types=...`), plus `--json` for CI. The compute backends it checks are those of the `compute_types` (or `compute_type`) context, from `-c` arguments and `cdk/cdk.json`. A backend that only the `compute` list of a [deployment profile](#profile-file-and-precedence) selects is not checked. A bare `cdk deploy` and the GitHub Actions pipeline do not run the preflight.
+Before it runs `cdk deploy`, `mise //cdk:deploy` compares the outputs of the `CDKToolkit` stack with the checkout. A bootstrap the check rejects stops the task there, instead of failing with an IAM `AccessDenied` after every asset is built and uploaded.
+
+`mise //cdk:preflight` runs the same check on its own. It is read-only. It needs the AWS CLI on `PATH` and no permission beyond `cloudformation:DescribeStacks`. Arguments after `--` are those of the deploy (`--profile`, `--region`, `-c compute_types=...`), plus `--json` for CI.
+
+The compute backends the preflight checks are those of the `compute_types` (or `compute_type`) context, from `-c` arguments and `cdk/cdk.json`. A backend that only the `compute` list of a [deployment profile](#profile-file-and-precedence) selects is not checked. A bare `cdk deploy` and the GitHub Actions pipeline do not run the preflight.
 
 | Result | When | What to do |
 |---|---|---|
@@ -282,7 +286,7 @@ A Region listed in the catalog has the required services; the list says nothing 
 To update the data when AWS expands coverage:
 
 1. Check the [supported AgentCore Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page. For `compute.lambda-microvm`, check the Regions where AWS Lambda MicroVMs has launched.
-2. Edit `regions` in `contracts/deployment-capabilities.json`. Set `lastVerified` only when you have checked the AgentCore page again: the date speaks for that page.
+2. Edit `regions` in `contracts/deployment-capabilities.json`. Set `lastVerified` only when you have checked the AgentCore page again. The date records the last check of that page.
 3. Mirror the change into `cli/src/deployment-capabilities.ts`.
 4. Run `mise //cdk:test` and `mise //cli:build`. The parity test fails if the mirror drifts, and the census fails if a footprint estimate drifts by more than 15%.
 

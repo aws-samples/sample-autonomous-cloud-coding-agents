@@ -1711,7 +1711,9 @@ Defense in depth: rows written before the agent-side sanitization landed (if any
 
 After a DENIED or TIMED_OUT outcome, the engine caches `(tool_name, tool_input_sha256)` for 60s. The agent's next identical tool call auto-denies without a new approval request. This blocks the naïve retry-loop case where an agent receives a deny and immediately re-invokes the identical command.
 
-After a DENIED outcome the engine also caches `(tool_name, rule_id)` for each rule that gated the call: a second map with the same 60s TTL and its own bound of 50 entries (§12.9). Another call of that tool that one of those rules gates auto-denies whatever its input. These entries are consulted after the allowlist, so they do not refuse a call that an approval given in the meantime covers (for example with scope `rule:<rule_id>`). The `policy_decision` event of such a hit names the rule in `matched_rule_id`. This blocks the retry with variations: in end-to-end testing an agent answered a deny by re-issuing the denied command with another branch name and other flags until it ran out of turns (issue #113). A TIMED_OUT outcome is not recorded per rule — the user was away, which is not a refusal.
+After a DENIED outcome the engine also caches `(tool_name, rule_id)` for each rule that gated the call, in a second map with the same 60s TTL and its own bound of 50 entries (§12.9). Another call of that tool that one of those rules gates auto-denies whatever its input. These entries are consulted after the allowlist, so they do not refuse a call that an approval given in the meantime covers (for example with scope `rule:<rule_id>`). The `policy_decision` event of such a hit names the rule in `matched_rule_id`.
+
+This blocks the retry with variations. In end-to-end testing an agent answered a deny by re-issuing the denied command with another branch name and other flags until it ran out of turns (issue #113). A TIMED_OUT outcome is not recorded per rule. The user was away, which is not a refusal.
 
 **Honest framing of what the cache does and does not defend:**
 - **Does block:** verbatim retry loops (agent sees deny, retries identical command within 60s).
