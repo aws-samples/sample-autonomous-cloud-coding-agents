@@ -38,8 +38,11 @@ describe('repo onboard/offboard commands', () => {
       return null;
     });
     // `onboard` asks for its outputs in one batch; each key is answered by the per-key mock above.
-    (getStackOutputs as jest.Mock).mockImplementation((region: string, stack: string, keys: readonly string[]) =>
-      Promise.all(keys.map((key) => getStackOutput(region, stack, key))));
+    (getStackOutputs as jest.Mock).mockImplementation(async (region: string, stack: string, keys: readonly string[]) => {
+      const outputs: Record<string, string | null> = {};
+      for (const key of keys) outputs[key] = await getStackOutput(region, stack, key);
+      return outputs;
+    });
     (onboardRepo as jest.Mock).mockResolvedValue({
       repo: 'acme/a',
       status: 'active',

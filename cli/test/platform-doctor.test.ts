@@ -34,8 +34,11 @@ jest.mock('../src/linear-auth-health', () => ({
 // a missing stack output rather than reaching AWS.
 const stackOutputMock = jest.fn();
 // The doctor asks for all its outputs in one batch; each key is answered by the per-key mock above.
-const stackOutputsMock = jest.fn((region: string, stack: string, keys: readonly string[]) =>
-  Promise.all(keys.map((key) => stackOutputMock(region, stack, key))));
+const stackOutputsMock = jest.fn(async (region: string, stack: string, keys: readonly string[]) => {
+  const outputs: Record<string, string | null> = {};
+  for (const key of keys) outputs[key] = await stackOutputMock(region, stack, key);
+  return outputs;
+});
 jest.mock('../src/stack-outputs', () => ({
   getStackOutputs: (...args: [string, string, readonly string[]]) => stackOutputsMock(...args),
 }));

@@ -41,9 +41,13 @@ export function makeRuntimeCommand(): Command {
       .action(async (opts) => {
         if (opts.repo) assertRepoFormat(opts.repo);
         const { region, stackName } = resolveOperatorContext(opts);
-        const [
-          repoTableName, platformRuntimeArn, computeSubstrate, computeDeploymentMode, computeTypes,
-        ] = await getStackOutputs(region, stackName, [
+        const {
+          RepoTableName: repoTableName,
+          RuntimeArn: platformRuntimeArn,
+          ComputeSubstrate: computeSubstrate,
+          ComputeDeploymentMode: computeDeploymentMode,
+          ComputeTypes: computeTypes,
+        } = await getStackOutputs(region, stackName, [
           'RepoTableName',
           'RuntimeArn',
           'ComputeSubstrate',

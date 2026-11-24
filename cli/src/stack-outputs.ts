@@ -121,23 +121,19 @@ export async function fetchConfigureBundleFromStack(
 /**
  * Read several CloudFormation stack outputs with one DescribeStacks call.
  *
- * The values come back in the order of `outputKeys`, null for an output the stack does
- * not have. A command that needs more than one output asks for them together: one
+ * The result is keyed by output name, with null for an output the stack does not have.
+ * A command that needs more than one output asks for them together: one
  * {@link getStackOutput} per key describes the whole stack once per key.
- *
- * Typed the way `Promise.all` is: the result is a tuple as long as `outputKeys`, so
- * destructuring one name more than there are keys does not compile. A key added without
- * a name does compile, and shifts the names after it: only a test can tell.
  */
-export async function getStackOutputs<K extends readonly string[] | []>(
+export async function getStackOutputs<K extends string>(
   region: string,
   stackName: string,
-  outputKeys: K,
-): Promise<{ -readonly [I in keyof K]: string | null }> {
+  outputKeys: readonly K[],
+): Promise<Record<K, string | null>> {
   const stack = await describeStack(region, stackName);
-  return outputKeys.map(
-    (key) => stack.Outputs?.find((o) => o.OutputKey === key)?.OutputValue ?? null,
-  ) as { -readonly [I in keyof K]: string | null };
+  return Object.fromEntries(outputKeys.map(
+    (key) => [key, stack.Outputs?.find((o) => o.OutputKey === key)?.OutputValue ?? null],
+  )) as Record<K, string | null>;
 }
 
 /** Read a single CloudFormation stack output by key. */
@@ -146,8 +142,8 @@ export async function getStackOutput(
   stackName: string,
   outputKey: string,
 ): Promise<string | null> {
-  const [value] = await getStackOutputs(region, stackName, [outputKey]);
-  return value;
+  const outputs = await getStackOutputs(region, stackName, [outputKey]);
+  return outputs[outputKey];
 }
 
 /**

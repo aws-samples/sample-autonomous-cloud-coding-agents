@@ -116,10 +116,15 @@ export function makeRepoCommand(): Command {
       .action(async (repoId: string, opts) => {
         assertRepoFormat(repoId);
         const { region, stackName } = resolveOperatorContext(opts);
-        const [
-          tableName, platformTokenArn, runtimeArn, computeSubstrate, computeDeploymentMode, computeTypes,
-          bedrockGeoRegion,
-        ] = await getStackOutputs(region, stackName, [
+        const {
+          RepoTableName: tableName,
+          GitHubTokenSecretArn: platformTokenArn,
+          RuntimeArn: runtimeArn,
+          ComputeSubstrate: computeSubstrate,
+          ComputeDeploymentMode: computeDeploymentMode,
+          ComputeTypes: computeTypes,
+          BedrockGeoRegion: bedrockGeoRegion,
+        } = await getStackOutputs(region, stackName, [
           'RepoTableName',
           'GitHubTokenSecretArn',
           'RuntimeArn',
@@ -180,10 +185,16 @@ export function makeRepoCommand(): Command {
         }
 
         const { region, stackName } = resolveOperatorContext(opts);
-        const [
-          tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate, deployedGeo,
-          grantedModelIds, computeDeploymentMode, computeTypes,
-        ] = await getStackOutputs(region, stackName, [
+        const {
+          RepoTableName: tableName,
+          RuntimeArn: platformRuntimeArn,
+          GitHubTokenSecretArn: platformGithubTokenSecretArn,
+          ComputeSubstrate: computeSubstrate,
+          BedrockGeoRegion: deployedGeo,
+          BedrockModelIds: grantedModelIds,
+          ComputeDeploymentMode: computeDeploymentMode,
+          ComputeTypes: computeTypes,
+        } = await getStackOutputs(region, stackName, [
           'RepoTableName',
           'RuntimeArn',
           'GitHubTokenSecretArn',

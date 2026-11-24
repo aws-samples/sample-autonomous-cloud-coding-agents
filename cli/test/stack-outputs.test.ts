@@ -174,12 +174,16 @@ describe('getStackOutputs', () => {
     cfSend.mockReset();
   });
 
-  test('reads several outputs with one DescribeStacks call, in the order asked', async () => {
-    mockStackWithOutputs({ ApiUrl: 'https://api.example/v1/', RepoTableName: 'RepoTable' });
+  test('reads several outputs with one DescribeStacks call, keyed by output name', async () => {
+    mockStackWithOutputs({ ApiUrl: 'https://api.example/v1/', RepoTableName: 'RepoTable', NotAskedFor: 'value' });
 
-    await expect(getStackOutputs('us-east-1', 'dev', ['RepoTableName', 'MissingKey', 'ApiUrl']))
-      .resolves.toEqual(['RepoTable', null, 'https://api.example/v1/']);
+    const outputs = await getStackOutputs('us-east-1', 'dev', ['RepoTableName', 'MissingKey', 'ApiUrl']);
+
+    expect(outputs).toEqual({ RepoTableName: 'RepoTable', MissingKey: null, ApiUrl: 'https://api.example/v1/' });
     expect(cfSend).toHaveBeenCalledTimes(1);
+    // Only `mise //cli:typecheck` checks the next line. Jest does not check types.
+    const hasOnlyTheKeysAskedFor: keyof typeof outputs extends 'RepoTableName' | 'MissingKey' | 'ApiUrl' ? true : false = true;
+    expect(hasOnlyTheKeysAskedFor).toBe(true);
   });
 
   test('fails as getStackOutput does when the stack does not exist', async () => {

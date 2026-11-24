@@ -44,8 +44,11 @@ jest.mock('../../src/stack-outputs', () => {
     ...actual,
     getStackOutput: perKey,
     // `show` and `onboard` ask for their outputs in one batch; each key is answered by the per-key mock.
-    getStackOutputs: jest.fn((region: string, stack: string, keys: readonly string[]) =>
-      Promise.all(keys.map((key) => perKey(region, stack, key)))),
+    getStackOutputs: jest.fn(async (region: string, stack: string, keys: readonly string[]) => {
+      const outputs: Record<string, string | null> = {};
+      for (const key of keys) outputs[key] = await perKey(region, stack, key);
+      return outputs;
+    }),
   };
 });
 jest.mock('../../src/repo-onboard');

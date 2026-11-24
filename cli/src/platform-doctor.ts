@@ -119,19 +119,19 @@ export async function runPlatformDoctor(
   options: RunPlatformDoctorOptions,
 ): Promise<DoctorCheckResult[]> {
   const { region, stackName } = options;
-  const [
-    apiUrl,
-    userPoolId,
-    appClientId,
-    githubTokenSecretArn,
-    repoTableName,
-    linearRegistryTableName,
-    jiraRegistryTableName,
-    bedrockGeoRegion,
-    bedrockModelIds,
-    linearVaultWorkloadName,
-    linearProjectMappingTableName,
-  ] = await getStackOutputs(region, stackName, [
+  const {
+    ApiUrl: apiUrl,
+    UserPoolId: userPoolId,
+    AppClientId: appClientId,
+    GitHubTokenSecretArn: githubTokenSecretArn,
+    RepoTableName: repoTableName,
+    LinearWorkspaceRegistryTableName: linearRegistryTableName,
+    JiraWorkspaceRegistryTableName: jiraRegistryTableName,
+    BedrockGeoRegion: bedrockGeoRegion,
+    BedrockModelIds: bedrockModelIds,
+    LinearVaultWorkloadName: linearVaultWorkloadName,
+    LinearProjectMappingTableName: linearProjectMappingTableName,
+  } = await getStackOutputs(region, stackName, [
     'ApiUrl',
     'UserPoolId',
     'AppClientId',

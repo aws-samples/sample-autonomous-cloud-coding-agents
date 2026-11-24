@@ -81,7 +81,7 @@ function mockStackOutputs(): void {
       GitHubTokenSecretArn: 'arn:token',
       RepoTableName: 'RepoTable',
     };
-    return keys.map((key) => outputs[key] ?? null);
+    return Object.fromEntries(keys.map((key) => [key, outputs[key] ?? null]));
   });
 }
 
@@ -145,13 +145,15 @@ describe('runPlatformDoctor', () => {
 
   test('fails the active-repo check when the repo table output is missing', async () => {
     mockStackOutputs();
-    getStackOutputsSpy.mockImplementation(async (_region, _stack, keys) => keys.map((key) =>
+    getStackOutputsSpy.mockImplementation(async (_region, _stack, keys) => Object.fromEntries(keys.map((key) => [
+      key,
       key === 'RepoTableName' ? null : ({
         ApiUrl: 'https://api.example/v1/',
         UserPoolId: 'us-east-1_pool',
         AppClientId: 'client123',
         GitHubTokenSecretArn: 'arn:token',
-      }[key] ?? null)));
+      }[key] ?? null),
+    ])));
     isGithubTokenConfiguredMock.mockResolvedValue(true);
 
     const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
