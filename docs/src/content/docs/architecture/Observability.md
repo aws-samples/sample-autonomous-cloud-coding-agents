@@ -447,7 +447,7 @@ Every agent commit carries attribution trailers (via a git hook installed during
 | Trailer | Example | Links the commit to |
 |---------|---------|---------------------|
 | `Task-Id:` | `01KRPZ3PF8ZBRZ2600GRJS2VF7` | The task |
-| `Prompt-Version:` | `1c9c10e027a2` | The system prompt the task ran with (a hash of it) |
+| `Prompt-Version:` | `1c9c10e027a2` | The task's `prompt_version`: a hash of the constant `system_prompt_v1` and the Blueprint's `system_prompt_overrides`, not of the prompt's text |
 | `Workflow-Id:` | `coding/new-task-v1` | The workflow the task ran |
 | `Workflow-Step:` | `implement` | The workflow step that was running when the commit was made: the step's `name`, else its `kind` |
 

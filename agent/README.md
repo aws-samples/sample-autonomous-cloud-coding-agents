@@ -413,7 +413,7 @@ The `prepare-commit-msg` hook (`prepare-commit-msg.sh`, installed into the clone
 | Trailer | Example | Meaning | Variable, and what sets it |
 |---------|---------|---------|----------------------------|
 | `Task-Id` | `01KRPZ3PF8ZBRZ2600GRJS2VF7` | The task that made the commit | `TASK_ID`: the pipeline, before the pre-hooks |
-| `Prompt-Version` | `1c9c10e027a2` | 12-character hash of the system prompt; no trailer when the task was given none | `PROMPT_VERSION`: the pipeline, before the pre-hooks |
+| `Prompt-Version` | `1c9c10e027a2` | The task's `prompt_version`: 12 hex digits of a hash over the constant `system_prompt_v1` and the Blueprint's `system_prompt_overrides`, not over the prompt's text. No trailer when the task was given none | `PROMPT_VERSION`: the pipeline, before the pre-hooks |
 | `Workflow-Id` | `coding/new-task-v1` | The workflow the task runs | `WORKFLOW_ID`: the workflow step runner, when a step starts |
 | `Workflow-Step` | `implement` | The workflow step that was running: the step's `name`, else its `kind` | `WORKFLOW_STEP`: the workflow step runner, when a step starts |
 
