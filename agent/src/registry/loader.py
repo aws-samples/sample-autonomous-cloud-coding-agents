@@ -120,7 +120,10 @@ class RegistryAssetLoadError(RuntimeError):
     actually loaded (#246 Option C). This covers every condition that would leave
     a pinned asset unloaded — missing repo dir, empty/invalid runtime, structurally
     invalid connection config, or a write error (see :func:`apply_mcp_assets`), and
-    a server that the Linear scrub removes behind the merge (``pipeline.run_task``). The
+    a server that the Linear scrub removes behind the merge (``pipeline.run_task``). It
+    also covers the conditions under which the resolved config, which may hold
+    secrets, could reach a commit: ``.mcp.json`` is a symlink (#758), or git cannot
+    be shown to leave the written file out of commits (#759). The
     only warn-and-continue case is a pre-existing malformed ``.mcp.json`` on disk
     (:func:`channel_mcp.read_existing_mcp_config`), which is replaced, not fatal."""
 
@@ -134,7 +137,8 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
     post-hook safety net (``git add -u`` → commit → ``git push``) will exfiltrate
     it into the PR whenever the target repo *tracks* ``.mcp.json`` (#246 review
     B4). Setting ``skip-worktree`` blocks both ``git add -u`` and an explicit
-    ``git add .mcp.json``. Mechanical enforcement, mirroring the ADR-016
+    ``git add .mcp.json``; the advice git prints with that refusal is switched
+    off in the clone. Mechanical enforcement, mirroring the ADR-016
     Linear-strip posture — a prompt is not a security boundary.
 
     A file the repo does not track is listed in the clone's own exclude file
@@ -148,10 +152,28 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
     afterwards: the repo's own ``.gitignore`` re-includes it, which outranks the
     exclude file, or the exclude file could not be written.
 
-    Best-effort: git plumbing failures here are logged, not fatal. The SDK still
-    reads the on-disk file (neither mechanism touches the working tree), so
-    loading is unaffected either way.
+    Neither mechanism touches the working tree, so the SDK still reads the file.
+    Both keep the agent's own edits of ``.mcp.json`` out of its commits as well,
+    and git names another cause when it refuses them (a sparse-checkout
+    definition, a ``.gitignore`` file): the ``TASK`` line logged here records the
+    real one (#760).
+
+    Fail-closed (#759): the file is on disk when this runs, so a guard that is not
+    in place leaves it for ``git add -u`` to stage. The exit code of
+    ``update-index`` is not the proof: the flag is read back with ``git ls-files
+    -v``, and :class:`RegistryAssetLoadError` is raised when it is not set (another
+    git process holds ``index.lock``, the index entry is unmerged, sparse checkout
+    is enabled in the clone, ``repo_dir`` is not in a repository) or when a git
+    call fails or times out. The pipeline then fails the task before the agent
+    starts, and commits nothing.
     """
+
+    def _log_platform_managed(how: str) -> None:
+        log(
+            "TASK",
+            f"Registry: {mcp_path} is platform-managed for this task and left out of its "
+            f"commits, the agent's own edits of it included ({how})",
+        )
 
     def _git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -173,20 +195,35 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
                 # git refuses an add that names the ignored file. The refusal
                 # stays; the advice git prints with it is off for this clone.
                 _git("config", "advice.addIgnoredFile", "false")
+                _log_platform_managed(".git/info/exclude: git add reports the path as ignored")
                 return
             # Not ignored after all (the repo's .gitignore re-includes it, or the
             # exclude file could not be written): give the untracked file an
             # index entry so skip-worktree can attach.
             _git("add", "--intent-to-add", ".mcp.json")
-        result = _git("update-index", "--skip-worktree", ".mcp.json")
-        if result.returncode != 0:
-            log(
-                "WARN",
-                f"Registry: could not skip-worktree {mcp_path} "
-                f"(exit {result.returncode}): {result.stderr.strip()}",
-            )
+        # git refuses an add that names the flagged file. The refusal stays; the
+        # advice git prints with it is off for this clone.
+        _git("config", "advice.updateSparsePath", "false")
+        marked = _git("update-index", "--skip-worktree", ".mcp.json")
+        # The flag has to be on the entry of the file itself. For this pathspec git also lists the
+        # entries below a directory of that name. "s" is "S" (skip-worktree) with assume-unchanged.
+        entry = _git("ls-files", "-v", "--", ".mcp.json").stdout
+        flagged = entry in ("S .mcp.json\n", "s .mcp.json\n")
     except (OSError, subprocess.SubprocessError) as e:
-        log("WARN", f"Registry: commit guard for {mcp_path} failed: {type(e).__name__}: {e}")
+        raise RegistryAssetLoadError(
+            f"could not keep {mcp_path} out of commits: {type(e).__name__}: {e}"
+        ) from e
+    if not flagged:
+        reason = " ".join(marked.stderr.split()) or (
+            "git reported no error, as it does where sparse checkout is enabled"
+        )
+        raise RegistryAssetLoadError(
+            f"could not keep {mcp_path} out of commits: git did not mark it "
+            f"skip-worktree ({reason})"
+        )
+    _log_platform_managed(
+        "git skip-worktree: git add reports the path as outside the sparse-checkout definition"
+    )
 
 
 def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> list[str]:
@@ -205,6 +242,13 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
       * two pins of one asset whose resolved connection configs differ: they
         share one ``.mcp.json`` key, so only one of them could be loaded.
 
+    Fail-closed as well where the resolved config, which may hold secrets, could
+    reach a commit made in the clone:
+      * ``.mcp.json`` is a symlink — the write would land in the link's target,
+        which the commit guard does not cover (#758).
+      * git cannot be shown to leave the written file out of commits (#759, see
+        :func:`_protect_mcp_json_from_commit`).
+
     A pinned asset is one the operator explicitly referenced in the Blueprint, so
     "load it or fail the task" keeps the stamped ``resolved_assets`` audit record
     accurate by construction — a warn-and-skip here would let the record claim an
@@ -221,6 +265,12 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
         )
 
     mcp_path = os.path.join(repo_dir, ".mcp.json")
+    if os.path.islink(mcp_path):
+        raise RegistryAssetLoadError(
+            f"refusing to write the resolved MCP config through a symlink: {mcp_path}. "
+            "Make .mcp.json a regular file in the repository, or remove the Blueprint's "
+            "mcp_server pins."
+        )
     config = read_existing_mcp_config(mcp_path)
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):

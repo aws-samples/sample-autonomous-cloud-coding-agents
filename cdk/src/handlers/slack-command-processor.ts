@@ -199,8 +199,54 @@ function buildMentionReply(event: MentionEvent): ReplyFn {
 
 // ─── Submit ───────────────────────────────────────────────────────────────────
 
-/** `owner/repo` or `owner/repo#42` as a word of a message: group 1 is the repo, group 2 the issue number. */
-const REPO_REFERENCE = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)(?:#(\d+))?\b/g;
+/**
+ * A link is read whole, so that its parts are not taken for words. A word is tried
+ * from its first `\w` only, because a start at every dot and hyphen takes quadratic time.
+ */
+const REPO_REFERENCE = /<(?<slackLink>https?:\/\/[^\s<>|]+)(?:\|[^<>]*)?>|(?<typedLink>https?:\/\/[^\s<>|]*[^\s<>|.,;:!?)])|(?=\w)(?<!\w[.-]*)(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)(?:#(?<issueNumber>\d+))?\b/gi;
+
+/**
+ * Without an issue or pull request number, only a query or a fragment may follow the
+ * repo. A link to a file, a branch or another page of the repo names no repo.
+ */
+const GITHUB_LINK = /^https?:\/\/(?:www\.)?github\.com\/(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+?)(?:\.git)?(?:\/(?:issues|pull)\/(?<issueNumber>\d+)|\/?(?:[?#].*)?$)/i;
+
+/**
+ * What a github.com path begins with, in lower case, when it is a page of the site.
+ * A name that an account has must stay out, or links to its repos are ignored.
+ */
+const GITHUB_SITE_PAGES = new Set([
+  'about', 'account', 'advisories', 'apps', 'codespaces', 'collections', 'enterprise', 'enterprises', 'features',
+  'issues', 'login', 'marketplace', 'notifications', 'organizations', 'orgs', 'pulls', 'readme', 'resources',
+  'search', 'security', 'settings', 'site', 'solutions', 'sponsors', 'stars', 'topics', 'trending',
+]);
+
+interface RepoReference {
+  readonly repo: string;
+  readonly issueNumber?: number;
+  readonly certain: boolean;
+  readonly start: number;
+  readonly end: number;
+}
+
+function repoReferences(message: string): RepoReference[] {
+  const references: RepoReference[] = [];
+  for (const match of message.matchAll(REPO_REFERENCE)) {
+    const groups = match.groups ?? {};
+    const link = groups.slackLink ?? groups.typedLink;
+    const { repo, issueNumber } = link ? (GITHUB_LINK.exec(link)?.groups ?? {}) : groups;
+    if (repo && !(link && GITHUB_SITE_PAGES.has(ownerOf(repo)))) {
+      references.push({
+        repo,
+        issueNumber: issueNumber ? parseInt(issueNumber, 10) : undefined,
+        certain: Boolean(link ?? issueNumber),
+        start: match.index,
+        end: match.index + match[0].length,
+      });
+    }
+  }
+  return references;
+}
 
 /** The owner part of `owner/repo`, lower-cased: owners compare without case. */
 function ownerOf(repo: string): string {
@@ -208,16 +254,17 @@ function ownerOf(repo: string): string {
 }
 
 /**
- * The first of these references that certainly means a repo: it carries an
- * issue number, or it names an onboarded repo (one RepoTable read per distinct name).
+ * The first of these references that certainly means a repo: it is a GitHub
+ * link, it carries an issue number, or it names an onboarded repo (one
+ * RepoTable read per distinct name).
  */
-async function findRepoReference(references: RegExpExecArray[]): Promise<RegExpExecArray | undefined> {
+async function findRepoReference(references: RepoReference[]): Promise<RepoReference | undefined> {
   const notOnboarded = new Set<string>();
   for (const reference of references) {
-    if (reference[2] || (!notOnboarded.has(reference[1]) && (await lookupRepo(reference[1])).onboarded)) {
+    if (reference.certain || (!notOnboarded.has(reference.repo) && (await lookupRepo(reference.repo)).onboarded)) {
       return reference;
     }
-    notOnboarded.add(reference[1]);
+    notOnboarded.add(reference.repo);
   }
   return undefined;
 }
@@ -238,27 +285,26 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
 
   // Resolve the target repo. A slash-joined word is not necessarily a repo
   // ("CI/CD", "and/or", "src/handlers/foo.ts"), so the first one does not decide.
-  // A repo is known when a word certainly means one (findRepoReference) or,
-  // failing that, when the channel has an onboarded default repo (`bgagent
+  // A repo is known when a word or a link certainly means one (findRepoReference)
+  // or, failing that, when the channel has an onboarded default repo (`bgagent
   // slack onboard-channel`).
-  //   1. The repo is the first word under the owner of the known repo, wherever
-  //      it stands in "fix the bug in org/repo#42": that repo itself or, before
-  //      it, a sibling or a misspelling. The rest of the message is the
+  //   1. The repo is the first word or link under the owner of the known repo,
+  //      wherever it stands in "fix the bug in org/repo#42": that repo itself or,
+  //      before it, a sibling or a misspelling. The rest of the message is the
   //      description, and createTaskCore reports a repo that is not onboarded.
-  //   2. With no such word, the channel default gets the WHOLE message.
+  //   2. With no such word or link, the channel default gets the WHOLE message.
   //   3. With no repo known at all, the first slash-joined word is taken, as before.
-  const references = [...message.matchAll(REPO_REFERENCE)];
+  const references = repoReferences(message);
   const certain = await findRepoReference(references);
   const defaultRepo = certain ? null : await lookupChannelDefaultRepo(event.team_id, event.channel_id);
-  const known = certain?.[1] ?? defaultRepo;
+  const known = certain?.repo ?? defaultRepo;
   const reference = known
-    ? references.find(candidate => ownerOf(candidate[1]) === ownerOf(known))
+    ? references.find(candidate => ownerOf(candidate.repo) === ownerOf(known))
     : references[0];
-  const repo = reference?.[1] ?? defaultRepo;
-  const issueNumber = reference?.[2] ? parseInt(reference[2], 10) : undefined;
-  // The message without the word that named the repo and the blanks in front of it.
+  const repo = reference?.repo ?? defaultRepo;
+  // The message without the word or link that named the repo and the blanks in front of it.
   const description = reference
-    ? (message.slice(0, reference.index).replace(/[ \t]+$/, '') + message.slice(reference.index + reference[0].length)).trim()
+    ? (message.slice(0, reference.start).replace(/(?<![ \t])[ \t]+$/, '') + message.slice(reference.end)).trim()
     : message;
   if (!repo) {
     await reply('Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`. Or ask an admin to set a default with `bgagent slack onboard-channel`.');
@@ -302,7 +348,7 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
   const result = await createTaskCore(
     {
       repo,
-      issue_number: issueNumber,
+      issue_number: reference?.issueNumber,
       task_description: description || undefined,
       // Explicit coding workflow: a Slack-submitted task targets a repo, so it
       // must not fall through the resolution ladder to the repo-less

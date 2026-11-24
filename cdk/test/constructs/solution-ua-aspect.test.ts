@@ -84,7 +84,7 @@ function envVarsOfFirstFunction(aspects: (stack: Stack) => void): Record<string,
   const app = new App();
   const stack = new Stack(app, 'TestStack');
   new lambda.Function(stack, 'Fn', {
-    runtime: lambda.Runtime.NODEJS_20_X,
+    runtime: lambda.Runtime.NODEJS_24_X,
     handler: 'index.handler',
     code: lambda.Code.fromInline('exports.handler = async () => {};'),
   });

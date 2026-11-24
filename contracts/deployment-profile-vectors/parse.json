@@ -1,0 +1,140 @@
+{
+  "description": "Profile parsing vectors (#1016). `profile` is the parsed content of an abca.deployment.json file. parseDeploymentProfile in cdk/src/deployment/features.ts and in cli/src/deployment-profile.ts must both return `expected.profile`, or both fail with the message 'Invalid deployment profile <source>: ' followed by `expected.error`. See README.md.",
+  "cases": [
+    {
+      "name": "minimal",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false } },
+      "expected": { "profile": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false } } }
+    },
+    {
+      "name": "every-feature-enabled",
+      "profile": { "schemaVersion": 1, "features": { "slack": true, "linear": true, "jira": true, "deployPreviewScreenshots": true, "agentRegistry": true, "toolGateway": true } },
+      "expected": { "profile": { "features": { "slack": true, "linear": true, "jira": true, "deployPreviewScreenshots": true, "agentRegistry": true, "toolGateway": true } } }
+    },
+    {
+      "name": "compute-order-is-kept",
+      "profile": { "schemaVersion": 1, "features": { "slack": true, "linear": false, "jira": true, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": ["ecs", "agentcore"] },
+      "expected": { "profile": { "features": { "slack": true, "linear": false, "jira": true, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": ["ecs", "agentcore"] } }
+    },
+    {
+      "name": "every-compute-backend",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": ["agentcore", "ecs", "lambda-microvm"] },
+      "expected": { "profile": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": ["agentcore", "ecs", "lambda-microvm"] } }
+    },
+    {
+      "name": "array-instead-of-object",
+      "profile": [],
+      "expected": { "error": "expected a JSON object" }
+    },
+    {
+      "name": "null-instead-of-object",
+      "profile": null,
+      "expected": { "error": "expected a JSON object" }
+    },
+    {
+      "name": "string-instead-of-object",
+      "profile": "slack",
+      "expected": { "error": "expected a JSON object" }
+    },
+    {
+      "name": "unknown-top-level-key",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "network": "split" },
+      "expected": { "error": "unknown top-level key 'network'" }
+    },
+    {
+      "name": "newer-schema-version",
+      "profile": { "schemaVersion": 2, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false } },
+      "expected": { "error": "schemaVersion 2 was written by a newer ABCA; upgrade this checkout" }
+    },
+    {
+      "name": "schema-version-zero",
+      "profile": { "schemaVersion": 0, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false } },
+      "expected": { "error": "schemaVersion must be 1, got 0" }
+    },
+    {
+      "name": "schema-version-as-string",
+      "profile": { "schemaVersion": "1", "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false } },
+      "expected": { "error": "schemaVersion must be 1, got \"1\"" }
+    },
+    {
+      "name": "schema-version-missing",
+      "profile": { "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false } },
+      "expected": { "error": "schemaVersion must be 1, got undefined" }
+    },
+    {
+      "name": "features-missing",
+      "profile": { "schemaVersion": 1 },
+      "expected": { "error": "features must be an object" }
+    },
+    {
+      "name": "features-null",
+      "profile": { "schemaVersion": 1, "features": null },
+      "expected": { "error": "features must be an object" }
+    },
+    {
+      "name": "features-as-array",
+      "profile": { "schemaVersion": 1, "features": [] },
+      "expected": { "error": "features must be an object" }
+    },
+    {
+      "name": "unknown-feature",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false, "slak": true } },
+      "expected": { "error": "unknown feature 'slak' (expected slack, linear, jira, deployPreviewScreenshots, agentRegistry, toolGateway)" }
+    },
+    {
+      "name": "feature-not-boolean",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": "yes", "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false } },
+      "expected": { "error": "features.jira must be true or false" }
+    },
+    {
+      "name": "feature-missing",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false } },
+      "expected": { "error": "features.toolGateway must be true or false" }
+    },
+    {
+      "name": "compute-empty",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": [] },
+      "expected": { "error": "compute must be a non-empty array of agentcore, ecs or lambda-microvm" }
+    },
+    {
+      "name": "compute-not-an-array",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": "ecs" },
+      "expected": { "error": "compute must be a non-empty array of agentcore, ecs or lambda-microvm" }
+    },
+    {
+      "name": "compute-null",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": null },
+      "expected": { "error": "compute must be a non-empty array of agentcore, ecs or lambda-microvm" }
+    },
+    {
+      "name": "compute-unknown-backend",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": ["lambda"] },
+      "expected": { "error": "unknown compute backend \"lambda\" (expected agentcore, ecs or lambda-microvm)" }
+    },
+    {
+      "name": "compute-backend-wrong-case",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": ["ECS"] },
+      "expected": { "error": "unknown compute backend \"ECS\" (expected agentcore, ecs or lambda-microvm)" }
+    },
+    {
+      "name": "compute-backend-not-a-string",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": [null] },
+      "expected": { "error": "unknown compute backend null (expected agentcore, ecs or lambda-microvm)" }
+    },
+    {
+      "name": "compute-duplicate",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": ["ecs", "ecs"] },
+      "expected": { "error": "compute lists a backend more than once" }
+    },
+    {
+      "name": "unknown-key-reported-before-schema-version",
+      "profile": { "schemaVersion": 2, "features": { "slack": false, "linear": false, "jira": false, "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "network": "split" },
+      "expected": { "error": "unknown top-level key 'network'" }
+    },
+    {
+      "name": "feature-error-reported-before-compute",
+      "profile": { "schemaVersion": 1, "features": { "slack": false, "linear": false, "jira": "yes", "deployPreviewScreenshots": false, "agentRegistry": false, "toolGateway": false }, "compute": [] },
+      "expected": { "error": "features.jira must be true or false" }
+    }
+  ]
+}

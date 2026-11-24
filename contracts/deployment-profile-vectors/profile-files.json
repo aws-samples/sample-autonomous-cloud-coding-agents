@@ -1,0 +1,19 @@
+{
+  "description": "Profile file vectors (#1016). deploymentProfileCandidates in cdk/src/deployment/features.ts and in cli/src/deployment-profile.ts must both return `expected` for `stackName`: a stack other than the default one reads and writes only its own file, and a name that is not a valid stack name never becomes part of a file name. See README.md.",
+  "cases": [
+    { "name": "default-stack-uses-the-shared-file", "stackName": "backgroundagent-dev", "expected": ["abca.deployment.json"] },
+    { "name": "another-stack-has-its-own-file", "stackName": "team-b", "expected": ["abca.deployment.team-b.json"] },
+    { "name": "suffixed-default-name-has-its-own-file", "stackName": "backgroundagent-dev-team-b", "expected": ["abca.deployment.backgroundagent-dev-team-b.json"] },
+    { "name": "name-with-a-digit", "stackName": "backgroundagent-dev-2", "expected": ["abca.deployment.backgroundagent-dev-2.json"] },
+    { "name": "default-name-is-case-sensitive", "stackName": "BackgroundAgent-Dev", "expected": ["abca.deployment.BackgroundAgent-Dev.json"] },
+    { "name": "single-letter", "stackName": "a", "expected": ["abca.deployment.a.json"] },
+    { "name": "longest-valid-name", "stackName": "abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnop", "expected": ["abca.deployment.abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnop.json"] },
+    { "name": "name-too-long", "stackName": "abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopq", "expected": ["abca.deployment.json"] },
+    { "name": "empty", "stackName": "", "expected": ["abca.deployment.json"] },
+    { "name": "leading-digit", "stackName": "1team", "expected": ["abca.deployment.json"] },
+    { "name": "leading-hyphen", "stackName": "-team", "expected": ["abca.deployment.json"] },
+    { "name": "underscore", "stackName": "team_b", "expected": ["abca.deployment.json"] },
+    { "name": "dot", "stackName": "team.b", "expected": ["abca.deployment.json"] },
+    { "name": "path-separators", "stackName": "../x", "expected": ["abca.deployment.json"] }
+  ]
+}

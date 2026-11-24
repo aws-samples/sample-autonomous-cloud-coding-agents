@@ -13,7 +13,10 @@ The workflow files, the configuration and the system prompt are the real ones.
 
 import hashlib
 import io
+import json
+import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +24,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import runner
 from config import NEEDS_INPUT_MARKER
 from models import AgentResult, RepoSetup
 from pipeline import run_task
@@ -43,6 +47,7 @@ def _run_task(
     agent_result: AgentResult | None = None,
     *,
     setup: RepoSetup | None = None,
+    setup_error: Exception | None = None,
     build: VerifyOutcome | None = None,
     agent_notes: str | None = None,
     **task_fields,
@@ -53,9 +58,13 @@ def _run_task(
     ``agent_result`` is what the agent returns (a success by default), ``build``
     what the post-agent build returns (passed by default) and ``agent_notes`` the
     "Agent notes" section of the pull request. ``ensure_pr`` answers ``_PR_URL``.
+    ``setup_error`` is what the repository setup raises instead of returning.
+    The stubbed agent starts in the environment the runner prepares for the real
+    one.
     ``task_fields`` go to ``run_task`` as they are. Returns the result, the stubs
-    the tests assert on, and the prompt, system prompt, working directory and
-    configuration the agent was started with."""
+    the tests assert on, the prompt, system prompt, working directory and
+    configuration the agent was started with, and ``getenv``, which looks a
+    variable up in the environment it was started with."""
     run = SimpleNamespace()
     task: dict[str, Any] = {
         "repo_url": "o/r",
@@ -68,6 +77,9 @@ def _run_task(
 
     async def run_agent(prompt, system_prompt, config, cwd=None, trajectory=None):
         run.prompt, run.system_prompt, run.cwd, run.config = prompt, system_prompt, cwd, config
+        runner._setup_agent_env(config)
+        # A lookup and not the copy itself: pytest --showlocals prints ``run``.
+        run.getenv = dict(os.environ).get
         return agent_result or _agent_succeeded()
 
     span = MagicMock()
@@ -78,6 +90,7 @@ def _run_task(
         patch(
             "repo.setup_repo",
             return_value=setup or RepoSetup(repo_dir=_CLONE, branch="bgagent/test/branch"),
+            side_effect=setup_error,
         ) as run.setup_repo,
         patch("pipeline.task_span", return_value=span),
         patch("pipeline.task_state") as task_state,
@@ -97,7 +110,6 @@ def _run_task(
         ) as run.write_repo_learnings,
         patch("pipeline.get_disk_usage", return_value=0),
         patch("pipeline.print_metrics"),
-        patch("pipeline.resolve_linear_api_token"),
         patch("pipeline.react_task_started", return_value="reaction-42"),
         patch("pipeline.react_task_finished") as run.react_task_finished,
     ):
@@ -329,3 +341,185 @@ class TestHowAFinishedTaskIsRecorded:
         finished = run.react_task_finished.call_args.kwargs
         assert finished["success"] is False
         assert finished["started_reaction_id"] == "reaction-42"
+
+
+_TASK_ENVIRON = {
+    "GIT_AUTHOR_NAME": "bgagent",
+    "GIT_AUTHOR_EMAIL": "bgagent@noreply.github.com",
+    "GIT_COMMITTER_NAME": "bgagent",
+    "GIT_COMMITTER_EMAIL": "bgagent@noreply.github.com",
+    "GITHUB_TOKEN": "ghp_test",
+    "GH_TOKEN": "ghp_test",
+    "TASK_ID": "t-1",
+    "PROMPT_VERSION": "1c9c10e027a2",
+    "WORKFLOW_ID": "coding/new-task-v1",
+    "WORKFLOW_STEP": "implement",
+}
+
+# For each issue tracker, what Secrets Manager holds and the variables a task
+# from that tracker resolves it into.
+_TRACKERS = {
+    "linear": (
+        {"access_token": "lin_oauth_of_the_task"},
+        {"LINEAR_API_TOKEN": "lin_oauth_of_the_task"},
+    ),
+    "jira": (
+        {
+            "access_token": "jira_oauth_of_the_task",
+            "app_actor_proxy_url": "https://forge.example/trigger",
+            "app_actor_shared_secret": "forge_secret_of_the_task",
+        },
+        {
+            "JIRA_API_TOKEN": "jira_oauth_of_the_task",
+            "JIRA_APP_ACTOR_CONFIGURED": "1",
+            "JIRA_APP_ACTOR_PROXY_URL": "https://forge.example/trigger",
+            "JIRA_APP_ACTOR_SHARED_SECRET": "forge_secret_of_the_task",
+        },
+    ),
+}
+
+
+def _environ_watch() -> Callable[[], set[str]]:
+    """Returns a function that names the variables that have changed since this
+    call. The copy of the environment stays in here: in a failed comparison, or in
+    a local that pytest ``--showlocals`` prints, it would show the host's variables."""
+    before = dict(os.environ)
+
+    def changed() -> set[str]:
+        return {
+            name
+            for name in before.keys() | os.environ.keys()
+            if before.get(name) != os.environ.get(name)
+        }
+
+    return changed
+
+
+class TestWhatATaskLeavesInTheEnvironment:
+    """A task puts into the environment of the process what git, ``gh``, the agent
+    and the commit hook read there, and the credentials of its issue tracker. The
+    process can go on after the task: a server that takes the next one, a script,
+    this test run. ``run_task`` leaves the environment as it found it."""
+
+    @pytest.fixture(params=["unset", "set"])
+    def caller(self, request, monkeypatch) -> None:
+        """The process that calls ``run_task`` has none of the variables of
+        ``_TASK_ENVIRON``, or a value of its own in each."""
+        for name in _TASK_ENVIRON:
+            if request.param == "unset":
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, f"the caller's {name}")
+
+    @pytest.fixture(params=_TRACKERS)
+    def tracker(self, request, monkeypatch) -> SimpleNamespace:
+        """A task from Linear or from Jira, in a process that has none of the
+        tracker's credentials. Returns the fields of the task and the variables
+        it resolves the credentials into."""
+        stored, credentials = _TRACKERS[request.param]
+        for name in credentials:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        secrets_manager = MagicMock()
+        secrets_manager.get_secret_value.return_value = {
+            "SecretString": json.dumps({**stored, "expires_at": "2999-01-01T00:00:00Z"})
+        }
+        monkeypatch.setattr("aws_session.platform_client", MagicMock(return_value=secrets_manager))
+        arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:tracker-oauth"
+        return SimpleNamespace(
+            fields={
+                "channel_source": request.param,
+                "channel_metadata": {f"{request.param}_oauth_secret_arn": arn},
+            },
+            credentials=credentials,
+        )
+
+    def test_agent_sees_the_values_of_the_task_and_the_caller_gets_its_own_back(self, caller):
+        changed = _environ_watch()
+
+        run = _run_task(prompt_version="1c9c10e027a2")
+
+        assert {name: run.getenv(name) for name in _TASK_ENVIRON} == _TASK_ENVIRON
+        assert changed() == set()
+
+    def test_task_that_fails_leaves_it_as_it_found_it(self, caller):
+        changed = _environ_watch()
+
+        # The clone fails after the variables were set for it.
+        with pytest.raises(RuntimeError, match="clone failed"):
+            _run_task(setup_error=RuntimeError("clone failed"), prompt_version="1c9c10e027a2")
+
+        assert changed() == set()
+
+    def test_task_without_a_repository_leaves_it_as_it_found_it(self, caller, monkeypatch):
+        # It returns before run_task sets any of the variables: its token is put
+        # into the environment by the runner, when the agent is started.
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        changed = _environ_watch()
+
+        with patch("aws_session.tenant_client"):  # the upload of the answer
+            run = _run_task(
+                _agent_succeeded(result_text="Token buckets suit this API."),
+                repo_url="",
+                resolved_workflow=_workflow("knowledge/web-research-v1"),
+            )
+
+        assert run.result["status"] == "success"
+        run.setup_repo.assert_not_called()
+        assert changed() == set()
+
+    def test_token_the_configuration_fetched_is_gone_after_the_task(self, monkeypatch):
+        # A payload without a token, as on ECS: the configuration reads the token
+        # from Secrets Manager and keeps it in GITHUB_TOKEN.
+        fetched = "ghp_from_secrets_manager"
+        secrets_manager = MagicMock()
+        secrets_manager.get_secret_value.return_value = {"SecretString": fetched}
+        monkeypatch.setenv(
+            "GITHUB_TOKEN_SECRET_ARN",
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token",
+        )
+        changed = _environ_watch()
+
+        with patch("aws_session.platform_client", return_value=secrets_manager):
+            run = _run_task(github_token="")
+
+        assert run.getenv("GITHUB_TOKEN") == fetched
+        assert changed() == set()
+
+    def test_what_the_runner_changes_for_the_agent_is_undone_after_the_task(self, monkeypatch):
+        # The runner switches Claude Code to Bedrock, and takes the variables of
+        # the agent's own instrumentation away from the programs the agent starts.
+        monkeypatch.delenv("CLAUDE_CODE_USE_BEDROCK", raising=False)
+        monkeypatch.setenv("OTEL_PYTHON_DISTRO", "aws_distro")
+        for_the_agent = {"CLAUDE_CODE_USE_BEDROCK": "1", "OTEL_PYTHON_DISTRO": None}
+        changed = _environ_watch()
+
+        run = _run_task()
+
+        assert {name: run.getenv(name) for name in for_the_agent} == for_the_agent
+        assert changed() == set()
+
+    def test_agent_sees_the_credentials_of_the_tracker_and_none_is_left_behind(self, tracker):
+        changed = _environ_watch()
+
+        run = _run_task(**tracker.fields)
+
+        assert {name: run.getenv(name) for name in tracker.credentials} == tracker.credentials
+        assert changed() == set()
+
+    def test_task_of_a_tracker_that_fails_leaves_no_credential_behind(self, tracker):
+        changed = _environ_watch()
+
+        with pytest.raises(RuntimeError, match="clone failed"):
+            _run_task(setup_error=RuntimeError("clone failed"), **tracker.fields)
+
+        assert changed() == set()
+
+    def test_tracker_credentials_of_the_caller_are_back_after_the_task(self, tracker, monkeypatch):
+        for name in tracker.credentials:
+            monkeypatch.setenv(name, f"the caller's {name}")
+        changed = _environ_watch()
+
+        _run_task(**tracker.fields)
+
+        assert changed() == set()

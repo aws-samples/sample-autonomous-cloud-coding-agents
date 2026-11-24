@@ -209,6 +209,11 @@ function findMarker() {
   );
 }
 
+function expectNothingRemoved() {
+  expect(smSend).not.toHaveBeenCalled();
+  expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Update' || c._type === 'Delete')).toHaveLength(0);
+}
+
 describe('linear-remove-workspace handler', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -486,6 +491,117 @@ describe('linear-remove-workspace handler', () => {
     expect(findRevoke()![0].input.Key).toEqual({ linear_workspace_id: 'ws-dead' });
   });
 
+  // ─── One slug, several active rows (#883) ───────────────────────────────
+  test.each([
+    ['on one scan page', undefined, undefined],
+    ['on two scan pages', 1, undefined],
+    ['with purge=true', undefined, { purge: 'true' }],
+  ])('409s and removes nothing when two active rows carry the slug (%s)', async (_how, pageSize, query) => {
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-first' }),
+        activeRow({ linear_workspace_id: 'ws-second' }),
+      ],
+      pageSize,
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN, query }));
+
+    expect(result.statusCode).toBe(409);
+    const { error } = JSON.parse(result.body) as { error: { code: string; message: string } };
+    expect(error.code).toBe('WORKSPACE_SLUG_AMBIGUOUS');
+    expect(error.message).toContain('ws-first');
+    expect(error.message).toContain('ws-second');
+    expectNothingRemoved();
+  });
+
+  test.each([
+    ["another admin's row is read first", ['someone-else', ADMIN]],
+    ["the caller's row is read first", [ADMIN, 'someone-else']],
+  ])('409s for the admin of one of two active rows (%s)', async (_order, [installerOfFirst, installerOfSecond]) => {
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-first', installed_by_platform_user_id: installerOfFirst }),
+        activeRow({ linear_workspace_id: 'ws-second', installed_by_platform_user_id: installerOfSecond }),
+      ],
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+
+    expect(result.statusCode).toBe(409);
+    const { error } = JSON.parse(result.body) as { error: { code: string; message: string } };
+    expect(error.code).toBe('WORKSPACE_SLUG_AMBIGUOUS');
+    expect(error.message).toContain('ws-first');
+    expect(error.message).toContain('ws-second');
+    expectNothingRemoved();
+  });
+
+  test('the 409 names each of three active rows, and not a dead row that carries the slug too', async () => {
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
+        activeRow({ linear_workspace_id: 'ws-first' }),
+        activeRow({ linear_workspace_id: 'ws-second' }),
+        activeRow({ linear_workspace_id: 'ws-third' }),
+      ],
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+
+    expect(result.statusCode).toBe(409);
+    expect(result.body).toContain('ws-first');
+    expect(result.body).toContain('ws-second');
+    expect(result.body).toContain('ws-third');
+    expect(result.body).not.toContain('ws-dead');
+    expectNothingRemoved();
+  });
+
+  test("403s for the admin of a dead row when the active row that carries the slug is another admin's", async () => {
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
+        activeRow({ linear_workspace_id: 'ws-live', installed_by_platform_user_id: 'someone-else' }),
+      ],
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+
+    expect(result.statusCode).toBe(403);
+    expectNothingRemoved();
+  });
+
+  test('403s, without naming the rows, for a caller who installed none of the active rows that carry the slug', async () => {
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-first' }),
+        activeRow({ linear_workspace_id: 'ws-second' }),
+      ],
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: 'not-the-admin' }));
+
+    expect(result.statusCode).toBe(403);
+    expect(JSON.parse(result.body).error.code).toBe('FORBIDDEN');
+    expect(result.body).not.toContain('ws-first');
+    expect(result.body).not.toContain('ws-second');
+    expectNothingRemoved();
+  });
+
+  test('with no active row for the slug, the dead row read first is removed and the other is left as it is', async () => {
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-dead-1', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
+        activeRow({ linear_workspace_id: 'ws-dead-2', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
+      ],
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+
+    expect(result.statusCode).toBe(200);
+    expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Update').map(([c]) => c.input.Key))
+      .toEqual([{ linear_workspace_id: 'ws-dead-1' }]);
+  });
+
   test('the registry scan fail-closes on status via the FilterExpression (pins the filter to the handler)', async () => {
     // Assert the handler itself sends the status filter — the revoke-oracle
     // prevention property lives in this filter, not in the test router.
@@ -751,6 +867,23 @@ describe('linear-remove-workspace handler', () => {
     // Bounded, and the bound is the handler's MAX_SCAN_PAGES (20).
     expect(scans).toBe(20);
     expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('the page cap also stops a scan that has read an active row: the pages left unread can hold a second one', async () => {
+    let scans = 0;
+    ddbSend.mockImplementation((cmd: { _type: string }) => {
+      if (cmd._type === 'Scan') {
+        scans += 1;
+        return Promise.resolve({ Items: scans === 1 ? [activeRow()] : [], LastEvaluatedKey: { _idx: scans } });
+      }
+      return Promise.resolve({});
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+
+    expect(result.statusCode).toBe(500);
+    expect(scans).toBe(20);
+    expectNothingRemoved();
   });
 
   test('a --purge row delete failure after a successful secret delete 500s (does not report purged)', async () => {

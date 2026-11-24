@@ -319,6 +319,10 @@ def run_workflow(
                 _milestone(ctx, f"step:{key}:skipped")
                 continue
 
+        # For prepare-commit-msg.sh, which writes them as commit trailers. They stay set after
+        # the step: the pipeline's safety-net commit saves the work of that step, and names it.
+        os.environ["WORKFLOW_ID"] = workflow.id
+        os.environ["WORKFLOW_STEP"] = key
         _milestone(ctx, f"step:{key}:start")
         try:
             handler = handlers[step.kind]

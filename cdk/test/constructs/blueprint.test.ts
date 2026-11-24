@@ -17,14 +17,17 @@
  *  SOFTWARE.
  */
 
-import { App, Stack } from 'aws-cdk-lib';
+import { App, Lazy, Stack } from 'aws-cdk-lib';
 import { Annotations, Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Blueprint, type BlueprintProps } from '../../src/constructs/blueprint';
 import { MAX_BUDGET_USD_MAX, MAX_BUDGET_USD_MIN } from '../../src/handlers/shared/types';
 
-function createStack(props?: Partial<BlueprintProps>): { stack: Stack; template: Template } {
-  const app = new App();
+function createStack(
+  props?: Partial<BlueprintProps>,
+  context?: Record<string, unknown>,
+): { stack: Stack; template: Template } {
+  const app = new App({ context });
   const stack = new Stack(app, 'TestStack');
 
   const repoTable = new dynamodb.Table(stack, 'RepoTable', {
@@ -127,11 +130,11 @@ describe('Blueprint construct', () => {
 
   test('maps agent model ID prop', () => {
     const { template } = createStack({
-      agent: { modelId: 'anthropic.claude-sonnet-4-6' },
+      agent: { modelId: 'us.anthropic.claude-sonnet-4-6' },
     });
     const parts = getCreateJoinParts(template);
     const serialized = parts.join('');
-    expect(serialized).toContain('"model_id":{"S":"anthropic.claude-sonnet-4-6"}');
+    expect(serialized).toContain('"model_id":{"S":"us.anthropic.claude-sonnet-4-6"}');
   });
 
   test('maps agent max turns prop', () => {
@@ -227,6 +230,50 @@ describe('Blueprint construct', () => {
     const parts = getUpdateJoinParts(template);
     const serialized = parts.join('');
     expect(serialized).not.toContain('max_budget_usd');
+  });
+
+  test('maps agent memory token budget prop', () => {
+    const { template } = createStack({
+      agent: { memoryTokenBudget: 4000 },
+    });
+    const serialized = getCreateJoinParts(template).join('');
+    expect(serialized).toContain('"memory_token_budget":{"N":"4000"}');
+  });
+
+  test('onUpdate sets memory_token_budget', () => {
+    const { template } = createStack({
+      agent: { memoryTokenBudget: 4000 },
+    });
+    const serialized = getUpdateJoinParts(template).join('');
+    expect(serialized).toContain('#memory_token_budget = :memory_token_budget');
+    expect(serialized).toContain('"#memory_token_budget":"memory_token_budget"');
+    expect(serialized).toContain('":memory_token_budget":{"N":"4000"}');
+  });
+
+  test('omits memory_token_budget on create and update when memoryTokenBudget is undefined', () => {
+    const { template } = createStack({
+      agent: { maxBudgetUsd: 5 },
+    });
+    expect(getCreateJoinParts(template).join('')).not.toContain('memory_token_budget');
+    expect(getUpdateJoinParts(template).join('')).not.toContain('memory_token_budget');
+  });
+
+  test('exposes memoryTokenBudget as a public property, undefined when absent', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    const configured = new Blueprint(stack, 'Configured', {
+      repo: 'org/configured',
+      repoTable,
+      agent: { memoryTokenBudget: 4000 },
+    });
+    const absent = new Blueprint(stack, 'Absent', { repo: 'org/absent', repoTable });
+
+    expect(configured.memoryTokenBudget).toBe(4000);
+    expect(absent.memoryTokenBudget).toBeUndefined();
   });
 
   test('maps system prompt overrides prop', () => {
@@ -424,11 +471,6 @@ describe('Blueprint construct', () => {
     expect(serialized).toContain('#mcp_servers');
     expect(serialized).toContain('#cedar_policy_modules');
     expect(serialized).toContain('#skills');
-    // All three populated → none of the ASSET columns is removed. Asserted per
-    // column rather than as "no REMOVE anywhere": the clause is shared with the
-    // per-repo overrides, and this blueprint declares no `agent.modelId`, so it
-    // legitimately removes `model_id`. A blanket assertion coupled this test to
-    // an unrelated field and failed for the wrong reason.
     // Only the REMOVE clause of the UpdateExpression — not everything after the
     // word, which would sweep in ExpressionAttributeNames and match every column.
     const removeClause = /REMOVE ([^"\\]*)/.exec(serialized)?.[1] ?? '';
@@ -449,7 +491,7 @@ describe('Blueprint construct', () => {
 
     // And a declared override is still written, not merely left alone.
     const withModel = getUpdateJoinParts(
-      createStack({ agent: { modelId: 'global.anthropic.claude-opus-5' } }).template,
+      createStack({ agent: { modelId: 'us.anthropic.claude-opus-5' } }).template,
     ).join('');
     expect(withModel).toContain('#model_id = :model_id');
   });
@@ -721,6 +763,33 @@ describe('Blueprint construct', () => {
     expect(MAX_BUDGET_USD_MAX).toBe(100);
   });
 
+  // 2 ** 53 is the first integer the orchestrator would read back from the row as a BigInt.
+  test.each([0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53])('rejects memoryTokenBudget %p at synth', (budget) => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+
+    new Blueprint(stack, 'Blueprint', {
+      repo: 'org/my-repo',
+      repoTable,
+      agent: { memoryTokenBudget: budget },
+    });
+
+    expect(() => Template.fromStack(stack)).toThrow(`Invalid agent.memoryTokenBudget: ${budget}. Must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}.`);
+  });
+
+  test.each([
+    [1, '1'],
+    [Number.MAX_SAFE_INTEGER, '9007199254740991'],
+  ])('accepts memoryTokenBudget %p', (budget, written) => {
+    const { template } = createStack({
+      agent: { memoryTokenBudget: budget },
+    });
+    expect(getCreateJoinParts(template).join('')).toContain(`"memory_token_budget":{"N":"${written}"}`);
+  });
+
   test('accepts boundary values (min and max)', () => {
     const appMin = new App();
     const stackMin = new Stack(appMin, 'TestStackMin');
@@ -803,14 +872,14 @@ describe('Blueprint construct', () => {
   test('onUpdate includes optional fields in UpdateExpression', () => {
     const { template } = createStack({
       compute: { type: 'ecs' },
-      agent: { modelId: 'anthropic.claude-sonnet-4-6', maxTurns: 50 },
+      agent: { modelId: 'us.anthropic.claude-sonnet-4-6', maxTurns: 50 },
     });
     const parts = getUpdateJoinParts(template);
     const serialized = parts.join('');
     expect(serialized).toContain('#compute_type');
     expect(serialized).toContain('"S":"ecs"');
     expect(serialized).toContain('#model_id');
-    expect(serialized).toContain('"S":"anthropic.claude-sonnet-4-6"');
+    expect(serialized).toContain('"S":"us.anthropic.claude-sonnet-4-6"');
     expect(serialized).toContain('#max_turns');
     expect(serialized).toContain('"N":"50"');
   });
@@ -895,5 +964,115 @@ describe('Blueprint validation', () => {
     });
 
     expect(() => app.synth()).not.toThrow();
+  });
+});
+
+describe('Blueprint agent.modelId validation', () => {
+  const GLOBAL = { bedrockGeoRegion: 'global' };
+
+  function synthError(modelId: string, context?: Record<string, unknown>): string {
+    try {
+      createStack({ agent: { modelId } }, context);
+    } catch (err) {
+      return (err as Error).message;
+    }
+    return '';
+  }
+
+  test('accepts a granted model under the geography the deployment grants', () => {
+    expect(synthError('us.anthropic.claude-opus-5')).toBe('');
+    // The colon of a version suffix does not make an ID an ARN.
+    expect(synthError('us.anthropic.claude-haiku-4-5-20251001-v1:0')).toBe('');
+    expect(synthError('global.anthropic.claude-opus-5', GLOBAL)).toBe('');
+  });
+
+  test('rejects a bare foundation-model ID and names the profile form to use', () => {
+    const error = synthError('anthropic.claude-opus-5', GLOBAL);
+    expect(error).toContain("Invalid agent.modelId: 'anthropic.claude-opus-5'.");
+    expect(error).toContain('bare foundation-model ID');
+    expect(error).toContain("Use the inference-profile ID 'global.anthropic.claude-opus-5'.");
+  });
+
+  test('rejects an unprefixed value that is not a granted model without building a suggestion from it', () => {
+    // `opus` is a Claude Code alias.
+    const error = synthError('opus', GLOBAL);
+    expect(error).toContain("Invalid agent.modelId: 'opus'. It has no geography prefix.");
+    expect(error).toContain("Use 'global.<model-id>' with a model this deployment grants (");
+    expect(error).toContain('anthropic.claude-opus-5-5');
+    expect(error).not.toContain("'global.opus'");
+    expect(synthError('anthropic.example-ungranted-model', GLOBAL))
+      .toContain("Use 'global.<model-id>' with a model this deployment grants (");
+  });
+
+  test('rejects another geography than the one the deployment grants, naming both', () => {
+    const error = synthError('us.anthropic.claude-opus-5', GLOBAL);
+    expect(error).toContain("a 'us' inference profile");
+    expect(error).toContain("grants 'global' profiles");
+    expect(error).toContain("Use 'global.anthropic.claude-opus-5'.");
+    expect(synthError('global.anthropic.claude-opus-5')).toContain("grants 'us' profiles");
+  });
+
+  test('reads a hyphenated geography as one prefix', () => {
+    expect(synthError('us-gov.anthropic.claude-opus-5', GLOBAL))
+      .toContain("a 'us-gov' inference profile, but this deployment grants 'global' profiles");
+  });
+
+  test('rejects a model the deployment does not grant and lists what it grants', () => {
+    const error = synthError('global.anthropic.example-ungranted-model', GLOBAL);
+    expect(error).toContain("'anthropic.example-ungranted-model' is not a model this deployment grants");
+    expect(error).toContain('anthropic.claude-opus-5-5');
+    expect(error).toContain("'bedrockModels' context");
+    expect(synthError('global.anthropic.claude-opus-5[1m]', GLOBAL))
+      .toContain("'anthropic.claude-opus-5[1m]' is not a model this deployment grants");
+  });
+
+  test('reads the granted set from the bedrockModels context', () => {
+    const context = {
+      bedrockModels: ['anthropic.claude-opus-5-5', 'anthropic.claude-haiku-5-5', 'anthropic.example-added'],
+    };
+    expect(synthError('us.anthropic.example-added', context)).toBe('');
+    // The override replaces the default list, so a default it leaves out is not granted.
+    expect(synthError('us.anthropic.claude-sonnet-4-6', context))
+      .toContain("'anthropic.claude-sonnet-4-6' is not a model this deployment grants");
+  });
+
+  test('rejects two geography prefixes and names the single-prefix form', () => {
+    const error = synthError('global.us.anthropic.claude-opus-5', GLOBAL);
+    expect(error).toContain("two geography prefixes ('global.' then 'us.')");
+    expect(error).toContain("Use one: 'global.anthropic.claude-opus-5'.");
+    expect(synthError('global.us.opus', GLOBAL)).toContain("Use one: 'global.<model-id>'.");
+  });
+
+  test('rejects a geography prefix with no model after it', () => {
+    expect(synthError('global.', GLOBAL)).toContain('geography prefix with no model after it');
+  });
+
+  test('rejects surrounding whitespace, which would be written as given', () => {
+    expect(synthError('global.anthropic.claude-opus-5 ', GLOBAL)).toContain('surrounding whitespace');
+    expect(synthError(' global.anthropic.claude-opus-5', GLOBAL)).toContain('surrounding whitespace');
+  });
+
+  test('rejects the ARN of a profile as an ARN, not as a bare ID', () => {
+    const error = synthError(
+      'arn:aws:bedrock:us-east-1:111122223333:inference-profile/global.anthropic.claude-opus-5-5',
+      GLOBAL,
+    );
+    expect(error).toContain('It is an ARN.');
+    expect(error).toContain("Use the inference-profile ID 'global.<model-id>'");
+    expect(error).not.toContain('bare foundation-model ID');
+  });
+
+  test('rejects a token, which cannot be checked at synth', () => {
+    const error = synthError(Lazy.string({ produce: () => 'global.anthropic.claude-opus-5' }), GLOBAL);
+    expect(error).toContain('unresolved token');
+    expect(error).not.toContain('bare foundation-model ID');
+  });
+
+  test('reads the context only for a Blueprint that pins a model', () => {
+    // An unknown geography is reported by the grant sites. A Blueprint without a model
+    // must not report it as well; one with a model cannot be checked without it.
+    const unknownGeo = { bedrockGeoRegion: 'usa' };
+    expect(() => createStack(undefined, unknownGeo)).not.toThrow();
+    expect(synthError('us.anthropic.claude-opus-5', unknownGeo)).toContain("'bedrockGeoRegion' must be one of");
   });
 });

@@ -39,7 +39,6 @@ If `mise run install` fails or versions look wrong:
 | `yarn: command not found` | Activate mise in your shell (`eval "$(mise activate zsh)"`), then `corepack enable && corepack prepare yarn@1.22.22 --activate`. |
 | `node` is not v22 | Activate mise in your shell, then `mise install` from the repo root. |
 | Mise errors about untrusted config | `mise trust` from the repo root, then `mise install` again. |
-| `MISE_EXPERIMENTAL` required | `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`. |
 
 Minimal recovery sequence:
 
@@ -48,7 +47,6 @@ eval "$(mise activate zsh)"   # or bash; add permanently to your shell rc file
 cd /path/to/sample-autonomous-cloud-coding-agents
 mise trust && mise install
 corepack enable && corepack prepare yarn@1.22.22 --activate
-export MISE_EXPERIMENTAL=1
 mise run install
 ```
 
@@ -187,6 +185,8 @@ mise //cdk:deploy
 
 A full deploy takes approximately 10 minutes. Expect variation by region and whether container layers are cached.
 
+Deleting a stack (`mise //cdk:destroy`) can end in `DELETE_FAILED` on the runtime's security group and the VPC's private subnets: AgentCore releases the runtime's network interfaces some time after the runtime is deleted, with no fixed delay (it can take hours). [Teardown blocked by AgentCore network interfaces](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#teardown-blocked-by-agentcore-network-interfaces) in the deployment guide shows how to inspect the stack, when to retry, and how to finish the deletion by retaining the blocked resources.
+
 ### Stack outputs
 
 After deployment, the stack emits these outputs (retrieve with `aws cloudformation describe-stacks --stack-name backgroundagent-dev --query 'Stacks[0].Outputs' --output table`):
@@ -207,7 +207,7 @@ After deployment, the stack emits these outputs (retrieve with `aws cloudformati
 | `CedarWasmLayerArn` | Lambda layer ARN for the Cedar WASM policy engine |
 | `TraceArtifactsBucketName` | S3 bucket for agent trace artifacts (7-day lifecycle) |
 | `GitHubTokenSecretArn` | Secrets Manager secret ARN for the GitHub PAT |
-| `OperationalAlertsTopicArn` | SNS topic for DLQ and monthly-budget alarms |
+| `OperationalAlertsTopicArn` | ARN of the `OperationalAlerts` topic, the SNS topic that every CloudWatch alarm of the stack notifies (Lambda errors, DLQ depth, monthly budgets, webhook screening, XSS matches on the signed webhook routes) |
 
 When the Slack or Linear integrations are enabled, the stack emits additional outputs (e.g. `Slack*` and `Linear*` secret ARNs and integration table names).
 

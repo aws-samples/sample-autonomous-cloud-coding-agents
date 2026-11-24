@@ -17,8 +17,9 @@
  *  SOFTWARE.
  */
 
-import { App, Stack } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { App, Aspects, Stack } from 'aws-cdk-lib';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
+import { AwsSolutionsChecks } from 'cdk-nag';
 import { AgentVpc } from '../../src/constructs/agent-vpc';
 
 describe('AgentVpc', () => {
@@ -218,5 +219,44 @@ describe('AgentVpc with custom props', () => {
 
     // 3 AZs × 2 subnet types = 6 subnets
     template.resourceCountIs('AWS::EC2::Subnet', 6);
+  });
+});
+
+describe('AgentVpc under cdk-nag', () => {
+  let stack: Stack;
+  let template: Template;
+
+  beforeAll(() => {
+    stack = new Stack(new App(), 'TestStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    new AgentVpc(stack, 'AgentVpc');
+    Aspects.of(stack).add(new AwsSolutionsChecks());
+    template = Template.fromStack(stack);
+  });
+
+  test('emits no warning for a rule that cdk-nag could not evaluate', () => {
+    Annotations.fromStack(stack).hasNoWarning('*', Match.stringLikeRegexp('CdkNagValidationFailure'));
+  });
+
+  test('exempts only the EC23 validation failure, on groups that admit nothing but the VPC range on 443', () => {
+    const [vpcId] = Object.keys(template.findResources('AWS::EC2::VPC'));
+    const groups = Object.values(template.findResources('AWS::EC2::SecurityGroup', {
+      Properties: { GroupDescription: Match.stringLikeRegexp('Endpoint/SecurityGroup$') },
+    }));
+    expect(groups).toHaveLength(7);
+    for (const group of groups) {
+      // The broad id (AwsSolutions-EC23) would also hide a real finding.
+      expect(group.Metadata?.cdk_nag?.rules_to_suppress).toEqual([
+        { id: 'CdkNagValidationFailure', applies_to: ['AwsSolutions-EC23'], reason: expect.any(String) },
+      ]);
+      expect(group.Properties.SecurityGroupIngress).toEqual([{
+        CidrIp: { 'Fn::GetAtt': [vpcId, 'CidrBlock'] },
+        Description: expect.anything(),
+        FromPort: 443,
+        IpProtocol: 'tcp',
+        ToPort: 443,
+      }]);
+    }
   });
 });

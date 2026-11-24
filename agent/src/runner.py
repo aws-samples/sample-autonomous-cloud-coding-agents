@@ -40,9 +40,27 @@ from config import AGENT_WORKSPACE
 from gateway_tools import GATEWAY_SERVER_NAME, build_gateway_server
 from hooks import _map_strings, _screened
 from models import AgentResult, TaskConfig, TokenUsage
+from output_scanner import scan_tool_output
 from progress_writer import _ProgressWriter
 from shell import _clean_env, log, log_error_cw, truncate
 from telemetry import _TrajectoryWriter
+
+
+def _screened_text(value: Any) -> str:
+    """Return *value* as the text that is recorded of it, screened.
+
+    The input of a tool call is a dict and a tool result can be a list of
+    content blocks: both are recorded as their ``str()``. Their strings are
+    screened first, because ``str()`` escapes the quotes, tabs and newlines
+    the patterns rely on. The text as a whole then passes the scanner, for
+    what only a key and its value show together, but not the redaction of
+    log lines: that takes everything up to the next blank, which here
+    includes the quote and the comma that close a string, and the web
+    console reads the arguments of a call back from this text.
+    """
+    if isinstance(value, str):
+        return _screened(value)
+    return scan_tool_output(str(_map_strings(value, _screened))).redacted_content
 
 
 def _format_tool_result(block) -> tuple[str, str]:
@@ -54,12 +72,7 @@ def _format_tool_result(block) -> tuple[str, str]:
     and the CLI does not take every rewrite.
     """
     status = "ERROR" if block.is_error else "ok"
-    content = block.content
-    if not isinstance(content, str):
-        # A list of content blocks: its strings are screened before str()
-        # escapes the quotes, tabs and newlines the patterns rely on.
-        content = str(_map_strings(content, _screened))
-    return status, _screened(content)
+    return status, _screened_text(block.content)
 
 
 def _result_error_text(message: Any) -> str:
@@ -694,18 +707,19 @@ async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 w
                     tool_results=[],
                 )
 
-                # Write progress events for this message
+                # Write progress events for this message. The text is screened before the
+                # writer cuts it to a preview: a credential cut in two is not recognised.
                 progress.write_agent_turn(
                     turn=result.turns,
                     model=message.model,
-                    thinking=turn_thinking.strip(),
-                    text=turn_text.strip(),
+                    thinking=_screened(turn_thinking.strip()),
+                    text=_screened(turn_text.strip()),
                     tool_calls_count=len(turn_tool_calls),
                 )
                 for tc in turn_tool_calls:
                     progress.write_agent_tool_call(
                         tool_name=tc["name"],
-                        tool_input=str(tc.get("input", "")),
+                        tool_input=_screened_text(tc.get("input", "")),
                         turn=result.turns,
                     )
                 # Tool result events are written from the UserMessage branch
@@ -785,14 +799,15 @@ async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 w
                     usage=usage,
                 )
 
-                # Write progress cost update event
+                # Write progress cost update event. Its ``turn`` is the number
+                # the turn and tool events carry, not the CLI's ``num_turns``.
                 input_toks = usage.input_tokens if usage else 0
                 output_toks = usage.output_tokens if usage else 0
                 progress.write_agent_cost_update(
                     cost_usd=result.cost_usd,
                     input_tokens=input_toks,
                     output_tokens=output_toks,
-                    turn=result.num_turns,
+                    turn=result.turns,
                 )
 
             elif isinstance(message, UserMessage):
@@ -845,10 +860,12 @@ async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 w
             f"Exception during Claude session: {type(e).__name__}: {e}",
             task_id=config.task_id or None,
         )
-        progress.write_agent_error(error_type=type(e).__name__, message=str(e))
+        # The text of an exception may quote a command or a URL.
+        err_text = _screened(str(e))
+        progress.write_agent_error(error_type=type(e).__name__, message=err_text)
         if result.status == "unknown":
             result.status = "error"
-            result.error = f"Claude session failed: {e}"
+            result.error = f"Claude session failed: {err_text}"
     finally:
         # Also cover startup/query failure and cancellation, before pipeline
         # teardown removes the task's lifecycle registry entry.

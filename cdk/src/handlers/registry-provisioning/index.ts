@@ -76,7 +76,7 @@ const CLIENT_TOKEN_LENGTH = 64;
  *  and a stopped handler fails the delete at once. */
 const RECORD_DELETION_BUDGET_MS = 30_000;
 
-type DeleteAttempt = 'started' | 'absent' | 'retryable';
+type DeleteAttempt = 'absent' | 'pending';
 
 /** The registry id is the last ARN segment; we also accept a bare id. */
 function registryIdFromArn(arn: string): string {
@@ -154,15 +154,15 @@ async function deleteRegistryRecords(registryId: string): Promise<void> {
  * Start or re-drive asynchronous deletion: first the records, then the registry.
  *
  * A retryable service error is ambiguous: the request may have reached the
- * service even though the response did not reach us. Returning `retryable`
- * lets the Provider waiter observe the current state and re-issue the
- * idempotent delete when the registry is not already DELETING.
+ * service even though the response did not reach us. It is reported as `pending`,
+ * like an accepted delete: the Provider waiter observes the current state and
+ * re-issues the idempotent delete when the registry is not already DELETING.
  */
 async function requestRegistryDeletion(registryId: string): Promise<DeleteAttempt> {
   try {
     await deleteRegistryRecords(registryId);
     await client.send(new DeleteRegistryCommand({ registryId }));
-    return 'started';
+    return 'pending';
   } catch (err) {
     if (err instanceof ResourceNotFoundException) return 'absent';
     // Defence in depth behind the shape guard, and deliberately Delete-only. The guard
@@ -183,7 +183,7 @@ async function requestRegistryDeletion(registryId: string): Promise<DeleteAttemp
         registryId,
         error: String(err),
       });
-      return 'retryable';
+      return 'pending';
     }
     throw err;
   }

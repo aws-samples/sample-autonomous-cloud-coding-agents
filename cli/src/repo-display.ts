@@ -24,6 +24,7 @@ import {
   type ComputeDeploymentStatus,
 } from './compute-substrate';
 import type { GithubTokenSecretSource } from './github-token';
+import { geoPrefixOf } from './model-id';
 import { redactSecretArn } from './operator-context';
 import { RepoConfigRow } from './repo-lookup';
 
@@ -34,6 +35,8 @@ export interface PlatformStackContext {
   readonly deployment: ComputeDeployment;
   readonly runtimeArn: string | null;
   readonly githubTokenSecretArn: string | null;
+  /** The stack's `BedrockGeoRegion` output; null on a stack that predates it. */
+  readonly bedrockGeoRegion: string | null;
 }
 
 /**
@@ -47,16 +50,31 @@ export const PLATFORM_REPO_DEFAULTS = {
    * the runtime actually invokes (see the agent's ``ANTHROPIC_MODEL`` fallback and
    * the Bedrock grant list it must appear in).
    *
-   * Keep these three in step. This is not only what ``repo show`` prints:
+   * Keep these three in step. This is not only what ``repo show`` prints (in the
+   * deployment's own geography, see {@link platformDefaultModelId}):
    * ``platform doctor`` derives the model it probes for ACCESS from this value, so
    * if it names a different model than the runtime invokes, doctor can report a
    * healthy stack while every task fails at turn 0 with AccessDenied.
    */
   model_id: 'global.anthropic.claude-opus-5-5',
   max_turns: 200,
+  /** ``DEFAULT_MEMORY_TOKEN_BUDGET`` of ``cdk/src/handlers/shared/memory.ts``; a test holds the two equal. */
+  memory_token_budget: 2_000,
   poll_interval_ms: 30_000,
   approval_gate_cap: 50,
 } as const;
+
+/**
+ * The stack invokes the platform default through the inference profiles of its own geography,
+ * so the geography the stack exports replaces the one in the literal.
+ */
+function platformDefaultModelId(bedrockGeoRegion: string | null): string {
+  const literal = PLATFORM_REPO_DEFAULTS.model_id;
+  const deployedGeo = bedrockGeoRegion?.trim();
+  const literalGeo = geoPrefixOf(literal);
+  if (!deployedGeo || !literalGeo) return literal;
+  return `${deployedGeo}.${literal.slice(literalGeo.length + 1)}`;
+}
 
 /** How `repo show` resolved the effective GitHub token (subset of the resolver's sources). */
 export type GithubTokenSource = Exclude<GithubTokenSecretSource, 'explicit'>;
@@ -79,6 +97,7 @@ export interface RepoConfigDisplay {
     readonly model_id: string;
     readonly max_turns: number;
     readonly max_budget_usd: string;
+    readonly memory_token_budget: number;
     readonly poll_interval_ms: number;
     readonly approval_gate_cap: number;
     readonly github_token_source: GithubTokenSource;
@@ -117,13 +136,14 @@ export function formatRepoConfigForDisplay(
   mark('model_id', config.model_id !== undefined);
   mark('max_turns', config.max_turns !== undefined);
   mark('max_budget_usd', config.max_budget_usd !== undefined);
+  mark('memory_token_budget', config.memory_token_budget !== undefined);
   mark('poll_interval_ms', config.poll_interval_ms !== undefined);
   mark('approval_gate_cap', config.approval_gate_cap !== undefined);
   fieldSources.github_token_secret_arn = usesBlueprintToken ? 'blueprint' : 'platform';
 
   const blueprintOverrides: Record<string, unknown> = {};
   for (const key of [
-    'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd',
+    'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd', 'memory_token_budget',
     'poll_interval_ms', 'approval_gate_cap', 'system_prompt_overrides',
     'egress_allowlist', 'cedar_policies', 'github_token_secret_arn',
   ] as const) {
@@ -152,11 +172,12 @@ export function formatRepoConfigForDisplay(
       compute_type: compute.compute_type,
       runtime_arn: compute.compute_available && compute.compute_type === 'agentcore'
         ? config.runtime_arn ?? platform.runtimeArn ?? undefined : undefined,
-      model_id: config.model_id ?? PLATFORM_REPO_DEFAULTS.model_id,
+      model_id: config.model_id ?? platformDefaultModelId(platform.bedrockGeoRegion),
       max_turns: config.max_turns ?? PLATFORM_REPO_DEFAULTS.max_turns,
       max_budget_usd: config.max_budget_usd !== undefined
         ? String(config.max_budget_usd)
         : 'unlimited',
+      memory_token_budget: config.memory_token_budget ?? PLATFORM_REPO_DEFAULTS.memory_token_budget,
       poll_interval_ms: config.poll_interval_ms ?? PLATFORM_REPO_DEFAULTS.poll_interval_ms,
       approval_gate_cap: config.approval_gate_cap ?? PLATFORM_REPO_DEFAULTS.approval_gate_cap,
       github_token_source: usesBlueprintToken ? 'blueprint' : 'platform',
@@ -212,6 +233,13 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
       text: display.field_sources.max_budget_usd === 'blueprint'
         ? `${display.effective.max_budget_usd} (per-blueprint override)`
         : '(platform default) unlimited',
+    },
+    {
+      key: 'memory_token_budget',
+      text: formatSourcedValue(
+        String(display.effective.memory_token_budget),
+        display.field_sources.memory_token_budget,
+      ),
     },
     {
       key: 'poll_interval_ms',

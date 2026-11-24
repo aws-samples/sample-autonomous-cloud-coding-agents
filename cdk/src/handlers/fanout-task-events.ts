@@ -59,7 +59,7 @@ import {
   postIssueCommentAdf,
   type AdfBlock,
 } from './shared/jira-feedback';
-import { updateJiraIterationComment } from './shared/jira-preview';
+import { updateJiraIterationComment } from './shared/jira-iteration-comment';
 import {
   jiraIterationFrame,
   renderJiraFinalStatusComment,
@@ -185,12 +185,13 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     'approval_requested',
   ]),
   // GitHub edits a single issue comment in place (§6.4) covering
-  // pr_created + terminal — including cancellations and strands so
-  // the comment reflects the task's final outcome. Approval signals
-  // are intentionally NOT posted to GitHub: the issue comment is
-  // for progress, not synchronous gating.
+  // pr_created + terminal, including cancellations, strands, and
+  // timeouts so the comment reflects the task's final outcome. Approval
+  // signals are intentionally NOT posted to GitHub: the issue comment
+  // is for progress, not synchronous gating.
   github: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
+    'task_timed_out',
     'pr_created',
   ]),
   // Linear posts deterministic status comments on the platform tier
@@ -2007,10 +2008,10 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
 
   // A completed iteration whose build is red is not a clean success: it gets
   // the failure pointer and frame, with the reason, as it does on Linear, in
-  // the reconciler and when ``jira-preview.ts`` re-renders the comment. Not
-  // here when it changed no code: it answered a question, the build was red
-  // before it, and the failure frame would leave its answer out. The first
-  // run of an issue is rendered from the event alone.
+  // the reconciler and when ``jira-iteration-comment.ts`` re-renders the
+  // comment. Not here when it changed no code: it answered a question, the
+  // build was red before it, and the failure frame would leave its answer
+  // out. The first run of an issue is rendered from the event alone.
   const { eventType, errorTitle } = isIteration && task.code_changed !== false
     ? jiraIterationFrame(event.event_type, task.build_passed, classifiedTitle)
     : { eventType: event.event_type, errorTitle: classifiedTitle };

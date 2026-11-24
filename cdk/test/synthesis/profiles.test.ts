@@ -117,7 +117,7 @@ describe('structural synthesis profiles', () => {
           forkBlueprintRepo: 'example/census-blueprints',
           bedrockModels: expect.arrayContaining([...DEFAULT_BEDROCK_MODEL_IDS]),
         });
-        expect(matches[0].context.bedrockModels).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length + 8);
+        expect(matches[0].context.bedrockModels).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length + 16);
         expect(matches[0].expectedError).toBeUndefined();
       }
     }

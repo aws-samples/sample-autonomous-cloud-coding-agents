@@ -45,6 +45,9 @@ const NO_NAKED_SDK_CLIENT = {
     + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
     + ' the exception in this selector.',
 };
+const NO_IMPORT_OUTSIDE_PACKAGE = 'The CLI ships only lib/, compiled from cli/src: a file outside the cli package is not part of an'
+  + ' installed CLI. Mirror an API type or constant of the CDK in src/types.ts, which `mise run check:types-sync` compares with the'
+  + ' CDK declaration. Copy any other value into src and pin the copy with a parity test such as test/constants-parity.test.ts.';
 
 export default [
   // Global ignores
@@ -73,6 +76,9 @@ export default [
         ecmaVersion: 2018,
         sourceType: 'module',
         project: './tsconfig.dev.json',
+        // Without this, a run without --fix parses the copy on disk, where a shebang is not a
+        // comment, and license-header reports the header of src/bin/bgagent.ts as misplaced (#172).
+        disallowAutomaticSingleRunInference: true,
       },
     },
     plugins: {
@@ -294,14 +300,23 @@ export default [
     },
   },
 
-  // Override: allow console.log in CLI source files (console output is the product)
   {
     files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
+      // Console output is the product.
       'no-console': 'off',
       // Every AWS SDK client in src is built by the attributed factory (#319). The whole
       // list again: a later block replaces a rule's options.
       'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
+      // The compiler (rootDir) refuses only a TypeScript source outside the package, not build
+      // output or a JSON file. The second zone is Yarn's workspace links, which the first lets pass.
+      'import-x/no-restricted-paths': ['error', {
+        basePath: __dirname,
+        zones: [
+          { target: './src', from: '..', except: ['./cli', './node_modules'], message: NO_IMPORT_OUTSIDE_PACKAGE },
+          { target: './src', from: '../node_modules/@abca', except: ['./cli'], message: NO_IMPORT_OUTSIDE_PACKAGE },
+        ],
+      }],
     },
   },
 
@@ -310,14 +325,6 @@ export default [
     files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
-    },
-  },
-
-  // Override: shebang files can't have the license header at line 1
-  {
-    files: ['src/bin/**/*.{ts,tsx,mts,cts}'],
-    rules: {
-      'license-header/header': 'off',
     },
   },
 ];

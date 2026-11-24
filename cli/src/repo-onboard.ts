@@ -52,7 +52,7 @@ export interface OnboardRepoDependencies {
 }
 
 /** Register or re-activate a repository in RepoTable (operator path). */
-// eslint-disable-next-line complexity -- predates the ceiling (45 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (44, down from 45 when it landed); must not grow
 export async function onboardRepo(
   region: string,
   tableName: string,
@@ -121,10 +121,9 @@ export async function onboardRepo(
   }
   if (existing?.egress_allowlist?.length) item.egress_allowlist = existing.egress_allowlist;
   if (existing?.cedar_policies?.length) item.cedar_policies = existing.cedar_policies;
-  if (existing?.approval_gate_cap !== undefined) {
-    item.approval_gate_cap = existing.approval_gate_cap;
+  for (const key of ['approval_gate_cap', 'max_budget_usd', 'memory_token_budget'] as const) {
+    if (existing?.[key] !== undefined) item[key] = existing[key];
   }
-  if (existing?.max_budget_usd !== undefined) item.max_budget_usd = existing.max_budget_usd;
 
   await ddb.send(new PutCommand({
     TableName: tableName,

@@ -35,6 +35,7 @@ import {
   LEGACY_DEPLOYMENT_FEATURES,
   MINIMAL_DEPLOYMENT_FEATURES,
 } from '../../src/deployment/features';
+import { ComputeBackend, resolveComputeBackend } from '../../src/handlers/shared/compute-backend';
 import { buildApp } from '../../src/main';
 import { AgentStack } from '../../src/stacks/agent';
 
@@ -49,9 +50,17 @@ describe('regional capability catalog', () => {
     expect(Object.keys(CAPABILITY_CATALOG.features).sort()).toEqual([...DEPLOYMENT_FEATURES].sort());
   });
 
+  test('has an entry for every compute backend and limits only Lambda MicroVMs to Regions', () => {
+    const backends = Object.keys(CAPABILITY_CATALOG.compute) as ComputeBackend[];
+    // resolveComputeBackend throws on a name that is not a backend.
+    expect(backends.map(backend => resolveComputeBackend(backend)).sort()).toEqual(['agentcore', 'ecs', 'lambda-microvm']);
+    expect(backends.filter(backend => CAPABILITY_CATALOG.compute[backend].regions)).toEqual(['lambda-microvm']);
+  });
+
   const capabilities: Array<[string, Capability]> = [
     ['core', CAPABILITY_CATALOG.core],
     ...DEPLOYMENT_FEATURES.map((feature): [string, Capability] => [feature, CAPABILITY_CATALOG.features[feature]]),
+    ...Object.entries(CAPABILITY_CATALOG.compute),
   ];
   test.each(capabilities)(
     '%s has well-formed, de-duplicated Regions and a remediation',

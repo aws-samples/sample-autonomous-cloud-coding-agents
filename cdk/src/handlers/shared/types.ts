@@ -278,11 +278,13 @@ export interface TaskRecord {
   /** S3 URI of a repo-less workflow's delivered artifact (deliver_artifact,
    *  #248 Phase 3); absent for coding tasks / comment-only delivery. */
   readonly artifact_uri?: string;
-  /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
-   *  tripped any cap. Equals the legacy `turns` value. */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept raw for
+   *  debugging. Equals the legacy `turns` value. Not the count `max_turns`
+   *  limits, and it can exceed the limit on a task that never reached it:
+   *  see `TaskResult` in `agent/src/models.py`. */
   readonly turns_attempted?: number | string;
-  /** Rev-5 DATA-1: turns that actually completed (clamped to
-   *  `max_turns` when `agent_status='error_max_turns'`). */
+  /** Rev-5 DATA-1: turns that actually completed: the model's answers, which
+   *  is what `max_turns` limits (clamped to it). */
   readonly turns_completed?: number | string;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
@@ -350,8 +352,12 @@ export interface TaskRecord {
   readonly jira_final_comment_event_id?: string;
   /** Durable Jira iteration body, merged with preview metadata by every writer. */
   readonly jira_iteration_status?: { readonly body: Record<string, unknown>; readonly terminal: boolean };
-  /** At-most-once claim for the standalone preview comment POST. */
-  readonly jira_preview_claimed?: boolean;
+  /**
+   * At-most-once claim for the standalone preview comment POST. The claim is
+   * the presence of the attribute (the write is conditional on
+   * ``attribute_not_exists``), so it is never ``false``.
+   */
+  readonly jira_preview_claimed?: true;
   readonly jira_preview_comment_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
@@ -517,8 +523,9 @@ export interface TaskDetail {
   readonly completed_at: string | null;
   /**
    * ISO timestamp of the agent's last heartbeat, written by the in-guest pipeline
-   * every 45 s on every compute backend (``agent/src/server.py``
-   * ``_heartbeat_worker``). ``null`` before the first beat, on tasks that never
+   * every 45 s on the agentcore and lambda-microvm backends (``agent/src/server.py``
+   * ``_heartbeat_worker``) and once at start on ecs, which runs the pipeline
+   * without that server. ``null`` before the first beat, on tasks that never
    * ran, and on records predating the field.
    *
    * Surfaced (ADR-021 P2r2-F11) because it was the platform's only in-guest
@@ -545,11 +552,12 @@ export interface TaskDetail {
   readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
-  /** Rev-5 DATA-1: SDK-attempted turn count (may exceed `max_turns` by 1
-   *  under `agent_status='error_max_turns'`). */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept for debugging.
+   *  Not the count `max_turns` limits, and it can exceed the limit on a task
+   *  that never reached it: see `TaskResult` in `agent/src/models.py`. */
   readonly turns_attempted: number | null;
-  /** Rev-5 DATA-1: actually-completed turns, clamped to `max_turns`
-   *  when the cap tripped. */
+  /** Rev-5 DATA-1: actually-completed turns: the model's answers, which is
+   *  what `max_turns` limits (clamped to it). */
   readonly turns_completed: number | null;
   readonly prompt_version: string | null;
   /** True when the task was submitted with ``--trace`` — surfaces the
@@ -1261,6 +1269,11 @@ export interface CreateWebhookResponse {
   readonly webhook_id: string;
   readonly name: string;
   readonly secret: string;
+  /**
+   * URL that external systems post tasks to (`POST /webhooks/tasks`). It belongs to the
+   * API deployment, not to the webhook: every webhook of a deployment gets the same URL.
+   */
+  readonly webhook_url: string;
   readonly created_at: string;
 }
 

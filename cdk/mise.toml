@@ -144,11 +144,21 @@ run = "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, re
 
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
+# The pipeline does not run this task. The deploy job of .github/workflows/deploy.yml runs
+# `npx cdk deploy` on the assembly that build.yml synthesized, so nothing listed here
+# happens there unless the workflow has a step of its own for it (#843):
+#   :clean:disk             local only: it deletes cdk.out, which the pipeline deploys.
+#   //web:bundle            done by the build: synth:quiet depends on it.
+#   preflight-bootstrap     not run by the pipeline (#127).
+#   preflight-log-delivery  reported, not applied: the diff job runs it with --check-only.
+# A new entry of `depends` or `run` needs the same decision.
+# test/scripts/deploy-workflow.test.ts fails until the entry is recorded there.
+#
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
 # several GB of working space, and uv/Docker caches accumulate across runs.
 # The operator console stack packages web/dist, so bundle it first.
 depends = [":clean:disk", "//web:bundle"]
-# The log-delivery preflight runs as the FIRST command of this task rather than as a
+# The log-delivery preflight runs as a command of this task rather than as a
 # `depends`, so that the arguments after `--` reach BOTH it and `cdk deploy`. As a
 # `depends` it could not see them: mise forwards `--` args only to the invoked task's own
 # `run`, so `mise //cdk:deploy -- -c stackName=x` deployed stack `x` while the preflight
@@ -156,7 +166,7 @@ depends = [":clean:disk", "//web:bundle"]
 # is a step that DELETES resources, so the two must not be able to disagree about which
 # stack, account, or region they are operating on.
 #
-# A non-zero exit from the first command aborts the task, which is the intended
+# A non-zero exit from that command aborts the task, which is the intended
 # fail-closed behaviour: the deploy must not proceed into a known-bad migration state.
 #
 # `required=false` is load-bearing — without it a bare `mise //cdk:deploy` (the common
@@ -176,16 +186,20 @@ run = [
 # ECS compute backend you must set the ComputeTypes CFN *parameter* — `cdk bootstrap`
 # has no way to pass template parameters (no --parameters flag; --context sets CDK
 # construct context, NOT a CFN parameter), so run this task once, then set the
-# parameter directly on the CDKToolkit stack:
-#   aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
-#     --capabilities CAPABILITY_NAMED_IAM \
-#     --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs\,lambda-microvm
-#   # verify: aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
+# parameter on the CDKToolkit stack with the commands under "Using these policies" in
+# docs/design/DEPLOYMENT_ROLES.md. An update that names ComputeTypes alone resets the
+# other parameters to the template defaults.
+#
+# --force (#701): without it, the CDK CLI does not overwrite a CDKToolkit stack whose
+# BootstrapVariant parameter differs from the template's. It warns, changes nothing and exits 0.
+# A standard `cdk bootstrap` records another variant, and the stack can keep it after this
+# template has replaced that bootstrap, so every later run needs the flag. The flag stays in
+# front of the pass-through arguments, so that `-- --no-force` cancels it for a run.
 [tasks.bootstrap]
-description = "Bootstrap CDK with least-privilege policies (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
+description = "Bootstrap CDK with least-privilege policies, replacing an existing bootstrap (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
 depends = [":install", ":bootstrap:generate"]
 # Args after `--` (e.g. `aws://<account>/<region>`) pin the environment; `bgagent setup` passes one.
-run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml {{arg(name='cdkargs', var=true, required=false)}}"
+run = "npx cdk bootstrap --force --template bootstrap/bootstrap-template.yaml {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks."bootstrap:generate"]
 description = "Regenerate all bootstrap artifacts (policies JSON, template YAML, version/hash files)"
@@ -206,6 +220,11 @@ description = "CDK deploy-then-verify integration tests (integ-runner). Needs AW
 depends = [":compile"]
 run = [
   "mkdir -p $TMPDIR",
+  # integ-runner checks snapshots before it deploys, and no option skips that (#569).
+  # A snapshot left by an earlier local run is compared for real, so the echo does not
+  # call the check meaningless. mise appends the arguments after `--` to the last
+  # command, so the echo stays ahead of integ-runner.
+  "echo 'integ: no snapshot is committed, so on a fresh checkout (every CI run) the snapshot check of integ-runner lists each test as NEW and counts it as failed. That is expected and is not a test failure: --force deploys and verifies every test regardless, and that run is reported under Test Results.'",
   # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
   # snapshot to diff against or update. --force re-runs the deploy-then-verify
   # unconditionally, which is what we want in CI.

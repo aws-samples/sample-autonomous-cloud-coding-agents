@@ -28,7 +28,6 @@ Determine which area the issue falls into:
 ## Build/Compilation Issues
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:compile 2>&1 | tail -50  # TypeScript errors
 mise //cdk:test 2>&1 | tail -50     # Test failures
 ```
@@ -50,6 +49,8 @@ aws cloudformation describe-stack-events --stack-name backgroundagent-dev \
 **Common causes:**
 - Docker not running — Required for CDK asset bundling
 - Missing CDK bootstrap — Run `mise //cdk:bootstrap`
+  - The task passes `--force` to `cdk bootstrap`, so it replaces the bootstrap (the `CDKToolkit` stack) that the account and Region already have, for every CDK app that deploys through it. That includes a standard CDK bootstrap and one with a newer CDK bootstrap version than the task installs. `mise //cdk:bootstrap -- --no-force` cancels the flag for a run. The task then leaves such a bootstrap unchanged and still exits 0.
+  - Ask the user before you run the task, unless the user has said that no other CDK app deploys in that account and Region. What the replacement changes for the other CDK apps is described under "Using these policies" in `docs/design/DEPLOYMENT_ROLES.md`.
 - IAM permission issues — Check `aws sts get-caller-identity`
 - Region mismatch — Ensure consistent region across all commands
 

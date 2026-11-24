@@ -55,9 +55,11 @@ export const APP_ID_ENV = 'AWS_SDK_UA_APP_ID';
 
 /**
  * RFC 7230 token charset. `#` is the scheme's structural separator and is
- * deliberately excluded. Mirrors `_ALLOWED` in `agent/src/ua.py`.
+ * deliberately excluded. Mirrors `_ALLOWED` in `agent/src/ua.py`. The `u` flag
+ * matches by code point, as Python iterates a string, so a character outside
+ * the Basic Multilingual Plane is one `-`, not two.
  */
-const UA_TOKEN_SAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/g;
+const UA_TOKEN_SAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/gu;
 
 /** Replace every non-UA-token char (incl. non-ASCII) with `-`. */
 export function sanitizeUaValue(raw: string): string {

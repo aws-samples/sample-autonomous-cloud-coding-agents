@@ -20,7 +20,7 @@
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { JIRA_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 import { postIssueCommentAdf, updateIssueCommentAdf } from './jira-feedback';
-import { jiraPreviewDocument, updateJiraIterationComment } from './jira-preview';
+import { jiraPreviewDocument, updateJiraIterationComment } from './jira-iteration-comment';
 import { JiraPreviewBudget } from './jira-preview-budget';
 import { jiraIssueIdentity } from './jira-task-by-issue';
 import { logger } from './logger';
@@ -57,8 +57,6 @@ export async function deliverJiraDeploymentPreview(
   if (original.channel_source !== 'jira') return;
   const budget = new JiraPreviewBudget(remaining);
   try {
-    const document = jiraPreviewDocument(screenshotUrl, previewUrl);
-    if (!document) throw new Error('Jira screenshot URL is not allowed');
     if (!isTaskOfRepo(original, repo)) throw new Error('Deployment repository does not match the task');
     const metadata = original.channel_metadata;
     const cloudId = metadata?.jira_cloud_id;
@@ -113,6 +111,8 @@ export async function deliverJiraDeploymentPreview(
         throw new Error('No Jira task matches the deployment SHA');
       }
     } else if (task.head_sha !== sha) {
+      // An iteration recorded without head_sha is refused as well, on purpose:
+      // a preview is never attributed by guessing.
       throw new Error('Jira iteration SHA does not match the deployment');
     }
     await budget.run(() => ddb.send(new UpdateCommand({
@@ -131,6 +131,10 @@ export async function deliverJiraDeploymentPreview(
       if (!result.ok) throw new Error('Jira iteration preview update failed');
       return;
     }
+    // Only the standalone comment is built from these URLs, so only it is refused.
+    // An iteration comment renders no preview block for a URL that is not allowed.
+    const document = jiraPreviewDocument(screenshotUrl, previewUrl);
+    if (!document) throw new Error('Jira screenshot URL is not allowed');
     // Claim before POST: duplicate events, including concurrent deliveries, must
     // never create a second comment. Keep uncertain/failed POSTs claimed because
     // Jira may have committed before a transport timeout. Failures are observable.

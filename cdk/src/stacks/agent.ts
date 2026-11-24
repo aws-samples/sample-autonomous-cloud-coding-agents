@@ -21,6 +21,7 @@ import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -92,6 +93,7 @@ import { WebhookTable } from '../constructs/webhook-table';
 import { assertCapabilitiesAvailable } from '../deployment/capabilities';
 import { channelOauthSecretPatterns, DeploymentFeatures, enabledFeatures, resolveDeploymentFeatures } from '../deployment/features';
 import { resolveComputeBackends } from '../handlers/shared/compute-backend';
+import { WEBHOOK_METRIC_NAMESPACE, WEBHOOK_SCREENING_FAILED_METRIC } from '../handlers/shared/webhook-screening-metric';
 
 /** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
 const GUARDRAIL_NAME_MAX_LENGTH = 50;
@@ -139,6 +141,34 @@ function linearVaultWorkloadName(stack: Stack): string {
   return suffix
     ? `${LINEAR_VAULT_WORKLOAD_PREFIX}_${suffix.slice(0, room)}`
     : LINEAR_VAULT_WORKLOAD_PREFIX;
+}
+
+const WEBHOOK_SCREENING_ALARM_PERIOD_MINUTES = 5;
+
+/**
+ * One drop alarms (#794). The metric gets a datapoint only when a webhook event meets a
+ * failing guardrail call, so a rule that waits for several datapoints can miss an outage.
+ */
+function webhookScreeningAlarms(scope: Construct, trackerDeployed: boolean): cloudwatch.Alarm[] {
+  if (!trackerDeployed) return [];
+  return [new cloudwatch.Alarm(scope, 'WebhookScreeningFailedAlarm', {
+    // No dimensions: the total that every source adds to.
+    metric: new cloudwatch.Metric({
+      namespace: WEBHOOK_METRIC_NAMESPACE,
+      metricName: WEBHOOK_SCREENING_FAILED_METRIC,
+      statistic: 'Sum',
+      period: Duration.minutes(WEBHOOK_SCREENING_ALARM_PERIOD_MINUTES),
+    }),
+    threshold: 1,
+    evaluationPeriods: 1,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    alarmDescription:
+      'Guardrail screening of Jira or Linear comments, Linear project documents or the session context of a '
+      + 'Linear agent session failed, so that content was dropped. '
+      + 'A task created from the event runs without it. '
+      + 'Search the Jira and Linear webhook processor logs for "screening unavailable" (#794).',
+  })];
 }
 
 /** Properties for {@link AgentStack}. */
@@ -310,7 +340,9 @@ export class AgentStack extends Stack {
     ]);
 
     // Server access logging intentionally disabled. Rationale:
-    //  - writes: only the agent runtime IAM role (``grantPut`` below).
+    //  - uploads: only the per-task SessionRole (``AgentSessionRole``
+    //    below), tag-scoped to its own user and task prefixes. No
+    //    compute role holds a grant on this bucket.
     //  - reads: only via short-lived presigned URL issued by
     //    ``get-trace-url`` after a Cognito auth check + ownership
     //    check against the TaskRecord.
@@ -328,7 +360,7 @@ export class AgentStack extends Stack {
     NagSuppressions.addResourceSuppressions(traceArtifactsBucket.bucket, [
       {
         id: 'AwsSolutions-S1',
-        reason: 'Debug-only artifacts (design §10.1) with 7-day TTL; writes confined to runtime IAM role by grantPut; reads only via short-lived presigned URLs from an authn\'d handler. Object-level audit intentionally omitted — cost/complexity of CloudTrail data events or a log bucket is not justified for opt-in --trace usage.',
+        reason: 'Debug-only artifacts (design §10.1) with 7-day TTL; uploads confined to the per-task SessionRole, tag-scoped to its own user and task prefixes; reads only via short-lived presigned URLs from an authn\'d handler. Object-level audit intentionally omitted — cost/complexity of CloudTrail data events or a log bucket is not justified for opt-in --trace usage.',
       },
     ]);
 
@@ -2129,8 +2161,8 @@ export class AgentStack extends Stack {
     // is no RestackProcessor Lambda to wire here.
 
     // --- Operational alerts channel (§11.5 follow-up, issue #629) ---
-    // A single stack-wide SNS topic that the DLQ-depth alarms publish to
-    // on state change, so poison-pill accumulation pushes a notification
+    // A single stack-wide SNS topic that every alarm of this stack publishes
+    // to when it goes into ALARM, so a failure pushes a notification
     // instead of sitting silently in the Alarms console. Delivery target
     // is configurable: pass an email via `-c alertEmail=ops@example.com`
     // (AWS sends a confirmation link that must be clicked), or leave it
@@ -2139,18 +2171,23 @@ export class AgentStack extends Stack {
     const operationalAlerts = new OperationalAlerts(this, 'OperationalAlerts', {
       alertEmail: this.node.tryGetContext('alertEmail') as string | undefined,
     });
-    // Wire the DLQ-depth alarms shipped in #117 (FanOut + approval-metrics
-    // publisher) plus the screenshot processor's async-invoke DLQ alarm —
-    // all three share the threshold-1 "records landed in a DLQ" shape.
+    // Every alarm of the stack is listed here (#686). A test in
+    // test/stacks/agent.test.ts fails on an alarm that is left out.
     operationalAlerts.addAlarmActions(
+      orchestrator.errorAlarm,
       fanOutConsumer.dlqDepthAlarm,
       approvalMetricsPublisher.dlqAlarm,
-      ...(githubScreenshot ? [githubScreenshot.processorDlqDepthAlarm] : []),
+      ...(githubScreenshot
+        ? [githubScreenshot.processorDlqDepthAlarm, githubScreenshot.processorErrorAlarm]
+        : []),
       budgetAlerts.warningAlarm,
       budgetAlerts.exceededAlarm,
       budgetAlerts.teamMembershipUnresolvedAlarm,
       // #1063: XSS-shaped bodies counted (not blocked) on the signed webhook routes.
       ...[taskApi.webhookXssCountedAlarm].filter(alarm => alarm !== undefined),
+      // Only with Linear or Jira, which emit the metric (#794). In the maintenance stack
+      // because the widest inline deployment fills the root stack's resource budget.
+      ...webhookScreeningAlarms(concurrencyMaintenance, issueOrchestrationEnabled),
       prOutcomeSweep.errorAlarm,
     );
 
@@ -2176,7 +2213,7 @@ export class AgentStack extends Stack {
 
     new CfnOutput(this, 'OperationalAlertsTopicArn', {
       value: operationalAlerts.topic.topicArn,
-      description: 'SNS topic for DLQ-depth CloudWatch alarms — subscribe Slack / PagerDuty / email here (#629)',
+      description: 'SNS topic that every CloudWatch alarm of this stack notifies — subscribe Slack / PagerDuty / email here (#629)',
     });
 
     if (githubScreenshot) {

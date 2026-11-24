@@ -89,6 +89,8 @@ const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
   ['FORGE_WEBTRIGGER_SUFFIX', 'forge_webtrigger_suffix'],
   ['MICROVM_PLATFORM_CONFIG_ENV_BY_KEY', 'env_by_key'],
   ['MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS', 'required'],
+  ['MICROVM_PLATFORM_CONFIG_ARN_KEYS', 'arn_keys'],
+  ['MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY', 'account_anchor_key'],
   // ADR-021 P2: the `/ready` warm-up ceiling and the CDK-side `/ready` hook
   // timeout are a RELATIONSHIP (`warmup_total < ready_hook`), and a relationship
   // cannot be enforced from one side — so neither side may re-declare its half.

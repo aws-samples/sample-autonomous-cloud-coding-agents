@@ -118,14 +118,32 @@ export async function fetchConfigureBundleFromStack(
   );
 }
 
+/**
+ * Read several CloudFormation stack outputs with one DescribeStacks call.
+ *
+ * The result is keyed by output name, with null for an output the stack does not have.
+ * A command that needs more than one output asks for them together: one
+ * {@link getStackOutput} per key describes the whole stack once per key.
+ */
+export async function getStackOutputs<K extends string>(
+  region: string,
+  stackName: string,
+  outputKeys: readonly K[],
+): Promise<Record<K, string | null>> {
+  const stack = await describeStack(region, stackName);
+  return Object.fromEntries(outputKeys.map(
+    (key) => [key, stack.Outputs?.find((o) => o.OutputKey === key)?.OutputValue ?? null],
+  )) as Record<K, string | null>;
+}
+
 /** Read a single CloudFormation stack output by key. */
 export async function getStackOutput(
   region: string,
   stackName: string,
   outputKey: string,
 ): Promise<string | null> {
-  const stack = await describeStack(region, stackName);
-  return stack.Outputs?.find((o) => o.OutputKey === outputKey)?.OutputValue ?? null;
+  const outputs = await getStackOutputs(region, stackName, [outputKey]);
+  return outputs[outputKey];
 }
 
 /**

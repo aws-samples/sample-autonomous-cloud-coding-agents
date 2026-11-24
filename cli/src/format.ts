@@ -395,14 +395,20 @@ export function formatEvents(events: TaskEvent[]): string {
 
 /** Format a newly created webhook (includes the one-time secret). */
 export function formatWebhookCreated(res: CreateWebhookResponse): string {
-  return [
+  const lines = [
     `Webhook:     ${res.webhook_id}`,
     `Name:        ${res.name}`,
     `Created:     ${res.created_at}`,
-    '',
-    'Secret (store securely — shown only once):',
-    res.secret,
-  ].join('\n');
+  ];
+  // An API deployed before `webhook_url` existed does not return it.
+  if (res.webhook_url) {
+    lines.push(
+      `URL:         ${res.webhook_url}`,
+      '             (the endpoint to enter in the webhook settings of the external system)',
+    );
+  }
+  lines.push('', 'Secret (store securely — shown only once):', res.secret);
+  return lines.join('\n');
 }
 
 /** Format a list of WebhookDetail as an aligned table. */
@@ -632,16 +638,15 @@ function elapsedDescription(task: TaskDetail, now: number): string {
 }
 
 function describeTurn(task: TaskDetail, turnEvent: TaskEvent | null): string {
-  // Prefer the live ``turn`` from the most recent ``agent_turn`` event
-  // over the persisted ``turns_attempted`` — the former updates mid-task
-  // (the latter is written on terminal completion in most paths).
-  const liveTurn = readNumberField(turnEvent?.metadata, 'turn');
-  const currentTurn = liveTurn ?? task.turns_attempted ?? null;
+  // A finished task shows its record, because the turn event may have left the event window.
+  // A recorded 0 stands for no count. ``turns_attempted`` can exceed the limit (see ``TaskDetail``).
+  const recorded = TERMINAL_STATUSES.includes(task.status) ? task.turns_completed : null;
+  const currentTurn = recorded || readNumberField(turnEvent?.metadata, 'turn');
   const maxTurns = task.max_turns ?? null;
   if (currentTurn == null && maxTurns == null) return PLACEHOLDER;
   const left = currentTurn == null ? PLACEHOLDER : String(currentTurn);
   const right = maxTurns == null ? PLACEHOLDER : String(maxTurns);
-  return `${left} / ~${right}`;
+  return `${left} / ${right}`;
 }
 
 function describeMilestone(milestoneEvent: TaskEvent | null, now: number): string {

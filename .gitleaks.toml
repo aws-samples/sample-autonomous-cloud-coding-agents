@@ -3,6 +3,12 @@ title = "sample-autonomous-cloud-coding-agents"
 [extend]
 useDefault = true
 
+# cdk/test/scripts/gitleaks-config.test.ts reads this file as text and fails on
+# a line in another TOML form. Write a new entry like the ones below.
+#
+# The scan of the history reads a file under the path it had in each commit:
+# when a listed file moves, add its new path and keep the old one.
+
 [[allowlists]]
 description = "PEM-shaped fixtures for output_scanner / hook tests (not real keys)."
 targetRules = ["private-key"]
@@ -13,6 +19,11 @@ paths = [
 
 [[allowlists]]
 description = "Test fixture signing secret in Slack verification unit test (not a real credential)."
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    "^cdk/test/handlers/shared/slack-verify\\.test\\.ts$",
+]
 stopwords = ["test-signing-secret-abc123"]
 
 [[allowlists]]
@@ -22,6 +33,11 @@ stopwords = ["test-signing-secret-abc123"]
 # rewritten (rebases / dep-bump merges), which is exactly how #530's baseline
 # regressed. A stopword is SHA-independent. See #537 (regression of #530).
 description = "Test idempotency-key fixture 'orch_abc_SUB-1' (not a real credential)."
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    "^cdk/test/handlers/shared/orchestration-release\\.test\\.ts$",
+]
 stopwords = ["orch_abc_SUB-1"]
 
 # Catch bare 12-digit AWS account IDs. The default ruleset does not flag these,

@@ -20,9 +20,10 @@
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { makeRepoCommand } from '../../src/commands/repo';
 import { CliError } from '../../src/errors';
+import { PLATFORM_REPO_DEFAULTS } from '../../src/repo-display';
 import { listRepoConfigs, parseRepoConfigRow } from '../../src/repo-lookup';
 import { offboardRepo, onboardRepo } from '../../src/repo-onboard';
-import { getStackOutput } from '../../src/stack-outputs';
+import { getStackOutput, getStackOutputs } from '../../src/stack-outputs';
 
 const ddbSend = jest.fn();
 
@@ -38,11 +39,21 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
 
 jest.mock('../../src/stack-outputs', () => {
   const actual = jest.requireActual('../../src/stack-outputs');
-  return { ...actual, getStackOutput: jest.fn() };
+  const perKey = jest.fn();
+  return {
+    ...actual,
+    getStackOutput: perKey,
+    getStackOutputs: jest.fn(async (region: string, stack: string, keys: readonly string[]) => {
+      const outputs: Record<string, string | null> = {};
+      for (const key of keys) outputs[key] = await perKey(region, stack, key);
+      return outputs;
+    }),
+  };
 });
 jest.mock('../../src/repo-onboard');
 
 const getStackOutputMock = getStackOutput as jest.Mock;
+const getStackOutputsMock = getStackOutputs as jest.Mock;
 const onboardRepoMock = onboardRepo as jest.Mock;
 const offboardRepoMock = offboardRepo as jest.Mock;
 
@@ -207,10 +218,59 @@ describe('repo command JSON output', () => {
     expect(payload.compute_deployment.compute_types).toEqual(['ecs', 'lambda-microvm']);
   });
 
-  test('onboard reads ComputeTypes before writing and refuses an omitted AgentCore backend', async () => {
+  test('repo show reports the platform runtime and token from the outputs of the same name', async () => {
     getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
       RepoTableName: 'RepoTable-dev',
-      ComputeSubstrate: 'ecs,lambda-microvm',
+      GitHubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:PlatformToken-AbCdEf',
+      RuntimeArn: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/platform',
+    } as Record<string, string>)[key] ?? null);
+    ddbSend.mockResolvedValueOnce({ Item: { repo: 'acme/a', status: 'active' } });
+
+    await makeRepoCommand().parseAsync(['node', 'test', 'show', 'acme/a', '--region', 'us-east-1', '--output', 'json']);
+
+    const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(payload.effective.runtime_arn).toBe('arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/platform');
+    expect(payload.effective.github_token_secret_arn)
+      .toBe('arn:aws:secretsmanager:us-east-1:123456789012:secret:****-AbCdEf');
+  });
+
+  test.each(['text', 'json'])('repo show reports the default model in the geography the stack grants in %s', async format => {
+    getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
+      RepoTableName: 'RepoTable-dev',
+      BedrockGeoRegion: 'us',
+    } as Record<string, string>)[key] ?? null);
+    ddbSend.mockResolvedValueOnce({ Item: { repo: 'acme/a', status: 'active' } });
+    const deployedDefault = PLATFORM_REPO_DEFAULTS.model_id.replace(/^[^.]+/, 'us');
+
+    await makeRepoCommand().parseAsync(['node', 'test', 'show', 'acme/a', '--region', 'us-east-1', '--output', format]);
+
+    if (format === 'json') {
+      const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+      expect(payload.effective.model_id).toBe(deployedDefault);
+      expect(payload.field_sources.model_id).toBe('platform');
+    } else {
+      const output = consoleSpy.mock.calls.map(call => call[0]).join('\n');
+      expect(output).toContain(`(platform default) ${deployedDefault}`);
+      expect(output).not.toContain(PLATFORM_REPO_DEFAULTS.model_id);
+    }
+  });
+
+  test.each(['show', 'onboard'])('repo %s reads all its stack outputs with one stack read', async action => {
+    ddbSend.mockResolvedValueOnce({ Item: { repo: 'acme/a', status: 'active' } });
+    onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active' });
+
+    await makeRepoCommand().parseAsync(['node', 'test', action, 'acme/a', '--region', 'us-east-1']);
+
+    expect(getStackOutputsMock).toHaveBeenCalledTimes(1);
+    // Every per-key answer came from that one batch: no output was read on its own.
+    expect(getStackOutputMock).toHaveBeenCalledTimes(getStackOutputsMock.mock.calls[0][2].length);
+  });
+
+  test('onboard reads ComputeTypes before writing and refuses an omitted AgentCore backend', async () => {
+    // No ComputeSubstrate in this table: the backends are taken from it when ComputeTypes is
+    // missing, so with both set the same refusal comes out whether or not ComputeTypes is read.
+    getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
+      RepoTableName: 'RepoTable-dev',
       ComputeTypes: 'ecs,lambda-microvm',
       ComputeDeploymentMode: 'additive',
     } as Record<string, string>)[key] ?? null);

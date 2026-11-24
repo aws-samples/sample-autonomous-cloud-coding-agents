@@ -179,6 +179,13 @@ describe('TaskOrchestrator construct', () => {
     });
   });
 
+  test('keeps the live alias under the logical ID that deployed stacks have', () => {
+    // CloudFormation creates a resource under a new logical ID before it deletes the old
+    // one, and a function cannot have a second alias named `live`.
+    expect(Object.keys(baseTemplate.findResources('AWS::Lambda::Alias')))
+      .toEqual(['TaskOrchestratorOrchestratorFnCurrentVersionAliaslive08F80EEB']);
+  });
+
   test('retains published versions so in-flight durable executions can replay after deployment', () => {
     baseTemplate.resourceCountIs('AWS::Lambda::Version', 1);
     baseTemplate.hasResource('AWS::Lambda::Version', {

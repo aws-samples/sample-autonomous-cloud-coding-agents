@@ -181,7 +181,6 @@ describe('runtime handlers do not bundle aws-cdk-lib', () => {
     );
     const imports = [...src.matchAll(/^import\s.*?from\s+'([^']+)';$/gm)].map((m) => m[1]);
     expect(imports.filter((i) => i.includes('constructs/') || i.includes('aws-cdk'))).toEqual([]);
-    // It should import nothing at all, in fact — it is pure data plus one helper.
     expect(imports).toEqual([]);
   });
 });

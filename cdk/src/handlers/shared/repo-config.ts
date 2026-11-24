@@ -38,6 +38,12 @@ export interface RepoConfig {
   readonly model_id?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  /**
+   * Token budget of the memory context that hydration loads for this repo
+   * (#447). Written by the Blueprint construct when ``agent.memoryTokenBudget``
+   * is supplied. When absent, hydration applies the platform default.
+   */
+  readonly memory_token_budget?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
@@ -85,6 +91,8 @@ export interface BlueprintConfig {
   readonly model_id?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  /** Per-repo memory token budget (#447) surfaced from RepoConfig; hydration applies the platform default when unset. */
+  readonly memory_token_budget?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
