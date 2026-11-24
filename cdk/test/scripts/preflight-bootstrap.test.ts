@@ -58,7 +58,10 @@ const bundle = (version: string, hash: string): Toolkit => ({
 
 const CURRENT = bundle(VERSION, HASH);
 const OLDER = bundle('1.0.0', HASH);
-const NOT_BOOTSTRAPPED: Toolkit = { error: 'An error occurred (ValidationError): Stack with id CDKToolkit does not exist' };
+/** CloudFormation's answer for a stack that does not exist, as AWS CLI v1 writes it. v2 puts `aws: [ERROR]: ` in front of the line. */
+const missing = (stack: string): string =>
+  `\nAn error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id ${stack} does not exist\n`;
+const NOT_BOOTSTRAPPED: Toolkit = { error: missing('CDKToolkit').replace('An error', 'aws: [ERROR]: An error') };
 const DENIED: Toolkit = { error: 'An error occurred (AccessDenied): not authorized' };
 
 interface Invocation {
@@ -137,6 +140,44 @@ describe('preflight-bootstrap', () => {
     expect(run.status).toBe(1);
     expect(run.stderr).toMatch(message);
     expect(run.stderr).toContain('ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1');
+  });
+
+  // The AWS CLI raises these before it sends a request. They contain "does not exist", as
+  // CloudFormation's answer for a missing stack does.
+  test.each<[string, string]>([
+    ['a profile with no cached SSO token', 'Error loading SSO Token: Token for my-sso does not exist'],
+    ['a profile that names a missing sso-session', 'The specified sso-session does not exist: "my-sso"'],
+    ['a profile that names a missing source_profile', 'The source_profile "base" referenced in the profile "dev" does not exist.'],
+  ])('reports %s as a state it cannot read, not as an account that is not bootstrapped', (_case, error) => {
+    const run = preflight({ error });
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toMatch(/could not be determined/);
+    expect(run.stderr).toContain(error);
+    expect(run.stderr).not.toMatch(/not bootstrapped|cdk:bootstrap/);
+  });
+
+  test('reports an account as not bootstrapped when the stack named with --toolkit-stack-name is missing', () => {
+    const run = preflight({ error: missing('AbcaToolkit') }, { args: ['--toolkit-stack-name', 'AbcaToolkit'] });
+
+    expect(run).toMatchObject({ status: 1, stderr: expect.stringContaining('not bootstrapped') });
+    expect(run.calls).toEqual([expect.stringContaining('--stack-name AbcaToolkit')]);
+  });
+
+  // AWS CLI v2 with `cli_error_format = yaml` breaks the message line at column 80. Where it breaks depends on the
+  // length of the stack id: 49 characters are enough for the first break.
+  test.each<[string, number, string]>([
+    ['in front of "exist"', 50, ' does not\n  exist\n'],
+    ['in front of "not"', 54, ' does\n  not exist\n'],
+    ['behind the stack id', 60, '\n  does not exist\n'],
+  ])('reports an account as not bootstrapped when the AWS CLI prints the answer as YAML, broken %s', (_where, length, rest) => {
+    const stack = `Abca${'x'.repeat(length - 4)}`;
+    const run = preflight(
+      { error: `Code: ValidationError\nMessage: Stack with id ${stack}${rest}` },
+      { args: ['--toolkit-stack-name', stack] },
+    );
+
+    expect(run).toMatchObject({ status: 1, stderr: expect.stringContaining('not bootstrapped') });
   });
 
   // Which compute backends the app deploys is CDK context: an argument in one of its
