@@ -192,15 +192,8 @@ test('the standalone claim is conditional on an absent claim attribute', async (
   expect(claim.input.ConditionExpression).toBe('attribute_exists(task_id) AND attribute_not_exists(jira_preview_claimed)');
 });
 
-test('the claim is typed as present, never as false', () => {
-  // Compile-time guard, held by the package type check (jest checks no
-  // types): if the type admits `false`, the directive below is unused, which
-  // is an error. The claim is the presence of the attribute, so a stored
-  // `false` would block every later delivery, as `true` does.
-  // @ts-expect-error -- the claim admits only `true`
-  const invalid: TaskRecord = { ...original, jira_preview_claimed: false };
-  expect(invalid.jira_preview_claimed).toBe(false);
-});
+// A stored `false` would block every later delivery, as `true` does.
+const _claimIsTrueOrAbsent: [Exclude<TaskRecord['jira_preview_claimed'], true | undefined>] extends [never] ? true : never = true;
 
 test('an iteration with a synthetic reply target never calls Jira', async () => {
   await deliver({

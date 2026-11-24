@@ -33,7 +33,8 @@ import { AgentStack } from '../../src/stacks/agent';
 describe('AgentStack', () => {
   let template: Template;
   let concurrencyMaintenance: Template;
-  let nestedTemplates: Template[];
+  /** The nested stacks, each with the values the root template passes for its parameters (none below a nested stack). */
+  let nestedStacks: { path: string; template: Template; parameters: Record<string, unknown> }[];
 
   beforeAll(() => {
     const app = new App();
@@ -42,8 +43,11 @@ describe('AgentStack', () => {
     });
     template = Template.fromStack(stack);
     concurrencyMaintenance = Template.fromStack(stack.node.findChild('ConcurrencyMaintenance') as NestedStack);
-    nestedTemplates = stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child))
-      .map(child => Template.fromStack(child));
+    nestedStacks = stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child)).map(child => ({
+      path: child.node.path,
+      template: Template.fromStack(child),
+      parameters: template.toJSON().Resources[stack.resolve(child.nestedStackResource!.logicalId)]?.Properties.Parameters ?? {},
+    }));
   });
 
   test('synthesizes without errors', () => {
@@ -949,7 +953,7 @@ describe('AgentStack', () => {
     // large role into a managed policy. The bucket policy admits one more
     // principal, CDK's auto-delete provider (see trace-artifacts-bucket.ts).
     const writers = ['AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy']
-      .flatMap(type => [template, ...nestedTemplates].flatMap(t => Object.entries(t.findResources(type))))
+      .flatMap(type => [template, ...nestedStacks.map(nested => nested.template)].flatMap(t => Object.entries(t.findResources(type))))
       .filter(([, policy]) => (policy.Properties.PolicyDocument.Statement as Array<{ Effect: string; Action: string | string[]; Resource: unknown }>)
         .some(stmt => stmt.Effect === 'Allow' && /"s3:(Put|Delete|\*)/.test(JSON.stringify(stmt.Action)) && reaches(stmt.Resource)))
       .map(([policyId]) => policyId);
@@ -1235,14 +1239,23 @@ describe('AgentStack', () => {
       .toEqual(template.toJSON().Outputs.OperationalAlertsTopicArn.Value);
   });
 
-  test('notifies the alerts topic from every CloudWatch alarm, the Lambda error alarms included (#686)', () => {
-    // An alarm without an action is seen only by someone who is already
-    // watching the console. The two Lambda error alarms (orchestrator and
-    // screenshot processor) are counted first, so the check cannot pass on
-    // a template that lost them.
+  test('notifies the alerts topic from every CloudWatch alarm of the root stack and of each nested stack (#686)', () => {
     const topicRef = template.toJSON().Outputs.OperationalAlertsTopicArn.Value;
-    template.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', { Namespace: 'AWS/Lambda', MetricName: 'Errors' }, 2);
-    template.allResourcesProperties('AWS::CloudWatch::Alarm', { AlarmActions: Match.arrayWith([topicRef]) });
+    const alarms = (t: Template, toRootValue = (action: { Ref: string }): unknown => action) =>
+      Object.entries(t.findResources('AWS::CloudWatch::Alarm'))
+        .map(([id, alarm]) => ({ id, actions: (alarm.Properties.AlarmActions ?? []).map(toRootValue) }));
+    const notifiesTopic = expect.objectContaining({ actions: expect.arrayContaining([topicRef]) });
+    expect({
+      root: alarms(template),
+      // A nested template refers to the topic by a stack parameter, so its actions are read as the values the root passes.
+      ...Object.fromEntries(nestedStacks.map(nested =>
+        [nested.path, alarms(nested.template, action => nested.parameters[action.Ref])])),
+    }).toEqual({
+      'root': Array(9).fill(notifiesTopic),
+      'TestAgentStack/AgentRegistryStack': [],
+      'TestAgentStack/RegistryApi': [],
+      'TestAgentStack/ConcurrencyMaintenance': Array(2).fill(notifiesTopic),
+    });
   });
 
   test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
@@ -1475,6 +1488,11 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     // Runtime (443) + build-time (443 + 80, for apt-get) — see ADR-021's
     // build-time-egress security-table row.
     childTemplate.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+  });
+
+  test('creates no CloudWatch alarm in the child stack, which the test of the alerts topic does not read (#686)', () => {
+    // An alarm added there has to be passed to operationalAlerts.addAlarmActions in stacks/agent.ts, and its action checked here.
+    childTemplate.resourceCountIs('AWS::CloudWatch::Alarm', 0);
   });
 
   test('does NOT provision the ECS substrate (the gates are mutually exclusive)', () => {
@@ -2063,11 +2081,10 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
 
   test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
     const app = new App({ context: { enableLinearIdentityVault: true } });
-    const template = Template.fromStack(
-      new AgentStack(app, 'LinearVaultOnStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    );
+    const stack = new AgentStack(app, 'LinearVaultOnStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const template = Template.fromStack(stack);
     // The workload identity is provisioned.
     template.resourceCountIs('Custom::LinearWorkloadIdentity', 1);
     // Some role is granted the two token data-plane actions. Asserted on the
@@ -2100,6 +2117,9 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     // single AWS::CloudFormation::Stack for it.
     expect(rendered).not.toContain('Custom::CDKBucketDeployment');
     expect(rendered).toContain('LinearVaultConsentPageStack');
+    // The test of the alerts topic (#686) does not read this nested stack. An alarm added there has to be passed to
+    // operationalAlerts.addAlarmActions in stacks/agent.ts, and its action checked here.
+    Template.fromStack(stack.node.findChild('LinearVaultConsentPageStack') as NestedStack).resourceCountIs('AWS::CloudWatch::Alarm', 0);
   });
 
   test('the workload identity name is STACK-scoped, so two stacks cannot share one', () => {

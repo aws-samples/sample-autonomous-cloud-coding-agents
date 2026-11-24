@@ -172,6 +172,16 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
     expect(offenders).toEqual([]);
   });
 
+  test('gives every CloudWatch alarm of every template an action (#686)', () => {
+    const silent = census.templates.flatMap(({ file }) => {
+      const resources = JSON.parse(readFileSync(path.join(directory, file), 'utf8')).Resources ?? {};
+      return Object.entries(resources as Record<string, { Type: string; Properties?: { AlarmActions?: unknown[] } }>)
+        .filter(([, resource]) => resource.Type === 'AWS::CloudWatch::Alarm' && !resource.Properties?.AlarmActions?.length)
+        .map(([logicalId]) => `${file}/${logicalId}`);
+    });
+    expect(silent).toEqual([]);
+  });
+
   test('keeps stack dependencies one-way for the selected topology', () => {
     const application = 'backgroundagent-dev.template.json';
     const network = 'backgroundagent-dev-network.template.json';
