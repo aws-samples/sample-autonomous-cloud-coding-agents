@@ -107,6 +107,15 @@ export interface FanOutConsumerProps {
   readonly linearOauthSecretArnPattern?: string;
 
   /**
+   * Linear native agent-session channel (ADR-018 Phase 2). When true, sets
+   * ``LINEAR_AGENT_SESSIONS_ENABLED`` so the Linear dispatcher subscribes to
+   * per-turn events (session keep-alive). Session tasks' activities are emitted
+   * with the same registry + OAuth-secret grants as Linear comments — no new
+   * IAM. Default false.
+   */
+  readonly linearAgentSessionsEnabled?: boolean;
+
+  /**
    * JiraWorkspaceRegistryTable — the Jira dispatcher reads this to resolve
    * per-tenant OAuth tokens at comment-post time (issue #573). Optional:
    * when omitted, the dispatcher logs and skips so a deployment without
@@ -259,6 +268,10 @@ export class FanOutConsumer extends Construct {
         actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
         resources: [props.linearOauthSecretArnPattern],
       }));
+    }
+
+    if (props.linearAgentSessionsEnabled) {
+      this.fn.addEnvironment('LINEAR_AGENT_SESSIONS_ENABLED', 'true');
     }
 
     // Jira dispatcher plumbing (issue #573). Same guarded shape as Linear:

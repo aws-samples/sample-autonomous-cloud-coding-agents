@@ -52,6 +52,8 @@ import {
   PaginatedResponse,
   PersonalBudgetStatus,
   ReplayBundle,
+  Scoreboard,
+  ScoreboardRange,
   SuccessResponse,
   TaskDetail,
   TaskEvent,
@@ -237,6 +239,19 @@ export class ApiClient {
       'GET',
       '/tasks?view=budget',
     );
+    return res.data;
+  }
+
+  /**
+   * GET /tasks?view=scoreboard — the authenticated caller's factory scoreboard: their finished
+   * tasks of the range and of the period before it, or those of one repository when `repo` is given.
+   */
+  async getScoreboard(opts: { range: ScoreboardRange; repo?: string }): Promise<Scoreboard> {
+    const params = new URLSearchParams({ view: 'scoreboard', range: opts.range });
+    // An empty `repo` is sent too, for the API to refuse: left out, the answer would count every
+    // repository where one was asked for (`--repo "$REPO"` with the variable unset).
+    if (opts.repo !== undefined) params.set('repo', opts.repo);
+    const res = await this.request<SuccessResponse<Scoreboard>>('GET', `/tasks?${params.toString()}`);
     return res.data;
   }
 

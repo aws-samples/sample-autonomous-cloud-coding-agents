@@ -390,46 +390,61 @@ describe('TaskApi construct', () => {
     });
   });
 
-  test('allows large HMAC-verified Jira webhook bodies through the WAF common rule set', () => {
-    const webAcls = baseTemplate.findResources('AWS::WAFv2::WebACL');
-    const webAcl = Object.values(webAcls)[0] as any;
-    const rules = webAcl.Properties.Rules as any[];
-    const largeBodyRule = rules.find(
-      rule => rule.Name === 'AWSManagedRulesCommonRuleSet-TaskPaths',
-    );
-    const fullCommonRule = rules.find(
-      rule => rule.Name === 'AWSManagedRulesCommonRuleSet',
-    );
+  const wafRules = (template: Template): any[] =>
+    (Object.values(template.findResources('AWS::WAFv2::WebACL'))[0] as any).Properties.Rules;
+  const byteMatchPaths = (statement: any): string[] => (statement.OrStatement?.Statements ?? [statement])
+    .map((s: any) => s.ByteMatchStatement.SearchString);
 
-    expect(
-      largeBodyRule.Statement.ManagedRuleGroupStatement.ExcludedRules,
-    ).toEqual([{ Name: 'SizeRestrictions_BODY' }]);
-    expect(
-      largeBodyRule.Statement.ManagedRuleGroupStatement.ScopeDownStatement
-        .OrStatement.Statements,
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        ByteMatchStatement: expect.objectContaining({
-          PositionalConstraint: 'EXACTLY',
-          SearchString: '/v1/jira/webhook',
-        }),
-      }),
-    ]));
-    expect(
-      fullCommonRule.Statement.ManagedRuleGroupStatement.ScopeDownStatement
-        .AndStatement.Statements,
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        NotStatement: expect.objectContaining({
-          Statement: expect.objectContaining({
-            ByteMatchStatement: expect.objectContaining({
-              PositionalConstraint: 'EXACTLY',
-              SearchString: '/v1/jira/webhook',
-            }),
-          }),
-        }),
-      }),
-    ]));
+  test('the task-paths rule covers /v1/tasks only and keeps blocking XSS there', () => {
+    const rule = wafRules(baseTemplate).find(r => r.Name === 'AWSManagedRulesCommonRuleSet-TaskPaths');
+    const group = rule.Statement.ManagedRuleGroupStatement;
+    expect(group.ExcludedRules).toEqual([{ Name: 'SizeRestrictions_BODY' }]);
+    expect(group.RuleActionOverrides).toBeUndefined();
+    expect(group.ScopeDownStatement.ByteMatchStatement).toMatchObject({ PositionalConstraint: 'STARTS_WITH', SearchString: '/v1/tasks' });
+  });
+
+  test('signed webhook routes get the common rule set with XSS and body size counted, not blocked (#1063)', () => {
+    const rules = wafRules(baseTemplate);
+    const rule = rules.find(r => r.Name === 'AWSManagedRulesCommonRuleSet-SignedWebhooks');
+    const group = rule.Statement.ManagedRuleGroupStatement;
+    // Overrides only: WAF rejects excludedRules alongside ruleActionOverrides.
+    expect(group.ExcludedRules).toBeUndefined();
+    expect(group.RuleActionOverrides).toEqual([
+      { Name: 'SizeRestrictions_BODY', ActionToUse: { Count: {} } },
+      { Name: 'CrossSiteScripting_BODY', ActionToUse: { Count: {} } },
+    ]);
+    expect(byteMatchPaths(group.ScopeDownStatement).sort()).toEqual(['/v1/github/webhook', '/v1/jira/webhook', '/v1/linear/webhook']);
+    // The full rule set still excludes the webhook routes, so nothing else changes for them.
+    const fullCommon = rules.find(r => r.Name === 'AWSManagedRulesCommonRuleSet');
+    expect(JSON.stringify(fullCommon.Statement.ManagedRuleGroupStatement.ScopeDownStatement)).toContain('/v1/linear/webhook');
+    // The XSS matches let through are counted under their own metric, and alarmed.
+    expect(rules.find(r => r.Name === 'SignedWebhookXssCounted')).toMatchObject({
+      Action: { Count: {} },
+      Statement: { LabelMatchStatement: { Scope: 'LABEL', Key: 'awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body' } },
+      VisibilityConfig: { MetricName: 'SignedWebhookXssCounted' },
+    });
+    expect(new Set(rules.map(r => r.Priority)).size).toBe(rules.length);
+    baseTemplate.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/WAFV2',
+      MetricName: 'CountedRequests',
+      Dimensions: Match.arrayWith([
+        { Name: 'Rule', Value: 'SignedWebhookXssCounted' },
+        // The web ACL's name, which WAF uses as the metric dimension (not the
+        // visibilityConfig metric name `TaskApiWebAcl`).
+        { Name: 'WebACL', Value: { 'Fn::Select': [0, { 'Fn::Split': ['|', { Ref: Match.stringLikeRegexp('WebAcl') }] }] } },
+      ]),
+      Threshold: 20,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+    });
+  });
+
+  test('without webhook routes there is no signed-webhook rule and no alarm', () => {
+    const { template } = createStack({ largeBodyWebhookPaths: [] });
+    const names = wafRules(template).map(r => r.Name);
+    expect(names).not.toContain('AWSManagedRulesCommonRuleSet-SignedWebhooks');
+    expect(names).not.toContain('SignedWebhookXssCounted');
+    template.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', { MetricName: 'CountedRequests' }, 0);
   });
 
   test('WAF replaces the two credential headers in the request samples it keeps', () => {

@@ -72,7 +72,7 @@ export interface ClarifyHoldRow {
 }
 
 /** True when this task ran ``coding/new-task-v1`` (via pin or the raw ref). */
-function isNewTaskWorkflow(row: ClarifyHoldRow): boolean {
+export function isNewTaskWorkflow(row: ClarifyHoldRow): boolean {
   const pinned = row.resolved_workflow?.id;
   if (typeof pinned === 'string' && pinned === NEW_TASK_WORKFLOW_ID) return true;
   // Fallback for rows written before the pin, or where only the raw ref exists.

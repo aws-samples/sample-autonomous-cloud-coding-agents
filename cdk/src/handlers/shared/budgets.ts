@@ -122,6 +122,12 @@ export function taskBudgetMarkerKey(taskId: string): string {
   return `${BUDGET_TASK_PREFIX}${taskId}`;
 }
 
+/**
+ * Sort key of the scoreboard's once-only claim. Same partition key as the rollup
+ * marker, so the two items never collide, and not a row the budget queries read.
+ */
+export const BUDGET_METRICS_PERIOD = 'METRICS';
+
 export function parseBudgetScopeKey(scopeKey: string): {
   scopeType: BudgetScopeType;
   scopeId: string;

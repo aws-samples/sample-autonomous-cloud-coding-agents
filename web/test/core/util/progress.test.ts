@@ -26,6 +26,8 @@ const NOW = new Date();
 const fixtures = buildFixtures(NOW);
 const task = (id: string) => fixtures.tasks.find((t) => t.task_id === id)!;
 const events = (id: string) => fixtures.events[id] ?? [];
+/** The banner of a mock task, from the task and its own events. */
+const outcome = (id: string) => outcomeOf(task(id), events(id), NOW);
 const milestone = (name: string, details = ''): TaskEvent => ({ event_id: name, event_type: 'agent_milestone', timestamp: NOW.toISOString(), metadata: { milestone: name, details } });
 
 describe('stepStates', () => {
@@ -56,34 +58,50 @@ describe('stepStates', () => {
 
 describe('outcomeOf', () => {
   it('says nothing while the task is simply working', () => {
-    expect(outcomeOf(task(MOCK_IDS.running), NOW)).toBeNull();
+    expect(outcome(MOCK_IDS.running)).toBeNull();
   });
 
   it('calls out a stuck task', () => {
-    expect(outcomeOf(task(MOCK_IDS.stale), NOW)).toMatchObject({ type: 'warning', title: 'No update for 9 min', offer: 'stuck' });
+    expect(outcome(MOCK_IDS.stale)).toMatchObject({ type: 'warning', title: 'No update for 9 min', offer: 'stuck' });
+  });
+
+  it('does not call a quiet task on ECS stuck', () => {
+    expect(outcome(MOCK_IDS.ecs)).toBeNull();
+    // The mock task is silent for long enough to show the difference: the same silence on AgentCore is a stuck task.
+    expect(outcomeOf({ ...task(MOCK_IDS.ecs), compute_type: 'agentcore' }, events(MOCK_IDS.ecs), NOW)).toMatchObject({ offer: 'stuck' });
   });
 
   it('asks for approval', () => {
-    expect(outcomeOf(task(MOCK_IDS.awaiting), NOW)).toMatchObject({ title: 'Waiting for your approval', offer: 'approval' });
+    expect(outcome(MOCK_IDS.awaiting)).toMatchObject({ title: 'Waiting for your approval', offer: 'approval' });
   });
 
   it('shows the place in line', () => {
-    expect(outcomeOf(task(MOCK_IDS.queued), NOW)).toMatchObject({ title: 'Waiting in line (number 1)', text: 'Should start in about 4m 0s.' });
+    expect(outcome(MOCK_IDS.queued)).toMatchObject({ title: 'Waiting in line (number 1)', text: 'Should start in about 4m 0s.' });
   });
 
   it('reports a finished pull request', () => {
-    expect(outcomeOf(task(MOCK_IDS.completed), NOW)?.title).toBe('Done: pull request #482 is ready for review');
+    expect(outcome(MOCK_IDS.completed)?.title).toBe('Done: pull request #482 is ready for review');
+    // A task that opened no pull request is simply done.
+    expect(outcomeOf({ ...task(MOCK_IDS.completed), pr_url: null, pr_number: null }, [], NOW)).toEqual({ type: 'success', title: 'Done' });
+  });
+
+  it('says how the pull request ended, once the event of ABCA\'s read of GitHub is among the task\'s events', () => {
+    expect(outcome(MOCK_IDS.prMerged)).toEqual({ type: 'success', title: 'Done: pull request #212 was merged' });
+    // As information, with nothing to offer: the task finished, and its pull request is no longer open.
+    expect(outcome(MOCK_IDS.prClosed)).toEqual({ type: 'info', title: 'Done: pull request #1071 was closed without merging' });
+    // Until the events are in, the pull request is the one the task left.
+    expect(outcomeOf(task(MOCK_IDS.prMerged), [], NOW)).toEqual({ type: 'success', title: 'Done: pull request #212 is ready for review' });
   });
 
   it('shows a failed run without a pull request as the failure it is, even when the agent reported success', () => {
     // A clean "no changes" run, a failed PR and lost changes all look alike from here
     // (FAILED, no PR, agent_execution_complete status=success), so none is softened.
-    expect(outcomeOf(task(MOCK_IDS.noChanges), NOW)).toMatchObject({ type: 'error', offer: 'retry' });
+    expect(outcome(MOCK_IDS.noChanges)).toMatchObject({ type: 'error', offer: 'retry' });
   });
 
   it('keeps real failures as errors with a retry', () => {
-    expect(outcomeOf(task(MOCK_IDS.failed), NOW)).toMatchObject({ type: 'error', title: 'Budget exceeded', offer: 'retry' });
-    expect(outcomeOf(task(MOCK_IDS.timedOut), NOW)).toMatchObject({ title: 'Ran out of time', offer: 'retry' });
-    expect(outcomeOf(task(MOCK_IDS.cancelled), NOW)).toMatchObject({ title: 'Cancelled' });
+    expect(outcome(MOCK_IDS.failed)).toMatchObject({ type: 'error', title: 'Budget exceeded', offer: 'retry' });
+    expect(outcome(MOCK_IDS.timedOut)).toMatchObject({ title: 'Ran out of time', offer: 'retry' });
+    expect(outcome(MOCK_IDS.cancelled)).toMatchObject({ title: 'Cancelled' });
   });
 });

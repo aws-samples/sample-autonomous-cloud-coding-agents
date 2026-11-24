@@ -52,12 +52,12 @@ config_roots = ["cdk", "agent", "cli", "docs", "web"]
 # One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`, `web`).
 # `//cdk:install`, `//cli:install`, `//docs:install` and `//web:install` are thin wrappers around the same command.
 [tasks.install]
-description = "Yarn workspaces (cdk, cli, docs, web) + agent Python (uv) + prek git hooks when inside a Git repo"
+description = "Yarn workspaces (cdk, cli, docs, web) + agent Python (uv) + prek git hooks when inside a Git repo whose core.hooksPath prek may use"
 run = [
   "yarn install --check-files",
   "cd agent && mise run install",
-  # Install prek shims only in a real checkout (skip tarballs / no-.git environments).
-  "bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; prek install --prepare-hooks'",
+  # prek refuses a core.hooksPath set only outside local or worktree scope (prek install.rs); skip it there, as outside a checkout
+  '''bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; if git config --includes --get core.hooksPath >/dev/null && ! git config --includes --local --get core.hooksPath >/dev/null && ! git config --includes --worktree --get core.hooksPath >/dev/null 2>&1; then echo "install: git hooks not installed: core.hooksPath is set outside this repository (global, system or command line git config), so prek refuses to install them. Dependencies are installed. To get the hooks, see CONTRIBUTING.md, then run mise run hooks:install." >&2; exit 0; fi; prek install --prepare-hooks' ''',
 ]
 
 # Dependency upgrades for the scheduled upgrade-main workflow (and local use).

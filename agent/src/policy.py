@@ -524,16 +524,16 @@ class _ParsedRule:
     severity: str | None
 
 
-def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_ParsedRule]:
-    """Parse every static policy's annotations via cedarpy.policies_to_json_str.
-
-    Returns a list in cedarpy's positional order. Raises on malformed input.
-    """
+def _parse_policy_set(cedarpy_module, policies_text: str) -> dict:
     try:
-        parsed = json.loads(cedarpy_module.policies_to_json_str(policies_text))
+        return json.loads(cedarpy_module.policies_to_json_str(policies_text))
     except Exception as exc:
         raise ValueError(f"Cedar policy parse failed: {type(exc).__name__}: {exc}") from exc
 
+
+def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_ParsedRule]:
+    """Read every static policy's annotations in cedarpy's positional order."""
+    parsed = _parse_policy_set(cedarpy_module, policies_text)
     rules: list[_ParsedRule] = []
     for pid, body in parsed.get("staticPolicies", {}).items():
         ann = body.get("annotations", {}) or {}
@@ -557,6 +557,53 @@ def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_Parse
             )
         )
     return rules
+
+
+def _route_operator_policies(
+    cedarpy_module, extra_policies: list[str], blueprint_policies: list[str]
+) -> tuple[list[str], list[str]]:
+    """Keep each entry intact. Only entries without a tier or rule ID get a generated ID."""
+    hard: list[str] = []
+    soft: list[str] = []
+    legacy_count = 0
+    for field_name, entries in (
+        ("extra_policies", extra_policies),
+        ("cedar_policies", blueprint_policies),
+    ):
+        for idx, text in enumerate(entries):
+            source = f"{field_name}[{idx}]"
+            try:
+                parsed = _parse_policy_set(cedarpy_module, text)
+            except ValueError as exc:
+                raise ValueError(f"{source}: {exc}") from exc
+            templates = parsed.get("templates", {}).values()
+            if templates and field_name == "cedar_policies":
+                raise ValueError(
+                    f"{source} contains an unbound Cedar template; use a static policy"
+                )
+            bodies = (*parsed.get("staticPolicies", {}).values(), *templates)
+            if not bodies:
+                raise ValueError(f"{source} must contain a Cedar policy")
+            annotations = [body.get("annotations", {}) for body in bodies]
+            tiers = {ann.get("tier") for ann in annotations}
+            if tiers == {None} and all("rule_id" not in ann for ann in annotations):
+                soft.append(f'@tier("soft")\n@rule_id("legacy_extra_{legacy_count}")\n{text}')
+                legacy_count += 1
+            elif field_name == "extra_policies":
+                raise ValueError(
+                    f"{source} already declares @tier or @rule_id; use blueprint_policies"
+                )
+            elif tiers == {"hard"}:
+                hard.append(text)
+            elif tiers == {"soft"}:
+                soft.append(text)
+            elif {"hard", "soft"} <= tiers:
+                raise ValueError(
+                    f"{source} declares both hard and soft tiers; use separate entries"
+                )
+            else:
+                raise ValueError(f'{source}: declare the tier ("hard" or "soft") on each rule')
+    return hard, soft
 
 
 def _validate_tier(rules: list[_ParsedRule], expected_tier: str, source: str) -> None:
@@ -696,20 +743,18 @@ class PolicyEngine:
     disable-list validation), probes a test authorization to catch syntax
     errors early, and seeds the approval allowlist from ``initial_approvals``.
 
-    Legacy callers that pass ``extra_policies=[...]`` (Phase 1 shape) are
-    supported in backward-compat mode: the extra text is appended to the
-    soft-deny tier WITHOUT strict annotation validation. New callers in
-    Chunks 3+ should use ``blueprint_hard_policies`` / ``blueprint_soft_policies``
-    / ``blueprint_disable`` / ``initial_approvals`` / ``approval_gate_cap``.
+    Each ``blueprint_policies`` entry declares its tier in Cedar. Unannotated
+    entries and legacy ``extra_policies`` get generated soft rule IDs.
     """
 
-    def __init__(  # noqa: C901 -- 18 when the ceiling of 15 was set; must not grow
+    def __init__(
         self,
         task_type: str,
         repo: str,
         *,
         read_only: bool = False,
         extra_policies: list[str] | None = None,
+        blueprint_policies: list[str] | None = None,
         blueprint_hard_policies: str | None = None,
         blueprint_soft_policies: str | None = None,
         blueprint_disable: list[str] | None = None,
@@ -789,59 +834,27 @@ class PolicyEngine:
             # (rm -rf /, .git writes, DROP TABLE) are missing.
             raise RuntimeError(str(exc)) from exc
 
-        # Blueprint customization: append blueprint rules into the tiers.
-        hard_text = builtin_hard
-        if blueprint_hard_policies:
-            hard_text = f"{hard_text}\n{blueprint_hard_policies}"
-        soft_text = builtin_soft
-
-        # Legacy ``extra_policies`` goes into soft tier with a synthetic
-        # wrapper (@tier("soft") + @rule_id("legacy_extra_N")). Cedar's
-        # annotation semantics on duplicate keys within a single policy
-        # are implementation-defined (parse error in most versions), so
-        # we REJECT legacy text that already declares @tier or @rule_id
-        # (finding #2 from Chunk 2 review) instead of silently picking
-        # one interpretation. Callers should migrate to
-        # blueprint_soft_policies / blueprint_hard_policies with fully
-        # annotated rules.
-        legacy_extra: list[str] = []
-        if extra_policies:
-            for idx, policy_text in enumerate(extra_policies):
-                if "@tier(" in policy_text or "@rule_id(" in policy_text:
-                    raise ValueError(
-                        f"extra_policies[{idx}] already declares @tier or "
-                        f"@rule_id; the legacy extra_policies kwarg is for "
-                        f"UNANNOTATED rules only. Migrate annotated rules "
-                        f"to blueprint_soft_policies / blueprint_hard_policies."
-                    )
-                legacy_rule_id = f"legacy_extra_{idx}"
-                legacy_extra.append(f'@tier("soft")\n@rule_id("{legacy_rule_id}")\n{policy_text}')
-        if blueprint_soft_policies:
-            soft_text = f"{soft_text}\n{blueprint_soft_policies}"
-        if legacy_extra:
-            soft_text = soft_text + "\n" + "\n".join(legacy_extra)
-
-        # 64 KB cap on combined operator-supplied policy text (finding #12).
-        # Built-ins do not count — they are trusted platform content. Registry
-        # cedar_policy_module assets arrive via the legacy ``extra_policies``
-        # path, so they MUST be counted here too; otherwise a large registry
-        # policy bypasses the cap entirely (#246 review). Count the raw operator
-        # text (pre-synthetic-wrapper) so the bound reflects authored bytes.
-        operator_text = "".join(
-            filter(
-                None,
-                [
-                    blueprint_hard_policies,
-                    blueprint_soft_policies,
-                    *(extra_policies or []),
-                ],
+        # Cap all operator-authored bytes before asking Cedar to parse any of them.
+        operator_bytes = sum(
+            len(text.encode("utf-8"))
+            for text in (
+                blueprint_hard_policies or "",
+                blueprint_soft_policies or "",
+                *(extra_policies or []),
+                *(blueprint_policies or []),
             )
         )
-        if len(operator_text.encode("utf-8")) > POLICIES_MAX_BYTES:
+        if operator_bytes > POLICIES_MAX_BYTES:
             raise ValueError(
                 f"cedar_policies exceeds {POLICIES_MAX_BYTES // 1024} KB cap "
-                f"({len(operator_text.encode('utf-8'))} bytes)"
+                f"({operator_bytes} bytes)"
             )
+
+        hard, soft = _route_operator_policies(
+            self._cedarpy, extra_policies or [], blueprint_policies or []
+        )
+        hard_text = "\n".join(filter(None, [builtin_hard, blueprint_hard_policies, *hard]))
+        soft_text = "\n".join(filter(None, [builtin_soft, blueprint_soft_policies, *soft]))
 
         # Parse + validate annotations on each tier.
         try:

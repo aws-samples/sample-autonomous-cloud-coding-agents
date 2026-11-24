@@ -69,19 +69,26 @@ describe('agent image base pins', () => {
     // Guards the parser: a regex that silently matched nothing would make both
     // assertions above vacuously true.
     const refs = externalImageRefs();
-    expect(refs.length).toBeGreaterThanOrEqual(4);
+    expect(refs.length).toBeGreaterThanOrEqual(3);
     expect(refs.some((r) => r.includes('mise'))).toBe(true);
-    expect(refs.some((r) => r.includes('golang'))).toBe(true);
     expect(refs.some((r) => r.includes('python'))).toBe(true);
     expect(refs.some((r) => r.includes('astral-sh/uv'))).toBe(true);
   });
 
   test('build-stage references are not mistaken for registry images', () => {
-    // `COPY --from=mise` and `COPY --from=gh-builder` name local stages, which
+    // `COPY --from=mise` names a local stage, which
     // cannot and must not be digest-pinned. If the parser counted those, the pin
     // assertion would fail for an unfixable reason.
     const refs = externalImageRefs();
     expect(refs).not.toContain('mise');
-    expect(refs).not.toContain('gh-builder');
+  });
+
+  test('installs gh from its release, checked against a pinned SHA-256 per architecture (#1077)', () => {
+    // A build from source needs proxy.golang.org, which many networks block.
+    for (const arch of ['AMD64', 'ARM64']) {
+      expect(dockerfile).toMatch(new RegExp(`^ARG GH_SHA256_${arch}=[a-f0-9]{64}$`, 'm'));
+    }
+    expect(dockerfile).toContain('sha256sum -c -');
+    expect(dockerfile).not.toMatch(/go install/);
   });
 });

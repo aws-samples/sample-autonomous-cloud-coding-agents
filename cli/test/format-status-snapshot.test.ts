@@ -52,6 +52,7 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     // Heartbeat line, and "the agent has not beaten yet" is the honest default for
     // a freshly-built fixture.
     agent_heartbeat_at: null,
+    compute_type: null,
     duration_s: null,
     cost_usd: null,
     build_passed: null,
@@ -313,6 +314,11 @@ describe('formatStatusSnapshot', () => {
 
     test('is omitted entirely when the agent has not beaten yet', () => {
       expect(formatStatusSnapshot(buildTask(), [], NOW)).not.toContain('Heartbeat:');
+    });
+
+    test('is omitted on ecs, where the agent beats once, at its start, and the age only grows', () => {
+      const task = buildTask({ compute_type: 'ecs', agent_heartbeat_at: '2026-04-29T15:29:36Z' }); // 44s before NOW
+      expect(formatStatusSnapshot(task, [], NOW)).not.toContain('Heartbeat:');
     });
 
     test('degrades to a placeholder on an unparseable timestamp', () => {

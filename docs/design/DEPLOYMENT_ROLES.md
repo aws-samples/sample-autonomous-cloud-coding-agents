@@ -973,6 +973,7 @@ These roles are created inside the CloudFormation stack at deploy time, not by t
 | BedrockLoggingRole | `bedrock.amazonaws.com` | Writes model invocation logs to CloudWatch |
 | TaskOrchestrator Lambda role | Lambda | Durable orchestrator; DynamoDB, Secrets Manager, AgentCore Runtime invocation, AgentCore Memory |
 | ConcurrencyReconciler Lambda role | Lambda | Scheduled reconciliation; DynamoDB scan + conditional updates |
+| PrOutcomeSweep Lambda role | Lambda | Hourly read of pull-request outcomes; DynamoDB Query on the task table's status index, UpdateItem on the task table and PutItem on the task events table, Secrets Manager read of the platform GitHub token |
 | TaskApi Lambda roles (9-10) | Lambda | API handler functions; DynamoDB, Secrets Manager (webhook handlers), Bedrock Guardrail, Lambda invoke |
 | AwsCustomResource Lambda role | Lambda | Blueprint DDB writes, Bedrock logging config, DNS firewall config |
 | API Gateway CloudWatch role | API Gateway | Pushes API Gateway access logs |
