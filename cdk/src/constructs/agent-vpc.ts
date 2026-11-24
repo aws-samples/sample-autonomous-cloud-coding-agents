@@ -20,6 +20,7 @@
 import { RemovalPolicy, Tags } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
 /** HTTPS port — the only egress allowed from the Runtime ENIs. */
@@ -257,6 +258,15 @@ export class AgentVpc extends Construct implements AgentNetwork {
         const group = endpoint.node.findChild('SecurityGroup').node.defaultChild as ec2.CfnSecurityGroup;
         group.groupDescription = `${resourceVpcPath}/${ep.id}/SecurityGroup`;
       }
+      // AwsSolutions-EC23 reports a validation failure here, not a verdict, so it checks
+      // nothing on these groups. test/constructs/agent-vpc.test.ts pins their ingress.
+      NagSuppressions.addResourceSuppressions(endpoint.connections.securityGroups, [
+        {
+          id: 'CdkNagValidationFailure',
+          appliesTo: ['AwsSolutions-EC23'],
+          reason: 'Ingress is TCP 443 from the VPC CIDR only, rendered as Fn::GetAtt Vpc.CidrBlock, which the rule cannot resolve at synth time',
+        },
+      ]);
     }
   }
 }

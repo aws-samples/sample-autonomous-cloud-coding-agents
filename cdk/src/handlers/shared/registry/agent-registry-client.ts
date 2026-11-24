@@ -23,11 +23,13 @@
 //
 //   - namespace-in-`name` encoding (Option A): Agent Registry has no namespace, so we
 //     fold `kind/namespace/name` into the record `name` and split on read.
-//   - native-vs-CUSTOM storage: purist native descriptors (MCP/SKILL)
-//     by default, carrying ABCA runtime config in a `_meta` block; `custom:true`
-//     stores a verbatim CUSTOM body instead.
+//   - native-vs-CUSTOM storage: purist native descriptors (MCP/SKILL) by default,
+//     each carrying the ABCA runtime config where its format has room for it: MCP in
+//     a `_meta` block of server.json, SKILL in the `x-abca-runtime` frontmatter key
+//     of SKILL.md. `custom:true` stores a verbatim CUSTOM body instead.
 //   - 3-call publish: CreateRegistryRecord is async and lands in DRAFT even with
-//     registry autoApproval; `autoApprove` drives create→submit→approve.
+//     registry autoApproval. Create and submit always run, so the record reaches
+//     PENDING_APPROVAL; `autoApprove` gates only the third call, the approval.
 //   - resolve ranks semver in code (Agent Registry stores a plain version string).
 
 import {
@@ -607,18 +609,10 @@ export class AgentRegistryClient implements RegistryClient {
   }
 
   /**
-   * Poll a freshly-created record until it settles into a usable state.
+   * CreateRegistryRecord is async, so `publish` waits until the record leaves `CREATING`.
    *
-   * CreateRegistryRecord is async, so we must confirm the substrate actually
-   * accepted the record before treating publish as successful. Prior behavior
-   * returned on *any* non-`CREATING` status (so `CREATE_FAILED` looked like
-   * success), treated a not-found as success (it's transient right after
-   * create), and treated poll-budget exhaustion as success — any of which let
-   * the handler return 201 for a record that never became usable (#246 review).
-   *
-   * Now: not-found and `CREATING` are transient (keep polling); any `*_FAILED`
-   * status throws with the substrate's statusReason; reaching a usable state
-   * (`DRAFT`/`PENDING_APPROVAL`/`APPROVED`) returns; exhausting the budget throws.
+   * Not-found, `CREATING` and a missing status are transient right after the create.
+   * Reading one as success returns 201 for a record that never became usable (#246).
    */
   private async waitPastCreating(recordId: string): Promise<void> {
     for (let i = 0; i < RECORD_CREATE_MAX_POLLS; i++) {
@@ -632,7 +626,7 @@ export class AgentRegistryClient implements RegistryClient {
             `record ${recordId} entered ${status}${rec.statusReason ? `: ${rec.statusReason}` : ''}`,
           );
         }
-        if (status && status !== 'CREATING') return; // DRAFT / PENDING_APPROVAL / APPROVED
+        if (status && status !== 'CREATING') return; // past CREATING: DRAFT for a new record
       } catch (err) {
         // Transient right after CreateRegistryRecord — the record may not be
         // readable yet. Keep polling rather than declaring success.
@@ -687,8 +681,9 @@ export class AgentRegistryClient implements RegistryClient {
     };
   }
 
-  /** Pull the ABCA runtime payload back out of the descriptor (native `_meta` or
-   *  the verbatim CUSTOM body). */
+  /** Pull the ABCA runtime payload back out of the descriptor: the `_meta` block of
+   *  a native MCP server.json, the `x-abca-runtime` frontmatter key of a native
+   *  SKILL.md, or the verbatim CUSTOM body. */
   private extractPayload(raw: Pick<GetRegistryRecordCommandOutput, 'recordType' | 'descriptors'>): {
     runtime: RuntimePayload;
     storageMode: StorageMode;

@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import type { DeploymentFeature } from './deployment-profile';
+import type { ComputeBackend, DeploymentFeature } from './deployment-profile';
 
 /** Region data for one capability; `regions` absent means no constraint beyond core. */
 export interface Capability {
@@ -39,6 +39,8 @@ export interface CapabilityCatalog {
   readonly lastVerified: string;
   readonly source: string;
   readonly core: Capability;
+  /** Every compute backend; only a Region-limited one lists `regions`. */
+  readonly compute: Readonly<Record<ComputeBackend, Capability>>;
   readonly features: Readonly<Record<DeploymentFeature, FeatureCapability>>;
 }
 
@@ -57,6 +59,24 @@ export const CAPABILITY_CATALOG: CapabilityCatalog = {
     requiredServices: ['AgentCore Runtime', 'AgentCore Memory'],
     regions: ['us-east-1', 'us-east-2', 'us-west-2', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-north-1', 'ap-south-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1', 'ap-northeast-2', 'ca-central-1', 'sa-east-1', 'us-gov-west-1'],
     remediation: 'Deploy ABCA to a Region where both AgentCore Runtime and AgentCore Memory are available.',
+  },
+  compute: {
+    'agentcore': {
+      label: 'AgentCore Runtime',
+      requiredServices: ['AgentCore Runtime'],
+      remediation: 'AgentCore Runtime is an ABCA core service, so it has no Region constraint beyond core.',
+    },
+    'ecs': {
+      label: 'ECS Fargate',
+      requiredServices: ['Amazon ECS', 'AWS Fargate'],
+      remediation: 'ECS Fargate has no Region constraint beyond ABCA core.',
+    },
+    'lambda-microvm': {
+      label: 'Lambda MicroVMs',
+      requiredServices: ['AWS Lambda MicroVMs'],
+      regions: ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'ap-northeast-1'],
+      remediation: 'Choose one of the supported Regions, or deploy without the lambda-microvm backend. If AWS has since launched Lambda MicroVMs in the Region, add it to the capability catalog and its CLI mirror (docs/guides/DEPLOYMENT_GUIDE.md#regional-availability); until then, -c microvm_region_override=true lifts this check.',
+    },
   },
   features: {
     slack: {

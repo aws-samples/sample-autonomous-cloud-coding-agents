@@ -25,13 +25,12 @@ Before any deployment action, verify:
 
 1. **Build is clean:**
    ```bash
-   export MISE_EXPERIMENTAL=1
    mise run build
    ```
    This runs agent quality checks, CDK compilation + tests, CLI build, and docs build. Do NOT deploy if the build fails. Note: a passing build is noisy — it prints many `ERROR`/`WARN` and cdk-nag lines from test fixtures. Trust the **exit code (0 = pass)**, not the log volume.
 
 2. **Docker is running** — Required for CDK asset bundling.
-3. **Build host architecture** — The agent image targets `linux/arm64` (AgentCore is Graviton). On an **x86_64** host without QEMU/binfmt, the deploy fails partway with `exec /bin/sh: exec format error`. Register emulation once with `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or deploy from a native arm64 host (Graviton / Apple Silicon). Skip on arm64 hosts.
+3. **Build host architecture** — The agent image targets `linux/arm64` (AgentCore is Graviton). On an **x86_64** host without QEMU/binfmt, the deploy fails partway with `exec /bin/sh: exec format error`. Register emulation with `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or deploy from a native arm64 host (Graviton / Apple Silicon). The registration is kernel state and does not survive a reboot (stopping and starting a cloud dev box counts), so a host that deployed before can fail again: run the command again after a restart; repeating it is harmless. Skip on arm64 hosts.
 4. **AWS credentials are configured** — `aws sts get-caller-identity` (confirm it's the intended account/region).
 
 ## Deploy Workflow
@@ -62,7 +61,6 @@ Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `
 ## Diff Workflow
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:diff
 ```
 
@@ -73,16 +71,21 @@ Summarize the changes: new resources, modified resources, removed resources. Fla
 **CRITICAL: Ask for explicit confirmation before destroying.** Use AskUserQuestion to confirm, explaining consequences.
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:destroy
 ```
 
-**Teardown can stall in `DELETE_FAILED`** on a security group / private subnet: AgentCore injects service-managed (Hyperplane) ENIs into the VPC, and AWS reclaims them **asynchronously (~20–40 min)** after the runtime is gone. Wait for the ENIs to clear, then retry `mise //cdk:destroy`. Do **not** force-delete past the stuck VPC resources (`--deletion-mode FORCE_DELETE_STACK` / retaining them) — that orphans the VPC, and VPCs are quota-capped per Region. Also note: a first-create failure leaves the stack in `ROLLBACK_COMPLETE`, which can't be updated — destroy and redeploy fresh.
+**Teardown can stall in `DELETE_FAILED`** on a security group / private subnet: AgentCore injects service-managed (Hyperplane) ENIs into the VPC, and AWS reclaims them **asynchronously, with no fixed delay**, after the runtime is gone. It can take hours.
+
+- Do not promise the user a wait time, and do not try to force-detach the ENIs. They belong to `amazon-aws`.
+- While the ENIs exist, a retry of `mise //cdk:destroy` fails on the same security group and subnets. Before a retry, check that they are gone, with the inspection commands under "Teardown blocked by AgentCore network interfaces" in `docs/guides/DEPLOYMENT_GUIDE.md`.
+- Do **not** use `--deletion-mode FORCE_DELETE_STACK`, and do not retain the stuck VPC resources on your own initiative. What is left behind stays in the account, outside CloudFormation, and VPCs are quota-capped per Region.
+- If the user cannot wait, show them that section of the deployment guide. It has the command to finish the deletion with `--retain-resources`, and says what that leaves them to clean up.
+
+Also note: a first-create failure leaves the stack in `ROLLBACK_COMPLETE`, which can't be updated — destroy and redeploy fresh.
 
 ## Synth Workflow
 
 ```bash
-export MISE_EXPERIMENTAL=1
 mise //cdk:synth
 ```
 
@@ -99,6 +102,10 @@ After a successful deploy, remind the user to:
 ## Least-Privilege Bootstrap (the default)
 
 `mise //cdk:bootstrap` provisions a **custom least-privilege** CloudFormation execution role by default — NOT `AdministratorAccess` (ADR-002). It deploys `cdk/bootstrap/bootstrap-template.yaml`, which creates scoped `IaCRole-ABCA-*` managed policies (Infrastructure / Application / Observability) generated from `cdk/src/bootstrap/policies/`.
+
+The task passes `--force` to `cdk bootstrap`, so it replaces the bootstrap (the `CDKToolkit` stack) that the account and Region already have, for every CDK app that deploys through it. That includes a standard CDK bootstrap and one with a newer CDK bootstrap version than the task installs. `mise //cdk:bootstrap -- --no-force` cancels the flag for a run. The task then leaves such a bootstrap unchanged and still exits 0.
+
+Ask the user before you run the task, unless the user has said that no other CDK app deploys in that account and Region. What the replacement changes for the other CDK apps is described under "Using these policies" in `docs/design/DEPLOYMENT_ROLES.md`.
 
 A consequence worth knowing when you **add a new resource type or a new feature on an existing resource**: the scoped role must allow the IAM action CloudFormation will call, or the deploy rolls back with `AccessDenied` on that action (e.g. `s3:PutBucketVersioning`, `lambda:TagResource`). The fix is to add the action to the relevant policy in `cdk/src/bootstrap/policies/`, regenerate (`mise //cdk:bootstrap:generate`), re-bootstrap, and redeploy. The policy source and the `DEPLOYMENT_ROLES.md` golden doc are kept in sync by tests.
 

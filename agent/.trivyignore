@@ -1,8 +1,8 @@
 # Findings accepted temporarily in the agent image scan (`mise //agent:security:image`).
 # An entry applies to the whole image. Each one expires (exp:YYYY-MM-DD is the first
 # day, in UTC, on which it no longer applies) so that the scan fails again and the
-# finding is re-reviewed. Nothing warns ahead of that day: the weekly expiry warning
-# reads only the osv-scanner.toml files. Remove an entry as soon as a fixed release is
+# finding is re-reviewed. The weekly Security workflow lists an entry in its rolling
+# issue from 21 days before that day. Remove an entry as soon as a fixed release is
 # available.
 
 # golang.org/x/net/html, quadratic text-node parsing (GO-2026-6860), reported for

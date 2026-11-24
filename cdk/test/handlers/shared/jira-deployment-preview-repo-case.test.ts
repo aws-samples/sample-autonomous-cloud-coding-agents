@@ -26,15 +26,15 @@
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { deliverJiraDeploymentPreview } from '../../../src/handlers/shared/jira-deployment-preview';
 import { postIssueCommentAdf } from '../../../src/handlers/shared/jira-feedback';
-import { updateJiraIterationComment } from '../../../src/handlers/shared/jira-preview';
+import { updateJiraIterationComment } from '../../../src/handlers/shared/jira-iteration-comment';
 import type { TaskRecord } from '../../../src/handlers/shared/types';
 
 jest.mock('../../../src/handlers/shared/jira-feedback', () => ({
   ...jest.requireActual('../../../src/handlers/shared/jira-feedback'),
   postIssueCommentAdf: jest.fn(),
 }));
-jest.mock('../../../src/handlers/shared/jira-preview', () => ({
-  ...jest.requireActual('../../../src/handlers/shared/jira-preview'),
+jest.mock('../../../src/handlers/shared/jira-iteration-comment', () => ({
+  ...jest.requireActual('../../../src/handlers/shared/jira-iteration-comment'),
   updateJiraIterationComment: jest.fn(),
 }));
 const post = jest.mocked(postIssueCommentAdf);

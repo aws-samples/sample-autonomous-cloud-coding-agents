@@ -785,8 +785,8 @@ describe('pollTaskStatus', () => {
 
   // --- ADR-021 P2: heartbeat liveness on lambda-microvm ---
   //
-  // The gap this closes: the agent writes `agent_heartbeat_at` on every substrate,
-  // but the orchestrator only ACTED on it for agentcore. On a MicroVM the
+  // The gap this closes: the agent refreshes `agent_heartbeat_at` on AgentCore and Lambda
+  // MicroVMs, but the orchestrator only ACTED on it for agentcore. On a MicroVM the
   // substrate `GetMicrovm` cross-check catches a VM that DIED and nothing else —
   // an alive, healthy VM whose in-guest pipeline is hung or was OOM-killed inside
   // the guest looks perfectly fine (nothing self-terminates on this substrate, and
@@ -879,10 +879,8 @@ describe('pollTaskStatus', () => {
   });
 
   test('ECS remains untouched by the widening', async () => {
-    // The one backend deliberately left out: DescribeTasks reports a real container
-    // exit (including OOM-kill / exit 137) with an exit code, and the ECS poll block
-    // interprets it with its own patience counters. Layering the heartbeat on top
-    // would give one backend two independently-tuned kill paths for one failure.
+    // ECS runs the pipeline without the uvicorn server and writes `agent_heartbeat_at` once.
+    // The staleness check would fail every ECS task (see `heartbeatLivenessApplies`).
     const old = new Date(Date.now() - 400_000).toISOString();
     mockDdbSend.mockResolvedValueOnce({
       Item: {
@@ -1006,6 +1004,20 @@ describe('loadBlueprintConfig', () => {
     expect(config.cedar_policies).toBeUndefined();
   });
 
+  test('passes memory_token_budget from repo config, undefined when it has none (#447)', async () => {
+    const row = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+    mockLoadRepoConfig.mockResolvedValueOnce({ ...row, memory_token_budget: 4000 });
+    expect((await loadBlueprintConfig(baseTask as any)).memory_token_budget).toBe(4000);
+
+    mockLoadRepoConfig.mockResolvedValueOnce(row);
+    expect((await loadBlueprintConfig(baseTask as any)).memory_token_budget).toBeUndefined();
+  });
+
   // Compute substrate is a per-repo property that applies to ALL workflows: a
   // read-only review task clones + reads the SAME repo, so it needs the
   // SAME compute (a repo big enough to need the 64GB ECS tier to build also OOMs
@@ -1110,6 +1122,20 @@ describe('hydrateAndTransition with blueprint config', () => {
     expect(mockHydrateContext).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:per-repo-token' }),
+    );
+  });
+
+  test('passes the blueprint memory_token_budget to hydrateContext (#447)', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      runtime_arn: 'arn:test',
+      memory_token_budget: 4000,
+    });
+    expect(mockHydrateContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ memoryTokenBudget: 4000 }),
     );
   });
 

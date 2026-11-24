@@ -123,6 +123,10 @@ interface RemoveWorkspaceResponseBody {
  * ran `bgagent linear setup`/`add-workspace` for the slug, recorded as
  * `installed_by_platform_user_id`) may remove it.
  *
+ * A slug that more than one active row carries is refused (#883): nothing is
+ * written, and the admin of any of those rows gets 409
+ * `WORKSPACE_SLUG_AMBIGUOUS` with the `linear_workspace_id` of each.
+ *
  * By default this is a *soft* removal that preserves the audit trail:
  *   1. Flip the registry row to `status='revoked'` with
  *      `revoked_reason='admin_removed'`. The OAuth resolver refuses any
@@ -209,7 +213,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // destructive path is not re-run on a row that's already torn down.
     // An active row wins over a revoked one with the same slug (a Linear
     // workspace can give up its urlKey and another take it): the live one
-    // is what the admin means, so the scan goes on until it finds one.
+    // is what the admin means.
     // The scan is `ConsistentRead` and the revoke below carries a
     // `ConditionExpression`, because a filtered scan alone is a TOCTOU:
     // read-your-writes matters when a removal lands seconds after
@@ -221,9 +225,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // filtered `Limit: 1` scan can return `[]` + a LastEvaluatedKey while
     // the target sits one page deeper (the normal shared-stack state once
     // the registry holds more than one row). We follow the continuation key
-    // until an active match or key exhaustion (the loop stops on the first
-    // active match; for a revoked one it reads on, to be sure no active row
-    // carries the slug), matching the paginated small-table scan of this same
+    // to the end, past an active match too: only the whole registry says
+    // whether that row is the one active row with the slug or one of several
+    // (#883). This matches the paginated small-table scan of this same
     // registry shape in `shared/jira-tenant-registry.ts:32-46`, which is
     // also where the `ConsistentRead` precedent comes from. The registry
     // holds one row per onboarded workspace and stays small (tens of rows at
@@ -231,7 +235,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // it. (`shared/linear-issue-lookup.ts:131-136` scans this table
     // *without* pagination — a counter-example, not the precedent, and worth
     // its own fix.)
-    let row: Record<string, unknown> | undefined;
+    const matches: Record<string, unknown>[] = [];
     let scanKey: Record<string, unknown> | undefined;
     let pages = 0;
     do {
@@ -243,15 +247,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         ExclusiveStartKey: scanKey,
         ConsistentRead: true,
       }));
-      row = page.Items?.find((item) => item.status === 'active') ?? row ?? page.Items?.[0];
+      matches.push(...(page.Items ?? []));
       scanKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
       pages += 1;
-      if (row?.status !== 'active' && scanKey && pages >= MAX_SCAN_PAGES) {
+      if (scanKey && pages >= MAX_SCAN_PAGES) {
         // Bounded rather than open-ended: without this the only stop is the
         // 10s timeout, which surfaces as a generic 500 with no cause. Not a
-        // 404 — the row may well exist further in, and claiming it doesn't
-        // would be the same lie this endpoint is being fixed to stop telling.
-        logger.error('Linear registry scan hit the page cap without finding the workspace', {
+        // 404, and not the row read so far either. The pages left unread can
+        // hold the row, or a second one for the slug.
+        logger.error('Linear registry scan hit the page cap before the end of the registry', {
           request_id: requestId,
           workspace_slug: slug,
           pages,
@@ -259,8 +263,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
         return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
       }
-    } while (row?.status !== 'active' && scanKey);
-    if (!row) {
+    } while (scanKey);
+    const active = matches.filter((item) => item.status === 'active');
+    const candidates = active.length > 0 ? active : matches.slice(0, 1);
+    if (candidates.length === 0) {
       // Collapse "no such row" and "already removed" into one 404 — the
       // caller learns nothing about existence, and there's nothing left
       // to remove either way.
@@ -268,14 +274,36 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // ─── Admin authorization ─────────────────────────────────────────
-    const installedBy = row.installed_by_platform_user_id as string | undefined;
-    if (installedBy !== userId) {
+    if (!candidates.some((item) => item.installed_by_platform_user_id === userId)) {
       logger.warn('Linear remove-workspace rejected: caller is not the workspace admin', {
         request_id: requestId,
         workspace_slug: slug,
       });
       return errorResponse(403, ErrorCode.FORBIDDEN, 'Only the workspace admin who installed this workspace may remove it.', requestId);
     }
+
+    // ─── One slug, several active rows ───────────────────────────────
+    // The rows share the secret that the slug names, so no row is removed alone.
+    // This follows the admin check, so that only an admin of a row gets the ids.
+    if (candidates.length > 1) {
+      const workspaceIds = candidates.map((item) => item.linear_workspace_id as string);
+      logger.warn('Linear remove-workspace refused: several active registry rows carry the slug', {
+        request_id: requestId,
+        workspace_slug: slug,
+        linear_workspace_ids: workspaceIds,
+      });
+      return errorResponse(
+        409,
+        ErrorCode.WORKSPACE_SLUG_AMBIGUOUS,
+        `Workspace slug '${slug}' names ${workspaceIds.length} active registrations `
+        + `(linear_workspace_id ${workspaceIds.join(', ')}), so nothing was removed. `
+        + 'In the registry table, revoke by its id each one that should be removed; '
+        + 'a removal by slug works again when a single active one is left. '
+        + 'The Linear setup guide gives the steps for this error code.',
+        requestId,
+      );
+    }
+    const [row] = candidates;
 
     const linearWorkspaceId = row.linear_workspace_id as string;
     // Names the installation that was read: `setup` and `add-workspace` write it

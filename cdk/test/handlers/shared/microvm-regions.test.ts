@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import catalog from '../../../../contracts/deployment-capabilities.json';
 import {
   isLambdaMicrovmRegionSupported,
   LAMBDA_MICROVM_SUPPORTED_REGIONS,
@@ -31,6 +32,10 @@ describe('LAMBDA_MICROVM_SUPPORTED_REGIONS', () => {
       'eu-west-1',
       'ap-northeast-1',
     ]);
+  });
+
+  test('is the capability catalog entry itself, not a copy of it', () => {
+    expect(LAMBDA_MICROVM_SUPPORTED_REGIONS).toBe(catalog.compute['lambda-microvm'].regions);
   });
 
   test('has no duplicate entries', () => {

@@ -40,7 +40,7 @@ From the repository root, with dependencies installed:
 
 ```bash
 mise run build
-MISE_EXPERIMENTAL=1 mise //cdk:testf -- 'microvm|lifecycle'
+mise //cdk:testf -- 'microvm|lifecycle'
 ```
 
 For focused worker checks:

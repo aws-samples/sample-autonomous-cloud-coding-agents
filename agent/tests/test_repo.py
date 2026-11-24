@@ -717,6 +717,74 @@ class TestBaselineCommandThatCannotStart:
         assert setup.build_gate_inert is False
         assert setup.lint_gate_inert is False
 
+    def test_unclosed_quote_is_a_failed_baseline_not_a_task_crash(self, monkeypatch):
+        # The shell reports the quote that is never closed as a syntax error: exit 2.
+        fake = _fake_run_cmd(returncodes={"verify-build-pre": 2, "verify-lint-pre": 2})
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(
+            _config(build_command="npm run 'build", lint_command='npx eslint "src')
+        )  # must not raise
+
+        assert fake.cmd_for("verify-build-pre") == ["bash", "-lc", "npm run 'build"]
+        assert fake.cmd_for("verify-lint-pre") == ["bash", "-lc", 'npx eslint "src']
+        assert setup.build_before is False
+        assert setup.lint_before is False
+
+
+# What mise 2026.11.6 prints, with exit 1, for the two default commands, less the version
+# lines that close every error. `lint` resembles commands of mise, `build` does not.
+_NO_MISE_TASK_AT_ALL = {
+    "verify-build-pre": (
+        "mise ERROR no tasks defined in /workspace/task-abc. Are you in a project directory?"
+    ),
+    "verify-lint-pre": (
+        "mise ERROR unknown command: lint\n\nDid you mean:\n  mise link\n  mise list\n  mise ln"
+    ),
+}
+_OTHER_MISE_TASKS_ONLY = {
+    "verify-build-pre": (
+        "mise ERROR no task build found\n\nAvailable tasks:\n  Name  Description\n  test  "
+    ),
+    "verify-lint-pre": (
+        "mise ERROR no task lint found\n\nDid you mean the command:\n  mise link\n  mise list\n"
+        "  mise ln\n\nAvailable tasks:\n  Name  Description\n  test  "
+    ),
+}
+
+
+class TestBaselineDefaultTaskMissing:
+    """A repository that configures no build or lint command gets the mise
+    defaults. Where mise has no such task the baseline verified nothing, and
+    setup says so, in whichever words mise reports the missing task (#749)."""
+
+    @pytest.mark.parametrize(
+        "said",
+        [_NO_MISE_TASK_AT_ALL, _OTHER_MISE_TASKS_ONLY],
+        ids=["no-mise-task-at-all", "other-mise-tasks-only"],
+    )
+    def test_missing_default_tasks_are_gates_that_did_not_run(self, monkeypatch, said):
+        fake = _fake_run_cmd()
+
+        def run_cmd(cmd, label, **kwargs):
+            if label in said:
+                return SimpleNamespace(returncode=1, stdout="", stderr=said[label])
+            return fake(cmd, label, **kwargs)
+
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "run_cmd", _answer_push_url(run_cmd))
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(_config())
+
+        assert setup.build_gate_inert is True
+        assert any("Build-regression gating is INERT" in n for n in setup.notes)
+        assert setup.lint_gate_inert is True
+        assert setup.lint_before is True  # no baseline, so nothing to regress from
+        assert any("lint verification is INERT" in n for n in setup.notes)
+        assert "Initial lint (mise run lint) FAILED before agent changes" not in setup.notes
+
 
 class TestFindMiseConfigs:
     """`mise trust <repo_dir>` trusts only the ROOT config;

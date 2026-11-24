@@ -467,6 +467,31 @@ describe('slack-command-processor handler', () => {
       }]);
     });
 
+    test('a repo is read from its first letter, also right behind a hyphen', async () => {
+      givenTables(['acme/api']);
+
+      await handler(mention({ text: 'submit bump the SDK in\n-acme/api' }));
+
+      expect(submitted()).toEqual([{ repo: 'acme/api', issue_number: undefined, task_description: 'bump the SDK in\n-' }]);
+    });
+
+    test.each([
+      // A word tried from each of its dots reads on to its end every time.
+      ['dot-joined letters', `${'a.'.repeat(30_000)}/`],
+      // A look back over the dots in front of every dot reads them all again.
+      ['dots', '.'.repeat(60_000)],
+      // A run of blanks tried from each of its blanks reads on to its end every time.
+      ['blanks between two words in front of the repo', `a${' \t'.repeat(30_000)}b acme/api`],
+    ])('reads 60,000 characters of %s in under half a second', async (_what, message) => {
+      givenTables(['acme/api'], 'acme/api');
+
+      const started = Date.now();
+      await handler(mention({ text: `submit ${message}` }));
+
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(createTaskCoreMock.mock.calls.map(([body]) => body.repo)).toEqual(['acme/api']);
+    });
+
     test.each([
       'fix the CI/CD pipeline',
       'add a yes/no prompt',
@@ -490,6 +515,7 @@ describe('slack-command-processor handler', () => {
       ['with an issue number', 'fix other/web#7 the way acme/api does it', { repo: 'other/web', issue_number: 7, task_description: 'fix the way acme/api does it' }],
       // Under the owner of the onboarded repo: its sibling, or a typo of it.
       ['of the same owner', 'update acme/web like acme/api', { repo: 'acme/web', issue_number: undefined, task_description: 'update like acme/api' }],
+      ['given as a link', 'fix <https://github.com/other/web> the way acme/api does it', { repo: 'other/web', issue_number: undefined, task_description: 'fix the way acme/api does it' }],
     ])('a repo %s that is not onboarded is not passed over for an onboarded repo behind it', async (_what, message, expected) => {
       givenTables(['acme/api']);
       givenNotOnboardedAnswer();
@@ -504,6 +530,8 @@ describe('slack-command-processor handler', () => {
       ['a repo with an issue number', 'fix the bug in other/web#42', { repo: 'other/web', issue_number: 42, task_description: 'fix the bug in' }],
       // Under the owner of the channel default (owners compare without case): a sibling repo, or a typo.
       ["a repo of the default's owner", 'update the README in Acme/web', { repo: 'Acme/web', issue_number: undefined, task_description: 'update the README in' }],
+      ['a repo with an issue number under the name of a page of GitHub', 'fix the build in apps/web#42', { repo: 'apps/web', issue_number: 42, task_description: 'fix the build in' }],
+      ['a repo with an issue number behind a slash word that ends in a full stop', 'compare lib/utils./other/web#5', { repo: 'other/web', issue_number: 5, task_description: 'compare lib/utils./' }],
     ])('%s that is not onboarded is not replaced by the channel default', async (_what, message, expected) => {
       givenTables(['acme/api'], 'acme/api');
       givenNotOnboardedAnswer();
@@ -526,6 +554,91 @@ describe('slack-command-processor handler', () => {
       expect(submitted()).toEqual([{ repo: 'CI/CD', issue_number: undefined, task_description: 'fix the pipeline' }]);
     });
 
+    // ─── A pasted link ───────────────────────────────────────────────────────
+
+    const LINKED_ISSUE = { repo: 'aws-samples/sample-interview-assistant-serverless', issue_number: 24, task_description: 'fix' };
+
+    test.each([
+      ['an issue link as Slack delivers it', 'fix <https://github.com/aws-samples/sample-interview-assistant-serverless/issues/24>', LINKED_ISSUE],
+      ['an issue link as typed', 'fix https://github.com/aws-samples/sample-interview-assistant-serverless/issues/24', LINKED_ISSUE],
+      ['the short form', 'fix aws-samples/sample-interview-assistant-serverless#24', LINKED_ISSUE],
+      ['an issue link as typed, with text after it', 'fix https://github.com/other/web/issues/7 before the release', { repo: 'other/web', issue_number: 7, task_description: 'fix before the release' }],
+      ['a pull request link', 'review <https://github.com/other/web/pull/7> again', { repo: 'other/web', issue_number: 7, task_description: 'review again' }],
+      ['a link into a pull request', 'fix <https://github.com/other/web/pull/7/files#diff-0> too', { repo: 'other/web', issue_number: 7, task_description: 'fix too' }],
+      ['a repo link', 'update the README in <https://github.com/other/web>', { repo: 'other/web', issue_number: undefined, task_description: 'update the README in' }],
+      // Slack makes a link of an address typed without "https://" and keeps the typed text as its label.
+      ['a repo link with a label', 'update the README in <http://github.com/other/web|github.com/other/web>', { repo: 'other/web', issue_number: undefined, task_description: 'update the README in' }],
+      ['a repo link with www, a closing slash and a query', '<https://www.github.com/other/web/?tab=readme-ov-file> needs a license', { repo: 'other/web', issue_number: undefined, task_description: 'needs a license' }],
+      ['a repo link with a fragment', 'follow <https://github.com/other/web#readme> to the letter', { repo: 'other/web', issue_number: undefined, task_description: 'follow to the letter' }],
+      ['a clone address', 'update the README in <https://github.com/other/web.git>', { repo: 'other/web', issue_number: undefined, task_description: 'update the README in' }],
+      ['a link to a repo whose name ends in git', 'update the README in <https://github.com/other/web-git>', { repo: 'other/web-git', issue_number: undefined, task_description: 'update the README in' }],
+      ['a link written in capitals', 'fix <HTTPS://GITHUB.COM/other/web/issues/7>', { repo: 'other/web', issue_number: 7, task_description: 'fix' }],
+      ['an issue link with a label', 'fix <https://github.com/other/web/issues/7|the login timeout> before Friday', { repo: 'other/web', issue_number: 7, task_description: 'fix before Friday' }],
+      ['a repo link as typed, with a comma behind it', 'see https://github.com/other/web, then fix', { repo: 'other/web', issue_number: undefined, task_description: 'see, then fix' }],
+      ['a link to a repo named like a page of GitHub', 'fix <https://github.com/settings-sync/settings>', { repo: 'settings-sync/settings', issue_number: undefined, task_description: 'fix' }],
+    ])('%s names its repo, onboarded or not, and its issue number', async (_what, message, expected) => {
+      givenTables(['acme/api'], 'acme/api');
+      givenNotOnboardedAnswer();
+
+      await handler(mention({ text: `submit ${message}` }));
+
+      expect(submitted()).toEqual([expected]);
+      // No part of a link is looked up as a word.
+      expect(repoLookups()).toEqual([]);
+    });
+
+    test.each(['.', ',', ';', ':', '!', '?', ')'])('a typed link ends before a "%s" behind it, which stays in the description', async (mark) => {
+      givenTables(['acme/api'], 'acme/api');
+      givenNotOnboardedAnswer();
+
+      await handler(mention({ text: `submit fix https://github.com/other/web${mark}` }));
+
+      expect(submitted()).toEqual([{ repo: 'other/web', issue_number: undefined, task_description: `fix${mark}` }]);
+    });
+
+    test('an onboarded repo named before a link is the repo, and the link stays in the description', async () => {
+      givenTables(['acme/api']);
+
+      await handler(mention({ text: 'submit in acme/api do what <https://github.com/other/web/pull/9> did' }));
+
+      expect(submitted()).toEqual([{
+        repo: 'acme/api',
+        issue_number: undefined,
+        task_description: 'in do what <https://github.com/other/web/pull/9> did',
+      }]);
+    });
+
+    test.each([
+      // Another site. One part of the address stands under the owner of the channel default.
+      'fix what <https://example.com/teams/acme/board> describes',
+      'fix what https://example.com/teams/acme/board describes',
+      'fix the typo in <https://github.com/acme/acme/blob/main/README.md>',
+      'apply <https://gist.github.com/acme/notes> to the config',
+      'fix what <https://example.com/go?to=https://github.com/other/web/issues/3> says',
+      'rotate the token, see <https://github.com/settings/tokens>',
+      '<https://github.com/orgs/acme>',
+      '<https://github.com/pulls/assigned>',
+      'rotate the token, see <https://github.com/Settings/Tokens>',
+      'fix <https://github.com/orgs/acme/issues/5>',
+    ])('a link that names no repo leaves the channel default in charge of the whole message: %s', async (message) => {
+      givenTables(['acme/api'], 'acme/api');
+
+      await handler(mention({ text: `submit ${message}` }));
+
+      expect(submitted()).toEqual([{ repo: 'acme/api', issue_number: undefined, task_description: message }]);
+    });
+
+    test('without a channel default a link that names no repo is not taken for one', async () => {
+      givenTables(['acme/api']);
+
+      await handler(mention({ text: 'submit fix what <https://example.com/reports/latest> says' }));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(slackCalls('chat.postMessage')).toEqual([
+        expect.objectContaining({ text: expect.stringContaining('Please include a repo') }),
+      ]);
+    });
+
     // ─── The description keeps the user's lines ──────────────────────────────
 
     const DIFF = '```\n- timeout: 30\n+   timeout: 60\n```';
@@ -535,6 +648,7 @@ describe('slack-command-processor handler', () => {
       ['around a repo in the middle', `in acme/api apply this change:\n${DIFF}`, `in apply this change:\n${DIFF}`],
       ['before a repo at the end', `apply this change:\n${DIFF}\nin acme/api`, `apply this change:\n${DIFF}\nin`],
       ['before a repo that starts a line', `apply this change:\n${DIFF}\nacme/api: that is the repo`, `apply this change:\n${DIFF}\n: that is the repo`],
+      ['before a repo behind a tab and a blank, which go with it', 'apply this change:  \n\t acme/api: that is the repo', 'apply this change:  \n: that is the repo'],
     ])('the description keeps line breaks and indentation %s', async (_where, message, description) => {
       givenTables(['acme/api']);
 

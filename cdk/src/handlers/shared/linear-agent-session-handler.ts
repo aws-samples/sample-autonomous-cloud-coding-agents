@@ -56,6 +56,7 @@ import { deriveOrchestrationId, loadOrchestration } from './orchestration-store'
 import { prNumberFromTask } from './task-pr-number';
 import { NUDGE_MAX_MESSAGE_LENGTH, type TaskRecord } from './types';
 import { makeDocClient } from './ua';
+import { emitWebhookScreeningFailedMetric } from './webhook-screening-metric';
 import { CODING_WORKFLOW_ID, PR_ITERATION_WORKFLOW_ID } from './workflows';
 
 const ddb = makeDocClient();
@@ -316,10 +317,11 @@ async function screenSessionContextOrDrop(
       : 'Dropping Linear session context: guardrail not configured to screen it', logCtx);
     return null;
   } catch (err) {
+    emitWebhookScreeningFailedMetric('linear-session-context');
     logger.warn('Dropping Linear session context: screening unavailable (task still proceeds)', {
       ...logCtx, error: err instanceof Error ? err.message : String(err),
     });
-    return null; // nosemgrep: ts-silent-success-masking -- session context is advisory enrichment; a screening outage drops it (logged) and the requester's task still proceeds on text createTaskCore screens fail-closed
+    return null; // nosemgrep: ts-silent-success-masking -- advisory enrichment that cannot be screened is dropped and the task proceeds (ADR-026)
   }
 }
 

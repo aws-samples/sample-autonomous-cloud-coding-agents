@@ -30,8 +30,11 @@ const PLATFORM = {
   deployment: { stackName: 'backgroundagent-dev', computeSubstrate: null },
   runtimeArn: 'arn:aws:bedrock:us-east-1:123456789012:runtime/test',
   githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:GitHubTokenSecret-AbCdEf',
+  bedrockGeoRegion: null,
 };
 const BLUEPRINT_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:AcmeRepoToken-XyZ123';
+/** The shipped default without its geography (no geography name holds a dot). */
+const BARE_DEFAULT_MODEL = PLATFORM_REPO_DEFAULTS.model_id.slice(PLATFORM_REPO_DEFAULTS.model_id.indexOf('.') + 1);
 
 describe('formatRepoConfigForDisplay', () => {
   test('resolves platform defaults when blueprint fields are absent from RepoTable', () => {
@@ -45,6 +48,37 @@ describe('formatRepoConfigForDisplay', () => {
     expect(display.effective.model_id).toBe(PLATFORM_REPO_DEFAULTS.model_id);
     expect(display.field_sources.compute_type).toBe('platform');
     expect(Object.keys(display.blueprint_overrides)).toHaveLength(0);
+  });
+
+  test.each(['us', 'eu', 'us-gov', 'global'])('shows the default model in the %s geography the stack grants', geo => {
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/default', status: 'active' },
+      { ...PLATFORM, bedrockGeoRegion: geo },
+    );
+
+    expect(display.effective.model_id).toBe(`${geo}.${BARE_DEFAULT_MODEL}`);
+    expect(display.field_sources.model_id).toBe('platform');
+    expect(buildRepoShowLines(display).find(line => line.key === 'model_id')?.text)
+      .toBe(`(platform default) ${geo}.${BARE_DEFAULT_MODEL}`);
+  });
+
+  test.each([null, '', '  '])('keeps the shipped default model when the stack exports no geography (%p)', geo => {
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/default', status: 'active' },
+      { ...PLATFORM, bedrockGeoRegion: geo },
+    );
+
+    expect(display.effective.model_id).toBe(PLATFORM_REPO_DEFAULTS.model_id);
+  });
+
+  test('shows a per-blueprint model as stored, whatever geography the stack grants', () => {
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/pinned', status: 'active', model_id: 'eu.anthropic.claude-haiku-5-5' },
+      { ...PLATFORM, bedrockGeoRegion: 'us' },
+    );
+
+    expect(display.effective.model_id).toBe('eu.anthropic.claude-haiku-5-5');
+    expect(display.field_sources.model_id).toBe('blueprint');
   });
 
   test.each(['agentcore', 'ecs', 'lambda-microvm'] as const)(
@@ -155,6 +189,35 @@ describe('buildRepoShowLines', () => {
     const match = configPy.match(/"ANTHROPIC_MODEL",\s*"([^"]+)"/);
     expect(match).not.toBeNull();
     expect(PLATFORM_REPO_DEFAULTS.model_id).toBe(match![1]);
+  });
+
+  test('shows the memory token budget in effect and where it comes from', () => {
+    const inherited = formatRepoConfigForDisplay({ repo: 'acme/foo', status: 'active' }, PLATFORM);
+    expect(inherited.effective.memory_token_budget).toBe(PLATFORM_REPO_DEFAULTS.memory_token_budget);
+    expect(inherited.field_sources.memory_token_budget).toBe('platform');
+    expect(inherited.blueprint_overrides).not.toHaveProperty('memory_token_budget');
+    expect(buildRepoShowLines(inherited).find((l) => l.key === 'memory_token_budget')?.text)
+      .toBe(`(platform default) ${PLATFORM_REPO_DEFAULTS.memory_token_budget}`);
+
+    const pinned = formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', memory_token_budget: 4000 },
+      PLATFORM,
+    );
+    expect(pinned.effective.memory_token_budget).toBe(4000);
+    expect(pinned.field_sources.memory_token_budget).toBe('blueprint');
+    expect(pinned.blueprint_overrides.memory_token_budget).toBe(4000);
+    expect(buildRepoShowLines(pinned).find((l) => l.key === 'memory_token_budget')?.text)
+      .toBe('4000 (per-blueprint override)');
+  });
+
+  test('the advertised default memory token budget matches the one hydration applies', () => {
+    // The CLI cannot import the orchestrator's constant, so read it from the source.
+    const memoryTs = fs.readFileSync(
+      path.resolve(__dirname, '../../../cdk/src/handlers/shared/memory.ts'), 'utf8',
+    );
+    const match = memoryTs.match(/const DEFAULT_MEMORY_TOKEN_BUDGET = ([\d_]+);/);
+    expect(match).not.toBeNull();
+    expect(PLATFORM_REPO_DEFAULTS.memory_token_budget).toBe(Number(match![1].replace(/_/g, '')));
   });
 
   test('explains platform default github token in text output', () => {

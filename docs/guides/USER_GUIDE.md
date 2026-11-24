@@ -232,6 +232,7 @@ Blueprints can configure per-repository settings that override platform defaults
 | `model_id` | Bedrock inference-profile ID (geo-prefixed, matching the deployment's `bedrockGeoRegion`) | `global.anthropic.claude-opus-5-5` |
 | `max_turns` | Default turn limit for tasks | 100 |
 | `max_budget_usd` | Default cost budget in USD per task, `0.01`–`100` (Blueprint `agent.maxBudgetUsd`) | None (unlimited) |
+| `memory_token_budget` | Token budget for the memory context (repository knowledge and past task episodes) loaded into the agent's prompt; a positive integer (Blueprint `agent.memoryTokenBudget`) | 2000 |
 | `system_prompt_overrides` | Additional system prompt instructions | None |
 | `github_token_secret_arn` | Per-repo GitHub token (Secrets Manager ARN) | Platform default |
 | `poll_interval_ms` | Poll interval for awaiting completion (5000–300000) | 30000 |
@@ -239,6 +240,34 @@ Blueprints can configure per-repository settings that override platform defaults
 > `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.9.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs` — see the [Deployment guide](./DEPLOYMENT_GUIDE.md#lambda-microvms-backend-experimental).
 
 When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) is used. The same override pattern applies to `--max-budget` / `max_budget_usd`, except there is no platform default  - if neither the task nor the Blueprint specifies a budget, no cost limit is applied.
+
+`memory_token_budget` has no per-task override: the value in the repository's record applies to every task on it, and the platform default (2000) applies to a repository whose record has none. The budget trims what context hydration retrieves from memory (at most five knowledge records and three episodes); it does not retrieve more. A value that is not a positive integer fails at CDK synth. `bgagent repo show <owner/repo>` prints the value in effect.
+
+### Removing a per-repo override
+
+Deleting an override from the Blueprint and redeploying does not remove it. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value: a deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) are removed from the record when the Blueprint stops declaring them.
+
+`bgagent repo onboard` has no option that removes a setting. When you run it again for an onboarded repository, it keeps the stored value of every option you leave out, and a stored `max_budget_usd` or `memory_token_budget`.
+
+To change an override, set the new value in the Blueprint and redeploy. To remove one, so that the platform default applies again:
+
+1. Delete the setting from the Blueprint. Otherwise the next deploy writes it back.
+2. Remove the attribute from the repository's record. The table is the `RepoTableName` stack output (`bgagent platform outputs` prints it), and the attribute has the name of the setting in the table above; the design document linked below names the attributes that are not in that table. The condition makes a mistyped repository name fail instead of writing a new, empty record:
+
+   ```bash
+   aws dynamodb update-item \
+     --table-name <RepoTableName> \
+     --key '{"repo": {"S": "owner/repo"}}' \
+     --update-expression "REMOVE max_budget_usd" \
+     --condition-expression "attribute_exists(repo)" \
+     --return-values UPDATED_OLD
+   ```
+
+   The command prints the value it removed. No output means that the record had no attribute of that name.
+
+3. Run `bgagent repo show <owner/repo>`: the setting is no longer marked `(per-blueprint override)`. `bgagent repo show` does not list `build_command` or `lint_command`: for these two, the output of step 2 is the check.
+
+The change applies to tasks submitted after it. A task that is already running keeps the values it started with. [Repository onboarding](../design/REPO_ONBOARDING.md#blueprint-construct) lists every attribute that behaves this way and explains why a redeploy leaves them alone.
 
 ### Where can I set `max_budget_usd`?
 
@@ -264,7 +293,7 @@ new Blueprint(this, 'MyRepo', {
 });
 ```
 
-Run `bgagent repo show <owner/repo>` to see which value is in effect; the `max_budget_usd` line reads `(per-blueprint override)` when the repo pins one and `(platform default) unlimited` when it does not.
+Run `bgagent repo show <owner/repo>` to see which value is in effect; the `max_budget_usd` line reads `(per-blueprint override)` when the repo pins one and `(platform default) unlimited` when it does not. Deleting `agent.maxBudgetUsd` from the Blueprint does not lift the budget: see [Removing a per-repo override](#removing-a-per-repo-override).
 
 ### Per-task budgets are unlimited by default
 
@@ -938,6 +967,14 @@ node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
 
 The optional `--reason` text is sanitized and truncated server-side, then best-effort injected into the agent's Stop-hook context so it can adapt (try a different approach, ask you a question, or stop gracefully) instead of retrying blindly. Use `--reason-file` when the reason is multi-line and would otherwise require careful shell quoting.
 
+A deny tells the agent to stop trying that kind of action, not only that one call. With the refused call the agent gets your reason, the name of the rule that gated the call, and an instruction not to retry the action with variations. It has to find another way to do the task, or report why it is blocked.
+
+Put what matters most first. With the refused call the agent sees only about the first 200 characters of a long reason (that message is limited to 500 characters). The full text is in the Stop-hook injection described above.
+
+For the next 60 seconds, any other call of the same tool that the same rule gates is refused at once, without a new approval request. `bgagent watch` shows each such refusal as a `policy_decision` milestone. After that window a new attempt opens a new request. A gate that times out does less. The agent then gets no such instruction, and only the identical call is refused for 60 seconds.
+
+If you want the action to go through this time and be asked again the next time, approve it with the default scope `this_call` instead of denying. To stop being asked about a rule for the rest of the task, approve with `--scope rule:<rule_id>`.
+
 ### Discovering repo policies
 
 Before submitting a task you can list the rules that apply to the target repository:
@@ -1019,10 +1056,13 @@ The response includes a `secret` field  - **store it securely, it is only shown 
     "webhook_id": "01HYX...",
     "name": "My CI Pipeline",
     "secret": "<webhook-secret-64-hex-characters>",
+    "webhook_url": "https://<api-id>.execute-api.<region>.amazonaws.com/v1/webhooks/tasks",
     "created_at": "2025-03-15T10:30:00Z"
   }
 }
 ```
+
+`webhook_url` is the endpoint to enter in the external system: the URL that [Submitting tasks via webhook](#submitting-tasks-via-webhook) posts to. It belongs to the deployment, not to the webhook, so every webhook gets the same one. `bgagent webhook create` prints it as `URL:`.
 
 Webhook names must be 1-64 characters: alphanumeric, spaces, hyphens, or underscores, starting and ending with an alphanumeric character.
 
@@ -1128,10 +1168,14 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably -
 | `RUNNING` | Agent session started and actively working on the task |
 | `AWAITING_APPROVAL` | Agent paused at a Cedar HITL gate; waiting for your `approve` or `deny` decision. See [Approval gates](#approval-gates-cedar-hitl). |
 | `FINALIZING` | Agent session ended; task is wrapping up (post-session hooks / PR finalization) before reaching a terminal state |
-| `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
+| `COMPLETED` | Agent finished and the task succeeded. Depending on the [workflow](#workflows), the result is a new pull request, an update or a review of an existing one, an artifact, or an answer or a question from the agent with no change to the code |
 | `FAILED` | Something went wrong - pre-flight check failed, guardrail blocked the content, the task stayed queued for more than 24 hours, or the agent encountered an error |
 | `CANCELLED` | Task was cancelled by the user |
 | `TIMED_OUT` | Task exceeded the maximum allowed duration (~8 hours, the AgentCore max session duration; the orchestrator safety-net timer is slightly longer) |
+
+A task that is expected to open a new pull request ends as `FAILED`, not `COMPLETED`, when its agent reports success but leaves no commit on the task's branch, no pull request and no question. The platform expects a new pull request from every `coding/new-task-v1` task, and from a `default/agent-v1` or `knowledge/web-research-v1` task whose request names a repository. The agent of the last two is told to answer in its final message, so such a task ends this way each time the agent changes no file.
+
+The error is "No change was delivered" (`deliverable=lost` in the `error_message`). Either the agent made no change, for example because the repository already had what you asked for, or its changes were lost before they reached the branch. The platform cannot tell which. Check the repository before you retry. If it has what you asked for, a retry ends the same way. [#751](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/751) tracks a way for the agent to report that no change was needed.
 
 Terminal states: `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`. `AWAITING_APPROVAL` is not terminal — a decision (or an approval-timeout) always flips it back to `RUNNING` or onto a terminal state.
 
@@ -1195,11 +1239,11 @@ Filter by task ID to find logs for a specific task.
 
 ### Notifications (GitHub edit-in-place)
 
-When a task targets a pull request (`coding/pr-iteration-v1` or `coding/pr-review-v1`), the platform automatically posts a status comment on the PR and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
+When a task targets a pull request (`coding/pr-iteration-v1` or `coding/pr-review-v1`) or was submitted for a GitHub issue (`--issue`, or `issue_number` through the API), the platform automatically posts a status comment on that pull request or issue and edits it in place as the task progresses. This gives collaborators visibility into the agent's work without polling the CLI or API.
 
-The notification plane uses DynamoDB Streams to fan out task events to channel-specific dispatchers. Currently the GitHub edit-in-place dispatcher is active; Slack and Email dispatchers are planned.
+The notification plane uses DynamoDB Streams to fan out task events to channel-specific dispatchers: this GitHub comment for every task with a pull request or issue target, and the Slack, Linear and Jira notifications for tasks that came from those channels. Email notifications are not sent yet.
 
-The status comment shows: current phase, last milestone, cost so far, and a link to the task. It updates on key events (`session_started`, `pr_created`, `task_completed`, `task_failed`, `nudge_acknowledged`, and routable agent milestones).
+The status comment shows the task ID, the repository, the status, the last event and, once the agent has opened one, a link to the pull request. A task that the agent finished itself, successfully or not, also shows the duration and the cost of the run. A task that was cancelled or timed out shows neither: the agent records both when it ends the run itself. The comment is posted or updated when the agent opens the pull request and when the task ends, whether it completed, failed, was cancelled or timed out.
 
 ### Preview-deploy screenshots (optional)
 

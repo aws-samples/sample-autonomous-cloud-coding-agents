@@ -63,6 +63,15 @@ describe('Bootstrap template', () => {
         'ABCA: Least-Privilege Bootstrap',
       );
     });
+
+    // #701: the CDK CLI compares the default above with the `BootstrapVariant` parameter of
+    // the account's CDKToolkit stack: see the comment above the bootstrap task in cdk/mise.toml.
+    it('replaces a bootstrap of another variant, because the bootstrap task passes --force', () => {
+      const command = readFileSync(join(__dirname, '..', '..', 'mise.toml'), 'utf-8')
+        .split('\n')
+        .find((line) => line.startsWith('run = "npx cdk bootstrap '));
+      expect(command).toContain(' --force ');
+    });
   });
 
   describe('Conditions', () => {

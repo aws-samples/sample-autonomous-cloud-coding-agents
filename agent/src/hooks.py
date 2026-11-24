@@ -68,6 +68,7 @@ POLL_SLOW_INTERVAL_S: float = 5.0
 POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this many consecutive failures
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this many consecutive failures
 TOOL_INPUT_PREVIEW_MAX: int = 256  # cap for the strip-ANSI, truncated input preview
+PERMISSION_REASON_MAX: int = 500  # cap for the reason a denied tool call returns
 ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
 
 
@@ -170,6 +171,10 @@ _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 # one it listens on.
 _LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNORECASE)
 
+# The built-in tools through which a task opens outbound connections. The output of
+# any other tool is content, which can quote a failed connection the task never attempted.
+_NETWORK_TOOLS = frozenset(("Bash", "WebFetch"))
+
 
 # The most recent agent-detected blocker, as a canonical ``BLOCKED[<kind>]: …``
 # reason string (see ``format_blocker_reason``). Blockers are detected mid-turn
@@ -180,6 +185,8 @@ _LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNO
 # surfaces a precise remedy. Process-lifetime (== one task) like
 # ``_INJECTED_NUDGES``; last-writer-wins is fine — the most recent blocker is
 # the most relevant to a terminal failure.
+# Correct only for one task at a time per process (``docs/design/COMPUTE.md``).
+# Key the latch by task id before a process may run two tasks at once.
 _LAST_BLOCKER_REASON: str | None = None
 
 
@@ -272,14 +279,16 @@ def _deny_response(reason: str) -> dict:
     """Build a PreToolUse DENY response with a sanitized reason.
 
     Guaranteed surface: ``permissionDecisionReason`` is ANSI-stripped and
-    truncated to 500 chars so it can never carry terminal-escape injection
-    or overflow a log line.
+    truncated to ``PERMISSION_REASON_MAX`` chars so it can never carry
+    terminal-escape injection or overflow a log line.
     """
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": _truncate(_strip_ansi(reason or "denied"), 500),
+            "permissionDecisionReason": _truncate(
+                _strip_ansi(reason or "denied"), PERMISSION_REASON_MAX
+            ),
         }
     }
 
@@ -1074,13 +1083,19 @@ async def _handle_require_approval(  # noqa: C901 -- 24, down from 35 when the c
             if decision.matching_rule_ids
             else ""
         )
-        reason_text = (
-            f"AUTHORITATIVE DENY from human reviewer: {raw_reason}{rule_hint}. "
-            "Do NOT retry this class of action with trivial variations; "
+        prefix = "AUTHORITATIVE DENY from human reviewer: "
+        stop_language = (
+            ". Do NOT retry this class of action with trivial variations; "
             "the same rule will fast-deny subsequent attempts. Find an "
             "alternative task strategy or report back to the user explaining "
             "why progress is blocked."
         )
+        # ``_deny_response`` cuts the text at PERMISSION_REASON_MAX. That cut must not fall in the
+        # stop-language. ANSI is stripped before the cut here. No strip recognises half a sequence.
+        room = PERMISSION_REASON_MAX - len(prefix) - len(stop_language)
+        rule_hint = _truncate(rule_hint, room)
+        reason = _truncate(_strip_ansi(raw_reason), room - len(rule_hint))
+        reason_text = prefix + reason + rule_hint + stop_language
     else:
         reason_text = raw_reason
     return _deny_response(reason_text)
@@ -1556,8 +1571,10 @@ def _observe_tool_result(
     *response* is the response of a call that completed (PostToolUse) or the
     error of a call that failed (PostToolUseFailure, which is what a failing
     Bash command fires instead of PostToolUse). Best-effort observability.
-    *failed* tells the stuck guard how the call ended where the caller knows;
-    with ``None`` the guard reads the response for the signs of a failure.
+    *failed* tells the observers how the call ended where the caller knows.
+    From a call known not to have failed (``False``) the detector latches no
+    host; with ``None`` the guard reads the response for the signs of a
+    failure.
 
     Returns the stuck guard's advisory when this result completes a spin, for
     the caller to hand to the model as ``additionalContext`` with the result:
@@ -1589,7 +1606,14 @@ def _observe_tool_result(
         # and is clearly a heuristic signal in the live stream).
         # A loopback host is the same localhost race with a name on it (curl:
         # "Failed to connect to localhost port 3000"): no latch either.
-        if host and not _LOOPBACK_HOST_RE.fullmatch(host):
+        # Nor for a tool outside ``_NETWORK_TOOLS``, nor for a call known not to have
+        # failed: in the pinned CLI a fetch that cannot connect fails.
+        if (
+            host
+            and not _LOOPBACK_HOST_RE.fullmatch(host)
+            and str(tool_name) in _NETWORK_TOOLS
+            and failed is not False
+        ):
             _record_blocker_reason("egress_denied", detail, host)
         _try_progress(
             progress,

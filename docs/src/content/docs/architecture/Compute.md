@@ -33,10 +33,10 @@ Set `compute_types` in `cdk/cdk.json` as an array, or pass a comma-separated lis
 
 ```bash
 # AgentCore and MicroVM, with AgentCore as the repository default.
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c compute_types=agentcore,lambda-microvm
+mise //cdk:deploy -- -c compute_types=agentcore,lambda-microvm
 
 # Only ECS; removing an existing backend requires the transition below.
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c compute_types=ecs
+mise //cdk:deploy -- -c compute_types=ecs
 ```
 
 `compute_types` takes precedence over the legacy `compute_type` context. Empty lists, non-string entries and unsupported names fail synthesis. Duplicate names are collapsed while preserving order. Without `compute_types`, the previous deployment behavior is preserved:

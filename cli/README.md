@@ -177,6 +177,8 @@ bgagent events <task-id> \
 
 Create a new webhook integration. The HMAC secret is displayed once at creation time — store it securely.
 
+The output also shows the webhook URL (`webhook_url` in JSON output): the endpoint to enter in the external system. It belongs to the API deployment, not to the webhook, so it is the same for every webhook and there is no need to fetch it again.
+
 ```
 bgagent webhook create \
   --name <name>                Webhook name (required)
@@ -226,7 +228,7 @@ bgagent setup --features none --no-deploy          # write abca.deployment.json 
 bgagent setup -c networkTopology=split             # extra CDK context for diff and deploy (repeatable)
 ```
 
-It first confirms the AWS account your credentials resolve to and lets you update an existing deployment or create a new one (named by you). For a new installation it then asks where agents run (AgentCore, ECS, or both), and prepares the account (CDK bootstrap) if needed. It then asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `~/.bgagent/logs/<stack>/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature the Region does not support fails with the supported Regions.
+It first confirms the AWS account your credentials resolve to and lets you update an existing deployment or create a new one (named by you). For a new installation it then asks where agents run (AgentCore, ECS, or both), and prepares the account (CDK bootstrap) if needed. It then asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `~/.bgagent/logs/<stack>/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature or compute backend the Region does not support fails with the supported Regions, before the diff.
 
 Commands for a feature the stack omits (for example `bgagent slack setup`) fail and point back to `bgagent setup`.
 
@@ -274,7 +276,7 @@ bgagent repo list \
 
 ### `bgagent repo show <owner/repo>`
 
-Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token.
+Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token. When no per-blueprint model is configured, the **platform default** model is shown as this deployment invokes it: with the geography of the stack's `BedrockGeoRegion` output (`us.anthropic.…` on a stack deployed with `-c bedrockGeoRegion=us`). A stack that predates that output shows the shipped `global.` profile.
 
 ```
 bgagent repo show owner/repo \
@@ -429,7 +431,7 @@ bgagent admin reset-password <email> \
 - `status` and `submit` show a key-value detail view
 - `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, HEARTBEAT, DESCRIPTION)
 - `events` shows a timeline (TIMESTAMP, EVENT TYPE, METADATA)
-- `webhook create` shows webhook details and the one-time HMAC secret
+- `webhook create` shows webhook details, the URL to post tasks to, and the one-time HMAC secret
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)
 - `webhook revoke` shows the revoked webhook details
 

@@ -549,6 +549,25 @@ describe('isComplete Delete', () => {
     expect(res.IsComplete).toBe(false);
   });
 
+  test.each([
+    ['finds the registry gone', ResourceNotFoundException],
+    ['is rejected for its id', ValidationException],
+  ])('is complete when a re-driven delete %s', async (_label, ErrorType) => {
+    routeSend({
+      GetRegistry: () => ({ status: 'READY' }),
+      DeleteRegistry: () => {
+        throw new ErrorType();
+      },
+    });
+    await expect(
+      isComplete({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toEqual({ IsComplete: true });
+  });
+
   test('keeps polling when GetRegistry is throttled', async () => {
     routeSend({
       GetRegistry: () => {
@@ -561,6 +580,25 @@ describe('isComplete Delete', () => {
       ResourceProperties: { RegistryName: 'abca' },
     });
     expect(res.IsComplete).toBe(false);
+  });
+
+  // Reported complete, a registry that may still exist would be left behind.
+  // Polled again, the Provider would wait out its 15 minutes.
+  test('rethrows a GetRegistry failure that is neither absent nor retryable', async () => {
+    routeSend({
+      GetRegistry: () => {
+        throw new Error('AccessDenied');
+      },
+    });
+    await expect(
+      isComplete({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).rejects.toThrow('AccessDenied');
+    const types = mockSend.mock.calls.map((c) => (c[0] as TaggedCommand)._type);
+    expect(types).toEqual(['GetRegistry']);
   });
 
   test('throws when asynchronous deletion fails', async () => {

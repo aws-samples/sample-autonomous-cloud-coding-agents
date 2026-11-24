@@ -170,6 +170,14 @@ describe('github-webhook receiver', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  test.each(['null', '[]', '42', '"text"'])('400 when a deployment_status body is JSON but not an object: %s', async (body) => {
+    const res = await handler(event(body));
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'Invalid webhook payload' });
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
   test('200 skipped when deployment_status.state is not success', async () => {
     const res = await handler(event(deploymentStatusBody({ state: 'failure' })));
     expect(res.statusCode).toBe(200);

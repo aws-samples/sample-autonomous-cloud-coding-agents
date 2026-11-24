@@ -1147,7 +1147,7 @@ def _merge_predecessor_branch(repo_dir: str, pred_branch: str, notes: list[str])
 
 
 def _install_commit_hook(repo_dir: str) -> None:
-    """Install the prepare-commit-msg git hook for Task-Id/Prompt-Version trailers."""
+    """Install the prepare-commit-msg git hook, which adds the attribution trailers."""
     try:
         hooks_dir = os.path.join(repo_dir, ".git", "hooks")
         os.makedirs(hooks_dir, exist_ok=True)

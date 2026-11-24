@@ -358,7 +358,10 @@ class TokenUsage(BaseModel):
 
 class AgentResult(BaseModel):
     status: str = "unknown"
+    # Answers of the model, counted by the runner: what `max_turns` limits.
     turns: int = 0
+    # The Claude Code CLI's own `ResultMessage.num_turns` (0 when no result
+    # arrived). A different count: see `TaskResult.turns_attempted`.
     num_turns: int = 0
     cost_usd: float | None = None
     session_id: str = ""
@@ -390,14 +393,19 @@ class TaskResult(BaseModel):
     build_passed: bool | None = None
     lint_passed: bool | None = None
     cost_usd: float | None = None
-    # Historically the `turns` field was set to the SDK's
-    # `ResultMessage.num_turns`, which INCLUDES the attempted turn that
-    # tripped a cap (so `max_turns=6` yields `turns=7` under
-    # `agent_status='error_max_turns'`). That confused operators. We
-    # now expose both fields explicitly:
-    #   * `turns_attempted` — the SDK's authoritative counter (ex-`turns`).
-    #   * `turns_completed` — clamped to max_turns when we know the cap
-    #     fired; otherwise equals `turns_attempted`.
+    # Two counts, because the Claude Code CLI's own one is not the count that
+    # `max_turns` limits:
+    #   * `turns_completed`: the answers of the model, counted by the runner
+    #     and clamped to `max_turns`. This is what the limit counts.
+    #   * `turns_attempted`: the CLI's `ResultMessage.num_turns`, kept raw
+    #     for debugging (the runner's count when the CLI reported none). On a
+    #     run stopped at the limit it is `max_turns + 1`: the attempt the CLI
+    #     aborted is counted. On every other run it grows with each tool
+    #     result rather than with each answer (an answer that calls two tools
+    #     adds two), so it can exceed `max_turns` on a task that never reached
+    #     the limit. The CLI does not document this count: the description is
+    #     of version 2.1.319, to be checked again when the pinned version
+    #     changes.
     # The legacy `turns` field is retained (= `turns_attempted`) so
     # existing DDB consumers keep working during the transition.
     turns: int | None = None

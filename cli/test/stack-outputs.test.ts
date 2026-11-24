@@ -22,6 +22,7 @@ import {
   fetchConfigureBundleFromStack,
   findStackOutput,
   getStackOutput,
+  getStackOutputs,
   resolveConfigureBundleFromStack,
   resolveOperatorRegion,
 } from '../src/stack-outputs';
@@ -165,6 +166,30 @@ describe('getStackOutput', () => {
     );
     await expect(getStackOutput('us-east-1', 'dev', 'ApiUrl'))
       .rejects.toThrow(/Could not describe stack 'dev' in us-east-1/);
+  });
+});
+
+describe('getStackOutputs', () => {
+  beforeEach(() => {
+    cfSend.mockReset();
+  });
+
+  test('reads several outputs with one DescribeStacks call, keyed by output name', async () => {
+    mockStackWithOutputs({ ApiUrl: 'https://api.example/v1/', RepoTableName: 'RepoTable', NotAskedFor: 'value' });
+
+    const outputs = await getStackOutputs('us-east-1', 'dev', ['RepoTableName', 'MissingKey', 'ApiUrl']);
+
+    expect(outputs).toEqual({ RepoTableName: 'RepoTable', MissingKey: null, ApiUrl: 'https://api.example/v1/' });
+    expect(cfSend).toHaveBeenCalledTimes(1);
+    // Only `mise //cli:typecheck` checks the next line. Jest does not check types.
+    const hasOnlyTheKeysAskedFor: keyof typeof outputs extends 'RepoTableName' | 'MissingKey' | 'ApiUrl' ? true : false = true;
+    expect(hasOnlyTheKeysAskedFor).toBe(true);
+  });
+
+  test('fails as getStackOutput does when the stack does not exist', async () => {
+    cfSend.mockResolvedValueOnce({ Stacks: [] });
+    await expect(getStackOutputs('us-east-1', 'missing', ['ApiUrl', 'RepoTableName']))
+      .rejects.toThrow("Stack 'missing' was not found in us-east-1.");
   });
 });
 

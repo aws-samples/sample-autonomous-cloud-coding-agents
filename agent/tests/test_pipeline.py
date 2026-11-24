@@ -301,13 +301,20 @@ class TestCedarPoliciesInjection:
 
         mock_run_agent.side_effect = fake_run_agent
 
+        seen: dict[str, str] = {}
+
+        def fake_ensure_committed(_repo_dir):
+            # Read while the task runs: run_task puts the earlier values back when it ends (#635).
+            seen.update(os.environ)
+            return False
+
         mock_span = MagicMock()
         mock_span.__enter__ = MagicMock(return_value=mock_span)
         mock_span.__exit__ = MagicMock(return_value=False)
         mock_task_span.return_value = mock_span
 
         with (
-            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.ensure_committed", side_effect=fake_ensure_committed),
             patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch(
@@ -327,10 +334,10 @@ class TestCedarPoliciesInjection:
                 task_id="test-id",
             )
 
-        assert os.environ["GIT_AUTHOR_NAME"] == "bgagent"
-        assert os.environ["GIT_AUTHOR_EMAIL"] == "bgagent@noreply.github.com"
-        assert os.environ["GIT_COMMITTER_NAME"] == "bgagent"
-        assert os.environ["GIT_COMMITTER_EMAIL"] == "bgagent@noreply.github.com"
+        assert seen["GIT_AUTHOR_NAME"] == "bgagent"
+        assert seen["GIT_AUTHOR_EMAIL"] == "bgagent@noreply.github.com"
+        assert seen["GIT_COMMITTER_NAME"] == "bgagent"
+        assert seen["GIT_COMMITTER_EMAIL"] == "bgagent@noreply.github.com"
 
 
 class TestRepoLessPipeline:
@@ -2712,9 +2719,8 @@ class TestInertBuildIsNotReportedAsPassed:
 
 class TestTurnsCompletedAtTheCap:
     def test_max_turns_stop_is_clamped_to_the_cap(self):
-        # What the runner hands over when the cap fires: the CLI marks the
-        # max-turns result ``is_error``, so the runner reports status "error" (not
-        # "error_max_turns"), and num_turns counts the attempt that was aborted.
+        # The runner's count can pass the cap: the CLI may ask the model again without counting
+        # a turn. It marks the max-turns result ``is_error``, so the status is "error".
         run = _run_pipeline(
             AgentResult(
                 status="error",
@@ -2726,6 +2732,49 @@ class TestTurnsCompletedAtTheCap:
         )
 
         assert run.result["turns_attempted"] == 11
+        assert run.result["turns_completed"] == 10
+
+
+class TestTurnsCompletedCountsTheAnswers:
+    """``turns_completed`` is the number of answers of the model, which is what
+    ``max_turns`` limits: the runner's count. The CLI's ``num_turns`` is kept as
+    ``turns_attempted``: it grows with every tool result, so it can pass the cap
+    on a task that never reached it."""
+
+    def test_completed_task_records_its_answers_not_the_cli_count(self):
+        run = _run_pipeline(
+            AgentResult(status="success", turns=62, num_turns=90, cost_usd=0.01),
+            max_turns=80,
+        )
+
+        assert run.result["turns_completed"] == 62
+        assert run.result["turns_attempted"] == 90
+        assert run.result["turns"] == 90
+
+    def test_stop_at_the_cap_records_the_cap_and_the_aborted_attempt(self):
+        run = _run_pipeline(
+            AgentResult(
+                status="error",
+                error="Agent session error (subtype='error_max_turns')",
+                turns=10,
+                num_turns=11,
+            ),
+            max_turns=10,
+        )
+
+        assert run.result["turns_completed"] == 10
+        assert run.result["turns_attempted"] == 11
+
+    def test_cli_count_stands_in_when_the_runner_saw_no_answer(self):
+        run = _run_pipeline(
+            AgentResult(
+                status="error",
+                error="Agent session error (subtype='error_max_turns')",
+                num_turns=11,
+            ),
+            max_turns=10,
+        )
+
         assert run.result["turns_completed"] == 10
 
 
@@ -2799,7 +2848,7 @@ class TestHoldForInput:
     )
     def test_task_is_held_whatever_the_question_says(self, tmp_path, recorded_question, answer):
         # No pull request and nothing pushed (tmp_path is not a repository): a run
-        # that is not held ends as "the change was not saved".
+        # that is not held ends as "no change was delivered" (deliverable=lost).
         run = _run_pipeline(
             _agent_succeeded(
                 clarification_question=recorded_question,
@@ -3285,6 +3334,8 @@ class TestWhatTheAgentStepIsGiven:
         its prompt, system prompt and config, and the servers that ``.mcp.json``
         names at the moment the agent starts."""
         step = SimpleNamespace(ran=False)
+        # A clone is a repository: the registry loader has git keep .mcp.json out of commits.
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
         def servers_in_mcp_json(repo_dir: str) -> list[str]:
             mcp_json = Path(repo_dir, ".mcp.json")

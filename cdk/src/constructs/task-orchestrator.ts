@@ -22,7 +22,7 @@ import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
+import { Alias, Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -821,8 +821,10 @@ export class TaskOrchestrator extends Construct {
       }));
     }
 
-    // Create alias for durable function invocation
-    const fnAlias = this.fn.currentVersion.addAlias('live');
+    // Alias for durable function invocation. `fn.addAlias('live')` would change its
+    // logical ID, and CloudFormation cannot create a second alias named `live`.
+    const version = this.fn.currentVersion;
+    const fnAlias = new Alias(version, 'Aliaslive', { aliasName: 'live', version });
     this.alias = fnAlias;
 
     // Retry config: durable execution handles retries; disable Lambda-level retries

@@ -24,8 +24,11 @@ import {
 } from '../deployment/features';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-constants';
 
-/** Enough additional model grants to exercise the SessionRole's lazy policy split. */
-const EXTRA_MODEL_COUNT = 8;
+/**
+ * Enough additional model grants that CDK splits the policy of the SessionRole
+ * and of every backend's compute role during synthesis.
+ */
+const EXTRA_MODEL_COUNT = 16;
 
 type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
 type Image = 'none' | 'managed' | 'external';

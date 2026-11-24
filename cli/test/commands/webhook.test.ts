@@ -85,6 +85,7 @@ describe('webhook command', () => {
         webhook_id: 'wh-1',
         name: 'My CI',
         secret: 'whsec_abc123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
         created_at: '2026-01-01T00:00:00Z',
       });
 
@@ -94,8 +95,19 @@ describe('webhook command', () => {
       expect(mockCreateWebhook).toHaveBeenCalledWith({ name: 'My CI' });
       const output = consoleSpy.mock.calls[0][0] as string;
       expect(output).toContain('wh-1');
+      expect(output).toContain('URL:         https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks');
       expect(output).toContain('whsec_abc123');
       expect(output).toContain('store securely');
+    });
+
+    test('--help says the URL is the same for every webhook', () => {
+      const create = makeWebhookCommand().commands.find((command) => command.name() === 'create')!;
+      let help = '';
+      create.configureOutput({ writeOut: (text) => { help += text; } });
+      create.outputHelp();
+      const text = help.replace(/\s+/g, ' ');
+      expect(text).toContain('The output includes the webhook URL');
+      expect(text).toContain('the same for every webhook');
     });
 
     test('outputs JSON when --output json', async () => {
@@ -103,6 +115,7 @@ describe('webhook command', () => {
         webhook_id: 'wh-1',
         name: 'My CI',
         secret: 'whsec_abc123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
         created_at: '2026-01-01T00:00:00Z',
       };
       mockCreateWebhook.mockResolvedValue(webhookData);

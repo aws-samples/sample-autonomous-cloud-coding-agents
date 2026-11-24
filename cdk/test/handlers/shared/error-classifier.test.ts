@@ -436,22 +436,35 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/try again|capacity|admin/i);
     });
 
-    test('deliverable=lost is a retryable AGENT fault (work not saved), not the generic did-not-succeed', () => {
-      // A new-work task reported agent-success but no commit reached the branch
-      // and no PR opened — the agent's changes were LOST (nested-clone workspace
-      // fault). Must read as retryable/transient with "not saved" copy, NOT the
-      // non-retryable "Agent task did not succeed". Ordered before the
-      // agent_status catch-all so it wins.
-      const result = classifyError(
-        'Task did not succeed (agent_status=success, deliverable=lost): the coding '
-        + 'task reported success but no commit reached the branch and no PR was opened '
-        + "— the agent's changes did not land in the task's repository.",
-      );
-      expect(result!.category).toBe(ErrorCategory.AGENT);
-      expect(result!.title).toMatch(/not saved/i);
-      expect(result!.retryable).toBe(true);
-      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
-      expect(result!.remedy).toMatch(/try again/i);
+    // A task record written by an earlier agent image carries the first wording.
+    // The API classifies a record when it is read, so both wordings classify alike.
+    const deliveredNothing = 'Task did not succeed (agent_status=success, deliverable=lost): the coding '
+      + 'task reported success but no commit reached the branch and no PR was opened — ';
+
+    test.each([
+      {
+        writer: 'an earlier agent image',
+        message: `${deliveredNothing}the agent's changes did not land in the task's repository.`,
+      },
+      {
+        writer: 'the agent',
+        message: `${deliveredNothing}either the agent made no change, or its changes did not land in the task's repository.`,
+      },
+    ])('deliverable=lost, as $writer words it, names both lost work and a run that changed nothing', ({ message }) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(ErrorCategory.AGENT);
+      expect(result.title).toBe('No change was delivered');
+      expect(result.description).toMatch(/nothing to change/i);
+      expect(result.description).toMatch(/lost/i);
+      expect(result.remedy).toMatch(/already has what you asked for/i);
+      expect(result.remedy).toMatch(/try again/i);
+      expect(`${result.description} ${result.remedy}`).not.toMatch(/transient/i);
+      expect(result.retryable).toBe(true);
+      // USER, not TRANSIENT: a retry cannot help a run that changed nothing.
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(isTransientError(result)).toBe(false);
+      expect(retryGuidance(result)).toMatch(/extra guidance/i);
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
     });
 
     test('deliverable=no_pr says the work is SAFE on the branch (the pull request just did not open)', () => {
@@ -754,7 +767,7 @@ describe('classifyError', () => {
         expect(result.remedy).toContain(region);
       }
       expect(result.remedy).toContain('--compute-type agentcore');
-      expect(result.remedy).toContain('microvm-regions.ts');
+      expect(result.remedy).toContain('contracts/deployment-capabilities.json');
     });
 
     test('classifies regional unavailability from the raw (unwrapped) SDK error too', () => {

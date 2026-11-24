@@ -240,3 +240,11 @@ describe('buildApp — production resource ceiling', () => {
     },
   );
 });
+
+describe('buildApp — custom resource SDK', () => {
+  it('has every AwsCustomResource call AWS with the SDK of the Lambda runtime', async () => {
+    const customs = Object.values(Template.fromStack(stackOf(await app())).findResources('Custom::AWS'));
+    expect(customs.length).toBeGreaterThan(0);
+    expect(customs.map(custom => custom.Properties.InstallLatestAwsSdk)).toEqual(customs.map(() => false));
+  });
+});

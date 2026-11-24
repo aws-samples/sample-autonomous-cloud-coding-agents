@@ -34,7 +34,7 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
-When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+When a workspace's authorization dies, ABCA records it on the registry row and publishes to the `OperationalAlerts` topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
 
 A vault call that fails is not such a death. When the vault answers with an error (a throttle, a missing permission, a deleted credential provider) rather than saying that a new consent is needed, ABCA records and announces nothing. That event uses the Secrets Manager token if the workspace has a usable one and is otherwise dropped, with `Vault token resolution failed` in the function's log. The next event asks the vault again.
 
@@ -211,7 +211,7 @@ Linear's [Agents API](https://linear.app/developers/agents) gives an installed a
 1. Deploy the stack with the flag:
 
    ```bash
-   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context enableLinearAgentSessions=true
+   mise //cdk:deploy -- --context enableLinearAgentSessions=true
    ```
 
 2. In the Linear app (*Settings → API → Applications → your app → Webhooks*), tick **Agent session events** under *App events*. Leave **Issues** and **Comments** ticked. Inbox notifications and permission changes stay off.
@@ -414,6 +414,15 @@ aws dynamodb update-item \
 ### Manual fallback
 
 If `remove-workspace` returns the `SECRET_DELETE_FAILED` error code, the workspace is already revoked (fail-closed, so it no longer resolves tokens or routes webhooks), but its OAuth secret was orphaned. The handler records this durably on the registry row: `secret_deletion_failed = true`, `secret_deletion_error` (the failing error name), and `orphaned_oauth_secret_arn` (the exact secret ARN to purge). When you see that marker — or the error code — run the `delete-secret` step below against `orphaned_oauth_secret_arn` to finish teardown.
+
+If `remove-workspace` returns the `WORKSPACE_SLUG_AMBIGUOUS` error code (HTTP 409), more than one `active` registry row carries the slug, and the command changed nothing. The message names the `linear_workspace_id` of each of those rows. On a row, `team_keys` (the workspace's Linear team keys, such as the `ENG` of `ENG-42`, when recorded), `installed_at` and `installed_by_platform_user_id` tell them apart.
+
+1. Use the `update-item` command below to revoke each workspace that should go, by its id. Leave out the `delete-secret` step and the credential-provider step as long as another `active` row carries the slug. The rows share the secret and the provider, both named after the slug.
+2. Run `bgagent linear setup` again for each workspace that stays, under its own URL key if that differs from the slug. `setup` prints the workspace it authorized, which has to be that one.
+
+Once a single `active` row is left for the slug, `remove-workspace <slug>` works again. Run it if that workspace should go too, and it deletes the secret and names the provider as usual.
+
+If no `active` row is left for the slug, because each one was revoked by hand or set up again under another URL key, finish teardown by hand. Run the `delete-secret` step for the slug and, if the workspaces were vault-managed, the credential-provider step.
 
 If the CLI is unavailable, you can revoke a workspace directly (equivalent to the default `remove-workspace` flow). **Run the registry revoke first, then delete the secret** — the same order the handler uses. Deleting the secret first leaves an `active` registry row with no credential behind it: token resolution then fails per-event without latching the row (the resolver deliberately declines to infer a revocation from a missing secret), so the workspace keeps advertising itself as active, and webhook signature verification — which lets Secrets Manager errors bubble so a transient failure can't silently downgrade to the stack-wide secret — makes the receiver return 500 and Linear retry the delivery. Revoking first shuts the workspace off deterministically at the registry, and the secret delete is then pure cleanup.
 
