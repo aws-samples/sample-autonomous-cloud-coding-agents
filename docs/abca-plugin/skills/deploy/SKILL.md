@@ -96,6 +96,10 @@ After a successful deploy, remind the user to:
 
 `mise //cdk:bootstrap` provisions a **custom least-privilege** CloudFormation execution role by default — NOT `AdministratorAccess` (ADR-002). It deploys `cdk/bootstrap/bootstrap-template.yaml`, which creates scoped `IaCRole-ABCA-*` managed policies (Infrastructure / Application / Observability) generated from `cdk/src/bootstrap/policies/`.
 
+The task passes `--force` to `cdk bootstrap`, so it replaces the bootstrap (the `CDKToolkit` stack) that the account and Region already have, for every CDK app that deploys through it. That includes a standard CDK bootstrap and one with a newer CDK bootstrap version than the task installs. `mise //cdk:bootstrap -- --no-force` cancels the flag for a run. The task then leaves such a bootstrap unchanged and still exits 0.
+
+Ask the user before you run the task, unless the user has said that no other CDK app deploys in that account and Region. What the replacement changes for the other CDK apps is described under "Using these policies" in `docs/design/DEPLOYMENT_ROLES.md`.
+
 A consequence worth knowing when you **add a new resource type or a new feature on an existing resource**: the scoped role must allow the IAM action CloudFormation will call, or the deploy rolls back with `AccessDenied` on that action (e.g. `s3:PutBucketVersioning`, `lambda:TagResource`). The fix is to add the action to the relevant policy in `cdk/src/bootstrap/policies/`, regenerate (`mise //cdk:bootstrap:generate`), re-bootstrap, and redeploy. The policy source and the `DEPLOYMENT_ROLES.md` golden doc are kept in sync by tests.
 
 See `docs/design/DEPLOYMENT_ROLES.md` for the complete IAM policies, trust policy, runtime role inventory, and tightening recommendations.

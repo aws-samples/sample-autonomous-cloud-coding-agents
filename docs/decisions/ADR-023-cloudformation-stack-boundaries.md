@@ -2,7 +2,7 @@
 
 **Status:** proposed
 **Date:** 2026-09-21
-**Last-updated:** 2026-10-05
+**Last-updated:** 2026-11-21
 **Issue:** [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852)
 
 Per the [ADR lifecycle](./README.md#lifecycle), this decision remains proposed while its implementing PR is in review and becomes accepted when that PR merges. This record does not approve or waive the existing-stack migration criteria in #852.
@@ -58,3 +58,7 @@ The [teardown guidance](../guides/DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentc
 - [Compute selection](../design/COMPUTE.md#selecting-and-changing-the-backend)
 - [CDK best practices](https://docs.aws.amazon.com/cdk/v2/guide/best-practices.html)
 - [CloudFormation quotas](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cloudformation-limits.html)
+
+## Changelog
+
+- 2026-11-21 — The validation scope also covers the overflow policies of each backend's compute role, which carry the audit exception of the role's base policy (#916). The expanded-model profiles add enough synthetic model IDs for CDK to split the policy of the SessionRole and of each compute role (decision unchanged).
