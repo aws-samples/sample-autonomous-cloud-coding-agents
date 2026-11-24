@@ -194,6 +194,21 @@ function activities(): Array<{ type: string; [k: string]: unknown }> {
   return emitAgentActivityMock.mock.calls.map((c) => c[2]);
 }
 
+/** The WebhookScreeningFailed embedded-metric documents that `run` writes to stdout, without their `_aws` envelope. */
+async function screeningFailedMetricsOf(run: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
+  const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  try {
+    await run();
+    return stdout.mock.calls
+      .map(([chunk]) => String(chunk))
+      .filter((line) => line.includes('"WebhookScreeningFailed"'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map(({ WebhookScreeningFailed, source }) => ({ WebhookScreeningFailed, source }));
+  } finally {
+    stdout.mockRestore();
+  }
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   taskRecords.clear();
@@ -293,25 +308,27 @@ describe('handleAgentSessionEvent — created', () => {
   });
 
   describe('session context (promptContext) is screened on its own', () => {
-    test('clean context joins the description', async () => {
-      await handleAgentSessionEvent(created());
+    test('clean context joins the description and counts no screening failure', async () => {
+      const metrics = await screeningFailedMetricsOf(() => handleAgentSessionEvent(created()));
       expect(screenWithGuardrailMock).toHaveBeenCalledWith(expect.stringContaining('<issue identifier="ENG-7">'), expect.any(String));
       expect(createTaskCoreMock.mock.calls[0][0].task_description).toContain('## Linear session context');
+      expect(metrics).toEqual([]);
     });
 
     test.each([
-      ['a comment in it trips the guardrail', async () => ({ action: 'GUARDRAIL_INTERVENED' })],
-      ['screening is unavailable', async () => { throw new Error('bedrock down'); }],
-      ['no guardrail is configured', async () => undefined],
-    ])('when %s, the context is dropped and the task still starts from the issue', async (_name, screen) => {
+      ['a comment in it trips the guardrail', async () => ({ action: 'GUARDRAIL_INTERVENED' }), []],
+      ['screening is unavailable', async () => { throw new Error('bedrock down'); }, [{ WebhookScreeningFailed: 1, source: 'linear-session-context' }]],
+      ['no guardrail is configured', async () => undefined, []],
+    ])('when %s, the context is dropped, the task still starts from the issue and only a failed screening call is counted (#794)', async (_name, screen, countedFailures) => {
       screenWithGuardrailMock.mockImplementation(screen);
-      await handleAgentSessionEvent(created());
+      const metrics = await screeningFailedMetricsOf(() => handleAgentSessionEvent(created()));
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       const description = createTaskCoreMock.mock.calls[0][0].task_description;
       expect(description).not.toContain('## Linear session context');
       // Falls back to the issue as fetched; createTaskCore screens that fail-closed.
       expect(description).toContain('Users cannot log in.');
       expect(activities().at(-1)).toEqual(expect.objectContaining({ type: 'action', action: 'Started coding task' }));
+      expect(metrics).toEqual(countedFailures);
     });
 
     test('a PR iteration carries no session context and screens none', async () => {

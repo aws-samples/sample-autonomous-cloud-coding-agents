@@ -24,13 +24,14 @@ export const WEBHOOK_METRIC_NAMESPACE = 'ABCA/Webhooks';
 export const WEBHOOK_SCREENING_FAILED_METRIC = 'WebhookScreeningFailed';
 
 /** What was dropped; the value of the `source` dimension. */
-type WebhookScreeningSource = 'jira-comments' | 'linear-docs' | 'linear-comments';
+type WebhookScreeningSource = 'jira-comments' | 'linear-docs' | 'linear-comments' | 'linear-session-context';
 
 /**
- * Count one block of advisory third-party content (comments or project documents) that a
- * webhook processor dropped because the guardrail call that screens it failed (#794). The
- * processor still submits the task, so without this count the only trace is a log line.
- * Content that the guardrail blocked is not counted: that is screening at work.
+ * Count one block of advisory third-party content (comments, project documents or the
+ * context of a Linear agent session) that a webhook processor dropped because the guardrail
+ * call that screens it failed (#794). The processor still submits the task, so without this
+ * count the only trace is a log line. Content that the guardrail blocked is not counted:
+ * that is screening at work.
  *
  * Written as an embedded-metric log line, which CloudWatch Logs turns into the metric: it
  * needs no CloudWatch permission and no client.
