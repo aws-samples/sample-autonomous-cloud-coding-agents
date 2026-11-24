@@ -454,7 +454,7 @@ After deployment, the stack emits these outputs (retrieve with `aws cloudformati
 | `CedarWasmLayerArn` | Lambda layer ARN for the Cedar WASM policy engine |
 | `TraceArtifactsBucketName` | S3 bucket for agent trace artifacts (7-day lifecycle) |
 | `GitHubTokenSecretArn` | Secrets Manager secret ARN for the GitHub PAT |
-| `OperationalAlertsTopicArn` | SNS topic that every CloudWatch alarm of the stack notifies (Lambda errors, DLQ depth, monthly budgets, webhook screening) |
+| `OperationalAlertsTopicArn` | ARN of the `OperationalAlerts` topic, the SNS topic that every CloudWatch alarm of the stack notifies (Lambda errors, DLQ depth, monthly budgets, webhook screening, XSS matches on the signed webhook routes) |
 
 When the Slack or Linear integrations are enabled, the stack emits additional outputs (e.g. `Slack*` and `Linear*` secret ARNs and integration table names).
 

@@ -34,7 +34,7 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
-When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+When a workspace's authorization dies, ABCA records it on the registry row and publishes to the `OperationalAlerts` topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
 
 A vault call that fails is not such a death. When the vault answers with an error (a throttle, a missing permission, a deleted credential provider) rather than saying that a new consent is needed, ABCA records and announces nothing. That event uses the Secrets Manager token if the workspace has a usable one and is otherwise dropped, with `Vault token resolution failed` in the function's log. The next event asks the vault again.
 

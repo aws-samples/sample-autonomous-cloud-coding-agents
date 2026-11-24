@@ -593,7 +593,7 @@ CloudWatch dashboard shows, per task:
 
 ### 9.5 Alarms
 
-The alarms the stack deploys notify one SNS topic, `OperationalAlerts`. For this design that is the DLQ-depth alarm of the fan-out consumer, the signal that the fail-open notification dispatcher of section 9.1 is losing events. The topic has no subscriber until an operator adds one: see [Alarm notifications](/sample-autonomous-cloud-coding-agents/architecture/observability#alarm-notifications).
+The alarms the stack deploys notify the `OperationalAlerts` topic. For this design that is the DLQ-depth alarm of the fan-out consumer, the signal that the fail-open notification dispatcher of section 9.1 is losing events. The topic has no subscriber until an operator adds one: see [Alarm notifications](/sample-autonomous-cloud-coding-agents/architecture/observability#alarm-notifications).
 
 ---
 

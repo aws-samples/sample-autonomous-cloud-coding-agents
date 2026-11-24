@@ -706,6 +706,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `DUPLICATE_TASK` | 409 | Idempotency key already used by another user (`POST /v1/tasks` / webhook create); same-user replays return `200` with the existing task instead |
 | `TASK_ALREADY_TERMINAL` | 409 | Cannot cancel a terminal task |
 | `WEBHOOK_ALREADY_REVOKED` | 409 | Webhook is already revoked |
+| `WORKSPACE_SLUG_AMBIGUOUS` | 409 | More than one active Linear workspace registration carries the slug (`DELETE /v1/linear/workspaces/{slug}`). Nothing is removed, and the message names the `linear_workspace_id` of each. The [Linear setup guide](../guides/LINEAR_SETUP_GUIDE.md#manual-fallback) gives the steps |
 | `REPO_NOT_ONBOARDED` | 422 | Repository not registered (onboard via CDK, not runtime API) |
 | `REPO_NOT_FOUND_OR_NO_ACCESS` | 422 | Repo onboarded but credentials cannot reach it |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | PR does not exist, is closed, or is inaccessible |

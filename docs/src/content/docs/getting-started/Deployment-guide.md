@@ -469,6 +469,7 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 - **Configure OIDC**: Set `AWS_ROLE_TO_ASSUME` secret and `AWS_REGION` variable.
 - **Allowlist compute types**: Edit `ALLOWED_COMPUTE_TYPES` in `deploy.yml`.
 - **Deploy via PR label**: Add the `deploy:<type>` label to a PR (e.g., `deploy:agentcore`).
+- **Delete a leftover integ assertion stack**: An integ run (`integ.yml`) names its assertion stack after the run, `int-<sha>-<run>-assert`. It does not delete a stack named `TaskApiSmokeDefaultTestDeployAssert413BE3D6`, which is the assertion stack of every run whose checkout is from before that name (#400). If one is left, delete it while no integ run is in progress, in the account and Region of those runs, with `aws cloudformation delete-stack --stack-name TaskApiSmokeDefaultTestDeployAssert413BE3D6`.
 
 ## Known deployment issues
 
@@ -538,6 +539,12 @@ Two CloudFormation limits apply to the same update. It creates one index per upd
 aws dynamodb update-table --table-name <TaskTableName stack output> \
   --global-secondary-index-updates '[{"Delete": {"IndexName": "UserCreatedAtIndex"}}]'
 ```
+
+### `Custom::AWS` resources are updated in place on upgrade (#89)
+
+The first deploy of a version that sets `InstallLatestAwsSdk` to `false` changes that property on every `Custom::AWS` resource of an existing deployment. CloudFormation updates each one in place, also where `cdk diff` says `may be replaced`, because the resource keeps its physical resource id. The update runs the resource's `onUpdate` call again. This follows from the synthesized template, from the code of the resources' provider and from CloudFormation's rule that a custom resource is replaced only when the provider returns another physical resource id. It has not been observed on a deployed stack.
+
+In that call, `ModelInvocationLogging` writes the stack's log group and role to the Bedrock model-invocation logging configuration of the account and Region, which replaces a configuration that another deployment or a manual change put there. `DnsFirewall/FirewallConfig` sets the DNS Firewall of the VPC to fail open. A Blueprint's `RepoConfigCR` writes its repository record, as on every deploy.
 
 ### AgentCore unsupported Availability Zones
 

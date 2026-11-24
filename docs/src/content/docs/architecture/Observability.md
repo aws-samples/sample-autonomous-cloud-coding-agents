@@ -130,7 +130,7 @@ All events carry `task_id` for filtering; the events the orchestrator and the ag
 | Token usage per task | Cost | Cost attribution and budget enforcement |
 | `ABCA/Budgets:BudgetThresholdCrossed` | Cost | Claimed 80%/100% monthly user/team budget crossings; retries can rarely duplicate a metric |
 | `ABCA/Budgets:BudgetTeamMembershipUnresolved` | Correctness | Count of admissions where Cognito could not resolve a mapped user, so team-budget enforcement was skipped |
-| `ABCA/Webhooks:WebhookScreeningFailed` | Availability | Count of Jira or Linear comment blocks and Linear project-document blocks dropped because the Bedrock Guardrail call that screens them failed. The `source` dimension (`jira-comments`, `linear-comments`, `linear-docs`) names the content; the metric without dimensions is the total |
+| `ABCA/Webhooks:WebhookScreeningFailed` | Availability | Count of Jira or Linear comment blocks, Linear project-document blocks and Linear agent-session contexts dropped because the Bedrock Guardrail call that screens them failed. The `source` dimension (`jira-comments`, `linear-comments`, `linear-docs`, `linear-session-context`) names the content; the metric without dimensions is the total |
 | Cold start duration | Latency | Image optimization signal |
 | Active tasks (RUNNING count) | Capacity | Admission control and capacity planning |
 | Pending tasks (SUBMITTED count) | Capacity | Backlog depth and throughput monitoring |
@@ -169,14 +169,24 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 | Agent crash rate spike | Sustained high session failure rate | Check for model API errors, compute quota exhaustion, image pull failures. |
 | Submitted backlog depth | SUBMITTED count exceeds threshold | System at capacity. Increase concurrency limits or wait for running tasks. |
 | Guardrail screening failures | Sustained Bedrock Guardrail API failures | Tasks fail at submission (503) and hydration (FAILED). Recovers when Bedrock recovers. |
-| Monthly budget warning | Estimated spend crosses 80% | Notify the shared `OperationalAlerts` SNS topic; inspect `OrchestrationReconciler` logs for scope details. |
-| Monthly budget exceeded | Estimated spend crosses 100% | Notify the shared topic. Scopes configured with hard stop reject new tasks. |
+| Monthly budget warning | Estimated spend crosses 80% | Notify the `OperationalAlerts` topic; inspect `OrchestrationReconciler` logs for scope details. |
+| Monthly budget exceeded | Estimated spend crosses 100% | Notify the `OperationalAlerts` topic. Scopes configured with hard stop reject new tasks. |
 | Budget team membership unresolved | Cognito cannot resolve a mapped task owner | Inspect create-task logs for `budget_team_membership_user_missing`, then repair the stale mapping or federated identity configuration. User-budget enforcement remains active, but team-budget enforcement was skipped. |
-| Webhook screening failed | A guardrail call that screens Jira or Linear comments or Linear project documents failed, once or more in 5 minutes | Notify the shared topic. The content was dropped, and a task created from the event runs without it; in a full guardrail outage the task is rejected at submission as well (Guardrail screening failures, above). Search the Jira and Linear webhook processor logs for `screening unavailable` to find the issue and the error. Deployed only with Linear or Jira. |
+| Webhook screening failed | A guardrail call that screens Jira or Linear comments, Linear project documents or the session context of a Linear agent session failed, once or more in 5 minutes | Notify the `OperationalAlerts` topic. The content was dropped, and a task created from the event runs without it; in a full guardrail outage the task is rejected at submission as well (Guardrail screening failures, above). Search the Jira and Linear webhook processor logs for `screening unavailable` to find the issue and the error. Deployed only with Linear or Jira. |
 
 ### Alarm notifications
 
-Every CloudWatch alarm the stack deploys publishes to one SNS topic when it goes into `ALARM`: the orchestrator's Lambda-error alarm, the DLQ-depth alarms of the two task-event stream consumers (`FanOutConsumer` and `ApprovalMetricsPublisherConsumer`), the three budget alarms and, where deploy-preview screenshots are deployed, the screenshot processor's Lambda-error and DLQ-depth alarms and, where Linear or Jira is deployed, the webhook-screening alarm. The `OperationalAlerts` construct creates the topic, and the stack output `OperationalAlertsTopicArn` holds its ARN. Nothing is sent when an alarm returns to `OK`.
+Every CloudWatch alarm the stack deploys publishes to the `OperationalAlerts` topic when it goes into `ALARM`:
+
+- The orchestrator's Lambda-error alarm
+- The DLQ-depth alarms of the two task-event stream consumers (`FanOutConsumer` and `ApprovalMetricsPublisherConsumer`)
+- The three budget alarms
+- The Lambda-error alarm of the hourly read of pull-request outcomes
+- Where deploy-preview screenshots are deployed, the screenshot processor's Lambda-error and DLQ-depth alarms
+- Where Linear or Jira is deployed, the webhook-screening alarm
+- Where a signed webhook route is deployed (Linear, Jira or deploy-preview screenshots), the alarm on XSS matches that the WAF counts on those routes
+
+The topic is an SNS topic that the `OperationalAlerts` construct creates, and the stack output `OperationalAlertsTopicArn` holds its ARN. Nothing is sent when an alarm returns to `OK`.
 
 The topic has no subscriber until an operator adds one:
 
@@ -426,7 +436,7 @@ A run that has read its candidates ends with one line in the function's log, `PR
 | `secret` | `ERROR` | The secret could not be read, or holds a value that cannot be sent (empty, or with a character outside printable ASCII), or holds a GitHub token, told by the prefix GitHub gives its tokens, with other characters around it, so the run read nothing. A line of its own says which: `PR outcome sweep: the secret of the platform GitHub token cannot be read`, with Secrets Manager's name for the error as `cause`, or `PR outcome sweep: the secret of the platform GitHub token holds no usable token`, whose `error` names the case |
 | `no_token` | `INFO` | The secret holds a value that is no GitHub token: a character in it is none of the letters, digits, `_`, `.` and `-` that such a token is made of, and no GitHub token stands inside it. The run sent GitHub nothing, and the summary is its only line |
 
-An error-level summary means that the token or its secret is the problem, or that every pull request the run asked about failed. The reverse does not hold: a token that GitHub holds back with HTTP 403 shows as `unavailable`, a warning, and a value that is no GitHub token shows as `no_token`, at information level. No alarm watches the line. The function's `Errors` metric does, and that alarm is on the operational alerts topic: it fires when a run dies before the summary, a timeout while it reads its candidates among them. A refused token is an error-level summary, not an `Errors` datapoint. A stop by GitHub is also logged on its own, as `PR outcome sweep: stopped by GitHub`, with the `task_id` of the pull request it stopped on and, when one answer caused it, the HTTP status (`http_status`). What a run does not read waits for a later hour. A run that fails before it reads GitHub, as when it cannot read its candidates from the task table, has no summary line, and neither has one that the function's timeout cuts off. Such an invocation is not retried: the next hour is the retry.
+An error-level summary means that the token or its secret is the problem, or that every pull request the run asked about failed. The reverse does not hold: a token that GitHub holds back with HTTP 403 shows as `unavailable`, a warning, and a value that is no GitHub token shows as `no_token`, at information level. No alarm watches the line. The function's `Errors` metric does, and that alarm is on the `OperationalAlerts` topic: it fires when a run dies before the summary, a timeout while it reads its candidates among them. A refused token is an error-level summary, not an `Errors` datapoint. A stop by GitHub is also logged on its own, as `PR outcome sweep: stopped by GitHub`, with the `task_id` of the pull request it stopped on and, when one answer caused it, the HTTP status (`http_status`). What a run does not read waits for a later hour. A run that fails before it reads GitHub, as when it cannot read its candidates from the task table, has no summary line, and neither has one that the function's timeout cuts off. Such an invocation is not retried: the next hour is the retry.
 
 When the page shows pull requests as not read for long, or as open after they were merged, these lines say why: a pull request counted under `repo_not_visible` or `failed` is counted again in every run that reaches it, for as long as the cause lasts and its task record lives; one counted under `pr_not_found` is recorded as not found and stays not read, unless an earlier read had recorded it as open: that one stays open on the page and is counted again in every run that reaches it; one the run did not reach is in `left_out`; and a run that ends as `no_token` reads none.
 

@@ -66,7 +66,7 @@ The recurring configuration survives month boundaries; spend automatically start
 
 ### Troubleshooting missing alarm notifications
 
-If a budget or DLQ alarm enters `ALARM` but no notification arrives, inspect that alarm's **History** in CloudWatch, including its action results. `CloudWatch Alarms is not authorized to perform: SNS:Publish` indicates a topic-policy problem. Earlier deployments created the shared topic with only `DenyInsecureTransport`; [#925](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/925) adds the missing CloudWatch publish permission, restricted to the deployment account and Region.
+If a budget or DLQ alarm enters `ALARM` but no notification arrives, inspect that alarm's **History** in CloudWatch, including its action results. `CloudWatch Alarms is not authorized to perform: SNS:Publish` indicates a topic-policy problem. Earlier deployments created the `OperationalAlerts` topic with only `DenyInsecureTransport`; [#925](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/925) adds the missing CloudWatch publish permission, restricted to the deployment account and Region.
 
 Deploy a revision containing this fix using your normal stack deployment procedure, preserving the deployment's configuration. Verify that the topic identified by `OperationalAlertsTopicArn` has `AllowCloudWatchAlarmsPublish` in its access policy. Keep the topic's customer-managed encryption key and CloudWatch KMS permissions: SNS publishing and key access are both required.
 
