@@ -51,8 +51,6 @@ describe('formatRepoConfigForDisplay', () => {
   });
 
   test.each(['us', 'eu', 'us-gov', 'global'])('shows the default model in the %s geography the stack grants', geo => {
-    // The stack invokes `<BedrockGeoRegion>.<default model>`: on a deployment that is not
-    // `global`, the shipped id names a profile the stack does not grant.
     const display = formatRepoConfigForDisplay(
       { repo: 'acme/default', status: 'active' },
       { ...PLATFORM, bedrockGeoRegion: geo },
@@ -65,7 +63,6 @@ describe('formatRepoConfigForDisplay', () => {
   });
 
   test.each([null, '', '  '])('keeps the shipped default model when the stack exports no geography (%p)', geo => {
-    // null is a stack that predates the BedrockGeoRegion output; a blank value is no answer either.
     const display = formatRepoConfigForDisplay(
       { repo: 'acme/default', status: 'active' },
       { ...PLATFORM, bedrockGeoRegion: geo },
@@ -214,8 +211,7 @@ describe('buildRepoShowLines', () => {
   });
 
   test('the advertised default memory token budget matches the one hydration applies', () => {
-    // Drift guard: the CLI cannot import the orchestrator's constant, so read it
-    // from the source instead of trusting a second copy of the number.
+    // The CLI cannot import the orchestrator's constant, so read it from the source.
     const memoryTs = fs.readFileSync(
       path.resolve(__dirname, '../../../cdk/src/handlers/shared/memory.ts'), 'utf8',
     );

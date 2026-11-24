@@ -56,7 +56,6 @@ export interface MemoryContext {
 // ---------------------------------------------------------------------------
 
 const MEMORY_READ_TIMEOUT_MS = 5_000;
-/** The budget of a task whose repository has no `memory_token_budget` on its RepoTable row, and of a repo-less task. */
 const DEFAULT_MEMORY_TOKEN_BUDGET = 2_000;
 
 /** Rough token estimate: ~4 chars per token. */

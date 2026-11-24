@@ -29,11 +29,6 @@ const REPO_ROOT = path.join(__dirname, '..', '..');
  * The CLI cannot import ``contracts/`` at runtime (outside the published
  * ``lib`` files), so it carries literal copies. These tests turn drift between
  * the contract, the CDK resolver and the CLI into a CI failure.
- *
- * The profile parser, the feature list, the context-switch names and the
- * per-stack profile file are not compared here: both suites run the cases of
- * ``contracts/deployment-profile-vectors/`` against their own copy
- * (``deployment-profile-vectors.test.ts``).
  */
 describe('deployment capability parity', () => {
   test('the CLI catalog equals contracts/deployment-capabilities.json', () => {

@@ -148,13 +148,11 @@ description = "cdk deploy (pass args after --)"
 # `npx cdk deploy` on the assembly that build.yml synthesized, so nothing listed here
 # happens there unless the workflow has a step of its own for it (#843):
 #   :clean:disk             local only: it deletes cdk.out, which the pipeline deploys.
-#   //web:bundle            done by the build: synth:quiet depends on it, and build.yml
-#                           uploads the assembly that task writes.
+#   //web:bundle            done by the build: synth:quiet depends on it.
 #   preflight-bootstrap     not run by the pipeline (#127).
 #   preflight-log-delivery  reported, not applied: the diff job runs it with --check-only.
-# A new entry of `depends` or `run` needs the same decision:
-# test/scripts/deploy-workflow.test.ts fails until the entry is recorded there, and checks
-# the workflow for each step it records.
+# A new entry of `depends` or `run` needs the same decision.
+# test/scripts/deploy-workflow.test.ts fails until the entry is recorded there.
 #
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
 # several GB of working space, and uv/Docker caches accumulate across runs.
@@ -189,20 +187,14 @@ run = [
 # has no way to pass template parameters (no --parameters flag; --context sets CDK
 # construct context, NOT a CFN parameter), so run this task once, then set the
 # parameter on the CDKToolkit stack with the commands under "Using these policies" in
-# docs/design/DEPLOYMENT_ROLES.md. They name every other parameter of the stack with
-# UsePreviousValue: an update that names ComputeTypes alone resets the others to the
-# template defaults.
+# docs/design/DEPLOYMENT_ROLES.md. An update that names ComputeTypes alone resets the
+# other parameters to the template defaults.
 #
-# --force (#701): the CDK CLI does not overwrite a CDKToolkit stack whose BootstrapVariant
-# parameter differs from the template's. It warns, changes nothing and exits 0. A standard
-# `cdk bootstrap` records another variant, and the stack can keep that value after this
-# template has replaced the standard bootstrap (the CLI keeps previous parameter values),
-# so without the flag the task would do nothing on such an account, on every run. With it
-# the task replaces the bootstrap it finds: a standard one (other CDK apps in the account
-# and Region then deploy through ABCA's scoped execution role), another variant, or a
-# newer CDK bootstrap version. On a bootstrap that is already current, the CLI warns that
-# --force made no changes; that is expected. The flag stays in front of the pass-through
-# arguments, so that `-- --no-force` cancels it for a run.
+# --force (#701): without it, the CDK CLI does not overwrite a CDKToolkit stack whose
+# BootstrapVariant parameter differs from the template's. It warns, changes nothing and exits 0.
+# A standard `cdk bootstrap` records another variant, and the stack can keep it after this
+# template has replaced that bootstrap, so every later run needs the flag. The flag stays in
+# front of the pass-through arguments, so that `-- --no-force` cancels it for a run.
 [tasks.bootstrap]
 description = "Bootstrap CDK with least-privilege policies, replacing an existing bootstrap (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
 depends = [":install", ":bootstrap:generate"]
@@ -228,16 +220,10 @@ description = "CDK deploy-then-verify integration tests (integ-runner). Needs AW
 depends = [":compile"]
 run = [
   "mkdir -p $TMPDIR",
-  # integ-runner checks snapshots before it deploys, and no option skips that.
-  # A fresh checkout (every CI run) has no snapshot, so the check lists each
-  # test as NEW and counts it as failed, which reads as a failed run (#569).
-  # It is not a test failure: --force deploys and verifies every test whatever
-  # the check found, and with no snapshot the exit code follows that run alone.
-  # The echo says so in the log, above the check's output. Keep it ahead of
-  # integ-runner: mise appends the arguments after `--` to the last command.
-  # Its text does not call the check meaningless: a snapshot left by an earlier
-  # local run is compared for real, and a destructive change then fails the
-  # run even when the tests pass.
+  # integ-runner checks snapshots before it deploys, and no option skips that (#569).
+  # A snapshot left by an earlier local run is compared for real, so the echo does not
+  # call the check meaningless. mise appends the arguments after `--` to the last
+  # command, so the echo stays ahead of integ-runner.
   "echo 'integ: no snapshot is committed, so on a fresh checkout (every CI run) the snapshot check of integ-runner lists each test as NEW and counts it as failed. That is expected and is not a test failure: --force deploys and verifies every test regardless, and that run is reported under Test Results.'",
   # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
   # snapshot to diff against or update. --force re-runs the deploy-then-verify

@@ -1092,8 +1092,6 @@ class TestTurnCount:
         assert _turns_of(run.progress.write_agent_tool_result) == [1, 1]
 
     def test_cost_update_is_numbered_like_the_events_around_it(self, monkeypatch):
-        # Two answers and two tool results: the CLI's num_turns is 3, and the
-        # cost update carries the turn of the last answer, as its neighbours do.
         run = _run_agent(
             monkeypatch,
             _assistant(_bash("call_1", "ls src"), answer="msg_1"),
@@ -1105,8 +1103,6 @@ class TestTurnCount:
         )
 
         assert _turns_of(run.progress.write_agent_cost_update) == [2]
-        # The CLI's own count stays on the result: the record keeps it as
-        # turns_attempted.
         assert run.result.num_turns == 3
 
     def test_run_without_a_result_reports_the_turns_it_saw(self, monkeypatch):
@@ -1297,7 +1293,6 @@ class TestEventsOfTheRunAreScreened:
     notice of an error), so the runner screens each text before the progress
     writer cuts it to a preview, as it screens the result of a tool call."""
 
-    # One text that holds each of ``_SECRETS``.
     _TEXT = (
         f"git push https://x-access-token:{_GIT_URL_TOKEN}@github.com/o/r "
         f"with AWS_ACCESS_KEY_ID={_AWS_KEY_ID} "
@@ -1322,7 +1317,6 @@ class TestEventsOfTheRunAreScreened:
         )
 
         recorded = run.progress.write_agent_turn.call_args.kwargs
-        # Each field holds its own text: the two begin differently.
         assert recorded["thinking"].startswith("Plan: git push https://")
         _assert_screened(recorded["thinking"])
         assert recorded["text"].startswith("Running git push https://")
@@ -1336,8 +1330,6 @@ class TestEventsOfTheRunAreScreened:
 
     @pytest.mark.parametrize("command", _KEY_BEHIND_ITS_NAME)
     def test_strings_of_a_tool_input_are_screened_before_its_repr(self, monkeypatch, command):
-        # The input is recorded as its repr, and a repr escapes quotes, tabs and
-        # newlines: the scanner would no longer see the key behind its name.
         recorded = self._recorded_input(monkeypatch, _bash("call_1", command))
 
         assert _AWS_SECRET_KEY not in recorded
@@ -1353,10 +1345,8 @@ class TestEventsOfTheRunAreScreened:
         assert _AWS_SECRET_KEY not in self._recorded_input(monkeypatch, call)
 
     def test_arguments_after_a_replaced_value_stay_readable(self, monkeypatch):
-        # The web console reads the arguments back from the repr. What is replaced at
-        # the end of one must leave the quote and the comma that close it. The quote
-        # that closes the header goes with the token: the log redaction replaces up
-        # to the next blank.
+        # The web console reads the arguments back from the repr. What is replaced must leave the
+        # quote and the comma that close one. The quote that closes the header goes with the token.
         command = f'curl https://api.example.com -H "Authorization: token {_HEADER_TOKEN}"'
         call = sdk.ToolUseBlock(
             id="call_1", name="Bash", input={"command": command, "description": "List the items"}

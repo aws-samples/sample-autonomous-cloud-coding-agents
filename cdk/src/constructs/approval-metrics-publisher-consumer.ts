@@ -100,7 +100,7 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
   /** CloudWatch alarm that fires when the DLQ has at least one
    *  poison-pill record. Concrete {@link cloudwatch.Alarm} because
    *  ``AgentStack`` attaches the ``OperationalAlerts`` SNS topic to it
-   *  with ``addAlarmAction`` — declared on ``Alarm``, not the
+   *  with ``addAlarmAction``, declared on ``Alarm``, not the
    *  ``IAlarm`` interface (#629). */
   public readonly dlqAlarm: cloudwatch.Alarm;
 

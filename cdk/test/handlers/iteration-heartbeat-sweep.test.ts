@@ -176,7 +176,6 @@ describe('iteration heartbeat sweep', () => {
     await handler();
 
     expect(updateIssueCommentMock).not.toHaveBeenCalled();
-    // A reply that is left alone is not an attempt.
     expect(mockLogger.info).toHaveBeenCalledWith('Heartbeat sweep complete', { attempted: 0, edited: 0 });
   });
 
@@ -217,8 +216,6 @@ describe('iteration heartbeat sweep', () => {
         ? Promise.resolve({ Items: [runningJiraTask(), second] })
         : Promise.resolve({})
     ));
-    // The Jira writer does not throw: a failed edit comes back as a result
-    // that carries its retry class.
     updateIssueCommentMock.mockResolvedValueOnce({ ok: false, retryable });
 
     await handler();

@@ -1,14 +1,9 @@
 #!/bin/bash
-# Git prepare-commit-msg hook — appends attribution trailers to every commit
-# message: Task-Id, Prompt-Version, Workflow-Id and Workflow-Step. Installed by
-# the agent entrypoint during setup_repo().
+# Git prepare-commit-msg hook. Appends the attribution trailers to every commit
+# message. Installed by the agent entrypoint during setup_repo().
 #
-# Environment variables:
-#   TASK_ID         — unique task identifier (set by the pipeline before setup_repo())
-#   PROMPT_VERSION  — 12-char hex hash of the system prompt (same place)
-#   WORKFLOW_ID     — id of the workflow the task runs, e.g. coding/new-task-v1
-#   WORKFLOW_STEP   — name of the workflow step that is running, e.g. implement
-#                     (both set by the workflow step runner when a step starts)
+# The pipeline sets TASK_ID and PROMPT_VERSION before setup_repo(). The workflow
+# step runner sets WORKFLOW_ID and WORKFLOW_STEP when a step starts.
 
 COMMIT_MSG_FILE=$1
 

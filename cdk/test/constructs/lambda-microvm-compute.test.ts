@@ -204,9 +204,8 @@ test('keeps main\'s execution role description byte-for-byte', () => {
 });
 
 test('the execution role\'s IAM5 exception follows the policies CDK splits off for a large model list', () => {
-  // Forty ids put the Bedrock statement alone above the inline-policy limit, so
-  // CDK moves it into a managed policy during synthesis: a policy that does not
-  // exist yet when the construct declares the role's exception.
+  // Forty ids put the Bedrock statement alone above the inline-policy limit, so CDK moves it into a managed
+  // policy during synthesis. That policy does not exist yet when the construct declares the role's exception.
   const { stack } = instantiate({
     context: { bedrockModels: Array.from({ length: 40 }, (_, index) => `anthropic.claude-audit-${index}-v1:0`) },
   });
@@ -219,7 +218,6 @@ test('the execution role\'s IAM5 exception follows the policies CDK splits off f
   expect(Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-IAM5'))
     .filter(finding => finding.id.includes('/LambdaMicrovmCompute/ExecutionRole/'))
     .map(finding => String(finding.entry.data))).toEqual([]);
-  // Exactly the IAM5 exception of the default policy and no other rule: nothing wider reaches the overflow.
   const iam5 = (policy: Record<string, any>) => policy.Metadata.cdk_nag.rules_to_suppress
     .filter((rule: { id: string }) => rule.id === 'AwsSolutions-IAM5');
   const [defaultPolicy] = policiesOf('AWS::IAM::Policy', 'ExecutionRoleDefaultPolicy');
@@ -1335,9 +1333,6 @@ describe('assertLambdaMicrovmRegionSupported — Region gate', () => {
     }
 
     expect(error).toBeDefined();
-    // One instantiation, four assertions on its message — the remedy has to
-    // name the Region, the supported list, the escape hatch, and the catalog
-    // that holds the list, or an operator in a just-launched Region is stuck.
     expect(error!.message).toMatch(/AWS Lambda MicroVMs are not available in eu-central-1/);
     expect(error!.message).toContain(MICROVM_REGION_OVERRIDE_CONTEXT);
     expect(error!.message).toContain('us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1');
@@ -1346,8 +1341,6 @@ describe('assertLambdaMicrovmRegionSupported — Region gate', () => {
 
   test('the context escape hatch unblocks an unsupported Region', () => {
     overridden.template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
-    // Still surfaced as a warning — the operator is ahead of the constant, so
-    // it names the catalog to update before the flag can be dropped.
     const warning = JSON.stringify(overridden.construct.node.metadata);
     expect(warning).toContain('abca:microvm-region-override');
     expect(warning).toContain('contracts/deployment-capabilities.json');

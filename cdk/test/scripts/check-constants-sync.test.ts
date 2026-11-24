@@ -315,9 +315,6 @@ describe('check-constants-sync', () => {
       ['MICROVM_PLATFORM_CONFIG_ARN_KEYS', 'frozenset({"agent_session_role_arn"})'],
       ['MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY', '"github_token_secret_arn"'],
     ])('catches a literal %s (the ARN check must follow the contract)', (name, literal) => {
-      // The agent's ARN check takes its key list and its anchor from these two
-      // constants. A literal copy of either would not follow the contract when
-      // `arn_keys` or `account_anchor_key` changes there.
       const result = runInMutatedRepo((root) => {
         write(
           root,

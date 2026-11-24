@@ -959,9 +959,7 @@ def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> di
     if agent_result is None:
         return {}
     usage = agent_result.usage
-    # The CLI's own count where it reported one: not the count ``max_turns``
-    # limits (see ``TaskResult``). ``turns_completed`` takes the runner's, and
-    # this one only where the runner counted no answer.
+    # ``num_turns`` is the CLI's count, not the one ``max_turns`` limits (see ``TaskResult``).
     turns_attempted = agent_result.num_turns or agent_result.turns
     return {
         "agent_status": agent_result.status,
@@ -1056,11 +1054,8 @@ def _task_environ_restored() -> Generator[None]:
         os.environ.update(before)
 
 
-# Around the whole call, not only around the lines that set the variables:
-# build_config may cache the GitHub token in GITHUB_TOKEN before them, a task
-# without a repository returns before them and gets the token from the runner,
-# and the failure handler after them logs through shell.redact_secrets, which
-# masks the token by the value it finds in the environment.
+# Around the whole call, not only the lines that set the variables. build_config and the runner
+# write the environment too, and the failure handler masks the token by the value it finds there.
 @_task_environ_restored()
 def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
     repo_url: str = "",
@@ -1435,8 +1430,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # invalid config, or a write error) — we let it propagate so the task
             # fails rather than running with a pinned-but-absent asset while the
             # audit record claims it was loaded. It raises as well where the merged
-            # config, which may hold secrets, could reach a commit: .mcp.json is a
-            # symlink, or git cannot be shown to leave the file out (#758, #759).
+            # config, which may hold secrets, could reach a commit (#758, #759).
             if config.resolved_assets:
                 from registry.loader import RegistryAssetLoadError, apply_resolved_assets
 

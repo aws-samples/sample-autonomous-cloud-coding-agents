@@ -89,8 +89,6 @@ const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
   ['FORGE_WEBTRIGGER_SUFFIX', 'forge_webtrigger_suffix'],
   ['MICROVM_PLATFORM_CONFIG_ENV_BY_KEY', 'env_by_key'],
   ['MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS', 'required'],
-  // ADR-021 P2 (review B5): the agent's ARN check takes its key list and its anchor
-  // from these two, so a literal copy of either would stop following the contract.
   ['MICROVM_PLATFORM_CONFIG_ARN_KEYS', 'arn_keys'],
   ['MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY', 'account_anchor_key'],
   // ADR-021 P2: the `/ready` warm-up ceiling and the CDK-side `/ready` hook

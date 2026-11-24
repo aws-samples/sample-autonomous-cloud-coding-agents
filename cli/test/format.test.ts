@@ -583,7 +583,6 @@ describe('format', () => {
     });
 
     test('leaves the URL out when the API returned none', () => {
-      // An API deployed before the field existed: no URL row, and no "undefined" in its place.
       const older = { webhook_id: 'wh-abc', name: 'My CI Pipeline', secret: 'whsec_supersecret123', created_at: '2026-01-01T00:00:00Z' };
       expect(formatWebhookCreated(older as CreateWebhookResponse).split('\n')).toEqual([
         'Webhook:     wh-abc',

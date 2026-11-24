@@ -959,10 +959,8 @@ export class LambdaMicrovmCompute extends Construct {
       },
     ];
     NagSuppressions.addResourceSuppressions([this.buildRole, this.executionRole], roleIam5, true);
-    // The call above reaches the children the roles have now. When the execution
-    // role's policy outgrows the inline limit (a long `bedrockModels` list does
-    // it), CDK moves statements into managed policies during synthesis; those carry
-    // the same exception. At default priority it would arrive after cdk-nag's checks.
+    // When the execution role's policy outgrows the inline limit, CDK moves statements
+    // into managed policies during synthesis. Default priority runs this after cdk-nag.
     Aspects.of(this.executionRole).add({
       visit(node: IConstruct): void {
         if (node instanceof iam.CfnManagedPolicy) NagSuppressions.addResourceSuppressions(node, roleIam5);

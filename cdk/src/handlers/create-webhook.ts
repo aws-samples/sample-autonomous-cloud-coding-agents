@@ -38,13 +38,8 @@ const SECRET_PREFIX = 'bgagent/webhook/';
 const WEBHOOK_SECRET_BYTES = 32;
 
 /**
- * URL that external systems post tasks to (`POST /webhooks/tasks`). API Gateway serves every
- * route of this API on one host and stage, so those of the request give it: the URL is the
- * same for every webhook of a deployment. This assumes that the public path starts with the
- * stage name. It does on the default execute-api endpoint, the only one the stacks create.
- * Behind a custom domain name it does only if the API is mapped that way.
- * @param event - the API Gateway proxy event.
- * @returns the absolute URL of the webhook task route.
+ * Assumes that the public path starts with the stage name. It does on the default execute-api
+ * endpoint, the only one the stacks create. Behind a custom domain name it depends on the mapping.
  */
 function webhookTasksUrl(event: APIGatewayProxyEvent): string {
   const host = getHeader(event.headers, 'Host');

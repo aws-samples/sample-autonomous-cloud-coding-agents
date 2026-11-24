@@ -164,7 +164,6 @@ describe('loadMemoryContext', () => {
   test.each([
     { budget: 'a budget of 4000 tokens', tokenBudget: 4000, knowledge: 3, episodes: 1 },
     { budget: 'a budget of 1000 tokens', tokenBudget: 1000, knowledge: 1, episodes: 0 },
-    // Hydration passes undefined for a repository that sets no budget.
     { budget: 'the default budget when the caller passes undefined', tokenBudget: undefined, knowledge: 2, episodes: 0 },
   ])('trims to $budget', async ({ tokenBudget, knowledge, episodes }) => {
     const longText = 'x'.repeat(4000); // ~1000 tokens each

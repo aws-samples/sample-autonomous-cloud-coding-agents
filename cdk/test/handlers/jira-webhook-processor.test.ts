@@ -97,7 +97,6 @@ function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
 }
 
-/** The WebhookScreeningFailed embedded-metric documents that `run` writes to stdout, without their `_aws` envelope. */
 async function screeningFailedMetricsOf(run: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
   const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
   try {
@@ -112,10 +111,6 @@ async function screeningFailedMetricsOf(run: () => Promise<unknown>): Promise<Ar
   }
 }
 
-/**
- * The real resolver, over a workspace registry whose reads fail as a throttled
- * table's do. The other tables answer with the item given for them.
- */
 function failRegistryReads(items: Record<string, Record<string, unknown>>): void {
   const real = jest.requireActual<typeof import('../../src/handlers/shared/jira-oauth-resolver')>(
     '../../src/handlers/shared/jira-oauth-resolver',
@@ -212,7 +207,6 @@ describe('jira-webhook-processor handler', () => {
       oauthSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-cloud-1',
     });
     getRegistryRowStrictMock.mockReset();
-    // Default: the tenant has an active registry row.
     getRegistryRowStrictMock.mockResolvedValue({
       jira_cloud_id: 'cloud-1',
       site_url: 'https://acme.atlassian.net',
@@ -1176,7 +1170,6 @@ describe('jira-webhook-processor handler', () => {
       );
 
       expect(createTaskCoreMock).not.toHaveBeenCalled();
-      // The event is retried, so no comment is posted for the failed attempt.
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
 

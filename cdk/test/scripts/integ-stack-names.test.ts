@@ -17,21 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * Test for the stack names of the integ smoke app, `test/integ/integ.task-api-smoke.ts`.
- *
- * integ-runner deploys two stacks per run: the stack under test and the stack
- * that holds the assertions. CI runs share one AWS account, and runs of
- * different pull requests can be in it at the same time, so both names have to
- * come from INTEG_STACK_NAME (`int-<sha>-<run>`, set by integ.yml): a stack
- * with one fixed name is deployed and destroyed by every run. The job sits
- * behind the `deploy` approval gate, so a shared name goes unseen until two
- * approved runs meet. This test synthesizes the app without AWS access, in a
- * child process as integ-runner does, and reads the names from the cloud
- * assembly.
- *
- * Next to `integ-workflow.test.ts`, the other check of what an approved run does.
- */
+// CI runs share one AWS account and can run at the same time, so the names of both stacks that integ-runner deploys
+// come from INTEG_STACK_NAME, which integ.yml sets. A stack with one fixed name is deployed and destroyed by every run.
 
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -43,7 +30,6 @@ const CDK_ROOT = path.resolve(__dirname, '../..');
 const INTEG_APP = path.join(CDK_ROOT, 'test/integ/integ.task-api-smoke.ts');
 const SYNTH_TIMEOUT_MS = 120_000;
 
-/** CloudFormation names of the stacks the app synthesizes, sorted. Without a name it is the local path. */
 function stackNames(integStackName?: string): string[] {
   const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-integ-names-'));
   try {

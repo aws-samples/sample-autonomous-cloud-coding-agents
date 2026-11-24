@@ -194,7 +194,6 @@ function activities(): Array<{ type: string; [k: string]: unknown }> {
   return emitAgentActivityMock.mock.calls.map((c) => c[2]);
 }
 
-/** The WebhookScreeningFailed embedded-metric documents that `run` writes to stdout, without their `_aws` envelope. */
 async function screeningFailedMetricsOf(run: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
   const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
   try {

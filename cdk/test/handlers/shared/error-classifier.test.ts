@@ -436,13 +436,8 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/try again|capacity|admin/i);
     });
 
-    // The delivery gate (`_apply_delivery_gate` in agent/src/pipeline.py) sees the
-    // same thing for a run whose changes were lost and for a run that correctly
-    // changed nothing: agent success, no commit, no pull request (#751). The copy
-    // names both and does not promise that a retry helps. A task record written
-    // by an earlier agent image carries the first reason, and the API classifies
-    // a record when it is read, so both reasons classify alike. Ordered before
-    // the agent_status catch-all so it wins, not "Agent task did not succeed".
+    // A task record written by an earlier agent image carries the first wording.
+    // The API classifies a record when it is read, so both wordings classify alike.
     const deliveredNothing = 'Task did not succeed (agent_status=success, deliverable=lost): the coding '
       + 'task reported success but no commit reached the branch and no PR was opened — ';
 
@@ -463,7 +458,6 @@ describe('classifyError', () => {
       expect(result.description).toMatch(/lost/i);
       expect(result.remedy).toMatch(/already has what you asked for/i);
       expect(result.remedy).toMatch(/try again/i);
-      // The platform does not know the cause, so neither text calls it transient.
       expect(`${result.description} ${result.remedy}`).not.toMatch(/transient/i);
       expect(result.retryable).toBe(true);
       // USER, not TRANSIENT: a retry cannot help a run that changed nothing.

@@ -638,14 +638,8 @@ function elapsedDescription(task: TaskDetail, now: number): string {
 }
 
 function describeTurn(task: TaskDetail, turnEvent: TaskEvent | null): string {
-  // The left side counts the model's answers, which is what ``max_turns``
-  // limits. A finished task shows the ``turns_completed`` of its record, as
-  // the web console does, so that the line does not depend on which events
-  // are still in the window. A running task shows the ``turn`` of the newest
-  // ``agent_turn`` event, and so does a finished one whose record has no
-  // count (0 stands for none). ``turns_attempted`` is never shown against the
-  // limit: it is the Claude Code CLI's own count, which can exceed it (see
-  // ``TaskDetail``).
+  // A finished task shows its record, because the turn event may have left the event window.
+  // A recorded 0 stands for no count. ``turns_attempted`` can exceed the limit (see ``TaskDetail``).
   const recorded = TERMINAL_STATUSES.includes(task.status) ? task.turns_completed : null;
   const currentTurn = recorded || readNumberField(turnEvent?.metadata, 'turn');
   const maxTurns = task.max_turns ?? null;

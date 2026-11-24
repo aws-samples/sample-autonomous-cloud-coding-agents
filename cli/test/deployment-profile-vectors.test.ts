@@ -25,14 +25,10 @@ import { DeploymentFeatures, deploymentProfileCandidates, parseDeploymentProfile
 import { CliError } from '../src/errors';
 
 /**
- * CLI runner of the shared deployment-profile vectors (#1016). The CLI cannot import the
- * CDK package, so it carries its own copy of the profile parser, the context-switch names
- * and the per-stack file rule. ``cdk/test/deployment/deployment-profile-vectors.test.ts``
- * runs the same files against the CDK originals, so neither copy can change alone. The
- * cases and their shape are described in ``contracts/deployment-profile-vectors/README.md``.
+ * The CLI carries its own copy of the profile logic, and the CDK suite runs the same vectors
+ * (#1016). Their shape is described in ``contracts/deployment-profile-vectors/README.md``.
  */
 const VECTOR_DIR = path.join(__dirname, '..', '..', 'contracts', 'deployment-profile-vectors');
-/** The parser quotes the file it read in every message. */
 const SOURCE = 'abca.deployment.json';
 
 interface ParseCase {

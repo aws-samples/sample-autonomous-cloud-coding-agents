@@ -718,9 +718,7 @@ class TestBaselineCommandThatCannotStart:
         assert setup.lint_gate_inert is False
 
     def test_unclosed_quote_is_a_failed_baseline_not_a_task_crash(self, monkeypatch):
-        # No argv can be made of a command with a quote that is never closed.
-        # The shell gets it as written, like the same text beside a shell
-        # operator, and reports a syntax error: exit 2.
+        # The shell reports the quote that is never closed as a syntax error: exit 2.
         fake = _fake_run_cmd(returncodes={"verify-build-pre": 2, "verify-lint-pre": 2})
         _patch_common(monkeypatch, fake)
         monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
@@ -735,10 +733,8 @@ class TestBaselineCommandThatCannotStart:
         assert setup.lint_before is False
 
 
-# What mise 2026.11.6 prints, with exit 1, for the two default commands (less
-# the version lines that close every error), by the label of the baseline run.
-# In a repository without any mise task (`lint` resembles commands of mise,
-# `build` does not):
+# What mise 2026.11.6 prints, with exit 1, for the two default commands, less the version
+# lines that close every error. `lint` resembles commands of mise, `build` does not.
 _NO_MISE_TASK_AT_ALL = {
     "verify-build-pre": (
         "mise ERROR no tasks defined in /workspace/task-abc. Are you in a project directory?"
@@ -747,7 +743,6 @@ _NO_MISE_TASK_AT_ALL = {
         "mise ERROR unknown command: lint\n\nDid you mean:\n  mise link\n  mise list\n  mise ln"
     ),
 }
-# In a repository whose mise.toml defines a `test` task and no other:
 _OTHER_MISE_TASKS_ONLY = {
     "verify-build-pre": (
         "mise ERROR no task build found\n\nAvailable tasks:\n  Name  Description\n  test  "

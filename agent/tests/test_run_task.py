@@ -343,8 +343,6 @@ class TestHowAFinishedTaskIsRecorded:
         assert finished["started_reaction_id"] == "reaction-42"
 
 
-# The variables that tell git, ``gh``, the agent and the commit hook who task
-# ``t-1`` is and which step of its workflow is running.
 _TASK_ENVIRON = {
     "GIT_AUTHOR_NAME": "bgagent",
     "GIT_AUTHOR_EMAIL": "bgagent@noreply.github.com",
@@ -447,8 +445,7 @@ class TestWhatATaskLeavesInTheEnvironment:
     def test_task_that_fails_leaves_it_as_it_found_it(self, caller):
         changed = _environ_watch()
 
-        # The clone fails after the variables were set for it; run_task records
-        # the failure and re-raises it.
+        # The clone fails after the variables were set for it.
         with pytest.raises(RuntimeError, match="clone failed"):
             _run_task(setup_error=RuntimeError("clone failed"), prompt_version="1c9c10e027a2")
 
@@ -473,8 +470,7 @@ class TestWhatATaskLeavesInTheEnvironment:
 
     def test_token_the_configuration_fetched_is_gone_after_the_task(self, monkeypatch):
         # A payload without a token, as on ECS: the configuration reads the token
-        # from Secrets Manager and keeps it in GITHUB_TOKEN, before run_task sets
-        # any of the variables itself.
+        # from Secrets Manager and keeps it in GITHUB_TOKEN.
         fetched = "ghp_from_secrets_manager"
         secrets_manager = MagicMock()
         secrets_manager.get_secret_value.return_value = {"SecretString": fetched}

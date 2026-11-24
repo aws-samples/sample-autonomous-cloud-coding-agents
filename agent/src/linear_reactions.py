@@ -473,8 +473,7 @@ def react_task_started(
     # thread doesn't keep the container alive past the agent's terminal
     # status. The sweep filters out the just-posted reaction id so it
     # never deletes itself. It is handed the token because it can still be
-    # running when the task ends, and ``run_task`` then puts the environment
-    # back as it found it.
+    # running when ``run_task`` ends and restores the environment.
     threading.Thread(
         target=_sweep_stale_reactions_safe,
         args=(issue_id, os.environ.get("LINEAR_API_TOKEN", "")),

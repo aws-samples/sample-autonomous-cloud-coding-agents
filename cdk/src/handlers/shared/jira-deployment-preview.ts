@@ -131,9 +131,8 @@ export async function deliverJiraDeploymentPreview(
       if (!result.ok) throw new Error('Jira iteration preview update failed');
       return;
     }
-    // Only the standalone comment is built from the URLs of this delivery, so
-    // only it is refused here: an iteration comment is rendered from the task
-    // record, where a URL that is not allowed renders no preview block.
+    // Only the standalone comment is built from these URLs, so only it is refused.
+    // An iteration comment renders no preview block for a URL that is not allowed.
     const document = jiraPreviewDocument(screenshotUrl, previewUrl);
     if (!document) throw new Error('Jira screenshot URL is not allowed');
     // Claim before POST: duplicate events, including concurrent deliveries, must

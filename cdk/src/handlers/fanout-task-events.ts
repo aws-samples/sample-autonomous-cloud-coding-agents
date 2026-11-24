@@ -185,7 +185,7 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     'approval_requested',
   ]),
   // GitHub edits a single issue comment in place (§6.4) covering
-  // pr_created + terminal — including cancellations, strands, and
+  // pr_created + terminal, including cancellations, strands, and
   // timeouts so the comment reflects the task's final outcome. Approval
   // signals are intentionally NOT posted to GitHub: the issue comment
   // is for progress, not synchronous gating.

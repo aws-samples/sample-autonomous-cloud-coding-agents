@@ -906,7 +906,6 @@ describe('getRegistryRow / parseRegistryRow', () => {
     const ddb = asDdb(send);
     const strict = await getRegistryRowStrict(ddb, REGISTRY_TABLE, 'cloud-handover');
     expect(strict?.status).toBe('active');
-    // A second query would fail; the lenient read must not make one.
     const lenient = await getRegistryRow(ddb, REGISTRY_TABLE, 'cloud-handover');
     expect(lenient).toEqual(strict);
     expect(send).toHaveBeenCalledTimes(1);

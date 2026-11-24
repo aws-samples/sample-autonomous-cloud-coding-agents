@@ -214,17 +214,14 @@ test('untrusted screenshots are rejected before claiming or posting', async () =
   await deliverJiraDeploymentPreview(ddb, 'tasks', 'registry', original, 'owner/repo', 'initial', 'https://localhost/a', preview, () => 30_000);
   expect(records.original.jira_preview_claimed).toBeUndefined();
   expect(post).not.toHaveBeenCalled();
-  // A refusal is logged: a silent return would leave no trace of a delivery
-  // that posted nothing.
   expect(warn).toHaveBeenCalledWith('Jira deployment preview feedback failed (non-fatal)', {
     event: 'screenshot.jira_delivery_failed', task_id: 'original', error: 'Jira screenshot URL is not allowed',
   });
 });
 
 test('an untrusted screenshot does not keep an iteration from refreshing its status comment', async () => {
-  // The writer is mocked here. The real one renders from the task record and
-  // leaves out a URL that is not allowed: jira-iteration-comment.test.ts holds
-  // that half.
+  // The writer is mocked here. The real one leaves out a URL that is not allowed,
+  // which jira-iteration-comment.test.ts covers.
   const task = {
     ...original,
     channel_metadata: { ...original.channel_metadata, trigger_comment_id: 'trigger', iteration_reply_comment_id: '123' },

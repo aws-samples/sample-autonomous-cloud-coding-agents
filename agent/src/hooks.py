@@ -171,11 +171,8 @@ _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 # one it listens on.
 _LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNORECASE)
 
-# The built-in tools through which a task opens outbound connections. Of all
-# tool output, only theirs can make a blocked host the terminal reason, and
-# that of a fetch only when the fetch failed. The rest is content: a file, a
-# search hit, a fetched page or an MCP server's answer can quote a failed
-# connection that this task never attempted.
+# The built-in tools through which a task opens outbound connections. The output of
+# any other tool is content, which can quote a failed connection the task never attempted.
 _NETWORK_TOOLS = frozenset(("Bash", "WebFetch"))
 
 
@@ -1093,12 +1090,8 @@ async def _handle_require_approval(  # noqa: C901 -- 24, down from 35 when the c
             "alternative task strategy or report back to the user explaining "
             "why progress is blocked."
         )
-        # ``_deny_response`` cuts the text at PERMISSION_REASON_MAX, and that cut
-        # must not fall in the stop-language: the room beside the fixed text
-        # goes to the rule names first, and the reviewer's reason is shortened
-        # to the rest. ANSI is stripped before the cut: a cut inside an escape
-        # sequence leaves a fragment that the strip in ``_deny_response`` does
-        # not recognise.
+        # ``_deny_response`` cuts the text at PERMISSION_REASON_MAX. That cut must not fall in the
+        # stop-language. ANSI is stripped before the cut here. No strip recognises half a sequence.
         room = PERMISSION_REASON_MAX - len(prefix) - len(stop_language)
         rule_hint = _truncate(rule_hint, room)
         reason = _truncate(_strip_ansi(raw_reason), room - len(rule_hint))
@@ -1613,10 +1606,8 @@ def _observe_tool_result(
         # and is clearly a heuristic signal in the live stream).
         # A loopback host is the same localhost race with a name on it (curl:
         # "Failed to connect to localhost port 3000"): no latch either.
-        # Nor for a tool that opens no connection (see ``_NETWORK_TOOLS``): the
-        # host it shows is quoted from a file or a server's answer. Nor for a
-        # call known not to have failed: in the pinned CLI a fetch that cannot
-        # connect fails, so a completed one returns the page, content as well.
+        # Nor for a tool outside ``_NETWORK_TOOLS``, nor for a call known not to have
+        # failed: in the pinned CLI a fetch that cannot connect fails.
         if (
             host
             and not _LOOPBACK_HOST_RE.fullmatch(host)

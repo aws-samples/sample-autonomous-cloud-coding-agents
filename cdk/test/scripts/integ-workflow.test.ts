@@ -42,10 +42,6 @@ const AFTER_TASK = [...WORKFLOW.matchAll(/^[^#\n]*mise \/\/cdk:integ((?:.*\\\n)*
 
 const MISE = fs.readFileSync(path.resolve(__dirname, '../../mise.toml'), 'utf-8').split('\n');
 
-/**
- * The commands of the `integ` task in the order mise runs them. The task is read as
- * text, in one form only: a `run = [` list with one double-quoted string per line.
- */
 function taskCommands(): string[] {
   const start = MISE.indexOf('[tasks.integ]');
   const body = MISE.slice(start + 1);
@@ -75,15 +71,13 @@ describe('integ workflow', () => {
 });
 
 describe('integ task', () => {
-  // No snapshot is committed, so on a fresh checkout integ-runner lists every test as
-  // NEW and counts it as failed before it deploys anything: in the job log that reads
-  // as a failed run (#569). The task says what those lines are before they appear.
+  // No snapshot is committed, so integ-runner lists every test as NEW and counts it as failed before it deploys anything.
+  // In the job log that reads as a failed run (#569).
   test('says that a NEW snapshot is not a test failure, then runs integ-runner with --force', () => {
     const [notice, runner] = taskCommands().slice(-2);
 
-    // One single-quoted literal without apostrophe, backslash or brace: sh prints it
-    // as written, and mise's template engine finds nothing to render. Anything else
-    // could stop the task ahead of the deploy, unseen until someone approves a run.
+    // One single-quoted literal without apostrophe, backslash or brace. sh prints it as written, and mise's template
+    // engine finds nothing to render. Anything else could stop the task ahead of the deploy.
     expect(notice).toMatch(/^echo 'integ: [^'\\{}]*'$/);
     // The lines it is about, in the words integ-runner prints, and what it says of them.
     for (const phrase of ['snapshot check', 'NEW', 'failed', 'not a test failure', '--force', 'Test Results']) {

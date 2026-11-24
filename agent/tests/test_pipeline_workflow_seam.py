@@ -135,9 +135,7 @@ class TestCommitTrailersOfAWorkflowRun:
         with patch("runner.run_agent", side_effect=agent):
             _execute_agent_step("p", "s", _config(), setup, None, None, None)
         of_the_agent_commit = _git(repo, "log", "-1", "--format=%(trailers)").splitlines()
-        # What run_task does next for a task that may write: it commits the work
-        # the agent step left uncommitted. The build and the pull request, which
-        # the workflow declares after the agent step, have not started.
+        # What run_task does next, before the steps the workflow declares after the agent step.
         assert ensure_committed(str(repo)) is True
 
         trailers = [

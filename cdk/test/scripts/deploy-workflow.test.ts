@@ -17,28 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * Test that the `deploy` task of `cdk/mise.toml` and `.github/workflows/deploy.yml`
- * stay in step (#843).
- *
- * The pipeline does not run the task: its `deploy` job runs `npx cdk deploy` on the
- * assembly that `build.yml` synthesized. What the task does before it deploys therefore
- * happens in the pipeline only where the workflow has a step of its own, and a step
- * added to the task is skipped there without a word. This test fails, without AWS
- * access, when a dependency or a command of the task is added, removed, moved or
- * changed and the table below does not follow, when a step the table records for the
- * pipeline is no longer in the workflow, and when a step of the workflow runs a preflight
- * that the table does not record for it.
- *
- * The task is read as text, so that this suite needs neither a TOML parser, which no
- * workspace declares, nor `mise` on PATH. It takes one form only: a description, then
- * `depends` and `run` as arrays of double-quoted strings, and compares each string
- * whole. Under another key or in another TOML spelling a step would go unseen, so
- * anything else in the table fails the test as well, and so does a sub-table of the task.
- *
- * Same placement rationale as `check-constants-sync.test.ts`: `cdk/test/` is the Jest
- * tree that can reach the repository root.
- */
+// The pipeline does not run the `deploy` task of `cdk/mise.toml`. The `deploy` job of `deploy.yml` runs `npx cdk deploy` on
+// the assembly that `build.yml` synthesized, so a step added to the task does not run there and nothing says so (#843).
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -49,25 +29,16 @@ const WORKFLOW_FILE = '.github/workflows/deploy.yml';
 
 const read = (file: string): string => fs.readFileSync(path.join(ROOT, file), 'utf-8');
 
-/** The step of `deploy.yml` that does in the pipeline what an entry of the task does locally. */
 interface PipelineStep {
   readonly job: string;
-  /** Text that the `run` of exactly one step of that job contains. */
   readonly run: string;
 }
 
-/**
- * What each command of the task ends with: mise puts the arguments after `--` there. The
- * table records it with the command, because mise also runs a default written in it and
- * whatever follows it.
- */
+// Where mise puts the arguments after `--`. The table records it with each command, because mise also runs a default
+// written in it and whatever follows it.
 const ARGS = "{{arg(name='cdkargs', var=true, required=false)}}";
 
-/**
- * Every dependency and command of the task as the task writes it, in the task's order,
- * each with its step in the pipeline; no step where the workflow has none. The comment
- * on `[tasks.deploy]` gives the reason for each entry: keep the two in step.
- */
+/** The comment on `[tasks.deploy]` gives the reason for each entry. */
 const PIPELINE: readonly (readonly [entry: string, step?: PipelineStep])[] = [
   [':clean:disk'],
   ['//web:bundle'],
@@ -80,7 +51,6 @@ const isComment = (line: string): boolean => line.trimStart().startsWith('#');
 
 const MISE = read('cdk/mise.toml').split('\n');
 
-/** The lines of the task's table: after its header, up to the next table. */
 function taskLines(): string[] {
   const start = MISE.indexOf('[tasks.deploy]');
   if (start < 0) {
@@ -91,20 +61,14 @@ function taskLines(): string[] {
   return body.slice(0, end < 0 ? undefined : end);
 }
 
-/** The table without its comments, as mise reads it. */
 const TASK = taskLines().filter((line) => line !== '' && !isComment(line)).join('\n');
 
-/**
- * The headers of the task's sub-tables (`[tasks.deploy.env]`), which give it keys outside
- * its table. TOML reads a header with indentation, with spaces around its keys or with
- * quoted keys as the same header.
- */
+// A sub-table (`[tasks.deploy.env]`) gives the task keys outside its table. TOML reads a header with indentation, with
+// spaces around its keys or with quoted keys as the same header.
 const SUB_TABLES = MISE.filter((line) => /^\s*\[+\s*(tasks|"tasks"|'tasks')\s*\.\s*(deploy|"deploy"|'deploy')\s*\./.test(line));
 
-/** `key = [...]`, where the array holds double-quoted strings and nothing else, in any layout. */
 const STRING_ARRAY = /^(\w+) = \[((?:\s*"[^"\n]*",?)*)\s*\]$/gm;
 
-/** The strings of one array of the table: the entries of `depends`, the commands of `run`. */
 const strings = (key: string): string[] => [...TASK.matchAll(STRING_ARRAY)]
   .filter(([, name]) => name === key)
   .flatMap(([, , array]) => [...array.matchAll(/"([^"\n]*)"/g)].map((match) => match[1]));
@@ -115,15 +79,10 @@ interface Workflow {
 
 const WORKFLOW = yaml.load(read(WORKFLOW_FILE)) as Workflow;
 
-/**
- * The scripts that the steps of one job of the workflow run, without their comment
- * lines, and with a command that continues over several lines on one.
- */
 const scripts = (job: string): string[] => (WORKFLOW.jobs[job]?.steps ?? [])
   .flatMap((step) => step.run ?? [])
   .map((script) => script.split('\n').filter((line) => !isComment(line)).join('\n').replace(/\s*\\\n\s*/g, ' '));
 
-/** The preflights that a text names: `preflight-bootstrap` for that script, `preflight` for the task that runs it. */
 const preflights = (text: string): string[] => text.match(/preflight[\w:-]*/g) ?? [];
 
 describe('the deploy task and the deploy workflow', () => {
@@ -155,10 +114,8 @@ describe('the deploy task and the deploy workflow', () => {
     expect(scripts(job).filter((script) => script.includes(run))).toHaveLength(1);
   });
 
-  // The other direction, for the checks of the task, which carry `preflight` in the names of
-  // their scripts and tasks. That holds what the table and the comment on [tasks.deploy] say
-  // of the bootstrap preflight, that the pipeline does not run it (#127), until the table
-  // records its step.
+  // The other direction, for the checks of the task, which carry `preflight` in the names of their scripts and tasks.
+  // It holds what the table says of the bootstrap preflight, that the pipeline does not run it (#127).
   test('a step of the workflow runs only the preflights that the table records for it', () => {
     const unrecorded = Object.keys(WORKFLOW.jobs).flatMap((job) => scripts(job).flatMap((script) => {
       const inTable = recorded.filter((step) => step.job === job && script.includes(step.run)).flatMap((step) => preflights(step.run));

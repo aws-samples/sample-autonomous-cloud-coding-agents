@@ -723,8 +723,7 @@ describe('AgentRegistryClient', () => {
     ['a number', 123],
     ['an array', ['cognito-sub']],
     ['an object', { sub: 'x' }],
-    // An explicit null is present, not absent. These rows have no twin in the agent's
-    // tests: its reader does not read the publisher (its port has none).
+    // An explicit null is present, not absent.
     ['null', null],
   ])('getRecord rejects a healthy record whose publisher is %s (MALFORMED, not silent drop)', async (_label, badPublisher) => {
     const fake = new FakeClient();
@@ -908,10 +907,7 @@ describe('AgentRegistryClient', () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
     const b64 = (runtime: unknown): string => Buffer.from(JSON.stringify(runtime)).toString('base64');
-    // Hand-written frontmatter. js-yaml under `json: true` keeps the last value of a
-    // repeated key and so does PyYAML: the two readers must agree on which runtime and
-    // publisher such a record carries. Neither rejects it. What keeps a second key from
-    // being smuggled in is the writer (`buildSkillMd`), which quotes every value.
+    // js-yaml under `json: true` keeps the last value of a repeated key, and so does PyYAML.
     seedSkillMd(fake, [
       '---',
       'name: acme-readme-helper',
@@ -930,9 +926,7 @@ describe('AgentRegistryClient', () => {
 
   // --- an absent payload is an empty record, not a corrupt one ----------------
 
-  // A descriptor level, or its `data`, that is null or not an object. The record reads
-  // as empty, without a malformed marker, and cannot resolve. The agent's reader gives
-  // every row the same answer, so both adapters reject such a pin as REMOVED (#781).
+  // The agent's reader gives every row the same answer, so both adapters reject a pin of such a record as REMOVED (#781).
   test.each([
     ['CUSTOM', 'descriptors is null', null],
     ['CUSTOM', 'custom is null', { custom: null }],
@@ -949,7 +943,6 @@ describe('AgentRegistryClient', () => {
     ['SKILL', 'skillMd is null', { agentSkillsDefinition: { additionalData: { skillMd: null } } }],
     ['SKILL', 'data is null', { agentSkillsDefinition: { additionalData: { skillMd: { data: null } } } }],
     ['SKILL', 'skillMd is a string', { agentSkillsDefinition: { additionalData: { skillMd: 'text' } } }],
-    // The body parses and the null sits where the runtime should be.
     ['CUSTOM', 'body holds a null runtime', { custom: { data: '{"runtime": null}' } }],
     ['MCP', 'body holds a null _meta', { mcpServer: { data: '{"_meta": null}' } }],
     ['MCP', 'body holds a null runtime in _meta', { mcpServer: { data: `{"_meta": {"${RUNTIME_META_KEY}": null}}` } }],
@@ -969,11 +962,8 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'REMOVED' });
   });
 
-  // Present, unlike a null, and not a JSON object. `??` stands in for null and
-  // undefined only: an empty string, 0 and false reach JSON.parse, which rejects the
-  // first and reads the other two as a number and a boolean. It also rejects NaN,
-  // Infinity and -Infinity, which the agent's reader has to be told to refuse
-  // (json.loads reads them by default).
+  // `??` stands in for null and undefined only, so an empty string, 0 and false reach JSON.parse.
+  // JSON.parse rejects NaN and Infinity, which the agent's reader has to be told to refuse.
   test.each([
     ['CUSTOM', 'is an empty string', { custom: { data: '' } }],
     ['MCP', 'is an empty string', { mcpServer: { data: '' } }],
@@ -1017,7 +1007,6 @@ describe('AgentRegistryClient', () => {
   test('resolve returns a healthy record that shares its namespace with corrupt ones', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // Corrupt records of another asset and of a lower version of this asset.
     fake.seed({
       name: 'mcp_server/acme/other',
       recordType: 'MCP',
@@ -1036,9 +1025,6 @@ describe('AgentRegistryClient', () => {
   test('a record whose status this code does not know is not a resolution candidate', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // The service can add a status. Such a record is treated like every status other
-    // than APPROVED and DEPRECATED: it does not resolve, and it does not hide a lower
-    // approved version.
     fake.seed(healthyMcp('1.0.0', 'APPROVED'));
     fake.seed(healthyMcp('1.1.0', 'SOME_FUTURE_STATUS'));
 
@@ -1049,8 +1035,6 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(exact.ref)).rejects.toMatchObject({ reason: 'NO_MATCHING_VERSION' });
   });
 
-  // A null in the envelope takes that record out, not its neighbours: a null name
-  // belongs to no asset and a null version cannot win. The agent's reader agrees.
   test('a record without a name does not stop the others', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);

@@ -747,14 +747,9 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // A new-work coding task reported agent-success, but no commit reached the
-    // branch and no PR was opened. The delivery gate (``_apply_delivery_gate`` in
-    // ``agent/src/pipeline.py``) sees the same thing for two different runs and
-    // cannot tell them apart (#751): the agent's changes were LOST (observed
-    // cause: a stacked child edited a nested working tree that was never the
-    // branch's tree, so nothing committed), or the agent correctly changed
-    // NOTHING (the repository already had what the request asked for). The copy
-    // names both. Retryable, because a fresh run usually lands lost work.
+    // ``_apply_delivery_gate`` (``agent/src/pipeline.py``) cannot tell lost changes
+    // from a run that correctly changed nothing (#751), so the copy names both.
+    // Retryable, because a fresh run usually lands lost work.
     // Ordered before the generic ``agent_status=`` catch-all so it wins.
     pattern: /deliverable=lost/i,
     classification: {
@@ -763,10 +758,8 @@ const PATTERNS: readonly ErrorPattern[] = [
       description: 'The agent finished and reported success, but no commit reached the branch and no pull request was opened. Either the agent found nothing to change (for example, the repository already has what the request asked for), or it made changes that were lost before they reached the branch. The platform cannot tell the two apart.',
       remedy: 'Check whether the repository already has what you asked for: if it does, nothing more is needed, and a retry would end the same way. If a change was expected, reply here to try again; if it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
       retryable: true,
-      // Intentionally USER, not TRANSIENT: a retry cannot help a run that
-      // correctly changed nothing, so the reader decides. TRANSIENT makes
-      // ``retryGuidance`` call it a temporary infrastructure issue and ask for
-      // a plain retry. Do not "fix" this to TRANSIENT.
+      // USER on purpose. TRANSIENT makes ``retryGuidance`` ask for a plain retry, which
+      // cannot help a run that correctly changed nothing.
       errorClass: ErrorClass.USER,
     },
   },

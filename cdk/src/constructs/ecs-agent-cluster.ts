@@ -744,10 +744,8 @@ export class EcsAgentCluster extends Construct {
         reason: 'Environment variables contain table names and configuration, not secrets — GitHub token is fetched from Secrets Manager at runtime',
       },
     ], true);
-    // The call above reaches the children the role has now. When the policy
-    // outgrows the inline limit (a long `bedrockModels` list does it), CDK moves
-    // statements into managed policies during synthesis; those carry the same
-    // exception. At default priority it would arrive after cdk-nag's checks.
+    // When the policy outgrows the inline limit, CDK moves statements into managed
+    // policies during synthesis. Default priority runs this after cdk-nag.
     Aspects.of(taskRole).add({
       visit(node: IConstruct): void {
         if (node instanceof iam.CfnManagedPolicy) NagSuppressions.addResourceSuppressions(node, taskRoleIam5);

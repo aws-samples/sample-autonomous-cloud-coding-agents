@@ -204,8 +204,7 @@ def test_milestone_uses_kind_when_name_absent():
 
 def test_running_step_is_named_in_the_environment_of_the_commit_hook(monkeypatch):
     # prepare-commit-msg.sh writes WORKFLOW_ID and WORKFLOW_STEP on a commit as its
-    # Workflow-Id and Workflow-Step trailers (#560). Whatever commits while a step
-    # runs, the agent's git or a handler, inherits them from this process.
+    # Workflow-Id and Workflow-Step trailers (#560).
     monkeypatch.setenv("WORKFLOW_ID", "default/agent-v1")  # left by an earlier run
     monkeypatch.setenv("WORKFLOW_STEP", "deliver")
     named: list[tuple[str, str]] = []

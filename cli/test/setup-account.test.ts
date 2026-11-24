@@ -26,14 +26,11 @@ import {
   versionAtLeast,
 } from '../src/setup-account';
 
-/** ABCA's least-privilege bootstrap, as its stack reports it. */
 const abcaBootstrap = (version: string, computeTypes?: string): BootstrapStack => ({
   outputs: new Map([['BootstrapPolicyVersion', version]]),
   parameters: new Map(computeTypes === undefined ? [] : [['ComputeTypes', computeTypes]]),
 });
-/** Older than any version this CLI can require. */
 const OUTDATED = '0.0.1';
-/** Newer than any version this CLI can require. */
 const NEWER = '999.0.0';
 
 describe('planAccountPreparation', () => {
@@ -93,7 +90,6 @@ describe('versionAtLeast', () => {
     // Segments compare as numbers: as text, 1.9.0 would sort after 1.12.0.
     ['1.9.0', '1.12.0', false],
     ['0.99.99', '1.0.0', false],
-    // A missing segment counts as 0, on either side.
     ['1.12', '1.12.0', true],
     ['1.12', '1.12.1', false],
     ['1.12.1', '1.12', true],

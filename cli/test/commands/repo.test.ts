@@ -43,7 +43,6 @@ jest.mock('../../src/stack-outputs', () => {
   return {
     ...actual,
     getStackOutput: perKey,
-    // `show` and `onboard` ask for their outputs in one batch; each key is answered by the per-key mock.
     getStackOutputs: jest.fn(async (region: string, stack: string, keys: readonly string[]) => {
       const outputs: Record<string, string | null> = {};
       for (const key of keys) outputs[key] = await perKey(region, stack, key);
@@ -236,8 +235,6 @@ describe('repo command JSON output', () => {
   });
 
   test.each(['text', 'json'])('repo show reports the default model in the geography the stack grants in %s', async format => {
-    // A stack deployed with bedrockGeoRegion=us invokes `us.` profiles, so the shipped
-    // `global.` id would name a model that this deployment does not grant.
     getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
       RepoTableName: 'RepoTable-dev',
       BedrockGeoRegion: 'us',

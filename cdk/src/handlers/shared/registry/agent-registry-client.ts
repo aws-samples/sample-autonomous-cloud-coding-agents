@@ -609,17 +609,10 @@ export class AgentRegistryClient implements RegistryClient {
   }
 
   /**
-   * Poll a freshly created record until it leaves `CREATING`, and no further: the
-   * first status after `CREATING` ends the wait. For a new record, that status is
-   * `DRAFT`, which is not a terminal lifecycle state: `publish` moves the record on
-   * from there.
+   * CreateRegistryRecord is async, so `publish` waits until the record leaves `CREATING`.
    *
-   * CreateRegistryRecord is async, so `publish` has to see that the substrate accepted
-   * the record before it submits it. Not-found, `CREATING` and a response without a
-   * status are transient right after the create: keep polling. A `*_FAILED` status
-   * throws with the substrate's statusReason, and exhausting the poll budget throws
-   * too. Reading any of these as success would let the handler return 201 for a
-   * record that never became usable (#246 review).
+   * Not-found, `CREATING` and a missing status are transient right after the create.
+   * Reading one as success returns 201 for a record that never became usable (#246).
    */
   private async waitPastCreating(recordId: string): Promise<void> {
     for (let i = 0; i < RECORD_CREATE_MAX_POLLS; i++) {

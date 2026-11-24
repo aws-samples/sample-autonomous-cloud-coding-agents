@@ -143,18 +143,11 @@ function linearVaultWorkloadName(stack: Stack): string {
     : LINEAR_VAULT_WORKLOAD_PREFIX;
 }
 
-/** Webhook-screening alarm metric period (minutes). */
 const WEBHOOK_SCREENING_ALARM_PERIOD_MINUTES = 5;
 
 /**
- * The alarm on webhook content dropped because its guardrail screening failed (#794), in a
- * list for `OperationalAlerts.addAlarmActions`. Without a tracker the list is empty: only
- * the Linear and Jira webhook processors emit the metric, and a disabled feature
- * synthesizes no alarm (ADR-024).
- *
- * One drop alarms. The metric gets a datapoint only when a webhook event meets a failing
- * guardrail call, so on a quiet deployment a rule that waits for several datapoints would
- * stay silent through an outage.
+ * One drop alarms (#794). The metric gets a datapoint only when a webhook event meets a
+ * failing guardrail call, so a rule that waits for several datapoints can miss an outage.
  */
 function webhookScreeningAlarms(scope: Construct, trackerDeployed: boolean): cloudwatch.Alarm[] {
   if (!trackerDeployed) return [];
@@ -2177,8 +2170,7 @@ export class AgentStack extends Stack {
     const operationalAlerts = new OperationalAlerts(this, 'OperationalAlerts', {
       alertEmail: this.node.tryGetContext('alertEmail') as string | undefined,
     });
-    // Every alarm of the stack is listed here (#686): one without an action
-    // is seen only by someone who is already watching the console. A test in
+    // Every alarm of the stack is listed here (#686). A test in
     // test/stacks/agent.test.ts fails on an alarm that is left out.
     operationalAlerts.addAlarmActions(
       orchestrator.errorAlarm,
@@ -2192,10 +2184,8 @@ export class AgentStack extends Stack {
       budgetAlerts.teamMembershipUnresolvedAlarm,
       // #1063: XSS-shaped bodies counted (not blocked) on the signed webhook routes.
       ...[taskApi.webhookXssCountedAlarm].filter(alarm => alarm !== undefined),
-      // Only with Linear or Jira: their webhook processors emit the metric (#794).
-      // In the maintenance stack, like the scheduled jobs: the alarm holds no
-      // state, and the widest inline deployment fills the root stack's resource
-      // budget to the last resource.
+      // Only with Linear or Jira, which emit the metric (#794). In the maintenance stack
+      // because the widest inline deployment fills the root stack's resource budget.
       ...webhookScreeningAlarms(concurrencyMaintenance, issueOrchestrationEnabled),
       prOutcomeSweep.errorAlarm,
     );

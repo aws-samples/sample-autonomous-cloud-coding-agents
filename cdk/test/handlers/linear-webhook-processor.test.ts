@@ -99,7 +99,6 @@ function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
 }
 
-/** The WebhookScreeningFailed embedded-metric documents that `run` writes to stdout, without their `_aws` envelope. */
 async function screeningFailedMetricsOf(run: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
   const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
   try {

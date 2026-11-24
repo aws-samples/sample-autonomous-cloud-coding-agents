@@ -147,9 +147,7 @@ def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
         print("       Check Bedrock model access for this model in this Region, and")
         print("       that these credentials may invoke it.")
     elif answered:
-        # Only an exception leads here: the run delivered an answer and a clean result,
-        # then raised. Judged by its messages alone it is a PASS, and the verdict for a
-        # run without a result, below, would be false.
+        # Only an exception leads here: the run delivered an answer and a clean result, then raised.
         print("\nFAIL — The run raised an exception after it delivered its result")
         print("       (see Errors above). The model answered, but the session did not")
         print("       end cleanly: check the CLI stderr output above.")

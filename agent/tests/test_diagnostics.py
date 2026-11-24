@@ -105,8 +105,6 @@ def test_sdk_smoke_fails_when_the_model_call_is_rejected(monkeypatch, capsys):
 
 
 def test_sdk_smoke_fails_when_the_run_raises_after_its_result(monkeypatch, capsys):
-    # A complete answer and a clean result, then an exception from the stream: judged
-    # by its messages alone, this run is a PASS.
     status = _sdk_smoke(
         monkeypatch,
         SystemMessage(subtype="init", data={}),
@@ -146,8 +144,6 @@ def test_sdk_smoke_fails_when_the_run_raises_after_its_result(monkeypatch, capsy
 def test_sdk_smoke_keeps_its_verdict_when_the_run_raises_before_its_result(
     monkeypatch, capsys, messages, verdict
 ):
-    # Each of these runs fails on its messages alone, with a verdict that says where to
-    # look. The exception is reported above that verdict and does not replace it.
     status = _sdk_smoke(monkeypatch, *messages, raises=RuntimeError("stream closed"))
 
     out = capsys.readouterr().out

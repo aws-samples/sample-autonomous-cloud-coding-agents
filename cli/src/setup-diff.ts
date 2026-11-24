@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * State-bearing changes in `cdk diff` output: what the data-loss gate of
- * `bgagent setup` reads, and how it names the loss to the operator.
- */
-
 import { componentForPath, stripAnsi } from './setup-ui';
 
 /** Resource types whose deletion, replacement or orphaning loses data, installations or ownership. */

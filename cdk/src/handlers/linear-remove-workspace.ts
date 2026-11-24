@@ -253,7 +253,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (scanKey && pages >= MAX_SCAN_PAGES) {
         // Bounded rather than open-ended: without this the only stop is the
         // 10s timeout, which surfaces as a generic 500 with no cause. Not a
-        // 404, and not the row read so far either — the pages left unread can
+        // 404, and not the row read so far either. The pages left unread can
         // hold the row, or a second one for the slug.
         logger.error('Linear registry scan hit the page cap before the end of the registry', {
           request_id: requestId,
@@ -264,8 +264,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
       }
     } while (scanKey);
-    // The rows this request can mean: every active one, or with none active the
-    // revoked one that the scan read first.
     const active = matches.filter((item) => item.status === 'active');
     const candidates = active.length > 0 ? active : matches.slice(0, 1);
     if (candidates.length === 0) {
@@ -285,12 +283,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // ─── One slug, several active rows ───────────────────────────────
-    // Removing the row read first would leave the others active, behind an
-    // answer that says the slug is removed, and the caller's own row cannot
-    // go alone: the rows share the secret that the slug names. So nothing
-    // is written, and the answer names the rows. This follows the admin
-    // check on purpose: the ids go to a caller who installed one of the
-    // rows, and any other caller gets the 403 that a single row gives.
+    // The rows share the secret that the slug names, so no row is removed alone.
+    // This follows the admin check, so that only an admin of a row gets the ids.
     if (candidates.length > 1) {
       const workspaceIds = candidates.map((item) => item.linear_workspace_id as string);
       logger.warn('Linear remove-workspace refused: several active registry rows carry the slug', {

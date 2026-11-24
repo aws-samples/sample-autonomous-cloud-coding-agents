@@ -21,23 +21,10 @@ import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 import { buildSync } from 'esbuild';
 
-/**
- * PDF screening with the installed pdf-parse and real PDFs (#683).
- *
- * attachment-screening.test.ts mocks pdf-parse, so it proves that the code matches the
- * mock, not that the mock matches the package. Here only the guardrail call is replaced:
- * a pdf-parse without what the code uses (the `PDFParse` export, `getText` with its
- * `text` and `total`, `destroy`) fails these tests.
- *
- * The screening runs in a child process, because under Jest pdfjs cannot import() its ES
- * module worker. The child runs the module in the shape of a Lambda bundle: bundled by
- * esbuild as CommonJS without pdf-parse (`nodeModules: ['pdf-parse']` in the constructs),
- * which a native import() then finds in node_modules.
- */
+// Under Jest pdfjs cannot import() its ES module worker, so the screening runs in a child process.
 
 const CDK_ROOT = path.resolve(__dirname, '..', '..', '..');
 
-/** Screens the PDF passed as base64 in PDF_BASE64 and prints the outcome as one line of JSON. */
 const DRIVER = `
   import { screenTextFile } from './src/handlers/shared/attachment-screening';
   const screened = [];
@@ -54,7 +41,7 @@ const DRIVER = `
   );
 `;
 
-/** The driver and the screening module in one script, for the Node that runs this test. */
+// As in a Lambda bundle, the code is CommonJS without pdf-parse, which a native import() finds in node_modules.
 const BUNDLE = buildSync({
   stdin: { contents: DRIVER, resolveDir: CDK_ROOT },
   bundle: true,
@@ -93,7 +80,6 @@ function pdfWithPages(pageTexts: string[]): Buffer {
   return Buffer.from(pdf, 'latin1');
 }
 
-/** Screens `pdf` in a child process and returns the outcome the driver printed. */
 function screenInChild(pdf: Buffer): unknown {
   const stdout = execFileSync(process.execPath, ['-'], {
     cwd: CDK_ROOT, // pdf-parse and the AWS SDK resolve from here

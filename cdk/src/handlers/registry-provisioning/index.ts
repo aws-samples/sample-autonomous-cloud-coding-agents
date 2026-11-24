@@ -76,10 +76,6 @@ const CLIENT_TOKEN_LENGTH = 64;
  *  and a stopped handler fails the delete at once. */
 const RECORD_DELETION_BUDGET_MS = 30_000;
 
-/** What a delete request leaves for the Provider's waiter: nothing when the registry
- *  is `absent` (gone, or the service rejects its id), otherwise a `pending` delete to
- *  poll. `pending` covers an accepted delete and one that met a retryable error: the
- *  waiter reads the registry's state in both cases and does not tell them apart. */
 type DeleteAttempt = 'absent' | 'pending';
 
 /** The registry id is the last ARN segment; we also accept a bare id. */

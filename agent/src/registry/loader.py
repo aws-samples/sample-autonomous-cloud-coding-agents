@@ -205,9 +205,8 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
         # advice git prints with it is off for this clone.
         _git("config", "advice.updateSparsePath", "false")
         marked = _git("update-index", "--skip-worktree", ".mcp.json")
-        # The flag has to be on the entry of the file itself: for this pathspec git
-        # also lists the entries below a directory of that name. "S" is
-        # skip-worktree, "s" the same on an entry that is assume-unchanged too.
+        # The flag has to be on the entry of the file itself. For this pathspec git also lists the
+        # entries below a directory of that name. "s" is "S" (skip-worktree) with assume-unchanged.
         entry = _git("ls-files", "-v", "--", ".mcp.json").stdout
         flagged = entry in ("S .mcp.json\n", "s .mcp.json\n")
     except (OSError, subprocess.SubprocessError) as e:

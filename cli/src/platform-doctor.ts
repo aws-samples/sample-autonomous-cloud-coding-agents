@@ -662,8 +662,6 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
       id,
       label,
       status: statusFor(failure),
-      // A denial is about the CALLER, so it gets no remedy about the model: the
-      // console remedy is for the one case where the service answered "no such model".
       detail: failure === 'denied'
         ? `${message} That is a permissions gap on the caller, not evidence about the model — `
           + 're-run with credentials holding bedrock:GetFoundationModel to settle it.'
@@ -783,7 +781,6 @@ async function checkGrantedModelProfiles(
   const id = 'bedrock_granted_model_profiles';
   const label = 'Every granted Bedrock model has an inference profile';
   if (!bedrockModelIds || !geoRegion) {
-    // Either output alone is enough to land here, so name what is actually missing.
     const missing = [
       ...(bedrockModelIds ? [] : ['BedrockModelIds']),
       ...(geoRegion ? [] : ['BedrockGeoRegion']),

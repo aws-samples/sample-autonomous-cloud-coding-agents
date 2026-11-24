@@ -17,17 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for `cdk/scripts/preflight-bootstrap.ts`, the bootstrap check that is the first
- * command of `mise //cdk:deploy` (#126, #127).
- *
- * The script is a gate. mise stops a task at the first command that exits non-zero, so
- * this exit code alone decides whether `cdk deploy` starts: 0 for a verdict that is not
- * FAIL, 1 for FAIL and for a state it could not read. `test/bootstrap/preflight.test.ts`
- * covers how a verdict is reached. This suite runs the script as the task does, as a
- * subprocess, with a fake `aws` on PATH that answers `describe-stacks` and records each
- * call, and checks the exit code, the output and the call.
- */
+// mise stops a task at the first command that exits non-zero, so the exit code of `preflight-bootstrap.ts` alone decides
+// whether `cdk deploy` starts (#126, #127). `test/bootstrap/preflight.test.ts` covers how a verdict is reached.
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -39,14 +30,11 @@ const SCRIPT = path.join(CDK, 'scripts/preflight-bootstrap.ts');
 /** The task runs the script with `npx tsx`: its imports need more than type stripping. */
 const TSX = require.resolve('tsx/cli');
 
-/** The bundle this checkout needs: the committed artifacts, which `artifact-sync.test.ts` holds to the sources. */
 const VERSION = fs.readFileSync(path.join(CDK, 'bootstrap/BOOTSTRAP_VERSION'), 'utf-8').trim();
 const HASH = fs.readFileSync(path.join(CDK, 'bootstrap/BOOTSTRAP_HASH'), 'utf-8').trim();
 
-/** What `aws` is to answer: the outputs of the CDKToolkit stack, or the error it fails with. */
 type Toolkit = { outputs: object[] } | { error: string };
 
-/** The outputs of a CDKToolkit stack that carries an ABCA policy bundle for the default compute backend. */
 const bundle = (version: string, hash: string): Toolkit => ({
   outputs: [
     { OutputKey: 'BootstrapVersion', OutputValue: '33' },
@@ -65,19 +53,13 @@ const NOT_BOOTSTRAPPED: Toolkit = { error: missing('CDKToolkit').replace('An err
 const DENIED: Toolkit = { error: 'An error occurred (AccessDenied): not authorized' };
 
 interface Invocation {
-  /** What follows the script: the arguments `mise //cdk:deploy --` is given. */
   readonly args?: string[];
   readonly env?: Record<string, string>;
-  /** The `cdk.json` of the working directory; none when left out. */
   readonly cdkJson?: object;
 }
 
-/**
- * Runs the script with a fake `aws` first on PATH.
- *
- * The working directory is a new one, not `cdk/`: the script reads `cdk.json` there for
- * the compute backends of the app, and the file of the checkout is the developer's to edit.
- */
+// The working directory is a new one, not `cdk/`. The script reads `cdk.json` there for the compute backends of the app,
+// and the file of the checkout is the developer's to edit.
 function preflight(toolkit: Toolkit, { args = [], env = {}, cdkJson }: Invocation = {}) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-bootstrap-'));
   try {
@@ -103,7 +85,6 @@ process.stdout.write(JSON.stringify(toolkit.outputs));
       // that this process inherited out of the environment.
       env: { ...process.env, PATH: `${cwd}${path.delimiter}${process.env.PATH}`, ABCA_SKIP_BOOTSTRAP_PREFLIGHT: undefined, ...env },
     });
-    // A script that did not start, or did not end in time, has no exit code to compare.
     if (error) throw error;
     return { status, stdout, stderr, calls: fs.readFileSync(calls, 'utf-8').split('\n').filter(Boolean) };
   } finally {
@@ -112,15 +93,13 @@ process.stdout.write(JSON.stringify(toolkit.outputs));
 }
 
 describe('preflight-bootstrap', () => {
-  // Each test starts tsx, which loads the policy modules and aws-cdk-lib with them: give
-  // a busy runner room.
+  // Each test starts tsx, which loads the policy modules and aws-cdk-lib with them.
   jest.setTimeout(60_000);
 
   test('lets the deploy start on the bundle this checkout needs, after one read of CDKToolkit', () => {
     const run = preflight(CURRENT, { args: ['--profile', 'ops', '--region=eu-west-1'] });
 
     expect(run).toMatchObject({ status: 0, stdout: expect.stringContaining('PASS') });
-    // In the account and Region that `cdk deploy` is given, and nothing but DescribeStacks.
     expect(run.calls).toEqual([
       '--profile ops --region eu-west-1 cloudformation describe-stacks --stack-name CDKToolkit --query Stacks[0].Outputs --output json',
     ]);
@@ -180,8 +159,6 @@ describe('preflight-bootstrap', () => {
     expect(run).toMatchObject({ status: 1, stderr: expect.stringContaining('not bootstrapped') });
   });
 
-  // Which compute backends the app deploys is CDK context: an argument in one of its
-  // forms, or `cdk.json`.
   test.each<[string, Invocation]>([
     ['-c', { args: ['-c', 'compute_types=agentcore,ecs'] }],
     ['--context', { args: ['--context', 'compute_types=agentcore,ecs'] }],
@@ -220,7 +197,6 @@ describe('preflight-bootstrap', () => {
     expect(preflight(OLDER, { env: { ABCA_SKIP_BOOTSTRAP_PREFLIGHT: '1' } })).toMatchObject({ status: 0, calls: [] });
   });
 
-  // Only `1` is the bypass.
   test('ABCA_SKIP_BOOTSTRAP_PREFLIGHT=0 leaves the check on', () => {
     const run = preflight(OLDER, { env: { ABCA_SKIP_BOOTSTRAP_PREFLIGHT: '0' } });
 

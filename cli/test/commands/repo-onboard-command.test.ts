@@ -37,7 +37,6 @@ describe('repo onboard/offboard commands', () => {
       if (key === 'GitHubTokenSecretArn') return 'arn:aws:secretsmanager:us-east-1:123:secret:platform';
       return null;
     });
-    // `onboard` asks for its outputs in one batch; each key is answered by the per-key mock above.
     (getStackOutputs as jest.Mock).mockImplementation(async (region: string, stack: string, keys: readonly string[]) => {
       const outputs: Record<string, string | null> = {};
       for (const key of keys) outputs[key] = await getStackOutput(region, stack, key);
@@ -174,8 +173,7 @@ describe('repo onboard/offboard commands', () => {
   });
 
   test('rejects a --model outside the set the stack grants', async () => {
-    // The granted set has to reach the guard: without it the check is skipped, as on a
-    // stack that does not export the set.
+    // Without the granted set the check is skipped, as on a stack that does not export the set.
     (getStackOutput as jest.Mock).mockImplementation(async (_r: string, _s: string, key: string) => {
       if (key === 'RepoTableName') return 'RepoTable';
       if (key === 'BedrockGeoRegion') return 'global';

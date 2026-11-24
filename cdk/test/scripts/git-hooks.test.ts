@@ -29,10 +29,6 @@
  * every mise task, which makes mise put its tools first, and no `node` called
  * without mise.
  *
- * It also holds that a commit type-checks the TypeScript it changes: every package
- * that has an ESLint hook has a hook that runs its `typecheck` task when one of its
- * TypeScript files is staged. ESLint does not report the compiler's errors.
- *
  * Same placement rationale as `check-constants-sync.test.ts`: `cdk/test/` is the
  * Jest tree that can reach the repository root.
  */
@@ -62,7 +58,6 @@ describe('git hooks that start through a login shell', () => {
   });
 });
 
-/** The text of every hook of the configuration, from its id to the next hook, by id. */
 const HOOKS = new Map(
   CONFIG.split(/^ {6}- id: /m).slice(1).map((hook) => [hook.slice(0, hook.indexOf('\n')), hook] as const),
 );
@@ -70,7 +65,6 @@ const HOOKS = new Map(
 describe('type-check hooks', () => {
   /** The packages that have an ESLint hook: the TypeScript packages. */
   const packages = [...HOOKS.keys()].filter((id) => id.endsWith('-eslint')).map((id) => id.slice(0, -'-eslint'.length));
-  /** The text of the type-check hook of a package, empty when it has none. */
   const hook = (pkg: string): string => HOOKS.get(`${pkg}-typecheck`) ?? '';
 
   test('exist for every package that has an ESLint hook, and run its typecheck task', () => {

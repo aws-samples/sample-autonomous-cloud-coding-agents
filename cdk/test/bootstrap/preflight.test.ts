@@ -52,7 +52,6 @@ describe('evaluateBootstrap', () => {
     const verdict = evaluateBootstrap(outputs(), EXPECTED);
     expect(verdict.status).toBe('FAIL');
     expect(verdict.message).toMatch(/default CDK bootstrap/);
-    // The remedy replaces the bootstrap that every CDK app of the account and Region deploys through.
     expect(verdict.message).toMatch(/`mise \/\/cdk:bootstrap` replaces this one, for every CDK app/);
   });
 

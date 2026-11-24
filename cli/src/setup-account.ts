@@ -17,11 +17,7 @@
  *  SOFTWARE.
  */
 
-/**
- * Account preparation for `bgagent setup`: which one-time changes the CDK
- * bootstrap needs before a deploy, and which stack names ABCA's bootstrap
- * can deploy. Decisions only; the wizard carries them out.
- */
+/** Account preparation for `bgagent setup`. Decisions only; the wizard carries them out. */
 
 import type { ComputeBackend } from './deployment-profile';
 import { DEFAULT_STACK_NAME } from './operator-context';

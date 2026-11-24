@@ -935,44 +935,19 @@ function sanitizeOnce(text: string): string {
   return sanitized;
 }
 
-/**
- * Closes the external content of a prompt. The same text as _UNTRUSTED_END in
- * agent/src/context.py: the local and dry-run assembler writes it, and the rule of the
- * agent's system prompt names it.
- */
 const UNTRUSTED_END = '<<<END UNTRUSTED EXTERNAL CONTENT>>>';
 
-/**
- * Characters that can hide inside a marker: those Unicode makes ignorable by default, which
- * display nothing, and control characters.
- */
 const HIDDEN = '\\p{Default_Ignorable_Code_Point}\\p{Cc}';
 
-/** What joins two words of a marker: whitespace, underscores, hyphens, hidden characters. */
 const GAP = `[\\s_\\-${HIDDEN}]+`;
 
-/**
- * The pattern of a word of a marker, with any hidden characters between its letters.
- * @param word - the word.
- * @returns the source of the pattern.
- */
 function spelled(word: string): string {
   return [...word].join(`[${HIDDEN}]*`);
 }
 
 /**
- * Text that reads as one of the two markers: their words in any letter case, whatever
- * stands around them. untrustedBlock replaces it inside the block: content must not be
- * able to write the END marker of the block it stands in.
- *
- * One exception: directly after a letter from a to z, BEGIN or END is the end of a longer
- * word, and "send untrusted external content" is an ordinary sentence. Only those letters
- * count: after an underscore or a digit, as a branch name can have them, or after a
- * letter that displays nothing, the words still read as a marker.
- *
- * Imitations that follow one another with nothing between them are one match. Taken one
- * by one, each would stand directly after the last letter of the one before it, and that
- * letter would make it the end of a longer word.
+ * The lookbehind keeps prose ("send untrusted external content") from matching. The group
+ * repeats because the second of two adjacent imitations follows a letter and would not match.
  */
 const MARKER_LOOKALIKE = new RegExp(
   `(?<![a-z])(?:(?:${spelled('BEGIN')}|${spelled('END')})${GAP}${spelled('UNTRUSTED')}${GAP}${spelled('EXTERNAL')}${GAP}${spelled('CONTENT')})+`,
@@ -980,14 +955,8 @@ const MARKER_LOOKALIKE = new RegExp(
 );
 
 /**
- * Put external content between the two markers that tell the model it is data, not
- * instructions: the convention of assemble_prompt in agent/src/context.py, with the source
- * of the content and the time it was fetched. The rule "Untrusted external content" of the
- * agent's system prompt (agent/src/prompts/base.py) says what the markers mean.
- * @param source - what the content is.
- * @param fetchedAt - when the content was fetched, as an ISO 8601 time.
- * @param lines - the lines of the content, as assembled.
- * @returns the lines of the block: the BEGIN marker, the content, the END marker.
+ * The rule "Untrusted external content" of the agent's system prompt
+ * (agent/src/prompts/base.py) names these markers.
  */
 function untrustedBlock(source: 'github_issue' | 'github_pull_request', fetchedAt: string, lines: string[]): string[] {
   return [
@@ -1024,7 +993,6 @@ export function assembleUserPrompt(
   }
 
   if (issue) {
-    // The issue was written on GitHub: all of it goes between the markers
     const externalStart = parts.length;
     parts.push(`\n## GitHub Issue #${issue.number}: ${sanitizeOnce(issue.title)}\n`);
     parts.push(sanitizeOnce(issue.body) || '(no description)');
@@ -1102,7 +1070,6 @@ export function assemblePrIterationPrompt(
 
   parts.push(`Task ID: ${taskId}`);
   parts.push(`Repository: ${repo}`);
-  // The pull request, down to its diff, was written on GitHub: all of it goes between the markers
   const externalStart = parts.length;
   parts.push(`\n## Pull Request #${pr.number}: ${sanitizeOnce(pr.title)}\n`);
   parts.push(sanitizeOnce(pr.body) || '(no description)');

@@ -707,9 +707,8 @@ async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 w
                     tool_results=[],
                 )
 
-                # Write progress events for this message. What the model wrote is
-                # screened like the result of a tool call, and before the writer
-                # cuts it to a preview: a credential cut in two is not recognised.
+                # Write progress events for this message. The text is screened before the
+                # writer cuts it to a preview: a credential cut in two is not recognised.
                 progress.write_agent_turn(
                     turn=result.turns,
                     model=message.model,
@@ -861,8 +860,7 @@ async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 w
             f"Exception during Claude session: {type(e).__name__}: {e}",
             task_id=config.task_id or None,
         )
-        # The text of an exception may quote a command or a URL, so it is
-        # screened before it reaches the task's events and the task record.
+        # The text of an exception may quote a command or a URL.
         err_text = _screened(str(e))
         progress.write_agent_error(error_type=type(e).__name__, message=err_text)
         if result.status == "unknown":

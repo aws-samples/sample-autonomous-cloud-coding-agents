@@ -22,10 +22,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
- * The rules below are selectors and import zones written by hand in eslint.config.mjs.
- * One that matches nothing is still valid and lint passes, so each row lints a snippet as
- * the named file with the real config and lists the rules that must report it: none where
- * the snippet has to stay legal.
+ * A hand-written selector or import zone that matches nothing is still valid, and lint passes.
+ * So each row lints a snippet as the named file and lists the rules that must report it.
  */
 const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // An AWS SDK client built outside the ua factory (#319).
@@ -37,16 +35,14 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // md5 from node:crypto.
   ['src/a.ts', "export const digest = createHash('md5');", ['no-restricted-syntax']],
   ['test/a.test.ts', "export const digest = crypto.createHash('md5');", ['no-restricted-syntax']],
-  // An import in src of a file outside the package, which the CLI ships without. The
-  // package's own files and its installed dependencies stay legal, and so does a test
-  // that loads a contract.
+  // An import in src of a file outside the package, which the CLI ships without.
   ['src/a.ts', "import '../../cdk/src/handlers/shared/types';", ['import-x/no-restricted-paths']],
   ['src/a.ts', "import '../../contracts/constants.json';", ['import-x/no-restricted-paths']],
   ['src/a.ts', "import './types';", []],
   ['src/a.ts', "import 'commander';", []],
   ['test/a.test.ts', "import '../../contracts/constants.json';", []],
   // The same for a package of the workspace imported by its name, through the link Yarn
-  // makes for it in the root node_modules. The rule leaves this package's own link alone.
+  // makes for it in the root node_modules.
   ['src/a.ts', "import '@abca/cdk/package.json';", ['import-x/no-restricted-paths']],
   ['src/a.ts', "import '@abca/cli/package.json';", []],
   // A comment that takes code out of the coverage report, in each spelling the rule lists.
@@ -70,18 +66,13 @@ const SHEBANG = '#!/usr/bin/env node';
 const HEADER = fs.readFileSync(path.resolve(__dirname, '..', 'header.js'), 'utf-8').trim();
 
 /**
- * A file that starts with a shebang carries the license header like any other (#172). The
- * rule takes the shebang as the one line allowed above the header and wants the header
- * right below it, one blank line apart. A table of its own: every rule named in a table
- * runs on every row of it, and the snippets above carry no header.
+ * The license-header rule wants the header one blank line below a shebang, nothing in between
+ * (#172). In CASES the rule would run on every row, and those snippets carry no header.
  */
 const SHEBANG_CASES: typeof CASES = [
   ['src/bin/a.ts', `${SHEBANG}\n\n${HEADER}\n\nexport const a = 1;\n`, []],
-  // No header.
   ['src/bin/a.ts', `${SHEBANG}\n\nexport const a = 1;\n`, ['license-header/header']],
-  // Two blank lines between the shebang and the header.
   ['src/bin/a.ts', `${SHEBANG}\n\n\n${HEADER}\n\nexport const a = 1;\n`, ['license-header/header']],
-  // A comment between the shebang and the header.
   ['src/bin/a.ts', `${SHEBANG}\n\n// a comment\n\n${HEADER}\n\nexport const a = 1;\n`, ['license-header/header']],
 ];
 
@@ -121,12 +112,8 @@ test.each([
 }, 60_000);
 
 /**
- * The check-only lint (`mise //cli:eslint:check`, part of `mise run lint`) of the files that
- * start with a shebang. Run without --fix, the parser would take each file's syntax tree
- * from the copy on disk, where a shebang is not a comment, and the license-header rule
- * would report the header below it as misplaced: eslint.config.mjs tells the parser not to.
- * Only this run shows it: the build lints with --fix and the tests above lint without a
- * project, and the parser does that in neither.
+ * The parser reads a file from disk only in a run without --fix and with a project, unless
+ * eslint.config.mjs forbids it. The build lints with --fix, the tests above without a project.
  */
 test('eslint without --fix passes the files that start with a shebang', () => {
   const eslint = path.resolve(__dirname, '..', '..', 'node_modules', '.bin', 'eslint');

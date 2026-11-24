@@ -29,14 +29,9 @@ import {
   resolveDeploymentFeatures,
 } from '../../src/deployment/features';
 
-/**
- * CDK runner of the shared deployment-profile vectors (#1016). The CLI carries its own
- * copy of this logic, and ``cli/test/deployment-profile-vectors.test.ts`` runs the same
- * files against it, so neither copy can change alone. The cases and their shape are
- * described in ``contracts/deployment-profile-vectors/README.md``.
- */
+// The CLI suite runs the same vectors against the CLI's own copy of these rules.
+// See contracts/deployment-profile-vectors/README.md.
 const VECTOR_DIR = path.join(__dirname, '..', '..', '..', 'contracts', 'deployment-profile-vectors');
-/** The parser quotes the file it read in every message. */
 const SOURCE = 'abca.deployment.json';
 
 interface ParseCase {

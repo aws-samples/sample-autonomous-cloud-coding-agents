@@ -355,9 +355,8 @@ export class Blueprint extends Construct {
     }
     if (props.agent?.modelId) {
       item.model_id = { S: props.agent.modelId };
-      // Registered here, next to the write, so that a model is checked exactly when
-      // it is written (the onUpdate builders apply this same test) and a Blueprint
-      // that pins none does not read the model context.
+      // Registered next to the write, so that a model is checked exactly when it is
+      // written and a Blueprint that pins none does not read the model context.
       this.node.addValidation(new ModelIdValidation(
         props.agent.modelId,
         resolveBedrockGeoRegion(this.node),
@@ -652,14 +651,8 @@ class MaxBudgetUsdValidation implements IValidation {
 }
 
 /**
- * #447 — validates the per-repo memory token budget is a positive integer, so
- * a value that is no token count (zero, negative, fractional, non-finite)
- * fails at synth rather than reaching the RepoTable row. The only upper bound
- * is ``Number.MAX_SAFE_INTEGER``: the orchestrator's DynamoDB client returns a
- * larger number as a BigInt. Below that there is none, because context
- * hydration retrieves a fixed number of memory records and the budget only
- * decides how many of them are kept. ``undefined`` is allowed: the Blueprint
- * then writes no budget.
+ * The upper bound is ``Number.MAX_SAFE_INTEGER`` because the orchestrator's
+ * DynamoDB client returns a larger number as a BigInt (#447).
  */
 class MemoryTokenBudgetValidation implements IValidation {
   constructor(private readonly budget: number | undefined) {}
@@ -676,21 +669,8 @@ class MemoryTokenBudgetValidation implements IValidation {
 }
 
 /**
- * Validates ``agent.modelId`` with the rules ``bgagent repo onboard --model``
- * applies before it writes the same RepoTable column (``assertModelIdUsable`` in
- * ``cli/src/model-id.ts``). The Blueprint and the CLI both write ``model_id``
- * (ADR-017), so a value that only one of them rejects still reaches a task,
- * which then fails at turn 0 with an error that does not name the model.
- *
- * One form is accepted: ``<geo>.<model>``, with the geography and a model that
- * the grant sites resolve (``resolveBedrockGeoRegion``,
- * ``resolveBedrockModelIds``), so an ID that passes names a profile this
- * deployment grants.
- *
- * Two rules have no CLI counterpart. Surrounding whitespace is rejected: the
- * CLI trims ``--model`` and writes the trimmed value, while the Blueprint writes
- * the prop as given. A CDK token is rejected rather than skipped: its value is
- * unknown at synth, so it would reach the RepoTable unchecked.
+ * ``assertModelIdUsable`` in ``cli/src/model-id.ts`` guards the same ``model_id``
+ * column (ADR-017). A value that only one of the two rejects still reaches a task.
  */
 class ModelIdValidation implements IValidation {
   constructor(
@@ -738,7 +718,6 @@ class ModelIdValidation implements IValidation {
     }
     const secondGeo = geoPrefixOf(bare);
     if (secondGeo !== undefined) {
-      // As for a value without a prefix: a value to use is named only when it passes.
       const rest = bare.slice(secondGeo.length + 1);
       return invalid(
         `It carries two geography prefixes ('${geo}.' then '${secondGeo}.'). `

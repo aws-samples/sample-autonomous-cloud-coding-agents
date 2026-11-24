@@ -208,9 +208,8 @@ class TestGetSystemPrompt:
             assert has_rules, f"Missing Rules in {workflow_id}"
 
     def test_coding_prompts_tell_the_agent_what_the_untrusted_markers_mean(self):
-        # Both prompt assemblers put GitHub content between these markers: the
-        # orchestrator (untrustedBlock in context-hydration.ts) and the local
-        # one (context.py). The rule is what tells the agent how to read them.
+        # Both prompt assemblers put GitHub content between these markers: the orchestrator
+        # (untrustedBlock in context-hydration.ts) and the local one (context.py).
         assert _UNTRUSTED_BEGIN.startswith("<<<BEGIN UNTRUSTED EXTERNAL CONTENT")
         for workflow_id in (
             "coding/new-task-v1",

@@ -356,7 +356,6 @@ describe('compute the Region does not support', () => {
   const UNAVAILABLE = /Lambda MicroVMs \('lambda-microvm'\) is unavailable in eu-central-1 \(supported: us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1\)/;
   const withMicrovm = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore,lambda-microvm' }) });
   const inUnlistedRegion = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'eu-central-1', stackName: 'backgroundagent-dev', ...opts }, d);
-  /** A scripted run that selects the backend with --compute. */
   const SCRIPTED: SetupOptions = { features: 'none', compute: 'agentcore,lambda-microvm', yes: true };
 
   test('rejects --compute lambda-microvm before the diff, naming the Regions and the override', async () => {

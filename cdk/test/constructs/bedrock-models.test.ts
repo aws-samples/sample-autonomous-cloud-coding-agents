@@ -232,17 +232,10 @@ describe('geoPrefixOf', () => {
 
   it('returns undefined for a bare id, and for a name that merely starts with a geography word', () => {
     expect(geoPrefixOf('anthropic.claude-opus-5')).toBeUndefined();
-    // Keyed on the `<geo>.` separator: `au` must not claim `august-labs.…`.
     expect(geoPrefixOf('august-labs.model-1')).toBeUndefined();
   });
 });
 
-/**
- * Both arguments are plain strings, so the compiler accepts them swapped or already
- * prefixed. Either mistake would build a well-formed id of a profile that does not
- * exist (`global.global.anthropic.…`), which a grant or an env var then carries to a
- * turn-0 failure.
- */
 describe('inferenceProfileId', () => {
   it.each([...BEDROCK_GEO_REGIONS])('prefixes a bare model id with the %s geography', (geo) => {
     expect(inferenceProfileId(geo, 'anthropic.claude-opus-5')).toBe(`${geo}.anthropic.claude-opus-5`);

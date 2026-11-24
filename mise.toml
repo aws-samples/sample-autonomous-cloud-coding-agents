@@ -191,18 +191,13 @@ exit "$rc"
 '''
 
 # Shell scripts are code too: one is copied into the agent image and one deletes
-# CloudFormation stacks (#278). shellcheck reads every `*.sh` file that git tracks or
-# would add (new and not ignored): a script is checked before its first `git add`, and
-# generated trees (node_modules, cdk.out) are left out because git ignores them. A
-# tracked script that was deleted but not staged is still listed by git: it is skipped.
-# --severity=warning: errors and warnings fail, `info` and `style` notes are not
-# reported. `error` alone would not report what this gate is for (an unquoted command
-# substitution, SC2046, and a `cd` whose failure goes unnoticed, SC2164, are warnings).
+# CloudFormation stacks (#278). A tracked script that was deleted but not staged is
+# still listed by git: it is skipped.
+# --severity=warning: `error` alone would not report an unquoted command substitution
+# (SC2046) or a `cd` whose failure goes unnoticed (SC2164), which are warnings.
 # --norc and the unset: shellcheck would otherwise read a `.shellcheckrc` from the
 # checkout, from a directory above it or from the home directory, and options from
-# SHELLCHECK_OPTS. Either can switch checks off or on, so the answer would depend on
-# the machine and a dotfile could change what this task enforces. The only way to
-# accept a finding is a directive in the script:
+# SHELLCHECK_OPTS. The only way to accept a finding is a directive in the script:
 # `# shellcheck disable=SC<code> # <reason>` on the line above the command.
 # With no script listed the task fails: `xargs` on macOS would run nothing and exit 0.
 # The script is POSIX sh, because mise runs it with `sh`, which is dash on the CI
@@ -325,13 +320,9 @@ run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --l
 description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD; unset or empty, it scans the history of HEAD"
 # Range-scoped scan: only the commits a branch/PR introduces, not full history.
 # The per-PR CI job sets GITLEAKS_RANGE (security-pr.yml).
-#
-# Unset or empty, the range is `HEAD`: the scope of security:secrets above, for
-# the reasons given there, so the task is safe to run anywhere. An empty
-# --log-opts is not "no range": gitleaks then walks every ref of the clone and
-# fails on what other branches hold (#329). `origin/main..HEAD` is no default
-# either: on main it is empty, and where origin/main is missing gitleaks scans
-# nothing and still exits 0.
+# The default is `HEAD`, as in security:secrets above. With an empty --log-opts
+# gitleaks walks every ref of the clone (#329). With `origin/main..HEAD` it scans
+# nothing on main or where origin/main is missing, and still exits 0.
 run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-HEAD}"'
 
 [tasks."security:secrets:staged"]

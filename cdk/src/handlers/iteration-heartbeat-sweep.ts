@@ -142,8 +142,6 @@ export async function handler(): Promise<void> {
     edited_cap: MAX_EDITS_PER_SWEEP,
   });
 
-  // An edit that was tried and an edit that landed are counted apart: a sweep
-  // whose every edit fails must not read like a sweep with nothing to edit.
   let attempted = 0;
   let edited = 0;
   for (const plan of plans.slice(0, MAX_EDITS_PER_SWEEP)) {

@@ -33,7 +33,6 @@ jest.mock('../src/linear-auth-health', () => ({
 // Only the Linear registry output is wanted; every other check short-circuits on
 // a missing stack output rather than reaching AWS.
 const stackOutputMock = jest.fn();
-// The doctor asks for all its outputs in one batch; each key is answered by the per-key mock above.
 const stackOutputsMock = jest.fn(async (region: string, stack: string, keys: readonly string[]) => {
   const outputs: Record<string, string | null> = {};
   for (const key of keys) outputs[key] = await stackOutputMock(region, stack, key);
@@ -505,8 +504,6 @@ describe('doctor Bedrock catalog check error classification', () => {
     denied.name = 'AccessDeniedException';
     const check = await catalogCheck(denied);
     expect(check.status).toBe('warn');
-    // The remedy is the caller's missing permission. The console remedy is a conclusion
-    // about the MODEL, which a denial does not support.
     expect(check.detail).toMatch(/permissions gap on the caller/);
     expect(check.detail).toMatch(/re-run with credentials holding bedrock:GetFoundationModel/);
     expect(check.detail).not.toMatch(/Enable model access/);
@@ -745,12 +742,10 @@ describe('doctor granted-model profile check', () => {
     const check = await grantedCheck(null, 'global');
     expect(check.status).toBe('warn');
     expect(check.detail).toMatch(/BedrockModelIds/);
-    // The geography IS exported here, so the detail must not say otherwise.
     expect(check.detail).not.toMatch(/BedrockGeoRegion/);
   });
 
   it('names only the geography when that is the output the stack lacks', async () => {
-    // A partially updated stack: the granted set is exported, the geography is not.
     const check = await grantedCheck('anthropic.claude-opus-5', null);
     expect(check.status).toBe('warn');
     expect(check.detail).toMatch(/does not export BedrockGeoRegion,/);

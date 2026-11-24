@@ -250,7 +250,6 @@ describe('AgentVpc under cdk-nag', () => {
       expect(group.Metadata?.cdk_nag?.rules_to_suppress).toEqual([
         { id: 'CdkNagValidationFailure', applies_to: ['AwsSolutions-EC23'], reason: expect.any(String) },
       ]);
-      // What the exemption's reason states, and all that the rule cannot check here.
       expect(group.Properties.SecurityGroupIngress).toEqual([{
         CidrIp: { 'Fn::GetAtt': [vpcId, 'CidrBlock'] },
         Description: expect.anything(),

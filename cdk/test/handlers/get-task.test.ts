@@ -120,9 +120,8 @@ describe('get-task handler', () => {
   });
 
   test('surfaces agent_heartbeat_at so the in-guest liveness signal is observable', async () => {
-    // ADR-021 P2r2-F11. The agent refreshes this every 45 s where the uvicorn server
-    // runs the pipeline (AgentCore and Lambda MicroVMs; ECS writes it once at start),
-    // and the orchestrator reads it there for hang detection, but `toTaskDetail` dropped it — so
+    // ADR-021 P2r2-F11. The agent refreshes this every 45 s on AgentCore and Lambda MicroVMs,
+    // where the orchestrator reads it for hang detection, but `toTaskDetail` dropped it, so
     // `bgagent status` showed `None` while DynamoDB held a 6-second-old value, and
     // a live verification run concluded "heartbeats not observed" and blamed an
     // unrelated defect. Exactly the class of bug the channel_source assertion above

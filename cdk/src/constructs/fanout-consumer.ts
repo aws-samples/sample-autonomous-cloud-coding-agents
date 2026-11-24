@@ -172,7 +172,7 @@ export class FanOutConsumer extends Construct {
    *  Kept as the concrete {@link cloudwatch.Alarm} (matching the
    *  ``errorAlarm`` precedent in task-orchestrator.ts) because
    *  ``AgentStack`` attaches the ``OperationalAlerts`` SNS topic to it
-   *  with ``addAlarmAction`` — declared on ``Alarm``, not the
+   *  with ``addAlarmAction``, declared on ``Alarm``, not the
    *  ``IAlarm`` interface (#629). */
   public readonly dlqDepthAlarm: cloudwatch.Alarm;
 

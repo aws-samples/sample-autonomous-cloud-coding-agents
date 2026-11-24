@@ -45,7 +45,6 @@ const NO_NAKED_SDK_CLIENT = {
     + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
     + ' the exception in this selector.',
 };
-// Used by the rule for src below.
 const NO_IMPORT_OUTSIDE_PACKAGE = 'The CLI ships only lib/, compiled from cli/src: a file outside the cli package is not part of an'
   + ' installed CLI. Mirror an API type or constant of the CDK in src/types.ts, which `mise run check:types-sync` compares with the'
   + ' CDK declaration. Copy any other value into src and pin the copy with a parity test such as test/constants-parity.test.ts.';
@@ -77,11 +76,8 @@ export default [
         ecmaVersion: 2018,
         sourceType: 'module',
         project: './tsconfig.dev.json',
-        // Run without --fix, the parser would take each file's syntax tree from the copy on
-        // disk instead of the text ESLint hands it. A shebang is a comment only in that
-        // text, so the license-header rule would report the header below the shebang of
-        // src/bin/bgagent.ts as misplaced (#172). With this, a run reads the same text with
-        // and without --fix.
+        // Without this, a run without --fix parses the copy on disk, where a shebang is not a
+        // comment, and license-header reports the header of src/bin/bgagent.ts as misplaced (#172).
         disallowAutomaticSingleRunInference: true,
       },
     },
@@ -304,7 +300,6 @@ export default [
     },
   },
 
-  // Override: rules for the source files only
   {
     files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
@@ -313,12 +308,8 @@ export default [
       // Every AWS SDK client in src is built by the attributed factory (#319). The whole
       // list again: a later block replaces a rule's options.
       'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
-      // src imports no file of the repository outside this package, the root node_modules
-      // aside: Yarn installs the dependencies there. The compiler (rootDir) refuses only a
-      // TypeScript source: another package's build output and a JSON file both compile.
-      // The second zone is the links Yarn makes in the root node_modules for the packages
-      // of the workspace, this package's own aside: an import by package name may resolve
-      // to a path through such a link, and the first zone lets all of node_modules pass.
+      // The compiler (rootDir) refuses only a TypeScript source outside the package, not build
+      // output or a JSON file. The second zone is Yarn's workspace links, which the first lets pass.
       'import-x/no-restricted-paths': ['error', {
         basePath: __dirname,
         zones: [

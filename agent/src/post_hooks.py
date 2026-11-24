@@ -73,16 +73,8 @@ class VerifyOutcome:
 # configured verify command isn't installed), not a genuine build failure.
 SHELL_COMMAND_NOT_FOUND = 127
 
-# What mise says, lower-cased, on its own error line (``mise ERROR ...``) when a
-# task it was asked for does not exist. The wording depends on what else the
-# repository defines:
-#   task not found: <name>    a task that the requested one depends on
-#   no task <name> found      other tasks exist, this one does not
-#   unknown command: <name>   no task at all, and a name that resembles one of
-#                             mise's own commands, as ``lint`` does (for any
-#                             other name mise says "no tasks defined")
-# The name is one word, ``\S+``, which keeps the search linear in the length of
-# the line: a line of build output is as long as the build makes it.
+# What mise says, lower-cased, when a task it was asked for does not exist. The wording
+# depends on what else the repository defines. ``\S+`` keeps the search linear in a long line.
 _MISE_NO_SUCH_TASK = re.compile(r"not found|no task \S+ found|unknown command")
 
 
@@ -195,11 +187,8 @@ def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     try:
         return shlex.split(cmd)
     except ValueError:
-        # No argv can be made of the text, and an exception here ends the task:
-        # before the agent starts when the baseline resolves the command, after
-        # its work when the gate does. The shell gets the text as written, as it
-        # does for the same text beside a shell operator, and its exit status is
-        # the result of the gate.
+        # An exception here ends the task, after the agent's work when the gate resolves the
+        # command. The shell gets the text as written, and its exit status is the gate's result.
         return ["bash", "-lc", cmd]
 
 

@@ -191,15 +191,13 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).toContain('Current:       task completed');
     // With no live cost event, falls back to task.cost_usd.
     expect(rendered).toContain('Cost:          $0.44 / budget $2.00');
-    // A finished task shows turns_completed, the count that max_turns limits,
-    // and never turns_attempted against the limit (#919).
+    // The count shown against the limit is turns_completed, never turns_attempted (#919).
     expect(rendered).toContain('Turn:          11 / 12');
   });
 
   test('finished task shows turns_completed whatever the event window holds', () => {
-    // The 20 newest events of a finished task may or may not hold an
-    // ``agent_turn``, and older agents numbered these events per message, not
-    // per answer: the line must not depend on either.
+    // The 20 newest events of a finished task may or may not hold an ``agent_turn``,
+    // and older agents numbered these events per message, not per answer.
     const task = buildTask({
       status: 'COMPLETED',
       completed_at: '2026-04-29T15:29:50Z',
@@ -214,8 +212,7 @@ describe('formatStatusSnapshot', () => {
 
   test('task stopped at the turn limit shows the limit, not the attempt that was aborted', () => {
     // Such a task is FAILED, and its record holds the limit as turns_completed
-    // and the limit plus one as turns_attempted. As for any finished task, the
-    // record wins over an event in the window.
+    // and the limit plus one as turns_attempted.
     const task = buildTask({
       status: 'FAILED',
       completed_at: '2026-04-29T15:29:50Z',

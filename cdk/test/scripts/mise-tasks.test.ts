@@ -89,22 +89,18 @@ describe('the SAST scans with the rule packs of the semgrep registry', () => {
 });
 
 describe('the secret scans with gitleaks', () => {
-  /** The arguments a task gives gitleaks, with GITLEAKS_RANGE set to `range` or, without one, unset. */
   const gitleaksArguments = (name: string, range?: string): string[] => {
     const [, command] = /^run = ['"](gitleaks [^\\;&|<>]*)['"]$/.exec(task(name).find((line) => line.startsWith('run = ')) ?? '') ?? [];
     if (command === undefined) {
       throw new Error(`${name}: its command is not one gitleaks call`);
     }
-    // The command runs as it is written. A shell function stands in for gitleaks and prints
-    // its arguments, one per line. An undefined value takes a GITLEAKS_RANGE that this
-    // process inherited out of the environment.
+    // An undefined value takes a GITLEAKS_RANGE that this process inherited out of the environment.
     const env = { ...process.env, GITLEAKS_RANGE: range };
     return spawnSync('sh', ['-c', `gitleaks() { printf '%s\\n' "$@"; }\n${command}`], { encoding: 'utf-8', env }).stdout.trimEnd().split('\n');
   };
 
-  // An empty --log-opts is not "no range": gitleaks then walks every ref of the clone and fails
-  // on what other branches hold. A workflow step whose range expression has no value passes
-  // an empty variable, not an unset one.
+  // With an empty --log-opts gitleaks walks every ref of the clone and fails on what other branches hold. A workflow
+  // step whose range expression has no value passes an empty variable, not an unset one.
   test.each([undefined, ''])('security:secrets:range scans the history of HEAD when GITLEAKS_RANGE is %p', (range) => {
     expect(gitleaksArguments('security:secrets:range', range)).toContain('--log-opts=HEAD');
   });
@@ -113,9 +109,6 @@ describe('the secret scans with gitleaks', () => {
     expect(gitleaksArguments('security:secrets:range', 'origin/main..HEAD')).toContain('--log-opts=origin/main..HEAD');
   });
 
-  // Rule file, redaction and output are the same in the three scans, so that the hook, the
-  // pull request check and the sweep cannot disagree about a finding: only what they scan
-  // differs. Without a range, the range scan is the sweep.
   test('give gitleaks the same arguments, apart from what to scan', () => {
     const sweep = gitleaksArguments('security:secrets');
 
@@ -215,10 +208,7 @@ describe('the git hooks step of the install task', () => {
 });
 
 describe('the shell script lint', () => {
-  /**
-   * The script of the task: the lines between `run = '''` and the closing `'''`. `task` ends a
-   * table at a line that starts with `[`, so no line of the script may start with a `[ ... ]` test.
-   */
+  /** `task` ends a table at a line that starts with `[`, so no line of the script may start with a `[ ... ]` test. */
   const script = (): string => {
     const lines = task('check:shell');
     const start = lines.indexOf("run = '''");
@@ -231,11 +221,7 @@ describe('the shell script lint', () => {
 
   type Files = Record<string, string>;
 
-  /**
-   * Runs the script the way mise runs an inline task, in a repository whose index holds `tracked`
-   * and whose working tree also holds `untracked` and has lost `deleted`. A stand-in for
-   * shellcheck records how it was called and exits with `shellcheckStatus`.
-   */
+  /** Runs the script the way mise runs an inline task. */
   const run = (
     tracked: Files,
     { untracked = {}, deleted = [], shellcheckStatus = 0 }: { untracked?: Files; deleted?: string[]; shellcheckStatus?: number } = {},
@@ -250,7 +236,6 @@ describe('the shell script lint', () => {
         fs.writeFileSync(path.join(repo, file), text);
       });
       const record = path.join(bin, 'call.json');
-      // Started by the node that runs this suite, not by whichever `node` PATH holds.
       fs.writeFileSync(path.join(bin, 'shellcheck'), `#!${process.execPath}
 const call = { args: process.argv.slice(2), opts: process.env.SHELLCHECK_OPTS ?? null };
 require('node:fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify(call));
@@ -290,9 +275,8 @@ process.exit(${shellcheckStatus});
     expect(result.call?.args.filter((argument) => !argument.startsWith('-')).sort()).toEqual(['new script.sh', 'scripts/a.sh']);
   });
 
-  // A `.shellcheckrc` in the checkout, in a directory above it or in the home directory, and the
-  // options in SHELLCHECK_OPTS, switch checks off or on: the answer would depend on the machine,
-  // and a committed dotfile would change what the build enforces.
+  // shellcheck reads a `.shellcheckrc` in the checkout, in a directory above it or in the home directory, and the options in
+  // SHELLCHECK_OPTS. The answer would depend on the machine, and a committed dotfile would change what the build enforces.
   test('asks for errors and warnings, and lets neither an rc file nor SHELLCHECK_OPTS change that', () => {
     expect(run({ 'a.sh': '' }).call).toEqual({ args: ['--norc', '--severity=warning', '--', 'a.sh'], opts: null });
   });
@@ -314,7 +298,6 @@ process.exit(${shellcheckStatus});
     expect(result.call).toBeUndefined();
   });
 
-  // The places that start the task. Without them the lint exists and runs nowhere.
   test('runs in the build, in the security suite and in the commit hook', () => {
     const hooks = fs.readFileSync(path.resolve(__dirname, '../../../.pre-commit-config.yaml'), 'utf-8').split(/^ {6}- id: /m);
     const hook = hooks.find((text) => text.startsWith('shellcheck\n')) ?? '';

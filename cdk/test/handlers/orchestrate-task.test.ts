@@ -785,9 +785,8 @@ describe('pollTaskStatus', () => {
 
   // --- ADR-021 P2: heartbeat liveness on lambda-microvm ---
   //
-  // The gap this closes: the agent refreshes `agent_heartbeat_at` wherever the
-  // uvicorn server runs the pipeline (AgentCore and Lambda MicroVMs), but the
-  // orchestrator only ACTED on it for agentcore. On a MicroVM the
+  // The gap this closes: the agent refreshes `agent_heartbeat_at` on AgentCore and Lambda
+  // MicroVMs, but the orchestrator only ACTED on it for agentcore. On a MicroVM the
   // substrate `GetMicrovm` cross-check catches a VM that DIED and nothing else —
   // an alive, healthy VM whose in-guest pipeline is hung or was OOM-killed inside
   // the guest looks perfectly fine (nothing self-terminates on this substrate, and
@@ -880,12 +879,8 @@ describe('pollTaskStatus', () => {
   });
 
   test('ECS remains untouched by the widening', async () => {
-    // Left out as a hard constraint, not a preference: the ECS boot command runs the
-    // pipeline without the uvicorn server, so the periodic heartbeat writer never
-    // starts and `agent_heartbeat_at` is written once. Applying the staleness check
-    // would fail every ECS task about four minutes in, whatever the container's
-    // health (see `heartbeatLivenessApplies` in orchestrator.ts). ECS does not need
-    // it either: DescribeTasks reports a real container exit, OOM-kill included.
+    // ECS runs the pipeline without the uvicorn server and writes `agent_heartbeat_at` once.
+    // The staleness check would fail every ECS task (see `heartbeatLivenessApplies`).
     const old = new Date(Date.now() - 400_000).toISOString();
     mockDdbSend.mockResolvedValueOnce({
       Item: {

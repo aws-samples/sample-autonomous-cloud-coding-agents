@@ -47,7 +47,7 @@ import { compute } from '../../../../contracts/deployment-capabilities.json';
  *
  *   1. Add the Region id to that catalog entry and mirror it into
  *      `cli/src/deployment-capabilities.ts` (a parity test fails until both
- *      agree) — do not copy the list anywhere else.
+ *      agree). Do not copy the list anywhere else.
  *   2. Ship it; nothing else needs changing. The live probes already accepted
  *      the Region before this edit, so the edit only unblocks synth and setup.
  *

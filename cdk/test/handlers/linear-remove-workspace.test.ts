@@ -209,7 +209,6 @@ function findMarker() {
   );
 }
 
-/** The request removed nothing: no write to the registry, no call to Secrets Manager. */
 function expectNothingRemoved() {
   expect(smSend).not.toHaveBeenCalled();
   expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Update' || c._type === 'Delete')).toHaveLength(0);
@@ -493,9 +492,6 @@ describe('linear-remove-workspace handler', () => {
   });
 
   // ─── One slug, several active rows (#883) ───────────────────────────────
-  // Removing the row read first and answering 200 would leave the others
-  // active behind an answer that says the slug is removed. The request is
-  // refused instead, and writes nothing.
   test.each([
     ['on one scan page', undefined, undefined],
     ['on two scan pages', 1, undefined],
@@ -514,7 +510,6 @@ describe('linear-remove-workspace handler', () => {
     expect(result.statusCode).toBe(409);
     const { error } = JSON.parse(result.body) as { error: { code: string; message: string } };
     expect(error.code).toBe('WORKSPACE_SLUG_AMBIGUOUS');
-    // The answer names both rows: that is what the operator has to choose between.
     expect(error.message).toContain('ws-first');
     expect(error.message).toContain('ws-second');
     expectNothingRemoved();
@@ -524,8 +519,6 @@ describe('linear-remove-workspace handler', () => {
     ["another admin's row is read first", ['someone-else', ADMIN]],
     ["the caller's row is read first", [ADMIN, 'someone-else']],
   ])('409s for the admin of one of two active rows (%s)', async (_order, [installerOfFirst, installerOfSecond]) => {
-    // Taking the row read first would make the answer depend on the order of the
-    // table: 403 when that row is another admin's, a removal when it is the caller's.
     routeDdb({
       registryRows: [
         activeRow({ linear_workspace_id: 'ws-first', installed_by_platform_user_id: installerOfFirst }),
@@ -544,8 +537,6 @@ describe('linear-remove-workspace handler', () => {
   });
 
   test('the 409 names each of three active rows, and not a dead row that carries the slug too', async () => {
-    // Three active rows, not two: the refusal is for any number above one, and
-    // it names every one of them.
     routeDdb({
       registryRows: [
         activeRow({ linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
@@ -566,8 +557,6 @@ describe('linear-remove-workspace handler', () => {
   });
 
   test("403s for the admin of a dead row when the active row that carries the slug is another admin's", async () => {
-    // The right to remove comes from having installed a row this request can
-    // mean. A dead row of the caller's beside it gives none over the live one.
     routeDdb({
       registryRows: [
         activeRow({ linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
@@ -582,8 +571,6 @@ describe('linear-remove-workspace handler', () => {
   });
 
   test('403s, without naming the rows, for a caller who installed none of the active rows that carry the slug', async () => {
-    // The 409 lists workspace ids, so it is answered after the admin check: a
-    // caller who installed none of the rows learns no more than from a single row.
     routeDdb({
       registryRows: [
         activeRow({ linear_workspace_id: 'ws-first' }),
@@ -601,8 +588,6 @@ describe('linear-remove-workspace handler', () => {
   });
 
   test('with no active row for the slug, the dead row read first is removed and the other is left as it is', async () => {
-    // Only several active rows are refused: with none active, the row read first
-    // is removed, as when it is the only one.
     routeDdb({
       registryRows: [
         activeRow({ linear_workspace_id: 'ws-dead-1', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
@@ -889,7 +874,6 @@ describe('linear-remove-workspace handler', () => {
     ddbSend.mockImplementation((cmd: { _type: string }) => {
       if (cmd._type === 'Scan') {
         scans += 1;
-        // One active row on the first page, then empty pages without end.
         return Promise.resolve({ Items: scans === 1 ? [activeRow()] : [], LastEvaluatedKey: { _idx: scans } });
       }
       return Promise.resolve({});

@@ -295,9 +295,7 @@ class TestDeliveryGate:
         assert "deliverable=lost" in err
 
     def test_lost_reason_names_both_lost_work_and_a_run_that_changed_nothing(self):
-        # The gate sees the same thing for work that was lost and for a run that
-        # correctly changed nothing (#751). Slack and the CLI print this reason
-        # as it is, so it must not state that there were changes.
+        # The gate cannot tell the two apart (#751). Slack and the CLI print this reason as it is.
         _, err = self._gate()
         assert err is not None
         assert "the agent made no change" in err
@@ -345,13 +343,9 @@ class TestComputeTurnsCompleted:
         assert _compute_turns_completed(turns, max_turns=10) == turns
 
     def test_count_above_the_cap_is_clamped(self):
-        # The runner's count, or the CLI's where it stands in, can pass the cap;
-        # clamp to the declared ceiling so ``turns_completed`` reflects what
-        # actually executed.
         assert _compute_turns_completed(11, max_turns=10) == 10
 
     def test_exact_max_passes_through(self):
-        # Edge case: the count equals max_turns; min() is a no-op.
         assert _compute_turns_completed(10, max_turns=10) == 10
 
     def test_limit_of_zero_is_no_cap(self):

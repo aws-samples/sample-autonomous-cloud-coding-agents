@@ -1257,8 +1257,7 @@ class TestPostToolUseEgressBlocker:
         # …but the terminal carry-path was NOT latched (no host captured).
         assert last_blocker_reason() is None
 
-    # The last is no name at all: no latch for it either, and no exception,
-    # which would make the hook's wrapper blank the output of the tool.
+    # An exception for the last would make the hook's wrapper blank the output of the tool.
     @pytest.mark.parametrize(
         "tool_name",
         [
@@ -1272,10 +1271,6 @@ class TestPostToolUseEgressBlocker:
     def test_a_host_in_the_output_of_a_tool_that_opens_no_connection_does_not_latch(
         self, progress, tool_name
     ):
-        # #551: such a tool returns content, here a log that quotes a failed
-        # download. The event is written, but a task that later fails for
-        # another reason must not be reported as egress denied, with the remedy
-        # to allowlist a host that the task never called.
         hook_input = {
             "hook_event_name": "PostToolUse",
             "tool_name": tool_name,
@@ -1287,9 +1282,7 @@ class TestPostToolUseEgressBlocker:
         assert [b["resource"] for b in blocked] == ["registry.example.com"]
 
     def test_a_host_in_the_page_that_a_fetch_brought_back_does_not_latch(self, progress):
-        # A fetch that completed reached its host, and what it returns is the
-        # page: content as well, here an article that quotes the error. A fetch
-        # that cannot connect is a call that failed (TestPostToolUseFailure).
+        # A fetch that cannot connect is a call that failed (TestPostToolUseFailure).
         hook_input = {
             "hook_event_name": "PostToolUse",
             "tool_name": "WebFetch",
@@ -3459,9 +3452,6 @@ class TestTimeoutCapping:
 
 
 class TestPermissionDecisionReasonSanitization:
-    # What the model reads after the reviewer's reason when a gated call is
-    # denied: the rule (here that of ``engine_with_soft_gate``), then the
-    # instruction.
     STOP_LANGUAGE = (
         ". Do NOT retry this class of action with trivial variations; "
         "the same rule will fast-deny subsequent attempts. Find an "
@@ -3526,8 +3516,7 @@ class TestPermissionDecisionReasonSanitization:
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
         # Compared whole, on purpose: the text is an instruction to the model,
-        # and a change of its wording is a decision that has to show here. Given
-        # a bare reason, an agent retries the denied rule with variations (#113).
+        # and a change of its wording is a decision that has to show here.
         reason = self._denied_reason(
             fake_task_state, progress, engine_with_soft_gate, monkeypatch, "build makefile first"
         )
@@ -3540,9 +3529,7 @@ class TestPermissionDecisionReasonSanitization:
     def test_a_long_reason_is_shortened_and_the_stop_language_is_kept(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, length
     ):
-        # The reason that a denied call returns is capped at 500 characters: the
-        # cut falls in the reviewer's text, never in what follows it. 223 is the
-        # shortest reason that does not fit here, 2000 the longest the API accepts.
+        # 223 is the shortest reason that does not fit here, 2000 the longest the API accepts.
         reason = self._denied_reason(
             fake_task_state, progress, engine_with_soft_gate, monkeypatch, "x" * length
         )
@@ -3553,9 +3540,7 @@ class TestPermissionDecisionReasonSanitization:
     def test_a_cut_inside_an_escape_sequence_leaves_no_escape_character(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # With this rule a shortened reason keeps 219 characters, and the 219th
-        # is the ESC: cut there, it is left without the rest of its sequence,
-        # and the strip of escape sequences does not recognise it.
+        # With this rule a shortened reason keeps 219 characters, and the 219th is the ESC.
         ansi_reason = "x" * 218 + "\x1b[31m" + "y" * 300
         reason = self._denied_reason(
             fake_task_state, progress, engine_with_soft_gate, monkeypatch, ansi_reason

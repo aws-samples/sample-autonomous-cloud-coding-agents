@@ -67,12 +67,7 @@ def reset_server_state():
 
 
 # The fixture above acts once a test has ended, so no test of this file can watch it
-# work. The test below runs pytest on this throwaway module of two tests, with the
-# fixture and `conftest.py` loaded as they are for this file. The first test ends
-# while its pipeline thread has not looked up `run_task` yet. `/run` allows that: it
-# answers as soon as the thread is started. Here it is certain, because the thread
-# goes on only once something joins it. The second test checks that the thread ran
-# the first test's stub and never its own (#841).
+# work. The test below runs pytest on this throwaway module of two tests (#841).
 _TWO_TESTS_AROUND_A_LATE_PIPELINE = """
 import threading
 from unittest.mock import MagicMock
@@ -620,7 +615,6 @@ def test_debug_cw_write_blocking_reports_a_boto_error_on_stdout(monkeypatch, cap
     records the failure.
     """
 
-    # Stub ``boto3.client`` to raise so the except branch runs.
     class _BrokenBoto3:
         @staticmethod
         def client(*args, **kwargs):
@@ -1187,7 +1181,7 @@ class TestMicrovmReadyHookWarmUp:
         assert r.status_code == 503
         assert r.json()["status"] == "not_ready"
         assert any("claude" in f for f in r.json()["failed_warmups"])
-        # The attempt is logged (stdout only — a build hook makes no AWS call, its
+        # The attempt is logged (stdout only: a build hook makes no AWS call, its
         # own logging included), or a failed build gives the operator nothing to read.
         out = capfd.readouterr().out
         assert "warm-up of 'claude' FAILED" in out
@@ -1241,11 +1235,8 @@ class TestMicrovmReadyHookWarmUp:
     def test_the_warm_up_makes_no_aws_call_even_with_a_log_group_baked(
         self, client, monkeypatch, capfd, warm_ready
     ):
-        # /ready runs under the BUILD role, whose only Logs grant is the service's
-        # /aws/lambda-microvms/* namespace: a write to any other group, like the one
-        # baked here, can only fail, and any boto3 client built here freezes the
-        # build role's credential chain into the snapshot (the region is re-resolved
-        # per client). Adding a subprocess must not have changed that.
+        # /ready runs under the BUILD role: a Logs write to the group baked here can only fail,
+        # and a boto3 client built here freezes that role's credentials into the snapshot.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -2400,10 +2391,8 @@ class TestInstallPlatformConfig:
 
     def test_a_cross_region_arn_in_the_SAME_account_is_allowed(self, env_guard):
         # Region is deliberately NOT pinned: IAM ARNs are region-less and a
-        # cross-Region secret is a supported shape, while the execution role's
-        # Secrets Manager grants are Region-scoped — so IAM already refuses an
-        # in-account ARN in a Region no grant names. Pinning it would reject valid
-        # deployments.
+        # cross-Region secret is a supported shape, so pinning it would reject valid
+        # deployments. IAM already refuses an ARN in a Region no grant names.
         installed = server._install_platform_config(
             _platform_config(
                 github_token_secret_arn=(
@@ -2861,9 +2850,8 @@ class TestMicrovmValidateHook:
         # The whole point. _debug_cw / _warn_cw build a CloudWatch Logs client
         # whenever LOG_GROUP_NAME is set, so a build hook must not use them; and
         # boto3.client() would populate boto3.DEFAULT_SESSION — a module global
-        # holding the BUILD role's resolved credentials — which the snapshot would
-        # then freeze in for every MicroVM launched from it (credentials only: the
-        # region is re-resolved per client).
+        # holding the BUILD role's resolved credentials, which the snapshot would
+        # then freeze in for every MicroVM launched from it.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):

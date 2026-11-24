@@ -1100,8 +1100,6 @@ class TestIsVerifyCommandInert:
         assert post_hooks.is_verify_command_inert(1, "mise ERROR task not found: compile") is True
 
     def test_a_task_missing_from_a_repository_that_has_other_tasks_is_inert(self):
-        # `mise run build` where mise.toml defines tasks, but no `build`
-        # (mise 2026.11.6, exit 1). mise ends every error with its version.
         log = (
             "mise ERROR no task build found\n"
             "\n"
@@ -1114,9 +1112,7 @@ class TestIsVerifyCommandInert:
         assert post_hooks.is_verify_command_inert(1, log) is True
 
     def test_a_missing_task_named_like_a_mise_command_is_inert(self):
-        # `mise run lint` in a repository without any mise task (issue #749, mise
-        # 2026.8.4, exit 1): `lint` resembles commands of mise, so mise suggests
-        # those where it says "no tasks defined" for `build`.
+        # In a repository without any mise task (#749). For `build`, mise says "no tasks defined".
         log = (
             "mise ERROR unknown command: lint\n"
             "\n"
@@ -1128,16 +1124,13 @@ class TestIsVerifyCommandInert:
         assert post_hooks.is_verify_command_inert(1, log) is True
 
     def test_the_words_of_a_missing_task_in_the_output_of_a_task_are_a_failed_build(self):
-        # The task ran and printed the words itself: pip about one of its own
-        # commands, a script about a task. mise's line says that the task failed.
         for said in ('ERROR: unknown command "biuld"', "no task lint found"):
             log = f"[build] $ ./build.sh\n{said}\n[build] ERROR task failed"
             assert post_hooks.is_verify_command_inert(1, log) is False, said
 
     def test_a_task_file_that_mise_made_executable_and_ran_is_a_failed_build(self):
-        # A task file without the executable bit: mise warns in the words of its
-        # error, sets the bit (the image runs mise with MISE_YES=1) and runs the
-        # task, whose tests fail (mise 2026.11.6, exit 3).
+        # mise 2026.11.6 warns in the words of its error, sets the executable bit (the image
+        # runs it with MISE_YES=1) and runs the task.
         log = (
             "mise WARN  no task build found, but a non-executable file exists at "
             "/repo/mise-tasks/build\n"

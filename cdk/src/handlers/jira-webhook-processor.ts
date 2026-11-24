@@ -1639,12 +1639,8 @@ async function lookupPlatformUser(cloudId: string, accountId: string): Promise<s
 }
 
 /**
- * Resolve the tenant's OAuth token where the answer decides whether a task is
- * created. The registry row is read with the strict variant first: a read that
- * fails (throttling, a timeout, a missing permission) does not mean that the
- * tenant was never onboarded, so it fails the invocation and Lambda's retry of
- * the asynchronous invocation delivers the event again (#734). A row that was
- * read is cached, so the resolver does not query DynamoDB for it a second time.
+ * A failed registry read throws, and Lambda retries the asynchronous invocation
+ * (#734). A row that was read is cached, so the resolver does not query it again.
  */
 async function resolveOauthTokenForAdmission(
   cloudId: string,

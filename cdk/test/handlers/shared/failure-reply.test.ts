@@ -125,8 +125,7 @@ describe('renderFailureReply — failure is a conversation', () => {
 
     test('nothing delivered (deliverable=lost) → asks for guidance, not "temporary infrastructure issue, try again"', () => {
       // The delivery gate cannot tell lost work from a run that correctly changed
-      // nothing (#751), and a retry cannot help the second: neither the reply nor
-      // the epic panel line may send the reader into a retry loop.
+      // nothing (#751), and a retry cannot help the second.
       const input = {
         status: TaskStatus.FAILED,
         errorMessage: 'Task did not succeed (agent_status=success, deliverable=lost): the coding task reported success '

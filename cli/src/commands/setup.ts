@@ -84,7 +84,7 @@ const RESERVED_CONTEXT_KEYS = new Set([
   'stackName', 'deploymentProfile', 'compute_types', 'compute_type', ...Object.values(FEATURE_CONTEXT_KEYS),
 ]);
 
-/** Lifts the Lambda MicroVMs Region check at synthesis; mirrors `cdk/src/constructs/lambda-microvm-compute.ts` (parity-tested). */
+/** Lifts the Lambda MicroVMs Region check at synthesis. */
 const MICROVM_REGION_OVERRIDE_CONTEXT = 'microvm_region_override';
 
 /** CDK's bootstrap stack; ABCA's least-privilege variant publishes `BootstrapPolicyVersion`. */
@@ -291,9 +291,8 @@ function unavailableIn(region: string, selection: DeploymentFeatures): string[] 
 }
 
 /**
- * Reject a compute backend the catalog does not list for the Region, as synthesis would,
- * before any feature prompt or diff. The override context lifts the Lambda MicroVMs check
- * at synthesis (ADR-021), so it lifts it here: `--context` wins over the persistent sources.
+ * The override context lifts the Lambda MicroVMs check at synthesis (ADR-021), so it lifts it
+ * here. `--context` wins over the persistent sources.
  */
 function assertComputeAvailable(
   region: string,

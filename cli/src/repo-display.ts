@@ -65,12 +65,8 @@ export const PLATFORM_REPO_DEFAULTS = {
 } as const;
 
 /**
- * The model a repository with no pin runs on this deployment.
- *
- * The stack tells every substrate to invoke the platform default through the inference
- * profiles of its own geography, so the geography of the literal gives way to the one the
- * stack exports. A stack that predates the `BedrockGeoRegion` output, or exports it blank,
- * keeps the literal: the same degradation as `repo onboard --model`.
+ * The stack invokes the platform default through the inference profiles of its own geography,
+ * so the geography the stack exports replaces the one in the literal.
  */
 function platformDefaultModelId(bedrockGeoRegion: string | null): string {
   const literal = PLATFORM_REPO_DEFAULTS.model_id;

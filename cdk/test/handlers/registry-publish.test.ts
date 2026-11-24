@@ -111,9 +111,6 @@ describe('registry-publish handler: what a refused publish tells the publisher',
   });
 
   test('502 with the record id and what to do with it when the publish stops after the record is created', async () => {
-    // What the adapter throws when a step after the create fails, here the wait for a
-    // record that stays in CREATING. The record occupies the version, so a retry is
-    // refused while it exists; approving or deleting it in Agent Registry takes its id.
     mockPublish.mockRejectedValue(new RegistryPublishIncompleteError(
       'rec-1',
       'record mcp_server/acme/pdf-tools@1.0.0 was created (id rec-1) but could not be driven to a resolvable state; approve or delete it before retrying',

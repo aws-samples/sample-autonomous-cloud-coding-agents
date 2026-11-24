@@ -616,9 +616,8 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('the task role\'s IAM5 exception follows the policies CDK splits off for a large model list', () => {
-    // Forty ids put the Bedrock statement alone above the inline-policy limit, so
-    // CDK moves it into a managed policy during synthesis: a policy that does not
-    // exist yet when the construct declares the role's exception.
+    // Forty ids put the Bedrock statement alone above the inline-policy limit, so CDK moves it into a managed
+    // policy during synthesis. That policy does not exist yet when the construct declares the role's exception.
     const { stack, template } = createStack({
       withNagChecks: true,
       bedrockModels: Array.from({ length: 40 }, (_, index) => `anthropic.claude-audit-${index}-v1:0`),
@@ -630,7 +629,6 @@ describe('EcsAgentCluster construct', () => {
     expect(Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-IAM5'))
       .filter(finding => finding.id.includes('/TaskRole/'))
       .map(finding => String(finding.entry.data))).toEqual([]);
-    // Exactly the IAM5 exception of the default policy and no other rule: nothing wider reaches the overflow.
     const iam5 = (policy: Record<string, any>) => policy.Metadata.cdk_nag.rules_to_suppress
       .filter((rule: { id: string }) => rule.id === 'AwsSolutions-IAM5');
     const [defaultPolicy] = policiesOf('AWS::IAM::Policy', 'TaskRoleDefaultPolicy');

@@ -3,15 +3,8 @@ title = "sample-autonomous-cloud-coding-agents"
 [extend]
 useDefault = true
 
-# Every [[allowlists]] entry names the files it applies to: `paths`, each
-# pattern anchored at both ends (`^...$`) and without `|`. An entry that exempts
-# a value (`stopwords`, `regexes`) or a commit (`commits`) also names its rule
-# (`targetRules`) and sets `condition = "AND"`: without the condition gitleaks
-# ORs the criteria, so the value would be allowed in every file and every
-# finding of the rule would be allowed in the listed files.
-# cdk/test/scripts/gitleaks-config.test.ts fails on an entry that does not. It
-# reads this file as text and fails on a line in another TOML form as well:
-# write a new entry like the ones below.
+# cdk/test/scripts/gitleaks-config.test.ts reads this file as text and fails on
+# a line in another TOML form. Write a new entry like the ones below.
 #
 # The scan of the history reads a file under the path it had in each commit:
 # when a listed file moves, add its new path and keep the old one.

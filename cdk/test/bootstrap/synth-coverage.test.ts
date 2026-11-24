@@ -74,9 +74,8 @@ describe('Bootstrap policy synth coverage', () => {
   });
 
   it('maps every custom resource type to the invoke of its provider alone', () => {
-    // The provider's Lambda makes the AWS calls under its own role. An action listed
-    // for a `Custom::*` type is demanded of the bootstrap bundle, where nothing uses it;
-    // when the bundle already holds it, every other test here stays green.
+    // The provider's Lambda makes the AWS calls under its own role. When the bundle already
+    // holds a surplus action listed for a `Custom::*` type, no other test here fails.
     const customTypes = Object.keys(RESOURCE_ACTION_MAP).filter((cfnType) => cfnType.startsWith('Custom::'));
     expect(customTypes.length).toBeGreaterThan(0);
     for (const cfnType of customTypes) {

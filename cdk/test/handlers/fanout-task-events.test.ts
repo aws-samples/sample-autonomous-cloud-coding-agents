@@ -404,8 +404,6 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
   });
 
   test('GitHub subscribes to pr_created + terminal events + task_timed_out (edit-in-place surface)', () => {
-    // A timeout ends a task like the other four outcomes. Without it the
-    // comment of a timed-out task stays at its last edit, or is never posted.
     const f = CHANNEL_DEFAULTS.github;
     expect([...f].sort()).toEqual([
       'pr_created',
@@ -556,9 +554,6 @@ describe('fanout-task-events: routeEvent (per-channel dispatch)', () => {
 
   test('task_timed_out routes to Slack + GitHub + Jira + Linear', async () => {
     // ``task_timed_out`` is a distinct terminal event the orchestrator emits.
-    // It reaches the same channels as a cancellation or a strand: a timed-out
-    // standalone iteration settles on Linear, and the GitHub comment shows
-    // the timeout. Email excludes it.
     const outcome = await routeEvent(mk('task_timed_out'));
     expect([...outcome.dispatched].sort()).toEqual(['github', 'jira', 'linear', 'slack']);
   });
@@ -1352,8 +1347,6 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   // ---- Timeout (#583) ----
 
   test('a timed-out task gets its comment updated', async () => {
-    // The orchestrator ends a task that exceeds the maximum duration with
-    // ``task_timed_out``, not ``task_failed``.
     mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string }) => {
       if (cmd?._type === 'Get') {
         return Promise.resolve({

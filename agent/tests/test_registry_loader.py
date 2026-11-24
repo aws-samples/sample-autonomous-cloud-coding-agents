@@ -612,9 +612,7 @@ class TestMcpJsonGuardKeepsGitUsable(_GitClone):
         ],
     )
     def test_task_log_names_the_file_as_platform_managed(self, tmp_path, capfd, kind, mechanism):
-        # The agent's own edit of the file stays out of its commits as well, and git
-        # names another cause when it refuses to stage it (#760): a .gitignore file, or
-        # a sparse-checkout definition. The task log is where the real one is on record.
+        # git names another cause when it refuses to stage the file (#760).
         repo = self._clone(tmp_path, kind)
         lines = [ln for ln in capfd.readouterr().out.splitlines() if "platform-managed" in ln]
         assert len(lines) == 1
@@ -642,8 +640,6 @@ class TestMcpJsonGuardKeepsGitUsable(_GitClone):
 
     @pytest.mark.parametrize("kind", ["untracked", "tracked", "re-included"])
     def test_refused_add_of_the_file_comes_without_git_advice(self, tmp_path, monkeypatch, kind):
-        # git refuses an add that names the file, ignored or flagged, and prints
-        # advice with the refusal. The refusal stays; the advice is off in the clone.
         monkeypatch.setenv("LC_ALL", "C")  # git's own language: its advice lines begin "hint:"
         repo = self._clone(tmp_path, kind)
         refused = self._git(repo, "add", ".mcp.json", check=False)
@@ -795,10 +791,8 @@ class TestMcpJsonGuardFailsClosed(_GitClone):
     def test_index_lock_held_by_another_git_process_raises(self, tmp_path, capfd):
         repo = self._repo(tmp_path, {".mcp.json": '{"mcpServers": {}}\n'})
         (repo / ".git" / "index.lock").touch()
-        # git's own account of the failure is in the error.
         with pytest.raises(RegistryAssetLoadError, match=r"out of commits.*index\.lock"):
             self._apply(repo)
-        # The lines of a load that succeeded do not follow a guard that failed.
         out = capfd.readouterr().out
         assert "Registry: merged" not in out
         assert "platform-managed" not in out
@@ -876,8 +870,6 @@ class TestMcpJsonGuardFailsClosed(_GitClone):
             self._apply(repo)
 
     def test_entry_that_is_assume_unchanged_as_well_counts_as_flagged(self, tmp_path):
-        # "s" is skip-worktree on an entry that is assume-unchanged too: the flag the
-        # guard sets is there, so the server loads.
         repo = self._repo(tmp_path, {".mcp.json": '{"mcpServers": {}}\n'})
         self._git(repo, "update-index", "--assume-unchanged", ".mcp.json")
         self._apply(repo)
@@ -886,8 +878,6 @@ class TestMcpJsonGuardFailsClosed(_GitClone):
         assert self._git(repo, "diff", "--cached", "--name-only").stdout == ""
 
     def test_flagged_entry_of_another_path_does_not_count_for_the_file(self, tmp_path):
-        # The flag has to be on the entry of the file itself: for the pathspec
-        # `.mcp.json` git also lists what the index holds below a directory of that name.
         repo = self._repo(tmp_path, {".mcp.json/servers.json": "{}\n"})
         self._git(repo, "update-index", "--skip-worktree", ".mcp.json/servers.json")
         shutil.rmtree(repo / ".mcp.json")

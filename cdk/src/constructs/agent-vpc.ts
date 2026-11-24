@@ -258,10 +258,8 @@ export class AgentVpc extends Construct implements AgentNetwork {
         const group = endpoint.node.findChild('SecurityGroup').node.defaultChild as ec2.CfnSecurityGroup;
         group.groupDescription = `${resourceVpcPath}/${ep.id}/SecurityGroup`;
       }
-      // The only ingress is TCP 443 from the VPC's own range, which CDK renders as
-      // Fn::GetAtt Vpc.CidrBlock. AwsSolutions-EC23 cannot resolve that at synth time and
-      // reports a validation failure, not a verdict, so the rule does not vouch for these
-      // groups: test/constructs/agent-vpc.test.ts pins their ingress instead.
+      // AwsSolutions-EC23 reports a validation failure here, not a verdict, so it checks
+      // nothing on these groups. test/constructs/agent-vpc.test.ts pins their ingress.
       NagSuppressions.addResourceSuppressions(endpoint.connections.securityGroups, [
         {
           id: 'CdkNagValidationFailure',

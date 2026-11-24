@@ -581,8 +581,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 
   // One GitHub token for all that hydration fetches, the URL attachments included:
   // the repository's own where its blueprint sets one, else the platform's
-  // (loadBlueprintConfig has merged the two). The memory token budget is the
-  // repository's own, or undefined, which hydration reads as the platform default.
+  // (loadBlueprintConfig has merged the two).
   const { github_token_secret_arn: githubTokenSecretArn, memory_token_budget: memoryTokenBudget } = blueprintConfig ?? {};
   const hydratedContext = await hydrateContext(task, {
     githubTokenSecretArn,

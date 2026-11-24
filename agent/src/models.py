@@ -395,9 +395,9 @@ class TaskResult(BaseModel):
     cost_usd: float | None = None
     # Two counts, because the Claude Code CLI's own one is not the count that
     # `max_turns` limits:
-    #   * `turns_completed` — the answers of the model, counted by the runner
+    #   * `turns_completed`: the answers of the model, counted by the runner
     #     and clamped to `max_turns`. This is what the limit counts.
-    #   * `turns_attempted` — the CLI's `ResultMessage.num_turns`, kept raw
+    #   * `turns_attempted`: the CLI's `ResultMessage.num_turns`, kept raw
     #     for debugging (the runner's count when the CLI reported none). On a
     #     run stopped at the limit it is `max_turns + 1`: the attempt the CLI
     #     aborted is counted. On every other run it grows with each tool

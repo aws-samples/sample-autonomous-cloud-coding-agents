@@ -23,7 +23,6 @@ export const WEBHOOK_METRIC_NAMESPACE = 'ABCA/Webhooks';
 /** Counts the screening calls that failed, each of which dropped the content it was screening. */
 export const WEBHOOK_SCREENING_FAILED_METRIC = 'WebhookScreeningFailed';
 
-/** What was dropped; the value of the `source` dimension. */
 type WebhookScreeningSource = 'jira-comments' | 'linear-docs' | 'linear-comments' | 'linear-session-context';
 
 /**
@@ -42,9 +41,8 @@ export function emitWebhookScreeningFailedMetric(source: WebhookScreeningSource)
       Timestamp: Date.now(),
       CloudWatchMetrics: [{
         Namespace: WEBHOOK_METRIC_NAMESPACE,
-        // Each DimensionSet makes a metric of its own: one per source for graphs, and one
-        // without dimensions for the alarm, because CloudWatch does not add a custom
-        // metric up over the values of a dimension.
+        // The set without dimensions is for the alarm, because CloudWatch does not add a
+        // custom metric up over the values of a dimension.
         Dimensions: [['source'], []],
         Metrics: [{ Name: WEBHOOK_SCREENING_FAILED_METRIC, Unit: 'Count' }],
       }],

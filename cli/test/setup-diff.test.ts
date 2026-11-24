@@ -86,7 +86,6 @@ describe('describeDataLoss', () => {
 });
 
 describe('state-bearing resource types', () => {
-  // Every type the gate treats as state-bearing, with the noun the operator reads.
   test.each([
     ['AWS::DynamoDB::Table', 'table'],
     ['AWS::DynamoDB::GlobalTable', 'table'],

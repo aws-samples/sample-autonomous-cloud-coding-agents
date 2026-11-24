@@ -17,27 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for `scripts/cleanup-ephemeral-stacks.sh`, the manual sweep that deletes
- * old ABCA stacks (#72).
- *
- * The script deletes CloudFormation stacks, so the stacks it leaves alone matter
- * as much as the ones it deletes. It runs here the way an operator runs it,
- * with a fake `aws` on PATH that answers from a fixture and records every call:
- * the assertions hold the real status filter, the decision for each stack and
- * the exit code, without AWS.
- *
- * Not covered on purpose: the forced detach of network interfaces before a
- * deletion, which #72 records as unable to release the interfaces AgentCore
- * holds and due to be replaced, and the exit code after a refused deletion,
- * which that replacement has yet to settle. Not held either: `--max-age-hours 0`,
- * a stack that cannot be described, whether a stack with another description
- * is counted, and the two variables the script reads from the environment,
- * which `sweep()` empties.
- *
- * Same placement rationale as `check-constants-sync.test.ts`: `cdk/test/` is the
- * Jest tree that can reach the repository root.
- */
+// The forced detach of network interfaces and the exit code after a refused deletion are left untested on purpose.
+// #72 records that the detach cannot release the interfaces AgentCore holds. Its replacement has yet to settle the exit code.
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -46,28 +27,19 @@ import * as path from 'node:path';
 
 const SCRIPT = path.resolve(__dirname, '../../../scripts/cleanup-ephemeral-stacks.sh');
 
-/** The description `cdk/src/main.ts` gives the application stack. */
 const ABCA = 'ABCA Development Stack (uksb-wt64nei4u6)';
 
-/** A stack as CloudFormation reports it to the script. */
 interface FakeStack {
   readonly name: string;
   /** Its age in hours, or the text `list-stacks` gives as its creation time. @default 49, an hour over the default max age */
   readonly created?: number | string;
-  /** @default the description of an ABCA application stack */
   readonly description?: string | null;
-  /** The state `describe-stacks` reports. @default CREATE_COMPLETE */
   readonly status?: string;
-  /** The state `list-stacks` saw, for a stack that changed between the two calls. @default status */
   readonly listedAs?: string;
   readonly protected?: boolean;
-  /** CloudFormation refuses to delete it. */
   readonly deleteFails?: boolean;
 }
 
-// Answers the calls of the script from fixture.json beside it and logs each one.
-// `list-stacks` returns only the states it is asked for, as CloudFormation does, and
-// no stack owns a security group, so the script finds no network interface to detach.
 const AWS = `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -108,13 +80,11 @@ interface Sweep {
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
-  /** Every `aws <arguments>` the script ran, in order. */
   readonly calls: string[];
   /** The stacks it asked CloudFormation to delete, in order. */
   readonly deleted: string[];
 }
 
-/** Runs the script against `stacks`. `failing` names an `aws` command the fake refuses, for example `sts get-caller-identity`. */
 function sweep(stacks: FakeStack[], args: string[] = [], failing?: string): Sweep {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-cleanup-stacks-test-'));
   try {
@@ -138,12 +108,8 @@ function sweep(stacks: FakeStack[], args: string[] = [], failing?: string): Swee
       MAX_AGE_HOURS: '',
       AWS_DEFAULT_REGION: '',
     };
-    // The script deletes stacks, so it starts only when bash resolves `aws` to the fake. Standing
-    // first on PATH does not settle that: bash passes over a file it may not execute (a temporary
-    // directory mounted noexec), and a BASH_ENV file can put another directory in front. The
-    // question is put by a script that starts exactly as the cleanup script does: `bash -c` can
-    // read other start-up files than `bash <file>`, and would answer for a shell the cleanup
-    // script does not run in.
+    // The script deletes stacks, so it starts only when bash resolves `aws` to the fake. First place on PATH does not
+    // settle that under a noexec mount or a BASH_ENV file, and `bash -c` can read other start-up files than `bash <file>`.
     const bash = (script: string, ...scriptArgs: string[]) =>
       spawnSync('bash', [script, ...scriptArgs], { encoding: 'utf-8', timeout: 20_000, env });
     fs.writeFileSync(path.join(root, 'which-aws.sh'), 'command -v aws\n');
@@ -161,10 +127,8 @@ function sweep(stacks: FakeStack[], args: string[] = [], failing?: string): Swee
 }
 
 describe('cleanup-ephemeral-stacks.sh', () => {
-  // Every test is a handful of subprocess spawns; give them room on a loaded machine.
   jest.setTimeout(30_000);
 
-  // The script finds the application stack by this description: when the app changes it, this fails first.
   test('is tested with the description the CDK app gives the application stack', () => {
     expect(fs.readFileSync(path.resolve(__dirname, '../../src/main.ts'), 'utf-8')).toContain(`description: '${ABCA}'`);
   });
@@ -172,10 +136,8 @@ describe('cleanup-ephemeral-stacks.sh', () => {
   test('is not started when bash resolves `aws` to anything but the fake', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-cleanup-stacks-test-'));
     try {
-      // A shell set-up file that makes `aws` a function, which bash prefers to any file on PATH, and
-      // which leaves a mark when it is called. No SHLVL, as when no shell stands between the machine
-      // and jest: there a `bash -c` started by node passes over the set-up file that the bash of the
-      // cleanup script reads.
+      // The BASH_ENV file makes `aws` a function, which bash prefers to any file on PATH. Without SHLVL, a `bash -c`
+      // started by node passes over that file, which the bash of the cleanup script reads.
       const called = path.join(dir, 'called');
       fs.writeFileSync(path.join(dir, 'env.sh'), `aws() { : > '${called}'; }\n`);
       jest.replaceProperty(process, 'env', { ...process.env, BASH_ENV: path.join(dir, 'env.sh'), SHLVL: undefined });
@@ -200,7 +162,6 @@ describe('cleanup-ephemeral-stacks.sh', () => {
   test('considers only the stacks that are complete, rolled back or failed to delete', () => {
     const listing = sweep([]).calls.find((call) => call.startsWith('cloudformation list-stacks'));
 
-    // These five states, then the next option or the end of the call.
     expect(listing).toMatch(
       / --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE UPDATE_ROLLBACK_COMPLETE DELETE_FAILED( --|$)/);
   });
@@ -246,7 +207,6 @@ describe('cleanup-ephemeral-stacks.sh', () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('[dry-run] Would delete old');
-    // It reads the identity, the listing and the stack, and goes no further.
     expect(result.calls.map((call) => call.split(' ', 2).join(' '))).toEqual(
       ['sts get-caller-identity', 'cloudformation list-stacks', 'cloudformation describe-stacks']);
   });

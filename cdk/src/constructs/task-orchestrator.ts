@@ -821,10 +821,8 @@ export class TaskOrchestrator extends Construct {
       }));
     }
 
-    // Alias for durable function invocation. The scope (the version) and the id are the
-    // ones under which deployed stacks hold it: `fn.addAlias('live')` would move it to a
-    // new logical ID, and CloudFormation creates the new resource before it deletes the
-    // old one, which fails because the function already has an alias named `live`.
+    // Alias for durable function invocation. `fn.addAlias('live')` would change its
+    // logical ID, and CloudFormation cannot create a second alias named `live`.
     const version = this.fn.currentVersion;
     const fnAlias = new Alias(version, 'Aliaslive', { aliasName: 'live', version });
     this.alias = fnAlias;

@@ -232,8 +232,6 @@ describe('Blueprint construct', () => {
     expect(serialized).not.toContain('max_budget_usd');
   });
 
-  // --- #447: agent.memoryTokenBudget (mirrors agent.maxBudgetUsd) ---------
-
   test('maps agent memory token budget prop', () => {
     const { template } = createStack({
       agent: { memoryTokenBudget: 4000 },
@@ -473,7 +471,6 @@ describe('Blueprint construct', () => {
     expect(serialized).toContain('#mcp_servers');
     expect(serialized).toContain('#cedar_policy_modules');
     expect(serialized).toContain('#skills');
-    // All three populated → none of the ASSET columns is removed.
     // Only the REMOVE clause of the UpdateExpression — not everything after the
     // word, which would sweep in ExpressionAttributeNames and match every column.
     const removeClause = /REMOVE ([^"\\]*)/.exec(serialized)?.[1] ?? '';
@@ -766,8 +763,6 @@ describe('Blueprint construct', () => {
     expect(MAX_BUDGET_USD_MAX).toBe(100);
   });
 
-  // --- #447: agent.memoryTokenBudget must be a positive integer -----------
-
   // 2 ** 53 is the first integer the orchestrator would read back from the row as a BigInt.
   test.each([0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53])('rejects memoryTokenBudget %p at synth', (budget) => {
     const app = new App();
@@ -972,16 +967,9 @@ describe('Blueprint validation', () => {
   });
 });
 
-/**
- * `agent.modelId` is checked at synth with the rules `bgagent repo onboard --model`
- * applies (`assertModelIdUsable`, cli/src/model-id.ts). Both write the RepoTable
- * `model_id` column, so a value that only one of them rejects still reaches a task,
- * which then fails at turn 0 with an error that does not name the model.
- */
 describe('Blueprint agent.modelId validation', () => {
   const GLOBAL = { bedrockGeoRegion: 'global' };
 
-  /** The synth error of a Blueprint that pins `modelId`, or '' when it synthesizes. */
   function synthError(modelId: string, context?: Record<string, unknown>): string {
     try {
       createStack({ agent: { modelId } }, context);
@@ -992,7 +980,6 @@ describe('Blueprint agent.modelId validation', () => {
   }
 
   test('accepts a granted model under the geography the deployment grants', () => {
-    // No context: the code default, `us`.
     expect(synthError('us.anthropic.claude-opus-5')).toBe('');
     // The colon of a version suffix does not make an ID an ARN.
     expect(synthError('us.anthropic.claude-haiku-4-5-20251001-v1:0')).toBe('');
@@ -1007,13 +994,12 @@ describe('Blueprint agent.modelId validation', () => {
   });
 
   test('rejects an unprefixed value that is not a granted model without building a suggestion from it', () => {
-    // `opus` is a Claude Code alias. With the prefix added it is still not a granted model.
+    // `opus` is a Claude Code alias.
     const error = synthError('opus', GLOBAL);
     expect(error).toContain("Invalid agent.modelId: 'opus'. It has no geography prefix.");
     expect(error).toContain("Use 'global.<model-id>' with a model this deployment grants (");
     expect(error).toContain('anthropic.claude-opus-5-5');
     expect(error).not.toContain("'global.opus'");
-    // The same for a bare ID outside the grant list: what decides is the list, not the shape.
     expect(synthError('anthropic.example-ungranted-model', GLOBAL))
       .toContain("Use 'global.<model-id>' with a model this deployment grants (");
   });
@@ -1023,7 +1009,6 @@ describe('Blueprint agent.modelId validation', () => {
     expect(error).toContain("a 'us' inference profile");
     expect(error).toContain("grants 'global' profiles");
     expect(error).toContain("Use 'global.anthropic.claude-opus-5'.");
-    // Without context the deployment grants `us`, so there the `global.` form is the wrong one.
     expect(synthError('global.anthropic.claude-opus-5')).toContain("grants 'us' profiles");
   });
 
@@ -1037,7 +1022,6 @@ describe('Blueprint agent.modelId validation', () => {
     expect(error).toContain("'anthropic.example-ungranted-model' is not a model this deployment grants");
     expect(error).toContain('anthropic.claude-opus-5-5');
     expect(error).toContain("'bedrockModels' context");
-    // A granted ID with something appended is a different ID, and not a granted one.
     expect(synthError('global.anthropic.claude-opus-5[1m]', GLOBAL))
       .toContain("'anthropic.claude-opus-5[1m]' is not a model this deployment grants");
   });
@@ -1056,7 +1040,6 @@ describe('Blueprint agent.modelId validation', () => {
     const error = synthError('global.us.anthropic.claude-opus-5', GLOBAL);
     expect(error).toContain("two geography prefixes ('global.' then 'us.')");
     expect(error).toContain("Use one: 'global.anthropic.claude-opus-5'.");
-    // What follows the two prefixes is not a granted model: no value to use is built from it.
     expect(synthError('global.us.opus', GLOBAL)).toContain("Use one: 'global.<model-id>'.");
   });
 
@@ -1070,7 +1053,6 @@ describe('Blueprint agent.modelId validation', () => {
   });
 
   test('rejects the ARN of a profile as an ARN, not as a bare ID', () => {
-    // 111122223333 is an AWS-published placeholder account ID.
     const error = synthError(
       'arn:aws:bedrock:us-east-1:111122223333:inference-profile/global.anthropic.claude-opus-5-5',
       GLOBAL,

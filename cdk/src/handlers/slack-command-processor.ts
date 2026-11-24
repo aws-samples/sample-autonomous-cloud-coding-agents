@@ -200,19 +200,14 @@ function buildMentionReply(event: MentionEvent): ReplyFn {
 // ─── Submit ───────────────────────────────────────────────────────────────────
 
 /**
- * What can name a repo in a message. A link, as Slack delivers it (`<url>` or
- * `<url|label>`) or as typed, is read whole, so that its parts are not taken
- * for words. Otherwise `owner/repo` or `owner/repo#42` as a word. A word is
- * tried from its first letter, digit or underscore only: with a start at every
- * dot and hyphen, a long word takes quadratic time.
+ * A link is read whole, so that its parts are not taken for words. A word is tried
+ * from its first `\w` only, because a start at every dot and hyphen takes quadratic time.
  */
 const REPO_REFERENCE = /<(?<slackLink>https?:\/\/[^\s<>|]+)(?:\|[^<>]*)?>|(?<typedLink>https?:\/\/[^\s<>|]*[^\s<>|.,;:!?)])|(?=\w)(?<!\w[.-]*)(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)(?:#(?<issueNumber>\d+))?\b/gi;
 
 /**
- * A GitHub link to a repo, or to one of its issues or pull requests. A clone
- * address (`.../owner/repo.git`) names the repo without the suffix. Without a
- * number only a query or a fragment may follow the repo, so a link to a file,
- * a branch or another page of the repo is not one of these.
+ * Without an issue or pull request number, only a query or a fragment may follow the
+ * repo. A link to a file, a branch or another page of the repo names no repo.
  */
 const GITHUB_LINK = /^https?:\/\/(?:www\.)?github\.com\/(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+?)(?:\.git)?(?:\/(?:issues|pull)\/(?<issueNumber>\d+)|\/?(?:[?#].*)?$)/i;
 
@@ -226,21 +221,14 @@ const GITHUB_SITE_PAGES = new Set([
   'search', 'security', 'settings', 'site', 'solutions', 'sponsors', 'stars', 'topics', 'trending',
 ]);
 
-/** A repo named in a message, and where the word or link that names it stands. */
 interface RepoReference {
   readonly repo: string;
   readonly issueNumber?: number;
-  /** Written as a GitHub link or with an issue number: a repo, onboarded or not. */
   readonly certain: boolean;
   readonly start: number;
   readonly end: number;
 }
 
-/**
- * The repos a message names, in the order written. A link names the repo it
- * points to when it is a GitHub link to a repo, an issue or a pull request,
- * and no repo otherwise.
- */
 function repoReferences(message: string): RepoReference[] {
   const references: RepoReference[] = [];
   for (const match of message.matchAll(REPO_REFERENCE)) {
