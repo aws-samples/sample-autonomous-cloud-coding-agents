@@ -149,7 +149,10 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 
 `run_task` removes all Jira credential variables before every invocation,
 including non-Jira tasks, so a warm AgentCore process cannot expose one
-tenant's OAuth or Forge credential to the next task.
+tenant's OAuth or Forge credential to the next task. When it returns or
+raises, it puts the environment of the process back as it found it, so a
+credential that the task resolved (a Linear token, the Jira variables above)
+is no longer in that environment.
 
 **Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Always use an inference profile ID such as `global.anthropic.claude-opus-5-5`: a bare foundation-model ID cannot be invoked with on-demand throughput and Bedrock rejects it with `ValidationException`. IAM must also grant the model — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) for the full layering. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 

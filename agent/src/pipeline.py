@@ -1034,49 +1034,26 @@ def _write_memory(
     return episode_ok or learnings_ok
 
 
-#: The variables in ``os.environ`` that tell the processes a task starts (git,
-#: ``gh``, Claude Code, the commit hook) who it is: the commit identity, the
-#: GitHub token, and the task id, prompt version, workflow id and workflow step
-#: of the commit trailers. ``run_task`` sets them before the repository setup,
-#: all but ``WORKFLOW_ID`` and ``WORKFLOW_STEP``, which the workflow step runner
-#: sets when a step starts; the agent runner sets the token again before each
-#: agent run.
-_TASK_ENV_VARS = (
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "TASK_ID",
-    "PROMPT_VERSION",
-    "WORKFLOW_ID",
-    "WORKFLOW_STEP",
-)
-
-
 @contextmanager
 def _task_environ_restored() -> Generator[None]:
-    """Give the variables in ``_TASK_ENV_VARS`` their earlier values back (#635).
+    """Leave ``os.environ`` as it was found, on return and on exception (#635).
 
     ``os.environ`` belongs to the process, so what a task writes there outlives
     the task: a process that carries on after ``run_task`` would commit as
-    ``bgagent``, keep the task's GitHub token, and hand a later task this task's
-    ``PROMPT_VERSION``. On the way out, by return or by exception, each variable
-    gets the value it had on the way in, and one that was not set is removed.
+    ``bgagent``, keep the task's GitHub token and the credentials of its issue
+    tracker, and hand a later task this task's ``PROMPT_VERSION``.
 
     For one task at a time per process, like ``os.environ`` itself: of two that
-    overlap, the one that ends first takes the variables away from the other.
+    overlap, the one that ends first undoes what the other has changed while
+    both ran.
     """
-    before = {name: os.environ.get(name) for name in _TASK_ENV_VARS}
+    before = dict(os.environ)
     try:
         yield
     finally:
-        for name, value in before.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+        for name in os.environ.keys() - before.keys():
+            os.environ.pop(name, None)
+        os.environ.update(before)
 
 
 # Around the whole call, not only around the lines that set the variables:
@@ -1349,10 +1326,6 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # writing to any on-disk config. `--global` would clobber the real
             # ~/.gitconfig — harmless in the ephemeral container, but destructive
             # when this pipeline runs on a developer workstation (#622).
-            # These six and the two below last as long as this call: they are
-            # among the names in _TASK_ENV_VARS, which _task_environ_restored puts
-            # back when run_task is left (#635). A variable added here goes
-            # there too.
             os.environ["GIT_AUTHOR_NAME"] = "bgagent"
             os.environ["GIT_AUTHOR_EMAIL"] = "bgagent@noreply.github.com"
             os.environ["GIT_COMMITTER_NAME"] = "bgagent"
