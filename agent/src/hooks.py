@@ -188,10 +188,8 @@ _NETWORK_TOOLS = frozenset(("Bash", "WebFetch"))
 # surfaces a precise remedy. Process-lifetime (== one task) like
 # ``_INJECTED_NUDGES``; last-writer-wins is fine — the most recent blocker is
 # the most relevant to a terminal failure.
-# Correct only while a process runs one task at a time, which holds because
-# every task gets its own compute session (``docs/design/COMPUTE.md``). Tasks
-# that share a process would read each other's blocker: if the execution model
-# ever allows that, key the latch by task id first, as ``_INJECTED_NUDGES`` is.
+# Correct only for one task at a time per process (``docs/design/COMPUTE.md``).
+# Key the latch by task id before a process may run two tasks at once.
 _LAST_BLOCKER_REASON: str | None = None
 
 
