@@ -82,6 +82,7 @@ const SESSION_TASK = {
   },
   cost_usd: 0.5,
   turns_attempted: 12,
+  turns_completed: '9',
   max_turns: 100,
   duration_s: 300,
 };
@@ -197,6 +198,12 @@ test.each([
   expect(content.body).toContain('t-sess');
   expect(updates()[0].UpdateExpression).toContain('linear_final_comment_event_id');
   expect(mockPostIssueComment).not.toHaveBeenCalled();
+});
+
+test('the final activity counts turns_completed, not turns_attempted', async () => {
+  mockTask({ ...SESSION_TASK, status: 'COMPLETED', pr_url: 'https://github.com/acme/web/pull/7' });
+  await routeEvent(ev('task_completed'), LINEAR_ONLY);
+  expect(mockEmitAgentActivity.mock.calls[0][2].body).toContain('9 / 100');
 });
 
 test('a final activity already emitted is not repeated', async () => {
