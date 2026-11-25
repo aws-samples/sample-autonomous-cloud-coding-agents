@@ -46,6 +46,8 @@ const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9
  */
 const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
+const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
+const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
 
 /**
  * Bounds on a per-repo cost budget (#748). Same JSON the task-submit path
@@ -209,6 +211,18 @@ export interface BlueprintProps {
      * back to the platform default of 50 defined in the handler layer.
      */
     readonly approvalGateCap?: number;
+
+    /**
+     * How long, in seconds, a person has to answer an approval request on this
+     * repo's tasks before it is denied. Captured at task-submit time onto the
+     * TaskRecord; a task submitted with its own ``approval_timeout_s`` keeps
+     * that. A rule's own ``@approval_timeout_s`` still caps it for that rule.
+     *
+     * Must be an integer in the platform's ``approval_timeout_s`` range
+     * (``contracts/constants.json``: 30 to 3600). When omitted, the platform
+     * default applies.
+     */
+    readonly approvalTimeoutSeconds?: number;
   };
 
   /**
@@ -277,6 +291,9 @@ export class Blueprint extends Construct {
    */
   public readonly approvalGateCap?: number;
 
+  /** Default approval window in seconds from security.approvalTimeoutSeconds, if set. */
+  public readonly approvalTimeoutSeconds?: number;
+
   /**
    * Per-repo cost budget in USD from the agent.maxBudgetUsd prop (#748),
    * exposed for inspection. Undefined when the blueprint did not configure
@@ -306,7 +323,7 @@ export class Blueprint extends Construct {
 
     this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
     this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
-    this.approvalGateCap = props.security?.approvalGateCap;
+    ({ approvalGateCap: this.approvalGateCap, approvalTimeoutSeconds: this.approvalTimeoutSeconds } = approvalSettings(props));
     const { maxBudgetUsd, memoryTokenBudget } = props.agent ?? {};
     this.maxBudgetUsd = maxBudgetUsd;
     this.memoryTokenBudget = memoryTokenBudget;
@@ -331,6 +348,7 @@ export class Blueprint extends Construct {
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
+    this.node.addValidation(new ApprovalTimeoutValidation(this.approvalTimeoutSeconds));
     this.node.addValidation(new MaxBudgetUsdValidation(this.maxBudgetUsd));
     this.node.addValidation(new MemoryTokenBudgetValidation(this.memoryTokenBudget));
     this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs, 'mcp_server'));
@@ -395,6 +413,9 @@ export class Blueprint extends Construct {
     }
     if (this.approvalGateCap !== undefined) {
       item.approval_gate_cap = { N: String(this.approvalGateCap) };
+    }
+    if (this.approvalTimeoutSeconds !== undefined) {
+      item.approval_timeout_s = { N: String(this.approvalTimeoutSeconds) };
     }
     if (this.mcpServerRefs.length > 0) {
       item.mcp_servers = { L: this.mcpServerRefs.map(r => ({ S: r })) };
@@ -482,6 +503,7 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
     if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
+    if (this.approvalTimeoutSeconds !== undefined) fields.push(', #approval_timeout_s = :approval_timeout_s');
     // Registry asset refs (#246) — must mirror onCreate's item, else a redeploy
     // of an already-onboarded repo silently drops asset-ref changes.
     if (this.mcpServerRefs.length > 0) fields.push(', #mcp_servers = :mcp_servers');
@@ -506,6 +528,7 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
     if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
     if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
+    if (this.approvalTimeoutSeconds !== undefined) names['#approval_timeout_s'] = 'approval_timeout_s';
     if (this.mcpServerRefs.length > 0) names['#mcp_servers'] = 'mcp_servers';
     if (this.cedarPolicyModuleRefs.length > 0) names['#cedar_policy_modules'] = 'cedar_policy_modules';
     if (this.skillRefs.length > 0) names['#skills'] = 'skills';
@@ -528,6 +551,7 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
     if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
     if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };
+    if (this.approvalTimeoutSeconds !== undefined) values[':approval_timeout_s'] = { N: String(this.approvalTimeoutSeconds) };
     if (this.mcpServerRefs.length > 0) values[':mcp_servers'] = { L: this.mcpServerRefs.map(r => ({ S: r })) };
     if (this.cedarPolicyModuleRefs.length > 0) values[':cedar_policy_modules'] = { L: this.cedarPolicyModuleRefs.map(r => ({ S: r })) };
     if (this.skillRefs.length > 0) values[':skills'] = { L: this.skillRefs.map(r => ({ S: r })) };
@@ -611,6 +635,31 @@ class ApprovalGateCapValidation implements IValidation {
       return [
         `Invalid security.approvalGateCap: ${this.cap}. ` +
         `Must be between ${APPROVAL_GATE_CAP_MIN} and ${APPROVAL_GATE_CAP_MAX}.`,
+      ];
+    }
+    return [];
+  }
+}
+
+/** The blueprint's approval settings (read here to keep the constructor under the complexity ceiling). */
+function approvalSettings(props: BlueprintProps): { approvalGateCap?: number; approvalTimeoutSeconds?: number } {
+  const security = props.security ?? {};
+  return { approvalGateCap: security.approvalGateCap, approvalTimeoutSeconds: security.approvalTimeoutSeconds };
+}
+
+/** Validates ``security.approvalTimeoutSeconds`` against the platform's ``approval_timeout_s`` range. */
+class ApprovalTimeoutValidation implements IValidation {
+  constructor(private readonly seconds: number | undefined) {}
+
+  public validate(): string[] {
+    if (this.seconds === undefined) return [];
+    if (!Number.isInteger(this.seconds)) {
+      return [`Invalid security.approvalTimeoutSeconds: ${this.seconds}. Must be an integer.`];
+    }
+    if (this.seconds < APPROVAL_TIMEOUT_S_MIN || this.seconds > APPROVAL_TIMEOUT_S_MAX) {
+      return [
+        `Invalid security.approvalTimeoutSeconds: ${this.seconds}. `
+        + `Must be between ${APPROVAL_TIMEOUT_S_MIN} and ${APPROVAL_TIMEOUT_S_MAX}.`,
       ];
     }
     return [];

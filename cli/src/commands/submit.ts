@@ -88,7 +88,7 @@ export function makeSubmitCommand(): Command {
     .option(
       '--approval-timeout <seconds>',
       `Cedar HITL per-task default approval timeout (${APPROVAL_TIMEOUT_S_MIN}-${APPROVAL_TIMEOUT_S_MAX}s). `
-        + 'Overrides the platform default of 300s. Per-rule @approval_timeout_s still min-wins at gate-firing.',
+        + 'Overrides the platform default of 1800s and the repo blueprint\'s. Per-rule @approval_timeout_s still min-wins at gate-firing.',
       parseInt,
     )
     .option(

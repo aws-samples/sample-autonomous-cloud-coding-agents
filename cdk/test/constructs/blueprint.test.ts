@@ -563,6 +563,31 @@ describe('Blueprint construct', () => {
     );
   });
 
+  // --- security.approvalTimeoutSeconds (#1066) -----------------------------
+
+  test('persists approval_timeout_s on create and update when approvalTimeoutSeconds is set', () => {
+    const { template } = createStack({ security: { approvalTimeoutSeconds: 2700 } });
+    expect(getCreateJoinParts(template).join('')).toContain('"approval_timeout_s":{"N":"2700"}');
+    const update = getUpdateJoinParts(template).join('');
+    expect(update).toContain('#approval_timeout_s');
+    expect(update).toContain('"N":"2700"');
+  });
+
+  test('omits approval_timeout_s when approvalTimeoutSeconds is unset', () => {
+    const { template } = createStack({ security: { approvalGateCap: 10 } });
+    expect(getCreateJoinParts(template).join('')).not.toContain('approval_timeout_s');
+  });
+
+  test.each([10, 3601, 90.5])('rejects approvalTimeoutSeconds %p at synth', (seconds) => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    });
+    new Blueprint(stack, 'Blueprint', { repo: 'org/my-repo', repoTable, security: { approvalTimeoutSeconds: seconds } });
+    expect(() => Template.fromStack(stack)).toThrow(/Invalid security.approvalTimeoutSeconds/);
+  });
+
   // --- Chunk 7b: security.approvalGateCap ---------------------------------
 
   test('exposes approvalGateCap as public property when configured', () => {

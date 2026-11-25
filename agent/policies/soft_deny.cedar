@@ -24,7 +24,9 @@ permit (principal, action, resource);
 // `security.cedarPolicies.disable: [rule_id]`. They may NOT disable any
 // rule in hard_deny.cedar (blueprint loader rejects those at task start).
 
-// Gate any git --force / -f push. 300s default approval window, medium severity.
+// Gate any git --force / -f push. Medium severity. Each built-in rule allows the
+// platform maximum (3600s), so the task's window decides (default 1800s, per repo
+// via security.approvalTimeoutSeconds, per task via approval_timeout_s).
 // Covers both long-form (--force) and short-form (-f) variants, including
 // the bare `git push -f` invocation with no branch argument, and the flag
 // after the remote and branch (`git push origin feature --force`). After
@@ -37,7 +39,7 @@ permit (principal, action, resource);
 // other option that begins with `-f`.
 @tier("soft")
 @rule_id("force_push_any")
-@approval_timeout_s("300")
+@approval_timeout_s("3600")
 @severity("medium")
 @category("destructive")
 forbid (principal, action == Agent::Action::"execute_bash", resource)
@@ -61,7 +63,7 @@ when { context.command like "*git push --force*"
 // merging picks min(300, 600)=300s and max(medium, high)=high.
 @tier("soft")
 @rule_id("force_push_main")
-@approval_timeout_s("600")
+@approval_timeout_s("3600")
 @severity("high")
 @category("destructive")
 forbid (principal, action == Agent::Action::"execute_bash", resource)
@@ -74,7 +76,7 @@ when { context.command like "*git push --force origin main*"
 // agent bypasses PR workflow by pushing directly.
 @tier("soft")
 @rule_id("push_to_protected_branch")
-@approval_timeout_s("300")
+@approval_timeout_s("3600")
 @severity("medium")
 @category("destructive")
 forbid (principal, action == Agent::Action::"execute_bash", resource)
@@ -86,7 +88,7 @@ when { context.command like "*git push origin main*"
 // Writes to `.env` files typically contain secrets. 600s window, high severity.
 @tier("soft")
 @rule_id("write_env_files")
-@approval_timeout_s("600")
+@approval_timeout_s("3600")
 @severity("high")
 @category("filesystem")
 forbid (principal, action == Agent::Action::"write_file", resource)
@@ -96,7 +98,7 @@ when { context.file_path like "*.env" };
 // service-account JSON, etc. 300s window, high severity.
 @tier("soft")
 @rule_id("write_credentials")
-@approval_timeout_s("300")
+@approval_timeout_s("3600")
 @severity("high")
 @category("auth")
 forbid (principal, action == Agent::Action::"write_file", resource)

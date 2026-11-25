@@ -200,11 +200,14 @@ export async function createTaskCore(
   // in the "Task created" log. A repo-less submission has no blueprint, so it
   // stays false.
   let capFromBlueprint = false;
+  // The blueprint's approval window, the default for this task unless the request sets its own.
+  let blueprintApprovalTimeoutS: number | undefined;
   if (body.repo) {
     const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
     if (!onboarded) {
       return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
     }
+    blueprintApprovalTimeoutS = blueprintApprovalTimeout(repoConfig, body.repo, requestId);
     const blueprintCap = repoConfig?.approval_gate_cap;
     if (blueprintCap !== undefined) {
       if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
@@ -331,7 +334,7 @@ export async function createTaskCore(
   // maxLifetime-based ceiling clip is applied at orchestrator
   // invocation time; at submit time we only enforce the `[floor, cap]`
   // envelope.
-  let approvalTimeoutS: number | undefined;
+  let approvalTimeoutS: number | undefined = blueprintApprovalTimeoutS;
   if (body.approval_timeout_s !== undefined) {
     if (typeof body.approval_timeout_s !== 'number'
         || !Number.isInteger(body.approval_timeout_s)) {
@@ -950,6 +953,25 @@ export async function createTaskCore(
  * @param entry - the entry as the request body holds it.
  * @returns the parsed scope, or the message of the 400 that refuses the entry.
  */
+/**
+ * The blueprint's ``approval_timeout_s``, or undefined when it has none. A value out
+ * of the ``[min, max]`` envelope (a hand-edited row; the construct validates at
+ * synth) is logged and ignored, so the task gets the platform default rather than
+ * being refused: a wrong waiting time is not a reason to stop work.
+ */
+function blueprintApprovalTimeout(
+  config: { readonly approval_timeout_s?: unknown } | null, repo: string, requestId: string,
+): number | undefined {
+  const value = config?.approval_timeout_s;
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isInteger(value)
+    && value >= APPROVAL_TIMEOUT_S_MIN && value <= APPROVAL_TIMEOUT_S_MAX) return value;
+  logger.error('Blueprint misconfiguration — approval_timeout_s ignored', {
+    repo, blueprint_approval_timeout_s: value, min: APPROVAL_TIMEOUT_S_MIN, max: APPROVAL_TIMEOUT_S_MAX, request_id: requestId,
+  });
+  return undefined;
+}
+
 function checkInitialApproval(entry: unknown): { ok: true; scope: string } | { ok: false; message: string } {
   const parseResult = parseApprovalScope(String(entry));
   if (!parseResult.ok) {
