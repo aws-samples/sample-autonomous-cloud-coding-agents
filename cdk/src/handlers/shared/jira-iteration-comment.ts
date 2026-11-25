@@ -26,7 +26,7 @@ import {
 import type { JiraPreviewBudget } from './jira-preview-budget';
 import { jiraIterationFrame, renderJiraFinalStatusComment } from './jira-status-comment';
 import { logger } from './logger';
-import { coerceNumericOrNull } from './numeric';
+import { coerceNumericOrNull, completedTurnsOrNull } from './numeric';
 import { isAllowedScreenshotUrl } from './screenshot-url';
 import type { TaskRecord } from './types';
 
@@ -57,7 +57,7 @@ function renderIterationComment(task: TaskRecord): Record<string, unknown> {
       ...jiraIterationFrame(`task_${String(task.status).toLowerCase()}`, task.build_passed, null),
       prUrl: task.pr_url ?? null,
       costUsd: metric('cost_usd'),
-      turns: metric('turns_completed') || null,
+      turns: completedTurnsOrNull(metric('turns_completed')),
       maxTurns: metric('max_turns'),
       durationS: metric('duration_s'),
       taskId: task.task_id,

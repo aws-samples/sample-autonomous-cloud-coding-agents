@@ -70,6 +70,7 @@ import {
 } from './shared/jira-status-comment';
 import { logger } from './shared/logger';
 import { type LookupResult, LOOKUP_ABSENT, isLookupFailure, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
+import { completedTurnsOrNull } from './shared/numeric';
 import type { Channel, CommentRef, IssueRef } from './shared/orchestration-channel';
 import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
 import { computeLeaves, isIntegrationNode } from './shared/orchestration-integration-node';
@@ -252,7 +253,7 @@ interface TerminalTaskEvent {
  * null for records we don't act on (inserts, non-terminal MODIFYs,
  * non-orchestration tasks, malformed images).
  */
-// eslint-disable-next-line complexity -- predates the ceiling (71 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (70, down from 71 when it landed); must not grow
 export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEvent | null {
   if (record.eventName !== 'MODIFY' && record.eventName !== 'INSERT') return null;
   const img = record.dynamodb?.NewImage;
@@ -288,8 +289,8 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     : (img.cost_usd?.S !== undefined ? Number(img.cost_usd.S) : undefined);
   const durationS = img.duration_s?.N !== undefined ? Number(img.duration_s.N)
     : (img.duration_s?.S !== undefined ? Number(img.duration_s.S) : undefined);
-  const turns = img.turns_completed?.N !== undefined ? Number(img.turns_completed.N)
-    : (img.turns_completed?.S !== undefined ? Number(img.turns_completed.S) : undefined);
+  const turns = completedTurnsOrNull(img.turns_completed?.N !== undefined ? Number(img.turns_completed.N)
+    : (img.turns_completed?.S !== undefined ? Number(img.turns_completed.S) : undefined));
   const maxTurns = img.max_turns?.N !== undefined ? Number(img.max_turns.N)
     : (img.max_turns?.S !== undefined ? Number(img.max_turns.S) : undefined);
 
@@ -327,7 +328,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(iterationReplyId !== undefined && { iterationReplyId }),
     ...(costUsd !== undefined && Number.isFinite(costUsd) && { costUsd }),
     ...(durationS !== undefined && Number.isFinite(durationS) && { durationS }),
-    ...(Number.isFinite(turns) && turns! > 0 && { turns }),
+    ...(turns !== null && { turns }),
     ...(maxTurns !== undefined && Number.isFinite(maxTurns) && { maxTurns }),
   };
 }
