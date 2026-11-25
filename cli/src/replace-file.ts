@@ -67,7 +67,8 @@ function writeInPlace(file: string, content: string, createMode: number, mode?: 
 }
 
 function swapIn(target: string, content: string, openMode: number, mode?: number, owner?: fs.Stats): void {
-  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`);
+  const { root, dir, base } = path.parse(target);
+  const temp = path.format({ root, dir, base: `.${base}.${randomUUID()}.tmp` });
   const fd = fs.openSync(temp, 'wx', openMode);
   try {
     try {
