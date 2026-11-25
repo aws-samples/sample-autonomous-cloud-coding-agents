@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -110,13 +111,30 @@ export function clearCredentials(): void {
   fs.rmSync(credentialsPath(), { force: true });
 }
 
-/** Write a file that only its owner may read, whether it is new or already there. */
+/**
+ * Write a file that only its owner may read, whether it is new or already there.
+ * Another bgagent process may be reading it, so the content goes to a temporary file
+ * that replaces the target in one step: a reader gets the old file or the new one,
+ * never a truncated one (#1080).
+ */
 export function writeSecretFile(file: string, content: string): void {
+  const target = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!target || target.isFile()) {
+    // Created exclusively, under a name that cannot be guessed: a path the user chose may
+    // be in a directory that others can write to, and a link planted there is not followed.
+    const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temp, content, { mode: SECRET_FILE_MODE, flag: 'wx' });
+      fs.renameSync(temp, file);
+    } finally {
+      fs.rmSync(temp, { force: true });
+    }
+    return;
+  }
+  // A device such as /dev/null, a FIFO or a symbolic link is written in place: a rename
+  // would replace the node or the link itself. writeFileSync only honors `mode` when
+  // CREATING the file, so chmod what the path resolves to, if that is a regular file.
   fs.writeFileSync(file, content, { mode: SECRET_FILE_MODE });
-  // writeFileSync only honors `mode` when CREATING the file; overwriting a
-  // pre-existing loose-permissions file leaves its bits untouched. chmod
-  // makes the 0600 intent durable across rewrites. Regular files only: a
-  // path the user chose may be a device such as /dev/null.
   if (fs.statSync(file).isFile()) {
     fs.chmodSync(file, SECRET_FILE_MODE);
   }

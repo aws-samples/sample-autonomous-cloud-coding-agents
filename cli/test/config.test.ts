@@ -119,4 +119,97 @@ describe('config', () => {
       expect(fs.statSync(p).mode % 0o1000).toBe(0o600);
     });
   });
+
+  // One bgagent process saves a refreshed token while others read the file (#1080).
+  describe('writing the credentials file', () => {
+    const OLD = { id_token: 'old-id', refresh_token: 'old-refresh', token_expiry: '2026-01-01T00:00:00.000Z' };
+    const NEW = { id_token: 'new-id', refresh_token: 'new-refresh', token_expiry: '2026-02-01T00:00:00.000Z' };
+    // `import * as fs` is a read-only view of the module, here and in config.ts: a spy goes on the module itself.
+    const nodeFs = jest.requireActual<typeof fs>('fs');
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    test('replaces the file in one step, so a reader gets the old login or the new one', () => {
+      saveCredentials(OLD);
+      const rename = fs.renameSync;
+      const atRename: unknown[] = [];
+      jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce((from, to) => {
+        // A rename is one step only within a file system: the new file waits beside the old one,
+        // whole and owner-only, while a reader still gets the old login.
+        atRename.push({
+          read: loadCredentials(),
+          from: path.dirname(String(from)),
+          staged: JSON.parse(fs.readFileSync(from, 'utf-8')),
+          mode: fs.statSync(from).mode % 0o1000,
+        });
+        rename(from, to);
+      });
+
+      saveCredentials(NEW);
+
+      expect(atRename).toEqual([{ read: OLD, from: tmpDir, staged: NEW, mode: 0o600 }]);
+      expect(loadCredentials()).toEqual(NEW);
+      expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
+    });
+
+    test('keeps the old file and leaves no temporary file when the replacement fails', () => {
+      saveCredentials(OLD);
+      jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce(() => { throw new Error('rename failed'); });
+
+      expect(() => saveCredentials(NEW)).toThrow('rename failed');
+
+      expect(loadCredentials()).toEqual(OLD);
+      expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
+    });
+
+    test('refuses a temporary name that is taken instead of writing through it', () => {
+      // A path the user chose can be in a directory that others may write to: a link
+      // planted under the temporary name must not send the secret where it points.
+      const victim = path.join(tmpDir, 'victim');
+      fs.writeFileSync(victim, 'untouched');
+      const write = fs.writeFileSync;
+      jest.spyOn(nodeFs, 'writeFileSync').mockImplementationOnce((file, data, options) => {
+        fs.symlinkSync(victim, String(file));
+        write(file, data, options);
+      });
+
+      expect(() => saveCredentials(NEW)).toThrow('EEXIST');
+
+      expect(fs.readFileSync(victim, 'utf-8')).toBe('untouched');
+    });
+
+    test('gives every save a temporary file of its own, so two can run at once', () => {
+      // The process id alone does not tell two saves apart: containers that share the
+      // directory can give the same one to both.
+      const rename = fs.renameSync;
+      const renames = jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce((from, to) => {
+        // Another save, start to finish, while this one waits to rename.
+        saveCredentials(OLD);
+        rename(from, to);
+      });
+
+      saveCredentials(NEW);
+
+      expect(renames).toHaveBeenCalledTimes(2);
+      expect(loadCredentials()).toEqual(NEW);
+      expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
+    });
+
+    test('writes through a symbolic link instead of replacing it', () => {
+      // A dotfiles setup keeps credentials.json elsewhere and links to it.
+      const link = path.join(tmpDir, 'credentials.json');
+      const elsewhere = path.join(tmpDir, 'elsewhere.json');
+      fs.writeFileSync(elsewhere, '{}');
+      fs.chmodSync(elsewhere, 0o644);
+      fs.symlinkSync(elsewhere, link);
+
+      saveCredentials(NEW);
+
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(JSON.parse(fs.readFileSync(elsewhere, 'utf-8'))).toEqual(NEW);
+      expect(fs.statSync(elsewhere).mode % 0o1000).toBe(0o600);
+    });
+  });
 });
