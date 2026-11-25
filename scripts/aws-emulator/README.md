@@ -17,7 +17,7 @@ mise run emulator:down
 ```
 
 - The suites are `cdk/test/emulator/*.emulator.ts`, `cli/test/emulator/*.emulator.ts` and `agent/tests_emulator/`. The unit runs cannot pick them up: the unit `testMatch` does not match `*.emulator.ts`, and the agent's unit run collects `tests/` only.
-- The first `emulator:up` builds the image (about 1 GB) from the [Dockerfile](Dockerfile), once per version: it downloads the signed package, about 170 to 190 MB, and verifies it.
+- The first `emulator:up` builds the image (about 1.2 to 1.3 GB) from the [Dockerfile](Dockerfile), once per version: it downloads the signed package, about 190 to 215 MB, and verifies it.
 - Emulated state is in memory and there is no reset call. `emulator:up` always starts a fresh emulator, and `emulator:down` discards everything.
 - The port is derived from the checkout path, so two worktrees can run the tier at the same time. The header of [emulator.sh](emulator.sh), the wrapper behind these tasks, lists the variables that override the port, the state directory, the version and the container engine.
 - After a failed `test:integration` the emulator stays up for inspection (`docker logs abca-aws-emulator-<port>`) until `emulator:down` or the next `emulator:up`. Its per-run credentials stay on disk (mode 0600) under the user cache directory, and it is started with an idle timeout of one hour.
@@ -81,6 +81,8 @@ Recorded on emulator 1.0.489. Keep this table and the lists above current when t
 | An MCP record whose `server.json` matches no MCP schema version (for example one without name, description and version) is accepted; AWS's published test for the emulator expects `ValidationException` | An `mcp_server` publish with an incomplete `discovery` passes here |
 
 On emulator 1.0.523, DynamoDB `UpdateItem` rejects `REMOVE amount.child` with `ValidationException` when `amount` is a number. On 1.0.489 the same update succeeded and left `amount` unchanged. Both versions allowed `PutItem` to replace an item when its condition compared an attribute with itself.
+
+The pin is 1.0.610. It was moved without the local run of step 1 under [Moving the version pin](#moving-the-version-pin): the suites ran on it for the first time in CI, and nothing in this file was probed again. Upstream's release notes and fix commits after 1.0.523 say that four statements no longer hold as written. None of this was observed here: the `iss` claim of a Cognito token (from 1.0.606 its host is `cognito-idp.<region>.localhost:<port>`), the malformed expression forms (from 1.0.578 a comparison of an attribute with itself is refused, and so are doubled parentheses in a key condition, a document path into a key attribute, a map step and a list step on one attribute, and a start key beside a fully pinned key), an MCP record that matches no schema version (refused from 1.0.544), and the operations answered with 501 (`CompleteResourceTokenAuth` and `StopRuntimeSession` are implemented, from 1.0.555 and 1.0.579; `InvokeAgentRuntime` answers 403 or 404 before any 501 from 1.0.579).
 
 ## Keeping the tier away from real AWS
 
