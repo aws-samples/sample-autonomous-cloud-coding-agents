@@ -2179,6 +2179,7 @@ function orchestrationStore(
     child_task_id?: string;
     child_branch_name?: string;
     failure_reason?: string;
+    settled_task_id?: string;
   }>,
   meta: StoreRow = {},
 ) {
@@ -2231,13 +2232,14 @@ function orchestrationStore(
     if (!conditionHolds(row, input.ConditionExpression, vals)) {
       throw Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' });
     }
+    const old = { ...row };
     const expression = String(input.UpdateExpression);
     for (const assignment of /SET (.+?)(?= REMOVE |$)/.exec(expression)?.[1].split(', ') ?? []) {
       const [attr, value] = assignment.split(' = ');
       row[attr] = vals[value];
     }
     for (const attr of /REMOVE (.+?)(?= SET |$)/.exec(expression)?.[1].split(', ') ?? []) delete row[attr];
-    return {};
+    return input.ReturnValues === 'ALL_OLD' ? { Attributes: old } : {};
   });
 
   return {
@@ -2381,6 +2383,49 @@ describe('orchestration-reconciler handler — an event of a task that no longer
     expect(store.status('B')).toBe('skipped');
     expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('a later write of a failure that was already settled leaves the issue where a person put it', async () => {
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' }]);
+    await handler(lateFailure());
+    await handler(lateFailure());
+    await handler(lateFailure());
+
+    expect(store.status('A')).toBe('failed');
+    expect(store.row('A').settled_task_id).toBe('TA');
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledTimes(1);
+    expect(swapIssueReactionMock.mock.calls.filter(([, id, emoji]) => id === 'A' && emoji === 'x')).toHaveLength(1);
+  });
+
+  test('a settle that could not reach the tracker is not repeated by a later write', async () => {
+    revertIssueToNotStartedMock.mockRejectedValueOnce(new Error('Linear is down'));
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' }]);
+    await handler(lateFailure());
+    await handler(lateFailure());
+
+    expect(store.row('A').settled_task_id).toBe('TA');
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a settle of an earlier task of the row does not stop the settle of this one', async () => {
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA', settled_task_id: 'T-earlier' },
+    ]);
+    await handler(lateFailure());
+
+    expect(store.row('A').settled_task_id).toBe('TA');
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+  });
+
+  test('a row released to a new task while the failure settled is not marked for the old one', async () => {
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' }]);
+    revertIssueToNotStartedMock.mockImplementationOnce(async () => {
+      Object.assign(store.row('A'), { child_status: 'released', child_task_id: 'T2' });
+      return true;
+    });
+    await handler(lateFailure());
+
+    expect(store.row('A').settled_task_id).toBeUndefined();
   });
 
   test('a dependent that was released since the rows were read is not skipped; the rest of the failure still applies', async () => {

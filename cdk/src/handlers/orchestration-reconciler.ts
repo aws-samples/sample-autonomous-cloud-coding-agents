@@ -535,6 +535,20 @@ async function reloadIterationScreenshot(taskId?: string): Promise<{ screenshotU
   }
 }
 
+async function markSettled(orchestrationId: string, subIssueId: string, taskId: string): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: ORCHESTRATION_TABLE,
+      Key: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
+      UpdateExpression: 'SET settled_task_id = :tid',
+      ConditionExpression: 'child_task_id = :tid',
+      ExpressionAttributeValues: { ':tid': taskId },
+    }));
+  } catch (err) {
+    if (!isConditionalCheckFailed(err)) throw err;
+  }
+}
+
 /** Apply one terminal child's reconcile plan. */
 async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   const orchestrationId = evt.orchestrationId!;
@@ -582,6 +596,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //    child, or a retry reset it, and the row keeps the old task id until it
   //    is released again. Such an event must not put the old verdict back.
   let stale = false;
+  let settled = false;
   for (const update of plan.statusUpdates) {
     // ``toRelease`` rows are handled by releaseChild below (which flips
     // them to released conditionally); skip them here to avoid a
@@ -609,13 +624,15 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
       condition = 'child_task_id = :tid AND (child_status = :running OR child_status = :s)';
     }
     try {
-      await ddb.send(new UpdateCommand({
+      const res = await ddb.send(new UpdateCommand({
         TableName: ORCHESTRATION_TABLE,
         Key: { orchestration_id: orchestrationId, sub_issue_id: update.sub_issue_id },
         UpdateExpression: 'SET child_status = :s, updated_at = :now',
         ConditionExpression: condition,
         ExpressionAttributeValues: values,
+        ...(!skipGuard && { ReturnValues: 'ALL_OLD' as const }),
       }));
+      if (!skipGuard) settled = res.Attributes?.settled_task_id === evt.taskId;
     } catch (err) {
       if (!isConditionalCheckFailed(err)) throw err;
       if (skipGuard) continue; // not a skippable source
@@ -646,9 +663,9 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //     failure reason on the panel convey "it failed"; a reply re-runs it (the
   //     retry re-drives the state not-started → running). Skip the integration
   //     node (synthetic id, no real issue), and a stale event (the issue shows
-  //     what a later run did). Best-effort; never throws.
+  //     what a later run did).
   const settleChannel = channelForMeta(snapshot.meta);
-  if (settleChannel && !plan.terminalSucceeded && !stale && !isIntegrationNode(subIssueId)) {
+  if (settleChannel && !plan.terminalSucceeded && !stale && !settled && !isIntegrationNode(subIssueId)) {
     const channel = settleChannel;
     const childRef = issueRef(subIssueId, snapshot.meta.credentials_ref);
     try {
@@ -684,6 +701,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    await markSettled(orchestrationId, subIssueId, evt.taskId);
   }
 
   // 2. Re-evaluate releasability against a FRESH read, not the initial
