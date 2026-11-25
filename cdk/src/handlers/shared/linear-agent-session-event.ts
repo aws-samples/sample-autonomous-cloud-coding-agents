@@ -160,8 +160,17 @@ const LEADING_PROFILE_MENTION = /^(?:\[[^\]\n]*\]\(\s*https:\/\/linear\.app\/[^\
  * goes through the comment trigger's parser so both channels read it the same
  * way.
  */
+/**
+ * The comment Linear itself writes when an issue is delegated to an agent: it opens
+ * the session's thread and carries no instruction. Taken as one, it led the task
+ * description and named every delegated task's branch
+ * (``…/this-thread-is-for-an-agent-session-with-…``).
+ */
+const DELEGATION_THREAD_PLACEHOLDER = /^This thread is for an agent session with \S+\.?$/i;
+
 function mentionDirective(body: string | undefined): string {
   const trimmed = (body ?? '').trim().replace(LEADING_PROFILE_MENTION, '').trim();
+  if (DELEGATION_THREAD_PLACEHOLDER.test(trimmed)) return '';
   const trigger = parseCommentTrigger(trimmed);
   return trigger.triggered ? trigger.instruction : trimmed;
 }

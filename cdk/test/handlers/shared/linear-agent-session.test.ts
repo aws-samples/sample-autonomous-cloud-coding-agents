@@ -109,6 +109,17 @@ describe('parseAgentSessionEvent', () => {
     expect(at('https://linear.app/acme/issue/ENG-1 is related')).toBe('https://linear.app/acme/issue/ENG-1 is related');
   });
 
+  test('Linear\'s own delegation comment is not an instruction (it named every delegated branch)', () => {
+    const at = (body: string) => parseAgentSessionEvent({
+      ...base, action: 'created', agentSession: { id: 's-1', issueId: 'i-1', comment: { body } },
+    })?.directive;
+    expect(at('This thread is for an agent session with alanturing2.')).toBe('');
+    expect(at('this thread is for an agent session with bgagent')).toBe('');
+    // A person's comment that merely starts the same way is still theirs.
+    expect(at('This thread is for an agent session with bgagent, so please add tests')).toBe(
+      'This thread is for an agent session with bgagent, so please add tests');
+  });
+
   test('created by delegation has an empty directive and tolerates a blank promptContext', () => {
     const r = parseAgentSessionEvent({ ...base, action: 'created', agentSession: { id: 's-1', issueId: 'i-1' }, promptContext: '  ' });
     expect(r).toEqual(expect.objectContaining({ directive: '', actorId: null, promptContext: null }));
