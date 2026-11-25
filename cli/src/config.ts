@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -29,6 +30,8 @@ const CREDENTIALS_FILE = 'credentials.json';
 
 /** Owner-only read/write — credentials must never be group/world readable. */
 const SECRET_FILE_MODE = 0o600;
+const CONFIG_FILE_MODE = 0o644;
+const PERMISSION_MODULUS = 0o10000;
 
 /** Returns the config directory path (~/.bgagent or BGAGENT_CONFIG_DIR). */
 export function getConfigDir(): string {
@@ -74,7 +77,9 @@ export function loadConfig(): CliConfig {
 /** Save CLI configuration. */
 export function saveConfig(config: CliConfig): void {
   ensureConfigDir();
-  fs.writeFileSync(configPath(), JSON.stringify(config, null, 2) + '\n', { mode: 0o644 });
+  const p = configPath();
+  const existing = fs.statSync(p, { throwIfNoEntry: false });
+  replaceFile(p, JSON.stringify(config, null, 2) + '\n', CONFIG_FILE_MODE, existing && existing.mode % PERMISSION_MODULUS);
 }
 
 /** Load existing CLI config if present, else return null (no error). */
@@ -112,13 +117,38 @@ export function clearCredentials(): void {
 
 /** Write a file that only its owner may read, whether it is new or already there. */
 export function writeSecretFile(file: string, content: string): void {
-  fs.writeFileSync(file, content, { mode: SECRET_FILE_MODE });
-  // writeFileSync only honors `mode` when CREATING the file; overwriting a
-  // pre-existing loose-permissions file leaves its bits untouched. chmod
-  // makes the 0600 intent durable across rewrites. Regular files only: a
-  // path the user chose may be a device such as /dev/null.
-  if (fs.statSync(file).isFile()) {
-    fs.chmodSync(file, SECRET_FILE_MODE);
+  replaceFile(file, content, SECRET_FILE_MODE, SECRET_FILE_MODE);
+}
+
+function regularFileTarget(file: string): string | undefined {
+  try {
+    const real = fs.realpathSync(file);
+    return fs.statSync(real).isFile() ? real : undefined;
+  } catch (err) {
+    const creatable = (err as NodeJS.ErrnoException).code === 'ENOENT'
+      && !fs.lstatSync(file, { throwIfNoEntry: false })
+      && fs.existsSync(path.dirname(file));
+    return creatable ? file : undefined;
+  }
+}
+
+function replaceFile(file: string, content: string, createMode: number, setMode?: number): void {
+  const target = regularFileTarget(file);
+  if (!target) {
+    fs.writeFileSync(file, content, { mode: createMode });
+    return;
+  }
+
+  const temp = path.join(path.dirname(target), `.${randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(temp, content, { mode: createMode, flag: 'wx' });
+    if (setMode !== undefined) {
+      fs.chmodSync(temp, setMode);
+    }
+    fs.renameSync(temp, target);
+  } catch (err) {
+    fs.rmSync(temp, { force: true });
+    throw err;
   }
 }
 

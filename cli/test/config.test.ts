@@ -23,6 +23,11 @@ import * as path from 'path';
 import { loadConfig, loadCredentials, saveConfig, saveCredentials } from '../src/config';
 import { CliError } from '../src/errors';
 
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof fs>('fs');
+  return { ...actual, renameSync: jest.fn(actual.renameSync) };
+});
+
 describe('config', () => {
   let tmpDir: string;
 
@@ -46,6 +51,16 @@ describe('config', () => {
       };
       saveConfig(config);
       expect(loadConfig()).toEqual(config);
+    });
+
+    test('keeps the mode of a config file that already exists', () => {
+      const file = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(file, '{}');
+      fs.chmodSync(file, 0o600);
+
+      saveConfig({ api_url: 'https://api.example.com/v1', region: 'us-east-1', user_pool_id: 'p', client_id: 'c' });
+
+      expect(fs.statSync(file).mode % 0o1000).toBe(0o600);
     });
 
     test('throws when config does not exist', () => {
@@ -117,6 +132,51 @@ describe('config', () => {
       });
 
       expect(fs.statSync(p).mode % 0o1000).toBe(0o600);
+    });
+
+    const before = { id_token: 'old', refresh_token: 'old-ref', token_expiry: '2026-01-01T00:00:00.000Z' };
+    const after = { id_token: 'new', refresh_token: 'new-ref', token_expiry: '2026-02-01T00:00:00.000Z' };
+
+    test('a reader during a save sees the old credentials, then the new ones', () => {
+      saveCredentials(before);
+      let seen: unknown;
+      jest.mocked(fs.renameSync).mockImplementationOnce((from, to) => {
+        seen = loadCredentials();
+        jest.requireActual<typeof fs>('fs').renameSync(from, to);
+      });
+
+      saveCredentials(after);
+
+      expect(seen).toEqual(before);
+      expect(loadCredentials()).toEqual(after);
+      expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
+    });
+
+    test('a failed save keeps the old credentials and leaves no temporary file', () => {
+      saveCredentials(before);
+      jest.mocked(fs.renameSync).mockImplementationOnce(() => {
+        throw new Error('EXDEV');
+      });
+
+      expect(() => saveCredentials(after)).toThrow('EXDEV');
+
+      expect(loadCredentials()).toEqual(before);
+      expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
+    });
+
+    test('a save through a symlink updates the linked file and keeps the link', () => {
+      const realDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-real-'));
+      const real = path.join(realDir, 'creds.json');
+      const link = path.join(tmpDir, 'credentials.json');
+      fs.writeFileSync(real, '{}', { mode: 0o644 });
+      fs.symlinkSync(real, link);
+
+      saveCredentials(after);
+
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(JSON.parse(fs.readFileSync(real, 'utf-8'))).toEqual(after);
+      expect(fs.statSync(real).mode % 0o1000).toBe(0o600);
+      fs.rmSync(realDir, { recursive: true, force: true });
     });
   });
 });
