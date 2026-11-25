@@ -199,5 +199,6 @@ test('redacts known credential shapes before posting a preview to a shared chann
   const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'slack'))!;
   expect(message.text).toContain('[REDACTED-GITHUB_TOKEN]');
   expect(message.text).not.toContain(token);
+  // eslint-disable-next-line no-control-regex -- asserts the escape character was stripped
   expect(message.text).not.toMatch(/[\u001b\u202e]/);
 });

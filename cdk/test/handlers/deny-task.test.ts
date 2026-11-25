@@ -337,6 +337,8 @@ describe('trusted channel decision source', () => {
     await handler(makeEvent({ body: JSON.stringify({ request_id: 'gate', decision: 'deny', decisionSource: 'forged' }) }));
     const update = mockSend.mock.calls.find(([cmd]) => cmd._type === 'TransactWrite')![0].input.TransactItems[0].Update;
     expect(update.UpdateExpression).not.toContain('decision_source');
+  });
+});
 
 describe('deny-task — decision source (#1001)', () => {
   test('API callers record no decision_source (behaviour unchanged)', async () => {

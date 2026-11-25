@@ -1253,6 +1253,8 @@ describe('AgentStack', () => {
       'TestAgentStack/AgentRegistryStack': [],
       'TestAgentStack/RegistryApi': [],
       'TestAgentStack/ConcurrencyMaintenance': Array(2).fill(notifiesTopic),
+      // On by default with Linear and AgentCore; the consent page has no alarms of its own.
+      'TestAgentStack/LinearVaultConsentPageStack': [],
     });
   });
 
@@ -2152,10 +2154,11 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
     // 48 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
-    // provisioning handlers + 4 registry API handlers in nested stacks, + 2 now
+    // provisioning handlers + 4 registry API handlers in nested stacks, + 3 now
     // that the Linear identity vault is on by default (its provider onEvent
-    // handler and the provider framework function).
-    expect(abcaLambdas.length).toBe(56);
+    // handler, the provider framework function and the consent page's function
+    // in its nested stack).
+    expect(abcaLambdas.length).toBe(57);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas

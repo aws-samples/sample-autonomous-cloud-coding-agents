@@ -2046,17 +2046,24 @@ function commentTargetBelongsToWorkspace(
   return false;
 }
 
+/**
+ * A reply to an approval notice is a decision, not a task request. It is handled
+ * only for the exact thread ABCA created, and only for the owner. True when handled.
+ */
+async function handledAsApprovalReply(payload: LinearCommentEvent): Promise<boolean> {
+  const approvalsTable = process.env.TASK_APPROVALS_TABLE_NAME;
+  if (!approvalsTable || !WORKSPACE_REGISTRY_TABLE) return false;
+  return handleLinearApprovalReply(payload, {
+    ddb,
+    approvalsTable,
+    taskTable: process.env.TASK_TABLE_NAME!,
+    registryTable: WORKSPACE_REGISTRY_TABLE,
+    lookupUser: lookupPlatformUser,
+  });
+}
+
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
-  // A reply to an approval notice is a decision, not a task request. It is
-  // handled only for the exact thread ABCA created, and only for the owner.
-  if (process.env.TASK_APPROVALS_TABLE_NAME && WORKSPACE_REGISTRY_TABLE
-    && await handleLinearApprovalReply(payload, {
-      ddb,
-      approvalsTable: process.env.TASK_APPROVALS_TABLE_NAME,
-      taskTable: process.env.TASK_TABLE_NAME!,
-      registryTable: WORKSPACE_REGISTRY_TABLE,
-      lookupUser: lookupPlatformUser,
-    })) return;
+  if (await handledAsApprovalReply(payload)) return;
 
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
