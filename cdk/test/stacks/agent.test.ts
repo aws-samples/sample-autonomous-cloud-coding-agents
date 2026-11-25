@@ -1251,6 +1251,7 @@ describe('AgentStack', () => {
     }).toEqual({
       'root': Array(9).fill(notifiesTopic),
       'TestAgentStack/AgentRegistryStack': [],
+      'TestAgentStack/ApprovalRequests': [],
       'TestAgentStack/RegistryApi': [],
       'TestAgentStack/ConcurrencyMaintenance': Array(2).fill(notifiesTopic),
     });
@@ -1844,8 +1845,17 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       JSON.stringify(s.Resource).includes('ComputePayloadBucket'));
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    expect(actions.some(action => action.startsWith('s3:DeleteObject'))).toBe(true);
-    expect(actions.some(action => action.startsWith('s3:GetObject'))).toBe(false);
+    expect(actions).toContain('s3:DeleteObject');
+    expect(actions).toContain('s3:GetObject');
+    expect(actions).toContain('s3:ListBucket');
+    const deletion = payloadStatements.find(s => Array.isArray(s.Action) && s.Action.includes('s3:DeleteObject'));
+    // The payload bucket lives in the MicroVM nested stack, so its ARN arrives as that stack's output.
+    expect(deletion!.Resource).toEqual(['payload.json', 'launch.json'].map(filename => ({
+      'Fn::Join': ['', [
+        { 'Fn::GetAtt': [expect.stringMatching(/^MicrovmNestedStack/), expect.stringMatching(/ComputePayloadBucket.*Arn$/)] },
+        `/*/${filename}`,
+      ]],
+    })));
   });
 
   test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {
@@ -2152,8 +2162,9 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
     // 48 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
-    // provisioning handlers + 4 registry API handlers in nested stacks.
-    expect(abcaLambdas.length).toBe(54);
+    // provisioning handlers + 4 registry API handlers in nested stacks + the
+    // trusted approval writer (#1000) in its own nested stack.
+    expect(abcaLambdas.length).toBe(55);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas

@@ -52,6 +52,8 @@ const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
 /** Orchestrator Lambda memory (MB). */
 const ORCHESTRATOR_MEMORY_MB = 1024;
 
+import { grantCoordinatorPayloads } from './payload-bootstrap-permissions';
+
 /**
  * Properties for TaskOrchestrator construct.
  */
@@ -566,22 +568,10 @@ export class TaskOrchestrator extends Construct {
       props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
-    // ECS payload bucket (#502): the orchestrator writes the payload before
-    // RunTask and deletes it at finalize. Write + delete only (it never reads
-    // its own payload back; the ECS container is the reader, with its own
-    // read-only grant from EcsAgentCluster).
-    if (props.ecsPayloadBucket) {
-      props.ecsPayloadBucket.grantPut(this.fn);
-      props.ecsPayloadBucket.grantDelete(this.fn);
-    }
-
-    // ADR-021: MicroVM payload bucket. The strategy uploads an oversized /run
-    // payload and deletes it at finalize (`deleteMicrovmPayload`); it never
-    // reads it back — the MicroVM execution role is the reader.
-    if (props.microvmConfig) {
-      props.microvmConfig.payloadBucket.grantPut(this.fn);
-      props.microvmConfig.payloadBucket.grantDelete(this.fn);
-    }
+    // Publish manifests/payloads, sign one-object reads and persist private
+    // launch references for replay. Workers cannot read the launch records.
+    if (props.ecsPayloadBucket) grantCoordinatorPayloads(props.ecsPayloadBucket, this.fn);
+    if (props.microvmConfig) grantCoordinatorPayloads(props.microvmConfig.payloadBucket, this.fn);
 
     // Durable execution managed policy
     this.fn.role!.addManagedPolicy(
