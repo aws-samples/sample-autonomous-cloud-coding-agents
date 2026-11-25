@@ -18,9 +18,13 @@
  */
 
 import * as fs from 'fs';
+import { createHash } from 'node:crypto';
 import * as path from 'path';
-import { App, AspectPriority, Aspects, NestedStack } from 'aws-cdk-lib';
+import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
+import { App, AspectPriority, Aspects, NestedStack, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { CfnGuardrail } from 'aws-cdk-lib/aws-bedrock';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import {
   BEDROCK_GEO_REGION_CONTEXT_KEY,
   DEFAULT_BEDROCK_GEO_REGION,
@@ -28,7 +32,7 @@ import {
 } from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
-import { AgentStack } from '../../src/stacks/agent';
+import { AgentStack, publishGuardrailVersion } from '../../src/stacks/agent';
 
 describe('AgentStack', () => {
   let template: Template;
@@ -556,8 +560,9 @@ describe('AgentStack', () => {
    *
    * (The full 25k-line template was also diffed pre/post out-of-band and is
    * identical modulo CDK's own local synth non-determinism — asset hashes,
-   * custom-resource timestamps, the InputGuardrail version logical id — which
-   * differ between two synths of the SAME tree and so cannot be asserted here.
+   * custom-resource timestamps and, at the time, the InputGuardrail version
+   * logical id (stable since #1079) — which differ between two synths of the
+   * SAME tree and so cannot be asserted here.
    * The Bedrock resources are the change's entire blast radius.)
    */
   test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
@@ -1255,6 +1260,84 @@ describe('AgentStack', () => {
     // The default deploy ships the topic with no confirmed target;
     // operators subscribe Slack / PagerDuty / email themselves.
     template.resourceCountIs('AWS::SNS::Subscription', 0);
+  });
+
+  test('every GUARDRAIL_VERSION is the one published version of the input guardrail, which is retained (#1079)', () => {
+    const versions = template.findResources('AWS::Bedrock::GuardrailVersion');
+    expect(Object.values(versions)).toEqual([expect.objectContaining({ DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' })]);
+    const published = { 'Fn::GetAtt': [Object.keys(versions)[0], 'Version'] };
+    // A nested template would name the version by a stack parameter: read the value the root passes.
+    const pinned = [{ template, parameters: {} as Record<string, unknown> }, ...nestedStacks].flatMap(stack =>
+      Object.values(stack.template.findResources('AWS::Lambda::Function'))
+        .map(fn => fn.Properties.Environment?.Variables?.GUARDRAIL_VERSION)
+        .filter(value => value !== undefined)
+        .map(value => stack.parameters[value.Ref] ?? value));
+    expect(pinned.length).toBeGreaterThan(0);
+    // The guardrail's own Version attribute is DRAFT, which follows every edit instead of pinning one.
+    expect(pinned).toEqual(pinned.map(() => published));
+
+    // The version is named after the guardrail as CloudFormation receives it. A change made to
+    // the guardrail after its version was published fails the synthesis; this pins the name itself.
+    const [guardrail] = Object.values(template.findResources('AWS::Bedrock::Guardrail'));
+    const { Tags: _tags, ...properties } = guardrail.Properties;
+    const [[versionId, version]] = Object.entries(versions);
+    const hash = createHash('sha256').update(JSON.stringify([properties, version.Properties.Description])).digest('hex');
+    // The whole id: the guardrail's construct id, the hash, and the eight characters the CDK appends.
+    expect(versionId).toMatch(new RegExp(`^InputGuardrailVersion${hash.slice(0, 16)}[0-9A-F]{8}$`));
+  });
+});
+
+describe('publishGuardrailVersion (#1079)', () => {
+  interface Change { inFront?: boolean; tag?: boolean; inputStrength?: bedrock.ContentFilterStrength; description?: string }
+
+  // TEST-CONVENTION EXEMPTION (cdk/AGENTS.md "synth once in beforeAll"): each case
+  // compares two syntheses, and the stack holds one guardrail.
+  /** Logical id of the version published for a guardrail in a new stack. */
+  function versionId(change: Change = {}): string {
+    const stack = new Stack(new App(), 'Stack');
+    if (change.inFront) new sqs.Queue(stack, 'InFront');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', {
+      guardrailName: 'input',
+      contentFilters: [{
+        type: bedrock.ContentFilterType.PROMPT_ATTACK,
+        inputStrength: change.inputStrength ?? bedrock.ContentFilterStrength.MEDIUM,
+        outputStrength: bedrock.ContentFilterStrength.NONE,
+      }],
+    });
+    // Tags.of() would set the tag at synthesis, after the version got its name: set it on the resource now.
+    if (change.tag) guardrail.node.children.find(child => child instanceof CfnGuardrail)!.cdkTagManager.setTag('github:sha', 'abc');
+    publishGuardrailVersion(guardrail, change.description ?? 'Initial version');
+    const ids = Object.keys(Template.fromStack(stack).findResources('AWS::Bedrock::GuardrailVersion'));
+    expect(ids).toHaveLength(1);
+    return ids[0];
+  }
+
+  // Two syntheses in one process differ in their token numbers, as two deploys do.
+  test.each<[string, Change]>([
+    ['in a second synthesis of the same tree', {}],
+    ['with a construct in front of the guardrail', { inFront: true }],
+    ['with a tag on the guardrail', { tag: true }],
+  ])('names the version the same %s', (_case, change) => {
+    expect(versionId(change)).toBe(versionId());
+  });
+
+  test.each<[string, Change]>([
+    ['the configuration of the guardrail', { inputStrength: bedrock.ContentFilterStrength.HIGH }],
+    ['the description of the version', { description: 'Second version' }],
+  ])('names the version anew when %s changes', (_case, change) => {
+    expect(versionId(change)).not.toBe(versionId());
+  });
+
+  test('fails the synthesis when the guardrail changes after its version was published', () => {
+    const stack = new Stack(new App(), 'Stack');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', { guardrailName: 'input' });
+    publishGuardrailVersion(guardrail, 'Initial version');
+    guardrail.addContentFilter({
+      type: bedrock.ContentFilterType.PROMPT_ATTACK,
+      inputStrength: bedrock.ContentFilterStrength.MEDIUM,
+      outputStrength: bedrock.ContentFilterStrength.NONE,
+    });
+    expect(() => Template.fromStack(stack)).toThrow('it was changed after publishGuardrailVersion()');
   });
 });
 

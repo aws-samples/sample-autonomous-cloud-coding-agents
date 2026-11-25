@@ -17,9 +17,11 @@
  *  SOFTWARE.
  */
 
+import { createHash } from 'node:crypto';
 import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { CfnGuardrail, CfnGuardrailVersion } from 'aws-cdk-lib/aws-bedrock';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -97,6 +99,52 @@ import { WEBHOOK_METRIC_NAMESPACE, WEBHOOK_SCREENING_FAILED_METRIC } from '../ha
 
 /** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
 const GUARDRAIL_NAME_MAX_LENGTH = 50;
+
+/** Hex digits of the configuration hash that end the construct id of a guardrail version. */
+const GUARDRAIL_VERSION_HASH_LENGTH = 16;
+
+/**
+ * Publishes a version of the guardrail and returns its number.
+ *
+ * The construct id ends in a hash of the guardrail's CloudFormation properties and of
+ * the description, so a deploy publishes a version when the guardrail changed and only
+ * then. `createVersion()` of the alpha library names the version after an unresolved
+ * token (aws/aws-cdk#38674), whose text differs from one synthesis to the next: nearly
+ * every deploy published a version, until the guardrail reached its version quota (#1079).
+ *
+ * The properties are rendered here, not at synthesis: call this once the guardrail is
+ * fully configured, or synthesis fails. Tags are left out, because a deploy tag does not
+ * change the guardrail.
+ */
+export function publishGuardrailVersion(guardrail: bedrock.Guardrail, description: string): string {
+  const resource = guardrail.node.children.find(child => child instanceof CfnGuardrail)!;
+  // What CloudFormation will receive, the defaults of the alpha library included.
+  // The CDK names a Lambda version after the same rendering of its function.
+  const configuration = (): string => {
+    const rendered: { Resources: Record<string, { Properties: Record<string, unknown> }> }
+      = Stack.of(guardrail).resolve(resource._toCloudFormation());
+    const { Tags: _tags, ...properties } = Object.values(rendered.Resources)[0].Properties;
+    return JSON.stringify([properties, description]);
+  };
+  const published = configuration();
+  const hash = createHash('sha256').update(published).digest('hex');
+  const version = new CfnGuardrailVersion(guardrail, `Version${hash.slice(0, GUARDRAIL_VERSION_HASH_LENGTH)}`, {
+    guardrailIdentifier: guardrail.guardrailId,
+    description,
+  });
+  // The name is fixed now: a later change of the guardrail would reach the draft and no version.
+  // A property that takes a value from another stack renders differently by then, and fails too.
+  guardrail.node.addValidation({
+    validate: () => configuration() === published ? [] : [
+      'The guardrail does not have the properties its version was named after: it was changed after '
+      + 'publishGuardrailVersion(), or one of its properties takes a value from another stack.',
+    ],
+  });
+  // A retained durable Lambda version also pins GUARDRAIL_VERSION. Preserve that
+  // immutable dependency when a change of the guardrail publishes a new version.
+  version.applyRemovalPolicy(RemovalPolicy.RETAIN);
+  return version.attrVersion;
+}
 
 /** AgentCore Runtime session lifecycle ceiling (hours) — the AgentCore maximum. */
 const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
@@ -248,7 +296,7 @@ export class AgentStack extends Stack {
   /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
   public readonly linearIdentityVault?: LinearIdentityVault;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (123; 108 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (120; 108 when it landed); must not grow
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -539,14 +587,11 @@ export class AgentStack extends Stack {
       ],
     });
 
-    inputGuardrail.createVersion('Initial version');
-    // A retained durable Lambda version also pins GUARDRAIL_VERSION. Preserve
-    // that immutable dependency across updates, even when CDK creates a new one.
-    for (const child of inputGuardrail.node.findAll()) {
-      if (child instanceof CfnResource && child.cfnResourceType === 'AWS::Bedrock::GuardrailVersion') {
-        child.applyRemovalPolicy(RemovalPolicy.RETAIN);
-      }
-    }
+    // The version every consumer pins: `inputGuardrail.guardrailVersion` is the working
+    // draft. The guardrail gets its whole configuration in the constructor above: a
+    // change made to it after this line would reach the draft and no published version,
+    // and synthesis fails on it.
+    const inputGuardrailVersion = publishGuardrailVersion(inputGuardrail, 'Initial version');
 
     // --- TaskApi is constructed before the orchestrator (which it needs the
     // ARN of) and before the Runtime (which it needs the ARN of, for the
@@ -618,7 +663,7 @@ export class AgentStack extends Stack {
       apiKeyTable: apiKeyTable.table,
       orchestratorFunctionArn: lazyOrchestratorArn,
       guardrailId: inputGuardrail.guardrailId,
-      guardrailVersion: inputGuardrail.guardrailVersion,
+      guardrailVersion: inputGuardrailVersion,
       ...(agentCoreEnabled && { agentCoreStopSessionRuntimeArn: lazyRuntimeArn }),
       ...(ecsEnabled && { ecsClusterArn: lazyEcsClusterArn }),
       traceArtifactsBucket: traceArtifactsBucket.bucket,
@@ -1416,7 +1461,7 @@ export class AgentStack extends Stack {
       githubTokenSecretArn: githubTokenSecret.secretArn,
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
-      guardrailVersion: inputGuardrail.guardrailVersion,
+      guardrailVersion: inputGuardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
       ...(agentRegistry && { agentRegistryId: agentRegistry.registryId }),
       // ADR-021 P2: non-secret platform identifiers the orchestrator forwards to
@@ -1597,7 +1642,7 @@ export class AgentStack extends Stack {
         repoTable: repoTable.table,
         orchestratorFunctionArn: orchestrator.alias.functionArn,
         guardrailId: inputGuardrail.guardrailId,
-        guardrailVersion: inputGuardrail.guardrailVersion,
+        guardrailVersion: inputGuardrailVersion,
       });
 
       // --- Slack App setup outputs ---
@@ -1694,7 +1739,7 @@ export class AgentStack extends Stack {
       orchestrationTable: orchestrationTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
-      guardrailVersion: inputGuardrail.guardrailVersion,
+      guardrailVersion: inputGuardrailVersion,
       // Throttle the seed-time root release to the free concurrency
       // budget so a wide-root epic doesn't over-release roots admission then
       // hard-fails (an unrecoverable failure — a root has no predecessor for
@@ -1737,7 +1782,7 @@ export class AgentStack extends Stack {
     repoTable.table.grantReadData(orchestrationReconciler.fn);
     orchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
     orchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
-    orchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrail.guardrailVersion);
+    orchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrailVersion);
     orchestrationReconciler.fn.addEnvironment(
       'ORCHESTRATOR_FUNCTION_ARN',
       orchestrator.alias.functionArn,
@@ -1807,7 +1852,7 @@ export class AgentStack extends Stack {
       repoTable.table.grantReadData(strandedOrchestrationReconciler.fn);
       strandedOrchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
       strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
-      strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrail.guardrailVersion);
+      strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_VERSION', inputGuardrailVersion);
       strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['lambda:InvokeFunction'],
         resources: [orchestrator.alias.functionArn],
@@ -1957,7 +2002,7 @@ export class AgentStack extends Stack {
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
-      guardrailVersion: inputGuardrail.guardrailVersion,
+      guardrailVersion: inputGuardrailVersion,
       // Lets the processor fetch, screen, and store Jira media attachments at
       // task-admission time. Same bucket the orchestrator hydrates from.
       attachmentsBucket: attachmentsBucket.bucket,

@@ -42,7 +42,7 @@ Replace the compute list as needed and supply image settings for MicroVM. Persis
 
 **Existing inline-to-split migration is deferred.** Do not flip `networkTopology` on an existing inline deployment. An ordinary deploy creates a new VPC and removes old resources; identical logical IDs in different stacks do not preserve physical identity. Keep the existing topology until a separately reviewed migration has established resource-type eligibility, source retention and cleanup behavior, an ownership mapping, physical-ID/data preservation, and rollback on a populated disposable deployment. The `cdk refactor --unstable=refactor` criterion in #852 remains open; it is not waived or satisfied by synthesis tests.
 
-This change does not install broad retention, change the Blueprint provider, create an ownership ledger, or replace the guardrail versioning scheme. Those prerequisites belong in separate releases. CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries#deferred-migration-work).
+This change does not install broad retention, change the Blueprint provider or create an ownership ledger. Those prerequisites belong in separate releases. The guardrail versioning scheme, once listed with them, was replaced separately ([#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079)). CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries#deferred-migration-work).
 
 Stacks used to test earlier revisions with `blueprintProvisioning=prepare|adopt|managed` or the broad retention aspect require a separate recovery plan before adopting this narrowed version. Returning those stacks directly to the original Blueprint provider can overwrite or soft-delete repository rows. Synthesis rejects the removed `blueprintProvisioning` and `guardrailVersionMigration` context keys instead of silently ignoring them; removing those keys does not make an experimental stack safe to update. Preserve its deployed templates, repository data and ledger inventory; the removed experimental modes are not an upgrade path supported by this release.
 
@@ -522,6 +522,56 @@ aws dynamodb update-table --table-name <TaskTableName stack output> \
 The first deploy of a version that sets `InstallLatestAwsSdk` to `false` changes that property on every `Custom::AWS` resource of an existing deployment. CloudFormation updates each one in place, also where `cdk diff` says `may be replaced`, because the resource keeps its physical resource id. The update runs the resource's `onUpdate` call again. This follows from the synthesized template, from the code of the resources' provider and from CloudFormation's rule that a custom resource is replaced only when the provider returns another physical resource id. It has not been observed on a deployed stack.
 
 In that call, `ModelInvocationLogging` writes the stack's log group and role to the Bedrock model-invocation logging configuration of the account and Region, which replaces a configuration that another deployment or a manual change put there. `DnsFirewall/FirewallConfig` sets the DNS Firewall of the VPC to fail open. A Blueprint's `RepoConfigCR` writes its repository record, as on every deploy.
+
+### Deploys stop once the input guardrail reaches its version quota (#1079)
+
+**Affects:** a stack deployed from a version between [#904](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/904) and the fix of [#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079). Nearly every deploy of such a version published a new version of the input guardrail and kept the one before it, also when the guardrail had not changed.
+
+**Symptom:** the deploy fails on the guardrail version and the stack rolls back to `UPDATE_ROLLBACK_COMPLETE`. Nearly every later deploy fails in the same way until old versions are deleted.
+
+```
+CREATE_FAILED  AWS::Bedrock::GuardrailVersion  InputGuardrail/GuardrailVersion-...
+Resource handler returned message: "You have exceeded the service quota limit for ..."
+```
+
+**Root cause:** the logical ID of the version came from a value that differs from one synthesis to the next, so CloudFormation replaced the version on nearly every deploy. Since #904 it keeps the replaced version, because a retained version of the orchestrator function can still name it. Bedrock allows 20 versions per guardrail, and the quota cannot be raised (*Versions per guardrail* in the [Amazon Bedrock service quotas](https://docs.aws.amazon.com/general/latest/gr/bedrock.html#limits_bedrock)). The stack this was seen on had 19 numbered versions and its `DRAFT`.
+
+**Resolution:** with the fix, the logical ID contains a hash of the guardrail's configuration. A deploy publishes a version only when that configuration changed, and still keeps the one before it. Two things remain to do by hand:
+
+- The first deploy with the fix publishes one more version, because the logical ID changes one last time. A guardrail at its quota needs the cleanup below before that deploy.
+- The versions that earlier deploys left behind stay, and count against the quota, until they are deleted. So does each version that a later change of the guardrail replaces, and the version of a deploy that publishes one and then rolls back: an execution started during that deploy can still name it.
+
+Find the guardrail, whose name is `task-input-guardrail-<stack-name>` cut off after 50 characters, and list its versions:
+
+```bash
+aws bedrock list-guardrails \
+  --query "guardrails[?name=='task-input-guardrail-<stack-name>'].id" --output text
+aws bedrock list-guardrails --guardrail-identifier <guardrail-id> \
+  --query 'guardrails[].[version,createdAt]' --output text
+```
+
+List the versions that are in use. Each row is a function configuration that names this guardrail in `GUARDRAIL_ID`, with the guardrail version it names in `GUARDRAIL_VERSION`:
+
+```bash
+aws lambda list-functions --function-version ALL \
+  --query "Functions[?Environment.Variables.GUARDRAIL_ID=='<guardrail-id>'].[FunctionName,Version,Environment.Variables.GUARDRAIL_VERSION]" \
+  --output table
+```
+
+Keep the guardrail version of the rows whose function version is `$LATEST`: the stack runs on it. The rows with a numbered function version are the published versions of the orchestrator function, which the stack retains as well. A durable execution ends on the function version it started on, so also keep the guardrail version of each published version that still has an unfinished execution. The ARN of an execution names its function version. The loop passes one status per call, as the Lambda API reference requires:
+
+```bash
+for state in RUNNING PAUSING PAUSED; do
+  aws lambda list-durable-executions-by-function --function-name <orchestrator-function-name> \
+    --statuses "$state" --query 'DurableExecutions[].DurableExecutionArn'
+done
+```
+
+Delete every other numbered version. Always pass `--guardrail-version`: without it, the command deletes the guardrail and all of its versions.
+
+```bash
+aws bedrock delete-guardrail --guardrail-identifier <guardrail-id> --guardrail-version <n>
+```
 
 ### AgentCore unsupported Availability Zones
 
