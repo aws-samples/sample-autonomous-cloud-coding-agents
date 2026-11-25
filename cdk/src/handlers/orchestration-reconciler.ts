@@ -288,8 +288,8 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     : (img.cost_usd?.S !== undefined ? Number(img.cost_usd.S) : undefined);
   const durationS = img.duration_s?.N !== undefined ? Number(img.duration_s.N)
     : (img.duration_s?.S !== undefined ? Number(img.duration_s.S) : undefined);
-  const turns = img.turns_attempted?.N !== undefined ? Number(img.turns_attempted.N)
-    : (img.turns_attempted?.S !== undefined ? Number(img.turns_attempted.S) : undefined);
+  const turns = img.turns_completed?.N !== undefined ? Number(img.turns_completed.N)
+    : (img.turns_completed?.S !== undefined ? Number(img.turns_completed.S) : undefined);
   const maxTurns = img.max_turns?.N !== undefined ? Number(img.max_turns.N)
     : (img.max_turns?.S !== undefined ? Number(img.max_turns.S) : undefined);
 
@@ -327,7 +327,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(iterationReplyId !== undefined && { iterationReplyId }),
     ...(costUsd !== undefined && Number.isFinite(costUsd) && { costUsd }),
     ...(durationS !== undefined && Number.isFinite(durationS) && { durationS }),
-    ...(turns !== undefined && Number.isFinite(turns) && { turns }),
+    ...(turns !== undefined && Number.isFinite(turns) && turns > 0 && { turns }),
     ...(maxTurns !== undefined && Number.isFinite(maxTurns) && { maxTurns }),
   };
 }

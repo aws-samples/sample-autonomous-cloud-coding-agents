@@ -50,14 +50,14 @@ function renderIterationComment(task: TaskRecord): Record<string, unknown> {
   const saved = task.jira_iteration_status;
   // Only build a fallback when no usable status was persisted. Runtime result
   // metrics may be numeric strings, just as in the fan-out notification path.
-  const metric = (field: 'cost_usd' | 'turns_attempted' | 'max_turns' | 'duration_s') =>
+  const metric = (field: 'cost_usd' | 'turns_completed' | 'max_turns' | 'duration_s') =>
     coerceNumericOrNull(task[field], { field, task_id: task.task_id }, logger);
   const body = saved && (!terminal || saved.terminal) ? saved.body : terminal
     ? buildAdfDocument(renderJiraFinalStatusComment({
       ...jiraIterationFrame(`task_${String(task.status).toLowerCase()}`, task.build_passed, null),
       prUrl: task.pr_url ?? null,
       costUsd: metric('cost_usd'),
-      turns: metric('turns_attempted'),
+      turns: metric('turns_completed') || null,
       maxTurns: metric('max_turns'),
       durationS: metric('duration_s'),
       taskId: task.task_id,

@@ -1690,10 +1690,10 @@ function linearFinalStatusArgs(
       logger,
     ),
     turns: coerceNumericOrNull(
-      task.turns_attempted,
-      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+      task.turns_completed,
+      { field: 'turns_completed', task_id: task.task_id, event_id: event.event_id },
       logger,
-    ),
+    ) || null,
     maxTurns: coerceNumericOrNull(
       task.max_turns,
       { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
@@ -2028,10 +2028,10 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       logger,
     ),
     turns: coerceNumericOrNull(
-      task.turns_attempted,
-      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+      task.turns_completed,
+      { field: 'turns_completed', task_id: task.task_id, event_id: event.event_id },
       logger,
-    ),
+    ) || null,
     maxTurns: coerceNumericOrNull(
       task.max_turns,
       { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },

@@ -157,6 +157,7 @@ function taskRecord(fields: {
   cost_usd?: number;
   duration_s?: number;
   turns_attempted?: number;
+  turns_completed?: string;
   max_turns?: number;
   // Stream sequence number (itemIdentifier for partial-batch reporting).
   sequenceNumber?: string;
@@ -170,6 +171,7 @@ function taskRecord(fields: {
   if (fields.cost_usd !== undefined) img.cost_usd = { N: String(fields.cost_usd) };
   if (fields.duration_s !== undefined) img.duration_s = { N: String(fields.duration_s) };
   if (fields.turns_attempted !== undefined) img.turns_attempted = { N: String(fields.turns_attempted) };
+  if (fields.turns_completed !== undefined) img.turns_completed = { S: fields.turns_completed };
   if (fields.max_turns !== undefined) img.max_turns = { N: String(fields.max_turns) };
   if (fields.error_message) img.error_message = { S: fields.error_message };
   // PRODUCTION SHAPE: createTaskCore persists orchestration_id INSIDE the
@@ -206,6 +208,29 @@ describe('parseTerminalTaskRecord', () => {
       task_id: 'T1', status: 'COMPLETED', build_passed: true, orchestration_id: 'orch_1',
     }));
     expect(evt).toEqual({ taskId: 'T1', status: 'COMPLETED', buildPassed: true, orchestrationId: 'orch_1' });
+  });
+
+  test('reads turns_completed, the count max_turns limits, not turns_attempted', () => {
+    const evt = parseTerminalTaskRecord(taskRecord({
+      task_id: 'T1',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      turns_attempted: 90,
+      turns_completed: '62',
+      max_turns: 80,
+    }));
+    expect(evt).toMatchObject({ turns: 62, maxTurns: 80 });
+  });
+
+  test.each([undefined, '0', 'NaN'])('turns_completed %p is no count, so turns is left out', (turnsCompleted) => {
+    const evt = parseTerminalTaskRecord(taskRecord({
+      task_id: 'T1',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      turns_attempted: 90,
+      turns_completed: turnsCompleted,
+    }));
+    expect(evt).not.toHaveProperty('turns');
   });
 
   test('skips non-terminal status', () => {
@@ -1484,7 +1509,8 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
         iteration_reply_comment_id: 'jira-status-1',
         cost_usd: 1.25,
         duration_s: 125,
-        turns_attempted: 12,
+        turns_attempted: 19,
+        turns_completed: '12',
         max_turns: 100,
       })],
     } as never);
