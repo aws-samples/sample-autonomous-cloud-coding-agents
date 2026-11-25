@@ -36,6 +36,7 @@ import { parseRef } from './registry/ref';
 import { RegistryResolutionError, type ResolvedAsset } from './registry/types';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
+import { acquireTaskSlot, releaseTaskSlot } from './task-concurrency';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
@@ -44,7 +45,6 @@ const ddb = makeDocClient();
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
-const CONCURRENCY_TABLE_NAME = process.env.USER_CONCURRENCY_TABLE_NAME!;
 const RUNTIME_ARN = process.env.RUNTIME_ARN!;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '3');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -184,31 +184,12 @@ export async function loadTask(taskId: string, consistentRead = false): Promise<
 }
 
 /**
- * Admission control: check user concurrency and increment counter.
+ * Admission control: acquire or recover this task's capacity reservation.
  * @param task - the task record.
  * @returns true if admitted, false if concurrency limit reached.
  */
 export async function admissionControl(task: TaskRecord): Promise<boolean> {
-  try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: task.user_id },
-      UpdateExpression: 'SET active_count = if_not_exists(active_count, :zero) + :one, updated_at = :now',
-      ConditionExpression: 'attribute_not_exists(active_count) OR active_count < :max',
-      ExpressionAttributeValues: {
-        ':zero': 0,
-        ':one': 1,
-        ':max': MAX_CONCURRENT,
-        ':now': new Date().toISOString(),
-      },
-    }));
-    return true;
-  } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
-      return false;
-    }
-    throw err;
-  }
+  return acquireTaskSlot(task.task_id, task.user_id, MAX_CONCURRENT);
 }
 
 /**
@@ -260,7 +241,10 @@ export async function transitionTask(
     }
   }
 
-  let condition = '#status = :fromStatus';
+  // An admitted task holds a reservation; it must never be queued again.
+  let condition = fromStatus === TaskStatus.SUBMITTED && toStatus === TaskStatus.QUEUED
+    ? '#status = :fromStatus AND attribute_not_exists(concurrency_slot)'
+    : '#status = :fromStatus';
   if (expectedMicrovmId) {
     // A MicroVM transition applies only while the task still names this worker.
     condition += ' AND compute_type = :microvmType AND session_id = :microvmId AND compute_metadata.microvmId = :microvmId';
@@ -1028,7 +1012,12 @@ export async function pollTaskStatus(
 }
 
 /**
- * Finalize a task: write terminal status, emit events, release concurrency.
+ * Finalize a task: write terminal status, emit events, release its reservation.
+ *
+ * The reservation is released in ``finally`` and only once the task is
+ * terminal (``releaseTaskSlot`` checks its marker), so a crash, an event
+ * failure, a durable replay or a competing cleaner cannot release it twice,
+ * and a still-active task keeps its seat.
  * @param taskId - the task ID.
  * @param pollState - the final poll state.
  * @param userId - the user who owns the task.
@@ -1047,7 +1036,11 @@ export async function finalizeTask(
     logger.warn('MicroVM finalization skipped after worker ownership changed', { task_id: taskId, microvm_id: expectedId });
     return false;
   }
-  await finalizeTaskOutcome(taskId, pollState, userId, task);
+  try {
+    await finalizeTaskOutcome(taskId, pollState, task);
+  } finally {
+    await releaseTaskSlot(taskId, userId);
+  }
   return true;
 }
 
@@ -1058,7 +1051,6 @@ export async function finalizeTask(
 async function finalizeMicrovmSupervisorFailure(
   taskId: string,
   pollState: PollState,
-  userId: string,
   currentStatus: TaskStatusType,
   correlation: ReturnType<typeof envelopeFor>['correlation'],
 ): Promise<void> {
@@ -1079,7 +1071,6 @@ async function finalizeMicrovmSupervisorFailure(
     await emitTaskEvent(taskId, `task_${winner.status.toLowerCase()}`, {
       final_status: winner.status, poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
   await emitTaskEvent(taskId, timeout ? 'task_timed_out' : 'task_failed', {
@@ -1088,17 +1079,16 @@ async function finalizeMicrovmSupervisorFailure(
     microvm_id: pollState.microvmSupervisor?.microvmId,
     poll_attempts: pollState.attempts,
   }, correlation);
-  await decrementConcurrency(userId);
 }
 
-async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId: string, task: TaskRecord): Promise<void> {
+async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: TaskRecord): Promise<void> {
   const currentStatus = task.status;
   // Correlation envelope on this function's own log lines too, not just the
   // events it emits — admission→terminal logs must join by {user_id, repo}.
   const { log, correlation } = envelopeFor(task);
 
   if (pollState.microvmFailureReason && !TERMINAL_STATUSES.includes(currentStatus)) {
-    await finalizeMicrovmSupervisorFailure(taskId, pollState, userId, currentStatus, correlation);
+    await finalizeMicrovmSupervisorFailure(taskId, pollState, currentStatus, correlation);
     return;
   }
 
@@ -1130,7 +1120,7 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
       transitioned = true;
     } catch (err) {
       // Task may have transitioned concurrently (e.g. agent wrote terminal status).
-      // Re-read to avoid double-decrement or contradictory events.
+      // Re-read to report the terminal status that actually won.
       log.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -1140,7 +1130,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
         reason: 'agent_heartbeat_stale',
         poll_attempts: pollState.attempts,
       }, correlation);
-      await decrementConcurrency(userId);
     } else {
       // Transition failed — re-read task to determine actual state.
       // If already terminal the block below will handle TTL + concurrency.
@@ -1151,10 +1140,9 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
           final_status: reread.status,
           poll_attempts: pollState.attempts,
         }, correlation);
-        await decrementConcurrency(userId);
       } else {
-        log.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { status: reread.status });
-        await decrementConcurrency(userId);
+        log.warn('Heartbeat path: task in unexpected state after failed transition, keeping its reservation until terminal', { status: reread.status });
+        throw new Error(`Heartbeat finalization left task ${taskId} active in ${reread.status}`);
       }
     }
     return;
@@ -1221,15 +1209,14 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
       final_status: currentStatus,
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
-  // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
-  // window closes, terminate the task through an allowed transition: approval
-  // waits permit FAILED, not TIMED_OUT, and reaching the execution limit is not
-  // a human denial. The stranded-approval reconciler remains a secondary
-  // safety net for tasks the orchestrator already lost track of.
+  // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll window
+  // closes, terminate through an allowed transition: AWAITING_APPROVAL permits
+  // FAILED, not TIMED_OUT. The previous TIMED_OUT attempt for an approval wait
+  // was rejected by VALID_TRANSITIONS, left the task active, and still freed
+  // its seat.
   if (
     currentStatus === TaskStatus.RUNNING
     || currentStatus === TaskStatus.FINALIZING
@@ -1245,8 +1232,14 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
           : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
-      // Task may have transitioned concurrently — re-read and accept
+      // Accept a committed terminal winner; otherwise retry finalization.
       log.warn('Finalization transition failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
+      const winner = await loadTask(taskId, true);
+      if (!TERMINAL_STATUSES.includes(winner.status)) throw err;
+      await emitTaskEvent(taskId, `task_${winner.status.toLowerCase()}`, {
+        final_status: winner.status, poll_attempts: pollState.attempts,
+      }, correlation);
+      return;
     }
     await emitTaskEvent(taskId, terminalStatus === TaskStatus.FAILED ? 'task_failed' : 'task_timed_out', {
       reason: currentStatus === TaskStatus.AWAITING_APPROVAL
@@ -1254,7 +1247,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
         : 'poll_timeout',
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
@@ -1268,18 +1260,23 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
       });
     } catch (err) {
       log.warn('Finalization transition from HYDRATING failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
+      const winner = await loadTask(taskId, true);
+      if (!TERMINAL_STATUSES.includes(winner.status)) throw err;
+      await emitTaskEvent(taskId, `task_${winner.status.toLowerCase()}`, {
+        final_status: winner.status, poll_attempts: pollState.attempts,
+      }, correlation);
+      return;
     }
     await emitTaskEvent(taskId, 'task_failed', {
       reason: 'session_never_started',
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
-  // Unexpected state — log and release concurrency
+  // Unexpected active state — retain its reservation until terminal.
   log.error('Unexpected task state during finalization', { status: currentStatus });
-  await decrementConcurrency(userId);
+  throw new Error(`Cannot finalize task ${taskId} in ${currentStatus}`);
 }
 
 /**
@@ -1335,7 +1332,7 @@ export async function queueTask(task: TaskRecord): Promise<boolean> {
  * @param fromStatus - the current status.
  * @param errorMessage - the error reason.
  * @param userId - the user who owns the task.
- * @param releaseConcurrency - whether to decrement the concurrency counter.
+ * @param releaseConcurrency - whether to release this task's held reservation.
  * @param repo - optional target repo (`owner/repo`) for the correlation
  *   envelope; omit for repo-less workflows.
  */
@@ -1359,41 +1356,18 @@ export async function failTask(
     log.warn('Failed to transition task to FAILED', {
       error: err instanceof Error ? err.message : String(err),
     });
+    // Only a committed terminal state may release; an active task keeps its seat.
+    const current = await loadTask(taskId, true);
+    if (!TERMINAL_STATUSES.includes(current.status)) throw err;
   }
-  // Only emit / release concurrency after a successful transition. Callers such as
-  // orchestrate-task rethrow after failTask; Durable Execution retries the step and
-  // would otherwise re-run emit + decrement while the task is already FAILED.
-  if (transitioned) {
-    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
-    if (releaseConcurrency) {
-      await decrementConcurrency(userId);
-    }
-  }
-}
-
-/**
- * Decrement the user's concurrency counter (best-effort).
- * @param userId - the user ID.
- */
-async function decrementConcurrency(userId: string): Promise<void> {
+  // A replay may find the FAILED write already committed. Events remain
+  // transition-owned; releasing the marker-guarded reservation is safe to repeat.
   try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: userId },
-      UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
-      ConditionExpression: 'active_count > :zero',
-      ExpressionAttributeValues: {
-        ':one': 1,
-        ':zero': 0,
-        ':now': new Date().toISOString(),
-      },
-    }));
-  } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
-      logger.info('Concurrency counter already at zero, nothing to decrement', { user_id: userId });
-    } else {
-      logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
+    if (transitioned) {
+      await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
     }
+  } finally {
+    if (releaseConcurrency) await releaseTaskSlot(taskId, userId);
   }
 }
 

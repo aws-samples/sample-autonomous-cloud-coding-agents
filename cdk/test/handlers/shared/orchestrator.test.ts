@@ -33,6 +33,12 @@ jest.mock('@aws-sdk/client-s3', () => ({ S3Client: jest.fn(() => ({ send: jest.f
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), child: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 
+const mockReleaseTaskSlot = jest.fn().mockResolvedValue(undefined);
+jest.mock('../../../src/handlers/shared/task-concurrency', () => ({
+  acquireTaskSlot: jest.fn(),
+  releaseTaskSlot: (...args: unknown[]) => mockReleaseTaskSlot(...args),
+}));
+
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'Concurrency';
@@ -74,10 +80,9 @@ function primeReread(status: string): void {
     },
   } : {}));
 }
-/** Finalization returns the user's concurrency slot through the counter table. */
-function concurrencyDecrements() {
-  return commandsOfType('Update').filter(command =>
-    String(command.input.UpdateExpression).includes('active_count = active_count - :one'));
+/** Finalization returns the task's reservation through releaseTaskSlot (exactly once, #1003). */
+function slotReleases(): unknown[][] {
+  return mockReleaseTaskSlot.mock.calls;
 }
 function finish(substrate: SessionStatus, polledStatus = TaskStatus.RUNNING) {
   return finalizeTask('TASK001', {
@@ -218,12 +223,12 @@ describe('MicroVM terminal finalization', () => {
       primeReread(status);
       await finish({ status: 'completed' });
       expect(commandsOfType('Get')[0].input.ConsistentRead).toBe(true);
-      // Terminal TTL stamp plus the concurrency decrement; no status transition.
-      expect(commandsOfType('Update')).toHaveLength(2);
+      // Terminal TTL stamp only (the reservation goes back through releaseTaskSlot); no status transition.
+      expect(commandsOfType('Update')).toHaveLength(1);
       expect(commandsOfType('Update').some(command =>
         String(command.input.ConditionExpression ?? '').includes(':fromStatus'))).toBe(false);
       expect((commandsOfType('Put')[0].input.Item as Record<string, unknown>).event_type).toBe(`task_${status.toLowerCase()}`);
-      expect(concurrencyDecrements()).toHaveLength(1);
+      expect(slotReleases()).toHaveLength(1);
     },
   );
 
@@ -237,7 +242,6 @@ describe('MicroVM terminal finalization', () => {
       'MICROVM_SUBSTRATE_TERMINATED: MicroVM substrate terminated before the agent wrote a terminal status: host fault (hypervisor evicted the guest)',
     );
     expect(classifyError(String(values[':attr_error_message']))?.retryable).toBe(true);
-    expect(concurrencyDecrements()).toHaveLength(1);
-    expect(concurrencyDecrements()[0].input.Key).toEqual({ user_id: 'user-1' });
+    expect(slotReleases()).toEqual([['TASK001', 'user-1']]);
   });
 });
