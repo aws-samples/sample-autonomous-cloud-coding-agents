@@ -49,6 +49,8 @@ export interface ApprovalNotification {
   readonly marker: string;
   /** When a pending request is denied unanswered (ISO), if it has a timeout. */
   readonly deadline?: string;
+  /** The soft-deny rules a pending request matched (for an approve-for-this-task choice). */
+  readonly ruleIds?: readonly string[];
 }
 
 /** Where a notice goes. A Linear agent session answers with buttons, not a comment reply. */
@@ -246,6 +248,8 @@ export async function loadApprovalNotification(
     userId: task.user_id,
     marker,
     ...(deadline && { deadline }),
+    ...(status === 'PENDING' && Array.isArray(row.matching_rule_ids)
+      && { ruleIds: row.matching_rule_ids.filter((id: unknown): id is string => typeof id === 'string') }),
   };
 }
 

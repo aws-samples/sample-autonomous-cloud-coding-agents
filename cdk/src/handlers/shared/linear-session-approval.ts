@@ -32,13 +32,29 @@
 
 import { approvalNotificationMarkdown, type ApprovalNotification } from './approval-notifications';
 import type { AgentActivityContent } from './linear-agent-session';
-import type { LinearApprovalReply } from './linear-approval-thread';
+import { parseLinearApprovalReply, type LinearApprovalReply } from './linear-approval-thread';
 
 /** The buttons. Their values are what the session sends back as the prompt, and what the reply parser reads. */
 export const SESSION_APPROVAL_OPTIONS: ReadonlyArray<{ readonly label: string; readonly value: string }> = [
   { label: 'Approve', value: 'approve' },
   { label: 'Deny', value: 'deny' },
 ];
+
+/** Shown only for a request that matched exactly one rule (see {@link sessionApprovalActivity}). */
+const APPROVE_FOR_TASK_OPTION = { label: 'Approve for this task', value: 'approve for this task' } as const;
+
+/** An answer from the session: approve once, approve the request's rule for the rest of the task, or deny. */
+export type SessionApprovalAnswer = LinearApprovalReply & { readonly wholeTask?: boolean };
+
+/**
+ * A reply that answers an approval request, or null. ``approve for this task`` (the
+ * button's value, or typed) approves the request's rule for the rest of the task.
+ * @param text - the reply.
+ */
+export function parseSessionApprovalAnswer(text: string): SessionApprovalAnswer | null {
+  if (/^approve\s+for\s+(?:this|the)\s+(?:whole\s+)?task[.!]?$/i.test(text.trim())) return { decision: 'approve', wholeTask: true };
+  return parseLinearApprovalReply(text);
+}
 
 /** One activity plus the options ``emitAgentActivity`` takes. */
 export interface SessionApprovalActivity {
@@ -92,9 +108,17 @@ export function waitingOnYouLine(deadline: string | undefined, now: Date = new D
     : '**Waiting on you.** The agent is paused until you answer.';
 }
 
-/** The buttons, as ``emitAgentActivity`` options. */
-function choice(body: string): SessionApprovalActivity {
-  return { content: { type: 'elicitation', body }, signal: 'select', signalMetadata: { options: SESSION_APPROVAL_OPTIONS } };
+/**
+ * The buttons, as ``emitAgentActivity`` options. "Approve for this task" is offered
+ * only when the request matched exactly one rule: the agent treats a rule approval
+ * as covering any later request that rule is among, so approving one of several
+ * matched rules would also wave through requests the other rules raise.
+ */
+function choice(body: string, ruleIds?: readonly string[]): SessionApprovalActivity {
+  const options = ruleIds?.length === 1
+    ? [SESSION_APPROVAL_OPTIONS[0], APPROVE_FOR_TASK_OPTION, SESSION_APPROVAL_OPTIONS[1]]
+    : SESSION_APPROVAL_OPTIONS;
+  return { content: { type: 'elicitation', body }, signal: 'select', signalMetadata: { options } };
 }
 
 /**
@@ -108,7 +132,9 @@ export function sessionApprovalActivity(
   eventType: string, notification: ApprovalNotification, now: Date = new Date(),
 ): SessionApprovalActivity {
   const body = approvalNotificationMarkdown(notification);
-  if (eventType === 'approval_requested') return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`);
+  if (eventType === 'approval_requested') {
+    return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`, notification.ruleIds);
+  }
   return { content: { type: 'thought', body } };
 }
 
@@ -136,8 +162,17 @@ const HTTP_TOO_MANY = 429;
  * @param reply - the parsed answer.
  * @param result - the decision handler's result.
  */
-export function sessionDecisionNote(reply: LinearApprovalReply, result: DecisionResult): string {
+export function sessionDecisionNote(
+  reply: SessionApprovalAnswer, result: DecisionResult, ruleScope?: string,
+): string {
   if (result.statusCode >= HTTP_OK_MIN && result.statusCode < HTTP_OK_END) {
+    if (reply.wholeTask && ruleScope) {
+      return `Approved for the rest of this task: the agent won't ask again for \`${ruleScope}\`.`;
+    }
+    if (reply.wholeTask) {
+      return 'Approved this action only: it matched more than one rule, so I can\'t approve it for the whole task. '
+        + 'The agent continues.';
+    }
     return reply.decision === 'approve'
       ? 'Approved. The agent continues with this action.'
       : `Denied. The agent carries on without it${reply.reason ? ` (your reason: ${reply.reason})` : ''}.`;

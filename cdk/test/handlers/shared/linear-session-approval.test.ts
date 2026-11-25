@@ -20,6 +20,7 @@
 import type { ApprovalNotification } from '../../../src/handlers/shared/approval-notifications';
 import {
   formatDeadline,
+  parseSessionApprovalAnswer,
   repeatedApprovalChoice,
   SESSION_APPROVAL_OPTIONS,
   sessionApprovalActivity,
@@ -83,4 +84,25 @@ test('the note after a decision says what happened', () => {
   expect(sessionDecisionNote({ decision: 'approve' }, { statusCode: 404 })).toContain('already answered or timed out');
   expect(sessionDecisionNote({ decision: 'deny' }, { statusCode: 429 })).toContain('Too many');
   expect(sessionDecisionNote({ decision: 'deny' }, { statusCode: 500 })).toContain('bgagent approve');
+});
+
+test('"Approve for this task" is offered only for a request that matched exactly one rule', () => {
+  const labels = (ruleIds?: string[]) => (sessionApprovalActivity('approval_requested', { ...notice(), ...(ruleIds && { ruleIds }) }, NOW)
+    .signalMetadata as { options: Array<{ label: string }> }).options.map((o) => o.label);
+  expect(labels(['write_env_files'])).toEqual(['Approve', 'Approve for this task', 'Deny']);
+  expect(labels(['force_push_any', 'force_push_main'])).toEqual(['Approve', 'Deny']);
+  expect(labels()).toEqual(['Approve', 'Deny']);
+});
+
+test('the whole-task answer parses from the button value or typed', () => {
+  expect(parseSessionApprovalAnswer('approve for this task')).toEqual({ decision: 'approve', wholeTask: true });
+  expect(parseSessionApprovalAnswer('Approve for the whole task.')).toEqual({ decision: 'approve', wholeTask: true });
+  expect(parseSessionApprovalAnswer('approve')).toEqual({ decision: 'approve' });
+  expect(parseSessionApprovalAnswer('approve for this task and also rename the file')).toBeNull();
+});
+
+test('the note says what a whole-task approval covered', () => {
+  expect(sessionDecisionNote({ decision: 'approve', wholeTask: true }, { statusCode: 202 }, 'rule:write_env_files'))
+    .toBe('Approved for the rest of this task: the agent won\'t ask again for `rule:write_env_files`.');
+  expect(sessionDecisionNote({ decision: 'approve', wholeTask: true }, { statusCode: 202 })).toMatch(/^Approved this action only/);
 });

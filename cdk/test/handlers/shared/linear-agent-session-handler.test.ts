@@ -164,6 +164,7 @@ function ddbWith(opts: { linked?: boolean; mapping?: Record<string, unknown> | n
       const key = (cmd.input as unknown as { Key: { task_id: string } }).Key.task_id;
       return { Item: taskRecords.get(key) };
     }
+    if (cmd.input.TableName === 'Approvals') return approvalRow ? { Item: approvalRow } : {};
     if (cmd.input.TableName === 'LinearDedup' && (cmd as unknown as { _type: string })._type === 'Get') {
       return sessionPointer ? { Item: { task_id: sessionPointer, ttl: Math.floor(Date.now() / 1000) + 600 } } : {};
     }
@@ -173,6 +174,8 @@ function ddbWith(opts: { linked?: boolean; mapping?: Record<string, unknown> | n
 
 /** Task id the (strongly consistent) session → task pointer names, if any. */
 let sessionPointer: string | null = null;
+/** The approval request row the handler reads for a whole-task approval. */
+let approvalRow: Record<string, unknown> | null = null;
 
 /** Commands sent to one table, by type. */
 function sent(table: string, type: string): Array<{ input: Record<string, any> }> {
@@ -218,6 +221,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   taskRecords.clear();
   sessionPointer = null;
+  approvalRow = null;
   resetSessionWorkspaceCacheForTests();
   stopTaskComputeMock.mockResolvedValue(undefined);
   screenWithGuardrailMock.mockResolvedValue({ action: 'NONE' });
@@ -863,6 +867,22 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(recordApprovalMock).not.toHaveBeenCalled();
     expect(submitNudgeMock).not.toHaveBeenCalled();
     expect(lastEmit()[2].type).toBe('elicitation');
+  });
+
+  test('"Approve for this task" approves the request\'s one rule for the rest of the task', async () => {
+    waiting();
+    approvalRow = { task_id: 't-1', request_id: 'req-1', matching_rule_ids: ['write_env_files'] };
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve for this task' } }));
+    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: 'req-1', decision: 'approve', scope: 'rule:write_env_files' });
+    expect(String(lastEmit()[2].body)).toContain('won\'t ask again for `rule:write_env_files`');
+  });
+
+  test('a whole-task answer to a request that matched several rules approves this action only', async () => {
+    waiting();
+    approvalRow = { task_id: 't-1', request_id: 'req-1', matching_rule_ids: ['force_push_any', 'force_push_main'] };
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve for this task' } }));
+    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: 'req-1', decision: 'approve' });
+    expect(String(lastEmit()[2].body)).toMatch(/^Approved this action only/);
   });
 
   test('a late Approve after the task finished starts nothing', async () => {

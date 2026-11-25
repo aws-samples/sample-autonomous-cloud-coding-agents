@@ -38,7 +38,6 @@ import {
   type AgentSessionRequest,
   type LinearAgentSessionEvent,
 } from './linear-agent-session-event';
-import { parseLinearApprovalReply } from './linear-approval-thread';
 import {
   lookupLinearPlatformUser,
   lookupLinearProjectMapping,
@@ -50,6 +49,7 @@ import {
 import { resolveLinearOauthToken, type ResolvedLinearToken } from './linear-oauth-resolver';
 import {
   NOTHING_TO_APPROVE_MESSAGE,
+  parseSessionApprovalAnswer,
   repeatedApprovalChoice,
   sessionDecisionNote,
   type SessionApprovalActivity,
@@ -203,7 +203,7 @@ async function respondToAgentSession(
   }
   // A late "approve" / "deny" (after its request timed out, or in the wrong session)
   // is an answer to nothing. Taken as a prompt it would start new work.
-  if (parseLinearApprovalReply(request.directive)) {
+  if (parseSessionApprovalAnswer(request.directive)) {
     await emit({ type: 'response', body: NOTHING_TO_APPROVE_MESSAGE });
     return;
   }
@@ -445,7 +445,7 @@ async function steerRunningTask(
     await decideSessionApproval(request, task, openRequest, platformUserId, emit);
     return;
   }
-  if (parseLinearApprovalReply(request.directive)) {
+  if (parseSessionApprovalAnswer(request.directive)) {
     await reply(NOTHING_TO_APPROVE_MESSAGE);
     return;
   }
@@ -509,7 +509,7 @@ async function decideSessionApproval(
     const activity = repeatedApprovalChoice(lead);
     await emit(activity.content, false, activity);
   };
-  const answer = parseLinearApprovalReply(request.directive);
+  const answer = parseSessionApprovalAnswer(request.directive);
   if (!answer) {
     await again('That isn\'t an answer to the open approval request, so I haven\'t passed it to the agent.');
     return;
@@ -527,6 +527,7 @@ async function decideSessionApproval(
   const record = answer.decision === 'approve'
     ? (await import('../approve-task.js')).recordApprovalForUser
     : (await import('../deny-task.js')).recordDenialForUser;
+  const ruleScope = answer.wholeTask ? await singleRuleScope(task.task_id, requestId) : undefined;
   const result = await record({
     userId: platformUserId,
     taskId: task.task_id,
@@ -534,6 +535,7 @@ async function decideSessionApproval(
     body: JSON.stringify({
       request_id: requestId,
       decision: answer.decision,
+      ...(ruleScope && { scope: ruleScope }),
       ...(answer.decision === 'deny' && answer.reason ? { reason: answer.reason } : {}),
     }),
   });
@@ -542,9 +544,22 @@ async function decideSessionApproval(
     task_id: task.task_id,
     request_id: requestId,
     decision: answer.decision,
+    scope: ruleScope ?? 'this_call',
     status_code: result.statusCode,
   });
-  await emit({ type: 'thought', body: sessionDecisionNote(answer, result) });
+  await emit({ type: 'thought', body: sessionDecisionNote(answer, result, ruleScope) });
+}
+
+/**
+ * ``rule:<id>`` when the request matched exactly one rule, else undefined (approve
+ * this call only). Read consistently from the request row, never from the reply.
+ */
+async function singleRuleScope(taskId: string, requestId: string): Promise<string | undefined> {
+  const { Item } = await ddb.send(new GetCommand({
+    TableName: TASK_APPROVALS_TABLE_NAME, Key: { task_id: taskId, request_id: requestId }, ConsistentRead: true,
+  }));
+  const ids: unknown[] = Array.isArray(Item?.matching_rule_ids) ? Item.matching_rule_ids : [];
+  return ids.length === 1 && typeof ids[0] === 'string' ? `rule:${ids[0]}` : undefined;
 }
 
 /** The prior task as read from the base table (strongly consistent). */
