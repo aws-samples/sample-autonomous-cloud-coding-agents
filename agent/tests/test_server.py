@@ -1921,6 +1921,7 @@ class TestPlatformConfigContract:
             "task_table_name": "TASK_TABLE_NAME",
             "task_events_table_name": "TASK_EVENTS_TABLE_NAME",
             "task_approvals_table_name": "TASK_APPROVALS_TABLE_NAME",
+            "approval_requests_api_url": "APPROVAL_REQUESTS_API_URL",
             "nudges_table_name": "NUDGES_TABLE_NAME",
             "log_group_name": "LOG_GROUP_NAME",
             "artifacts_bucket_name": "ARTIFACTS_BUCKET_NAME",
@@ -1943,12 +1944,13 @@ class TestPlatformConfigContract:
             "linear_workload_identity_name": "LINEAR_WORKLOAD_IDENTITY_NAME",
         }
 
-    def test_required_subset_is_exactly_the_four_run_blocking_keys(self):
+    def test_required_subset_is_exactly_the_run_blocking_keys(self):
         assert (
             frozenset(
                 {
                     "task_table_name",
                     "task_events_table_name",
+                    "approval_requests_api_url",
                     "github_token_secret_arn",
                     "agent_session_role_arn",
                 }

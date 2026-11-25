@@ -113,11 +113,16 @@ class TestResumeAndTimeout:
         timed_out = task_state.best_effort_update_approval_status(
             running_task, pending_request, "TIMED_OUT"
         )
-        late_denial = task_state.best_effort_update_approval_status(
-            running_task, pending_request, "DENIED", reason="too late"
+        second_timeout = task_state.best_effort_update_approval_status(
+            running_task, pending_request, "TIMED_OUT"
         )
+        # A human decision is never the worker's to record (#1000).
+        with pytest.raises(ValueError, match="only non-human timeouts"):
+            task_state.best_effort_update_approval_status(
+                running_task, pending_request, "DENIED", reason="too late"
+            )
 
-        assert (timed_out, late_denial) == (True, False)
+        assert (timed_out, second_timeout) == (True, False)
         row = task_state.get_approval_row(running_task, pending_request)
         assert row is not None
         assert row["status"] == "TIMED_OUT"
