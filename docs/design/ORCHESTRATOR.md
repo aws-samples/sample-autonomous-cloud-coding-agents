@@ -466,3 +466,14 @@ Append-only audit log. See [OBSERVABILITY.md](./OBSERVABILITY.md).
 
 Increment: `SET active_count = active_count + 1` with `ConditionExpression: active_count < :max`.
 Decrement: `SET active_count = active_count - 1` with `ConditionExpression: active_count > 0`.
+
+### Orchestration table
+
+Backs the orchestration of an epic's child issues ([SURFACE_AGNOSTIC_ORCHESTRATION.md](./SURFACE_AGNOSTIC_ORCHESTRATION.md)), not the task lifecycle above: one row per child issue, keyed by `orchestration_id` (PK) and `sub_issue_id` (SK), plus one `#meta` row per epic. The row type is `OrchestrationChildRow` in `cdk/src/handlers/shared/orchestration-store.ts`. The fields the reconciler decides on:
+
+| Field | Type | Description |
+|---|---|---|
+| `child_status` | String | `blocked`, `ready`, `releasing`, `released`, `succeeded`, `failed` or `skipped` |
+| `child_task_id` | String? | Task of the current run, key of `ChildTaskIndex`; a retry keeps it until the next release |
+| `failure_reason` | String? | Why the last start was refused, when no task exists for that attempt |
+| `settled_task_id` | String? | Task whose failure has already moved the issue back and set ❌. Claimed with a conditional write before the tracker calls, so a later write on that task record, or a retry of its stream record, leaves the issue where a person put it |

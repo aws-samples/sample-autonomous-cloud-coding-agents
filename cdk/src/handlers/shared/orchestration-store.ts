@@ -125,6 +125,7 @@ export interface OrchestrationChildRow {
    * normal case (a released child's reason comes from its task record).
    */
   readonly failure_reason?: string;
+  readonly settled_task_id?: string;
   readonly created_at: string;
   readonly updated_at: string;
   /** TTL epoch (seconds) for eventual cleanup. */

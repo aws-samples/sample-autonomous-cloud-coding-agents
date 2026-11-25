@@ -2232,14 +2232,13 @@ function orchestrationStore(
     if (!conditionHolds(row, input.ConditionExpression, vals)) {
       throw Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' });
     }
-    const old = { ...row };
     const expression = String(input.UpdateExpression);
     for (const assignment of /SET (.+?)(?= REMOVE |$)/.exec(expression)?.[1].split(', ') ?? []) {
       const [attr, value] = assignment.split(' = ');
       row[attr] = vals[value];
     }
     for (const attr of /REMOVE (.+?)(?= SET |$)/.exec(expression)?.[1].split(', ') ?? []) delete row[attr];
-    return input.ReturnValues === 'ALL_OLD' ? { Attributes: old } : {};
+    return {};
   });
 
   return {
@@ -2273,6 +2272,10 @@ describe('orchestration-reconciler handler — an event of a task that no longer
   });
 
   /** A later write to A's first task, which ended FAILED. */
+  const sequencedFailure = () => ({
+    Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', sequenceNumber: 'seq-TA' })],
+  }) as never;
+  const isClaim = (cmd: StoreCommand) => String(cmd.input.UpdateExpression).includes('settled_task_id');
   const lateFailure = () => ({
     Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })],
   }) as never;
@@ -2417,15 +2420,48 @@ describe('orchestration-reconciler handler — an event of a task that no longer
     expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
   });
 
-  test('a row released to a new task while the failure settled is not marked for the old one', async () => {
+  test('a throttled claim fails the record before the issue is touched, and the retry settles it once', async () => {
     const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' }]);
-    revertIssueToNotStartedMock.mockImplementationOnce(async () => {
-      Object.assign(store.row('A'), { child_status: 'released', child_task_id: 'T2' });
-      return true;
+    store.before(isClaim, () => {
+      throw Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' });
     });
+    const first = await handler(sequencedFailure());
+
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: 'seq-TA' }]);
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+
+    await handler(lateFailure());
+
+    expect(store.row('A').settled_task_id).toBe('TA');
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a delivery that fails after the settle is retried without settling the issue again', async () => {
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' }]);
+    store.before(
+      (cmd) => cmd._type === 'Query' && store.row('A').settled_task_id === 'TA',
+      () => {
+        throw Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' });
+      },
+    );
+    const first = await handler(sequencedFailure());
+    await handler(lateFailure());
+
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: 'seq-TA' }]);
+    expect(revertIssueToNotStartedMock).toHaveBeenCalledTimes(1);
+    expect(swapIssueReactionMock.mock.calls.filter(([, id, emoji]) => id === 'A' && emoji === 'x')).toHaveLength(1);
+  });
+
+  test.each([
+    ['released to a new task', { child_status: 'released', child_task_id: 'T2' }],
+    ['repaired', { child_status: 'succeeded' }],
+  ])('a row %s between the verdict and the claim keeps its issue as it is', async (_name, change) => {
+    const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' }]);
+    store.before(isClaim, () => Object.assign(store.row('A'), change));
     await handler(lateFailure());
 
     expect(store.row('A').settled_task_id).toBeUndefined();
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
   });
 
   test('a dependent that was released since the rows were read is not skipped; the rest of the failure still applies', async () => {
