@@ -48,7 +48,7 @@ Deploy and update with `bgagent setup`. It reads the stack's deployed features, 
    - **Never pass `--accept-data-loss`.** If setup refuses because the change would delete state-bearing resources (tables, secrets, buckets), stop. Tell the user what would be removed, and ask them to run `node lib/bin/bgagent.js setup` themselves in a terminal, where they confirm by typing the stack name.
 3. To change code without changing features, run the same command with the stack's current features.
 
-Use `mise //cdk:deploy -- --require-approval never` only when the user asks for it explicitly (for example, to reproduce CI). It applies `abca.deployment.json` if that file exists, and otherwise deploys every optional feature.
+Use `mise //cdk:deploy -- --require-approval never` only when the user asks for it explicitly. It applies `abca.deployment.json` if that file exists, and otherwise deploys every optional feature.
 
 After a successful deployment, retrieve and display stack outputs:
 ```bash

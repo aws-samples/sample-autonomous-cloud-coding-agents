@@ -153,8 +153,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: mise run security:gh-actions
 
-      # Nothing else builds the agent image before merge (deploy and integ build
-      # it afterwards), so a broken Dockerfile or lockfile used to pass every
+      # Nothing else builds the agent image before merge (security.yml builds it
+      # only weekly), so a broken Dockerfile or lockfile used to pass every
       # check (#235). Build it here when a file that defines the image differs
       # between the base commit and this checkout: the Dockerfile, .dockerignore
       # and the four files the Dockerfile copies by name. Of the directories it

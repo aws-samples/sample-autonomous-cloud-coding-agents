@@ -5,15 +5,7 @@ on:
   # report inside the merge queue. Without this trigger, marking `build` a required
   # check would deadlock the queue (the check never reports). See issue #327.
   merge_group: {}
-  workflow_dispatch:
-    inputs:
-      deploy:
-        description: "Deploy after build (- = no deploy)"
-        type: choice
-        default: "-"
-        options:
-          - "-"
-          - agentcore
+  workflow_dispatch: {}
 permissions:
   actions: none
   attestations: none
@@ -58,6 +50,9 @@ jobs:
             && 'ubuntu-latest-4-cores')
         || 'ubuntu-latest'
       }}
+    # The one-value matrix names this job `build (agentcore)`, the check that the
+    # ruleset of `main` requires. Without it the check is `build`: the required
+    # one never reports and nothing merges.
     strategy:
       matrix:
         compute_type: [agentcore]
@@ -96,168 +91,6 @@ jobs:
         with:
           fetch-depth: 1  # shallow clone
           persist-credentials: false
-      - name: Resolve github:* tag values
-        id: tags
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_SHA: ${{ github.sha }}
-          GH_REF_NAME: ${{ github.ref_name }}
-          GH_REF_TYPE: ${{ github.ref_type }}
-          GH_HEAD_REF: ${{ github.head_ref }}
-          GH_BASE_REF: ${{ github.base_ref }}
-          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-          MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
-          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          case "$EVENT_NAME" in
-            merge_group)
-              echo "sha=${MG_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${MG_BASE_REF}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=branch" >> "$GITHUB_OUTPUT"
-              echo "head-ref=${MG_HEAD_REF}" >> "$GITHUB_OUTPUT"
-              echo "base-ref=${MG_BASE_REF}" >> "$GITHUB_OUTPUT"
-              PR_NUM=$(echo "$MG_HEAD_REF" | grep -oP 'pr-\K[0-9]+' || echo "")
-              echo "pr-number=${PR_NUM}" >> "$GITHUB_OUTPUT"
-              ;;
-            pull_request|pull_request_target)
-              echo "sha=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${GH_HEAD_REF}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=branch" >> "$GITHUB_OUTPUT"
-              echo "head-ref=${GH_HEAD_REF}" >> "$GITHUB_OUTPUT"
-              echo "base-ref=${GH_BASE_REF}" >> "$GITHUB_OUTPUT"
-              echo "pr-number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-              ;;
-            push)
-              echo "sha=${GH_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${GH_REF_NAME}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=${GH_REF_TYPE}" >> "$GITHUB_OUTPUT"
-              echo "head-ref=" >> "$GITHUB_OUTPUT"
-              echo "base-ref=" >> "$GITHUB_OUTPUT"
-              echo "pr-number=" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "sha=${GH_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${GH_REF_NAME}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=${GH_REF_TYPE}" >> "$GITHUB_OUTPUT"
-              echo "head-ref=" >> "$GITHUB_OUTPUT"
-              echo "base-ref=" >> "$GITHUB_OUTPUT"
-              echo "pr-number=" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-      - name: Resolve stack name
-        id: naming
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          COMPUTE_TYPE: ${{ matrix.compute_type }}
-          GH_SHA: ${{ github.sha }}
-          GH_REF_NAME: ${{ github.ref_name }}
-          PR_NUMBER: ${{ steps.tags.outputs.pr-number }}
-        run: |
-          sanitize() {
-            local result
-            result=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr '/_.' '-' | sed 's/[^a-z0-9-]//g; s/--*/-/g' | cut -c1-60 | sed 's/^-*//; s/-$//')
-            # CloudFormation requires stack names to start with a letter
-            if [[ -z "$result" || ! "$result" =~ ^[a-z] ]]; then
-              result="s-${result}"
-            fi
-            echo "$result"
-          }
-
-          case "$EVENT_NAME" in
-            push)
-              REF=$(sanitize "$GH_REF_NAME")
-              STACK_NAME="${REF}-${COMPUTE_TYPE}"
-              ;;
-            pull_request|pull_request_target)
-              if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-                echo "::error::Invalid PR number: '$PR_NUMBER'"
-                exit 1
-              fi
-              STACK_NAME="pr${PR_NUMBER}-${COMPUTE_TYPE}"
-              ;;
-            merge_group)
-              if [[ -n "$PR_NUMBER" && "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-                STACK_NAME="mg${PR_NUMBER}-${COMPUTE_TYPE}"
-              else
-                STACK_NAME="${COMPUTE_TYPE}-${GH_SHA:0:7}"
-              fi
-              ;;
-            workflow_dispatch)
-              REF=$(sanitize "$GH_REF_NAME")
-              STACK_NAME="${REF}-${COMPUTE_TYPE}"
-              ;;
-            *)
-              STACK_NAME="${COMPUTE_TYPE}-${GH_SHA:0:7}"
-              ;;
-          esac
-
-          echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
-          echo "Stack name: $STACK_NAME"
-      - name: Generate CDK context
-        env:
-          COMPUTE_TYPE: ${{ matrix.compute_type }}
-          STACK_NAME: ${{ steps.naming.outputs.stack_name }}
-          TAG_SHA: ${{ steps.tags.outputs.sha }}
-          TAG_REF: ${{ steps.tags.outputs.ref }}
-          TAG_REF_TYPE: ${{ steps.tags.outputs.ref-type }}
-          TAG_ACTOR: ${{ github.actor }}
-          TAG_HEAD_REF: ${{ steps.tags.outputs.head-ref }}
-          TAG_BASE_REF: ${{ steps.tags.outputs.base-ref }}
-          TAG_PR_NUMBER: ${{ steps.tags.outputs.pr-number }}
-          TAG_RUN_ID: ${{ github.run_id }}
-          TAG_RUN_ATTEMPT: ${{ github.run_attempt }}
-          TAG_EVENT: ${{ github.event_name }}
-          TAG_WORKFLOW: ${{ github.workflow }}
-          TAG_REPOSITORY: ${{ github.repository }}
-          # AgentCore-supported AZ pin for the deployed stack. The assembly this
-          # step feeds is synthesized WITHOUT credentials (env-agnostic), so
-          # auto-pin cannot run and this override is the only way the pipeline
-          # can keep the Runtime ENIs out of unsupported zones. Set the repo/env
-          # variable AGENTCORE_AVAILABILITY_ZONES to a JSON array of zone NAMES
-          # whose zone IDs are AgentCore-supported in the deploy account, e.g.
-          # ["us-east-1b","us-east-1c"]. Unset => not pinned (synth warns).
-          # See docs/guides/DEPLOYMENT_GUIDE.md "AgentCore unsupported Availability Zones".
-          AGENTCORE_AZS: ${{ vars.AGENTCORE_AVAILABILITY_ZONES }}
-        run: |
-          jq -n \
-            --arg compute_type "$COMPUTE_TYPE" \
-            --arg stackName "$STACK_NAME" \
-            --arg agentcore_azs "$AGENTCORE_AZS" \
-            --arg sha "$TAG_SHA" \
-            --arg ref "$TAG_REF" \
-            --arg ref_type "$TAG_REF_TYPE" \
-            --arg actor "$TAG_ACTOR" \
-            --arg head_ref "$TAG_HEAD_REF" \
-            --arg base_ref "$TAG_BASE_REF" \
-            --arg pr_number "$TAG_PR_NUMBER" \
-            --arg run_id "$TAG_RUN_ID" \
-            --arg run_attempt "$TAG_RUN_ATTEMPT" \
-            --arg event "$TAG_EVENT" \
-            --arg workflow "$TAG_WORKFLOW" \
-            --arg repository "$TAG_REPOSITORY" \
-            '{
-              "compute_type": $compute_type,
-              "stackName": $stackName,
-              "github:sha": $sha,
-              "github:ref": $ref,
-              "github:ref-type": $ref_type,
-              "github:actor": $actor,
-              "github:head-ref": $head_ref,
-              "github:base-ref": $base_ref,
-              "github:pr-number": $pr_number,
-              "github:run-id": $run_id,
-              "github:run-attempt": $run_attempt,
-              "github:event": $event,
-              "github:workflow": $workflow,
-              "github:repository": $repository,
-              "github:clean": "true"
-            }
-            + (if $agentcore_azs == "" then {}
-               else {"agentcore:availabilityZones": ($agentcore_azs | fromjson)} end)' \
-            > cdk/cdk.context.json
-          cat cdk/cdk.context.json
       - name: Install mise
         uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
@@ -403,61 +236,6 @@ jobs:
           # every file that looks like coverage, e.g. contracts/coverage-thresholds.json.
           disable_search: true
           fail_ci_if_error: false
-      - name: Upload CDK artifact (${{ matrix.compute_type }})
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: cdk-${{ matrix.compute_type }}-out
-          path: |
-            cdk/cdk.out/
-            cdk/cdk.context.json
-      - name: Write deploy intent
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_REF_NAME: ${{ github.ref_name }}
-          DISPATCH_DEPLOY: ${{ inputs.deploy }}
-          COMPUTE_TYPE: ${{ matrix.compute_type }}
-          # Keep in sync with matrix.compute_type above, inputs.deploy.options,
-          # and deploy.yml ALLOWED_COMPUTE_TYPES
-          ALLOWED_COMPUTE_TYPES: "agentcore"
-        run: |
-          # exit (not return) — no recovery path; invalid dispatch input must abort the step
-          validate_compute_type() {
-            local type="$1"
-            for allowed in $ALLOWED_COMPUTE_TYPES; do
-              [[ "$type" == "$allowed" ]] && return 0
-            done
-            echo "::error::Invalid compute_type: '$type'. Allowed: $ALLOWED_COMPUTE_TYPES"
-            exit 1
-          }
-
-          case "$EVENT_NAME" in
-            push)
-              if [[ "$GH_REF_NAME" == "main" ]]; then
-                INTENT="$COMPUTE_TYPE"
-              else
-                INTENT="-"
-              fi
-              ;;
-            workflow_dispatch)
-              if [[ "$DISPATCH_DEPLOY" != "-" ]]; then
-                validate_compute_type "$DISPATCH_DEPLOY"
-              fi
-              INTENT="$DISPATCH_DEPLOY"
-              ;;
-            pull_request|pull_request_target)
-              INTENT="labels"
-              ;;
-            *)
-              INTENT="-"
-              ;;
-          esac
-          jq -n --arg deploy "$INTENT" '{"deploy":$deploy}' > deploy-intent.json
-          echo "Deploy intent: $INTENT"
-      - name: Upload deploy intent
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: deploy-intent
-          path: deploy-intent.json
       - name: Find mutations
         id: self_mutation
         run: |-

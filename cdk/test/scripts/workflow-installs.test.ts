@@ -39,16 +39,20 @@ const installs = (file: string): Install[] => fs.readFileSync(path.join(ROOT, fi
     return at < 0 ? [] : [{ file, command: line.slice(at) }];
   });
 
-const WORKFLOW_INSTALLS = fs.readdirSync(path.join(ROOT, WORKFLOWS))
+const WORKFLOW_FILES = fs.readdirSync(path.join(ROOT, WORKFLOWS))
   .filter((name) => /\.ya?ml$/.test(name))
   .sort()
-  .flatMap((name) => installs(`${WORKFLOWS}/${name}`));
+  .map((name) => `${WORKFLOWS}/${name}`);
+
+const WORKFLOW_INSTALLS = WORKFLOW_FILES.flatMap(installs);
 
 const MISE_INSTALLS = ['mise.toml', 'cdk/mise.toml', 'cli/mise.toml', 'docs/mise.toml', 'web/mise.toml'].flatMap(installs);
 
 describe('workflow steps that run `yarn install` themselves', () => {
+  // No workflow has such a step at present, so the rule is for the next one.
+  // The first assertion shows that the workflows were listed: without it the rule would pass on an empty list.
   test('pass --frozen-lockfile, the flag Yarn 1 reads, and nothing else', () => {
-    expect(WORKFLOW_INSTALLS).not.toHaveLength(0);
+    expect(WORKFLOW_FILES).toContain(BUILD);
     expect(WORKFLOW_INSTALLS.filter(({ command }) => command !== 'yarn install --frozen-lockfile')).toEqual([]);
   });
 });

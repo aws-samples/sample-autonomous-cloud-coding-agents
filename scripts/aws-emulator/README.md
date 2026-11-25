@@ -2,7 +2,7 @@
 
 This tier (ADR-013 Tier 2a) runs ABCA's real handler, CLI and agent code in the normal test runners, jest and pytest, with no SDK mock: the AWS SDK calls go to an [AWS Emulator](https://github.com/aws/aws-emulator) on loopback. It needs Docker and `curl`, and no AWS account.
 
-It is an advisory check: the [`emulator` workflow](../../.github/workflows/emulator.yml) runs it on every pull request and is not a required check. [ADR-013](../../docs/decisions/ADR-013-tiered-validation-pyramid.md) has the criteria for making it one. It does not replace the real-AWS integ smoke (`mise //cdk:integ`), which stays the authority for IAM, deployment and API Gateway wiring. The investigation behind the tier, with what was measured and what was not verified, is in [docs/research/aws-emulator-local-tests.md](../../docs/research/aws-emulator-local-tests.md).
+It is an advisory check: the [`emulator` workflow](../../.github/workflows/emulator.yml) runs it on every pull request and is not a required check. [ADR-013](../../docs/decisions/ADR-013-tiered-validation-pyramid.md) has the criteria for making it one. It does not show that a deployment works: IAM, CloudFormation and API Gateway wiring are exercised only by a deployment of the platform to AWS, and no test in this repository makes one. The investigation behind the tier, with what was measured and what was not verified, is in [docs/research/aws-emulator-local-tests.md](../../docs/research/aws-emulator-local-tests.md).
 
 ## Run it
 

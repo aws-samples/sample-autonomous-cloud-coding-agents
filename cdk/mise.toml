@@ -144,16 +144,6 @@ run = "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, re
 
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
-# The pipeline does not run this task. The deploy job of .github/workflows/deploy.yml runs
-# `npx cdk deploy` on the assembly that build.yml synthesized, so nothing listed here
-# happens there unless the workflow has a step of its own for it (#843):
-#   :clean:disk             local only: it deletes cdk.out, which the pipeline deploys.
-#   //web:bundle            done by the build: synth:quiet depends on it.
-#   preflight-bootstrap     not run by the pipeline (#127).
-#   preflight-log-delivery  reported, not applied: the diff job runs it with --check-only.
-# A new entry of `depends` or `run` needs the same decision.
-# test/scripts/deploy-workflow.test.ts fails until the entry is recorded there.
-#
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
 # several GB of working space, and uv/Docker caches accumulate across runs.
 # The operator console stack packages web/dist, so bundle it first.
@@ -214,22 +204,6 @@ run = "npx cdk destroy"
 description = "cdk diff (pass args after --)"
 depends = ["//web:bundle"]
 run = "npx cdk diff {{arg(name='cdkargs', var=true, required=false)}}"
-
-[tasks.integ]
-description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for the shared integ account."
-depends = [":compile"]
-run = [
-  "mkdir -p $TMPDIR",
-  # integ-runner checks snapshots before it deploys, and no option skips that (#569).
-  # A snapshot left by an earlier local run is compared for real, so the echo does not
-  # call the check meaningless. mise appends the arguments after `--` to the last
-  # command, so the echo stays ahead of integ-runner.
-  "echo 'integ: no snapshot is committed, so on a fresh checkout (every CI run) the snapshot check of integ-runner lists each test as NEW and counts it as failed. That is expected and is not a test failure: --force deploys and verifies every test regardless, and that run is reported under Test Results.'",
-  # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
-  # snapshot to diff against or update. --force re-runs the deploy-then-verify
-  # unconditionally, which is what we want in CI.
-  "npx integ-runner --language typescript --directory test/integ --force",
-]
 
 [tasks.bundle]
 description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at synth time)"
