@@ -155,17 +155,17 @@ describe('config', () => {
     test('a failed save keeps the old credentials and leaves no temporary file', () => {
       saveCredentials(before);
       jest.mocked(fs.renameSync).mockImplementationOnce(() => {
-        throw new Error('EXDEV');
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
       });
 
-      expect(() => saveCredentials(after)).toThrow('EXDEV');
+      expect(() => saveCredentials(after)).toThrow('ENOSPC');
 
       expect(loadCredentials()).toEqual(before);
       expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
     });
 
     test('a save through a symlink updates the linked file and keeps the link', () => {
-      const realDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-real-'));
+      const realDir = fs.mkdtempSync(path.join(tmpDir, 'real-'));
       const real = path.join(realDir, 'creds.json');
       const link = path.join(tmpDir, 'credentials.json');
       fs.writeFileSync(real, '{}', { mode: 0o644 });
@@ -176,7 +176,6 @@ describe('config', () => {
       expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
       expect(JSON.parse(fs.readFileSync(real, 'utf-8'))).toEqual(after);
       expect(fs.statSync(real).mode % 0o1000).toBe(0o600);
-      fs.rmSync(realDir, { recursive: true, force: true });
     });
   });
 });

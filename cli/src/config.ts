@@ -17,11 +17,11 @@
  *  SOFTWARE.
  */
 
-import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CliError } from './errors';
+import { replaceFile } from './replace-file';
 import { CliConfig, Credentials } from './types';
 
 const CONFIG_DIR_ENV = 'BGAGENT_CONFIG_DIR';
@@ -31,7 +31,6 @@ const CREDENTIALS_FILE = 'credentials.json';
 /** Owner-only read/write — credentials must never be group/world readable. */
 const SECRET_FILE_MODE = 0o600;
 const CONFIG_FILE_MODE = 0o644;
-const PERMISSION_MODULUS = 0o10000;
 
 /** Returns the config directory path (~/.bgagent or BGAGENT_CONFIG_DIR). */
 export function getConfigDir(): string {
@@ -77,9 +76,7 @@ export function loadConfig(): CliConfig {
 /** Save CLI configuration. */
 export function saveConfig(config: CliConfig): void {
   ensureConfigDir();
-  const p = configPath();
-  const existing = fs.statSync(p, { throwIfNoEntry: false });
-  replaceFile(p, JSON.stringify(config, null, 2) + '\n', CONFIG_FILE_MODE, existing && existing.mode % PERMISSION_MODULUS);
+  replaceFile(configPath(), JSON.stringify(config, null, 2) + '\n', CONFIG_FILE_MODE);
 }
 
 /** Load existing CLI config if present, else return null (no error). */
@@ -118,38 +115,6 @@ export function clearCredentials(): void {
 /** Write a file that only its owner may read, whether it is new or already there. */
 export function writeSecretFile(file: string, content: string): void {
   replaceFile(file, content, SECRET_FILE_MODE, SECRET_FILE_MODE);
-}
-
-function regularFileTarget(file: string): string | undefined {
-  try {
-    const real = fs.realpathSync(file);
-    return fs.statSync(real).isFile() ? real : undefined;
-  } catch (err) {
-    const creatable = (err as NodeJS.ErrnoException).code === 'ENOENT'
-      && !fs.lstatSync(file, { throwIfNoEntry: false })
-      && fs.existsSync(path.dirname(file));
-    return creatable ? file : undefined;
-  }
-}
-
-function replaceFile(file: string, content: string, createMode: number, setMode?: number): void {
-  const target = regularFileTarget(file);
-  if (!target) {
-    fs.writeFileSync(file, content, { mode: createMode });
-    return;
-  }
-
-  const temp = path.join(path.dirname(target), `.${randomUUID()}.tmp`);
-  try {
-    fs.writeFileSync(temp, content, { mode: createMode, flag: 'wx' });
-    if (setMode !== undefined) {
-      fs.chmodSync(temp, setMode);
-    }
-    fs.renameSync(temp, target);
-  } catch (err) {
-    fs.rmSync(temp, { force: true });
-    throw err;
-  }
 }
 
 /** Save credentials with restricted permissions. */
