@@ -101,6 +101,11 @@ const PATTERNS: readonly SecretPattern[] = [
     regex: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
   },
   {
+    name: 'LINEAR_TOKEN',
+    // Linear personal API keys (`lin_api_`) and OAuth access tokens (`lin_oauth_`).
+    regex: /\blin_(?:api|oauth)_[A-Za-z0-9]{16,}/g,
+  },
+  {
     name: 'GENERIC_BEARER',
     regex: /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi,
   },
@@ -190,3 +195,20 @@ export function scanDenyReason(text: string): string {
  */
 export const DENY_REASON_SECRET_NAMES: readonly string[] =
   PATTERNS.map((p) => p.name);
+
+/**
+ * {@link scanDenyReason} over every string in a JSON-shaped value. Applied to the
+ * variables of every outbound Linear GraphQL call and to GitHub comment bodies, so
+ * agent-originated text the platform relays (answers, error messages, event
+ * details) cannot carry a credential out, whatever path it took.
+ * @param value - a JSON-shaped value.
+ * @returns the same shape with known secrets replaced.
+ */
+export function redactValue<T>(value: T): T {
+  if (typeof value === 'string') return scanDenyReason(value) as T;
+  if (Array.isArray(value)) return value.map((v: unknown) => redactValue(v)) as T;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, redactValue(v)])) as T;
+  }
+  return value;
+}

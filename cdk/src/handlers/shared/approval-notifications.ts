@@ -18,10 +18,10 @@
  */
 
 import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 import { scanDenyReason } from './deny-reason-scanner';
 import { logger } from './logger';
 import type { TaskRecord } from './types';
-import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
 const REQUEST_ID_MAX_LENGTH = 128;
 const SEVERITY_MAX_LENGTH = 20;
@@ -47,13 +47,20 @@ export interface ApprovalNotification {
   readonly requestId: string;
   readonly userId: string;
   readonly marker: string;
+  /** When a pending request is denied unanswered (ISO), if it has a timeout. */
+  readonly deadline?: string;
 }
+
+/** Where a notice goes. A Linear agent session answers with buttons, not a comment reply. */
+export type ApprovalChannel = 'slack' | 'linear' | 'linear_session';
 
 function text(value: unknown, max = 500): string {
   if (typeof value !== 'string') return '';
   // Redact before truncation so cutting a token cannot hide its recognizable shape.
   const clean = scanDenyReason(value)
+    // eslint-disable-next-line no-control-regex -- strips terminal escape sequences from untrusted text
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    // eslint-disable-next-line no-control-regex -- strips control and bidi characters from untrusted text
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
   return clean.length > max ? `${clean.slice(0, max)}… [shortened]` : clean;
 }
@@ -110,7 +117,7 @@ function pendingLines(
   row: Record<string, unknown>,
   task: TaskRecord,
   requestId: string,
-  channel: 'slack' | 'linear',
+  channel: ApprovalChannel,
 ): string[] {
   const lines: string[] = [];
   lines.push('', ...describeAction(row, task), '');
@@ -127,6 +134,9 @@ function pendingLines(
   if (channel === 'linear') {
     lines.push('', 'Reply approve, or deny with an optional reason (for example "deny use the staging config"),',
       'to this comment while signed in as the task owner.');
+  } else if (channel === 'linear_session') {
+    lines.push('', 'Choose Approve or Deny below, or reply deny with a reason (for example "deny use the staging config").',
+      'Only the task owner can decide.');
   }
   lines.push('', 'Technical details / CLI alternative',
     `Task: ${task.task_id}`, `Request: ${requestId}`,
@@ -148,7 +158,7 @@ function renderApproval(
   row: Record<string, unknown>,
   task: TaskRecord,
   requestId: string,
-  channel: 'slack' | 'linear',
+  channel: ApprovalChannel,
 ): { title: string; lines: string[] } {
   const title = status === 'PENDING' ? 'Approval needed'
     : status === 'APPROVED' ? 'Approval recorded'
@@ -187,7 +197,7 @@ export async function loadApprovalNotification(
   task: TaskRecord,
   eventType: string,
   metadata: Record<string, unknown>,
-  channel: 'slack' | 'linear',
+  channel: ApprovalChannel,
 ): Promise<ApprovalNotification | null> {
   if (!isApprovalNotification(eventType)) return null;
   const tableName = process.env.TASK_APPROVALS_TABLE_NAME;
@@ -225,7 +235,18 @@ export async function loadApprovalNotification(
     && (task.status !== 'AWAITING_APPROVAL' || task.awaiting_approval_request_id !== requestId)) return null;
 
   const { title, lines } = renderApproval(status, row, task, requestId, channel);
-  return { title, text: lines.join('\n'), taskId: task.task_id, requestId, userId: task.user_id, marker };
+  const deadlineMs = Date.parse(String(row.created_at)) + Number(row.timeout_s) * 1000;
+  const deadline = status === 'PENDING' && Number.isFinite(deadlineMs) && Number(row.timeout_s) > 0
+    ? new Date(deadlineMs).toISOString() : undefined;
+  return {
+    title,
+    text: lines.join('\n'),
+    taskId: task.task_id,
+    requestId,
+    userId: task.user_id,
+    marker,
+    ...(deadline && { deadline }),
+  };
 }
 
 /** Persist only after the external service accepted the message, so failures retry. */

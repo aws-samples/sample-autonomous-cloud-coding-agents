@@ -77,12 +77,25 @@ export async function emitAgentActivity(
   accessToken: string,
   agentSessionId: string,
   content: AgentActivityContent,
-  options: { readonly ephemeral?: boolean; readonly id?: string; readonly timeoutMs?: number } = {},
+  options: {
+    readonly ephemeral?: boolean;
+    readonly id?: string;
+    readonly timeoutMs?: number;
+    /** ``select`` turns an elicitation into buttons; ``signalMetadata.options`` lists them. */
+    readonly signal?: 'select';
+    readonly signalMetadata?: Readonly<Record<string, unknown>>;
+  } = {},
 ): Promise<LinearPostResult> {
   const ephemeral = options.ephemeral === true && (content.type === 'thought' || content.type === 'action');
   return graphqlRequest(accessToken, AGENT_ACTIVITY_CREATE_MUTATION, {
     // `id` (a version-4 UUID) makes a retried emit the same activity rather than a second one.
-    input: { agentSessionId, content, ...(ephemeral && { ephemeral: true }), ...(options.id && { id: options.id }) },
+    input: {
+      agentSessionId,
+      content,
+      ...(ephemeral && { ephemeral: true }),
+      ...(options.id && { id: options.id }),
+      ...(options.signal && { signal: options.signal, signalMetadata: options.signalMetadata ?? {} }),
+    },
   }, options.timeoutMs);
 }
 

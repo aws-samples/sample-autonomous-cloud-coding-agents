@@ -91,6 +91,13 @@ describe('linear-feedback', () => {
       expect(body.variables).toEqual({ issueId: ISSUE_ID, body: '❌ blocked' });
     });
 
+    test('a credential in the text is redacted before it leaves for Linear, the request token is not touched', async () => {
+      await postIssueComment(CTX, ISSUE_ID, 'Failed: push rejected for ghp_abcdefghijklmnopqrstuvwxyz0123456789AB');
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body as string).variables.body).toBe('Failed: push rejected for [REDACTED-GITHUB_TOKEN]');
+      expect(init.headers).toMatchObject({ Authorization: `Bearer ${TOKEN}` });
+    });
+
     test('terminal failure (not retryable) when the token cannot be resolved', async () => {
       resolveLinearOauthTokenMock.mockResolvedValueOnce(null);
 

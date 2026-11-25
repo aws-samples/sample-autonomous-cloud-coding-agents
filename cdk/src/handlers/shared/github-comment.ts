@@ -46,6 +46,7 @@
  * codebase pattern (``preflight.ts``, ``context-hydration.ts``).
  */
 
+import { scanDenyReason } from './deny-reason-scanner';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 
@@ -187,7 +188,7 @@ async function patchExistingComment(params: {
         'User-Agent': USER_AGENT,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ body }),
+      body: JSON.stringify({ body: scanDenyReason(body) }),
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     });
   } catch (err) {
@@ -226,7 +227,7 @@ async function createComment(params: {
         'User-Agent': USER_AGENT,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ body }),
+      body: JSON.stringify({ body: scanDenyReason(body) }),
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     });
   } catch (err) {

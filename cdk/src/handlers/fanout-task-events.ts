@@ -86,6 +86,7 @@ import {
   type LinearFeedbackContext,
   type LinearPostResult,
 } from './shared/linear-feedback';
+import { sessionApprovalActivity } from './shared/linear-session-approval';
 import {
   checklistKind,
   checklistMoveForEvent,
@@ -1633,6 +1634,10 @@ async function dispatchToLinearAgentSession(
   ctx: LinearFeedbackContext,
 ): Promise<void> {
   const effective = effectiveEventType(event);
+  if (isApprovalNotification(effective)) {
+    await dispatchSessionApproval(event, task, agentSessionId, ctx);
+    return;
+  }
   await advanceSessionChecklist(event, task, agentSessionId, ctx);
   if (LINEAR_SESSION_PROGRESS_EVENTS.has(effective)) {
     const progress = sessionProgressActivity(effective, event.metadata);
@@ -1723,6 +1728,53 @@ async function dispatchToLinearAgentSession(
       `[fanout/linear-session] transient Linear activity failure for task ${task.task_id} — escalating for batch retry`,
     );
   }
+}
+
+/**
+ * An approval notice in the task's session (#1066): a pending request is a choice with
+ * Approve / Deny buttons, anything after it a note. Same loader as the comment channel,
+ * so a delayed "please approve" for a request that is no longer open is never shown.
+ * Retried through the batch like the comment channel's notice; the activity id is
+ * derived from the notice, so a retry is the same activity.
+ */
+async function dispatchSessionApproval(
+  event: FanOutEvent,
+  task: TaskRecord,
+  agentSessionId: string,
+  ctx: LinearFeedbackContext,
+): Promise<void> {
+  const effective = effectiveEventType(event);
+  const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effective };
+  const approvalsTable = process.env.TASK_APPROVALS_TABLE_NAME;
+  if (!approvalsTable) {
+    logger.warn('[fanout/linear-session] approval notice skipped: TASK_APPROVALS_TABLE_NAME unset', logCtx);
+    return;
+  }
+  // After the final response a new activity would reopen the session.
+  if (task.linear_final_comment_event_id) return;
+  // A decision made in the session already has its reply there.
+  if (effective === 'approval_decision_recorded'
+    && String(event.metadata?.decision_source ?? '').startsWith('["linear_session"')) return;
+  const liveTask = (await ddb.send(new GetCommand({
+    TableName: process.env.TASK_TABLE_NAME, Key: { task_id: task.task_id }, ConsistentRead: true,
+  }))).Item as TaskRecord | undefined;
+  if (!liveTask) return;
+  const notification = await loadApprovalNotification(ddb, liveTask, effective, event.metadata ?? {}, 'linear_session');
+  if (!notification) return;
+  const token = await resolveToken(ctx);
+  if (!token) return;
+  const activity = sessionApprovalActivity(effective, notification);
+  const result = await emitAgentActivity(token, agentSessionId, activity.content, {
+    id: progressActivityId(`${notification.marker}#${notification.requestId}`),
+    ...(activity.signal && { signal: activity.signal, signalMetadata: activity.signalMetadata }),
+  });
+  if (!result.ok) {
+    logger.warn('[fanout/linear-session] approval notice failed', { ...logCtx, retryable: result.retryable });
+    if (result.retryable) throw new Error(`[fanout/linear-session] transient approval notice failure for task ${task.task_id}`);
+    return;
+  }
+  await markApprovalNotificationDelivered(ddb, notification);
+  logger.info('[fanout/linear-session] approval notice dispatched', { ...logCtx, request_id: notification.requestId });
 }
 
 /**

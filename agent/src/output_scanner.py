@@ -94,6 +94,8 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
     # Slack tokens (xoxb-, xoxp-, ...)
     ("SLACK_TOKEN", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    # Linear personal API keys (lin_api_) and OAuth access tokens (lin_oauth_).
+    ("LINEAR_TOKEN", re.compile(r"\blin_(?:api|oauth)_[A-Za-z0-9]{16,}")),
     # Generic Bearer / token patterns (min 20-char token to avoid false positives
     # on natural English like "bearer of good news")
     ("BEARER_TOKEN", re.compile(r"Bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*", re.IGNORECASE)),

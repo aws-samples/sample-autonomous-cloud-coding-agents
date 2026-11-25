@@ -19,7 +19,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { DENY_REASON_SECRET_NAMES, scanDenyReason } from '../../../src/handlers/shared/deny-reason-scanner';
+import { DENY_REASON_SECRET_NAMES, redactValue, scanDenyReason } from '../../../src/handlers/shared/deny-reason-scanner';
 
 // Shared with agent/tests/test_output_scanner.py: the agent's scanner has to
 // give the same text for a URL with a user and a password.
@@ -379,5 +379,23 @@ describe('scanDenyReason', () => {
     expect(DENY_REASON_SECRET_NAMES).toContain('AWS_KEY');
     expect(DENY_REASON_SECRET_NAMES).toContain('GITHUB_TOKEN');
     expect(DENY_REASON_SECRET_NAMES).toContain('PRIVATE_KEY');
+  });
+});
+
+describe('redactValue (outbound Linear and GitHub text, #1066)', () => {
+  test('redacts every string in a nested value and keeps the shape and other values', () => {
+    const value = {
+      input: { body: 'token lin_api_EXAMPLE0EXAMPLE0EX here', count: 3, ok: true },
+      list: ['AKIAIOSFODNN7EXAMPLE', null],
+    };
+    expect(redactValue(value)).toEqual({
+      input: { body: 'token [REDACTED-LINEAR_TOKEN] here', count: 3, ok: true },
+      list: ['[REDACTED-AWS_KEY]', null],
+    });
+  });
+
+  test('leaves ids and ordinary text alone', () => {
+    const value = { id: '420f1277-9f2b-4058-b9c1-ddbceeee6b96', body: 'Opened pull request https://github.com/acme/web/pull/7' };
+    expect(redactValue(value)).toEqual(value);
   });
 });

@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { redactValue } from './deny-reason-scanner';
 import { isTerminalMaturingReply, preservePreviewSuffix } from './iteration-reply';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
@@ -255,7 +256,7 @@ export async function graphqlData(
     const resp = await fetch(LINEAR_GRAPHQL_URL, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query, variables: redactValue(variables) }),
       signal: controller.signal,
     });
     if (!resp.ok) {
@@ -309,7 +310,7 @@ export async function graphqlRequest(
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query, variables: redactValue(variables) }),
       signal: controller.signal,
     });
     if (!resp.ok) {

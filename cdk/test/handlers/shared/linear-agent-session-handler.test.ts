@@ -93,6 +93,12 @@ process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.NUDGES_TABLE_NAME = 'Nudges';
 process.env.NUDGE_RATE_LIMIT_PER_MINUTE = '4';
 process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME = 'LinearDedup';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
+
+const recordApprovalMock = jest.fn();
+const recordDenialMock = jest.fn();
+jest.mock('../../../src/handlers/approve-task', () => ({ recordApprovalForUser: (...a: unknown[]) => recordApprovalMock(...a) }));
+jest.mock('../../../src/handlers/deny-task', () => ({ recordDenialForUser: (...a: unknown[]) => recordDenialMock(...a) }));
 
 import { SESSION_STOP_CANCELLED_VIA } from '../../../src/handlers/shared/linear-agent-session-event';
 import { handleAgentSessionEvent } from '../../../src/handlers/shared/linear-agent-session-handler';
@@ -795,5 +801,81 @@ describe('channel_metadata builders', () => {
     });
     expect(lines.some((l) => l.trim() === 'linear_workspace_slug: resolved.workspaceSlug,')).toBe(true);
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('handleAgentSessionEvent — approval requests in the session (#1066)', () => {
+  const waiting = (user = 'platform-user-1') => priorTask({
+    task_id: 't-1',
+    status: 'AWAITING_APPROVAL',
+    awaiting_approval_request_id: 'req-1',
+    user_id: user,
+    linear_workspace_id: 'org-1',
+    session: 'session-1',
+  });
+  const lastEmit = () => emitAgentActivityMock.mock.calls.at(-1)!;
+
+  beforeEach(() => {
+    recordApprovalMock.mockResolvedValue({ statusCode: 202 });
+    recordDenialMock.mockResolvedValue({ statusCode: 202 });
+  });
+
+  test('the owner\'s Approve decides the open request through the API path, not as a nudge', async () => {
+    waiting();
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(recordApprovalMock).toHaveBeenCalledWith({
+      userId: 'platform-user-1',
+      taskId: 't-1',
+      decisionSource: JSON.stringify(['linear_session', 'org-1', 'activity-9']),
+      body: JSON.stringify({ request_id: 'req-1', decision: 'approve' }),
+    });
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual({ type: 'thought', body: 'Approved. The agent continues with this action.' });
+  });
+
+  test('a deny with a reason passes the reason on', async () => {
+    waiting();
+    await handleAgentSessionEvent(prompted({ content: { body: 'deny use the staging config' } }));
+    expect(JSON.parse(recordDenialMock.mock.calls[0][0].body)).toEqual({ request_id: 'req-1', decision: 'deny', reason: 'use the staging config' });
+    expect(String(lastEmit()[2].body)).toContain('your reason: use the staging config');
+  });
+
+  test('a request that was already answered or timed out changes nothing, and says so', async () => {
+    waiting();
+    recordApprovalMock.mockResolvedValue({ statusCode: 409 });
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(String(lastEmit()[2].body)).toContain('already answered or timed out');
+  });
+
+  test('someone other than the owner gets the choice again, and nothing is decided', async () => {
+    waiting('someone-else');
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    const [, , content, options] = lastEmit();
+    expect(content.type).toBe('elicitation');
+    expect(String(content.body)).toMatch(/^Only the task owner can decide this request\./);
+    expect(options).toEqual(expect.objectContaining({ signal: 'select' }));
+  });
+
+  test('anything else keeps the request open: the choice comes back, nothing is nudged', async () => {
+    waiting();
+    await handleAgentSessionEvent(prompted({ content: { body: 'what does this command do?' } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2].type).toBe('elicitation');
+  });
+
+  test('a late Approve after the task finished starts nothing', async () => {
+    priorTask({ task_id: 't-1', status: 'COMPLETED', repo: 'acme/web', linear_workspace_id: 'org-1', session: 'session-1' });
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'response', body: expect.stringContaining('Nothing is waiting for your approval') }));
+  });
+
+  test('an Approve while the task runs without a request is not passed to the agent', async () => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1' });
+    await handleAgentSessionEvent(prompted({ content: { body: 'deny' } }));
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'thought', body: expect.stringContaining('Nothing is waiting') }));
   });
 });
