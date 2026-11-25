@@ -142,6 +142,35 @@ describe('ApiClient', () => {
     });
   });
 
+  describe('getScoreboard', () => {
+    const scoreboard = { range: '7d', truncated: false, previous: null, open_over_7d: null };
+
+    beforeEach(() => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ data: scoreboard }) });
+    });
+
+    test('asks the tasks endpoint for the scoreboard view of a range and a repository', async () => {
+      await expect(client.getScoreboard({ range: '7d', repo: 'acme/shop' })).resolves.toEqual(scoreboard);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/tasks?view=scoreboard&range=7d&repo=acme%2Fshop',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    test('names no repository when none is given', async () => {
+      await client.getScoreboard({ range: '30d' });
+
+      expect(mockFetch).toHaveBeenCalledWith('https://api.example.com/tasks?view=scoreboard&range=30d', expect.anything());
+    });
+
+    test('sends an empty repository as it is, for the API to refuse', async () => {
+      // `--repo "$REPO"` with the variable unset: left out, the answer would count every repository.
+      await client.getScoreboard({ range: '7d', repo: '' });
+
+      expect(mockFetch).toHaveBeenCalledWith('https://api.example.com/tasks?view=scoreboard&range=7d&repo=', expect.anything());
+    });
+  });
+
   describe('getTask', () => {
     test('sends GET with task ID', async () => {
       const taskDetail = { task_id: 'abc' };
@@ -672,6 +701,18 @@ describe('ApiClient', () => {
     afterEach(() => {
       setVerbose(false);
       errorSpy.mockRestore();
+    });
+
+    test('logs a request with its query, and the status of the response', async () => {
+      mockFetch.mockResolvedValue({ ok: true, status: 200, statusText: 'OK', json: async () => ({ data: {} }) });
+
+      await client.getScoreboard({ range: '7d', repo: 'acme/shop' });
+
+      const logged = errorSpy.mock.calls.map(args => args.join(' '));
+      expect(logged.slice(0, 2)).toEqual([
+        '[DEBUG] GET https://api.example.com/tasks?view=scoreboard&range=7d&repo=acme%2Fshop',
+        '[DEBUG] Response: 200 OK',
+      ]);
     });
 
     test('masks the one-time API key in the logged response body', async () => {

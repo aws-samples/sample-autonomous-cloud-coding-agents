@@ -249,6 +249,31 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // The agent's push preflight (agent/src/repo.py): SAML SSO or an IP allow list
+    // blocks the token, which scopes would not fix.
+    pattern: /GitHub organization policy blocks pushes to/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'GitHub organization policy blocks the token',
+      description: 'The organization that owns the repository enforces SAML single sign-on or an IP allow list, and the GitHub token does not satisfy it.',
+      remedy: 'Do what the error detail names: authorize the token for the organization\'s SAML single sign-on, or add the agent\'s egress IP addresses to the organization\'s IP allow list. Then resubmit.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    // The agent's push preflight: no token change makes an archived repository writable.
+    pattern: /is archived on GitHub, so it is read-only/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'Repository is archived',
+      description: 'The repository is archived on GitHub, so nothing can be pushed to it.',
+      remedy: 'Unarchive the repository on GitHub, or submit the task against another repository.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /Token cannot (push to|interact with pull requests on)/i,
     classification: {
       category: ErrorCategory.AUTH,
@@ -381,7 +406,7 @@ const PATTERNS: readonly ErrorPattern[] = [
         + '. Either redeploy the platform in a supported Region, or move this repo to a backend that is available here '
         + '(bgagent repo onboard <repo> --compute-type agentcore, or --compute-type ecs for large repos). '
         + 'If AWS has since launched MicroVMs in this Region, update the supported-Region list in '
-        + 'cdk/src/handlers/shared/microvm-regions.ts. Retrying as-is will not help.',
+        + 'contracts/deployment-capabilities.json. Retrying as-is will not help.',
       retryable: false,
       errorClass: ErrorClass.SERVICE,
     },
@@ -722,21 +747,20 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // A new-work coding task reported agent-success but no commit
-    // reached the branch and no PR was opened — the agent's changes were LOST
-    // (observed cause: a stacked child edited a nested working tree that was never
-    // the branch's tree, so nothing committed). This is an environment/infra
-    // fault, not the user's code, and a fresh run usually lands the work — so
-    // it reads as retryable, NOT the non-retryable "your task didn't succeed".
+    // ``_apply_delivery_gate`` (``agent/src/pipeline.py``) cannot tell lost changes
+    // from a run that correctly changed nothing (#751), so the copy names both.
+    // Retryable, because a fresh run usually lands lost work.
     // Ordered before the generic ``agent_status=`` catch-all so it wins.
     pattern: /deliverable=lost/i,
     classification: {
       category: ErrorCategory.AGENT,
-      title: 'The change was not saved',
-      description: 'The agent finished, but none of its changes were committed to the branch and no pull request was opened — the work did not land in the repository. This is usually a transient workspace fault (e.g. the clone ended up in an unexpected directory), not a problem with your request.',
-      remedy: 'Reply here to try again — a fresh run normally saves the work correctly. If it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
+      title: 'No change was delivered',
+      description: 'The agent finished and reported success, but no commit reached the branch and no pull request was opened. Either the agent found nothing to change (for example, the repository already has what the request asked for), or it made changes that were lost before they reached the branch. The platform cannot tell the two apart.',
+      remedy: 'Check whether the repository already has what you asked for: if it does, nothing more is needed, and a retry would end the same way. If a change was expected, reply here to try again; if it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
       retryable: true,
-      errorClass: ErrorClass.TRANSIENT,
+      // USER on purpose. TRANSIENT makes ``retryGuidance`` ask for a plain retry, which
+      // cannot help a run that correctly changed nothing.
+      errorClass: ErrorClass.USER,
     },
   },
   {
@@ -909,6 +933,30 @@ const PATTERNS: readonly ErrorPattern[] = [
 ];
 
 /**
+ * The agent's push preflight refusal (``PushCapabilityError`` in agent/src/repo.py):
+ * ``Token cannot push to <repo>: GitHub refused the <token type> write access (<git
+ * line>). To fix it, <fix>. The task stopped before the agent ran …``. The fix
+ * depends on the token type (scope for a classic PAT, repository access and
+ * Contents for a fine-grained one, installation for a GitHub App), so the
+ * classification carries the agent's own fix rather than the generic remedy of
+ * the ``Token cannot push`` pattern, which the orchestrator's preflight shares.
+ * The fix is matched up to the sentence that follows it, so a period inside it (a
+ * repository named ``a.b``) does not cut it short.
+ */
+const AGENT_PUSH_REFUSAL = /Token cannot push to (\S+): GitHub refused the (.+?) write access \(.*?\)\. To fix it, (.+?)\. The task stopped before the agent ran/;
+
+function agentPushRefusalClassification(repo: string, tokenType: string, fix: string): ErrorClassification {
+  return {
+    category: ErrorCategory.AUTH,
+    title: 'Insufficient GitHub token scopes',
+    description: `GitHub refused the ${tokenType} write access to ${repo}.`,
+    remedy: `${fix.charAt(0).toUpperCase()}${fix.slice(1)}. Then resubmit. The permissions each token type needs are in agent/README.md, GitHub PAT — Minimal Permissions.`,
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  };
+}
+
+/**
  * Canonical blocker-reason contract. Matches ``BLOCKED[<kind>]`` and,
  * separately, the optional `` (resource: <resource>)``
  * segment ``format_blocker_reason`` appends. This is the SINGLE source of truth
@@ -1042,32 +1090,44 @@ const UNKNOWN_CLASSIFICATION: ErrorClassification = {
 };
 
 /**
+ * Bounds what is classified: the agent stores at most 1,000 characters, and the
+ * platform's own reasons carry their marker at the front.
+ */
+const CLASSIFIED_MESSAGE_CHARS = 1000;
+
+/**
  * Classify an error message into a structured category with user-facing guidance.
- * Returns null if the error message is empty or undefined.
+ * Returns null if the error message is empty or undefined. A value that is not
+ * text has no classification.
  *
- * @param errorMessage - the raw error_message string from a task record.
+ * @param errorMessage - the raw error_message string from a task record; its first
+ *   {@link CLASSIFIED_MESSAGE_CHARS} characters are what is classified.
  * @returns the classification, or null if there is no error to classify.
  */
 export function classifyError(errorMessage: string | undefined | null): ErrorClassification | null {
-  if (!errorMessage) {
-    return null;
-  }
+  if (typeof errorMessage !== 'string' || errorMessage === '') return null;
+  const message = errorMessage.slice(0, CLASSIFIED_MESSAGE_CHARS);
 
   // Read the orchestrator's code before scanning any appended service text.
-  const microvmFailure = classifyMicrovmTerminalFailure(errorMessage);
+  const microvmFailure = classifyMicrovmTerminalFailure(message);
   if (microvmFailure) return microvmFailure;
 
   // Environmental blockers carry a canonical ``BLOCKED[<kind>]`` prefix
   // and an extractable resource — check them first so the remedy can name the
   // exact secret / host rather than falling through to a generic pattern.
-  const kindMatch = BLOCKED_KIND.exec(errorMessage);
+  const kindMatch = BLOCKED_KIND.exec(message);
   if (kindMatch) {
-    const resource = BLOCKED_RESOURCE.exec(errorMessage)?.[1];
+    const resource = BLOCKED_RESOURCE.exec(message)?.[1];
     return blockerClassification(kindMatch[1].toLowerCase(), resource);
   }
 
+  const pushRefusal = AGENT_PUSH_REFUSAL.exec(message);
+  if (pushRefusal) {
+    return agentPushRefusalClassification(pushRefusal[1], pushRefusal[2], pushRefusal[3]);
+  }
+
   for (const { pattern, exclude, classification } of PATTERNS) {
-    if (pattern.test(errorMessage) && (!exclude || !exclude.test(errorMessage))) {
+    if (pattern.test(message) && (!exclude || !exclude.test(message))) {
       return classification;
     }
   }

@@ -38,7 +38,7 @@ import {
   type RenderedComment,
 } from './shared/jira-attachments';
 import { reportIssueFailure } from './shared/jira-feedback';
-import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
+import { getRegistryRowStrict, resolveJiraOauthToken, type ResolvedJiraToken } from './shared/jira-oauth-resolver';
 import type { JiraSubIssueNode } from './shared/jira-subissue-fetch';
 import {
   resolveTaskByJiraIssue,
@@ -73,6 +73,7 @@ import { prNumberFromTask } from './shared/task-pr-number';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
+import { emitWebhookScreeningFailedMetric } from './shared/webhook-screening-metric';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = makeDocClient();
@@ -422,9 +423,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Jira OAuth token for the outbound REST progress comments.
   let resolvedJira: Awaited<ReturnType<typeof resolveJiraOauthToken>> = null;
   if (WORKSPACE_REGISTRY_TABLE) {
-    const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
+    const resolved = await resolveOauthTokenForAdmission(cloudId, WORKSPACE_REGISTRY_TABLE, issue.key);
     if (!resolved) {
-      logger.warn('Jira tenant not resolvable from registry — dropping event', {
+      logger.warn('No usable Jira OAuth token for this tenant — dropping event', {
         jira_cloud_id: cloudId,
         issue_key: issue.key,
       });
@@ -978,7 +979,7 @@ async function handleCommentTrigger(
     });
     return;
   }
-  const resolved = await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE);
+  const resolved = await resolveOauthTokenForAdmission(cloudId, WORKSPACE_REGISTRY_TABLE, issue.key);
   if (!resolved) {
     logger.warn('Cannot run Jira comment iteration: tenant OAuth is unavailable', {
       jira_cloud_id: cloudId,
@@ -1569,12 +1570,13 @@ async function screenCommentsOrDrop(
     return comments;
   } catch (err) {
     // Fail-open on a screening outage too — comments are advisory.
+    emitWebhookScreeningFailedMetric('jira-comments');
     logger.warn('Dropping Jira comments: screening unavailable (task still proceeds)', {
       issue_key: issueKey,
       jira_cloud_id: cloudId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return []; // nosemgrep: ts-silent-success-masking -- comments are advisory enrichment; a screening outage drops them (logged) and the reporter's task still proceeds. Fail-open is the deliberate posture, not a masked bug (#756 Category 3)
+    return []; // nosemgrep: ts-silent-success-masking -- advisory enrichment that cannot be screened is dropped and the task proceeds (ADR-026)
   }
 }
 
@@ -1634,6 +1636,37 @@ async function lookupPlatformUser(cloudId: string, accountId: string): Promise<s
     return null;
   }
   return platformUserId;
+}
+
+/**
+ * A failed registry read throws, and Lambda retries the asynchronous invocation
+ * (#734). A row that was read is cached, so the resolver does not query it again.
+ */
+async function resolveOauthTokenForAdmission(
+  cloudId: string,
+  registryTableName: string,
+  issueKey: string,
+): Promise<ResolvedJiraToken | null> {
+  let row: Awaited<ReturnType<typeof getRegistryRowStrict>>;
+  try {
+    row = await getRegistryRowStrict(ddb, registryTableName, cloudId);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    logger.error('Jira workspace registry unreadable — failing the invocation so that it is retried', {
+      jira_cloud_id: cloudId,
+      issue_key: issueKey,
+      error: reason,
+    });
+    throw new Error(`Jira workspace registry unreadable: ${reason}`, { cause: err });
+  }
+  if (!row) {
+    logger.warn('Jira tenant not onboarded: no usable workspace registry row', {
+      jira_cloud_id: cloudId,
+      issue_key: issueKey,
+    });
+    return null;
+  }
+  return resolveJiraOauthToken(cloudId, registryTableName);
 }
 
 async function getActiveProjectMapping(

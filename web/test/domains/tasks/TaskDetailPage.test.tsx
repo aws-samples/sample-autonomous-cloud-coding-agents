@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
 import { renderRoute } from '../../helpers/render';
 import { mockData, server, TEST_API_BASE } from '../../helpers/server';
@@ -77,13 +77,19 @@ describe('TaskDetailPage', () => {
     }
     fireEvent.click(screen.getAllByRole('button', { name: 'About turns' })[0]);
     expect(await screen.findByText(/A turn is one round of work/)).toBeInTheDocument();
+    // The activity can end with a line about something the agent did not do.
+    fireEvent.click(screen.getAllByRole('button', { name: 'About activity' })[0]);
+    expect(await screen.findByText(
+      / When the task opened a new pull request, a last line says what became of it, once ABCA has read on GitHub that it was merged or closed\. It reads about once an hour\.$/,
+    )).toBeInTheDocument();
   });
 
   it('counts turns the way the turn limit does', async () => {
     renderRoute(`/tasks/${MOCK_IDS.running}`);
     // Seven messages, five of which asked for tools; the fifth tool turn is still running.
     expect(await screen.findByText('5 of 60')).toBeInTheDocument();
-    expect(screen.getByText('$0.84 (limit $5.00)')).toBeInTheDocument();
+    // A task records its cost when it finishes.
+    expect(screen.getByText('Shown when it finishes (limit $5.00)')).toBeInTheDocument();
   });
 
   it('opens a step in the activity to show the command and what came back', async () => {
@@ -155,6 +161,8 @@ describe('TaskDetailPage', () => {
   it('lets you approve a paused task right on the page', async () => {
     renderRoute(`/tasks/${MOCK_IDS.awaiting}`);
     expect(await screen.findByText(/paused before an action that a person has to approve/)).toBeInTheDocument();
+    // The mock writes the request as the agent does, and the activity shows it.
+    expect(await screen.findByText('Asked for approval: Soft-deny: terraform_apply')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     expect(await screen.findByText('Your approval came through, so it carried on')).toBeInTheDocument();
     expect(mockData.pending).toHaveLength(0);
@@ -199,6 +207,19 @@ describe('TaskDetailPage', () => {
     expect(screen.getByRole('link', { name: 'View pull request' })).toHaveAttribute('href', 'https://github.com/acme/web-frontend/pull/482');
   });
 
+  it.each([
+    [MOCK_IDS.prMerged, /Pull request merged on GitHub$/, 'Done: pull request #212 was merged'],
+    [MOCK_IDS.prClosed, /Pull request closed on GitHub without merging$/, 'Done: pull request #1071 was closed without merging'],
+  ])('says what became of the pull request of a finished task, in the last line of its activity and in its banner (%s)', async (taskId, line, banner) => {
+    renderRoute(`/tasks/${taskId}`);
+    const feed = await screen.findByRole('list', { name: 'Activity' });
+    await within(feed).findByText('Finished');
+    expect(within(feed).getAllByRole('listitem').at(-1)).toHaveTextContent(line);
+    // The banner follows the same event: it no longer calls the pull request ready for review.
+    expect(screen.getByText(banner)).toBeInTheDocument();
+    expect(screen.queryByText(/is ready for review$/)).not.toBeInTheDocument();
+  });
+
   it('keeps fetching briefly after a task finishes, so its final events still arrive', async () => {
     // The task record says COMPLETED before its last event has been written.
     const all = mockData.events[MOCK_IDS.completed];
@@ -229,5 +250,22 @@ describe('TaskDetailPage', () => {
   it('treats an unknown task as not found rather than an error', async () => {
     renderRoute('/tasks/does-not-exist');
     expect(await screen.findByText('Task not found')).toBeInTheDocument();
+  });
+
+  it('says so when a running task goes quiet while its page stays open and no record changes', async () => {
+    // The interval clock and the date are in the test's hands, and still run on their own for the waits of the test.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], shouldAdvanceTime: true });
+    try {
+      renderRoute(`/tasks/${MOCK_IDS.running}`);
+      await screen.findByRole('list', { name: 'Activity' });
+      expect(screen.queryByText(/^No update for/)).not.toBeInTheDocument();
+      // Five minutes on. The agent reported 20 seconds before the page opened and not since.
+      act(() => {
+        vi.advanceTimersByTime(5 * 60_000);
+      });
+      expect(await screen.findByText(/^No update for \d+ min$/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

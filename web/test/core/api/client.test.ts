@@ -56,6 +56,11 @@ describe('createApiClient against the mock API contract', () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 404, code: 'TASK_NOT_FOUND', requestId: 'mock-request' });
   });
+
+  it('reads the scoreboard of a range and unwraps the envelope', async () => {
+    const board = await client.getScoreboard('7d');
+    expect(board).toMatchObject({ range: '7d', truncated: false, current: { finished: 8, verified: { count: 0, total: 5 } } });
+  });
 });
 
 describe('createApiClient request shape', () => {
@@ -65,6 +70,12 @@ describe('createApiClient request shape', () => {
     expect(fetchImpl).toHaveBeenCalledWith('https://api.example/v1/pending', expect.objectContaining({
       headers: expect.objectContaining({ Authorization: 'tok' }),
     }));
+  });
+
+  it('asks the task list route for its scoreboard view, with the range', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ data: { range: '30d' } }));
+    await createApiClient({ baseUrl: 'https://api.example/v1', getToken: async () => 'tok', fetchImpl }).getScoreboard('30d');
+    expect(fetchImpl).toHaveBeenCalledWith('https://api.example/v1/tasks?view=scoreboard&range=30d', expect.objectContaining({ method: 'GET' }));
   });
 
   it('classifies non-JSON errors, such as an edge or WAF page, by status', async () => {

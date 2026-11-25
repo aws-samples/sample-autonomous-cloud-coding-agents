@@ -19,9 +19,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { REQUIRED_BOOTSTRAP_VERSION } from '../src/commands/setup';
 import { CAPABILITY_CATALOG } from '../src/deployment-capabilities';
-import { COMPUTE_BACKENDS, DEPLOYMENT_FEATURES } from '../src/deployment-profile';
+import { COMPUTE_BACKENDS } from '../src/deployment-profile';
+import { REQUIRED_BOOTSTRAP_VERSION } from '../src/setup-account';
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
@@ -36,27 +36,17 @@ describe('deployment capability parity', () => {
     expect(CAPABILITY_CATALOG).toEqual(contract);
   });
 
-  test('the CLI feature list matches the CDK resolver', () => {
-    const source = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'deployment', 'features.ts'), 'utf-8');
-    const declared = /export const DEPLOYMENT_FEATURES = \[([^\]]+)\]/.exec(source)?.[1];
-    expect(declared).toBeDefined();
-    expect([...declared!.matchAll(/'([A-Za-z]+)'/g)].map(m => m[1])).toEqual([...DEPLOYMENT_FEATURES]);
-  });
-
-  test('the CLI context-switch names match the CDK resolver', () => {
-    const cdk = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'deployment', 'features.ts'), 'utf-8');
-    const cli = fs.readFileSync(path.join(REPO_ROOT, 'cli', 'src', 'commands', 'setup.ts'), 'utf-8');
-    const extract = (text: string) => {
-      const block = /FEATURE_CONTEXT_KEYS[^{]*\{([^}]+)\}/.exec(text)?.[1] ?? '';
-      return Object.fromEntries([...block.matchAll(/(\w+): '(\w+)'/g)].map(m => [m[1], m[2]]));
-    };
-    expect(Object.keys(extract(cdk))).toHaveLength(DEPLOYMENT_FEATURES.length);
-    expect(extract(cli)).toEqual(extract(cdk));
-  });
-
   test('the CLI requires the bootstrap bundle version CDK generates', () => {
     const source = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'bootstrap', 'version.ts'), 'utf-8');
     expect(/export const BOOTSTRAP_VERSION = '([^']+)'/.exec(source)?.[1]).toBe(REQUIRED_BOOTSTRAP_VERSION);
+  });
+
+  test('the CLI reads the Region override context that the CDK gate reads', () => {
+    const cdk = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'constructs', 'lambda-microvm-compute.ts'), 'utf-8');
+    const cli = fs.readFileSync(path.join(REPO_ROOT, 'cli', 'src', 'commands', 'setup.ts'), 'utf-8');
+    const declared = (text: string) => /MICROVM_REGION_OVERRIDE_CONTEXT = '([^']+)'/.exec(text)?.[1];
+    expect(declared(cdk)).toBeDefined();
+    expect(declared(cli)).toBe(declared(cdk));
   });
 
   test('the CLI compute backends match the CDK resolver', () => {

@@ -161,6 +161,31 @@ describe('loadMemoryContext', () => {
     expect(result!.past_episodes).toHaveLength(0);
   });
 
+  test.each([
+    { budget: 'a budget of 4000 tokens', tokenBudget: 4000, knowledge: 3, episodes: 1 },
+    { budget: 'a budget of 1000 tokens', tokenBudget: 1000, knowledge: 1, episodes: 0 },
+    { budget: 'the default budget when the caller passes undefined', tokenBudget: undefined, knowledge: 2, episodes: 0 },
+  ])('trims to $budget', async ({ tokenBudget, knowledge, episodes }) => {
+    const longText = 'x'.repeat(4000); // ~1000 tokens each
+    mockAgentCoreSend
+      .mockResolvedValueOnce({
+        memoryRecordSummaries: [
+          { content: { text: longText } },
+          { content: { text: longText } },
+          { content: { text: longText } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        memoryRecordSummaries: [
+          { content: { text: 'Short episode' } },
+        ],
+      });
+
+    const result = await loadMemoryContext('mem-123', 'owner/repo', 'Task', tokenBudget);
+    expect(result!.repo_knowledge).toHaveLength(knowledge);
+    expect(result!.past_episodes).toHaveLength(episodes);
+  });
+
   test('loads records without content_sha256 metadata (backward compat)', async () => {
     mockAgentCoreSend
       .mockResolvedValueOnce({

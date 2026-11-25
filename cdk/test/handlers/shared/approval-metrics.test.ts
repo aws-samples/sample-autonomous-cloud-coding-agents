@@ -20,12 +20,26 @@
 import {
   APPROVAL_METRIC_MILESTONES,
   METRIC_NAMESPACE,
+  RULE_ID_ALLOWLIST,
   buildEmfLine,
   classifyApprovalEvent,
   normalizeClipReason,
   normalizeRuleId,
   outcomeFromMilestone,
 } from '../../../src/handlers/shared/approval-metrics';
+import { BUILTIN_SOFT_DENY_POLICIES } from '../../../src/handlers/shared/builtin-policies';
+import { parseRules } from '../../../src/handlers/shared/cedar-policy';
+
+describe('approval-metrics: RULE_ID_ALLOWLIST', () => {
+  // Only a soft-deny rule asks for an approval. One the platform ships must keep its own
+  // name in the metric: listed nowhere, it would count as "other" and be logged as unknown.
+  test('holds every soft-deny rule the platform ships', () => {
+    const shipped = parseRules(BUILTIN_SOFT_DENY_POLICIES).filter((rule) => rule.tier === 'soft').map((rule) => rule.rule_id);
+
+    expect(shipped).toContain('force_push_any');
+    expect(shipped.filter((ruleId) => !RULE_ID_ALLOWLIST.has(ruleId))).toEqual([]);
+  });
+});
 
 describe('approval-metrics: normalizeRuleId', () => {
   test('returns allowlisted rule id verbatim', () => {
@@ -37,10 +51,15 @@ describe('approval-metrics: normalizeRuleId', () => {
     expect(normalizeRuleId(['user_custom_rule_42'])).toBe('other');
   });
 
-  test('takes the first allowlisted rule when multiple match', () => {
-    // Deterministic cardinality cap — the first match wins so a rule's
-    // dimension bucket doesn't flip based on Cedar evaluation order.
-    expect(normalizeRuleId(['write_credentials', 'force_push_any'])).toBe('write_credentials');
+  // The engine lists the rules that matched a command in no fixed order, and these pairs match
+  // one command: the list's order decides, so a rule's events do not split between two values.
+  test.each([
+    ['a force push to main', ['force_push_any', 'force_push_main'], 'force_push_main'],
+    ['a forced push to a protected branch', ['force_push_any', 'push_to_protected_branch'], 'force_push_any'],
+    ['a credentials file named .env', ['write_env_files', 'write_credentials'], 'write_credentials'],
+  ])('%s counts under one rule, in whichever order the engine lists the two', (_what, ids, expected) => {
+    expect(normalizeRuleId(ids)).toBe(expected);
+    expect(normalizeRuleId([...ids].reverse())).toBe(expected);
   });
 
   test('returns "other" when no entry is allowlisted', () => {

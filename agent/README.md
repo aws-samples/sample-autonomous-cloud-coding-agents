@@ -40,8 +40,10 @@ Go to GitHub > **Settings** > **Developer settings** > **Personal access tokens*
 
 | Scope | Reason |
 |-------|--------|
-| `repo` | Full repository access (clone, push, PRs, issues) |
+| `public_repo` (public repositories) or `repo` (private repositories) | Clone, push, PRs and issues. `public_repo` reaches public repositories only; `repo` grants every private repository the token's owner can reach, so use it only when a target repository is private |
 | `read:org` | Resolve org membership for org-owned repos |
+
+A token acts for its owner: whatever the scopes, the owner needs write access to the repository (collaborator or team role) for the agent to push.
 
 Set an expiration (90 days recommended) and store it in Secrets Manager the same way as a fine-grained token.
 
@@ -53,6 +55,22 @@ Set an expiration (90 days recommended) and store it in Secrets Manager the same
 | Collaborator on another user's repo | Classic |
 | Org has not opted in to fine-grained tokens | Classic |
 | Targeting repos across multiple orgs | Classic (single token covers all) |
+
+#### Push check before the agent runs
+
+A token can read a repository and still be refused every push. A classic PAT with no scopes, for instance, still reads public repositories. Once the clone's remote and credential helper are set, the agent runs `git push --dry-run` through the same helper the final push uses. When GitHub refuses it, the task fails within seconds instead of at the final push after the agent's work:
+
+| GitHub's answer | Task error |
+|-----------------|------------|
+| The token may not write | `Token cannot push to <repo>`, naming the token type and the permission to add |
+| No credential accepted (the token was revoked or expired after the clone; an invalid one already fails at `preflight_failed`) | `BLOCKED[auth_failure]`: replace the token secret |
+| The repository is archived | `Repository <repo> is archived on GitHub`: unarchive it or target another repository |
+| The organization enforces SAML single sign-on, or an IP allow list | `GitHub organization policy blocks pushes to <repo>`, naming the policy and its fix |
+| No answer: GitHub or the network down after retries, or no reply within 120 s | `BLOCKED[dependency_unreachable]`, retryable |
+
+The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Tasks that never push skip the check: read-only workflows (`coding/pr-review-v1`) and repository-bound workflows that deliver an artifact instead of a PR.
+
+Setup also makes every push from the clone use the task's token over HTTPS. It pins the push URL to `https://github.com/<owner>/<repo>.git`, which git's `pushInsteadOf` rules do not rewrite, and stops with an error if an `insteadOf` rule in the machine's git configuration still would. It clears the `github.com` credential helpers the clone would inherit (a saved GitHub login, for instance) before adding `gh`; helpers for other hosts keep working. Tasks whose workflow only looks up an existing pull request (`ensure_pr` with the `resolve` strategy) skip the check, as they never push.
 
 ### AWS Credentials
 
@@ -131,7 +149,10 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 
 `run_task` removes all Jira credential variables before every invocation,
 including non-Jira tasks, so a warm AgentCore process cannot expose one
-tenant's OAuth or Forge credential to the next task.
+tenant's OAuth or Forge credential to the next task. When it returns or
+raises, it puts the environment of the process back as it found it, so a
+credential that the task resolved (a Linear token, the Jira variables above)
+is no longer in that environment.
 
 **Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Always use an inference profile ID such as `global.anthropic.claude-opus-5-5`: a bare foundation-model ID cannot be invoked with on-demand throughput and Bedrock rejects it with `ValidationException`. IAM must also grant the model — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) for the full layering. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 
@@ -236,7 +257,7 @@ The warm-up is the *primary* fix; the probe that failed is also now non-fatal. `
 
 **`POST /aws/lambda-microvms/runtime/v1/validate`** — Build hook (P2). A **shallow self-check only**: server alive, every hook route registered, interpreter floor, `platform_config` contract loaded. Returns 200 with the individual check results, or 503 while still initialising (which fails the build if it never clears — the right outcome for a broken snapshot). That 503 branch is a **refactor tripwire**, not a state you can reach today: `_module_initialized` is set as the module's last statement and uvicorn accepts no request until the import completes, so it only becomes reachable once someone moves warm-up work behind the bind — and a hook with only a 200 path would then report a still-initialising snapshot as valid.
 
-It runs under the **build role**, which deliberately holds no Bedrock / Secrets Manager / DynamoDB grants, so it **makes zero AWS API calls and must keep making zero** — including its own logging (both build hooks log to stdout via `_build_hook_log`, never through the CloudWatch writer). Two reasons: a Logs write outside the service's `/aws/lambda-microvms/*` namespace (the build role's only Logs grant) can only fail, and each failure pollutes the shared `_debug_cw_failures` alarm signal; and `boto3.client(...)` populates `boto3.DEFAULT_SESSION`, a module global holding a resolved credential chain, which the snapshot would then freeze in for every MicroVM launched from that image version (credentials only: clients still re-resolve the region). "Deeper warm-up assertions" (Bedrock reachability, Memory access, tool availability) are therefore *not* implementable here. The one member of that list that turned out to be partly implementable — proving the local `claude` binary execs — lives on `/ready` instead, as a side effect of warming it (above): a local `exec` is not an AWS call, and it belongs to the hook whose 200 gates the snapshot.
+It runs under the **build role**, which deliberately holds no Bedrock / Secrets Manager / DynamoDB grants, so it **makes zero AWS API calls and must keep making zero** — including its own logging (both build hooks log to stdout via `_build_hook_log`, never through the CloudWatch writer). Two reasons: a Logs write outside the service's `/aws/lambda-microvms/*` namespace (the build role's only Logs grant) can only fail, leaving nothing but a `CloudWatch write failed` line on stdout; and `boto3.client(...)` populates `boto3.DEFAULT_SESSION`, a module global holding a resolved credential chain, which the snapshot would then freeze in for every MicroVM launched from that image version (credentials only: clients still re-resolve the region). "Deeper warm-up assertions" (Bedrock reachability, Memory access, tool availability) are therefore *not* implementable here. The one member of that list that turned out to be partly implementable — proving the local `claude` binary execs — lives on `/ready` instead, as a side effect of warming it (above): a local `exec` is not an AWS call, and it belongs to the hook whose 200 gates the snapshot.
 
 Baked secrets are **reported, not enforced**: `warnings` lists the names (never values) of any credential-shaped env var present in the snapshot, because the build environment's own credentials may legitimately be in that env and failing here would fail every build.
 
@@ -385,6 +406,19 @@ The agent pipeline (shared by both modes). Behavior varies by task type (`new_ta
 7. **Status resolution** — `_resolve_overall_task_status()` maps the agent outcome (success/end_turn/error/unknown) and build gate into a final task status. `agent_status=unknown` (SDK stream ended without a ResultMessage) always fails — success is never inferred from PR or build alone. If a post-hook raises after the agent ran, `_chain_prior_agent_error()` preserves the agent-layer error so it is not masked by the later exception.
 8. **Metrics** — returns duration, disk usage, turn count, cost, and PR URL
 
+### Commit trailers
+
+The `prepare-commit-msg` hook (`prepare-commit-msg.sh`, installed into the clone at the end of the pre-hooks) adds attribution trailers to every commit made in the clone from then on: the agent's commits, and the safety-net commit of work the agent left uncommitted. It reads the values from environment variables that the agent sets itself (they are not inputs of `run.sh`):
+
+| Trailer | Example | Meaning | Variable, and what sets it |
+|---------|---------|---------|----------------------------|
+| `Task-Id` | `01KRPZ3PF8ZBRZ2600GRJS2VF7` | The task that made the commit | `TASK_ID`: the pipeline, before the pre-hooks |
+| `Prompt-Version` | `1c9c10e027a2` | The task's `prompt_version`: 12 hex digits of a hash over the constant `system_prompt_v1` and the Blueprint's `system_prompt_overrides`, not over the prompt's text. No trailer when the task was given none | `PROMPT_VERSION`: the pipeline, before the pre-hooks |
+| `Workflow-Id` | `coding/new-task-v1` | The workflow the task runs | `WORKFLOW_ID`: the workflow step runner, when a step starts |
+| `Workflow-Step` | `implement` | The workflow step that was running: the step's `name`, else its `kind` | `WORKFLOW_STEP`: the workflow step runner, when a step starts |
+
+For a task with a repository the step runner runs the agent step only, so the commits of a task name that step (`implement` for `coding/new-task-v1`), the safety-net commit included: it follows the agent step and saves that step's work. A trailer the message already has is kept, so an amended commit keeps the step it was first made in.
+
 ## Metrics
 
 After the agent completes, a summary report is printed:
@@ -467,7 +501,7 @@ agent/
 ├── scripts/diagnostics/ Optional ops diagnostics (not bundled in the production image)
 │   ├── test_sdk_smoke.py        Minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
 │   └── test_subprocess_threading.py  Subprocess-in-background-thread verification
-├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
+├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version / Workflow-Id / Workflow-Step trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
 ├── tests/               pytest unit tests (pythonpath: src/)
 │   ├── test_config.py       Config validation and workflow-resolution tests (requires_repo / read_only / is_pr_workflow, load-failure fallback)

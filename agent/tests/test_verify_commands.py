@@ -81,6 +81,10 @@ class TestResolveVerifyArgv:
             "--define=X=1",
         ]
 
+    def test_command_that_cannot_be_split_runs_through_a_shell(self):
+        for cmd in ("npm run 'build", "npm run build \\"):
+            assert resolve_verify_argv(cmd, "") == ["bash", "-lc", cmd], cmd
+
 
 class TestVerifyBuildHonorsCommand:
     def _capture_argv(self, monkeypatch):

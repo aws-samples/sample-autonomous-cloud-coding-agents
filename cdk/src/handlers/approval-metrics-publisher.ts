@@ -33,8 +33,7 @@
  *   - Single source of truth stays ``TaskEventsTable`` (DDB).
  *   - Metric schema lives here, not in the agent — future dashboard
  *     changes don't force an agent redeploy.
- *   - Native CloudWatch metrics are alarm-ready for §11.5 once a
- *     notification channel lands.
+ *   - Native CloudWatch metrics are alarm-ready for §11.5.
  *   - §11.3 literal wording is "CloudWatch custom metric" — EMF is the
  *     cheapest path to that posture without a custom metric-put API.
  *

@@ -1257,6 +1257,49 @@ class TestPostToolUseEgressBlocker:
         # …but the terminal carry-path was NOT latched (no host captured).
         assert last_blocker_reason() is None
 
+    # An exception for the last would make the hook's wrapper blank the output of the tool.
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "Read",
+            "Grep",
+            "Edit",
+            "mcp__abca_gateway__repo_config",
+            pytest.param(["Bash"], id="a name that is no string"),
+        ],
+    )
+    def test_a_host_in_the_output_of_a_tool_that_opens_no_connection_does_not_latch(
+        self, progress, tool_name
+    ):
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_response": "ci.log:7: curl: (6) Could not resolve host: registry.example.com",
+        }
+        _run(post_tool_use_hook(hook_input, "t-content", {}, progress=progress))
+        assert last_blocker_reason() is None
+        blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert [b["resource"] for b in blocked] == ["registry.example.com"]
+
+    def test_a_host_in_the_page_that_a_fetch_brought_back_does_not_latch(self, progress):
+        # A fetch that cannot connect is a call that failed (TestPostToolUseFailure).
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "WebFetch",
+            "tool_response": {
+                "bytes": 20480,
+                "code": 200,
+                "codeText": "OK",
+                "result": "`Could not resolve host: registry.example.com` is a DNS error.",
+                "durationMs": 812,
+                "url": "https://docs.example.org/troubleshooting",
+            },
+        }
+        _run(post_tool_use_hook(hook_input, "t-page", {}, progress=progress))
+        assert last_blocker_reason() is None
+        blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert [b["resource"] for b in blocked] == ["registry.example.com"]
+
 
 def _failed_bash(command: str, error: str) -> dict:
     """The PostToolUseFailure event of a Bash command that exits non-zero."""
@@ -1382,6 +1425,28 @@ class TestPostToolUseFailure:
         assert last_blocker_reason() is None
         blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
         assert [b["resource"] for b in blocked] == [host]
+
+    # WebFetch opens its connection itself, as a command does. A file tool
+    # opens none, and an MCP tool hands on what a server answered.
+    @pytest.mark.parametrize(
+        ("tool_name", "latched"),
+        [("WebFetch", True), ("Read", False), ("mcp__abca_gateway__repo_config", False)],
+    )
+    def test_a_failed_call_latches_the_host_only_for_a_tool_that_opens_connections(
+        self, progress, tool_name, latched
+    ):
+        event = {
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": tool_name,
+            "tool_input": {},
+            "tool_use_id": "tu-1",
+            "error": "getaddrinfo ENOTFOUND docs.example.com",
+            "is_interrupt": False,
+        }
+        _run(self._callback(progress)(event, "tu-1", {}))
+        assert ("(resource: docs.example.com)" in (last_blocker_reason() or "")) is latched
+        blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
+        assert [b["resource"] for b in blocked] == ["docs.example.com"]
 
     def test_third_identical_failure_returns_the_steer_to_the_model(self, progress):
         callback = self._callback(progress)
@@ -2679,9 +2744,18 @@ class TestTimedOutPath:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        # A timeout is not a refusal: the model gets no stop-language.
+        assert result["hookSpecificOutput"]["permissionDecisionReason"] == "User timed_out"
         assert fake_task_state.update_calls  # TIMED_OUT write attempted
         assert fake_task_state.update_calls[-1][2] == "TIMED_OUT"
         assert "write_approval_timed_out" in progress.milestones()
+        # A retry of the same call is fast-denied without a "None" reason leaking
+        # into the agent-visible message (seen live as "...within 60s: None").
+        retry = engine_with_soft_gate.evaluate_tool_use(
+            _hook_input()["tool_name"], _hook_input()["tool_input"]
+        )
+        assert retry.reason.startswith("Recent TIMED_OUT within")
+        assert "None" not in retry.reason
 
 
 class TestApprovalRowExpiry:
@@ -3378,6 +3452,14 @@ class TestTimeoutCapping:
 
 
 class TestPermissionDecisionReasonSanitization:
+    STOP_LANGUAGE = (
+        ". Do NOT retry this class of action with trivial variations; "
+        "the same rule will fast-deny subsequent attempts. Find an "
+        "alternative task strategy or report back to the user explaining "
+        "why progress is blocked."
+    )
+    RULE_AND_STOP_LANGUAGE = " (matching rule: test_bash_foo)" + STOP_LANGUAGE
+
     def test_ansi_is_stripped_on_deny(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
@@ -3409,28 +3491,83 @@ class TestPermissionDecisionReasonSanitization:
         assert reason.startswith("AUTHORITATIVE DENY from human reviewer:")
         assert "forbidden" in reason
 
-    def test_long_reason_truncated_to_500(
-        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
-    ):
+    def _denied_reason(self, fake_task_state, progress, engine, monkeypatch, deny_reason):
+        """The reason the model receives when the reviewer denies ``echo foo``."""
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state,
-            {"status": "DENIED", "deny_reason": "x" * 2000, "decided_at": "t1"},
+            {"status": "DENIED", "deny_reason": deny_reason, "decided_at": "t1"},
         )
-
         result = _run(
             pre_tool_use_hook(
                 _hook_input(),
                 "tu-1",
                 {},
-                engine=engine_with_soft_gate,
+                engine=engine,
                 task_id="01KTASK",
                 user_id="u-1",
                 progress=progress,
                 task_state_module=fake_task_state,
             )
         )
-        assert len(result["hookSpecificOutput"]["permissionDecisionReason"]) <= 500
+        return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_denied_reason_names_the_rule_and_tells_the_agent_not_to_retry(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # Compared whole, on purpose: the text is an instruction to the model,
+        # and a change of its wording is a decision that has to show here.
+        reason = self._denied_reason(
+            fake_task_state, progress, engine_with_soft_gate, monkeypatch, "build makefile first"
+        )
+        assert reason == (
+            "AUTHORITATIVE DENY from human reviewer: build makefile first"
+            + self.RULE_AND_STOP_LANGUAGE
+        )
+
+    @pytest.mark.parametrize("length", [223, 2000])
+    def test_a_long_reason_is_shortened_and_the_stop_language_is_kept(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, length
+    ):
+        # 223 is the shortest reason that does not fit here, 2000 the longest the API accepts.
+        reason = self._denied_reason(
+            fake_task_state, progress, engine_with_soft_gate, monkeypatch, "x" * length
+        )
+        assert len(reason) == 500
+        assert reason.startswith("AUTHORITATIVE DENY from human reviewer: xxx")
+        assert reason.endswith("x..." + self.RULE_AND_STOP_LANGUAGE)
+
+    def test_a_cut_inside_an_escape_sequence_leaves_no_escape_character(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # With this rule a shortened reason keeps 219 characters, and the 219th is the ESC.
+        ansi_reason = "x" * 218 + "\x1b[31m" + "y" * 300
+        reason = self._denied_reason(
+            fake_task_state, progress, engine_with_soft_gate, monkeypatch, ansi_reason
+        )
+        assert "\x1b" not in reason
+        assert reason.endswith("y..." + self.RULE_AND_STOP_LANGUAGE)
+
+    def test_rule_names_that_do_not_fit_are_shortened_and_the_stop_language_is_kept(
+        self, fake_task_state, progress, monkeypatch
+    ):
+        # Two rules gate the call, and their names alone take more room than the
+        # stop-language leaves: nothing is left for the reviewer's reason.
+        soft_rules = "\n".join(
+            f'@tier("soft")\n@rule_id("{rule_id}")\n'
+            'forbid (principal, action == Agent::Action::"execute_bash", resource) '
+            'when { context.command like "*foo*" };'
+            for rule_id in ("a" * 150, "b" * 150)
+        )
+        engine = PolicyEngine(
+            task_type="new_task", repo="owner/repo", blueprint_soft_policies=soft_rules
+        )
+        reason = self._denied_reason(
+            fake_task_state, progress, engine, monkeypatch, "build makefile first"
+        )
+        assert len(reason) == 500
+        assert reason.endswith("..." + self.STOP_LANGUAGE)
+        assert reason.startswith("AUTHORITATIVE DENY from human reviewer:  (matching rules: ")
 
 
 # --- Denial-injection hook ----------------------------------------------

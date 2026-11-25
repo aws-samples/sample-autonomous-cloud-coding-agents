@@ -55,6 +55,31 @@ def _config(**overrides: Any) -> TaskConfig:
     return TaskConfig(**base)
 
 
+class TestBlueprintCedarPolicyBootstrap:
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            '@tier ( "soft" )',
+            '// Previously used @tier("hard").\n@tier("soft")',
+        ],
+    )
+    @patch("hooks.build_hook_matchers")
+    def test_cedar_recognizes_the_tier_despite_formatting_or_comments(
+        self, _mock_build_hooks, annotation
+    ):
+        policy = (
+            f'{annotation}\n@rule_id("review_report")\n'
+            'forbid (principal, action == Agent::Action::"execute_bash", resource)\n'
+            '  when { context.command == "echo report" };'
+        )
+        engine, _ = _initialize_policy_engine_and_hooks(
+            config=_config(cedar_policies=[policy]), trajectory=None, progress=MagicMock()
+        )
+        decision = engine.evaluate_tool_use("Bash", {"command": "echo report"})
+        assert decision.outcome == "require_approval"
+        assert decision.matching_rule_ids == ("review_report",)
+
+
 class TestClaudeSessionOwnership:
     @pytest.mark.parametrize("microvm", [False, True])
     @pytest.mark.parametrize(
@@ -743,7 +768,8 @@ def _run_agent(
 
     The SDK client is replaced, so no CLI is started and nothing reaches Bedrock;
     the environment setup, the version probe, the policy engine and the gateway
-    bridge are stubbed too. ``run_agent_kwargs`` (``cwd``, ``trajectory``) are
+    bridge are stubbed too. An exception among ``messages`` is raised in its place:
+    a session that breaks off. ``run_agent_kwargs`` (``cwd``, ``trajectory``) are
     passed on. Returns the ``AgentResult``, the progress writer the run wrote its
     events to (a mock), the options the client was built with and the hooks that
     stand in for those of the policy engine.
@@ -763,6 +789,8 @@ def _run_agent(
 
         async def receive_response(self):
             for message in messages:
+                if isinstance(message, Exception):
+                    raise message
                 yield message
 
         async def disconnect(self):
@@ -888,6 +916,16 @@ _AWS_KEY_ID = "AKIA" + "IOSFODNN7EXAMPLE"
 _GIT_URL_TOKEN = "gh" + "s_" + "a1B2c3D4" * 5
 _HEADER_TOKEN = "made-up-" + "0123456789"
 _SECRETS = (_AWS_KEY_ID, _GIT_URL_TOKEN, _HEADER_TOKEN)
+# 40 characters in the shape of a secret access key, from short pieces. The scanner
+# knows such a key by the name that stands in front of it.
+_AWS_SECRET_KEY = "wJalrXUt" + "nFEMI/K7" + "MDENG/bP" + "xRfiCYEX" + "AMPLEKEY"
+# The key behind its name, with something between the two that a repr escapes:
+# a quote (of a text that holds both kinds), a tab, a newline.
+_KEY_BEHIND_ITS_NAME = [
+    pytest.param(f"aws_secret_access_key='{_AWS_SECRET_KEY}' # \"prod\"", id="quoted"),
+    pytest.param(f"aws_secret_access_key\t{_AWS_SECRET_KEY}", id="after a tab"),
+    pytest.param(f"aws_secret_access_key:\n{_AWS_SECRET_KEY}", id="on the next line"),
+]
 
 
 def _assert_screened(recorded: str) -> None:
@@ -1053,6 +1091,20 @@ class TestTurnCount:
         assert _turns_of(run.progress.write_agent_turn) == [1, 1, 2]
         assert _turns_of(run.progress.write_agent_tool_result) == [1, 1]
 
+    def test_cost_update_is_numbered_like_the_events_around_it(self, monkeypatch):
+        run = _run_agent(
+            monkeypatch,
+            _assistant(_bash("call_1", "ls src"), answer="msg_1"),
+            _tool_result("call_1", "a.py"),
+            _assistant(_bash("call_2", "ls tests"), answer="msg_1"),
+            _tool_result("call_2", "test_a.py"),
+            _assistant(sdk.TextBlock(text="Two files."), answer="msg_2"),
+            _result(num_turns=3),
+        )
+
+        assert _turns_of(run.progress.write_agent_cost_update) == [2]
+        assert run.result.num_turns == 3
+
     def test_run_without_a_result_reports_the_turns_it_saw(self, monkeypatch):
         # No result message (the stream broke off): the task record then takes
         # its turn counts from this number, and clamps it to max_turns.
@@ -1171,19 +1223,12 @@ class TestToolResultsAreRecorded:
             turn=1,
         )
 
-    @pytest.mark.parametrize(
-        "separator",
-        ["='{}' # \"prod\"", "\t{}", ":\n{}"],
-        ids=["quoted", "after a tab", "on the next line"],
-    )
+    @pytest.mark.parametrize("text", _KEY_BEHIND_ITS_NAME)
     def test_credentials_in_a_list_of_blocks_are_replaced_as_in_a_string(
-        self, monkeypatch, capfd, separator
+        self, monkeypatch, capfd, text
     ):
         # A result that is a list of content blocks is recorded as its repr, and a
         # repr escapes quotes, tabs and newlines: the strings are screened first.
-        # 40 characters in the shape of a secret access key, from short pieces.
-        value = "wJalrXUt" + "nFEMI/K7" + "MDENG/bP" + "xRfiCYEX" + "AMPLEKEY"
-        text = "aws_secret_access_key" + separator.format(value)
         recorded = {}
         for shape, content in (("string", text), ("list", [{"type": "text", "text": text}])):
             trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
@@ -1200,8 +1245,8 @@ class TestToolResultsAreRecorded:
                 + capfd.readouterr().out
             )
 
-        assert value not in recorded["string"]
-        assert value not in recorded["list"]
+        assert _AWS_SECRET_KEY not in recorded["string"]
+        assert _AWS_SECRET_KEY not in recorded["list"]
 
     def test_long_output_is_cut_in_the_trace(self, monkeypatch):
         trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
@@ -1239,3 +1284,97 @@ class TestToolResultsAreRecorded:
         _assert_screened(in_trace)
         assert in_event == in_trace
         _assert_screened(capfd.readouterr().out)
+
+
+class TestEventsOfTheRunAreScreened:
+    """What the model thinks, says and hands to a tool is written to the task's
+    events, and so is the text of an exception that ends the session. The events
+    are read outside the session (``bgagent watch``, the web console, a Slack
+    notice of an error), so the runner screens each text before the progress
+    writer cuts it to a preview, as it screens the result of a tool call."""
+
+    _TEXT = (
+        f"git push https://x-access-token:{_GIT_URL_TOKEN}@github.com/o/r "
+        f"with AWS_ACCESS_KEY_ID={_AWS_KEY_ID} "
+        f"and -H 'Authorization: token {_HEADER_TOKEN}'"
+    )
+
+    @staticmethod
+    def _recorded_input(monkeypatch, call: sdk.ToolUseBlock) -> str:
+        """The text that the event of ``call`` holds of its input."""
+        run = _run_agent(monkeypatch, _assistant(call, answer="msg_1"), _result())
+        return run.progress.write_agent_tool_call.call_args.kwargs["tool_input"]
+
+    def test_credentials_in_thinking_and_text_are_replaced(self, monkeypatch):
+        run = _run_agent(
+            monkeypatch,
+            _assistant(
+                _thinking(f"Plan: {self._TEXT}"),
+                sdk.TextBlock(text=f"Running {self._TEXT}"),
+                answer="msg_1",
+            ),
+            _result(),
+        )
+
+        recorded = run.progress.write_agent_turn.call_args.kwargs
+        assert recorded["thinking"].startswith("Plan: git push https://")
+        _assert_screened(recorded["thinking"])
+        assert recorded["text"].startswith("Running git push https://")
+        _assert_screened(recorded["text"])
+
+    def test_credentials_in_a_tool_input_are_replaced(self, monkeypatch):
+        recorded = self._recorded_input(monkeypatch, _bash("call_1", self._TEXT))
+
+        assert recorded.startswith("{'command': ")
+        _assert_screened(recorded)
+
+    @pytest.mark.parametrize("command", _KEY_BEHIND_ITS_NAME)
+    def test_strings_of_a_tool_input_are_screened_before_its_repr(self, monkeypatch, command):
+        recorded = self._recorded_input(monkeypatch, _bash("call_1", command))
+
+        assert _AWS_SECRET_KEY not in recorded
+
+    def test_secret_under_a_key_of_a_tool_input_is_replaced(self, monkeypatch):
+        # Name and value are two strings of the input: only the repr holds the pair.
+        call = sdk.ToolUseBlock(
+            id="call_1",
+            name="mcp__vault__put",
+            input={"aws_secret_access_key": _AWS_SECRET_KEY},
+        )
+
+        assert _AWS_SECRET_KEY not in self._recorded_input(monkeypatch, call)
+
+    def test_arguments_after_a_replaced_value_stay_readable(self, monkeypatch):
+        # The web console reads the arguments back from the repr. What is replaced must leave the
+        # quote and the comma that close one. The quote that closes the header goes with the token.
+        command = f'curl https://api.example.com -H "Authorization: token {_HEADER_TOKEN}"'
+        call = sdk.ToolUseBlock(
+            id="call_1", name="Bash", input={"command": command, "description": "List the items"}
+        )
+
+        assert self._recorded_input(monkeypatch, call) == (
+            "{'command': 'curl https://api.example.com -H \"Authorization: token ***', "
+            "'description': 'List the items'}"
+        )
+
+    def test_input_without_a_credential_is_recorded_as_its_repr(self, monkeypatch):
+        # The form the web console reads the fields of a call from.
+        run = _run_agent(
+            monkeypatch, _assistant(_bash("call_1", "npm test"), answer="msg_1"), _result()
+        )
+
+        run.progress.write_agent_tool_call.assert_called_once_with(
+            tool_name="Bash", tool_input="{'command': 'npm test'}", turn=1
+        )
+
+    def test_credentials_in_the_text_of_a_session_error_are_replaced(self, monkeypatch):
+        run = _run_agent(monkeypatch, RuntimeError(self._TEXT))
+
+        assert run.result.status == "error"
+        recorded = run.progress.write_agent_error.call_args.kwargs
+        assert recorded["error_type"] == "RuntimeError"
+        assert recorded["message"].startswith("git push https://")
+        _assert_screened(recorded["message"])
+        # The same text is the task's error message, which the failure notice quotes.
+        assert run.result.error.startswith("Claude session failed: git push https://")
+        _assert_screened(run.result.error)

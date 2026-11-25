@@ -19,7 +19,7 @@
 
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { buildAdfDocument, updateIssueCommentAdf } from '../../../src/handlers/shared/jira-feedback';
-import { jiraPreviewDocument, updateJiraIterationComment } from '../../../src/handlers/shared/jira-preview';
+import { jiraPreviewDocument, updateJiraIterationComment } from '../../../src/handlers/shared/jira-iteration-comment';
 import type { TaskRecord } from '../../../src/handlers/shared/types';
 
 jest.mock('../../../src/handlers/shared/jira-feedback', () => ({
@@ -46,7 +46,7 @@ function fixture() {
   const ddb = { send } as unknown as DynamoDBDocumentClient;
   return {
     update: (value?: ReturnType<typeof status>) => updateJiraIterationComment(ddb, 'table', 'task', ctx, 'ENG-42', '123', value),
-    screenshot: () => { task = { ...task, screenshot_url: shot, screenshot_preview_url: preview }; },
+    screenshot: (url = shot) => { task = { ...task, screenshot_url: url, screenshot_preview_url: preview }; },
     finish: (metrics: Record<string, unknown> = {}) => { task = { ...task, ...metrics, status: 'COMPLETED' } as TaskRecord; },
     send,
   };
@@ -77,6 +77,17 @@ test('duplicate preview refreshes keep exactly one preview block', async () => {
   const body = JSON.stringify(put.mock.calls.at(-1)![3]);
   expect(body.match(/Open screenshot/g)).toHaveLength(1);
   expect(body).toContain('Working');
+});
+
+test('a stored screenshot URL that is not allowed renders no preview block', async () => {
+  const f = fixture();
+  await f.update(status('Working', false));
+  f.screenshot('https://localhost/a');
+  await f.update();
+  const body = JSON.stringify(put.mock.calls.at(-1)![3]);
+  expect(body).toContain('Working');
+  expect(body).not.toContain('Open screenshot');
+  expect(body).not.toContain('Open live preview');
 });
 
 test.each([false, true])('a slow heartbeat repairs a terminal write with preview (preview first: %s)', async (previewFirst) => {
@@ -205,6 +216,16 @@ test('Jira and persistence failures are best effort', async () => {
   await expect(f.update()).resolves.toEqual({ ok: false, retryable: false });
   f.send.mockRejectedValueOnce(new Error('DDB unavailable'));
   await expect(f.update()).resolves.toEqual({ ok: false, retryable: true });
+});
+
+test.each([
+  ['terminal (4xx)', false],
+  ['transient (5xx, 429)', true],
+])('a %s Jira failure reaches the caller with its retry classification', async (_kind, retryable) => {
+  const f = fixture();
+  put.mockResolvedValueOnce({ ok: false, retryable });
+  await expect(f.update()).resolves.toEqual({ ok: false, retryable });
+  expect(put).toHaveBeenCalledTimes(1);
 });
 
 test('a missing task is non-retryable and never writes a comment', async () => {

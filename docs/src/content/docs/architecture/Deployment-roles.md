@@ -31,26 +31,57 @@ The policies are split into six IAM managed policies (each under the 6,144-chara
 | `IaCRole-ABCA-Compute-LambdaMicrovms` | Lambda MicroVM image + network-connector operations | Only when `lambda-microvm` is in `ComputeTypes` |
 
 > **Placeholder substitution**: Replace `ACCOUNT_ID` with your 12-digit AWS account ID and `REGION` with your deployment region (e.g., `us-east-1`) throughout this document.
+>
+> **Partition scope**: Every resource ARN in the six managed policies names the commercial `aws` partition (`arn:aws:...`), so the policies work in that partition only: they cannot authorize an ABCA deployment in another one, such as `aws-us-gov` or `aws-cn`. The inline policy `PassExecutionRoleToCloudFormation` (described below) resolves the partition of the account being bootstrapped, which does not change that. Partition support is an open question ([#928](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/928)).
 
 These policies are not created or attached manually. The repository generates them and a custom bootstrap template that attaches the selected policies to the CloudFormation execution role:
 
 ```bash
 # Regenerate artifacts (policies JSON + template YAML) and bootstrap.
 # ComputeTypes defaults to "agentcore".
-MISE_EXPERIMENTAL=1 mise //cdk:bootstrap
+mise //cdk:bootstrap
 
 # To ALSO enable the ECS compute backend (attach IaCRole-ABCA-Compute-ECS), set the
-# ComputeTypes CFN *parameter*. `cdk bootstrap` cannot pass template parameters — it
+# ComputeTypes CFN *parameter*. cdk bootstrap cannot pass template parameters — it
 # has no --parameters flag, and --context sets CDK construct context, not a CFN
-# parameter — so bootstrap first (above), then update the parameter on CDKToolkit:
-aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs
+# parameter — so bootstrap first (above), then update the parameter on CDKToolkit.
+# The first command below lists the other parameters of the stack, and the update names
+# each with UsePreviousValue, because CloudFormation sets a parameter that an update
+# leaves out to its template default. The update runs only if the list was read. A
+# --profile or --region option goes on every aws command. Keep the single quotes:
+# without them the shell removes the backslash, and the AWS CLI splits the value at the
+# comma and rejects it.
+keep=($(aws cloudformation describe-stacks --stack-name CDKToolkit --output text \
+    --query "Stacks[0].Parameters[?ParameterKey!='ComputeTypes'].[ParameterKey]" \
+  | sed 's/.*/ParameterKey=&,UsePreviousValue=true/'))
+[ ${#keep[@]} -gt 0 ] && aws cloudformation update-stack --stack-name CDKToolkit \
+  --use-previous-template --capabilities CAPABILITY_NAMED_IAM \
+  --parameters 'ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs' "${keep[@]}"
 # verify it took:
 aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 ```
 
-Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --force --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+
+**An account that is already bootstrapped.** The task replaces the bootstrap it finds, which is why it passes `--force`. Without the flag, the CDK CLI does not overwrite a `CDKToolkit` stack whose `BootstrapVariant` parameter differs from the template's. It prints `Not overwriting it with a template containing 'ABCA: Least-Privilege Bootstrap' (use --force if you intend to overwrite)`, changes nothing and exits 0 ([#701](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/701)).
+
+A standard `cdk bootstrap` records `AWS CDK: Default Resources` in that parameter, and the stack can keep that value after this template has replaced the standard one, because the CLI keeps previous parameter values. A later standard `cdk bootstrap` makes the same comparison. On such a stack it finds no difference and puts the standard template back, and `mise //cdk:preflight` then reports a standard bootstrap.
+
+Know what the task changes before you run it on an account that already has a bootstrap:
+
+- **Other CDK apps in the account and Region deploy through the same execution role.** Once the task has replaced a standard bootstrap, CloudFormation deploys them with the ABCA policies only. This is why `bgagent setup` leaves a standard bootstrap unchanged, and why replacing it is a command you run yourself. In a script that must not replace one, cancel the flag: `mise //cdk:bootstrap -- --no-force`.
+- **`--force` also lifts the CLI's refusal to replace a newer CDK bootstrap version** (the `BootstrapVersion` output) with this template's.
+- **An execution-policy list set by the earlier bootstrap stays.** If that bootstrap passed `--cloudformation-execution-policies`, the CLI sends the same list again, and the template attaches it in place of the ABCA policies. Pass an empty list to drop it: `mise //cdk:bootstrap -- --cloudformation-execution-policies ""`. The CLI rejects an empty list for a bootstrap that trusts another account (`--trust`).
+
+Check the result on the execution role, not on the `BootstrapVariant` parameter. Every policy name the command prints contains `IaCRole-ABCA-`, and `AdministratorAccess` is not among them:
+
+```bash
+aws iam list-attached-role-policies \
+  --role-name cdk-hnb659fds-cfn-exec-role-ACCOUNT_ID-REGION \
+  --query 'AttachedPolicies[].PolicyName'
+```
+
+On a bootstrap that is already current, the task changes nothing and the CLI prints `You used the --force flag, but CloudFormation reported that the deployment would not make any changes`. That is expected.
 
 **Re-bootstrap to bundle 1.7.0 or later before deploying nested stacks.** The
 execution role also needs the generated inline policy
@@ -75,6 +106,20 @@ that deployed permissions match source.
 > - **Each managed-policy `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line. The original fix reduced the body to 45,743 characters from 53,369; subsequent policy additions remain subject to the budget. The small inline self-role policy uses a mapping to resolve its ARN with `Fn::Sub`.
 >
 > `cdk/scripts/generate-bootstrap-template.ts` fails the build when the body exceeds the budget in `cdk/src/bootstrap/template-size.ts`, so adding statements surfaces the problem at generation time rather than against somebody's fresh account. Both the guard and its regression test obtain the size by invoking `cdk bootstrap --show-template` on the committed artifact — the CLI is the component that makes the inline-vs-S3 decision, so asking it directly cannot drift the way a local copy of its serialiser would. No AWS credentials are required.
+
+## Versioning
+
+The bootstrap template publishes three values as outputs of the `CDKToolkit` stack. `mise //cdk:bootstrap:generate` writes them into the template:
+
+| Layer | `CDKToolkit` output | Where it comes from | What it answers |
+|-------|---------------------|---------------------|-----------------|
+| Version | `BootstrapPolicyVersion` | `BOOTSTRAP_VERSION` in `cdk/src/bootstrap/version.ts`, copied to `cdk/bootstrap/BOOTSTRAP_VERSION` | Does the account have to be bootstrapped again? A new policy or statement is a minor bump, because it reaches an account only through a re-bootstrap |
+| Hash | `BootstrapPolicyHash` | `computeBootstrapHash()`: SHA-256 over the six managed policies and the inline `PassExecutionRoleToCloudFormation` policy, copied to `cdk/bootstrap/BOOTSTRAP_HASH` | Was the account bootstrapped from the same policies as this checkout? At an equal version it differs when a policy changed without a version bump |
+| Policy set | `BootstrapPolicySet` | The names of the policies the template selects for the stack's `ComputeTypes` parameter | Which compute policies does the account's bootstrap carry? |
+
+Before `mise //cdk:deploy` deploys, the bootstrap preflight compares the three with the checkout. [Bootstrap preflight](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#bootstrap-preflight) in the deployment guide lists the results and what to do about each. The three values come from the template: they say which bundle was deployed and what `ComputeTypes` selects, not what is attached to the execution role. They stay the same when a policy is edited in IAM, and when the stack's `CloudFormationExecutionPolicies` parameter is set, which attaches that list in place of the ABCA policies.
+
+The actions themselves are checked at build time, without an account. `cdk/test/bootstrap/synth-coverage.test.ts` synthesizes the app and fails when a resource type has no entry in `cdk/src/bootstrap/resource-action-map.ts`, or when the policies do not allow an action of its entry.
 
 ## Trust policy
 
@@ -312,16 +357,6 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
 
 `NestedStackPassRole` (bundle 1.7.0) exists because the app contains nested stacks. CloudFormation creates them *as* the execution role and passes that same role on to each child stack, which needs `iam:PassRole` on the role itself. Without it, every deploy fails at change-set creation with `cfn-exec-role ... is not authorized to perform: iam:PassRole on resource: ...cfn-exec-role...`. The statement is limited to the CDK execution role and to `cloudformation.amazonaws.com`, so it grants nothing the role does not already hold (#865). `test/bootstrap/synth-coverage.test.ts` now walks every nested stack (#757) and pins this statement's resource and condition, which an action-level check cannot distinguish from `IAMPassRole`.
 
-Before deploying, `mise //cdk:deploy` runs the bootstrap preflight (#126; also `mise //cdk:preflight`, read-only, `--json` for CI). It compares the `CDKToolkit` outputs with the checkout and needs only `cloudformation:DescribeStacks`:
-
-| Result | When | Deploy |
-|---|---|---|
-| PASS | `BootstrapPolicyVersion` matches (or is newer) and `BootstrapPolicySet` includes every policy the app's compute backends need | continues |
-| WARN | Same version, different `BootstrapPolicyHash` (console drift, or a policy change without a version bump) | continues |
-| FAIL | No `CDKToolkit`; a default CDK bootstrap (no ABCA outputs); an older bundle; or a missing compute policy | stops, with the fix |
-
-`ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` bypasses it.
-
 ### IaCRole-ABCA-Application
 
 DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS, CloudFront, and Secrets Manager. When ECS Fargate compute is enabled, add the ECS statement below to this policy.
@@ -330,7 +365,9 @@ Agent Registry provisioning also uses a Step Functions workflow to wait for
 asynchronous creation and deletion. Its construct explicitly names the workflow
 with the parent stack's `backgroundagent-dev-` prefix so it fits this policy,
 including when deployed in a nested stack. Adopting this name in an existing
-deployment replaces the provider's waiter state machine.
+deployment replaces the provider's waiter state machine. The registry's own API
+calls (`agent-registry` actions) are in none of these policies: see
+[Custom resource providers](#custom-resource-providers).
 
 ```json
 {
@@ -975,12 +1012,22 @@ These roles are created inside the CloudFormation stack at deploy time, not by t
 | BedrockLoggingRole | `bedrock.amazonaws.com` | Writes model invocation logs to CloudWatch |
 | TaskOrchestrator Lambda role | Lambda | Durable orchestrator; DynamoDB, Secrets Manager, AgentCore Runtime invocation, AgentCore Memory |
 | ConcurrencyReconciler Lambda role | Lambda | Scheduled reconciliation; DynamoDB scan + conditional updates |
+| PrOutcomeSweep Lambda role | Lambda | Hourly read of pull-request outcomes; DynamoDB Query on the task table's status index, UpdateItem on the task table and PutItem on the task events table, Secrets Manager read of the platform GitHub token |
 | TaskApi Lambda roles (9-10) | Lambda | API handler functions; DynamoDB, Secrets Manager (webhook handlers), Bedrock Guardrail, Lambda invoke |
 | AwsCustomResource Lambda role | Lambda | Blueprint DDB writes, Bedrock logging config, DNS firewall config |
+| Agent Registry provisioning Lambda roles (2, when enabled) | Lambda | Custom resource handlers (`onEvent`, `isComplete`): create, read, update and delete the registry, delete its records first; the registry's service-linked role and workload identity |
 | API Gateway CloudWatch role | API Gateway | Pushes API Gateway access logs |
 | VPC Flow Log role | VPC Flow Logs | Writes flow logs to CloudWatch |
 | ECS task execution role (when enabled) | ECS (pull images) | ECR image pull, CloudWatch Logs write |
 | ECS task role (when enabled) | ECS (container runtime) | DynamoDB, Secrets Manager, Bedrock InvokeModel |
+
+### Custom resource providers
+
+For a custom resource (`Custom::*`), CloudFormation's only call as the execution role is `lambda:InvokeFunction` on the provider function. The AWS calls that do the work are made by the provider's Lambda function under its own role: a runtime role like those above, created by the stack together with its permissions. The execution role needs none of those actions, and adding them to the policies in this document would give it privilege that nothing uses. `RESOURCE_ACTION_MAP` in `cdk/src/bootstrap/resource-action-map.ts` records the rule: it maps every `Custom::*` type to `lambda:InvokeFunction` alone.
+
+This is why no policy here grants an `agent-registry` action, although the stack provisions an AWS Agent Registry ([REGISTRY.md](/sample-autonomous-cloud-coding-agents/architecture/registry)). The registry is a `Custom::AgentRegistry` resource: `CreateRegistry`, `GetRegistry`, `UpdateRegistry`, `DeleteRegistry` and the deletion of its records run under the roles of its two handlers, granted in `cdk/src/constructs/registry.ts` and pinned by `cdk/test/constructs/registry.test.ts`. The execution role creates what surrounds it: the nested stack, the handler functions and their roles, and the waiter state machine. `cdk/test/bootstrap/synth-coverage.test.ts` checks that side only; it cannot see a provider's role.
+
+Seven actions in the policies predate this rule: `dynamodb:PutItem`, `dynamodb:UpdateItem`, `bedrock:PutModelInvocationLoggingConfiguration`, `bedrock:DeleteModelInvocationLoggingConfiguration`, `bedrock:GetModelInvocationLoggingConfiguration`, `route53resolver:UpdateFirewallConfig` and `route53resolver:GetFirewallConfig`. They belong to three settings that `AwsCustomResource` providers apply (Blueprint records, Bedrock model invocation logging, DNS Firewall configuration) under the `AwsCustomResource` role, which holds its own grants. They have been here since the first version of these policies and are not a precedent for a new custom resource.
 
 ### CDK bootstrap roles
 

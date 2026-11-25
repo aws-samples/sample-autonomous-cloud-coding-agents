@@ -52,8 +52,8 @@ class TaskApiSmokeStack extends Stack {
     // Environment-agnostic on purpose. integ-runner deploys into whatever
     // account/region the active AWS credentials resolve to (the shared account
     // that also hosts the live backgroundagent-dev stack). An
-    // explicit env here would force the IntegTest DeployAssert stack — which is
-    // always environment-agnostic — into a cross-region reference it cannot
+    // explicit env here would force the IntegTest DeployAssert stack (created
+    // below without one) into a cross-region reference it cannot
     // resolve (CrossRegionReferencesRequireExplicitRegion) when it reads this
     // stack's UserPool / API outputs in the assertions below.
     super(scope, id, {
@@ -101,6 +101,9 @@ const stack = new TaskApiSmokeStack(app, stackName);
 
 const integ = new IntegTest(app, 'TaskApiSmoke', {
   testCases: [stack],
+  // Left to IntegTest, the assertion stack is named after its construct path alone. Every run would use
+  // that one name, and two runs in the shared account would work on the same stack.
+  assertionStack: new Stack(app, `${stackName}-assert`),
   // Force teardown on success and failure so a failed assertion never strands
   // the stack (and its billable resources) in the shared integ account.
   cdkCommandOptions: {

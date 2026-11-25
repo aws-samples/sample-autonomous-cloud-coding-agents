@@ -17,14 +17,13 @@
  *  SOFTWARE.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
- * The rules below are selectors written by hand in eslint.config.mjs. One that matches
- * nothing is still valid and lint passes, so each row lints a snippet as the named file
- * with the real config and lists the rules that must report it: none where the snippet
- * has to stay legal.
+ * A hand-written selector or import zone that matches nothing is still valid, and lint passes.
+ * So each row lints a snippet as the named file and lists the rules that must report it.
  */
 const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // An AWS SDK client built outside the ua factory (#319).
@@ -36,6 +35,16 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // md5 from node:crypto.
   ['src/a.ts', "export const digest = createHash('md5');", ['no-restricted-syntax']],
   ['test/a.test.ts', "export const digest = crypto.createHash('md5');", ['no-restricted-syntax']],
+  // An import in src of a file outside the package, which the CLI ships without.
+  ['src/a.ts', "import '../../cdk/src/handlers/shared/types';", ['import-x/no-restricted-paths']],
+  ['src/a.ts', "import '../../contracts/constants.json';", ['import-x/no-restricted-paths']],
+  ['src/a.ts', "import './types';", []],
+  ['src/a.ts', "import 'commander';", []],
+  ['test/a.test.ts', "import '../../contracts/constants.json';", []],
+  // The same for a package of the workspace imported by its name, through the link Yarn
+  // makes for it in the root node_modules.
+  ['src/a.ts', "import '@abca/cdk/package.json';", ['import-x/no-restricted-paths']],
+  ['src/a.ts', "import '@abca/cli/package.json';", []],
   // A comment that takes code out of the coverage report, in each spelling the rule lists.
   ['src/a.ts', '/* istanbul ignore next */', ['no-warning-comments']],
   ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
@@ -51,6 +60,20 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/a.ts', 'export const pattern = /\\x01/;', ['no-control-regex']],
   // Two spaces inside an import attribute, which @stylistic/no-multi-spaces lets pass by default.
   ['src/a.ts', "import cfg from './cfg.json' with { type: /* c */  'json' };", ['@stylistic/no-multi-spaces']],
+];
+
+const SHEBANG = '#!/usr/bin/env node';
+const HEADER = fs.readFileSync(path.resolve(__dirname, '..', 'header.js'), 'utf-8').trim();
+
+/**
+ * The license-header rule wants the header one blank line below a shebang, nothing in between
+ * (#172). In CASES the rule would run on every row, and those snippets carry no header.
+ */
+const SHEBANG_CASES: typeof CASES = [
+  ['src/bin/a.ts', `${SHEBANG}\n\n${HEADER}\n\nexport const a = 1;\n`, []],
+  ['src/bin/a.ts', `${SHEBANG}\n\nexport const a = 1;\n`, ['license-header/header']],
+  ['src/bin/a.ts', `${SHEBANG}\n\n\n${HEADER}\n\nexport const a = 1;\n`, ['license-header/header']],
+  ['src/bin/a.ts', `${SHEBANG}\n\n// a comment\n\n${HEADER}\n\nexport const a = 1;\n`, ['license-header/header']],
 ];
 
 /**
@@ -75,14 +98,31 @@ const LINT_CASES = `
   console.log(JSON.stringify(reported));
 `;
 
-test('eslint.config.mjs reports each snippet with exactly the rules listed', () => {
-  const stdout = execFileSync(process.execPath, ['--input-type=module', '--eval', LINT_CASES, JSON.stringify(CASES)], {
+test.each([
+  ['each snippet', CASES],
+  ['each file that starts with a shebang', SHEBANG_CASES],
+])('eslint.config.mjs reports %s with exactly the rules listed', (_name, cases) => {
+  const stdout = execFileSync(process.execPath, ['--input-type=module', '--eval', LINT_CASES, JSON.stringify(cases)], {
     cwd: path.resolve(__dirname, '..'),
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const reported = JSON.parse(stdout) as string[][];
-  expect(CASES.map(([file, code], index) => [file, code, reported[index]])).toEqual(CASES);
+  expect(cases.map(([file, code], index) => [file, code, reported[index]])).toEqual(cases);
+}, 60_000);
+
+/**
+ * The parser reads a file from disk only in a run without --fix and with a project, unless
+ * eslint.config.mjs forbids it. The build lints with --fix, the tests above without a project.
+ */
+test('eslint without --fix passes the files that start with a shebang', () => {
+  const eslint = path.resolve(__dirname, '..', '..', 'node_modules', '.bin', 'eslint');
+  const { status, stdout } = spawnSync(process.execPath, [eslint, '--config', 'eslint.config.mjs', '--max-warnings', '0', 'src/bin'], {
+    cwd: path.resolve(__dirname, '..'),
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  expect({ status, stdout }).toEqual({ status: 0, stdout: '' });
 }, 60_000);
 
 /**

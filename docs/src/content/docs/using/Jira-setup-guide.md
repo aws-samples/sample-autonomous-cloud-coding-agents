@@ -443,6 +443,7 @@ The receiver dedupes issue events on `{issueKey}#{webhookEvent}#{timestamp}` and
 - Is the label spelled exactly as configured? Match is case-insensitive but must be the same word.
 - For an `issue_updated` event, confirm the label was *added in this update* — re-saving an issue that already carries the label won't re-trigger by design.
 - Check CloudWatch logs for `JiraWebhookFn` and `JiraWebhookProcessorFn`.
+- In the `JiraWebhookProcessorFn` log, `Jira tenant not onboarded: no usable workspace registry row` means the registry was read and holds no usable row for the `cloudId`: run `bgagent jira setup`. `Jira workspace registry unreadable` means the read of `JiraWorkspaceRegistryTable` itself failed (throttling, or a missing IAM permission on the processor's role). That fails the invocation on purpose, and Lambda retries it twice, about one and three minutes after the first attempt. If the retries fail as well, the event is discarded: fix the cause, then remove and re-add the trigger label, or post the `@bgagent` comment again.
 
 ### Webhook signature verification fails repeatedly (401)
 

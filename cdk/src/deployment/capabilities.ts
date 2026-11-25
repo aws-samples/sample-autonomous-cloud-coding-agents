@@ -19,6 +19,7 @@
 
 import { Token } from 'aws-cdk-lib';
 import catalog from '../../../contracts/deployment-capabilities.json';
+import type { ComputeBackend } from '../handlers/shared/compute-backend';
 import { DeploymentFeature, DeploymentFeatures, enabledFeatures } from './features';
 
 /** Region data for one capability; `regions` absent means no constraint beyond core. */
@@ -43,6 +44,11 @@ export interface CapabilityCatalog {
   readonly lastVerified: string;
   readonly source: string;
   readonly core: Capability;
+  /**
+   * Every compute backend; only a Region-limited one lists `regions`. The Lambda MicroVMs
+   * construct enforces its entry (`handlers/shared/microvm-regions.ts`), not this module.
+   */
+  readonly compute: Readonly<Record<ComputeBackend, Capability>>;
   readonly features: Readonly<Record<DeploymentFeature, FeatureCapability>>;
 }
 

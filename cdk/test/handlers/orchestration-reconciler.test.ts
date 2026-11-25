@@ -51,6 +51,11 @@ jest.mock('../../src/handlers/budget-rollup', () => ({
   rollupTaskCost: (...args: unknown[]) => rollupTaskCostMock(...args),
 }));
 
+const publishTaskMetricsMock = jest.fn();
+jest.mock('../../src/handlers/scoreboard-metrics', () => ({
+  publishTaskMetrics: (...args: unknown[]) => publishTaskMetricsMock(...args),
+}));
+
 const postIssueCommentMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 const swapIssueReactionMock = jest.fn();
@@ -88,8 +93,8 @@ afterEach(() => {
   }
   mockIterationStatus.mockClear();
 });
-// Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
-jest.mock('../../src/handlers/shared/jira-preview', () => ({
+// Delivery convergence is exercised with real interleavings in jira-iteration-comment.test.ts.
+jest.mock('../../src/handlers/shared/jira-iteration-comment', () => ({
   updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
     ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) => {
     mockIterationStatus(status);
@@ -108,9 +113,8 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   transitionIssueState: (...args: unknown[]) => jiraTransitionIssueStateMock(...args),
 }));
 
-jest.mock('../../src/handlers/shared/logger', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
-}));
+const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+jest.mock('../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 process.env.TASK_TABLE_NAME = 'TaskTable';
@@ -125,6 +129,7 @@ import { handler, parseTerminalTaskRecord, refreshPanelAndSettle } from '../../s
 
 beforeEach(() => {
   rollupTaskCostMock.mockReset().mockResolvedValue(false);
+  publishTaskMetricsMock.mockReset().mockResolvedValue(false);
 });
 
 /** Build a TaskTable stream MODIFY record. */
@@ -415,6 +420,96 @@ describe('orchestration-reconciler handler', () => {
 
     expect(rollupTaskCostMock).toHaveBeenCalledWith(record);
     expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'seq-orchestration' }]);
+  });
+
+  describe('the scoreboard metrics step', () => {
+    const BATCH_LINE = 'Orchestration reconciler batch processed';
+    const STEP_FAILED = 'Scoreboard metrics step failed: task not counted';
+
+    test('runs for every record, after the budget rollup, and the batch line counts the lines written', async () => {
+      publishTaskMetricsMock.mockResolvedValueOnce(true);
+      const first = taskRecord({ task_id: 'T1', status: 'COMPLETED' });
+      const second = taskRecord({ task_id: 'T2', status: 'FAILED' });
+
+      const result = await handler({ Records: [first, second] } as never);
+
+      expect(publishTaskMetricsMock.mock.calls).toEqual([[first], [second]]);
+      const [rollupOfFirst, rollupOfSecond] = rollupTaskCostMock.mock.invocationCallOrder;
+      const [metricsOfFirst] = publishTaskMetricsMock.mock.invocationCallOrder;
+      expect(rollupOfFirst).toBeLessThan(metricsOfFirst);
+      expect(metricsOfFirst).toBeLessThan(rollupOfSecond);
+      expect(result.batchItemFailures).toEqual([]);
+      expect(loggerMock.info).toHaveBeenCalledWith(BATCH_LINE, {
+        records: 2, reconciled: 0, budget_rolled_up: 0, metrics_published: 1, metrics_failed: 0, failed: 0,
+      });
+    });
+
+    test('a failure is logged and counted, and the record is not reported for retry', async () => {
+      publishTaskMetricsMock.mockRejectedValueOnce(new Error('claim throttled'));
+      const record = taskRecord({ task_id: 'T1', status: 'COMPLETED', sequenceNumber: 'seq-metrics' });
+
+      const result = await handler({ Records: [record] } as never);
+
+      expect(result.batchItemFailures).toEqual([]);
+      // The only error line: the record itself did not fail.
+      expect(loggerMock.error.mock.calls).toEqual([
+        [STEP_FAILED, { sequence_number: 'seq-metrics', task_id: 'T1', error: 'claim throttled' }],
+      ]);
+      expect(loggerMock.info).toHaveBeenCalledWith(BATCH_LINE, {
+        records: 1, reconciled: 0, budget_rolled_up: 0, metrics_published: 0, metrics_failed: 1, failed: 0,
+      });
+    });
+
+    test('a failure does not fail the batch of a record without a sequence number', async () => {
+      // Not an Error: whatever the step throws, the handler does not.
+      publishTaskMetricsMock.mockRejectedValueOnce('claim throttled');
+      const record = taskRecord({ task_id: 'T1', status: 'COMPLETED' });
+
+      await expect(handler({ Records: [record] } as never)).resolves.toEqual({ batchItemFailures: [] });
+
+      expect(loggerMock.error.mock.calls).toEqual([
+        [STEP_FAILED, { sequence_number: undefined, task_id: 'T1', error: 'claim throttled' }],
+      ]);
+    });
+
+    test('a failure leaves the other steps of its record, and the records after it, alone', async () => {
+      mockOrchestration({
+        subIssueId: 'A',
+        children: [
+          { sub_issue_id: 'A', child_status: 'released' },
+          { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+        ],
+      });
+      rollupTaskCostMock.mockResolvedValue(true);
+      publishTaskMetricsMock.mockRejectedValueOnce(new Error('claim throttled')).mockResolvedValueOnce(true);
+      const first = taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1', sequenceNumber: 'seq-1' });
+      const second = taskRecord({ task_id: 'standalone', status: 'COMPLETED', sequenceNumber: 'seq-2' });
+
+      const result = await handler({ Records: [first, second] } as never);
+
+      // The first record released its dependent and rolled up its spend, and the second got all three steps.
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][1].idempotencyKey).toBe('orch_1_B');
+      expect(rollupTaskCostMock.mock.calls).toEqual([[first], [second]]);
+      expect(publishTaskMetricsMock.mock.calls).toEqual([[first], [second]]);
+      expect(result.batchItemFailures).toEqual([]);
+      expect(loggerMock.info).toHaveBeenCalledWith(BATCH_LINE, {
+        records: 2, reconciled: 1, budget_rolled_up: 2, metrics_published: 1, metrics_failed: 1, failed: 0,
+      });
+    });
+
+    test('a failure does not hide the failure of another step of the same record', async () => {
+      ddbSend.mockRejectedValue(new Error('orchestration table unavailable'));
+      publishTaskMetricsMock.mockRejectedValue(new Error('claim throttled'));
+      const reportable = taskRecord({ task_id: 'TA', status: 'COMPLETED', orchestration_id: 'orch_1', sequenceNumber: 'seq-1' });
+      const unreportable = taskRecord({ task_id: 'TB', status: 'COMPLETED', orchestration_id: 'orch_2' });
+
+      await expect(handler({ Records: [reportable] } as never)).resolves.toEqual({ batchItemFailures: [{ itemIdentifier: 'seq-1' }] });
+      expect(loggerMock.info).toHaveBeenCalledWith(BATCH_LINE, {
+        records: 1, reconciled: 0, budget_rolled_up: 0, metrics_published: 0, metrics_failed: 1, failed: 1,
+      });
+      await expect(handler({ Records: [unreportable] } as never)).rejects.toThrow('orchestration table unavailable');
+    });
   });
 
   test('A fails → no release, B skipped (createTaskCore not called)', async () => {

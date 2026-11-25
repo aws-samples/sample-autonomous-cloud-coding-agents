@@ -21,6 +21,7 @@ import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
 import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -70,6 +71,7 @@ import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { PendingUploadCleanup } from '../constructs/pending-upload-cleanup';
+import { PrOutcomeSweep } from '../constructs/pr-outcome-sweep';
 import { AgentRegistryStack } from '../constructs/registry';
 import { RegistryApi } from '../constructs/registry-api';
 import { RepoTable } from '../constructs/repo-table';
@@ -91,6 +93,7 @@ import { WebhookTable } from '../constructs/webhook-table';
 import { assertCapabilitiesAvailable } from '../deployment/capabilities';
 import { channelOauthSecretPatterns, DeploymentFeatures, enabledFeatures, resolveDeploymentFeatures } from '../deployment/features';
 import { resolveComputeBackends } from '../handlers/shared/compute-backend';
+import { WEBHOOK_METRIC_NAMESPACE, WEBHOOK_SCREENING_FAILED_METRIC } from '../handlers/shared/webhook-screening-metric';
 
 /** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
 const GUARDRAIL_NAME_MAX_LENGTH = 50;
@@ -140,6 +143,34 @@ function linearVaultWorkloadName(stack: Stack): string {
     : LINEAR_VAULT_WORKLOAD_PREFIX;
 }
 
+const WEBHOOK_SCREENING_ALARM_PERIOD_MINUTES = 5;
+
+/**
+ * One drop alarms (#794). The metric gets a datapoint only when a webhook event meets a
+ * failing guardrail call, so a rule that waits for several datapoints can miss an outage.
+ */
+function webhookScreeningAlarms(scope: Construct, trackerDeployed: boolean): cloudwatch.Alarm[] {
+  if (!trackerDeployed) return [];
+  return [new cloudwatch.Alarm(scope, 'WebhookScreeningFailedAlarm', {
+    // No dimensions: the total that every source adds to.
+    metric: new cloudwatch.Metric({
+      namespace: WEBHOOK_METRIC_NAMESPACE,
+      metricName: WEBHOOK_SCREENING_FAILED_METRIC,
+      statistic: 'Sum',
+      period: Duration.minutes(WEBHOOK_SCREENING_ALARM_PERIOD_MINUTES),
+    }),
+    threshold: 1,
+    evaluationPeriods: 1,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    alarmDescription:
+      'Guardrail screening of Jira or Linear comments, Linear project documents or the session context of a '
+      + 'Linear agent session failed, so that content was dropped. '
+      + 'A task created from the event runs without it. '
+      + 'Search the Jira and Linear webhook processor logs for "screening unavailable" (#794).',
+  })];
+}
+
 /** Properties for {@link AgentStack}. */
 export interface AgentStackProps extends StackProps {
   /**
@@ -167,6 +198,39 @@ export interface AgentStackProps extends StackProps {
    * topology, so a profile file never leaks into direct construction.
    */
   readonly features?: DeploymentFeatures;
+}
+
+/**
+ * Per-user nudge rate limit. One value for both entry points that spend the
+ * same counter row: `POST /tasks/{id}/nudge` (TaskApi) and a follow-up in a
+ * Linear agent session (the Linear webhook processor).
+ */
+const NUDGE_RATE_LIMIT_PER_MINUTE = 10;
+
+/** `--context enableLinearAgentSessions=true` arrives as a string from the CLI, a boolean from cdk.json. */
+function isLinearAgentSessionsContextOn(value: unknown): boolean {
+  return value === true || value === 'true';
+}
+
+type LinearAgentSessionsProps = NonNullable<ConstructorParameters<typeof LinearIntegration>[2]['agentSessions']>;
+type LinearStopComputeKey = keyof NonNullable<LinearAgentSessionsProps['stopCompute']>;
+
+/**
+ * `agentSessions` for LinearIntegration: `undefined` with the flag off (the
+ * construct then synthesizes unchanged), else the nudges table plus a stop
+ * grant for each compute backend this deployment actually runs.
+ */
+function linearAgentSessionsProps(
+  enabled: boolean,
+  nudgesTable: LinearAgentSessionsProps['nudgesTable'],
+  backends: ReadonlyArray<readonly [deployed: boolean, key: LinearStopComputeKey, arn: string]>,
+): LinearAgentSessionsProps | undefined {
+  if (!enabled) return undefined;
+  return {
+    nudgesTable,
+    nudgeRateLimitPerMinute: NUDGE_RATE_LIMIT_PER_MINUTE,
+    stopCompute: Object.fromEntries(backends.filter(([deployed]) => deployed).map(([, key, arn]) => [key, arn])),
+  };
 }
 
 export class AgentStack extends Stack {
@@ -276,7 +340,9 @@ export class AgentStack extends Stack {
     ]);
 
     // Server access logging intentionally disabled. Rationale:
-    //  - writes: only the agent runtime IAM role (``grantPut`` below).
+    //  - uploads: only the per-task SessionRole (``AgentSessionRole``
+    //    below), tag-scoped to its own user and task prefixes. No
+    //    compute role holds a grant on this bucket.
     //  - reads: only via short-lived presigned URL issued by
     //    ``get-trace-url`` after a Cognito auth check + ownership
     //    check against the TaskRecord.
@@ -294,7 +360,7 @@ export class AgentStack extends Stack {
     NagSuppressions.addResourceSuppressions(traceArtifactsBucket.bucket, [
       {
         id: 'AwsSolutions-S1',
-        reason: 'Debug-only artifacts (design §10.1) with 7-day TTL; writes confined to runtime IAM role by grantPut; reads only via short-lived presigned URLs from an authn\'d handler. Object-level audit intentionally omitted — cost/complexity of CloudTrail data events or a log bucket is not justified for opt-in --trace usage.',
+        reason: 'Debug-only artifacts (design §10.1) with 7-day TTL; uploads confined to the per-task SessionRole, tag-scoped to its own user and task prefixes; reads only via short-lived presigned URLs from an authn\'d handler. Object-level audit intentionally omitted — cost/complexity of CloudTrail data events or a log bucket is not justified for opt-in --trace usage.',
       },
     ]);
 
@@ -374,6 +440,13 @@ export class AgentStack extends Stack {
     // name the SAME workload identity, and a second copy of the derivation is a
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
+
+    // ADR-018 Phase 2 (Linear native agent sessions, #990). Additive + default-off
+    // (ADR-006): the Linear receiver, processor and fan-out consumer key off this
+    // one predicate. Flip it together with the Linear app's "Agent session events"
+    // webhook category — with the category on and this off, every mention opens a
+    // session nothing answers.
+    const linearAgentSessionsEnabled = isLinearAgentSessionsContextOn(this.node.tryGetContext('enableLinearAgentSessions'));
 
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
@@ -534,6 +607,7 @@ export class AgentStack extends Stack {
 
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
+      nudgeRateLimitPerMinute: NUDGE_RATE_LIMIT_PER_MINUTE,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
@@ -1161,6 +1235,7 @@ export class AgentStack extends Stack {
         }),
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
+        taskApprovalsTable: taskApprovalsTable.table,
         userConcurrencyTable: userConcurrencyTable.table,
         // ECS parity: NUDGES_TABLE_NAME in the container env, without which the
         // agent's nudge reader is off. No task-role grant: the agent reads the
@@ -1174,7 +1249,7 @@ export class AgentStack extends Stack {
         // without this grant. The AgentCore runtime gets the equivalent grant
         // where it is created above.
         agentMemory,
-        // Read-only grant so the container can fetch its payload from S3.
+        // The task role reads bootstrap manifests; a signed URL delivers its payload.
         payloadBucket: ecsPayloadBucket!.bucket,
         // ECS parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
         // a repo-bound artifact workflow delivers here. Wires the
@@ -1482,6 +1557,15 @@ export class AgentStack extends Stack {
       attachmentsBucket: attachmentsBucket.bucket,
     });
 
+    // --- Pull-request outcomes ---
+    // Reads from GitHub, once an hour, what became of each new pull request that
+    // ABCA follows, and records it on the task for the factory scoreboard.
+    const prOutcomeSweep = new PrOutcomeSweep(concurrencyMaintenance, 'PrOutcomeSweep', {
+      taskTable: taskTable.table,
+      taskEventsTable: taskEventsTable.table,
+      githubTokenSecret,
+    });
+
     // FanOutConsumer is constructed below LinearIntegration so the
     // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.
 
@@ -1620,6 +1704,13 @@ export class AgentStack extends Stack {
       // Image attachments extracted from issue descriptions upload here
       // (otherwise createTaskCore 503s "Attachment storage is not configured").
       attachmentsBucket: attachmentsBucket.bucket,
+      // A session `stop` shuts compute down like DELETE /tasks/{id} does: same
+      // lazy ARNs and same per-backend gating as TaskApi's cancel Lambda.
+      agentSessions: linearAgentSessionsProps(linearAgentSessionsEnabled, taskNudgesTable.table, [
+        [agentCoreEnabled, 'agentCoreRuntimeArn', lazyRuntimeArn],
+        [ecsEnabled, 'ecsClusterArn', lazyEcsClusterArn],
+        [microvmImageConfigured, 'lambdaMicrovmImageArn', lazyMicrovmImageArn],
+      ]),
     }) : undefined;
     const linearOauthSecretArn = Stack.of(this).formatArn({
       service: 'secretsmanager',
@@ -2002,6 +2093,7 @@ export class AgentStack extends Stack {
         linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
         linearOauthSecretArnPattern: linearOauthSecretArn,
       }),
+      linearAgentSessionsEnabled,
       // Jira dispatcher posts a deterministic final-status comment with
       // cost/turns/duration on Jira-origin terminal tasks. Same scope
       // `bgagent-jira-oauth-*` as the orchestrator and Jira webhook
@@ -2069,8 +2161,8 @@ export class AgentStack extends Stack {
     // is no RestackProcessor Lambda to wire here.
 
     // --- Operational alerts channel (§11.5 follow-up, issue #629) ---
-    // A single stack-wide SNS topic that the DLQ-depth alarms publish to
-    // on state change, so poison-pill accumulation pushes a notification
+    // A single stack-wide SNS topic that every alarm of this stack publishes
+    // to when it goes into ALARM, so a failure pushes a notification
     // instead of sitting silently in the Alarms console. Delivery target
     // is configurable: pass an email via `-c alertEmail=ops@example.com`
     // (AWS sends a confirmation link that must be clicked), or leave it
@@ -2079,16 +2171,24 @@ export class AgentStack extends Stack {
     const operationalAlerts = new OperationalAlerts(this, 'OperationalAlerts', {
       alertEmail: this.node.tryGetContext('alertEmail') as string | undefined,
     });
-    // Wire the DLQ-depth alarms shipped in #117 (FanOut + approval-metrics
-    // publisher) plus the screenshot processor's async-invoke DLQ alarm —
-    // all three share the threshold-1 "records landed in a DLQ" shape.
+    // Every alarm of the stack is listed here (#686). A test in
+    // test/stacks/agent.test.ts fails on an alarm that is left out.
     operationalAlerts.addAlarmActions(
+      orchestrator.errorAlarm,
       fanOutConsumer.dlqDepthAlarm,
       approvalMetricsPublisher.dlqAlarm,
-      ...(githubScreenshot ? [githubScreenshot.processorDlqDepthAlarm] : []),
+      ...(githubScreenshot
+        ? [githubScreenshot.processorDlqDepthAlarm, githubScreenshot.processorErrorAlarm]
+        : []),
       budgetAlerts.warningAlarm,
       budgetAlerts.exceededAlarm,
       budgetAlerts.teamMembershipUnresolvedAlarm,
+      // #1063: XSS-shaped bodies counted (not blocked) on the signed webhook routes.
+      ...[taskApi.webhookXssCountedAlarm].filter(alarm => alarm !== undefined),
+      // Only with Linear or Jira, which emit the metric (#794). In the maintenance stack
+      // because the widest inline deployment fills the root stack's resource budget.
+      ...webhookScreeningAlarms(concurrencyMaintenance, issueOrchestrationEnabled),
+      prOutcomeSweep.errorAlarm,
     );
 
     // #812: the Linear webhook processor announces a revoked authorization here.
@@ -2113,7 +2213,7 @@ export class AgentStack extends Stack {
 
     new CfnOutput(this, 'OperationalAlertsTopicArn', {
       value: operationalAlerts.topic.topicArn,
-      description: 'SNS topic for DLQ-depth CloudWatch alarms — subscribe Slack / PagerDuty / email here (#629)',
+      description: 'SNS topic that every CloudWatch alarm of this stack notifies — subscribe Slack / PagerDuty / email here (#629)',
     });
 
     if (githubScreenshot) {

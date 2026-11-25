@@ -19,13 +19,14 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { App, Stack } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { App, Aspects, Stack } from 'aws-cdk-lib';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AwsSolutionsChecks } from 'cdk-nag';
 import sharedConstants from '../../../contracts/constants.json';
 import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
@@ -200,6 +201,27 @@ test('keeps main\'s execution role description byte-for-byte', () => {
     Description: 'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
       + 'lifecycle hooks; writes logs and reads out-of-band /run payloads.',
   });
+});
+
+test('the execution role\'s IAM5 exception follows the policies CDK splits off for a large model list', () => {
+  // Forty ids put the Bedrock statement alone above the inline-policy limit, so CDK moves it into a managed
+  // policy during synthesis. That policy does not exist yet when the construct declares the role's exception.
+  const { stack } = instantiate({
+    context: { bedrockModels: Array.from({ length: 40 }, (_, index) => `anthropic.claude-audit-${index}-v1:0`) },
+  });
+  Aspects.of(stack).add(new AwsSolutionsChecks());
+  const template = Template.fromStack(stack);
+  const policiesOf = (type: string, role: string) => Object.entries(template.findResources(type))
+    .filter(([id]) => id.includes(role)).map(([, policy]) => policy);
+  const overflow = policiesOf('AWS::IAM::ManagedPolicy', 'ExecutionRoleOverflowPolicy');
+  expect(overflow.length).toBeGreaterThan(0);
+  expect(Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-IAM5'))
+    .filter(finding => finding.id.includes('/LambdaMicrovmCompute/ExecutionRole/'))
+    .map(finding => String(finding.entry.data))).toEqual([]);
+  const iam5 = (policy: Record<string, any>) => policy.Metadata.cdk_nag.rules_to_suppress
+    .filter((rule: { id: string }) => rule.id === 'AwsSolutions-IAM5');
+  const [defaultPolicy] = policiesOf('AWS::IAM::Policy', 'ExecutionRoleDefaultPolicy');
+  for (const policy of overflow) expect(policy.Metadata.cdk_nag.rules_to_suppress).toEqual(iam5(defaultPolicy));
 });
 
 describe('LambdaMicrovmCompute — image provisioned from a managed base image', () => {
@@ -1311,19 +1333,17 @@ describe('assertLambdaMicrovmRegionSupported — Region gate', () => {
     }
 
     expect(error).toBeDefined();
-    // One instantiation, three assertions on its message — the remedy has to
-    // name the Region, the supported list, and the escape hatch, or an operator
-    // in a just-launched Region is stuck.
     expect(error!.message).toMatch(/AWS Lambda MicroVMs are not available in eu-central-1/);
     expect(error!.message).toContain(MICROVM_REGION_OVERRIDE_CONTEXT);
     expect(error!.message).toContain('us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1');
+    expect(error!.message).toContain('contracts/deployment-capabilities.json');
   });
 
   test('the context escape hatch unblocks an unsupported Region', () => {
     overridden.template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
-    // Still surfaced as a warning — the operator is ahead of the constant.
-    expect(JSON.stringify(overridden.construct.node.metadata))
-      .toContain('abca:microvm-region-override');
+    const warning = JSON.stringify(overridden.construct.node.metadata);
+    expect(warning).toContain('abca:microvm-region-override');
+    expect(warning).toContain('contracts/deployment-capabilities.json');
   });
 
   test('skips the check for a region-agnostic (token) Region rather than rejecting it', () => {

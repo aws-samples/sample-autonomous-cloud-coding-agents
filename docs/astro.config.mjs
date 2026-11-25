@@ -1,4 +1,5 @@
 import { defineConfig } from 'astro/config';
+import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
 import { remarkMermaid } from './plugins/remark-mermaid.mjs';
 import remarkGfm from 'remark-gfm';
@@ -8,7 +9,7 @@ export default defineConfig({
   site: 'https://aws-samples.github.io',
   base: '/sample-autonomous-cloud-coding-agents',
   markdown: {
-    remarkPlugins: [remarkMermaid, remarkGfm],
+    processor: unified({ remarkPlugins: [remarkMermaid, remarkGfm] }),
   },
   integrations: [
     starlight({

@@ -120,8 +120,8 @@ describe('get-task handler', () => {
   });
 
   test('surfaces agent_heartbeat_at so the in-guest liveness signal is observable', async () => {
-    // ADR-021 P2r2-F11. The agent writes this every 45 s on every backend and the
-    // orchestrator reads it for hang detection, but `toTaskDetail` dropped it — so
+    // ADR-021 P2r2-F11. The agent refreshes this every 45 s on AgentCore and Lambda MicroVMs,
+    // where the orchestrator reads it for hang detection, but `toTaskDetail` dropped it, so
     // `bgagent status` showed `None` while DynamoDB held a 6-second-old value, and
     // a live verification run concluded "heartbeats not observed" and blamed an
     // unrelated defect. Exactly the class of bug the channel_source assertion above
@@ -143,6 +143,16 @@ describe('get-task handler', () => {
     const body = JSON.parse((await handler(makeEvent())).body);
     expect(body.data).toHaveProperty('agent_heartbeat_at');
     expect(body.data.agent_heartbeat_at).toBeNull();
+  });
+
+  test('surfaces the compute backend the session started on, and null before one starts', async () => {
+    // What a heartbeat says differs by backend, so the reader of one has to know which it is.
+    expect(JSON.parse((await handler(makeEvent())).body).data.compute_type).toBeNull();
+
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({ Item: { ...TASK_RECORD, compute_type: 'lambda-microvm' } });
+
+    expect(JSON.parse((await handler(makeEvent())).body).data.compute_type).toBe('lambda-microvm');
   });
 
   test('surfaces the stored issue title, and null before hydration stores it', async () => {

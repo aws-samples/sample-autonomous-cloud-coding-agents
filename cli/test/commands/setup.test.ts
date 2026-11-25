@@ -27,7 +27,6 @@ import {
   identityLabel,
   makeSetupCommand,
   parseContextArgs,
-  parseStateBearingChanges,
   runSetup,
   SETUP_CANCELLED_EXIT_CODE,
   setupCancelled,
@@ -158,7 +157,7 @@ describe('new installation', () => {
     expect(runs.map(r => path.basename(r.logFile))).toEqual(['setup-changes.log', 'setup-deploy.log']);
     expect(text()).toContain('Deployment complete in');
     expect(text()).toContain(`API      ${BUNDLE.api_url}`);
-    expect(runs[0].env).toMatchObject({ AWS_REGION: 'us-east-1', CDK_DEFAULT_REGION: 'us-east-1', MISE_EXPERIMENTAL: '1' });
+    expect(runs[0].env).toMatchObject({ AWS_REGION: 'us-east-1', CDK_DEFAULT_REGION: 'us-east-1' });
     expect(JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'))).toEqual({ ...BUNDLE, stack_name: 'backgroundagent-dev' });
   });
 
@@ -352,6 +351,69 @@ describe('compute changes on the review screen', () => {
   });
 });
 
+describe('compute the Region does not support', () => {
+  // eu-central-1 has the core AgentCore services but no Lambda MicroVMs.
+  const UNAVAILABLE = /Lambda MicroVMs \('lambda-microvm'\) is unavailable in eu-central-1 \(supported: us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1\)/;
+  const withMicrovm = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore,lambda-microvm' }) });
+  const inUnlistedRegion = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'eu-central-1', stackName: 'backgroundagent-dev', ...opts }, d);
+  const SCRIPTED: SetupOptions = { features: 'none', compute: 'agentcore,lambda-microvm', yes: true };
+
+  test('rejects --compute lambda-microvm before the diff, naming the Regions and the override', async () => {
+    const rejection = inUnlistedRegion(SCRIPTED, deps({ interactive: false }));
+    await expect(rejection).rejects.toThrow(UNAVAILABLE);
+    await expect(rejection).rejects.toThrow('-c microvm_region_override=true');
+    expect(profileOnDisk()).toBeUndefined();
+    expect(runs).toEqual([]);
+  });
+
+  test('rejects before asking about any feature', async () => {
+    // One answer (the account): a feature prompt would run out of answers and cancel instead.
+    await expect(inUnlistedRegion({ compute: 'lambda-microvm' }, deps({ answers: [ACCOUNT_OK] }))).rejects.toThrow(UNAVAILABLE);
+  });
+
+  test('rejects the backend of an existing stack and of a repository profile alike', async () => {
+    await expect(inUnlistedRegion({ yes: true }, deps({ interactive: false, describeStack: withMicrovm }))).rejects.toThrow(UNAVAILABLE);
+    fs.writeFileSync(
+      path.join(root, DEPLOYMENT_PROFILE_FILE),
+      serializeDeploymentProfile({ features: MINIMAL_DEPLOYMENT_FEATURES, compute: ['agentcore', 'lambda-microvm'] }),
+    );
+    await expect(inUnlistedRegion({ yes: true, deploy: false }, deps({ interactive: false }))).rejects.toThrow(UNAVAILABLE);
+    expect(runs).toEqual([]);
+  });
+
+  test('accepts the backend in a Region the catalog lists', async () => {
+    await setup(SCRIPTED, deps({ interactive: false }));
+    expect(profileFile().compute).toEqual(['agentcore', 'lambda-microvm']);
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+  });
+
+  test('the context that lifts the synthesis check lifts this one, from --context or cdk.json', async () => {
+    await inUnlistedRegion({ yes: true, context: ['microvm_region_override=true'] }, deps({ interactive: false, describeStack: withMicrovm }));
+    expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'microvm_region_override=true']));
+    fs.writeFileSync(path.join(root, 'cdk', 'cdk.json'), JSON.stringify({ context: { microvm_region_override: true } }));
+    await inUnlistedRegion(SCRIPTED, deps({ interactive: false }));
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy', '//cdk:diff', '//cdk:deploy']);
+  });
+
+  test('an empty --context value switches a persistent override off, as it does for CDK', async () => {
+    fs.writeFileSync(path.join(root, 'cdk', 'cdk.json'), JSON.stringify({ context: { microvm_region_override: true } }));
+    await expect(inUnlistedRegion({ ...SCRIPTED, context: ['microvm_region_override='] }, deps({ interactive: false })))
+      .rejects.toThrow(UNAVAILABLE);
+  });
+
+  test('cdk.json decides over cdk.context.json, as it does for CDK', async () => {
+    const persist = (cdkJson: boolean, cdkContextJson: boolean) => {
+      fs.writeFileSync(path.join(root, 'cdk', 'cdk.json'), JSON.stringify({ context: { microvm_region_override: cdkJson } }));
+      fs.writeFileSync(path.join(root, 'cdk', 'cdk.context.json'), JSON.stringify({ microvm_region_override: cdkContextJson }));
+    };
+    persist(true, false);
+    await inUnlistedRegion(SCRIPTED, deps({ interactive: false }));
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+    persist(false, true);
+    await expect(inUnlistedRegion(SCRIPTED, deps({ interactive: false }))).rejects.toThrow(UNAVAILABLE);
+  });
+});
+
 describe('non-interactive operation', () => {
   test('deploys the requested features with --yes and no prompts', async () => {
     const d = deps({ interactive: false, ask: async () => { throw new Error('must not prompt'); } });
@@ -425,12 +487,13 @@ describe('failures and cancellation', () => {
   });
 
   test('a failing diff writes and deploys nothing and shows the error line, not the whole output', async () => {
-    const diff = 'Bundling asset...\nlots of noise\nError: Deployment profile is not deployable in us-east-1\n';
+    const diff = 'Bundling asset...\nlots of noise\nError: Deployment profile is not deployable in us-east-1\n[//cdk:diff] ERROR task failed\n';
     await expect(setup({ features: 'slack', yes: true }, deps({ diffCode: 1, diff })))
       .rejects.toThrow(/Nothing was written or deployed/);
     expect(text()).toContain('✗ Checking what will change  could not compute the changes');
     expect(text()).toContain('Error: Deployment profile is not deployable in us-east-1');
     expect(text()).not.toContain('lots of noise');
+    expect(text()).not.toContain('ERROR task failed');
     expect(profileOnDisk()).toBeUndefined();
   });
 
@@ -464,6 +527,28 @@ describe('failures and cancellation', () => {
     await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
     expect(text()).toContain('✗ Preparing deployment');
     expect(text()).toContain('ERROR: failed to build asset');
+  });
+
+  test('a deploy stopped by a preflight shows the preflight message, not the closing line of mise', async () => {
+    // What mise prints when the first command of //cdk:deploy exits non-zero.
+    const deployLines = [
+      '[//cdk:deploy] bootstrap preflight: FAIL: CDKToolkit is a default CDK bootstrap (no BootstrapPolicyVersion output).',
+      '[//cdk:deploy] To bypass at your own risk: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.',
+      'Finished in 547.1ms',
+      '[//cdk:deploy] ERROR task failed',
+    ];
+    await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
+    expect(text()).toContain('bootstrap preflight: FAIL: CDKToolkit is a default CDK bootstrap');
+    // FAIL counts as an error; without that, the last raw lines are listed, mise's timing line among them.
+    expect(text()).not.toContain('Finished in');
+    expect(text()).not.toContain('ERROR task failed');
+  });
+
+  test('a failed deploy with no error-looking line shows the last lines of the output', async () => {
+    const deployLines = ['Building agent image', 'Killed', '[//cdk:deploy] ERROR task failed'];
+    await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
+    expect(text()).toContain('Killed');
+    expect(text()).not.toContain('ERROR task failed');
   });
 
   test('shows deploy progress per component and finishes every component with a check mark', async () => {
@@ -554,41 +639,6 @@ describe('data-loss gate and post-deploy state', () => {
 });
 
 describe('helpers', () => {
-  test('parseStateBearingChanges finds exactly the data a real cdk diff removes', () => {
-    // Captured from aws-cdk 2.1129 `cdk diff` of the legacy topology without Linear (IAM tables trimmed).
-    const diff = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'cdk-diff-remove-linear.txt'), 'utf-8');
-    expect(parseStateBearingChanges(diff)).toEqual([
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/ProjectMappingTable/Table' },
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/UserMappingTable/Table' },
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/WorkspaceRegistryTable/Table' },
-      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/WebhookDedupTable' },
-      { change: 'delete', type: 'AWS::SecretsManager::Secret', id: 'LinearIntegration/WebhookSecret' },
-    ]);
-  });
-
-  test('parseStateBearingChanges reads the impact word on resource lines', () => {
-    const diff = [
-      'Stack backgroundagent-dev',
-      '\u001b[31m[-]\u001b[39m AWS::SecretsManager::Secret JiraIntegration/WebhookSecret JiraSecret destroy',
-      '[~] AWS::DynamoDB::Table TaskTable TaskTable123 replace',
-      ' └─ [~] KeySchema (requires replacement)',
-      '[~] AWS::S3::Bucket ScreenshotBucket Bucket1 may be replaced',
-      '[~] AWS::Logs::LogGroup Logs Logs1',
-      '[-] AWS::Cognito::UserPool Pool Pool1 orphan',
-      '[-] AWS::Lambda::Function Fn Fn1 destroy',
-      '[+] AWS::DynamoDB::Table New New1',
-      'Stack backgroundagent-dev/AgentRegistryStack',
-      '[-] AWS::CloudFormation::Stack AgentRegistryStack.NestedStack/AgentRegistryStack.NestedStackResource Nested1 destroy',
-    ].join('\n');
-    expect(parseStateBearingChanges(diff)).toEqual([
-      { change: 'delete', type: 'AWS::SecretsManager::Secret', id: 'JiraIntegration/WebhookSecret' },
-      { change: 'replace', type: 'AWS::DynamoDB::Table', id: 'TaskTable' },
-      { change: 'replace', type: 'AWS::S3::Bucket', id: 'ScreenshotBucket' },
-      { change: 'orphan', type: 'AWS::Cognito::UserPool', id: 'Pool' },
-      { change: 'delete', type: 'AWS::CloudFormation::Stack', id: 'AgentRegistryStack.NestedStack/AgentRegistryStack.NestedStackResource' },
-    ]);
-  });
-
   test('conflictingContextOverrides ignores agreeing switches', () => {
     fs.writeFileSync(path.join(root, 'cdk', 'cdk.context.json'), JSON.stringify({ enableSlack: 'false', compute_type: 'ecs' }));
     expect(conflictingContextOverrides(root, MINIMAL_DEPLOYMENT_FEATURES)).toEqual([]);
@@ -714,6 +764,19 @@ describe('brand-new accounts', () => {
       expect(runs.every(run => run.env.CDK_DOCKER === undefined)).toBe(true);
     } finally {
       if (saved !== undefined) process.env.CDK_DOCKER = saved;
+    }
+  });
+
+  // The mise that mise.toml requires (min_version) runs `//cdk:*` tasks without experimental mode.
+  test('leaves MISE_EXPERIMENTAL unset', async () => {
+    const saved = process.env.MISE_EXPERIMENTAL;
+    delete process.env.MISE_EXPERIMENTAL;
+    try {
+      await setup({ features: 'none', yes: true }, deps());
+      expect(runs.map(run => run.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+      expect(runs.every(run => run.env.MISE_EXPERIMENTAL === undefined)).toBe(true);
+    } finally {
+      if (saved !== undefined) process.env.MISE_EXPERIMENTAL = saved;
     }
   });
 

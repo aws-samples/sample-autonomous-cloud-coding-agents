@@ -33,6 +33,8 @@ import { AgentStack } from '../../src/stacks/agent';
 describe('AgentStack', () => {
   let template: Template;
   let concurrencyMaintenance: Template;
+  /** The nested stacks, each with the values the root template passes for its parameters (none below a nested stack). */
+  let nestedStacks: { path: string; template: Template; parameters: Record<string, unknown> }[];
 
   beforeAll(() => {
     const app = new App();
@@ -41,6 +43,11 @@ describe('AgentStack', () => {
     });
     template = Template.fromStack(stack);
     concurrencyMaintenance = Template.fromStack(stack.node.findChild('ConcurrencyMaintenance') as NestedStack);
+    nestedStacks = stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child)).map(child => ({
+      path: child.node.path,
+      template: Template.fromStack(child),
+      parameters: template.toJSON().Resources[stack.resolve(child.nestedStackResource!.logicalId)]?.Properties.Parameters ?? {},
+    }));
   });
 
   test('synthesizes without errors', () => {
@@ -49,15 +56,16 @@ describe('AgentStack', () => {
 
   test('nests scheduled maintenance while retaining its data in the parent', () => {
     const parentFunctions = Object.keys(template.findResources('AWS::Lambda::Function'));
-    for (const prefix of ['ConcurrencyReconciler', 'AdmissionQueuePickup', 'StrandedTaskReconciler', 'PendingUploadCleanup']) {
+    for (const prefix of ['ConcurrencyReconciler', 'AdmissionQueuePickup', 'StrandedTaskReconciler', 'PendingUploadCleanup', 'PrOutcomeSweep']) {
       expect(parentFunctions.some(id => id.startsWith(prefix))).toBe(false);
       expect(Object.keys(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
         .filter(id => id.startsWith(prefix))).toHaveLength(1);
     }
-    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 4);
-    concurrencyMaintenance.resourceCountIs('AWS::Events::Rule', 4);
+    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 5);
+    concurrencyMaintenance.resourceCountIs('AWS::Events::Rule', 5);
     concurrencyMaintenance.resourceCountIs('AWS::S3::Bucket', 0);
     concurrencyMaintenance.resourceCountIs('AWS::DynamoDB::Table', 0);
+    concurrencyMaintenance.resourceCountIs('AWS::SecretsManager::Secret', 0);
     concurrencyMaintenance.hasResourceProperties('AWS::Events::Rule', {
       ScheduleExpression: 'rate(15 minutes)',
     });
@@ -70,6 +78,37 @@ describe('AgentStack', () => {
       .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
     expect(nested.Properties.Parameters[variables.USER_CONCURRENCY_TABLE_NAME.Ref])
       .toEqual({ Ref: expect.stringMatching(/^UserConcurrencyTable/) });
+  });
+
+  test('the pull-request sweep works on the stack\'s own tables, reads GitHub with its token secret, and is granted that secret only', () => {
+    const sweep = Object.entries(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('PrOutcomeSweep'))![1];
+    const variables = sweep.Properties.Environment.Variables;
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[variables.GITHUB_TOKEN_SECRET_ARN.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^GitHubTokenSecret/) });
+    expect(nested.Properties.Parameters[variables.TASK_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
+    expect(nested.Properties.Parameters[variables.TASK_EVENTS_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskEventsTable/) });
+
+    // The secret its role may read is the one its environment names.
+    const secretStatements = Object.entries(concurrencyMaintenance.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith('PrOutcomeSweep'))
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement as { Action: unknown; Resource: unknown }[])
+      .filter((statement) => JSON.stringify(statement.Action).includes('secretsmanager:'));
+    expect(secretStatements).toEqual([{
+      Action: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+      Effect: 'Allow',
+      Resource: variables.GITHUB_TOKEN_SECRET_ARN,
+    }]);
+
+    const sweepAlarms = Object.entries(concurrencyMaintenance.findResources('AWS::CloudWatch::Alarm'))
+      .filter(([id]) => id.startsWith('PrOutcomeSweep'))
+      .map(([, alarm]) => alarm);
+    expect(sweepAlarms).toHaveLength(1);
+    expect(JSON.stringify((sweepAlarms[0] as { Properties: unknown }).Properties)).toContain('OperationalAlerts');
   });
 
   test('creates exactly 22 DynamoDB tables', () => {
@@ -221,7 +260,7 @@ describe('AgentStack', () => {
   test('creates the Cedar-wasm Lambda layer', () => {
     template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
     template.hasResourceProperties('AWS::Lambda::LayerVersion', {
-      CompatibleRuntimes: ['nodejs20.x', 'nodejs22.x', 'nodejs24.x'],
+      CompatibleRuntimes: ['nodejs22.x', 'nodejs24.x'],
     });
   });
 
@@ -897,6 +936,31 @@ describe('AgentStack', () => {
     expect(objectStatements).toEqual([]);
   });
 
+  test('only the per-task SessionRole can write the trace bucket, and its access-logging exception says so', () => {
+    // The AwsSolutions-S1 exception on this bucket argues from who can write it. cdk-nag copies the reason into the
+    // template and the NagReport, where a reviewer reads it as evidence. It has to name the role that holds the grant.
+    const [, bucket] = Object.entries(template.findResources('AWS::S3::Bucket'))
+      .find(([id]) => id.startsWith('TraceArtifactsBucket'))!;
+    // In the root template a statement names the bucket by its logical id, in a
+    // nested one by the parameter that passes it in. Both contain the construct id.
+    const reaches = (resource: unknown) => resource === '*' || JSON.stringify(resource).includes('TraceArtifactsBucket');
+    // Nested stacks have roles of their own, and CDK moves the statements of a large role into a managed policy.
+    // The bucket policy admits one more principal, CDK's auto-delete provider (see trace-artifacts-bucket.ts).
+    const writers = ['AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy']
+      .flatMap(type => [template, ...nestedStacks.map(nested => nested.template)].flatMap(t => Object.entries(t.findResources(type))))
+      .filter(([, policy]) => (policy.Properties.PolicyDocument.Statement as Array<{ Effect: string; Action: string | string[]; Resource: unknown }>)
+        .some(stmt => stmt.Effect === 'Allow' && /"s3:(Put|Delete|\*)/.test(JSON.stringify(stmt.Action)) && reaches(stmt.Resource)))
+      .map(([policyId]) => policyId);
+    expect(writers).toEqual([expect.stringMatching(/^AgentSessionRole/)]);
+
+    const s1 = (bucket.Metadata.cdk_nag.rules_to_suppress as Array<{ id: string; reason: string; is_reason_encoded?: boolean }>)
+      .find(rule => rule.id === 'AwsSolutions-S1')!;
+    // cdk-nag stores a reason base64-encoded when it holds a character above
+    // U+00FF (here the em dash).
+    const reason = s1.is_reason_encoded ? Buffer.from(s1.reason, 'base64').toString('utf8') : s1.reason;
+    expect(reason).toContain('SessionRole');
+  });
+
   test('no hard-coded log-delivery logical ids or names anywhere in the stack', () => {
     // The template must not carry values recorded from one account's live stack.
     //
@@ -1143,6 +1207,50 @@ describe('AgentStack', () => {
     }
   });
 
+  test('alarms on the first failed webhook screening call and notifies the alerts topic (#794)', () => {
+    const screeningFailed = { Namespace: 'ABCA/Webhooks', MetricName: 'WebhookScreeningFailed' };
+    // In the maintenance stack, not the root stack: the widest inline deployment
+    // has no root-stack resource to spare under the 490-resource budget.
+    template.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', screeningFailed, 0);
+    concurrencyMaintenance.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', screeningFailed, 1);
+    concurrencyMaintenance.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      ...screeningFailed,
+      // The total is the metric without dimensions; with one, the alarm would read a per-source metric.
+      Dimensions: Match.absent(),
+      Statistic: 'Sum',
+      Period: 300,
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+    });
+    const [alarm] = Object.values(concurrencyMaintenance.findResources('AWS::CloudWatch::Alarm', { Properties: screeningFailed }));
+    expect(alarm.Properties.AlarmActions).toHaveLength(1);
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[alarm.Properties.AlarmActions[0].Ref])
+      .toEqual(template.toJSON().Outputs.OperationalAlertsTopicArn.Value);
+  });
+
+  test('notifies the alerts topic from every CloudWatch alarm of the root stack and of each nested stack (#686)', () => {
+    const topicRef = template.toJSON().Outputs.OperationalAlertsTopicArn.Value;
+    const alarms = (t: Template, toRootValue = (action: { Ref: string }): unknown => action) =>
+      Object.entries(t.findResources('AWS::CloudWatch::Alarm'))
+        .map(([id, alarm]) => ({ id, actions: (alarm.Properties.AlarmActions ?? []).map(toRootValue) }));
+    const notifiesTopic = expect.objectContaining({ actions: expect.arrayContaining([topicRef]) });
+    expect({
+      root: alarms(template),
+      // A nested template refers to the topic by a stack parameter, so its actions are read as the values the root passes.
+      ...Object.fromEntries(nestedStacks.map(nested =>
+        [nested.path, alarms(nested.template, action => nested.parameters[action.Ref])])),
+    }).toEqual({
+      'root': Array(9).fill(notifiesTopic),
+      'TestAgentStack/AgentRegistryStack': [],
+      'TestAgentStack/RegistryApi': [],
+      'TestAgentStack/ConcurrencyMaintenance': Array(2).fill(notifiesTopic),
+    });
+  });
+
   test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
     // The default deploy ships the topic with no confirmed target;
     // operators subscribe Slack / PagerDuty / email themselves.
@@ -1214,7 +1322,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    // Two task defs — the 64 GB build def and the 8 GB read-only planning def
+    // Two task defs — the 16 GB build def and the 8 GB read-only planning def
     // (a read-only workflow runs on the smaller one). See
     // docs/design/ECS_RIGHTSIZED_PLANNING.md.
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
@@ -1222,6 +1330,21 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
+  });
+
+  test('both ECS task definitions receive the same approval table as AgentCore', () => {
+    const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskApprovalsTable'));
+    expect(approvalId).toBeDefined();
+    const approvalTable = { Ref: approvalId };
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'TASK_APPROVALS_TABLE_NAME',
+        Value: approvalTable,
+      });
+    }
   });
 
   test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {
@@ -1358,6 +1481,11 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     // Runtime (443) + build-time (443 + 80, for apt-get) — see ADR-021's
     // build-time-egress security-table row.
     childTemplate.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+  });
+
+  test('creates no CloudWatch alarm in the child stack, which the test of the alerts topic does not read (#686)', () => {
+    // An alarm added there has to be passed to operationalAlerts.addAlarmActions in stacks/agent.ts, and its action checked here.
+    childTemplate.resourceCountIs('AWS::CloudWatch::Alarm', 0);
   });
 
   test('does NOT provision the ECS substrate (the gates are mutually exclusive)', () => {
@@ -1796,9 +1924,9 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    // 47 existing handlers (4 scheduled maintenance jobs nested) + 2 registry
+    // 48 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
     // provisioning handlers + 4 registry API handlers in nested stacks.
-    expect(abcaLambdas.length).toBe(53);
+    expect(abcaLambdas.length).toBe(54);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas
@@ -1946,11 +2074,10 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
 
   test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
     const app = new App({ context: { enableLinearIdentityVault: true } });
-    const template = Template.fromStack(
-      new AgentStack(app, 'LinearVaultOnStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    );
+    const stack = new AgentStack(app, 'LinearVaultOnStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const template = Template.fromStack(stack);
     // The workload identity is provisioned.
     template.resourceCountIs('Custom::LinearWorkloadIdentity', 1);
     // Some role is granted the two token data-plane actions. Asserted on the
@@ -1983,6 +2110,9 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     // single AWS::CloudFormation::Stack for it.
     expect(rendered).not.toContain('Custom::CDKBucketDeployment');
     expect(rendered).toContain('LinearVaultConsentPageStack');
+    // The test of the alerts topic (#686) does not read this nested stack. An alarm added there has to be passed to
+    // operationalAlerts.addAlarmActions in stacks/agent.ts, and its action checked here.
+    Template.fromStack(stack.node.findChild('LinearVaultConsentPageStack') as NestedStack).resourceCountIs('AWS::CloudWatch::Alarm', 0);
   });
 
   test('the workload identity name is STACK-scoped, so two stacks cannot share one', () => {
@@ -2196,5 +2326,50 @@ describe('AgentStack Agent Registry gate', () => {
     expect(() => new AgentStack(app, 'InvalidAgentRegistryContext', {
       env: { account: '123456789012', region: 'us-east-1' },
     })).toThrow("enableAgentRegistry must be true or false, got 'fasle'");
+  });
+});
+
+describe('AgentStack — Linear agent sessions gate (ADR-018 Phase 2, #990)', () => {
+  const envVarsWith = (template: Template, marker: string): Array<Record<string, unknown>> =>
+    Object.values(template.findResources('AWS::Lambda::Function'))
+      .map((fn) => (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {})
+      .filter((vars) => vars.LINEAR_AGENT_SESSIONS_ENABLED === marker);
+
+  test('flag on: receiver, processor and fan-out consumer carry the gate; the processor can forward nudges', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsOn', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const gated = envVarsWith(template, 'true');
+    expect(gated).toHaveLength(3);
+    expect(gated.some((vars) => 'NUDGES_TABLE_NAME' in vars && 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)).toBe(true);
+  });
+
+  test('flag on: the processor can stop the default backend\'s compute on a session stop', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsStop', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const processor = envVarsWith(template, 'true').find((vars) => 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)!;
+    // AgentCore is the default compute: its runtime ARN is the stop fallback.
+    expect(processor.RUNTIME_ARN).toBeDefined();
+  });
+
+  test('flag on: the nudge API and the session path are given the same rate limit', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsRate', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const limits = Object.values(template.findResources('AWS::Lambda::Function'))
+      .map((fn) => (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {})
+      .filter((vars) => 'NUDGE_RATE_LIMIT_PER_MINUTE' in vars)
+      .map((vars) => vars.NUDGE_RATE_LIMIT_PER_MINUTE);
+    // The nudge Lambda and the Linear processor spend one counter row.
+    expect(limits).toHaveLength(2);
+    expect(new Set(limits).size).toBe(1);
+  });
+
+  test('flag off (default): no Lambda carries the gate', () => {
+    const template = Template.fromStack(new AgentStack(new App(), 'LinearSessionsOff', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    expect(envVarsWith(template, 'true')).toHaveLength(0);
   });
 });

@@ -311,6 +311,22 @@ describe('check-constants-sync', () => {
       expect(result.stderr).toContain('MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS');
     });
 
+    test.each([
+      ['MICROVM_PLATFORM_CONFIG_ARN_KEYS', 'frozenset({"agent_session_role_arn"})'],
+      ['MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY', '"github_token_secret_arn"'],
+    ])('catches a literal %s (the ARN check must follow the contract)', (name, literal) => {
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'agent/src/server.py',
+          `${read(root, 'agent/src/server.py')}\n${name} = ${literal}\n`,
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`"${name}" is not a plain read of its contract value`);
+    });
+
     test('catches the TypeScript half of the hook-budget invariant', () => {
       // An invariant between two values cannot be enforced from one side, so the
       // CDK consumer is checked the same way the Python ones are.

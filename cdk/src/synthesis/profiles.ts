@@ -24,8 +24,11 @@ import {
 } from '../deployment/features';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-constants';
 
-/** Enough additional model grants to exercise the SessionRole's lazy policy split. */
-const EXTRA_MODEL_COUNT = 8;
+/**
+ * Enough additional model grants that CDK splits the policy of the SessionRole
+ * and of every backend's compute role during synthesis.
+ */
+const EXTRA_MODEL_COUNT = 16;
 
 type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
 type Image = 'none' | 'managed' | 'external';
@@ -115,7 +118,13 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
   ].map(base => ({
     ...base,
     name: `${base.name}-email-fork`,
-    context: { ...base.context, alertEmail: 'census@example.com', forkBlueprintRepo: 'example/census-blueprints' },
+    context: {
+      ...base.context,
+      alertEmail: 'census@example.com',
+      forkBlueprintRepo: 'example/census-blueprints',
+      // Adds a processor IAM statement + env (no resources); probed on the widest profiles.
+      enableLinearAgentSessions: true,
+    },
   }));
   profiles.push(...supplemental);
   const externalConsent = profile('ecs', true, true, true, 'none');

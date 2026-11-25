@@ -119,6 +119,8 @@ bgagent list \
   --output <text|json>        Output format (default: text)
 ```
 
+The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+
 ### `bgagent budget status --me`
 
 Show the logged-in user's personal monthly estimated spend and administrator-configured limit:
@@ -129,7 +131,18 @@ bgagent budget status --me [--output text|json]
 
 This path uses Cognito authentication and requires no operator AWS credentials. It is read-only, does not expose team budgets, and reports personal spend even when no personal limit is configured.
 
-The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+### `bgagent stats`
+
+Show the scoreboard of your own finished tasks: how the work you handed to agents turned into verified and merged pull requests, what it took of your attention and money, and whether it stayed inside the rules.
+
+```
+bgagent stats \
+  --range <7d|30d>             Period the scoreboard covers (default: 30d)
+  --repo <owner/repo>          Count the tasks of one repository only
+  --output <text|json>         Output format (default: text)
+```
+
+The numbers are those of the console's Scoreboard page, under its four headings, each with the counts it rests on and, where the page compares, the number of the period before; a number with nothing to compute it from shows `-` and the reason. `--output json` prints the response of `GET /v1/tasks?view=scoreboard`. What each number counts and leaves out: [Factory scoreboard](../docs/design/OBSERVABILITY.md#factory-scoreboard). The command's limits: [Reading your scoreboard (stats)](../docs/guides/USER_GUIDE.md#reading-your-scoreboard-stats).
 
 ### `bgagent status <task-id>`
 
@@ -163,6 +176,8 @@ bgagent events <task-id> \
 ### `bgagent webhook create`
 
 Create a new webhook integration. The HMAC secret is displayed once at creation time — store it securely.
+
+The output also shows the webhook URL (`webhook_url` in JSON output): the endpoint to enter in the external system. It belongs to the API deployment, not to the webhook, so it is the same for every webhook and there is no need to fetch it again.
 
 ```
 bgagent webhook create \
@@ -213,7 +228,7 @@ bgagent setup --features none --no-deploy          # write abca.deployment.json 
 bgagent setup -c networkTopology=split             # extra CDK context for diff and deploy (repeatable)
 ```
 
-It first confirms the AWS account your credentials resolve to and lets you update an existing deployment or create a new one (named by you). For a new installation it then asks where agents run (AgentCore, ECS, or both), and prepares the account (CDK bootstrap) if needed. It then asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `~/.bgagent/logs/<stack>/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature the Region does not support fails with the supported Regions.
+It first confirms the AWS account your credentials resolve to and lets you update an existing deployment or create a new one (named by you). For a new installation it then asks where agents run (AgentCore, ECS, or both), and prepares the account (CDK bootstrap) if needed. It then asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `~/.bgagent/logs/<stack>/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature or compute backend the Region does not support fails with the supported Regions, before the diff.
 
 Commands for a feature the stack omits (for example `bgagent slack setup`) fail and point back to `bgagent setup`.
 
@@ -261,7 +276,7 @@ bgagent repo list \
 
 ### `bgagent repo show <owner/repo>`
 
-Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token.
+Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token. When no per-blueprint model is configured, the **platform default** model is shown as this deployment invokes it: with the geography of the stack's `BedrockGeoRegion` output (`us.anthropic.…` on a stack deployed with `-c bedrockGeoRegion=us`). A stack that predates that output shows the shipped `global.` profile.
 
 ```
 bgagent repo show owner/repo \
@@ -416,7 +431,7 @@ bgagent admin reset-password <email> \
 - `status` and `submit` show a key-value detail view
 - `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, HEARTBEAT, DESCRIPTION)
 - `events` shows a timeline (TIMESTAMP, EVENT TYPE, METADATA)
-- `webhook create` shows webhook details and the one-time HMAC secret
+- `webhook create` shows webhook details, the URL to post tasks to, and the one-time HMAC secret
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)
 - `webhook revoke` shows the revoked webhook details
 

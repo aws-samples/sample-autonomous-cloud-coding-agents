@@ -33,7 +33,6 @@ jobs:
       contents: read
     env:
       CI: "true"
-      MISE_EXPERIMENTAL: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -46,7 +45,7 @@ jobs:
           persist-credentials: false
 
       - name: Install mise
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
@@ -72,9 +71,10 @@ jobs:
               head="${PR_HEAD_SHA}"
               ;;
             merge_group)
-              # Scan only the queued merge commits — not full history. An empty
-              # range would walk every ref and fail on secrets on other branches
-              # (#334 merge-queue ejection).
+              # Scan only the queued merge commits, not the history behind them.
+              # Without a range the task scans the whole history of HEAD;
+              # gitleaks itself, given an empty range, walks every ref and fails
+              # on secrets on other branches (#334 merge-queue ejection).
               range="${MG_BASE_SHA}..${MG_HEAD_SHA}"
               baseline="${MG_BASE_SHA}"
               head="${MG_HEAD_SHA}"

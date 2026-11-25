@@ -54,9 +54,9 @@ export interface TraceArtifactsBucketProps {
    * tables — which auto-empty on table delete — S3 requires a custom
    * resource to clear out the bucket, so enabling this flag deploys
    * CDK's ``Custom::S3AutoDeleteObjects`` Lambda with delete permissions
-   * on this bucket (wider IAM surface than ``grantPut(runtime)`` alone
-   * suggests; the auto-delete Lambda role is active, not just during
-   * destroy).
+   * on this bucket (wider IAM surface than the SessionRole's
+   * prefix-scoped ``s3:PutObject`` alone suggests; the auto-delete
+   * Lambda role is active, not just during destroy).
    * @default true
    */
   readonly autoDeleteObjects?: boolean;

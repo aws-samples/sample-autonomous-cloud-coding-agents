@@ -80,6 +80,8 @@ Recorded on emulator 1.0.489. Keep this table and the lists above current when t
 | `CreateRegistryRecord` parses every descriptor `data` member as JSON and refuses anything else with `ValidationException`, the skill Markdown in `agentSkillsDefinition.additionalData.skillMd.data` included; the AWS [user guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-supported-record-types.html#registry-agentskills-descriptors) gives a Markdown `SKILL.md` as valid content of that member | ABCA publishes a `skill` as a native record with a Markdown `SKILL.md`, so a skill can be published here only with `custom: true`. Native skills, and the read paths for a corrupt `SKILL.md` or a record body that is not JSON, stay on mocks |
 | An MCP record whose `server.json` matches no MCP schema version (for example one without name, description and version) is accepted; AWS's published test for the emulator expects `ValidationException` | An `mcp_server` publish with an incomplete `discovery` passes here |
 
+On emulator 1.0.523, DynamoDB `UpdateItem` rejects `REMOVE amount.child` with `ValidationException` when `amount` is a number. On 1.0.489 the same update succeeded and left `amount` unchanged. Both versions allowed `PutItem` to replace an item when its condition compared an attribute with itself.
+
 ## Keeping the tier away from real AWS
 
 The same tests with no endpoint set would call AWS with whatever credentials the shell holds, and product code also makes calls that are not AWS SDK calls. The guard is layered:

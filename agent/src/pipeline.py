@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -55,6 +56,8 @@ from telemetry import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from workflow import Workflow
 
 _SDK_NO_RESULT_MESSAGE = (
@@ -881,7 +884,12 @@ def _apply_delivery_gate(
     ``commit_landed`` (from :func:`_branch_has_new_commits`) distinguishes
     "a commit reached the branch but the PR failed to open" (``deliverable=no_pr``
     — recoverable, the work is safe on the branch) from "no commit ever landed"
-    (``deliverable=lost`` — the work is gone) so the failure copy is honest.
+    (``deliverable=lost``) so the failure copy is honest.
+
+    ``deliverable=lost`` covers two runs this gate cannot tell apart (#751), because
+    both end with agent-success, no commit and no PR: the work is gone, or the
+    agent correctly changed nothing (the repository already met the request). The
+    agent has no way to report the second, so the reason names both.
     Returns the (possibly unchanged) ``(overall_status, result_error)``.
     """
     delivery_expected = (
@@ -902,24 +910,27 @@ def _apply_delivery_gate(
         reason = (
             "Task did not succeed (agent_status=success, deliverable=lost): the "
             "coding task reported success but no commit reached the branch and no "
-            "PR was opened — the agent's changes did not land in the task's "
-            "repository."
+            "PR was opened — either the agent made no change, or its changes did "
+            "not land in the task's repository."
         )
     log("WARN", f"Delivery gate: {reason}")
     return "error", reason
 
 
 def _compute_turns_completed(
-    turns_attempted: int | None,
+    turns: int | None,
     max_turns: int,
 ) -> int | None:
     """Clamp ``turns_completed`` to ``max_turns``.
 
-    The Claude Agent SDK reports ``num_turns = max_turns + 1``
-    on ``error_max_turns`` because the aborted attempt is counted.  Clamping
-    at the final write keeps ``turns_completed`` truthful ("how many turns
-    actually executed") while ``turns_attempted`` keeps the raw SDK value
-    for debugging.
+    ``turns`` is the runner's count of the model's answers, which is what
+    ``max_turns`` limits ("how many turns actually executed"), or the CLI's
+    ``num_turns`` where the runner saw no answer. Either can pass the cap. The
+    runner's does when the CLI asks the model again without counting a turn
+    (in CLI 2.1.319, for example, after an answer that was refused, cut off or
+    empty) or sends a message without an id, which the runner takes for an
+    answer of its own. ``num_turns`` is not the count the cap applies to (see
+    ``models.TaskResult``); ``turns_attempted`` keeps it raw for debugging.
 
     The agent status is not consulted: the CLI marks a max-turns result
     ``is_error``, so the runner reports it as ``error``, not ``error_max_turns``,
@@ -929,12 +940,12 @@ def _compute_turns_completed(
     truthy value) and a negative one is not a count to clamp to, so for both the
     count is returned as it is.
 
-    Returns ``None`` if ``turns_attempted`` is ``None``/falsy so callers can
-    round-trip a missing SDK count without inventing a fake zero.
+    Returns ``turns`` as it is when it is ``None`` or 0, so that a missing
+    count is not turned into a number.
     """
-    if not turns_attempted or max_turns <= 0:
-        return turns_attempted
-    return min(turns_attempted, max_turns)
+    if not turns or max_turns <= 0:
+        return turns
+    return min(turns, max_turns)
 
 
 def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> dict:
@@ -948,6 +959,7 @@ def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> di
     if agent_result is None:
         return {}
     usage = agent_result.usage
+    # ``num_turns`` is the CLI's count, not the one ``max_turns`` limits (see ``TaskResult``).
     turns_attempted = agent_result.num_turns or agent_result.turns
     return {
         "agent_status": agent_result.status,
@@ -955,7 +967,9 @@ def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> di
         # Legacy field (= turns_attempted) kept for back-compat.
         "turns": turns_attempted,
         "turns_attempted": turns_attempted,
-        "turns_completed": _compute_turns_completed(turns_attempted, max_turns),
+        "turns_completed": _compute_turns_completed(
+            agent_result.turns or turns_attempted, max_turns
+        ),
         "session_id": agent_result.session_id or None,
         "input_tokens": usage.input_tokens if usage else None,
         "output_tokens": usage.output_tokens if usage else None,
@@ -1018,6 +1032,31 @@ def _write_memory(
     return episode_ok or learnings_ok
 
 
+@contextmanager
+def _task_environ_restored() -> Generator[None]:
+    """Leave ``os.environ`` as it was found, on return and on exception (#635).
+
+    ``os.environ`` belongs to the process, so what a task writes there outlives
+    the task: a process that carries on after ``run_task`` would commit as
+    ``bgagent``, keep the task's GitHub token and the credentials of its issue
+    tracker, and hand a later task this task's ``PROMPT_VERSION``.
+
+    For one task at a time per process, like ``os.environ`` itself: of two that
+    overlap, the one that ends first undoes what the other has changed while
+    both ran.
+    """
+    before = dict(os.environ)
+    try:
+        yield
+    finally:
+        for name in os.environ.keys() - before.keys():
+            os.environ.pop(name, None)
+        os.environ.update(before)
+
+
+# Around the whole call, not only the lines that set the variables. build_config and the runner
+# write the environment too, and the failure handler masks the token by the value it finds there.
+@_task_environ_restored()
 def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
     repo_url: str = "",
     task_description: str = "",
@@ -1390,7 +1429,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # asset unloaded (missing repo_dir, empty/invalid runtime, structurally
             # invalid config, or a write error) — we let it propagate so the task
             # fails rather than running with a pinned-but-absent asset while the
-            # audit record claims it was loaded.
+            # audit record claims it was loaded. It raises as well where the merged
+            # config, which may hold secrets, could reach a commit (#758, #759).
             if config.resolved_assets:
                 from registry.loader import RegistryAssetLoadError, apply_resolved_assets
 
@@ -1507,10 +1547,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 _workflow = load_workflow(
                     (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
                 )
-                ensure_pr_strategy = next(
-                    (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
-                    "create",
-                )
+                # The rule the push preflight in repo.setup_repo applies too.
+                ensure_pr_strategy = _workflow.ensure_pr_strategy
             except WorkflowValidationError as exc:
                 log(
                     "WARN",
@@ -1535,14 +1573,11 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # branch, but default/agent-v1 is repo-OPTIONAL — run WITH a repo it
             # takes THIS path yet still expects a PR (primary: artifact but
             # requires_repo: false). So gate on requires_repo too, or a
-            # repo-optional default-agent run would wrongly skip its PR. The
-            # resolved value, as in build_config: a coding workflow may leave the
-            # line out, and the raw field is then None.
-            artifact_workflow = bool(
-                _workflow
-                and _workflow.terminal_outcomes.primary == "artifact"
-                and _workflow.resolved_requires_repo
-            )
+            # repo-optional default-agent run would wrongly skip its PR. The rule is
+            # Workflow.delivers_repo_artifact (the resolved requires_repo, as in
+            # build_config: a coding workflow may leave the line out), which the push
+            # preflight in repo.setup_repo applies too, so a task it skips never pushes.
+            artifact_workflow = bool(_workflow and _workflow.delivers_repo_artifact)
             artifact_uri: str | None = None  # set by the artifact branch below
 
             # Clarify-before-spend (UX #4): a writeable, PR-producing task

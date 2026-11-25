@@ -28,6 +28,8 @@ import type {
   NudgeResponse,
   PaginatedResponse,
   PersonalBudgetStatus,
+  Scoreboard,
+  ScoreboardRange,
   StartLinearIssueResponse,
   SuccessResponse,
   TaskDetail,
@@ -87,6 +89,8 @@ export interface ApiClient {
   listPending(): Promise<GetPendingResponse>;
   /** The signed-in user's spend this UTC month and any limit an administrator set. */
   getMyBudget(): Promise<PersonalBudgetStatus>;
+  /** What the signed-in user's finished tasks came to over the range, and over the period before it. */
+  getScoreboard(range: ScoreboardRange): Promise<Scoreboard>;
   /** `idempotencyKey` makes a retried submit (double click, flaky network) create one task, not two. */
   createTask(req: CreateTaskRequest, idempotencyKey: string): Promise<TaskDetail>;
   cancelTask(taskId: string): Promise<CancelTaskResponse>;
@@ -187,6 +191,9 @@ export function createApiClient({ baseUrl, consoleBaseUrl, getToken, fetchImpl }
     },
     getMyBudget() {
       return data(get<SuccessResponse<PersonalBudgetStatus>>('/tasks', new URLSearchParams({ view: 'budget' })));
+    },
+    getScoreboard(range) {
+      return data(get<SuccessResponse<Scoreboard>>('/tasks', new URLSearchParams({ view: 'scoreboard', range })));
     },
     async listPending() {
       const res = await get<SuccessResponse<GetPendingResponse>>('/pending');

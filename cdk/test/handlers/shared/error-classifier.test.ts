@@ -21,6 +21,16 @@ import { classifyError, ErrorCategory, ErrorClass, formatMicrovmTerminalFailure,
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../../src/handlers/shared/microvm-regions';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
+// Persisted agent push preflight refusals, printed from agent/src/repo.py.
+const MSG_CLASSIC = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the classic personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_FINE = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the fine-grained personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, include the repository in the token\'s repository access and give it the Contents permission with Read and write access; its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_APP = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the GitHub App token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the app the Contents permission with Read and write access and install it on the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_UNKNOWN = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the GitHub token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, for a fine-grained personal access token, include the repository in the token\'s repository access and give it the Contents permission with Read and write access; for a classic one, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); either way, its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+// The longest refusal: a 39 + 1 + 100 character owner/repo, a token of no known type and a
+// full git excerpt, cut to the 1,000 characters the task record keeps (agent/src/task_state.py).
+const MSG_LONGEST = 'PushCapabilityError: Token cannot push to ooooooooooooooooooooooooooooooooooooooo/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr: GitHub refused the GitHub token write access (remote: Permission to ooooooooooooooooooooooooooooooooooooooo/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr.git denied to <token user> xxxxxxxxxx). To fix it, for a fine-grained personal access token, include the repository in the token\'s repository access and give it the Contents permission with Read and write access; for a classic one, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); either way, its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_DOTTED = 'PushCapabilityError: Token cannot push to owner/my.repo: GitHub refused the classic personal access token write access (remote: Permission to owner/my.repo.git denied to <token user>). To fix it, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+
 describe('classifyError', () => {
   // --- Null / empty inputs ---
 
@@ -34,6 +44,14 @@ describe('classifyError', () => {
 
   test('returns null for empty string', () => {
     expect(classifyError('')).toBeNull();
+  });
+
+  test.each([
+    ['a number', 404],
+    ['a boolean', true],
+    ['a map', { message: 'Guardrail blocked' }],
+  ])('a value that is not text has no classification: %s', (_kind, value) => {
+    expect(classifyError(value as unknown as string)).toBeNull();
   });
 
   // --- Auth errors ---
@@ -100,6 +118,78 @@ describe('classifyError', () => {
       const result = classifyError('Token cannot push to owner/repo');
       expect(result!.category).toBe(ErrorCategory.AUTH);
       expect(result!.title).toBe('Insufficient GitHub token scopes');
+    });
+
+    // The errors agent/src/repo.py raises (PushCapabilityError) when GitHub refuses
+    // the dry-run push, verbatim as the pipeline persists them (prefixed with the
+    // exception's type name), printed from the agent code for #801's test cases.
+    test.each([
+      [
+        'a token without write access',
+        MSG_CLASSIC,
+        ErrorCategory.AUTH,
+        'Insufficient GitHub token scopes',
+      ],
+      [
+        'a rejected credential',
+        'PushCapabilityError: BLOCKED[auth_failure]: GitHub did not accept a token for the push (remote: Invalid username or token. Password authentication is not supported.): it is missing, invalid, expired or revoked. Replace the GitHub token secret, then resubmit. The task stopped before the agent ran, so no work was lost. (resource: owner/repo)',
+        ErrorCategory.BLOCKED,
+        'Blocked: authentication rejected',
+      ],
+      [
+        'an archived repository',
+        'PushCapabilityError: Repository owner/repo is archived on GitHub, so it is read-only (remote: This repository was archived so it is read-only.). Unarchive it or target another repository. The task stopped before the agent ran, so no work was lost.',
+        ErrorCategory.CONFIG,
+        'Repository is archived',
+      ],
+      [
+        'SAML SSO enforcement',
+        "PushCapabilityError: GitHub organization policy blocks pushes to owner/repo: it enforces SAML single sign-on and the token is not authorized for it. To fix it, authorize the classic token for the organization (GitHub > Settings > Developer settings > Personal access tokens > Tokens (classic) > Configure SSO) (remote: The 'acme' organization has enabled or enforced SAML SSO.). The task stopped before the agent ran, so no work was lost.",
+        ErrorCategory.AUTH,
+        'GitHub organization policy blocks the token',
+      ],
+      [
+        'an IP allow list',
+        "PushCapabilityError: GitHub organization policy blocks pushes to owner/repo: its IP allow list does not include the agent's address. To fix it, add the agent's egress IP addresses to the organization's IP allow list (remote: Although you appear to have the correct authorization credentials, the `acme` organization has an IP allow list enabled, and your IP address is not permitted to access this resource.). The task stopped before the agent ran, so no work was lost.",
+        ErrorCategory.AUTH,
+        'GitHub organization policy blocks the token',
+      ],
+    ])('classifies the agent push preflight refusal for %s (#801)', (_label, message, category, title) => {
+      // The git line quoted in each ("denied", "403", "credentials") must not move it
+      // to another title, and none gets the scope remedy unless scopes are the cause.
+      const result = classifyError(message);
+      expect(result!.category).toBe(category);
+      expect(result!.title).toBe(title);
+      expect(result!.retryable).toBe(false);
+    });
+
+    // The refusal's fix depends on the token type. The classification (which the
+    // web console's failure banner shows) carries the agent's fix, not the generic
+    // fine-grained-PAT remedy of the orchestrator's message (#801 review).
+    test.each([
+      ['a classic PAT', MSG_CLASSIC, 'owner/repo', ['`public_repo` scope for a public repository', '`repo` for a private one', 'its owner needs write access']],
+      ['a fine-grained PAT', MSG_FINE, 'owner/repo', ['repository access', 'Contents permission with Read and write access']],
+      ['a GitHub App token', MSG_APP, 'owner/repo', ['install it on the repository']],
+      ['an unknown token type', MSG_UNKNOWN, 'owner/repo', ['For a fine-grained personal access token', 'for a classic one']],
+      ['a repository with a dot in its name', MSG_DOTTED, 'owner/my.repo', ['its owner needs write access to the repository']],
+      // The record is cut at 1,000 characters; the sentence the pattern needs must survive (#801 review).
+      ['the longest refusal, as stored', MSG_LONGEST, 'ooooooooooooooooooooooooooooooooooooooo/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr', ['For a fine-grained personal access token', 'for a classic one']],
+    ])('carries the agent push preflight fix for %s (#801)', (_label, message, repo, fragments) => {
+      const result = classifyError(message);
+      expect(result!.title).toBe('Insufficient GitHub token scopes');
+      expect(result!.description).toContain(repo);
+      for (const fragment of fragments) {
+        expect(result!.remedy).toContain(fragment);
+      }
+      expect(result!.remedy).toMatch(/Then resubmit\.$|Then resubmit\. /);
+      // Not the orchestrator pattern's generic remedy.
+      expect(result!.remedy).not.toContain('Update the PAT with');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('keeps the generic remedy for the orchestrator preflight message', () => {
+      const result = classifyError('Pre-flight check failed: INSUFFICIENT_GITHUB_REPO_PERMISSIONS — Token cannot push to owner/repo. Required: push.');
+      expect(result!.title).toBe('Insufficient GitHub permissions');
     });
 
     test('classifies bare "Token cannot interact with pull requests on" without error code', () => {
@@ -346,22 +436,35 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/try again|capacity|admin/i);
     });
 
-    test('deliverable=lost is a retryable AGENT fault (work not saved), not the generic did-not-succeed', () => {
-      // A new-work task reported agent-success but no commit reached the branch
-      // and no PR opened — the agent's changes were LOST (nested-clone workspace
-      // fault). Must read as retryable/transient with "not saved" copy, NOT the
-      // non-retryable "Agent task did not succeed". Ordered before the
-      // agent_status catch-all so it wins.
-      const result = classifyError(
-        'Task did not succeed (agent_status=success, deliverable=lost): the coding '
-        + 'task reported success but no commit reached the branch and no PR was opened '
-        + "— the agent's changes did not land in the task's repository.",
-      );
-      expect(result!.category).toBe(ErrorCategory.AGENT);
-      expect(result!.title).toMatch(/not saved/i);
-      expect(result!.retryable).toBe(true);
-      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
-      expect(result!.remedy).toMatch(/try again/i);
+    // A task record written by an earlier agent image carries the first wording.
+    // The API classifies a record when it is read, so both wordings classify alike.
+    const deliveredNothing = 'Task did not succeed (agent_status=success, deliverable=lost): the coding '
+      + 'task reported success but no commit reached the branch and no PR was opened — ';
+
+    test.each([
+      {
+        writer: 'an earlier agent image',
+        message: `${deliveredNothing}the agent's changes did not land in the task's repository.`,
+      },
+      {
+        writer: 'the agent',
+        message: `${deliveredNothing}either the agent made no change, or its changes did not land in the task's repository.`,
+      },
+    ])('deliverable=lost, as $writer words it, names both lost work and a run that changed nothing', ({ message }) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(ErrorCategory.AGENT);
+      expect(result.title).toBe('No change was delivered');
+      expect(result.description).toMatch(/nothing to change/i);
+      expect(result.description).toMatch(/lost/i);
+      expect(result.remedy).toMatch(/already has what you asked for/i);
+      expect(result.remedy).toMatch(/try again/i);
+      expect(`${result.description} ${result.remedy}`).not.toMatch(/transient/i);
+      expect(result.retryable).toBe(true);
+      // USER, not TRANSIENT: a retry cannot help a run that changed nothing.
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(isTransientError(result)).toBe(false);
+      expect(retryGuidance(result)).toMatch(/extra guidance/i);
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
     });
 
     test('deliverable=no_pr says the work is SAFE on the branch (the pull request just did not open)', () => {
@@ -664,7 +767,7 @@ describe('classifyError', () => {
         expect(result.remedy).toContain(region);
       }
       expect(result.remedy).toContain('--compute-type agentcore');
-      expect(result.remedy).toContain('microvm-regions.ts');
+      expect(result.remedy).toContain('contracts/deployment-capabilities.json');
     });
 
     test('classifies regional unavailability from the raw (unwrapped) SDK error too', () => {
@@ -1299,6 +1402,15 @@ describe('classifyError', () => {
       expect(detail.error_classification).not.toBeNull();
       expect(detail.error_classification!.category).toBe('concurrency');
       expect(detail.error_classification!.title).toBe('Concurrency limit reached');
+    });
+
+    test('gives the console the token-specific fix of an agent push preflight refusal (#801)', () => {
+      // web/src/core/util/progress.ts shows `${description} What to do: ${remedy}`.
+      const detail = toTaskDetail({ ...baseRecord, error_message: MSG_APP });
+      expect(detail.error_classification!.description).toContain('GitHub App token');
+      expect(detail.error_classification!.remedy).toContain('install it on the repository');
+      expect(detail.error_classification!.remedy).not.toContain('fine-grained');
+      expect(detail.error_classification!.remedy).not.toContain('Update the PAT');
     });
 
     test('returns null error_classification when error_message is undefined', () => {

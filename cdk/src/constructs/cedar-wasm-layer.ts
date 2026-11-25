@@ -80,8 +80,10 @@ export interface CedarWasmLayerProps {
  * a layer-local manifest to keep bundling hermetic (no reliance on yarn
  * workspace resolution).
  *
- * Runtime compatibility is the union of Node.js 20 and 22 — older
- * runtimes lack the subtle WebAssembly support cedar-wasm relies on.
+ * Compatible runtimes are Node.js 22 and 24. Node.js 20 is left out on
+ * purpose (#889): Lambda deprecated it on 2026-04-30 and no function of
+ * this stack runs on it. The list must name the runtime of every
+ * function that attaches the layer, or CDK fails the synth.
  *
  * See §15.2 task 10 and §15.6.
  */
@@ -148,7 +150,6 @@ export class CedarWasmLayer extends Construct {
         },
       }),
       compatibleRuntimes: [
-        lambda.Runtime.NODEJS_20_X,
         lambda.Runtime.NODEJS_22_X,
         lambda.Runtime.NODEJS_24_X,
       ],

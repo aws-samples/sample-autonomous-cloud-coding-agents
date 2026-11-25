@@ -38,8 +38,10 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
 }));
 
 const resolveJiraOauthTokenMock = jest.fn();
+const getRegistryRowStrictMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-oauth-resolver', () => ({
   resolveJiraOauthToken: (...args: unknown[]) => resolveJiraOauthTokenMock(...args),
+  getRegistryRowStrict: (...args: unknown[]) => getRegistryRowStrictMock(...args),
 }));
 
 const jiraGraphSourceMock = jest.fn();
@@ -233,6 +235,13 @@ describe('jira-webhook-processor orchestration adapter', () => {
     reportIssueFailureMock.mockResolvedValue(undefined);
     resolveJiraOauthTokenMock.mockReset();
     resolveJiraOauthTokenMock.mockResolvedValue(oauth);
+    getRegistryRowStrictMock.mockReset();
+    getRegistryRowStrictMock.mockResolvedValue({
+      jira_cloud_id: 'cloud-1',
+      site_url: oauth.siteUrl,
+      oauth_secret_arn: oauth.oauthSecretArn,
+      status: 'active',
+    });
     jiraGraphSourceMock.mockReset();
     jiraGraphSourceMock.mockReturnValue(jest.fn().mockResolvedValue({
       kind: 'ok',

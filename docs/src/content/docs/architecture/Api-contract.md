@@ -253,7 +253,8 @@ Returns full details of a task. Users can only access their own tasks.
     "updated_at": "2025-03-15T10:31:15Z",
     "started_at": "2025-03-15T10:31:10Z",
     "completed_at": null,
-    "agent_heartbeat_at": "2025-03-15T10:36:02Z"
+    "agent_heartbeat_at": "2025-03-15T10:36:02Z",
+    "compute_type": "agentcore"
   }
 }
 ```
@@ -262,7 +263,9 @@ Returns full details of a task. Users can only access their own tasks.
 
 `agent_heartbeat_at` is the agent's last in-guest liveness beat, or `null`. The agent writes it every 45 s on the `agentcore` and `lambda-microvm` backends; on `ecs` it is written once at start, because that backend runs the pipeline directly instead of serving HTTP. The orchestrator reads the same field to detect a hung agent inside a healthy compute environment ([ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#liveness-monitoring)), so a value that is minutes old on a `RUNNING` task is the signal, not the timestamp itself. `null` on records written before the field existed.
 
-`error_classification` is a derived field computed at response time from `error_message`. When `error_message` is `null`, `error_classification` is `null`. When present, it contains:
+`compute_type` is the compute backend the task's session was started on: `agentcore`, `ecs` or `lambda-microvm`. It is `null` before a session starts and on records written before the field existed. It stands beside `agent_heartbeat_at` because what a heartbeat says differs by backend: on `ecs` an old value is the normal case.
+
+`error_classification` is a derived field computed at response time from `error_message`, of which the first 1,000 characters are classified. When `error_message` is `null`, `error_classification` is `null`. When present, it contains:
 
 | Field | Type | Description |
 |---|---|---|
@@ -302,12 +305,15 @@ Returns the authenticated user's tasks, newest first. Paginated.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `status` | String | all | Filter by status (comma-separated: `RUNNING,HYDRATING`) |
-| `repo` | String | all | Filter by repository (`owner/repo`) |
+| `repo` | String | all | Filter the list by repository (`owner/repo`): the name as the task holds it, letter for letter. With `view=scoreboard` the parameter follows other rules, given with that view below |
 | `limit` | Number | 20 | Page size (1-100) |
 | `next_token` | String | - | Pagination token from previous response |
-| `view` | String | — | Omit for a task page; `budget` returns the authenticated caller's personal monthly budget instead |
+| `view` | String | — | Omit for a task page; `budget` returns the authenticated caller's personal monthly budget instead, `scoreboard` their factory scoreboard |
+| `range` | String | 30d | With `view=scoreboard`: the period the scoreboard covers, `7d` or `30d` |
 
 Returns a summary subset of fields. Use `GET /v1/tasks/{task_id}` for full details.
+
+The summary includes `agent_heartbeat_at` and `compute_type` (same semantics as on the task detail above). They are on the summary as well as the detail because liveness is a list-level question — "is anything still alive?" is asked across tasks, and answering it one task at a time is how a hung task goes unnoticed.
 
 With `view=budget`, the Cognito-authenticated caller receives only their personal estimated-spend scope:
 
@@ -329,7 +335,102 @@ With `view=budget`, the Cognito-authenticated caller receives only their persona
 
 When no personal limit exists, `configured` is false, the limit/remaining/utilization fields are null, and `spend_usd` still reports the caller's current estimated spend. Team budgets are not returned. This read-only view backs `bgagent budget status --me`; budget mutation remains an operator-AWS-credential workflow.
 
-The summary includes `agent_heartbeat_at` (same semantics as on the task detail above). It is on the summary as well as the detail because liveness is a list-level question — "is anything still alive?" is asked across tasks, and answering it one task at a time is how a hung task goes unnoticed.
+With `view=scoreboard`, the caller receives the factory scoreboard of their own finished tasks: how the work they handed to agents turned into pull requests during the last `range` and during the period of the same length before it, and what became on GitHub of the pull requests ABCA follows. A `range` of `7d` or `30d` is that many days of 24 hours up to the time of the request. With `repo=owner/name`, every number counts the caller's tasks in that repository only, whatever the letter case of the name. [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability#factory-scoreboard) defines every number. The view backs the **Scoreboard** page of the operator console and `bgagent stats`.
+
+```json
+{
+  "data": {
+    "range": "30d",
+    "truncated": false,
+    "current": {
+      "from": "2026-10-20T12:00:00.000Z",
+      "to": "2026-11-19T12:00:00.000Z",
+      "finished": 8,
+      "outcomes": { "verified_pr": 2, "unverified_pr": 1, "no_new_pr": 2, "failed": 1, "cancelled": 1, "timed_out": 1 },
+      "time_to_verified_pr_s": { "p50": 1440, "p90": 3600, "count": 2 },
+      "wait_p50_s": 41,
+      "queued": { "count": 1, "total": 7 },
+      "verified": { "count": 2, "total": 7 },
+      "not_reworked": { "count": 2, "total": 3 },
+      "untouched": { "count": 1, "total": 7 },
+      "touchpoints": { "approve": 2, "clarify": 1, "follow_up": 1, "cancel": 1 },
+      "spend_usd": 14.5,
+      "uncosted": 2,
+      "guardrail_stops": { "count": 1, "task_ids": ["01M6P..."] },
+      "blanket_approvals": { "count": 1, "task_ids": ["01M7F..."] },
+      "gated": { "count": 1, "total": 7 },
+      "pull_requests": { "merged": 1, "closed": 0, "open": 1, "unread": 1 },
+      "merged_clean": { "count": 1, "total": 1 },
+      "time_to_merge_s": { "p50": 93600, "p90": 93600, "count": 1 },
+      "first_review_s": { "p50": 21600, "p90": 21600, "count": 1 }
+    },
+    "previous": {
+      "from": "2026-09-20T12:00:00.000Z",
+      "to": "2026-10-20T12:00:00.000Z",
+      "finished": 2,
+      "outcomes": { "verified_pr": 1, "unverified_pr": 0, "no_new_pr": 0, "failed": 1, "cancelled": 0, "timed_out": 0 },
+      "time_to_verified_pr_s": { "p50": 1800, "p90": 1800, "count": 1 },
+      "wait_p50_s": 60,
+      "queued": { "count": 0, "total": 2 },
+      "verified": { "count": 1, "total": 2 },
+      "not_reworked": { "count": 1, "total": 1 },
+      "untouched": { "count": 1, "total": 2 },
+      "touchpoints": { "approve": 0, "clarify": 0, "follow_up": 0, "cancel": 0 },
+      "spend_usd": 3.5,
+      "uncosted": 0,
+      "guardrail_stops": { "count": 0, "task_ids": [] },
+      "blanket_approvals": { "count": 0, "task_ids": [] },
+      "gated": { "count": 0, "total": 2 },
+      "pull_requests": { "merged": 1, "closed": 0, "open": 0, "unread": 0 },
+      "merged_clean": { "count": 1, "total": 1 },
+      "time_to_merge_s": { "p50": 172800, "p90": 172800, "count": 1 },
+      "first_review_s": { "p50": 7200, "p90": 7200, "count": 1 }
+    },
+    "open_over_7d": { "count": 1, "task_ids": ["01M4C..."] }
+  }
+}
+```
+
+`range` is the range served. `current` holds the numbers of the tasks that finished in it, `previous` those of the period before it, or `null` (see below). `open_over_7d` belongs to neither: it is described under the table. Both periods have these fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `from`, `to` | String | ISO 8601 bounds: the tasks that finished at or after `from` and before `to`. `current` has no upper test: a finish time ahead of the clock belongs to it. `current.to` is the time of the request |
+| `finished` | Number | Tasks that reached a terminal state |
+| `outcomes` | Object | `finished` by outcome. `failed`, `cancelled` and `timed_out` are the statuses of those names; `verified_pr`, `unverified_pr` and `no_new_pr` split the completed tasks. All six keys are always present |
+| `time_to_verified_pr_s` | Object or null | Seconds from task creation to a verified pull request: `p50`, `p90`, and the `count` of tasks measured. With fewer than 10 values, `p90` is the largest or close to it. `null` when there is none |
+| `wait_p50_s` | Number or null | Median seconds from creation to the start of the session, time in the admission queue included, over the verified pull requests above whose start is known. `null` when there is none |
+| `queued` | Fraction | Tasks that waited in the admission queue, of the tasks that waited or ran |
+| `verified` | Fraction | Verified pull requests, of the tasks that asked for a new pull request |
+| `not_reworked` | Fraction | New pull requests with no follow-up task before the period's end (a follow-up known to have changed no code is not one), of the new pull requests whose number is known |
+| `untouched` | Fraction | Verified pull requests whose task never stopped for a person, of the tasks that asked for a new pull request |
+| `touchpoints` | Object | Human touchpoints on coding tasks, by kind. `approve` counts approval requests, whatever the answer. All four keys are always present |
+| `spend_usd` | Number | Recorded spend of coding tasks, whatever their outcome, to the micro-dollar |
+| `uncosted` | Number | Coding tasks that ran and recorded no cost: `spend_usd` is short by them |
+| `guardrail_stops` | Flagged | Finished tasks of any kind, not only coding tasks, that a guardrail stopped; newest first. Each is also one of `outcomes.failed` |
+| `blanket_approvals` | Flagged | Finished tasks of any kind that were submitted with every approval granted in advance; newest first |
+| `gated` | Fraction | Coding tasks that stopped for at least one approval request, of the coding tasks that ran |
+| `pull_requests` | Object | The new pull requests of the period that ABCA follows, by their state at the period's end: `merged`, `closed`, `open`, or `unread`. `unread`: no read has recorded one yet, or a read found no pull request of the task under the recorded number and does not ask again. The four add up to those pull requests. A pull request opened by a task of an orchestration is not followed, and is in none of them. All four keys are always present |
+| `merged_clean` | Fraction | Merged pull requests nobody sent back first (no change request by a reviewer with write access, no reworking follow-up before the merge), of the merged ones |
+| `time_to_merge_s` | Object or null | Seconds from task creation to the merge, over the pull requests merged before the period's end: `p50`, `p90` and `count`. `null` when none was merged |
+| `first_review_s` | Object or null | Seconds from the end of the task to the first review of its pull request by a person with write access to the repository, other than the pull request's author, over the merged ones that had one: `p50`, `p90` and `count`. A review before that end counts as 0. `null` when none had |
+
+A Fraction is `count` of `total`: the rate is `count / total`; with a `total` of 0 there is none. A Flagged is a `count` with the ids (`task_ids`) of up to 10 of the tasks behind it. Durations are whole seconds. The figures per pull request are left to the client: divide the sum of `touchpoints`, or `spend_usd`, by `outcomes.verified_pr`, or by `pull_requests.merged` for the figures per merged pull request. So is the merged share: `merged` of `merged` + `closed` + `open`, with `unread` outside it.
+
+`open_over_7d` is one number of the whole response, a Flagged or `null`: the new pull requests that ABCA follows and that were open at its last read more than 7 days after their task finished, oldest first, over the tasks of both periods. Those are the tasks that finished 7 to 14 days ago with `range=7d`, and 7 to 60 days ago with `range=30d`. It is `null` when the count is not known: the read did not cover the earlier period (`previous` is `null` then too), or some pull requests are that old and ABCA has read none of them on GitHub. With no pull request that old, the count is 0.
+
+The state of a pull request comes from a read of GitHub that ABCA makes about once an hour, with the platform's GitHub token: a pull request is `unread` until a read records a state, and stays so in a repository that token cannot read and when GitHub has no pull request of the task under the recorded number. [Pull-request outcomes](/sample-autonomous-cloud-coding-agents/architecture/observability#pull-request-outcomes) has the rules and the limits.
+
+The scoreboard counts the caller's own tasks and nothing else: no variant returns a team's numbers or every user's. Every user's are CloudWatch metrics in the `ABCA/Factory` namespace; there are none per team. A `view` response is not paginated, and `status`, `limit` and `next_token` do not apply to it. Nor does the list's `repo` filter: `view=scoreboard` reads `repo` by its own rules, and `view=budget` does not read it.
+
+With `repo`, the request reads the same task records as without it and then counts the ones of that repository, in `current`, in `previous` and in `open_over_7d`. So `truncated` and a `null` `previous` mean what they mean without it: they describe the read. `open_over_7d` is `null` for its two reasons as well, and the second is judged within the repository: some of its pull requests are that old and ABCA has read none of them. A task record without a repository belongs to none, and a repository in which the caller has no finished task answers with zeros.
+
+A request reads a bounded number of task records, newest first: at most six pages of up to 1 MB for each terminal status. When the caller's finished tasks since the start of the previous period exceed that, the scoreboard covers the time from which every status was read in full, and no number is computed over a span in which one was not:
+
+- The read stopped inside the previous period: `previous` and `open_over_7d` are `null`. `truncated` is `false`, because `current` is whole.
+- The read stopped inside the range: `truncated` is `true`, `previous` and `open_over_7d` are `null`, and `current.from` is the time from which every finished task was read, later than the start of the range. With `range=30d`, `7d` may fit.
+
+Any other `view` is refused with `400 VALIDATION_ERROR` and the message `Invalid view value. Expected "budget" or "scoreboard".`. With `view=scoreboard`, any other `range` is refused with the message `Invalid range value. Expected "7d" or "30d".`, and a `repo` that is not a repository name, the empty value included, with `Invalid repo value. Expected "owner/name".`; `range` is checked first, and a refused request reads nothing.
 
 **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`.
 
@@ -360,6 +461,8 @@ Returns the audit trail for a task: state transitions, hydration events, session
 **Query parameters:** `limit` (default 50, max 100), `next_token`.
 
 **Event types:** `task_created`, `uploads_confirmed`, `attachment_blocked`, `admission_queued`, `queue_pickup`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Custom blueprint steps emit `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. (There is no `admission_passed` or `session_ended` event — admission success is implicit in the subsequent `hydration_started`, and session end is captured by the terminal event.)
+
+`pr_outcome_recorded` comes after the terminal event, when the hourly read of GitHub records that the task's pull request was merged or closed. Its `metadata` holds `pr_state` (`merged` or `closed`), `pr_closed_at`, `pr_changes_requested` and, when a review counted, `pr_first_review_at`; its `timestamp` is the time of the read, not of the merge. It is written at most once and can be missing for a pull request whose outcome is recorded (see [Pull-request outcomes](/sample-autonomous-cloud-coding-agents/architecture/observability#pull-request-outcomes)).
 
 **Correlation envelope (#245):** each event optionally carries top-level `user_id`, `repo`, and `trace_id` (the agent's OTEL trace id) so the event stream joins to structured logs and X-Ray. Each field is present only when the event's source stamped it — `task_created` predates the envelope and carries none; events from `hydration_started` onward carry `user_id`/`repo`, and agent-emitted events additionally carry `trace_id`. Fields are omitted (not `null`) when absent. See [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability#correlation-envelope).
 
@@ -495,7 +598,7 @@ External systems (CI pipelines, GitHub Actions, custom automation) can create ta
 POST /v1/webhooks
 ```
 
-Creates a webhook and returns the shared secret (shown only once).
+Creates a webhook and returns the shared secret (shown only once) and the URL to post tasks to.
 
 **Request:** `{ "name": "My CI Pipeline" }` (1-64 chars, alphanumeric + spaces/hyphens/underscores).
 
@@ -507,12 +610,15 @@ Creates a webhook and returns the shared secret (shown only once).
     "webhook_id": "01HYX...",
     "name": "My CI Pipeline",
     "secret": "<64-hex-characters>",
+    "webhook_url": "https://{api-id}.execute-api.{region}.amazonaws.com/v1/webhooks/tasks",
     "created_at": "2025-03-15T10:30:00Z"
   }
 }
 ```
 
 Store the `secret` securely. It cannot be retrieved again.
+
+`webhook_url` is the address of [Create task via webhook](#create-task-via-webhook), built from the host and stage that served the request. It belongs to the API deployment, not to the webhook: every webhook of a deployment gets the same URL, so the list and revoke responses do not repeat it.
 
 **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`.
 
@@ -602,6 +708,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `DUPLICATE_TASK` | 409 | Idempotency key already used by another user (`POST /v1/tasks` / webhook create); same-user replays return `200` with the existing task instead |
 | `TASK_ALREADY_TERMINAL` | 409 | Cannot cancel a terminal task |
 | `WEBHOOK_ALREADY_REVOKED` | 409 | Webhook is already revoked |
+| `WORKSPACE_SLUG_AMBIGUOUS` | 409 | More than one active Linear workspace registration carries the slug (`DELETE /v1/linear/workspaces/{slug}`). Nothing is removed, and the message names the `linear_workspace_id` of each. The [Linear setup guide](/sample-autonomous-cloud-coding-agents/using/linear-setup-guide#manual-fallback) gives the steps |
 | `REPO_NOT_ONBOARDED` | 422 | Repository not registered (onboard via CDK, not runtime API) |
 | `REPO_NOT_FOUND_OR_NO_ACCESS` | 422 | Repo onboarded but credentials cannot reach it |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | PR does not exist, is closed, or is inaccessible |

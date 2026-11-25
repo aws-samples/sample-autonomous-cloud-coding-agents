@@ -163,8 +163,13 @@ jobs:
         with:
           node-version: 22.x
 
+      # Yarn 1 installs this repository and ignores Yarn Berry's --immutable. Its
+      # own flag, --frozen-lockfile, fails when a dependency of the root
+      # package.json is not in yarn.lock. It does not notice a changed
+      # `resolutions` entry or workspace manifest: "Fail on lockfile drift" in
+      # build.yml catches those.
       - name: Install dependencies
-        run: yarn install --immutable
+        run: yarn install --frozen-lockfile
 
       - name: CDK Diff (full)
         env:
@@ -278,7 +283,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Install mise
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
@@ -288,8 +293,13 @@ jobs:
         with:
           node-version: 22.x
 
+      # Yarn 1 installs this repository and ignores Yarn Berry's --immutable. Its
+      # own flag, --frozen-lockfile, fails when a dependency of the root
+      # package.json is not in yarn.lock. It does not notice a changed
+      # `resolutions` entry or workspace manifest: "Fail on lockfile drift" in
+      # build.yml catches those.
       - name: Install dependencies
-        run: yarn install --immutable
+        run: yarn install --frozen-lockfile
 
       - name: Deploy
         env:

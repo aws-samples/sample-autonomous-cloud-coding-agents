@@ -45,20 +45,17 @@ class TestErrorScanning:
         leaked = "AKIA" + "IOSFODNN7EXAMPLE"
         err = f"HTTP 403 with key {leaked} in request"
         out = _metrics_payload_for_logging({"error": err})
-        assert leaked not in out["error"]
-        assert "[REDACTED-AWS_KEY]" in out["error"]
+        assert out["error"] == "HTTP 403 with key [REDACTED-AWS_KEY] in request"
 
     def test_bearer_token_redacted(self) -> None:
         err = "401 Unauthorized: Bearer abcdefghijklmnop1234567890"
         out = _metrics_payload_for_logging({"error": err})
-        assert "abcdefghijklmnop1234567890" not in out["error"]
-        assert "[REDACTED-BEARER_TOKEN]" in out["error"]
+        assert out["error"] == "401 Unauthorized: [REDACTED-BEARER_TOKEN]"
 
     def test_connection_string_redacted(self) -> None:
         err = "connect error: postgres://app_user:s3cretPW@db.example.com/prod"
         out = _metrics_payload_for_logging({"error": err})
-        assert "s3cretPW" not in out["error"]
-        assert "[REDACTED-CONNECTION_STRING]" in out["error"]
+        assert out["error"] == "connect error: [REDACTED-CONNECTION_STRING]"
 
 
 class TestNonErrorFieldsUntouched:

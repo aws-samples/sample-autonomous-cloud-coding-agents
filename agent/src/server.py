@@ -45,19 +45,6 @@ from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
 from shell import redact_secrets
 
-# --- _debug_cw / _warn_cw failure counter -------------------------------
-# Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
-# doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
-# is invisible except for this metric. Single counter = single alarm
-# surface — the trade-off is that the alarm can't distinguish which writer
-# is broken (see Chunk 7c review notes). Defined BEFORE any function that
-# references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
-# import-time safe: a daemon thread spawned from a write-blocking function
-# can never race with module-level globals still being assigned.
-_debug_cw_failures = 0
-_debug_cw_failures_lock = threading.Lock()
-_DEBUG_CW_FAILURE_EMIT_EVERY = 5
-
 
 def _emit_stdout_line(stamped: str) -> None:
     """Write one line to stdout via ``os.write`` (fd 1).
@@ -123,18 +110,18 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     """Emit a server-level warning to stdout AND CloudWatch.
 
     Chunk 7c — AgentCore doesn't forward container stdout to
-    APPLICATION_LOGS (see the ``_debug_cw`` comment block above), so
-    warning ``print`` calls about malformed invocation payloads are
-    effectively invisible in production. Route them through the same
-    daemon-thread CloudWatch writer used by ``_debug_cw`` (writing to
-    the ``server_warn/<task_id>`` stream so operators can alarm on
-    warn traffic separately from debug noise).
+    APPLICATION_LOGS, so warning ``print`` calls about malformed
+    invocation payloads are effectively invisible in production. Route
+    them through the same daemon-thread CloudWatch writer used by
+    ``_debug_cw`` (writing to the ``server_warn/<task_id>`` stream so
+    operators can alarm on warn traffic separately from debug noise).
 
     The stdout emission is preserved so local ``docker-compose`` runs
     and the ``capfd``-based unit tests still observe the line.
-    CloudWatch delivery is fire-and-forget — failures bump the
-    shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
-    so a silently broken writer still surfaces via that single metric.
+    CloudWatch delivery is fire-and-forget: a failed write leaves one
+    ``[server/warn/self] CloudWatch write failed`` line on stdout
+    (``_warn_cw_write_blocking``). Nothing counts those lines, and no
+    metric or alarm is fed by them.
     """
     # Redact cached credentials and emit via the same os.write path as
     # ``_debug_cw``: warn messages can embed payload fragments, so they
@@ -163,9 +150,8 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 
     Mirrors ``_debug_cw_write_blocking`` but writes to the
     ``server_warn/<task_id>`` stream so warn-level traffic is easy to
-    alarm on independently of debug breadcrumbs. Failures bump the
-    shared ``_debug_cw_failures`` counter — a single alarm surface
-    covers both writers.
+    alarm on independently of debug breadcrumbs. A failed write is
+    reported on stdout only, like a failed debug write.
     """
     try:
         from aws_session import platform_client
@@ -183,9 +169,6 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
     except Exception as _exc:
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
         print(
             f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
             flush=True,
@@ -210,11 +193,7 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
     except Exception as _exc:
-        # Never let debug logging break the request path. Bump the failure
-        # counter so operators can alarm on a blind debug path.
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
+        # Never let debug logging break the request path.
         print(
             f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
             flush=True,
@@ -899,7 +878,7 @@ _S3_URI_SCHEME = "s3://"
 # compile-time enforcement of the key names via ``resolveJsonModule``) rather
 # than re-declaring the key names. ``mise run check:constants-sync``
 # (``scripts/check-constants-sync.ts``) validates this block's shape and rejects a
-# literal re-declaration of either constant below in the Python consumers.
+# literal re-declaration of any of the four constants below in the Python consumers.
 _PLATFORM_CONFIG_CONTRACT: dict[str, Any] = SHARED_CONSTANTS["microvm_platform_config"]
 
 #: ``platform_config`` key (snake_case) → environment variable it becomes.
@@ -1182,8 +1161,9 @@ def _reject_foreign_arns(resolved: dict[str, str]) -> None:
     differ on that axis in this system — IAM is global (empty region field), and a
     cross-Region secret is a supported deployment shape — so requiring agreement
     would reject valid configurations while adding nothing: the execution role's
-    grants are account-scoped, so an in-account cross-Region ARN reaches nothing
-    the in-Region one does not. Partition + account is the boundary this checks.
+    Secrets Manager grants are Region-scoped (each names the Region of the secrets
+    it covers), so IAM already refuses an in-account ARN in a Region no grant
+    names. Partition + account is the boundary this checks.
     """
     anchor_value = resolved.get(MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY, "")
     # The anchor is contract-guaranteed REQUIRED (asserted at import), so by the
@@ -1377,9 +1357,8 @@ def _build_hook_log(msg: str) -> None:
     1. The build role's Logs grant is scoped to the service's own
        ``/aws/lambda-microvms/*`` namespace, so a write to any OTHER
        ``LOG_GROUP_NAME`` — e.g. an APPLICATION_LOGS group baked into a legacy or
-       hand-built image — can only FAIL. That failure bumps the shared
-       ``_debug_cw_failures`` counter, i.e. such an image build would poison the
-       "debug path is blind" signal with a false positive.
+       hand-built image — can only FAIL, and all it would leave is a
+       ``CloudWatch write failed`` line on stdout per attempt.
     2. ``boto3.DEFAULT_SESSION`` created during ``/ready`` freezes the BUILD role's
        CREDENTIALS into the snapshot, where every launched MicroVM would inherit
        them (region is re-resolved per client; credentials are not — see
@@ -1905,10 +1884,10 @@ def microvm_validate():
 
     It must also not touch credential resolution: ``platform_config`` has not
     arrived yet (it comes with ``/run``), and any client built here would leave a
-    resolved boto3 session — with the build role's credentials and the build
-    region — frozen in the snapshot for every MicroVM launched from it. Hence
-    ``_build_hook_log`` instead of ``_debug_cw``, and no import of
-    ``aws_session``.
+    resolved boto3 session — with the build role's credentials — frozen in the
+    snapshot for every MicroVM launched from it (credentials only: the region is
+    re-resolved per client, see ``_aws_silent_log``). Hence ``_build_hook_log``
+    instead of ``_debug_cw``, and no import of ``aws_session``.
 
     What it CAN prove, all in-process:
 

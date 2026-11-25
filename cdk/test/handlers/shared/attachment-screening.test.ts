@@ -26,7 +26,7 @@ import type { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 // the real v2 contract (see the PDF-extraction regression tests below). pdfjs runs
 // headless in the nodejs24.x Lambda, but ts-jest's CJS transform can't spin its
 // ESM worker under jest — so unit-mock the class and prove the wiring here; the
-// real extraction is validated on the live deploy.
+// real extraction runs in attachment-screening-real-pdf.test.ts, in a child process.
 const pdfGetTextMock = jest.fn();
 const pdfDestroyMock = jest.fn().mockResolvedValue(undefined);
 jest.mock('pdf-parse', () => ({
@@ -395,8 +395,8 @@ describe('screenTextFile', () => {
   // (`pdfParseFn(buf)`), undefined on v2, so every PDF fail-closed as
   // "processing unavailable". These assert the v2 contract:
   // `new PDFParse({data}).getText()` → `{ text }`. Real end-to-end PDF extraction
-  // is validated on the live deploy (pdfjs runs headless in nodejs24.x; ts-jest's
-  // CJS transform can't drive its ESM worker, so a class mock is the right unit).
+  // is tested in attachment-screening-real-pdf.test.ts, in a child process (ts-jest's
+  // CJS transform can't drive pdfjs' ESM worker, so a class mock is the right unit here).
 
   test('extracts and screens a PDF via the v2 PDFParse class', async () => {
     pdfGetTextMock.mockResolvedValueOnce({ text: 'Design spec: add CONTRIBUTORS', total: 1, pages: [] });

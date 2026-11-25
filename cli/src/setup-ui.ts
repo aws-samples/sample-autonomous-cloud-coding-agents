@@ -42,13 +42,18 @@ export function stripAnsi(text: string): string {
   return text.replace(ANSI, '');
 }
 
-/** Component names shown to the operator, keyed by top-level construct id in `AgentStack`. */
+/**
+ * Component names shown to the operator, keyed by top-level construct id in `AgentStack`.
+ * A nested stack is one resource of the root stack, under its own id, whatever it holds:
+ * `ConcurrencyMaintenance` is the scheduled maintenance jobs, `Microvm` the Lambda MicroVM
+ * backend in its nested layout.
+ */
 const COMPONENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['Networking', ['AgentVpc', 'DnsFirewall']],
   ['Task API & sign-in', ['TaskApi']],
   ['Agent runtime', [
     'Runtime', 'RuntimeApplicationLogGroup', 'RuntimeUsageLogGroup', 'AgentMemory', 'AgentSessionRole', 'InputGuardrail',
-    'CdkLogGroupLogsDeliveryPolicy', 'EcsAgentCluster', 'AgentImage', 'EcsPayloadBucket', 'LambdaMicrovmCompute',
+    'CdkLogGroupLogsDeliveryPolicy', 'EcsAgentCluster', 'AgentImage', 'EcsPayloadBucket', 'LambdaMicrovmCompute', 'Microvm',
   ]],
   ['Task data & storage', [
     'TaskTable', 'TaskEventsTable', 'TaskNudgesTable', 'TaskApprovalsTableV2', 'UserConcurrencyTable', 'BudgetTable',
@@ -56,9 +61,8 @@ const COMPONENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
     'GitHubTokenSecret', 'CedarWasmLayer',
   ]],
   ['Orchestration', [
-    'TaskOrchestrator', 'ConcurrencyReconciler', 'AdmissionQueuePickup', 'StrandedTaskReconciler', 'PendingUploadCleanup',
-    'OrchestrationReconciler', 'StrandedOrchestrationReconciler', 'IterationHeartbeat', 'FanOutConsumer',
-    'ApprovalMetricsPublisherConsumer',
+    'TaskOrchestrator', 'ConcurrencyMaintenance', 'OrchestrationReconciler', 'StrandedOrchestrationReconciler',
+    'IterationHeartbeat', 'FanOutConsumer', 'ApprovalMetricsPublisherConsumer',
   ]],
   ['Monitoring & alerts', ['TaskDashboard', 'OperationalAlerts', 'BudgetAlerts', 'ModelInvocationLogGroup', 'BedrockLoggingRole', 'ModelInvocationLogging']],
   ['Slack', ['SlackIntegration']],

@@ -282,7 +282,7 @@ function TaskBody({ task, events, eventsLoading }: {
   const live = !isTerminal(task.status);
   const messageBox = useRef<TextareaProps.Ref>(null);
   const lines = useMemo(() => activityFeed(events, task.repo), [events, task.repo]);
-  const outcome = outcomeOf(task);
+  const outcome = outcomeOf(task, events);
 
   return (
     <SpaceBetween size="l">
@@ -296,7 +296,9 @@ function TaskBody({ task, events, eventsLoading }: {
             info={(
               <InfoTip about="Activity">
                 What the agent did, in plain words and oldest first. Steps with an arrow open to show the exact command or
-                file and what came back. Quoted lines are what the agent said along the way.
+                file and what came back. Quoted lines are what the agent said along the way. When the task opened a new pull
+                request, a last line says what became of it, once ABCA has read on GitHub that it was merged or closed. It
+                reads about once an hour.
               </InfoTip>
             )}
           >
