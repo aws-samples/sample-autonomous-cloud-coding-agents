@@ -92,6 +92,7 @@ import {
   setStatusCommentId,
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
+import { finishTimeMs } from './shared/scoreboard';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
 import { ORCHESTRATION_CHILD_TASK_INDEX_NAME } from './shared/storage-names';
 import { readTaskPrNumber } from './shared/task-pr-number';
@@ -535,8 +536,35 @@ async function reloadIterationScreenshot(taskId?: string): Promise<{ screenshotU
   }
 }
 
-/** Apply one terminal child's reconcile plan. */
-async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
+/**
+ * How long after its task ended a write on the task record still moves a failed child's
+ * issue back (step 1b of `reconcileTerminalChild`). A finished task record is written again
+ * for as long as it lives, and every write arrives here with the terminal status. The stream
+ * carries the new image only, so the write that ended the task cannot be told from a later
+ * one by its content: the time between the task's end and the write separates them. After
+ * the window a person may have taken the issue over, and the surface cannot tell their
+ * running state from the agent's (#1073). Inside it the step runs for every record on
+ * purpose. Nothing retries a failed surface call, so the next record is the retry: the
+ * orchestrator's ttl stamp, one poll after a terminal write it did not make itself (30 s
+ * by default; `poll_interval_ms` can make it as long as this window), or a redelivery.
+ */
+const SETTLE_WINDOW_MINUTES = 5;
+
+/**
+ * Whether the record was written longer after its task ended than the settle window. The
+ * stream stamps a record with the time of its write, in seconds, so a delivery that comes
+ * late, or again, decides as the first one would have. A record without that stamp or
+ * without a finish time is not late: NaN compares false.
+ */
+function writtenLongAfterTaskEnded(record: DynamoDBRecord): boolean {
+  const image = record.dynamodb?.NewImage;
+  const endedAtMs = finishTimeMs({ completed_at: image?.completed_at?.S, updated_at: image?.updated_at?.S });
+  const writtenAtMs = Number(record.dynamodb?.ApproximateCreationDateTime) * 1000;
+  return writtenAtMs - endedAtMs > SETTLE_WINDOW_MINUTES * 60 * 1000;
+}
+
+/** Apply one terminal child's reconcile plan. `lateWrite`: see {@link writtenLongAfterTaskEnded}. */
+async function reconcileTerminalChild(evt: TerminalTaskEvent, lateWrite: boolean): Promise<void> {
   const orchestrationId = evt.orchestrationId!;
 
   const subIssueId = await resolveSubIssueId(evt.taskId);
@@ -640,15 +668,16 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //     reads awaiting-review with a PR link — a visible contradiction. The
   //     reconciler holds the authoritative verdict, so when a terminal child did
   //     NOT succeed we pull its issue back out of any bot-set running state.
-  //     `revertState` is tightly guarded per surface (only demotes an issue still
-  //     in a bot-set running state — never a human-advanced done/canceled or a
+  //     `revertState` is tightly guarded per surface (only demotes an issue in a
+  //     running state — never a human-advanced done/canceled or a
   //     human-pulled-back one) and idempotent on replay. The ❌ reaction + the
   //     failure reason on the panel convey "it failed"; a reply re-runs it (the
   //     retry re-drives the state not-started → running). Skip the integration
-  //     node (synthetic id, no real issue), and a stale event (the issue shows
-  //     what a later run did). Best-effort; never throws.
+  //     node (synthetic id, no real issue), a stale event (the issue shows
+  //     what a later run did), and a record that was written long after the task
+  //     ended (see SETTLE_WINDOW_MINUTES). Best-effort; never throws.
   const settleChannel = channelForMeta(snapshot.meta);
-  if (settleChannel && !plan.terminalSucceeded && !stale && !isIntegrationNode(subIssueId)) {
+  if (settleChannel && !plan.terminalSucceeded && !stale && !lateWrite && !isIntegrationNode(subIssueId)) {
     const channel = settleChannel;
     const childRef = issueRef(subIssueId, snapshot.meta.credentials_ref);
     try {
@@ -660,8 +689,9 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
       // (build_passed===false ⇒ failed, absolute), so a child can legitimately end
       // agent-✅ but graph-failed — leaving a ✅ reaction that contradicts the
       // failed node (observed in practice: PR opened, agent ✅, build red).
-      // Replacing the reaction clears only the bot's own status markers and adds
-      // ❌ — a human's reaction is never touched, and it's idempotent on replay.
+      // Replacing the reaction clears the status markers and adds ❌. Markers are
+      // matched by emoji alone, so a person's own reaction with one of them goes
+      // too; it's idempotent on replay.
       // This makes the reaction agree with the reverted state + the panel's ❌
       // row. (The stale "✅ Task completed" comment is left as history — the
       // surface won't let us edit another actor's comment; the reaction + state +
@@ -1651,7 +1681,7 @@ export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatch
         if (evt.cascadeSubIssueId) {
           await cascadeRestack(evt);
         } else {
-          await reconcileTerminalChild(evt);
+          await reconcileTerminalChild(evt, writtenLongAfterTaskEnded(record));
         }
         processed += 1;
       }

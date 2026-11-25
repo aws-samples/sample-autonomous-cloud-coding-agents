@@ -160,6 +160,8 @@ function taskRecord(fields: {
   max_turns?: number;
   // Stream sequence number (itemIdentifier for partial-batch reporting).
   sequenceNumber?: string;
+  // When the write happened: the stream stamps it on the record, in seconds.
+  written_at?: string;
 }): DynamoDBRecord {
   const img: Record<string, unknown> = {};
   if (fields.task_id) img.task_id = { S: fields.task_id };
@@ -196,6 +198,7 @@ function taskRecord(fields: {
     dynamodb: {
       NewImage: img as never,
       ...(fields.sequenceNumber !== undefined && { SequenceNumber: fields.sequenceNumber }),
+      ...(fields.written_at !== undefined && { ApproximateCreationDateTime: Date.parse(fields.written_at) / 1000 }),
     },
   } as DynamoDBRecord;
 }
@@ -605,6 +608,58 @@ describe('orchestration-reconciler handler', () => {
     } as never);
     expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
     expect(swapIssueReactionMock).toHaveBeenCalledWith(expect.anything(), 'A', 'x');
+  });
+
+  test('a write made long after the task ended leaves the failed child\'s issue alone: a person may have taken it over (#1073)', async () => {
+    // Every write on a finished task record arrives here with its terminal status.
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [{ sub_issue_id: 'A', child_status: 'released' }],
+    });
+    const ended = Date.parse('2026-11-24T10:00:00Z');
+    const minutesAfterEnd = (minutes: number) => new Date(ended + minutes * 60_000).toISOString();
+    /** The record of the task as a write made at that time delivers it, with these times of the task. */
+    const write = (writtenAt: string, times: Record<string, unknown> = { completed_at: { S: minutesAfterEnd(0) } }) => {
+      const record = taskRecord({
+        task_id: 'TA',
+        status: 'COMPLETED',
+        build_passed: false,
+        orchestration_id: 'orch_1',
+        written_at: writtenAt,
+      });
+      Object.assign(record.dynamodb!.NewImage!, times);
+      return { Records: [record] } as never;
+    };
+    /** How often A's issue was moved back, and how often its reaction was replaced. */
+    const settled = () => [revertIssueToNotStartedMock, swapIssueReactionMock]
+      .map((mock) => mock.mock.calls.filter((call) => call[1] === 'A').length);
+
+    await handler(write(minutesAfterEnd(0)));
+    expect(settled()).toEqual([1, 1]);
+
+    // A write made soon after repeats the step on purpose: the orchestrator's
+    // ttl stamp is its retry when the surface failed a call.
+    await handler(write(minutesAfterEnd(4)));
+    expect(settled()).toEqual([2, 2]);
+
+    // A later one does not, for example the preview of a later push to the branch.
+    // The end of the task decides, also when the write moves updated_at.
+    await handler(write(minutesAfterEnd(6), {
+      completed_at: { S: minutesAfterEnd(0) },
+      updated_at: { S: minutesAfterEnd(6) },
+      screenshot_url: { S: 'https://cdn.example/later-push.png' },
+    }));
+    expect(settled()).toEqual([2, 2]);
+
+    // A record from before #1048 has no completed_at: its updated_at is the write that ended the task.
+    await handler(write(minutesAfterEnd(6), { updated_at: { S: minutesAfterEnd(0) } }));
+    expect(settled()).toEqual([2, 2]);
+
+    // The panel is refreshed every time: a late write is how a preview reaches it.
+    expect(upsertStatusCommentMock).toHaveBeenCalledTimes(4);
   });
 
   test('a genuinely FAILED child also reverts state + swaps reaction to ❌', async () => {
@@ -2365,6 +2420,22 @@ describe('orchestration-reconciler handler — an event of a task that no longer
 
     expect(store.status('A')).toBe('released');
     expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+  });
+
+  test('a late write that is the first to reach the row fails the child and skips its dependents: only the issue is left alone', async () => {
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+    ]);
+    const record = taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', written_at: '2026-11-24T10:06:00Z' });
+    Object.assign(record.dynamodb!.NewImage!, { completed_at: { S: '2026-11-24T10:00:00Z' } });
+    await handler({ Records: [record] } as never);
+
+    expect(store.status('A')).toBe('failed');
+    expect(store.status('B')).toBe('skipped');
+    expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
+    expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
+    expect(swapIssueReactionMock).not.toHaveBeenCalledWith(expect.anything(), 'A', 'x');
   });
 
   test.each([
