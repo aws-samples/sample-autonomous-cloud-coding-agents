@@ -327,7 +327,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
     ...(iterationReplyId !== undefined && { iterationReplyId }),
     ...(costUsd !== undefined && Number.isFinite(costUsd) && { costUsd }),
     ...(durationS !== undefined && Number.isFinite(durationS) && { durationS }),
-    ...(turns !== undefined && Number.isFinite(turns) && turns > 0 && { turns }),
+    ...(Number.isFinite(turns) && turns! > 0 && { turns }),
     ...(maxTurns !== undefined && Number.isFinite(maxTurns) && { maxTurns }),
   };
 }
