@@ -2271,11 +2271,11 @@ describe('orchestration-reconciler handler — an event of a task that no longer
     revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
   });
 
-  /** A later write to A's first task, which ended FAILED. */
   const sequencedFailure = () => ({
     Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', sequenceNumber: 'seq-TA' })],
   }) as never;
   const isClaim = (cmd: StoreCommand) => String(cmd.input.UpdateExpression).includes('settled_task_id');
+  /** A later write to A's first task, which ended FAILED. */
   const lateFailure = () => ({
     Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })],
   }) as never;
