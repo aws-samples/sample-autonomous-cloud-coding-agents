@@ -225,7 +225,6 @@ export class EcsComputeStrategy implements ComputeStrategy {
       { name: 'MAX_TURNS', value: String(payload.max_turns ?? DEFAULT_MAX_TURNS) },
       ...(payload.max_budget_usd !== undefined ? [{ name: 'MAX_BUDGET_USD', value: String(payload.max_budget_usd) }] : []),
       ...(blueprintConfig.model_id ? [{ name: 'ANTHROPIC_MODEL', value: blueprintConfig.model_id }] : []),
-      ...(blueprintConfig.system_prompt_overrides ? [{ name: 'SYSTEM_PROMPT_OVERRIDES', value: blueprintConfig.system_prompt_overrides }] : []),
       { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
       // Prefer the S3 pointer; fall back to the inline payload when no bucket is
       // configured (keeps small-payload / AgentCore-only deployments working with
