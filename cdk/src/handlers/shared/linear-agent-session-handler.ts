@@ -29,6 +29,7 @@ import {
   buildAgentSessionTaskDescription,
   emitAgentActivity,
   fetchAgentSessionIssue,
+  fetchSessionPromptActivity,
   type AgentActivityContent,
   type AgentSessionIssue,
 } from './linear-agent-session';
@@ -54,6 +55,7 @@ import {
   repeatedApprovalChoice,
   sessionDecisionNote,
   type SessionApprovalActivity,
+  type SessionApprovalAnswer,
 } from './linear-session-approval';
 import { fetchIssueParentId } from './linear-subissue-fetch';
 import { lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
@@ -199,7 +201,7 @@ async function respondToAgentSession(
 
   const priorTask = await findPriorTask(request);
   if (priorTask && !isTerminal(priorTask.status)) {
-    await steerRunningTask(request, priorTask, platformUserId, emit);
+    await steerRunningTask(request, priorTask, platformUserId, emit, resolved.accessToken);
     return;
   }
   // A late "approve" / "deny" (after its request timed out, or in the wrong session)
@@ -438,12 +440,13 @@ async function steerRunningTask(
   task: PriorTask,
   platformUserId: string,
   emit: SessionEmit,
+  accessToken: string,
 ): Promise<void> {
   const ownSession = isRunningTasksOwnSession(request, task);
   const reply = (body: string) => emit(ownSession ? { type: 'thought', body } : { type: 'response', body });
   const openRequest = task.status === 'AWAITING_APPROVAL' ? task.awaiting_approval_request_id : undefined;
   if (ownSession && openRequest && request.directive) {
-    await decideSessionApproval(request, task, openRequest, platformUserId, emit);
+    await decideSessionApproval(request, task, openRequest, platformUserId, emit, accessToken);
     return;
   }
   if (isBareApprovalAnswer(request.directive)) {
@@ -505,6 +508,7 @@ async function decideSessionApproval(
   requestId: string,
   platformUserId: string,
   emit: SessionEmit,
+  accessToken: string,
 ): Promise<void> {
   const again = async (lead: string) => {
     const activity = repeatedApprovalChoice(lead);
@@ -521,6 +525,13 @@ async function decideSessionApproval(
   }
   if (!TASK_APPROVALS_TABLE_NAME) {
     await emit({ type: 'thought', body: 'Approvals can\'t be answered in Linear on this deployment. Use `bgagent approve` / `bgagent deny`.' });
+    return;
+  }
+  if (!await promptConfirmed(request, answer, accessToken)) {
+    logger.warn('Agent-session approval reply not confirmed by Linear — no decision recorded', {
+      linear_agent_session_id: request.sessionId, task_id: task.task_id, request_id: requestId,
+    });
+    await again('I couldn\'t confirm this answer with Linear, so nothing was decided.');
     return;
   }
   // Loaded only when a session decides: other session deliveries do not need the
@@ -549,6 +560,21 @@ async function decideSessionApproval(
     status_code: result.statusCode,
   });
   await emit({ type: 'thought', body: sessionDecisionNote(answer, result, ruleScope) });
+}
+
+/**
+ * True when Linear holds this delivery as a human's prompt in this session, from the
+ * same person, with the same answer. The decision is consent, so it is taken from
+ * Linear's copy, not the webhook's (see ``fetchSessionPromptActivity``).
+ */
+async function promptConfirmed(
+  request: AgentSessionRequest, answer: SessionApprovalAnswer, accessToken: string,
+): Promise<boolean> {
+  const prompt = await fetchSessionPromptActivity(accessToken, request.workspaceId, request.deliveryId);
+  const echoed = prompt ? parseSessionApprovalAnswer(prompt.body) : null;
+  return prompt?.sessionId === request.sessionId && prompt.authorId === request.actorId
+    && echoed?.decision === answer.decision && (echoed.reason ?? '') === (answer.reason ?? '')
+    && Boolean(echoed.wholeTask) === Boolean(answer.wholeTask);
 }
 
 /**

@@ -160,6 +160,62 @@ export async function fetchAgentSessionIssue(
   });
 }
 
+/** A human's prompt in a session, as Linear records it. */
+export interface SessionPromptActivity {
+  readonly sessionId: string;
+  readonly authorId: string;
+  readonly body: string;
+}
+
+const SESSION_PROMPT_QUERY = `
+query VerifySessionPrompt($id: String!) {
+  organization { id }
+  viewer { id }
+  agentActivity(id: $id) {
+    agentSession { id }
+    content { __typename ... on AgentActivityPromptContent { body } }
+    user { id app }
+    promptAuthor { id app }
+  }
+}`;
+
+/**
+ * Read a session prompt back from Linear before acting on it as consent. Webhook
+ * authentication alone is not enough: legacy worker credentials can read the OAuth
+ * bundle that holds the webhook signing key (the comment path reads its replies back
+ * for the same reason, ``readLinearApprovalComment``). Null when the activity is not a
+ * human's prompt: missing, not a prompt, written by an app, or by this token's own
+ * identity. Throws when Linear cannot answer, so the delivery retries instead of
+ * falling back to the webhook's fields.
+ */
+export async function fetchSessionPromptActivity(
+  accessToken: string,
+  workspaceId: string,
+  activityId: string,
+): Promise<SessionPromptActivity | null> {
+  const result = await graphqlData(accessToken, SESSION_PROMPT_QUERY, { id: activityId });
+  if (!result.ok) throw new Error('Linear session prompt verification unavailable');
+  const data = result.value as {
+    organization?: { id?: string };
+    viewer?: { id?: string };
+    agentActivity?: {
+      agentSession?: { id?: string } | null;
+      content?: { __typename?: string; body?: string } | null;
+      user?: { id?: string; app?: boolean } | null;
+      promptAuthor?: { id?: string; app?: boolean } | null;
+    } | null;
+  };
+  if (data.organization?.id !== workspaceId) throw new Error('Linear session prompt verification workspace mismatch');
+  const viewerId = data.viewer?.id;
+  if (!viewerId) throw new Error('Linear session prompt verification identity unavailable');
+  const activity = data.agentActivity;
+  const author = activity?.promptAuthor ?? activity?.user;
+  const sessionId = activity?.agentSession?.id;
+  if (activity?.content?.__typename !== 'AgentActivityPromptContent' || !sessionId
+    || !author?.id || author.app || author.id === viewerId) return null;
+  return { sessionId, authorId: author.id, body: activity.content.body ?? '' };
+}
+
 /** Separator + heading that introduces Linear's `promptContext` in the description. */
 const SESSION_CONTEXT_PREFIX = '\n\n## Linear session context\n\n';
 const CONTEXT_TRUNCATION_NOTICE = '\n\n_(session context truncated)_';

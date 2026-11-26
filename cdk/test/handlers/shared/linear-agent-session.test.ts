@@ -27,6 +27,7 @@ import {
   buildAgentSessionTaskDescription,
   emitAgentActivity,
   fetchAgentSessionIssue,
+  fetchSessionPromptActivity,
 } from '../../../src/handlers/shared/linear-agent-session';
 import {
   isHandledAgentSessionAction,
@@ -285,5 +286,37 @@ describe('GraphQL helpers', () => {
     const failed = await fetchAgentSessionIssue('tok', 'i-1');
     expect(failed.ok).toBe(false);
     expect('error' in failed).toBe(true);
+  });
+
+  describe('fetchSessionPromptActivity (consent is read from Linear, not the webhook)', () => {
+    const reply = (activity: unknown, org = 'org-1') => jsonResponse({
+      data: { organization: { id: org }, viewer: { id: 'app-user' }, agentActivity: activity },
+    });
+    const prompt = (author: unknown, typename = 'AgentActivityPromptContent') => ({
+      agentSession: { id: 's-1' }, content: { __typename: typename, body: 'approve' }, user: null, promptAuthor: author,
+    });
+
+    test('a human\'s prompt comes back with its session, author and body', async () => {
+      fetchMock.mockResolvedValueOnce(reply(prompt({ id: 'u-1', app: false })));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toEqual({ sessionId: 's-1', authorId: 'u-1', body: 'approve' });
+      expect(sentBody(0).variables).toEqual({ id: 'a-1' });
+    });
+
+    test.each([
+      ['an app', prompt({ id: 'u-2', app: true })],
+      ['this token\'s own identity', prompt({ id: 'app-user', app: false })],
+      ['not a prompt', prompt({ id: 'u-1', app: false }, 'AgentActivityThoughtContent')],
+      ['missing', null],
+    ])('an activity by %s is not consent', async (_label, activity) => {
+      fetchMock.mockResolvedValueOnce(reply(activity));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toBeNull();
+    });
+
+    test('another workspace, or Linear failing, throws so the delivery retries', async () => {
+      fetchMock.mockResolvedValueOnce(reply(prompt({ id: 'u-1', app: false }), 'org-2'));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).rejects.toThrow('workspace mismatch');
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).rejects.toThrow('unavailable');
+    });
   });
 });
