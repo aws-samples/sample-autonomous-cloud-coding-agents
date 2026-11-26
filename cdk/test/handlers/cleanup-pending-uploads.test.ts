@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-// Mock DynamoDB and S3 clients
 const mockDdbSend = jest.fn();
 const mockS3Send = jest.fn();
 
@@ -34,7 +33,6 @@ jest.mock('@aws-sdk/client-s3', () => ({
   DeleteObjectsCommand: jest.fn((input: any) => ({ input, _type: 'DeleteObjects' })),
 }));
 
-// Set env vars before import
 process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.TASK_EVENTS_TABLE_NAME = 'EventsTable';
 process.env.ATTACHMENTS_BUCKET_NAME = 'test-attachments-bucket';
@@ -60,7 +58,6 @@ describe('cleanup-pending-uploads handler', () => {
   test('cancels expired task with conditional write and sets TTL', async () => {
     const thirtyFiveMinAgo = new Date(Date.now() - 35 * 60 * 1000).toISOString();
 
-    // findExpiredPendingUploads returns one task
     mockDdbSend.mockResolvedValueOnce({
       Items: [{
         task_id: { S: 'TASK001' },
@@ -69,22 +66,17 @@ describe('cleanup-pending-uploads handler', () => {
       }],
     });
 
-    // cancelExpiredTask — DDB update succeeds
     mockDdbSend.mockResolvedValueOnce({});
-    // write event (best-effort)
     mockDdbSend.mockResolvedValueOnce({});
 
-    // cleanupTaskAttachments — S3 list returns no objects
     mockS3Send.mockResolvedValueOnce({ Contents: [] });
 
     await handler();
 
-    // Verify the UpdateItem includes TTL
     const updateCall = mockDdbSend.mock.calls[1][0];
     expect(updateCall.input.UpdateExpression).toContain('#ttl = :ttl');
     expect(updateCall.input.ExpressionAttributeValues[':ttl']).toBeDefined();
     expect(updateCall.input.ExpressionAttributeValues[':ttl'].N).toBeDefined();
-    // TTL should be ~90 days from now
     const ttlValue = Number(updateCall.input.ExpressionAttributeValues[':ttl'].N);
     const expectedMin = Math.floor(Date.now() / 1000) + 89 * 86400;
     const expectedMax = Math.floor(Date.now() / 1000) + 91 * 86400;
@@ -103,17 +95,14 @@ describe('cleanup-pending-uploads handler', () => {
       }],
     });
 
-    // Transition fails — confirm-uploads won the race
     const condErr = new Error('The conditional request failed');
     condErr.name = 'ConditionalCheckFailedException';
     mockDdbSend.mockRejectedValueOnce(condErr);
 
     await handler();
 
-    // S3 cleanup should NOT be called when race was lost
     expect(mockS3Send).not.toHaveBeenCalled();
-    // No event should be written
-    expect(mockDdbSend).toHaveBeenCalledTimes(2); // query + failed update
+    expect(mockDdbSend).toHaveBeenCalledTimes(2);
   });
 
   test('cleans up S3 objects after successful cancellation', async () => {
@@ -127,12 +116,9 @@ describe('cleanup-pending-uploads handler', () => {
       }],
     });
 
-    // cancelExpiredTask succeeds
     mockDdbSend.mockResolvedValueOnce({});
-    // write event
     mockDdbSend.mockResolvedValueOnce({});
 
-    // S3 ListObjectVersions returns versions
     mockS3Send.mockResolvedValueOnce({
       Versions: [
         { Key: 'attachments/user-123/TASK001/ATT001/image.png', VersionId: 'v1' },
@@ -140,12 +126,10 @@ describe('cleanup-pending-uploads handler', () => {
       ],
       DeleteMarkers: [],
     });
-    // S3 delete succeeds
     mockS3Send.mockResolvedValueOnce({ Deleted: [{}, {}] });
 
     await handler();
 
-    // Verify S3 delete was called with VersionIds (versioned cleanup)
     const deleteCall = mockS3Send.mock.calls[1][0];
     expect(deleteCall.input.Bucket).toBe('test-attachments-bucket');
     expect(deleteCall.input.Delete.Objects).toEqual([
@@ -165,7 +149,6 @@ describe('cleanup-pending-uploads handler', () => {
       }],
     });
 
-    // Non-conditional DDB error (infra failure)
     const infraErr = new Error('Service unavailable');
     infraErr.name = 'InternalServerError';
     mockDdbSend.mockRejectedValueOnce(infraErr);
@@ -184,12 +167,9 @@ describe('cleanup-pending-uploads handler', () => {
       }],
     });
 
-    // cancelExpiredTask succeeds
     mockDdbSend.mockResolvedValueOnce({});
-    // write event
     mockDdbSend.mockResolvedValueOnce({});
 
-    // Page 1: empty but IsTruncated=true (S3 scanned past prefix boundary)
     mockS3Send.mockResolvedValueOnce({
       Versions: [],
       DeleteMarkers: [],
@@ -197,7 +177,6 @@ describe('cleanup-pending-uploads handler', () => {
       NextKeyMarker: 'attachments/user-123/TASK001/ATT001/image.png',
       NextVersionIdMarker: 'v1',
     });
-    // Page 2: has objects, not truncated
     mockS3Send.mockResolvedValueOnce({
       Versions: [
         { Key: 'attachments/user-123/TASK001/ATT001/image.png', VersionId: 'v1' },
@@ -205,22 +184,18 @@ describe('cleanup-pending-uploads handler', () => {
       DeleteMarkers: [],
       IsTruncated: false,
     });
-    // DeleteObjects succeeds
     mockS3Send.mockResolvedValueOnce({ Deleted: [{}] });
 
     await handler();
 
-    // Verify both ListObjectVersions calls were made (pagination continued past empty page)
     const listCalls = mockS3Send.mock.calls.filter(
       (call: any[]) => call[0]?._type === 'ListObjectVersions',
     );
     expect(listCalls).toHaveLength(2);
 
-    // Verify second list call used the marker from first response
     expect(listCalls[1][0].input.KeyMarker).toBe('attachments/user-123/TASK001/ATT001/image.png');
     expect(listCalls[1][0].input.VersionIdMarker).toBe('v1');
 
-    // Verify delete was called with the objects from page 2
     const deleteCalls = mockS3Send.mock.calls.filter(
       (call: any[]) => call[0]?._type === 'DeleteObjects',
     );
@@ -240,17 +215,14 @@ describe('cleanup-pending-uploads handler', () => {
       ],
     });
 
-    // First task: cancel succeeds
     mockDdbSend.mockResolvedValueOnce({});
-    mockDdbSend.mockResolvedValueOnce({}); // event
-    mockS3Send.mockResolvedValueOnce({ Versions: [], DeleteMarkers: [] }); // no S3 objects
+    mockDdbSend.mockResolvedValueOnce({});
+    mockS3Send.mockResolvedValueOnce({ Versions: [], DeleteMarkers: [] });
 
-    // Second task: cancel fails with infra error
     const infraErr = new Error('Timeout');
     infraErr.name = 'RequestTimeout';
     mockDdbSend.mockRejectedValueOnce(infraErr);
 
-    // Should NOT throw — partial success is acceptable
     await expect(handler()).resolves.toBeUndefined();
   });
 });

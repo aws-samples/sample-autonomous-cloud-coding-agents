@@ -19,7 +19,6 @@
 
 import { CliError } from './errors';
 
-/** Mirrored from cdk/src/handlers/shared/compute-backend.ts. */
 export type OnboardComputeType = 'agentcore' | 'ecs' | 'lambda-microvm';
 
 export interface ComputeDeployment {
@@ -45,7 +44,6 @@ export interface RepositoryComputeBinding {
   readonly configuration_error?: string;
 }
 
-/** Older deployments advertised optional backends as a comma-separated list. */
 export function parseComputeSubstrateOutput(raw: string | null | undefined): readonly string[] | undefined {
   const values = raw?.split(',').map(value => value.trim()).filter(Boolean);
   return values?.length ? values : undefined;
@@ -53,7 +51,6 @@ export function parseComputeSubstrateOutput(raw: string | null | undefined): rea
 
 type ComputeOutputs = Pick<ComputeDeployment, 'computeSubstrate' | 'computeDeploymentMode' | 'computeTypes'>;
 
-/** Explicit outputs are authoritative; only stacks without them imply AgentCore. */
 function declaredComputeTypes(deployment: ComputeOutputs): readonly OnboardComputeType[] | undefined {
   const mode = deployment.computeDeploymentMode;
   if (mode != null && mode !== 'exclusive' && mode !== 'additive') {
@@ -107,7 +104,6 @@ function computeConfigurationError(args: ComputeDeployment & { computeType: stri
   return `Stack '${args.stackName}' was deployed without the ${label} substrate (ComputeSubstrate=${args.computeSubstrate}), so a repo onboarded as --compute-type ${requested} would fail at session start. Redeploy the stack with --context compute_type=${requested} first, then re-run this — or onboard with --compute-type agentcore.`;
 }
 
-/** Report each stale pin without preventing inspection of other repositories. */
 export function resolveRepositoryCompute(deployment: ComputeDeployment, computeType?: string): RepositoryComputeBinding {
   const configurationError = computeConfigurationError({ ...deployment, computeType });
   return {
@@ -117,7 +113,6 @@ export function resolveRepositoryCompute(deployment: ComputeDeployment, computeT
   };
 }
 
-/** Reject incompatible repository pins before writing RepoTable or probing MicroVM availability. */
 export function assertComputeSubstrateDeployed(args: ComputeDeployment & { computeType: string | undefined }): void {
   const configurationError = computeConfigurationError(args);
   if (configurationError) throw new CliError(configurationError);

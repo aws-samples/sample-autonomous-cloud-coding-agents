@@ -62,21 +62,18 @@ import {
   WebhookDetail,
 } from './types';
 
-/** How many of the newest events ``getStatusSnapshot`` reads for ``bgagent status``. */
 const STATUS_SNAPSHOT_EVENT_LIMIT = 20;
 
-/** Options for constructing an {@link ApiClient}. */
 export interface ApiClientOptions {
   /**
    * Platform API key to authenticate with instead of a Cognito session.
    * When set (or when `BGAGENT_API_KEY` is in the environment), requests carry
    * the `X-API-Key` header and no `bgagent login` is required. Only the
-   * endpoints the key is scoped for will succeed (Phase 1: `webhooks:manage`).
+   * endpoints the key is scoped for will succeed.
    */
   readonly apiKey?: string;
 }
 
-/** HTTP client for the Background Agent REST API. */
 export class ApiClient {
   private baseUrl: string | undefined;
 
@@ -91,15 +88,11 @@ export class ApiClient {
   private getBaseUrl(): string {
     if (!this.baseUrl) {
       const config = loadConfig();
-      // ApiUrl from the stack output already includes the stage name (e.g. /v1/)
       this.baseUrl = config.api_url.replace(/\/+$/, '');
     }
     return this.baseUrl;
   }
 
-  /** Base URL for the agent asset registry API (#246). It is a SEPARATE API
-   *  Gateway from the main one (RegistryApiUrl stack output), so it has its own
-   *  config field. Throws a clear error if the config predates the registry. */
   private getRegistryBaseUrl(): string {
     if (!this.registryBaseUrl) {
       const config = loadConfig();
@@ -123,15 +116,12 @@ export class ApiClient {
     signal?: AbortSignal,
     baseUrl?: string,
   ): Promise<T> {
-    // API-key mode skips Cognito entirely: no cached token, no refresh.
     const authHeaders: Record<string, string> = this.apiKey
       ? { 'X-API-Key': this.apiKey }
       : { Authorization: await getAuthToken() };
     const url = `${baseUrl ?? this.getBaseUrl()}${path}`;
 
     debug(`${method} ${url}`);
-    // Redaction + stringification are gated on isVerbose() so they don't
-    // run on every request when verbose is off (watch polls hot).
     if (body && isVerbose()) {
       debug(`Request body: ${redactedJson(body)}`);
     }
@@ -158,17 +148,10 @@ export class ApiClient {
     }
 
     if (jsonParseOk && isVerbose()) {
-      // Redact secret-bearing fields (e.g. the one-time webhook `secret`) —
-      // verbose output ends up in scrollback / CI logs.
       debug(`Response body: ${redactedJson(json)}`);
     }
 
     if (!res.ok) {
-      // Keep HTTP-status-carrying errors as ``ApiError`` regardless of
-      // body shape so callers (e.g. the watch retry loop) can classify
-      // 4xx-vs-5xx reliably. A WAF / CloudFront / API-GW edge page is
-      // still a deterministic 4xx from the caller's perspective —
-      // retrying it would be futile.
       if (jsonParseOk && (json as ErrorResponse).error) {
         const err = json as ErrorResponse;
         let message = `${err.error.message} (${err.error.code})`;
@@ -177,9 +160,6 @@ export class ApiClient {
         }
         throw new ApiError(res.status, err.error.code, message, err.error.request_id);
       }
-      // Non-JSON or envelope-less error body — still an HTTP error, still
-      // must carry the status so classification works. Code/request_id
-      // are unavailable at this layer; surface ``HTTP_ERROR`` / empty.
       throw new ApiError(
         res.status,
         'HTTP_ERROR',
@@ -189,17 +169,12 @@ export class ApiClient {
     }
 
     if (!jsonParseOk) {
-      // 2xx with an unparseable body is a server contract violation —
-      // neither transient (5xx) nor user-recoverable (4xx). Fail hard
-      // with ``CliError`` so the retry loop does NOT treat it as
-      // transient.
       throw new CliError(`HTTP ${res.status}: ${res.statusText} (non-JSON response)`);
     }
 
     return json as T;
   }
 
-  /** POST /tasks — create a new task. */
   async createTask(req: CreateTaskRequest, idempotencyKey?: string): Promise<CreateTaskResponse> {
     const headers: Record<string, string> = {};
     if (idempotencyKey) {
@@ -209,13 +184,11 @@ export class ApiClient {
     return res.data;
   }
 
-  /** POST /tasks/{task_id}/confirm-uploads — confirm presigned uploads. */
   async confirmUploads(taskId: string): Promise<TaskDetail> {
     const res = await this.request<SuccessResponse<TaskDetail>>('POST', `/tasks/${encodeURIComponent(taskId)}/confirm-uploads`);
     return res.data;
   }
 
-  /** GET /tasks — list tasks. */
   async listTasks(opts?: {
     status?: string;
     repo?: string;
@@ -233,7 +206,6 @@ export class ApiClient {
     return this.request<PaginatedResponse<TaskSummary>>('GET', path);
   }
 
-  /** GET /tasks?view=budget — read the authenticated caller's personal budget. */
   async getPersonalBudget(): Promise<PersonalBudgetStatus> {
     const res = await this.request<SuccessResponse<PersonalBudgetStatus>>(
       'GET',
@@ -248,14 +220,11 @@ export class ApiClient {
    */
   async getScoreboard(opts: { range: ScoreboardRange; repo?: string }): Promise<Scoreboard> {
     const params = new URLSearchParams({ view: 'scoreboard', range: opts.range });
-    // An empty `repo` is sent too, for the API to refuse: left out, the answer would count every
-    // repository where one was asked for (`--repo "$REPO"` with the variable unset).
     if (opts.repo !== undefined) params.set('repo', opts.repo);
     const res = await this.request<SuccessResponse<Scoreboard>>('GET', `/tasks?${params.toString()}`);
     return res.data;
   }
 
-  /** GET /tasks/{task_id} — get task detail. */
   async getTask(taskId: string, opts?: { signal?: AbortSignal }): Promise<TaskDetail> {
     const res = await this.request<SuccessResponse<TaskDetail>>(
       'GET',
@@ -267,14 +236,13 @@ export class ApiClient {
     return res.data;
   }
 
-  /** DELETE /tasks/{task_id} — cancel a task. */
   async cancelTask(taskId: string): Promise<CancelTaskResponse> {
     const res = await this.request<SuccessResponse<CancelTaskResponse>>('DELETE', `/tasks/${encodeURIComponent(taskId)}`);
     return res.data;
   }
 
   /**
-   * POST /tasks/{task_id}/nudge — send a steering message to a running task (Phase 2).
+   * POST /tasks/{task_id}/nudge — send a steering message to a running task.
    *
    * The server guardrail-screens and rate-limits the nudge before enqueuing it
    * for the agent to pick up at the next between-turns seam. Returns HTTP 202
@@ -340,7 +308,6 @@ export class ApiClient {
     return res.data;
   }
 
-  /** GET /pending — list pending approvals owned by the caller. */
   async listPending(): Promise<GetPendingResponse> {
     const res = await this.request<SuccessResponse<GetPendingResponse>>(
       'GET',
@@ -352,8 +319,8 @@ export class ApiClient {
   /**
    * GET /repos/{repo_id}/policies — list Cedar rules for a repo.
    *
-   * The server encodes the repo_id itself; this client URL-encodes the
-   * path segment so callers can pass `owner/repo` as-is.
+   * This client URL-encodes the path segment so callers can pass
+   * `owner/repo` as-is.
    */
   async listPolicies(repoId: string): Promise<GetPoliciesResponse> {
     const res = await this.request<SuccessResponse<GetPoliciesResponse>>(
@@ -374,7 +341,7 @@ export class ApiClient {
    *
    * If both are passed, the server prefers ``after`` and logs a warning.
    * Prefer {@link catchUpEvents} when you want all events after a known
-   * id drained across pagination (the watch loop uses this).
+   * id drained across pagination.
    */
   async getTaskEvents(taskId: string, opts?: {
     limit?: number;
@@ -382,7 +349,6 @@ export class ApiClient {
     after?: string;
     /** Request newest-first ordering — mutually exclusive with ``after`` on the server. */
     desc?: boolean;
-    /** Abort an in-flight request (SIGINT during ``bgagent watch``, etc.). */
     signal?: AbortSignal;
   }): Promise<PaginatedResponse<TaskEvent>> {
     const params = new URLSearchParams();
@@ -398,15 +364,7 @@ export class ApiClient {
 
   /**
    * Fetch the combined task + most-recent-events payload that backs the
-   * deterministic ``bgagent status`` snapshot (design §5.2).
-   *
-   * Runs the ``GET /tasks/{id}`` and ``GET /tasks/{id}/events?desc=1&limit=N``
-   * calls in parallel so the snapshot is a single round-trip in wall-clock
-   * terms. The event page is intentionally small — the
-   * formatter only needs the latest tool call, turn, milestone, and cost
-   * update, which are always recent in a well-behaved event stream.
-   *
-   * @param taskId - the task to summarize.
+   * deterministic ``bgagent status`` snapshot.
    */
   async getStatusSnapshot(taskId: string): Promise<{ task: TaskDetail; recentEvents: TaskEvent[] }> {
     const [task, eventsPage] = await Promise.all([
@@ -420,11 +378,6 @@ export class ApiClient {
    * Fetch every event with ``event_id > afterEventId``, paginating through
    * the server's ``next_token`` internally.
    *
-   * Paginates forward from a known event_id cursor. Returns events in
-   * ascending order (oldest first), matching the server's
-   * ``ScanIndexForward: true``.
-   *
-   * @param taskId - the task whose events to fetch.
    * @param afterEventId - the ULID cursor; events strictly greater than
    *   this id are returned.
    * @returns all events after the cursor, in chronological order.
@@ -436,8 +389,6 @@ export class ApiClient {
   ): Promise<TaskEvent[]> {
     const collected: TaskEvent[] = [];
     const signal = opts?.signal;
-    // First page uses ``after``; subsequent pages use the opaque ``next_token``.
-    // 100 is the largest page the server returns.
     let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: 100, signal });
     collected.push(...page.data);
     while (page.pagination.has_more && page.pagination.next_token) {
@@ -453,7 +404,7 @@ export class ApiClient {
 
   /**
    * GET /tasks/{task_id}/trace — get a presigned S3 URL for the
-   * ``--trace`` trajectory dump (design §10.1).
+   * ``--trace`` trajectory dump.
    *
    * Returns a short-lived (15-minute) presigned URL the CLI can
    * stream directly from S3. The endpoint 404s with code
@@ -468,7 +419,6 @@ export class ApiClient {
     return res.data;
   }
 
-  /** GET /tasks/{task_id}/replay — operator replay bundle (#515). */
   async getReplay(taskId: string): Promise<ReplayBundle> {
     const res = await this.request<SuccessResponse<ReplayBundle>>(
       'GET',
@@ -477,13 +427,11 @@ export class ApiClient {
     return res.data;
   }
 
-  /** POST /webhooks — create a new webhook. */
   async createWebhook(req: CreateWebhookRequest): Promise<CreateWebhookResponse> {
     const res = await this.request<SuccessResponse<CreateWebhookResponse>>('POST', '/webhooks', req);
     return res.data;
   }
 
-  /** GET /webhooks — list webhooks. */
   async listWebhooks(opts?: {
     includeRevoked?: boolean;
     limit?: number;
@@ -499,7 +447,6 @@ export class ApiClient {
     return this.request<PaginatedResponse<WebhookDetail>>('GET', path);
   }
 
-  /** DELETE /webhooks/{webhook_id} — revoke a webhook. */
   async revokeWebhook(webhookId: string): Promise<WebhookDetail> {
     const res = await this.request<SuccessResponse<WebhookDetail>>('DELETE', `/webhooks/${encodeURIComponent(webhookId)}`);
     return res.data;
@@ -511,7 +458,6 @@ export class ApiClient {
     return res.data;
   }
 
-  /** GET /api-keys — list platform API keys. */
   async listApiKeys(opts?: {
     includeRevoked?: boolean;
     limit?: number;
@@ -527,13 +473,11 @@ export class ApiClient {
     return this.request<PaginatedResponse<ApiKeyDetail>>('GET', path);
   }
 
-  /** DELETE /api-keys/{key_id} — revoke a platform API key. */
   async revokeApiKey(keyId: string): Promise<ApiKeyDetail> {
     const res = await this.request<SuccessResponse<ApiKeyDetail>>('DELETE', `/api-keys/${encodeURIComponent(keyId)}`);
     return res.data;
   }
 
-  /** POST /slack/link — link a Slack account using a verification code. */
   async slackLink(code: string): Promise<SlackLinkResponse> {
     const res = await this.request<SuccessResponse<SlackLinkResponse>>('POST', '/slack/link', { code });
     return res.data;
@@ -542,7 +486,7 @@ export class ApiClient {
   /** POST /linear/link — link a Linear account using a verification code.
    *
    * `dryRun: true` returns the identity attached to the code without
-   * writing the mapping (preview-before-confirm UX). */
+   * writing the mapping. */
   async linearLink(code: string, opts: { dryRun?: boolean } = {}): Promise<LinearLinkResponse> {
     const body: Record<string, unknown> = { code };
     if (opts.dryRun) body.dry_run = true;
@@ -571,7 +515,7 @@ export class ApiClient {
   /** POST /jira/link — link a Jira account using a verification code.
    *
    * `dryRun: true` returns the identity attached to the code without
-   * writing the mapping. Mirrors linearLink. */
+   * writing the mapping. */
   async jiraLink(code: string, opts: { dryRun?: boolean } = {}): Promise<JiraLinkResponse> {
     const body: Record<string, unknown> = { code };
     if (opts.dryRun) body.dry_run = true;
@@ -579,12 +523,6 @@ export class ApiClient {
     return res.data;
   }
 
-  // --- Agent asset registry (#246) ---
-
-  // Registry (#246) commands target the SEPARATE registry API (its own API
-  // Gateway); getRegistryBaseUrl() resolves registry_api_url from config.
-
-  /** POST /registry/records — publish an asset record. */
   async registryPublish(req: RegistryPublishRequest): Promise<RegistryRecordResponse> {
     const res = await this.request<SuccessResponse<RegistryRecordResponse>>(
       'POST', '/registry/records', req, undefined, undefined, this.getRegistryBaseUrl(),
@@ -592,7 +530,6 @@ export class ApiClient {
     return res.data;
   }
 
-  /** GET /registry/resolve?ref=… — resolve a pinned ref to a single asset. */
   async registryResolve(ref: string): Promise<RegistryResolveResponse> {
     const res = await this.request<SuccessResponse<RegistryResolveResponse>>(
       'GET',
@@ -602,7 +539,6 @@ export class ApiClient {
     return res.data;
   }
 
-  /** GET /registry/records — list assets (optionally filtered). */
   async registryList(opts?: { kind?: string; namespace?: string }): Promise<RegistryListEntry[]> {
     const params = new URLSearchParams();
     if (opts?.kind) params.set('kind', opts.kind);
@@ -616,7 +552,6 @@ export class ApiClient {
     return res.data.assets;
   }
 
-  /** GET /registry/records/{kind}/{namespace}/{name} — show all versions. */
   async registryShow(
     kind: string,
     namespace: string,

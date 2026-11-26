@@ -17,36 +17,10 @@
  *  SOFTWARE.
  */
 
-/**
- * Orchestration integration test — sub-issue graph declared on the parent issue.
- *
- * Drives the REAL release/reconcile path against a stateful in-memory
- * DynamoDB fake and the REAL ``createTaskCore`` — NOT a mock of it. The
- * unit tests mock createTaskCore, which is exactly why the first dev
- * smoke shipped three bugs they couldn't catch:
- *   1. idempotency key with '#' rejected by createTaskCore's validator,
- *   2. orchestration_id persisted under nested ``channel_metadata`` (not
- *      top-level) so the reconciler's stream parse missed it,
- *   3. (memory OOM — runtime-only, not coverable here).
- *
- * This test exercises: seedOrchestration → releaseReadyChildren →
- * createTaskCore (real) → persisted TaskRecord → simulate the TaskTable
- * stream image → parseTerminalTaskRecord → computeReconcilePlan, and
- * asserts the round-trips the bugs broke.
- *
- * The fake implements just enough DynamoDB DocumentClient semantics
- * (Put/Get/Query/Update with a ConditionExpression subset + the
- * IdempotencyIndex GSI) for these handlers. It is deliberately in this
- * file (not shared) — it tracks exactly what these code paths use.
- */
-
-// ── In-memory DynamoDB DocumentClient fake ───────────────────────────
 interface Stored { [k: string]: unknown }
 const tables: Record<string, Map<string, Stored>> = {};
 
 function pk(item: Stored): string {
-  // Composite key support: TaskTable uses task_id; OrchestrationTable
-  // uses orchestration_id + sub_issue_id.
   if (item.orchestration_id !== undefined && item.sub_issue_id !== undefined) {
     return `${item.orchestration_id}\u0000${item.sub_issue_id}`;
   }
@@ -85,25 +59,21 @@ const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unkn
     return {};
   }
   if (_type === 'Query') {
-    // IdempotencyIndex GSI on TaskTable.
     if (input.IndexName === 'IdempotencyIndex') {
       const key = (input.ExpressionAttributeValues as Stored)[':key'];
       const items = [...t.values()].filter((i) => i.idempotency_key === key);
       return { Items: items };
     }
-    // ChildTaskIndex GSI on OrchestrationTable.
     if (input.IndexName === 'ChildTaskIndex') {
       const tid = (input.ExpressionAttributeValues as Stored)[':tid'];
       return { Items: [...t.values()].filter((i) => i.child_task_id === tid) };
     }
-    // loadOrchestration: query by orchestration_id partition.
     const oid = (input.ExpressionAttributeValues as Stored)[':oid'];
     return { Items: [...t.values()].filter((i) => i.orchestration_id === oid) };
   }
   if (_type === 'Update') {
     const item = t.get(keyOf(input.Key as Stored));
     const vals = input.ExpressionAttributeValues as Stored;
-    // Evaluate the two ConditionExpressions our code uses.
     const cond = input.ConditionExpression as string | undefined;
     if (cond && item) {
       if (cond.includes('child_status IN')) {
@@ -114,11 +84,9 @@ const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unkn
       }
     }
     const next: Stored = { ...(item ?? input.Key as Stored) };
-    // Minimal SET parser for the expressions our code issues.
     if (vals[':released'] !== undefined) {
       next.child_status = vals[':released'];
       next.child_task_id = vals[':tid'];
-      // The release flip also persists the child's branch_name.
       if (vals[':bn'] !== undefined) next.child_branch_name = vals[':bn'];
     }
     if (vals[':s'] !== undefined) next.child_status = vals[':s'];
@@ -143,18 +111,11 @@ jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
-// The reconciler's scoreboard step claims each finished task with a conditional
-// update of its record. The fake above implements the expressions of the
-// orchestration path only: it would store the time of that claim as the task's
-// `updated_at`.
 const publishTaskMetricsMock = jest.fn();
 jest.mock('../../src/handlers/scoreboard-metrics', () => ({
   publishTaskMetrics: (...args: unknown[]) => publishTaskMetricsMock(...args),
 }));
 
-// Env: no guardrail, no repo table (lookupRepo → onboarded:true), no
-// orchestrator invoke. Keeps createTaskCore on its pure validate+persist
-// path so the integration stays hermetic.
 process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEventsTable';
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
@@ -171,7 +132,6 @@ const ddb = DynamoDBDocumentClient.from({} as never);
 const NOW = '2026-06-10T00:00:00.000Z';
 const ORCH = 'OrchestrationTable';
 
-/** Build the TaskTable stream NewImage for a persisted task record. */
 function streamImageFor(taskId: string, status: string, buildPassed?: boolean) {
   const rec = tables.TaskTable?.get(taskId) as Record<string, unknown> | undefined;
   if (!rec) throw new Error(`no task record ${taskId}`);
@@ -180,7 +140,6 @@ function streamImageFor(taskId: string, status: string, buildPassed?: boolean) {
     status: { S: status },
   };
   if (buildPassed !== undefined) img.build_passed = { BOOL: buildPassed };
-  // Mirror how the Document client marshals the nested channel_metadata MAP.
   const cm = rec.channel_metadata as Record<string, string> | undefined;
   if (cm) {
     img.channel_metadata = { M: Object.fromEntries(Object.entries(cm).map(([k, v]) => [k, { S: v }])) };
@@ -188,11 +147,6 @@ function streamImageFor(taskId: string, status: string, buildPassed?: boolean) {
   return { eventName: 'MODIFY' as const, dynamodb: { NewImage: img as never } };
 }
 
-/**
- * Mark a released child's task terminal and drive its stream event
- * through the REAL reconciler handler — the full load → plan → persist →
- * release wired path (not just computeReconcilePlan in isolation).
- */
 async function completeAndReconcile(taskId: string, status = 'COMPLETED', buildPassed = true): Promise<void> {
   const rec = tables.TaskTable.get(taskId) as Record<string, unknown>;
   rec.status = status;
@@ -203,7 +157,6 @@ async function completeAndReconcile(taskId: string, status = 'COMPLETED', buildP
   await reconcilerHandler(event);
 }
 
-/** Convenience: current child_status map for an orchestration. */
 async function statuses(orchestrationId: string): Promise<Record<string, string>> {
   const snap = await loadOrchestration(ddb, ORCH, orchestrationId);
   return Object.fromEntries(snap!.children.map((c) => [c.sub_issue_id, c.child_status]));
@@ -217,7 +170,6 @@ beforeEach(() => {
 
 describe('orchestration integration — real createTaskCore', () => {
   test('release → real task persisted → reconciler resolves it (the 3-bug path)', async () => {
-    // Seed a 2-child graph: A (root), B depends on A.
     const children = [
       { id: 'a00650a1-uuid-aaaa', depends_on: [], identifier: 'ABCA-1', title: 'Step A' },
       { id: 'b11761b2-uuid-bbbb', depends_on: ['a00650a1-uuid-aaaa'], identifier: 'ABCA-2', title: 'Step B' },
@@ -234,34 +186,26 @@ describe('orchestration integration — real createTaskCore', () => {
     });
     expect(seed.alreadyExisted).toBe(false);
 
-    // Release roots via the REAL createTaskCore.
     const snap = await loadOrchestration(ddb, ORCH, seed.orchestrationId);
     const results = await releaseReadyChildren(
       ddb, ORCH, snap!.children, snap!.meta.release_context, createTaskCore, NOW,
     );
     const released = results.filter((r) => r.kind === 'released');
-    expect(released).toHaveLength(1); // only A is ready; B is blocked
+    expect(released).toHaveLength(1);
 
-    // BUG 1 regression: the real createTaskCore accepted the key (no 400),
-    // so a real TaskRecord exists.
     const aTaskId = (released[0] as { taskId: string }).taskId;
     expect(aTaskId).toBeTruthy();
     const aRec = tables.TaskTable.get(aTaskId) as Record<string, unknown>;
     expect(aRec).toBeDefined();
     expect(aRec.channel_source).toBe('linear');
 
-    // BUG 2 regression: orchestration_id round-trips under channel_metadata
-    // (NOT top-level) — exactly the shape the reconciler must read.
     expect((aRec.channel_metadata as Record<string, string>).orchestration_id).toBe(seed.orchestrationId);
     expect(aRec.orchestration_id).toBeUndefined();
 
-    // Now simulate A's terminal stream event and confirm the reconciler
-    // parser extracts the orchestration id from the PERSISTED shape.
     const evt = parseTerminalTaskRecord(streamImageFor(aTaskId, 'COMPLETED', true) as never);
     expect(evt).not.toBeNull();
     expect(evt!.orchestrationId).toBe(seed.orchestrationId);
 
-    // Gating: A succeeded → B becomes releasable.
     const reloaded = await loadOrchestration(ddb, ORCH, seed.orchestrationId);
     const childView = reloaded!.children.map((c: OrchestrationChildRow) => ({
       sub_issue_id: c.sub_issue_id, depends_on: c.depends_on, child_status: c.child_status,
@@ -289,17 +233,13 @@ describe('orchestration integration — real createTaskCore', () => {
 
     const first = await releaseChild({ ddb, tableName: ORCH, row, platformUserId: 'user-1', createTaskCore, now: NOW });
     expect(first.kind).toBe('released');
-    // Second attempt on the same (now 'released') row: conditional flip fails.
     const second = await releaseChild({ ddb, tableName: ORCH, row, platformUserId: 'user-1', createTaskCore, now: NOW });
     expect(second.kind).toBe('already_released');
 
-    // Exactly one TaskRecord for this child (idempotency-key dedup in createTaskCore).
     const tasks = [...tables.TaskTable.values()];
     expect(tasks).toHaveLength(1);
   });
 
-  // ── seed + release roots, returning the orchestration id + a map of
-  //    sub_issue_id → released task id (for the wired reconciler tests) ──
   async function seedAndReleaseRoots(
     parent: string,
     children: Array<{ id: string; depends_on: string[]; identifier?: string; title?: string }>,
@@ -319,7 +259,6 @@ describe('orchestration integration — real createTaskCore', () => {
       ddb, ORCH, snap!.children, snap!.meta.release_context, createTaskCore, NOW,
     );
     const taskIds: Record<string, string> = {};
-    // map released task ids back to their sub_issue_id via the child rows
     const after = await loadOrchestration(ddb, ORCH, seed.orchestrationId);
     for (const c of after!.children) {
       if (c.child_task_id) taskIds[c.sub_issue_id] = c.child_task_id;
@@ -336,8 +275,6 @@ describe('orchestration integration — real createTaskCore', () => {
     const first = await seedAndReleaseRoots('REPLAY-PARENT', children);
     const tasksAfterFirst = [...tables.TaskTable.values()].length;
 
-    // Replay: same parent labeled again → seedOrchestration sees the meta
-    // row and no-ops; re-releasing roots must not create a second task.
     const seed2 = await seedOrchestration({
       ddb,
       tableName: ORCH,
@@ -353,16 +290,12 @@ describe('orchestration integration — real createTaskCore', () => {
     const snap = await loadOrchestration(ddb, ORCH, first.orchestrationId);
     await releaseReadyChildren(ddb, ORCH, snap!.children, snap!.meta.release_context, createTaskCore, NOW);
 
-    // No new tasks (the already-released root's conditional flip fails;
-    // even if it re-called createTaskCore, the idempotency key dedups).
     expect([...tables.TaskTable.values()].length).toBe(tasksAfterFirst);
-    // Still exactly one child row per sub-issue (+ meta).
     const rows = [...tables.OrchestrationTable.values()].filter((r) => r.orchestration_id === first.orchestrationId);
     expect(rows.filter((r) => r.sub_issue_id !== '#meta')).toHaveLength(2);
   });
 
   test('diamond timing (wired): D releases only after BOTH B and C succeed', async () => {
-    // A → {B,C} → D. Root A; B,C depend on A; D depends on B,C.
     const children = [
       { id: 'd-a', depends_on: [], identifier: 'A', title: 'A' },
       { id: 'd-b', depends_on: ['d-a'], identifier: 'B', title: 'B' },
@@ -371,21 +304,18 @@ describe('orchestration integration — real createTaskCore', () => {
     ];
     const { orchestrationId, taskIds } = await seedAndReleaseRoots('DIAMOND', children);
 
-    // A completes → B and C release.
     await completeAndReconcile(taskIds['d-a']);
     let st = await statuses(orchestrationId);
     expect(st['d-b']).toBe('released');
     expect(st['d-c']).toBe('released');
     expect(st['d-d']).toBe('blocked');
 
-    // B completes → D still blocked (C not done).
     const t2 = await loadOrchestration(ddb, ORCH, orchestrationId);
     const bTask = t2!.children.find((c) => c.sub_issue_id === 'd-b')!.child_task_id!;
     await completeAndReconcile(bTask);
     st = await statuses(orchestrationId);
     expect(st['d-d']).toBe('blocked');
 
-    // C completes → D releases.
     const cTask = t2!.children.find((c) => c.sub_issue_id === 'd-c')!.child_task_id!;
     await completeAndReconcile(cTask);
     st = await statuses(orchestrationId);
@@ -399,30 +329,15 @@ describe('orchestration integration — real createTaskCore', () => {
     ];
     const { orchestrationId, taskIds } = await seedAndReleaseRoots('BUILDFAIL', children);
 
-    // A reaches COMPLETED but build failed → NOT a success → B skipped.
     await completeAndReconcile(taskIds['bp-a'], 'COMPLETED', false);
     const st = await statuses(orchestrationId);
     expect(st['bp-a']).toBe('failed');
     expect(st['bp-b']).toBe('skipped');
-    // No task ever created for B.
     const bRows = [...tables.OrchestrationTable.values()].find((r) => r.sub_issue_id === 'bp-b');
     expect(bRows?.child_task_id).toBeUndefined();
   });
 
-  // KNOWN FAILURE — executable witness for double task creation under
-  // concurrent predecessor completion. See
-  // docs/research/orchestration-reconciler-correctness.md §4 schedule S2.
-  // The reconciler's release is create-then-flip, so the conditional row
-  // flip (the only serialization point) happens AFTER the irreversible
-  // createTaskCore → two predecessors racing D each create a task. The fix
-  // is flip-then-create, with the stranded-task sweep as the backstop for a
-  // crash between flip and create; un-skip when that lands. Kept as
-  // `test.failing` so the suite stays green AND CI flags us the day the bug
-  // is fixed.
   test.failing('concurrent predecessors (wired): two terminal events racing the same dependent release it once', async () => {
-    // D depends on B and C; both succeed "simultaneously" — fire both
-    // reconciler events without awaiting between them, then assert D
-    // released exactly once (one task).
     const children = [
       { id: 'cc-b', depends_on: [], identifier: 'B', title: 'B' },
       { id: 'cc-c', depends_on: [], identifier: 'C', title: 'C' },
@@ -430,9 +345,6 @@ describe('orchestration integration — real createTaskCore', () => {
     ];
     const { orchestrationId, taskIds } = await seedAndReleaseRoots('CONCURRENT', children);
 
-    // Mark both terminal, then drive both events. (The fake is sync under
-    // the hood, so this is sequential-but-interleaved at the await points
-    // — enough to exercise the conditional-flip idempotency guard.)
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism -- fixed 2-element array (two named children), not input-derived
     await Promise.all([
       completeAndReconcile(taskIds['cc-b']),
@@ -441,16 +353,12 @@ describe('orchestration integration — real createTaskCore', () => {
 
     const st = await statuses(orchestrationId);
     expect(st['cc-d']).toBe('released');
-    // Exactly one task for D despite both predecessors triggering release.
     const dTasks = [...tables.TaskTable.values()].filter(
       (t) => (t.channel_metadata as Record<string, string>)?.orchestration_sub_issue_id === 'cc-d',
     );
     expect(dTasks).toHaveLength(1);
   });
 
-  // ── base-branch selection threads through the real release path ──
-
-  /** Find the persisted task record for a given orchestration sub_issue_id. */
   function taskForSub(sub: string): Record<string, unknown> | undefined {
     return [...tables.TaskTable.values()].find(
       (t) => (t.channel_metadata as Record<string, string>)?.orchestration_sub_issue_id === sub,
@@ -464,7 +372,6 @@ describe('orchestration integration — real createTaskCore', () => {
     ];
     const { taskIds } = await seedAndReleaseRoots('A4-LINEAR', children);
 
-    // A's persisted branch_name → becomes B's base when B releases.
     const aBranch = tables.TaskTable.get(taskIds['lin-a'])!.branch_name as string;
     expect(aBranch).toBeTruthy();
 
@@ -472,7 +379,6 @@ describe('orchestration integration — real createTaskCore', () => {
 
     const bTask = taskForSub('lin-b')!;
     const cm = bTask.channel_metadata as Record<string, string>;
-    // B stacks on A: base = A's branch, no merges.
     expect(cm.orchestration_base_branch).toBe(aBranch);
     expect(cm.orchestration_merge_branches).toBeUndefined();
   });
@@ -487,13 +393,11 @@ describe('orchestration integration — real createTaskCore', () => {
     const bBranch = tables.TaskTable.get(taskIds['dia-b'])!.branch_name as string;
     const cBranch = tables.TaskTable.get(taskIds['dia-c'])!.branch_name as string;
 
-    // Both predecessors complete → D releases.
     await completeAndReconcile(taskIds['dia-b']);
     await completeAndReconcile(taskIds['dia-c']);
 
     const dTask = taskForSub('dia-d')!;
     const cm = dTask.channel_metadata as Record<string, string>;
-    // Diamond: D branches off main, merges B's and C's branches in.
     expect(cm.orchestration_base_branch).toBe('main');
     expect(JSON.parse(cm.orchestration_merge_branches)).toEqual([bBranch, cBranch].sort());
   });

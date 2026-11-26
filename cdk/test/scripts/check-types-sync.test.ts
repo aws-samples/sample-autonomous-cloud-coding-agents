@@ -17,28 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for `scripts/check-types-sync.ts` — the API type drift gate between the
- * CDK types (canonical), the CLI mirror (exact) and the web mirror (subset).
- *
- * WHY THESE EXIST: a comparison that silently skips a kind of declaration still
- * prints "OK". The gate used to trust re-exports, ignore `extends`, index and
- * method signatures, compare types declared in another file by name only, and
- * never read the web mirror — so the task-status union, among others, was not
- * compared at all. Each of those is pinned here by making the gate fail on it.
- * So is each direction of the name checks: a mirror export nothing declares,
- * and a CDK export the CLI lacks. The CLI's copies of the status list and of
- * the coding workflow id were excused as client-only although the CDK declares
- * both in other modules; a mirror export declared elsewhere, under its own
- * name or another, is pinned too.
- *
- * HOW: same as `check-constants-sync.test.ts` — the script is spawned against a
- * throwaway repo root. Drift is APPENDED to copies of the real files as small
- * `Gate*` declarations, so the cases do not depend on what the real types look
- * like today. All drift cases share one run (the script compiles three files,
- * about a second per run); each test then asserts its own message.
- */
-
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -56,19 +34,15 @@ interface RunResult {
   readonly stderr: string;
 }
 
-/** Copy what the script reads into a temp root, apply `mutate`, and run it there. */
 function runInMutatedRepo(mutate: (root: string) => void): RunResult {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-types-sync-'));
   const nodeModules = path.join(root, 'node_modules');
   try {
-    // The script compiles the three files, so it also reads what the CDK types
-    // import. Copy the CDK sources whole: a hand-kept import closure would rot.
     fs.cpSync(path.join(REPO_ROOT, 'cdk/src'), path.join(root, 'cdk/src'), { recursive: true });
     for (const rel of [SCRIPT_REL, CLI_TYPES, WEB_TYPES, 'contracts/constants.json']) {
       fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
       fs.copyFileSync(path.join(REPO_ROOT, rel), path.join(root, rel));
     }
-    // `typescript` and the packages the CDK types import resolve from here.
     fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), nodeModules, 'dir');
     mutate(root);
 
@@ -84,7 +58,6 @@ function runInMutatedRepo(mutate: (root: string) => void): RunResult {
       return { status: e.status ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' };
     }
   } finally {
-    // Unlink the link itself first, so the cleanup can never reach the real node_modules.
     fs.rmSync(nodeModules, { force: true });
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -94,12 +67,10 @@ function append(root: string, rel: string, text: string): void {
   fs.appendFileSync(path.join(root, rel), `\n${text}\n`);
 }
 
-/** Escape a literal for use inside a `RegExp`. */
 function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Add an entry to one of the script's own lists (fails loudly if the list is renamed). */
 function addEntry(root: string, opening: string, entry: string): void {
   const file = path.join(root, SCRIPT_REL);
   const source = fs.readFileSync(file, 'utf-8');
@@ -111,7 +82,6 @@ function allowlist(root: string, list: string, entry: string): void {
   addEntry(root, `const ${list} = new Set<string>([`, `'${entry}'`);
 }
 
-/** Tell the script that a mirror export is declared in a CDK module other than the types file (as `canonName`, when it differs). */
 function canonElsewhere(root: string, name: string, module: string, canonName?: string): void {
   const declaration = canonName === undefined ? `'${module}'` : `'${module}', '${canonName}'`;
   addEntry(root, 'const CANON_ELSEWHERE: ReadonlyMap<string, readonly [module: string, name?: string]> = new Map([', `['${name}', [${declaration}]]`);
@@ -125,8 +95,6 @@ describe('check-types-sync', () => {
       const result = runInMutatedRepo(() => {});
 
       expect(result.status).toBe(0);
-      // The counts are the anti-vacuity assertion: a script that compared
-      // NOTHING would also exit 0.
       expect(result.stdout).toMatch(/[1-9]\d* CLI exports validated against [1-9]\d* CDK exports/);
       expect(result.stdout).toMatch(/CDK ↔ web: [1-9]\d* of \d+ web exports match their canonical declaration \([1-9]\d* console-only allowlisted\)/);
     });
@@ -137,14 +105,12 @@ describe('check-types-sync', () => {
 
     beforeAll(() => {
       result = runInMutatedRepo((root) => {
-        // Declared OUTSIDE the CDK types file, as the task-status union is.
         fs.writeFileSync(
           path.join(root, 'cdk/src/handlers/shared/gate-fixture.ts'),
           [
             "export const GateStatuses = { A: 'A', B: 'B' } as const;",
             'export type GateStatus = (typeof GateStatuses)[keyof typeof GateStatuses];',
             'export interface GateNested { readonly x: string; readonly y: number }',
-            // Constants declared outside the types file, as the status lists are.
             'export const GateList: readonly GateStatus[] = [GateStatuses.A, GateStatuses.B];',
             'export const GateListSame: readonly GateStatus[] = [GateStatuses.A, GateStatuses.B];',
           ].join('\n'),
@@ -186,7 +152,6 @@ describe('check-types-sync', () => {
           'export function gateCliFn(): number { return 1; }',
           'export class GateCliClass {}',
           'export interface GateCliShape { readonly a: string }',
-          // Copies of what the CDK declares outside its types file, as the status list is.
           "export const GateList = ['B', 'A'] as const;",
           "export const GATE_RENAMED_LIST = ['A'] as const;",
           "export const GATE_RENAMED_LIST_SAME = ['A', 'B'] as const;",
@@ -219,7 +184,6 @@ describe('check-types-sync', () => {
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateConsole');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateStaleWeb');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateWeb');
-        // Listed as console-only although the CLI declares it, or the canonical-module list names it.
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateCliShape');
         canonElsewhere(root, 'GateListListed', 'cdk/src/handlers/shared/gate-fixture.ts', 'GateListSame');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateListListed');
@@ -235,7 +199,6 @@ describe('check-types-sync', () => {
     });
 
     test('follows a re-export to a union derived in another file (the task-status shape)', () => {
-      // The CDK location is the DECLARING file: the re-export was followed, not trusted.
       const declared = 'cdk/src/handlers/shared/gate-fixture.ts:2 (CDK)';
       expect(result.stderr).toMatch(new RegExp(`"GateStatus" differs between ${escape(declared)} and ${escape(CLI_TYPES)}:\\d+ \\(CLI\\)`));
       expect(result.stderr).toMatch(new RegExp(`"GateStatus" differs between ${escape(declared)} and ${escape(WEB_TYPES)}:\\d+ \\(web\\)`));
@@ -273,7 +236,6 @@ describe('check-types-sync', () => {
     });
 
     test('rejects a web export that nothing declares, and accepts a listed console-only one', () => {
-      // A type renamed in the CDK and the CLI leaves the forgotten web copy here.
       expect(result.stderr).toContain(`web exports "GateWebOnly" but neither ${CDK_TYPES} nor ${CLI_TYPES} declares it`);
       expect(result.stderr).not.toContain('"GateConsole"');
     });
@@ -281,7 +243,6 @@ describe('check-types-sync', () => {
     test('compares a web constant with the CDK module that declares it, by value', () => {
       expect(result.stderr).toMatch(new RegExp(`"GateList" differs between cdk/src/handlers/shared/gate-fixture\\.ts:\\d+ \\(CDK\\) and ${escape(WEB_TYPES)}:\\d+ \\(web\\)`));
       expect(result.stderr).toContain('GateList: ["A","B"] in CDK, ["A"] in web');
-      // The false-positive side: member accesses on one side, literals `as const` on the other.
       expect(result.stderr).not.toContain('GateListSame');
     });
 
@@ -291,7 +252,6 @@ describe('check-types-sync', () => {
       expect(result.stderr).toContain('GateList: ["A","B"] in CDK, ["B","A"] in CLI');
       expect(result.stderr).toMatch(new RegExp(`"GATE_RENAMED_LIST" ${between}`));
       expect(result.stderr).toContain('GATE_RENAMED_LIST: ["A","B"] in CDK, ["A"] in CLI');
-      // The false-positive side: an equal copy under another name.
       expect(result.stderr).not.toContain('GATE_RENAMED_LIST_SAME');
     });
 
@@ -301,7 +261,6 @@ describe('check-types-sync', () => {
 
     test('rejects a stale or contradicted entry of the web lists', () => {
       expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateStaleWeb", which ${WEB_TYPES} does not export`);
-      // A canonical declaration is one in the CDK types, in the CLI mirror or in a listed CDK module.
       for (const name of ['GateWeb', 'GateCliShape', 'GateListListed']) {
         expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "${name}", but it has a canonical declaration`);
       }
@@ -310,9 +269,7 @@ describe('check-types-sync', () => {
     test('rejects a stale, contradicted or dangling entry of the canonical-module list', () => {
       expect(result.stderr).toContain(`CANON_ELSEWHERE in ${SCRIPT_REL} names "GateGone", which neither ${CLI_TYPES} nor ${WEB_TYPES} exports`);
       expect(result.stderr).toContain(`CANON_ELSEWHERE in ${SCRIPT_REL} sends "GateWeb" to cdk/src/handlers/shared/gate-fixture.ts, but ${CDK_TYPES} exports it`);
-      // Excused as CLI-only and given a canonical declaration at once: the excuse would win silently.
       expect(result.stderr).toContain(`CLI_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateExcused", but CANON_ELSEWHERE there gives it a canonical declaration`);
-      // The module named for a mirror export lacks it: one message, about the entry.
       expect(result.stderr).toContain('says cdk/src/handlers/shared/gate-fixture.ts declares "GateMoved", but that module does not export it');
       expect(result.stderr).not.toContain('CLI exports "GateMoved" but CDK does not');
       expect(result.stderr).toContain('says cdk/src/handlers/shared/gate-fixture.ts declares "GateMovedWeb", but that module does not export it');
@@ -337,7 +294,6 @@ describe('check-types-sync', () => {
     });
 
     test('does not flag the same shape spelled differently', () => {
-      // The false-positive side: flattened `extends`, reordered union, `T[]` vs `Array<T>`.
       expect(result.stderr).not.toContain('GateSame');
     });
 

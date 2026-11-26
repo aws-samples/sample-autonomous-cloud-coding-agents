@@ -42,8 +42,7 @@ export function jiraIssueIdentity(cloudId: string, issueKey: string): string {
  * Resolve a Jira issue to its newest PR-producing ABCA task.
  *
  * Newer attempts that never opened a PR are skipped. Query pagination is
- * required because DynamoDB applies Limit before any client-side selection;
- * stopping after a PR-less first page could hide an older valid PR target.
+ * required because DynamoDB applies Limit before any client-side selection.
  */
 export async function resolveTaskByJiraIssue(
   ddb: DynamoDBDocumentClient,

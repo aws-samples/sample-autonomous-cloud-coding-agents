@@ -1,14 +1,3 @@
-"""Semver RESOLUTION-ranking parity corpus runner (Python side) (#246).
-
-Loads ``contracts/registry-resolution/resolution-cases.json`` and asserts the
-Python ``registry.resolver.select_highest`` picks the golden winner for each
-(candidates, constraint). The TypeScript runner
-(``cdk/test/handlers/shared/registry-resolution-ranking-parity.test.ts``) runs
-the same file against ``selectHighest``; both must agree, so caret/tilde/
-prerelease ranking cannot drift between the API path (TS) and the orchestrator's
-direct port path (Python).
-"""
-
 from __future__ import annotations
 
 import json

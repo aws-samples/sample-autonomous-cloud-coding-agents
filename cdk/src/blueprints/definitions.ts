@@ -26,7 +26,6 @@ export interface BlueprintDefinition extends Omit<BlueprintProps, 'repoTable'> {
   readonly id: string;
 }
 
-/** Resolve once so repository provisioning and the network use the same inputs. */
 export function resolveBlueprintDefinitions(
   node: Node,
   environment: NodeJS.ProcessEnv = process.env,
@@ -35,8 +34,6 @@ export function resolveBlueprintDefinitions(
     id: 'AgentPluginsBlueprint',
     repo: environment.BLUEPRINT_REPO ?? node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins',
   }];
-  // Optional per-repository registry assets (#246); preserve the deployed IDs
-  // and environment/context precedence while moving configuration out of a stack.
   const forkRepo = environment.FORK_BLUEPRINT_REPO ?? node.tryGetContext('forkBlueprintRepo');
   if (forkRepo) {
     definitions.push({
@@ -52,7 +49,6 @@ export function resolveBlueprintDefinitions(
   return definitions;
 }
 
-/** Aggregate plain domain strings without referring to repository resources. */
 export function blueprintEgressDomains(definitions: readonly BlueprintDefinition[]): string[] {
   return [...new Set(definitions.flatMap(definition => definition.networking?.egressAllowlist ?? []))];
 }

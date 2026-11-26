@@ -28,12 +28,10 @@ const sm = makeClient(SecretsManagerClient);
 /** Prefix for Slack-related secrets in Secrets Manager. */
 export const SLACK_SECRET_PREFIX = 'bgagent/slack/';
 
-// In-memory secret cache with 5-minute TTL (same pattern as webhook handler).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
-/** Maximum age of a Slack request timestamp before it is rejected (replay protection). */
 const MAX_TIMESTAMP_AGE_MINUTES = 5;
 const MAX_TIMESTAMP_AGE_S = MAX_TIMESTAMP_AGE_MINUTES * 60;
 
@@ -55,8 +53,6 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    // Treat empty / whitespace-only SecretString as null — an empty secret
-    // must never be used for HMAC, or HMAC('', input) becomes forgeable.
     if (!isUsableHmacSecret(result.SecretString)) {
       logger.error('Slack signing secret is empty — refusing to use for HMAC', {
         secret_id: secretId,
@@ -68,19 +64,15 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
     return result.SecretString;
   } catch (err) {
     const errorName = (err as Error)?.name;
-    // A bot token that is scheduled for deletion (its workspace removed the
-    // app) cannot be read until its recovery window ends: it is as absent as
-    // one that does not exist. Bot tokens are the secrets read by name under
-    // SLACK_SECRET_PREFIX. Any other secret in that state stays an error (the
-    // signing secret and the OAuth credentials are read by ARN), so that a
-    // signing secret never looks "not populated yet" to its callers.
+    // Secrets Manager refuses to read a secret that is scheduled for deletion until
+    // its recovery window ends: InvalidRequestException, "marked for deletion".
     const pendingDeletion = errorName === 'InvalidRequestException'
       && secretId.startsWith(SLACK_SECRET_PREFIX)
       && String((err as Error).message).includes('marked for deletion');
     if (errorName === 'ResourceNotFoundException' || pendingDeletion) {
       logger.error('Slack secret not found in Secrets Manager', { secret_id: secretId, pending_deletion: pendingDeletion });
       secretCache.delete(secretId);
-      return null; // missing Slack signing secret means "cannot verify"; ResourceNotFound is expected before setup
+      return null;
     }
     logger.error('Failed to fetch Slack secret from Secrets Manager', {
       secret_id: secretId,
@@ -90,11 +82,6 @@ export async function getSlackSecret(secretId: string, forceRefresh = false): Pr
   }
 }
 
-/**
- * Explicitly drop a cached secret. Called when rotation is suspected —
- * e.g. signature verification fails with an otherwise valid-looking request.
- * @param secretId - the Secrets Manager secret ID or ARN to evict.
- */
 export function invalidateSlackSecretCache(secretId: string): void {
   secretCache.delete(secretId);
 }
@@ -105,7 +92,6 @@ export function invalidateSlackSecretCache(secretId: string): void {
  * Slack signs every request with HMAC-SHA256 using the app signing secret.
  * Signature format: `v0={hex}` where the HMAC input is `v0:{timestamp}:{body}`.
  *
- * @param signingSecret - the Slack app signing secret.
  * @param signature - the `X-Slack-Signature` header value.
  * @param timestamp - the `X-Slack-Request-Timestamp` header value.
  * @param body - the raw request body string.
@@ -117,13 +103,9 @@ export function verifySlackSignature(
   timestamp: string,
   body: string,
 ): boolean {
-  // Defense-in-depth: getSlackSecret already filters empty secrets, but
-  // if a future caller wires a different secret source we still want
-  // HMAC('') rejected — anyone can compute it.
   if (!isUsableHmacSecret(signingSecret)) {
     return false;
   }
-  // Reject requests with stale timestamps (replay protection).
   const ts = parseInt(timestamp, 10);
   if (isNaN(ts)) {
     logger.warn('Invalid Slack request timestamp', { timestamp });
@@ -135,7 +117,6 @@ export function verifySlackSignature(
     return false;
   }
 
-  // Compute expected signature: v0=HMAC-SHA256(signing_secret, "v0:{ts}:{body}")
   const sigBasestring = `v0:${timestamp}:${body}`;
   const expected = 'v0=' + crypto.createHmac('sha256', signingSecret).update(sigBasestring).digest('hex');
 
@@ -153,8 +134,7 @@ export function verifySlackSignature(
 
 /**
  * Verify a Slack request, transparently re-fetching the signing secret once
- * if the cached copy is rejected. After rotation, warm Lambdas keep the old
- * cached secret until their 5-minute TTL elapses — this forces an early refresh.
+ * if the cached copy is rejected.
  *
  * @param secretId - Secrets Manager ARN/ID for the signing secret.
  * @param signature - the `X-Slack-Signature` header value.
@@ -173,10 +153,9 @@ export async function verifySlackRequest(
     return true;
   }
 
-  // Cache might be stale after a signing-secret rotation — evict and try once more.
   invalidateSlackSecretCache(secretId);
   const fresh = await getSlackSecret(secretId, true);
   if (!fresh) return false;
-  if (fresh === cached) return false; // Same secret, still invalid — don't double-log.
+  if (fresh === cached) return false;
   return verifySlackSignature(fresh, signature, timestamp, body);
 }

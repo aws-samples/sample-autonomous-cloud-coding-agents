@@ -68,13 +68,9 @@ describe('JiraIntegration construct', () => {
     });
   });
 
-  // A structured initial value avoids seeding a bare signing-key-shaped
-  // secret. Setup unconditionally replaces the complete value; no runtime
-  // code interprets the marker key.
   test('webhook secret seeds a non-signing JSON placeholder', () => {
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
       GenerateSecretString: Match.objectLike({
-        // secretStringTemplate pins the non-operational initial JSON shape.
         SecretStringTemplate: Match.stringLikeRegexp('abca_jira_webhook_placeholder'),
         GenerateStringKey: 'value',
       }),
@@ -82,8 +78,6 @@ describe('JiraIntegration construct', () => {
   });
 
   test('every Lambda carries ABCA_COMPONENT=webhook via ComponentUaAspect (#319)', () => {
-    // The Jira integration was the one integration missing ComponentUaAspect,
-    // so its Lambdas fell back to the `api` label. Match slack/linear/github.
     const functions = template.findResources('AWS::Lambda::Function');
     const fnIds = Object.keys(functions);
     expect(fnIds.length).toBeGreaterThan(0);

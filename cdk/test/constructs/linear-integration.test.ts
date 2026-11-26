@@ -53,8 +53,6 @@ describe('LinearIntegration construct', () => {
   });
 
   test('creates four Linear DynamoDB tables (project mapping + user mapping + workspace registry + dedup)', () => {
-    // TaskTable + TaskEventsTable + LinearProjectMapping + LinearUserMapping
-    // + LinearWorkspaceRegistry + LinearWebhookDedup = 6
     template.resourceCountIs('AWS::DynamoDB::Table', 6);
   });
 
@@ -77,9 +75,6 @@ describe('LinearIntegration construct', () => {
   });
 
   test('DELETE /linear/workspaces/{slug} is Cognito-authorized (pinned to the {slug} resource)', () => {
-    // Pin the method to the {slug} resource so "any authorized DELETE
-    // anywhere" cannot satisfy this — the DELETE must be on the
-    // workspace-by-slug path specifically.
     const slugResources = template.findResources('AWS::ApiGateway::Resource', {
       Properties: { PathPart: '{slug}' },
     });
@@ -97,17 +92,6 @@ describe('LinearIntegration construct', () => {
     expect((onSlug[0].Properties as { AuthorizationType?: string }).AuthorizationType).toBe('COGNITO_USER_POOLS');
   });
 
-  // Locate the RemoveWorkspaceFn INDEPENDENTLY of any IAM policy: it is the
-  // ONLY Lambda whose environment is registry-only — it carries
-  // `LINEAR_WORKSPACE_REGISTRY_TABLE_NAME` but none of the sibling markers
-  // (`LINEAR_PROJECT_MAPPING_TABLE_NAME` on the processor,
-  // `LINEAR_WEBHOOK_SECRET_ARN` on the webhook receiver,
-  // `LINEAR_USER_MAPPING_TABLE_NAME` on the link handler). We then read the
-  // role off the FUNCTION resource itself (`Role: Fn::GetAtt[<roleId>]`), so
-  // the derived `role` is bound to the function's own identity — NOT read out
-  // of the DeleteSecret policy. This lets the secret-prefix test assert the
-  // grant lands on THIS role and genuinely fail if a future edit attaches the
-  // DeleteSecret grant to the wrong role.
   function findRemoveWorkspaceFn(): { logicalId: string; role: string } {
     const fns = template.findResources('AWS::Lambda::Function');
     const matches = Object.entries(fns).filter(([, fn]) => {
@@ -130,9 +114,6 @@ describe('LinearIntegration construct', () => {
   }
 
   test('remove-workspace handler wires ONLY the workspace registry (no project mapping table)', () => {
-    // B2: the mapping-cleanup path was dropped, so the remove-workspace
-    // function must NOT carry the project-mapping table env var (that was
-    // the dead grant + no-op cleanup the reviewer flagged).
     const { logicalId } = findRemoveWorkspaceFn();
     const fn = template.findResources('AWS::Lambda::Function')[logicalId];
     const vars = (fn.Properties as { Environment: { Variables: Record<string, unknown> } })
@@ -142,10 +123,6 @@ describe('LinearIntegration construct', () => {
   });
 
   test('remove-workspace role can delete ONLY the bgagent-linear-oauth-* secret prefix (scope pinned to the role)', () => {
-    // Bind the DeleteSecret grant to the remove-workspace role AND pin the
-    // resource ARN to the bgagent-linear-oauth-* prefix, so a future
-    // widening of that wildcard (or attaching DeleteSecret to another role)
-    // fails this test.
     const { role } = findRemoveWorkspaceFn();
     const policies = template.findResources('AWS::IAM::Policy');
     const deletePolicies = Object.values(policies).filter((p) => {
@@ -159,12 +136,10 @@ describe('LinearIntegration construct', () => {
     expect(deletePolicies).toHaveLength(1);
 
     const policy = deletePolicies[0];
-    // The policy is attached to the remove-workspace role only.
     const roleRefs = ((policy.Properties as { Roles?: Array<{ Ref?: string }> }).Roles ?? [])
       .map((r) => r.Ref);
     expect(roleRefs).toContain(role);
 
-    // The DeleteSecret statement's resource ends with the documented prefix.
     const stmt = (policy.Properties as {
       PolicyDocument: { Statement: Array<{ Action?: unknown; Resource?: unknown }> };
     }).PolicyDocument.Statement.find((s) => {
@@ -175,9 +150,6 @@ describe('LinearIntegration construct', () => {
   });
 
   test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {
-    // Phase 2.0b-O2: per-workspace OAuth tokens live in
-    // `bgagent-linear-oauth-<slug>` secrets created by `bgagent linear setup`,
-    // NOT by CDK. Only the webhook signing secret is CDK-managed.
     template.resourceCountIs('AWS::SecretsManager::Secret', 1);
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
       Description: Match.stringLikeRegexp('Linear webhook signing secret'),
@@ -215,12 +187,6 @@ describe('LinearIntegration construct', () => {
   });
 
   test('webhook processor Lambda timeout is generous (>=120s) for its synchronous work', () => {
-    // The processor does real synchronous work per event — attachment screening,
-    // orchestration graph seed + root release, per-workspace OAuth resolve. The
-    // Lambda timeout is kept generous (WEBHOOK_PROCESSOR_TIMEOUT_SECONDS=120) so an
-    // issue with several attachments or a wide root layer never gets killed
-    // mid-call, which surfaces as a silent hang rather than an error. Identify the
-    // processor by its unique env var and assert its Timeout is at least 120s.
     const fns = template.findResources('AWS::Lambda::Function');
     const processors = Object.values(fns).filter(
       (fn) => fn.Properties?.Environment?.Variables?.LINEAR_PROJECT_MAPPING_TABLE_NAME !== undefined,
@@ -238,9 +204,6 @@ describe('LinearIntegration construct', () => {
 });
 
 describe('LinearIntegration construct — seed-time root release throttle', () => {
-  // When orchestrationTable + userConcurrencyTable are both provided, the
-  // webhook processor env carries the concurrency table + cap so it throttles
-  // the seed-time ROOT release (a failed root is unrecoverable by the sweep).
   function buildWith(opts: { withConcurrency: boolean }): Template {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
@@ -288,7 +251,6 @@ describe('LinearIntegration construct — seed-time root release throttle', () =
 
   test('does NOT set USER_CONCURRENCY_TABLE_NAME when the table is omitted (back-compat)', () => {
     const t = buildWith({ withConcurrency: false });
-    // The processor still has ORCHESTRATION_TABLE_NAME but no concurrency var.
     const fns = t.findResources('AWS::Lambda::Function', {
       Properties: {
         Environment: { Variables: Match.objectLike({ USER_CONCURRENCY_TABLE_NAME: Match.anyValue() }) },
@@ -299,11 +261,6 @@ describe('LinearIntegration construct — seed-time root release throttle', () =
 });
 
 describe('LinearIntegration construct — attachmentsBucket wiring', () => {
-  // Regression-guard: webhook processor needs ATTACHMENTS_BUCKET_NAME and S3
-  // Put/Delete on the bucket so `extractImageUrlAttachments` can reach the
-  // bucket via createTaskCore. Without this, Linear-triggered tasks with
-  // markdown image attachments fail with 503 ("Attachment storage is not
-  // configured.").
   let template: Template;
 
   beforeAll(() => {
@@ -362,11 +319,6 @@ describe('LinearIntegration construct — attachmentsBucket wiring', () => {
 });
 
 describe('revoked-authorization recording (#812)', () => {
-  // The whole point of the issue: markWorkspaceRevoked existed but every
-  // token-resolving role held read-only registry access, so the conditional write
-  // failed AccessDenied and was swallowed — a feature that read as implemented
-  // while being permanently inert. The grant is the fix; assert it exists, so a
-  // future least-privilege tightening cannot quietly make it dormant again.
   test('the webhook processor holds registry WRITE, not just read', () => {
     const app = new App();
     const stack = new Stack(app, 'RevocationStack');
@@ -386,12 +338,6 @@ describe('revoked-authorization recording (#812)', () => {
       JSON.stringify(p.Properties.Roles ?? '').includes('WebhookProcessorFn'),
     );
     expect(processorPolicy).toBeDefined();
-    // Scoped to the statement that actually covers the REGISTRY table. Stringifying
-    // the whole statement list and grepping for `dynamodb:UpdateItem` proved nothing:
-    // this same role holds grantReadWriteData on taskTable and taskEventsTable, which
-    // contribute that action anyway — so the assertion stayed green with the registry
-    // grant reverted to read-only, leaving `markWorkspaceRevoked` permanently inert,
-    // which is the dormancy this grant exists to end. Mutation-checked by reverting it.
     const statements = processorPolicy!.Properties.PolicyDocument.Statement as Array<{
       Action?: unknown;
       Resource?: unknown;
@@ -400,7 +346,6 @@ describe('revoked-authorization recording (#812)', () => {
       JSON.stringify(s.Resource ?? '').includes('WorkspaceRegistryTable'),
     );
     expect(registryStatements.length).toBeGreaterThan(0);
-    // UpdateItem is what markWorkspaceRevoked needs; a read-only grant omits it.
     expect(JSON.stringify(registryStatements.map((s) => s.Action))).toContain('dynamodb:UpdateItem');
   });
 });

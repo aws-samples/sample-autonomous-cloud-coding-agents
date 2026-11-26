@@ -4,80 +4,36 @@ version = "0.1.0"
 description = "Background coding agent — runs tasks in isolated cloud environments and produces pull requests"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3==1.44.0", #https://pypi.org/project/boto3/ (botocore 1.44.0 makes "standard" the default retry mode; src/aws_session.py names "legacy", the mode every client ran with before)
-    # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
-    # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
-    # Secrets Manager because AgentCore Identity's USER_FEDERATION
-    # flow has an open service-side bug (see memory/project_oauth_2_0b.md).
-    # Kept here so the workload-token bridge in `server.py` still
-    # imports cleanly when Phase 2.0c eventually resumes the
-    # AgentCore Identity path. The bridge is now wrapped in
-    # try/except (ImportError, AttributeError), so removing this dep
-    # would degrade gracefully — but for now we keep the dep to
-    # preserve the clean code path.
-    "bedrock-agentcore==1.26.0", #https://pypi.org/project/bedrock-agentcore/
-    # Held at 0.2.179, one release below the newest that is past the 7-day
-    # cooldown. 0.2.180 bundles claude CLI 2.1.321, whose changelog says: "Changed
+    "boto3==1.44.0",
+    "bedrock-agentcore==1.26.0",
+    # Held at 0.2.179: 0.2.180 bundles claude CLI 2.1.321, whose changelog says: "Changed
     # mods Claude writes to turn on without asking in auto and bypass modes".
-    # Every task runs in bypassPermissions (runner.py) and is held to the Cedar
-    # policy by PreToolUse hooks (hooks.py). Up to 2.1.319 the CLI asks before it
-    # turns such a mod on, and a task gives it nobody to ask. Move on once it is
-    # shown that a mod written in a session cannot act outside those hooks, or
-    # that the CLI can be told not to load one.
-    "claude-agent-sdk==0.2.179", #https://github.com/anthropics/claude-agent-sdk-python/releases/tag/v0.2.179 (bundles claude CLI 2.1.319; kept in lockstep with the npm CLI pin in the Dockerfile, #215. Claude 5.5 models need CLI >= 2.1.280, #953)
-    "requests==2.34.2", #https://pypi.org/project/requests/
-    "fastapi==0.162.4", #https://pypi.org/project/fastapi/
-    "uvicorn==0.54.0", #https://pypi.org/project/uvicorn/
-    "aws-opentelemetry-distro==0.22.0", #https://pypi.org/project/aws-opentelemetry-distro/ (0.22.0 clears GHSA-xcq7-p3pf-p88h and GHSA-f5m9-jfrj-jjj7)
-    "mcp==2.3.0", #https://pypi.org/project/mcp/ (GHSA-84m7-p3x7-pcfv is fixed since 1.30.0; 2.x replaces httpx with httpx2, which src/gateway_tools.py imports)
-    # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
-    # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
-    # CDK Lambdas) are two language bindings over the same Cedar Rust core.
-    # Even patch-version drift between the bindings can produce divergent
-    # (decision, matching_rule_ids) on the same (policy, input) — a class
-    # of bug invisible to per-side unit tests. The contracts/cedar-parity/
-    # golden fixtures are how CI catches divergence; if you bump cedarpy
-    # you MUST bump @cedar-policy/cedar-wasm to a tested-compatible version
-    # in cdk/package.json AND refresh the parity fixtures, in the same
-    # commit. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23) and
-    # the parity-contract banner in mise.toml.
-    # EXACT pin (no ^/~). The binding version (4.12.2) is the cedarpy package
-    # release, NOT the Cedar Rust core version (cedarpy 4.12.2 builds on
-    # cedar-policy 4.12.0, the same core as @cedar-policy/cedar-wasm 4.12.0
-    # pinned in cdk/package.json).
-    # Matching binding version *strings* across languages is neither necessary
-    # nor sufficient for behavioral parity; parity is established empirically by
-    # the contracts/cedar-parity/ golden fixtures in CI, which assert identical
-    # (decision, matching_rule_ids) for both bindings on the same (policy, input).
-    "cedarpy==4.12.2", #https://github.com/k9securityio/cedar-py
-    # Workflow-driven tasks (#248): the step runner loads YAML workflow files
-    # and validates them against agent/workflows/schema/workflow.schema.json.
-    # Both were previously only transitively present; declared directly so the
-    # workflow loader does not depend on another package's transitive pin.
-    "pyyaml==6.0.3", #https://pypi.org/project/PyYAML/
-    "jsonschema==4.26.0", #https://pypi.org/project/jsonschema/
+    # 0.2.179 bundles claude CLI 2.1.319, kept in lockstep with the npm CLI pin in the
+    # Dockerfile (#215).
+    "claude-agent-sdk==0.2.179",
+    "requests==2.34.2",
+    "fastapi==0.162.4",
+    "uvicorn==0.54.0",
+    "aws-opentelemetry-distro==0.22.0",
+    "mcp==2.3.0",
+    # The binding version is not the Cedar core version: cedarpy 4.12.2 builds on cedar-policy
+    # 4.12.0, the same core as @cedar-policy/cedar-wasm 4.12.0 pinned in cdk/package.json.
+    "cedarpy==4.12.2",
+    "pyyaml==6.0.3",
+    "jsonschema==4.26.0",
 ]
 
-# The uv-missing-dependency-cooldown rule wants a global exclude-newer window.
-# We intentionally do NOT set one: deps are exact-pinned (==) and lockfile-managed
-# via upgrade-main.yml, and a global cooldown conflicts with fresh exact pins
-# (fastapi/bedrock-agentcore/boto3 were published within the last week) — it makes
-# `uv sync` unsatisfiable and re-breaks on every pin bump. The rule's threat model
-# (surprise malicious/unstable version) is already covered by exact pins + reviewed
-# lock upgrades. See #532.
 # nosemgrep: uv-missing-dependency-cooldown -- deps are exact-pinned and lock-reviewed; a global cooldown makes `uv sync` unsatisfiable on fresh pins (#532)
 [tool.uv]
 constraint-dependencies = [
-    "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp, which still accepts pyjwt>=2.10.1 in 2.3.0; remove when mcp bumps floor (#267)
+    "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp, which still accepts pyjwt>=2.10.1 in 2.3.0 (#267)
 ]
 
-# Dead-code detection (#282, cairn MVG gate #6), part of `mise run quality`.
 # At min_confidence 80 vulture reports only what it is sure of: unreachable code
 # (after return or raise, a condition that cannot hold) and imports and function
 # arguments that nothing reads (it calls such an argument an "unused variable").
 # It rates an unused function, class, method or variable 60, so those are NOT
-# reported at this threshold; lowering it needs a reviewed allowlist first.
-# Intentional keeps live in .vulture_allowlist.py.
+# reported at this threshold.
 [tool.vulture]
 paths = ["src", ".vulture_allowlist.py"]
 min_confidence = 80
@@ -88,98 +44,76 @@ exclude_dirs = ["tests", ".venv"]
 
 [dependency-groups]
 dev = [
-    "bandit==1.9.4",  # security:bandit task — exact pin: the scan runs this version, on the project's Python
-    "ruff==0.17.4",  # lint and format tasks — exact pin: the rules and the formatting change only with a reviewed bump
-    "ty==0.0.100",  # typecheck task — exact pin: each ty release changes what it reports (0.0.100 found 39 errors that 0.0.56 did not), so that changes only with a reviewed bump
-    "pytest==9.2.0",  # test task — exact pin: strict mode and filterwarnings = error turn a new pytest's deprecations into failures, so it moves only with a reviewed bump
+    "bandit==1.9.4",
+    "ruff==0.17.4",
+    "ty==0.0.100",
+    "pytest==9.2.0",
     "pygments==2.21.0",
     "pytest-cov==7.1.0",
-    "pytest-timeout==2.4.0",  # per-test wall-clock cap: a single hung test (network/subprocess/Bedrock without its own timeout) must fail LOUDLY with a traceback, not silently burn the whole build-verify budget (ABCA-684/686: one hang stalled the baseline build past its 3600s ceiling)
-    "vulture==2.16",  # dead code (#282): unreachable code and unused imports and arguments, at min_confidence 80 (see [tool.vulture])
+    "pytest-timeout==2.4.0",
+    "vulture==2.16",
 ]
 
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-# The vulture allowlist is bare-name expressions by design (that is how vulture
-# "uses" a name to suppress it). ruff would flag every line F821/B018, so it is
-# not Python source ruff should lint. See .vulture_allowlist.py (#282).
+# The vulture allowlist is bare-name expressions: ruff would flag every line F821/B018.
 extend-exclude = [".vulture_allowlist.py"]
 
 [tool.ruff.lint]
 select = [
-    "E",     # pycodestyle errors
-    "W",     # pycodestyle warnings
-    "F",     # pyflakes
-    "ARG",   # flake8-unused-arguments
-    "I",     # isort
-    "B",     # flake8-bugbear
-    "S",     # flake8-bandit (security)
-    "UP",    # pyupgrade
-    "SIM",   # flake8-simplify
-    "TCH",   # flake8-type-checking
-    "RUF",   # ruff-specific rules
-    "ASYNC", # flake8-async: blocking calls inside `async def`
-    "C4",    # flake8-comprehensions
-    "EXE",   # flake8-executable: shebang and executable bit agree
-    "FURB",  # refurb: a builtin or stdlib call that already does what the code spells out
-    "PERF",  # perflint: loops that rebuild what a comprehension or one call does
-    "RET",   # flake8-return
-    # AI007 guard (#258): magic-value comparisons should use named constants.
-    # Values shared across Python/TypeScript belong in contracts/constants.json
-    # (see contracts/constants.md).
-    "PLR2004",  # pylint magic-value-comparison
-    # Families this tree had no findings in when they were switched on
-    # (ruff 0.15.20). They are on so that it stays that way.
-    "A",     # flake8-builtins: a name that shadows a builtin
-    "DTZ",   # flake8-datetimez: naive datetimes
-    "FAST",  # FastAPI: route parameters and dependencies
-    "FLY",   # flynt: str.join over literals
-    "G",     # flake8-logging-format: strings formatted before the logging call
-    "INT",   # flake8-gettext
-    "ISC",   # flake8-implicit-str-concat
-    "LOG",   # flake8-logging: logger misuse
-    "PGH",   # pygrep-hooks: blanket `noqa` and `type: ignore`
-    "PIE",   # flake8-pie: statements and fields that do nothing
-    "PLE",   # pylint errors
-    "RSE",   # flake8-raise
-    "T10",   # flake8-debugger: breakpoints left behind
-    "YTT",   # flake8-2020: sys.version misuse
-    # One fixed ceiling on cyclomatic complexity, set under [tool.ruff.lint.mccabe].
-    "C90",   # mccabe
-    # Import boundaries. TID251 enforces the banned-api table below (attributed
-    # AWS clients, #319). TID252 rejects an import relative to a parent package
-    # (`from .. import x`): `src/` is the import root, so there is no parent and
-    # such an import fails when the module loads.
-    "TID",   # flake8-tidy-imports
+    "E",
+    "W",
+    "F",
+    "ARG",
+    "I",
+    "B",
+    "S",
+    "UP",
+    "SIM",
+    "TCH",
+    "RUF",
+    "ASYNC",
+    "C4",
+    "EXE",
+    "FURB",
+    "PERF",
+    "RET",
+    "PLR2004",
+    "A",
+    "DTZ",
+    "FAST",
+    "FLY",
+    "G",
+    "INT",
+    "ISC",
+    "LOG",
+    "PGH",
+    "PIE",
+    "PLE",
+    "RSE",
+    "T10",
+    "YTT",
+    "C90",
+    "TID",
 ]
 ignore = [
-    "S603",  # subprocess call — allowed for agent CLI operations
-    "S607",  # partial executable path — agent relies on PATH for git, gh, mise
+    "S603",
+    "S607",
 ]
 
-# A function with more than 15 independent paths fails the lint. Nine functions
-# that were above it when the ceiling was set carry `# noqa: C901` with the value
-# they had (after a newer value, where the comment gives one): the first value
-# must not grow, and the comment goes when the function is split. Do not raise the
-# number to make a new function fit.
 [tool.ruff.lint.mccabe]
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
-"tests_emulator/**" = ["S101", "PLR2004", "ARG", "TID251"]  # emulator-backed tests (mise run test:integration): assert; literal assertions; fixtures taken for their effect; their own boto3 session
-"src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
-# aws_session.py is the one module that builds boto3 clients, resources and sessions:
-# it attaches the solution User-Agent (#319). TID251 is one rule for the whole
-# banned-api table below, so this file-wide exemption also switches off the ban
-# on importing `server` and `entrypoint` in that file.
+"tests_emulator/**" = ["S101", "PLR2004", "ARG", "TID251"]
+"src/entrypoint.py" = ["E402"]
+# TID251 is one rule for the whole banned-api table below, so this file-wide exemption
+# also switches off the ban on importing `server` and `entrypoint` in that file.
 "src/aws_session.py" = ["TID251"]
-"src/prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106", "S108", "PLR2004", "ARG", "TID251"]  # assert; test tokens; /tmp paths; literal assertions; fixture and stub signatures are set by pytest and by what they replace; a client built in a test sends nothing (conftest.py refuses every request)
+"src/prompts/*.py" = ["E501"]
+"tests/**" = ["S101", "S106", "S108", "PLR2004", "ARG", "TID251"]
 
-# Every AWS call the agent makes must carry the solution User-Agent (#319), and
-# only the factories in src/aws_session.py attach it. These names are the ways
-# to get a client, resource or session without them.
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "boto3.client".msg = "un-attributed AWS client (#319): use aws_session.tenant_client() for tenant data or aws_session.platform_client() for platform calls"
 "boto3.resource".msg = "un-attributed AWS resource (#319): use aws_session.tenant_resource()"
@@ -188,61 +122,25 @@ max-complexity = 15
 "boto3.DEFAULT_SESSION".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
 "boto3.setup_default_session".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
 "botocore.session".msg = "a botocore session builds un-attributed clients (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
-# The two process entrypoints: uvicorn loads server.py, batch mode runs
-# entrypoint.py. No module in src/ or scripts/ may import either. Tests import
-# both to test them, under the tests/** exemption above. src/aws_session.py is
-# not checked for this either: its TID251 exemption is file-wide.
 "server".msg = "server.py is a process entrypoint (uvicorn loads it): move what you need into a module both can import"
 "entrypoint".msg = "entrypoint.py is the batch entrypoint and a re-export shim kept for tests, and importing it reloads config: import the name from the module that defines it"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-# Strict mode (pytest 9): a key this table does not know, a marker nobody registered,
-# an xfail that passes and two parameter sets with the same id are errors, not
-# warnings. Without it a typo in `timeout` below silently removes the hang protection.
 strict = true
-# A parametrize over an empty list is an error, not one skipped test. The lists here
-# come from globs and tables: "nothing found" means the check has stopped checking.
 empty_parameter_set_mark = "fail_at_collect"
-# A warning is an error. In a green run nobody reads the warnings summary; as an
-# error the warning fails the test that caused it, or the collection of its module.
-# An entry below "error" lets one named warning through and says why.
 filterwarnings = [
     "error",
 ]
-# Non-TTY output ergonomics. In a captured/piped context (the ECS build gate, CI,
-# an agent's Bash tool) pytest's default is a wall of featureless progress dots
-# with the "N passed" summary easy to lose in a tail — live-caught on ABCA-691,
-# where an agent burned ~6 turns re-running the full suite with different flags
-# because it couldn't confirm the result from the dots. ``count`` renders progress
-# as an explicit "N/M passed" so a captured log always shows how far it got and how
-# many passed; ``-ra`` appends a short summary of every non-passing outcome (with
-# reasons) at the end. Both are display-only — they never change test results.
 addopts = "-ra"
 console_output_style = "count"
-# pytest-timeout: hard wall-clock cap PER TEST. A unit test that blocks (an
-# unmocked network/subprocess/Bedrock call with no timeout of its own) otherwise
-# hangs the whole `mise run build` until the 3600s build-verify ceiling kills it,
-# turning one flaky test into an un-diagnosable 60-min stall (ABCA-684/686). With
-# this, the offending test fails with a dumped stack in 120s and the suite moves on.
-# method="signal" (SIGALRM) actually ABORTS the hung test — pytest runs
-# single-threaded in the main thread here, so the alarm interrupts even a blocked
-# C-level/socket call. method="thread" only PRINTS the stack and cannot interrupt a
-# syscall-blocked test (proven live on ABCA-688: the thread method dumped the stack
-# but the build kept hanging ~55 min until the 3600s ceiling). signal is the real fix.
 timeout = 120
+# pytest-timeout's thread method dumped the stack but did not end a syscall-blocked test
+# (observed, ABCA-688). The signal method (SIGALRM) interrupts it in the main thread.
 timeout_method = "signal"
-# faulthandler backstop for hangs signal-timeout CANNOT interrupt. SIGALRM only
-# fires in the MAIN thread during a test's call phase, so a hang in a WORKER
-# thread (a deadlocked Barrier/join), a fixture, or a C-level socket read the
-# main thread never returns from is invisible to it — exactly the ECS-only stall
-# chased across ABCA-684/686/688 and again on the warm-cache run (53 min of
-# silence, signal never fired). This arms faulthandler's dedicated C watchdog
-# thread (immune to the GIL and blocked syscalls) to dump EVERY thread's Python
-# stack after 300s in a test, so the next hang self-reports the exact file:line
-# instead of stalling blind to the 3600s build ceiling. A session-level
-# hard-exit watchdog for hangs OUTSIDE any test lives in tests/conftest.py.
+# SIGALRM fires only in the main thread, so it does not end a hang in a worker thread.
+# faulthandler's C watchdog thread, immune to the GIL and blocked syscalls, dumps every stack.
 faulthandler_timeout = 300
 
 [tool.coverage.run]
@@ -255,11 +153,8 @@ fail_under = 89
 precision = 2
 show_missing = true
 skip_covered = true
-# These two lists replace coverage.py's defaults, which honour `# pragma: no cover` and
-# `# pragma: no branch`: one such comment took a whole function or class out of what
-# fail_under measures. No comment does that now. What stays out is code that cannot
-# run: the imports under `if TYPE_CHECKING:` and a `...` that is the body of a stub.
-# Each pattern matches a whole line, so neither can be appended to a line as a comment.
+# These two lists replace coverage.py's defaults, which honour the `pragma: no cover` and
+# `pragma: no branch` comments.
 exclude_lines = ["^ *if TYPE_CHECKING:$", "^ *[.][.][.]$"]
 partial_branches = []
 
@@ -268,7 +163,5 @@ python-version = "3.13"
 extra-paths = ["src"]
 
 [tool.ty.src]
-# The vulture allowlist is bare-name expressions by design, not type-checkable
-# Python — ty flags each line unresolved-reference. Excluded here for the same
-# reason ruff excludes it via extend-exclude (#282).
+# The vulture allowlist is bare-name expressions: ty flags each line unresolved-reference.
 exclude = [".vulture_allowlist.py"]

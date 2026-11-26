@@ -28,7 +28,6 @@ jest.mock('../../src/prompt-secret');
 const mockChangePassword = changePassword as jest.MockedFunction<typeof changePassword>;
 const mockPromptSecret = promptSecret as jest.MockedFunction<typeof promptSecret>;
 
-/** Queue prompt answers in the order the command reads them. */
 function queuePrompts(...answers: string[]): void {
   mockPromptSecret.mockReset();
   for (const a of answers) {

@@ -17,16 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Per-workspace webhook signing-secret tests for the Linear webhook handler.
- *
- * Lives in a separate file from `linear-webhook.test.ts` because the
- * handler reads `LINEAR_WORKSPACE_REGISTRY_TABLE_NAME` at module-load
- * time. Setting it here before the import gives us the multi-workspace
- * code path; the sibling test file leaves it unset to exercise the
- * single-workspace back-compat path.
- */
-
 import * as crypto from 'crypto';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -143,11 +133,6 @@ function makeStoredOauth(overrides: Partial<StoredOauthFixture> = {}): StoredOau
   };
 }
 
-/**
- * Wire the SM mock to respond by SecretId. Tests configure the
- * per-workspace OAuth secrets and the stack-wide signing secret on a
- * single mock so the receiver can fall through cleanly.
- */
 function configureSecretsManager(secrets: Record<string, string | object>) {
   smSend.mockImplementation((cmd: { input: { SecretId: string } }) => {
     const id = cmd.input.SecretId;
@@ -163,10 +148,6 @@ function configureSecretsManager(secrets: Record<string, string | object>) {
   });
 }
 
-/**
- * Wire DDB to return registry rows by `linear_workspace_id`.
- * Workspaces not listed return `Item: undefined` (registry miss).
- */
 function configureRegistry(rows: Record<string, { oauth_secret_arn: string; status: string; workspace_slug: string }>) {
   ddbSend.mockImplementation((cmd: { _type?: string; input: Record<string, unknown> }) => {
     if (cmd._type === 'Get') {
@@ -176,7 +157,6 @@ function configureRegistry(rows: Record<string, { oauth_secret_arn: string; stat
       return Promise.resolve(item ? { Item: { linear_workspace_id: workspaceId, ...item } } : { Item: undefined });
     }
     if (cmd._type === 'Put') {
-      // Dedup PutItem — succeed.
       return Promise.resolve({});
     }
     if (cmd._type === 'Delete') {
@@ -211,7 +191,6 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
     const body = payloadFor(WORKSPACE_A_ID);
     const result = await handler(makeEvent(body, sign(WORKSPACE_A_SECRET, body)));
     expect(result.statusCode).toBe(200);
-    // Processor was invoked → signature passed.
     expect(lambdaSend).toHaveBeenCalledTimes(1);
   });
 
@@ -233,11 +212,6 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   });
 
   test('rejects workspace A signed with workspace B\'s secret (per-workspace mismatch is fatal)', async () => {
-    // The CRITICAL test: an attacker who learns workspace B's signing
-    // secret (or replays a workspace B event) cannot dispatch as
-    // workspace A by claiming A's orgId. The receiver locks the
-    // per-workspace path once it finds A's secret and refuses to fall
-    // back to the stack-wide secret.
     configureRegistry({
       [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'active', workspace_slug: 'acme-A' },
     });
@@ -250,19 +224,13 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
       [process.env.LINEAR_WEBHOOK_SECRET_ARN!]: STACK_WIDE_SECRET,
     });
     const body = payloadFor(WORKSPACE_A_ID);
-    // Sign with WORKSPACE_B_SECRET — wrong secret for A.
     const result = await handler(makeEvent(body, sign(WORKSPACE_B_SECRET, body)));
     expect(result.statusCode).toBe(401);
-    // Lambda must NOT be invoked.
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
   test('falls back to stack-wide secret when registry has no row for the orgId', async () => {
-    // Single-workspace back-compat: an old install written before the
-    // per-workspace flow has no registry row keyed on its orgId. The
-    // receiver falls through to the stack-wide secret and verifies
-    // with that. Existing single-workspace deployments keep working.
-    configureRegistry({}); // empty — registry miss
+    configureRegistry({});
     configureSecretsManager({
       [process.env.LINEAR_WEBHOOK_SECRET_ARN!]: STACK_WIDE_SECRET,
     });
@@ -273,18 +241,12 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   });
 
   test('falls back to stack-wide secret when per-workspace bundle has no webhook_signing_secret field', async () => {
-    // Migration mid-state: workspace was onboarded under the old flow
-    // (no signing secret on its OAuth bundle), but later got registered.
-    // Until the user runs `bgagent linear update-webhook-secret` to
-    // populate `webhook_signing_secret` on the OAuth bundle, the
-    // stack-wide secret remains the source of truth for that workspace.
     configureRegistry({
       [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'active', workspace_slug: 'acme-A' },
     });
     configureSecretsManager({
       [WORKSPACE_A_SECRET_ARN]: makeStoredOauth({
         workspace_id: WORKSPACE_A_ID,
-        // No webhook_signing_secret field — pre-migration bundle.
       }),
       [process.env.LINEAR_WEBHOOK_SECRET_ARN!]: STACK_WIDE_SECRET,
     });
@@ -295,10 +257,6 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   });
 
   test('rejects when registry status is not active even if per-workspace secret matches', async () => {
-    // Revoked workspaces shouldn't trigger tasks. The stack-wide
-    // signing secret here does not match the per-workspace secret, so
-    // even without the no-fallback rule the request would fail — this
-    // test only asserts that `revoked` flips to a 401.
     configureRegistry({
       [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'revoked', workspace_slug: 'acme-A' },
     });
@@ -316,14 +274,6 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   });
 
   test('revoked workspace rejected even when the stack-wide secret matches the request', async () => {
-    // Critical security test: `setup` mirrors the first workspace's
-    // signing secret into the stack-wide one. If a workspace later gets
-    // revoked, the stack-wide secret still matches its requests. Without
-    // a distinct `revoked` outcome the receiver would silently fall
-    // through to the stack-wide fallback and re-grant access. A revoked
-    // workspace whose orgId is in the registry MUST fail closed — this test
-    // pins the no-fallback rule.
-    // verification regardless of how the request is signed.
     configureRegistry({
       [WORKSPACE_A_ID]: { oauth_secret_arn: WORKSPACE_A_SECRET_ARN, status: 'revoked', workspace_slug: 'acme-A' },
     });
@@ -332,7 +282,6 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
         workspace_id: WORKSPACE_A_ID,
         webhook_signing_secret: WORKSPACE_A_SECRET,
       }),
-      // Stack-wide secret == workspace A's secret (the bypass scenario).
       [process.env.LINEAR_WEBHOOK_SECRET_ARN!]: WORKSPACE_A_SECRET,
     });
     const body = payloadFor(WORKSPACE_A_ID);
@@ -342,13 +291,6 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   });
 
   test('infra error during per-workspace lookup surfaces as 500 (no silent stack-wide downgrade)', async () => {
-    // A DDB throttle on the registry table (or a Secrets Manager 5xx)
-    // must NOT collapse to the stack-wide fallback path — that would
-    // silently downgrade a per-workspace-secured workspace to stack-
-    // wide verification under load. Strict lookups bubble the error so
-    // the receiver returns 500 and Linear retries (delivery is
-    // best-effort with retries; brief unavailability is preferable to
-    // a security-relevant downgrade).
     ddbSend.mockImplementation((cmd: { _type?: string }) => {
       if (cmd._type === 'Get') {
         const err = new Error('Throttled');
@@ -367,9 +309,6 @@ describe('linear-webhook handler — multi-workspace signature verification', ()
   });
 
   test('an organizationId that is not a string names no workspace: a bad signature is a 401, not a 500', async () => {
-    // The registry is keyed on a string, and DynamoDB rejects a Get whose key has
-    // another type. The id is read before the signature is checked, so reaching the
-    // registry with it let any unsigned request produce a 500 and an error log.
     ddbSend.mockImplementation((cmd: { _type?: string; input: { Key?: { linear_workspace_id?: unknown } } }) => {
       if (cmd._type === 'Get' && typeof cmd.input.Key?.linear_workspace_id !== 'string') {
         const err = new Error('One or more parameter values were invalid: Type mismatch for key linear_workspace_id expected: S actual: N');

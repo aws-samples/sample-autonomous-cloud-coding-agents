@@ -1,9 +1,5 @@
-"""Unit tests for policy.py — Cedar policy engine."""
-
 from unittest.mock import patch
 
-# Hard import (not importorskip): without cedarpy the engine denies every call.
-# These tests must then fail, not drop out of the run.
 import cedarpy  # noqa: F401
 import pytest
 
@@ -44,9 +40,6 @@ class TestNewTaskPermissions:
 
 
 class TestReadOnlyPermissions:
-    # #248 Phase 2a: read-only enforcement keys off the ``read_only`` context
-    # attribute, not the principal literal. A read-only engine forbids
-    # Write/Edit for any principal; reads/globs/greps/bash still pass.
     def test_denies_write(self):
         engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
@@ -58,16 +51,11 @@ class TestReadOnlyPermissions:
         assert result.allowed is False
 
     def test_denies_write_for_any_read_only_principal(self):
-        # The deny attaches to the property, not the "pr_review" literal — a
-        # non-pr_review principal that is read-only is still denied Write.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
         assert result.allowed is False
 
     def test_writeable_principal_allows_write(self):
-        # Inverse guard: read_only=False must NOT block Write (the deny is gated
-        # on context.read_only == true). A pr_review principal that is not
-        # read-only can write — proving enforcement no longer rides the literal.
         engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=False)
         result = engine.evaluate_tool_use("Write", {"file_path": "src/main.py"})
         assert result.allowed is True
@@ -94,20 +82,11 @@ class TestReadOnlyPermissions:
 
 
 class TestReadOnlyMissingAttributeFailsClosed:
-    """The read-only forbid rules are ``when { context.read_only == true }``.
-    If ``read_only`` is ABSENT from the context, Cedar errors on the attribute
-    access, SKIPS the forbid rule, and the base permit wins → native Allow
-    (proven by contracts/cedar-parity/read-only-missing-attribute.json on both
-    engines). Production safety on this path therefore does NOT rest on Cedar's
-    native decision — it rests on ``_eval_tier`` re-raising on
-    ``diagnostics.errors`` so the outer handler maps to a fail-closed DENY.
-    These tests pin that re-raise + injection discipline (#248).
-    """
+    """Cedar skips a forbid rule whose ``when`` clause errors on a missing
+    attribute: the base permit wins, and the answer is Allow with
+    ``diagnostics.errors`` set (contracts/cedar-parity/read-only-missing-attribute.json)."""
 
     def test_eval_tier_reraises_on_missing_read_only_attribute(self):
-        # Drive _eval_tier directly with a context that omits read_only against
-        # the hard-deny tier. cedarpy returns Allow + diagnostics.errors; the
-        # re-raise is the ONLY thing standing between that Allow and a write.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
         with pytest.raises(RuntimeError, match="Cedar policy parse/eval errors"):
             engine._eval_tier(
@@ -115,13 +94,10 @@ class TestReadOnlyMissingAttributeFailsClosed:
                 action="invoke_tool",
                 resource_type="Agent::Tool",
                 resource_id="Write",
-                context={},  # read_only deliberately absent
+                context={},
             )
 
     def test_evaluate_tool_use_always_injects_read_only(self):
-        # The companion guard: evaluate_tool_use must ALWAYS put read_only in the
-        # context so the missing-attribute path above is never reached in normal
-        # operation. A read-only engine denies Write through the normal path.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "src/app.py"})
         assert result.allowed is False
@@ -187,8 +163,6 @@ class TestDestructiveBashCommands:
 
 
 class TestBashCommandsWithQuotes:
-    """Commands containing double quotes must not cause NoDecision."""
-
     @pytest.mark.parametrize(
         "cmd",
         [
@@ -212,8 +186,6 @@ class TestBashCommandsWithQuotes:
 
 
 class TestFilePathsWithSpecialChars:
-    """File paths with special characters must not cause NoDecision."""
-
     def test_allows_path_with_quotes(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         result = engine.evaluate_tool_use("Write", {"file_path": '/workspace/it"s-a-file.ts'})
@@ -240,15 +212,6 @@ class TestExtraPolicies:
 
 class TestFailClosed:
     def test_invalid_policy_syntax_fails_closed(self):
-        """Invalid Cedar policy syntax should fail closed (deny the call).
-
-        Phase 1 patched ``engine._policies`` after construction; the Cedar
-        HITL rewrite validates policy text at ``PolicyEngine.__init__`` so
-        the Phase 1 back-door attribute no longer exists. Patching
-        ``_hard_policies`` to invalid text reproduces the same hazard path:
-        the next ``evaluate_tool_use`` raises inside cedarpy and the engine
-        returns DENY with ``fail-closed: <ExceptionType>``.
-        """
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         engine._hard_policies = "THIS IS NOT VALID CEDAR"
         result = engine.evaluate_tool_use("Write", {"file_path": "test.py"})
@@ -269,8 +232,6 @@ class TestDurationMetrics:
 
 
 class TestConstantsSemanticValidation:
-    """Verify _validate_constants rejects invariant violations."""
-
     def test_rejects_approval_timeout_min_zero(self):
         with (
             patch.object(policy, "FLOOR_TIMEOUT_S", 0),
@@ -327,5 +288,4 @@ class TestConstantsSemanticValidation:
             _validate_constants()
 
     def test_passes_with_valid_constants(self):
-        """Sanity: the real constants pass validation."""
         _validate_constants()

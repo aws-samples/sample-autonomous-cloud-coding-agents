@@ -19,7 +19,6 @@
 
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -44,7 +43,6 @@ jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
 let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
-// Set env vars before importing handler
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.ORCHESTRATOR_FUNCTION_ARN = 'arn:aws:lambda:us-east-1:123456789012:function:orchestrator:live';
@@ -103,11 +101,8 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 beforeEach(() => {
   jest.clearAllMocks();
   ulidCounter = 0;
-  // Default: PutCommand succeeds, no idempotency conflicts
   mockSend.mockResolvedValue({});
-  // Default: orchestrator invocation succeeds
   mockLambdaSend.mockResolvedValue({});
-  // Default: guardrail allows content
   mockBedrockSend.mockResolvedValue({ action: 'NONE' });
 });
 
@@ -125,10 +120,8 @@ describe('create-task handler', () => {
     expect(body.data.branch_name).toContain('bgagent/ULID1/');
     expect(result.headers?.['X-Request-Id']).toBe('ULID0');
 
-    // Two DynamoDB calls: PutCommand for task + PutCommand for event
     expect(mockSend).toHaveBeenCalledTimes(2);
 
-    // Orchestrator invoked async
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
@@ -161,10 +154,6 @@ describe('create-task handler', () => {
   });
 
   test('returns 400 for missing repo on a repo-bound workflow', async () => {
-    // #248 Phase 3: repo is required only when the resolved workflow's
-    // requires_repo is true. coding/new-task-v1 is repo-bound, so a missing
-    // repo is rejected; a repo-less workflow (default/agent-v1) is not (see
-    // the repo-less acceptance test below).
     const event = makeEvent({ body: JSON.stringify({ workflow_ref: 'coding/new-task-v1', task_description: 'Fix it' }) });
     const result = await handler(event);
 
@@ -184,8 +173,6 @@ describe('create-task handler', () => {
   });
 
   test('returns 400 when the resolved workflow has no satisfiable input', async () => {
-    // No workflow_ref ⇒ resolves to default/agent-v1, which requires
-    // task_description; a bare repo satisfies nothing.
     const event = makeEvent({ body: JSON.stringify({ repo: 'org/repo' }) });
     const result = await handler(event);
 
@@ -196,7 +183,6 @@ describe('create-task handler', () => {
   });
 
   test('accepts issue_number without task_description for the coding workflow', async () => {
-    // coding/new-task-v1 accepts one_of issue_number/task_description.
     const event = makeEvent({
       body: JSON.stringify({ repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: 42 }),
     });
@@ -208,8 +194,6 @@ describe('create-task handler', () => {
   });
 
   test('returns 200 with same task_id for idempotency replay', async () => {
-    // First call: QueryCommand returns existing task_id
-    // Second call: GetCommand returns existing task
     const existingItem = {
       task_id: 'existing-task',
       user_id: 'user-123',
@@ -250,7 +234,6 @@ describe('create-task handler', () => {
   });
 
   test('proceeds when idempotency key is not found', async () => {
-    // QueryCommand returns no items
     mockSend
       .mockResolvedValueOnce({ Items: [] })
       .mockResolvedValueOnce({})
@@ -298,7 +281,6 @@ describe('create-task handler', () => {
     const body = JSON.parse(result.body);
     expect(body.error.code).toBe('VALIDATION_ERROR');
     expect(body.error.message).toContain('content policy');
-    // Should not write to DynamoDB
     expect(mockSend).not.toHaveBeenCalled();
   });
 
@@ -318,7 +300,6 @@ describe('create-task handler', () => {
     const result = await handler(event);
 
     expect(result.statusCode).toBe(201);
-    // Guardrail should not be called for issue-only tasks
     expect(mockBedrockSend).not.toHaveBeenCalled();
   });
 });

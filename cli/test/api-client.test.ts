@@ -22,14 +22,12 @@ import { getAuthToken } from '../src/auth';
 import { setVerbose } from '../src/debug';
 import { ApiError } from '../src/errors';
 
-// Mock auth
 jest.mock('../src/auth', () => ({
   getAuthToken: jest.fn().mockResolvedValue('mock-token'),
 }));
 
 const mockGetAuthToken = getAuthToken as jest.Mock;
 
-// Mock config
 jest.mock('../src/config', () => ({
   loadConfig: jest.fn().mockReturnValue({
     api_url: 'https://api.example.com',
@@ -40,7 +38,6 @@ jest.mock('../src/config', () => ({
   }),
 }));
 
-// Mock fetch
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
@@ -164,7 +161,6 @@ describe('ApiClient', () => {
     });
 
     test('sends an empty repository as it is, for the API to refuse', async () => {
-      // `--repo "$REPO"` with the variable unset: left out, the answer would count every repository.
       await client.getScoreboard({ range: '7d', repo: '' });
 
       expect(mockFetch).toHaveBeenCalledWith('https://api.example.com/tasks?view=scoreboard&range=7d&repo=', expect.anything());
@@ -280,8 +276,6 @@ describe('ApiClient', () => {
         await client[method]('link-abc', { dryRun: true });
         await client[method]('link-abc');
 
-        // The handler stores the identity mapping and consumes the code unless
-        // the body says `dry_run: true` (the wire name, not the option's).
         expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({ code: 'link-abc', dry_run: true });
         expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ code: 'link-abc' });
       },
@@ -317,7 +311,6 @@ describe('ApiClient', () => {
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain('/tasks/abc/events');
       expect(url).toContain(`after=${ulid}`);
-      // Must not silently send next_token when only after was provided.
       expect(url).not.toContain('next_token=');
     });
 
@@ -348,8 +341,6 @@ describe('ApiClient', () => {
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain('desc=1');
       expect(url).toContain('limit=20');
-      // ``desc: false`` MUST NOT leak as ``desc=0`` or ``desc=false`` —
-      // the server treats anything truthy-looking as opt-in.
     });
 
     test('omits desc when desc is falsy or absent', async () => {
@@ -366,8 +357,6 @@ describe('ApiClient', () => {
     });
 
     test('both after and nextToken are sent verbatim to the server', async () => {
-      // The client does not arbitrate — the server prefers ``after`` and logs
-      // a warning. This test just locks in the transport behaviour.
       const response = { data: [], pagination: { next_token: null, has_more: false } };
       mockFetch.mockResolvedValue({
         ok: true,
@@ -435,17 +424,14 @@ describe('ApiClient', () => {
       expect(result.map(e => e.event_id)).toEqual(['E1', 'E2', 'E3']);
       expect(mockFetch).toHaveBeenCalledTimes(3);
 
-      // First call: uses after
       const url1 = mockFetch.mock.calls[0][0] as string;
       expect(url1).toContain('after=01ARZ3NDEKTSV4RRFFQ69G5FAV');
-      // Second and third: use next_token (no after)
       const url2 = mockFetch.mock.calls[1][0] as string;
       expect(url2).toContain('next_token=tok-1');
       expect(url2).not.toContain('after=');
       const url3 = mockFetch.mock.calls[2][0] as string;
       expect(url3).toContain('next_token=tok-2');
       expect(url3).not.toContain('after=');
-      // Every request asks for the largest page the server returns.
       for (const [url] of mockFetch.mock.calls) {
         expect(url).toContain('limit=100');
       }
@@ -468,11 +454,6 @@ describe('ApiClient', () => {
 
   describe('AbortSignal propagation', () => {
     test('threads signal through request() into fetch()', async () => {
-      // Regression guard: if a refactor ever drops ``signal`` from the
-      // fetch options, ``bgagent watch`` Ctrl+C becomes unresponsive
-      // because in-flight requests would have to time out before the
-      // loop could exit. This test proves the plumbing end-to-end at
-      // the HTTP boundary.
       mockFetch.mockResolvedValue({
         ok: true,
         json: async () => ({ data: { task_id: 'abc' } }),
@@ -497,7 +478,6 @@ describe('ApiClient', () => {
       await client.getTaskEvents('abc', { signal: controller.signal });
       await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV', { signal: controller.signal });
 
-      // Every fetch the client issued must carry the same signal.
       const calls = mockFetch.mock.calls;
       expect(calls.length).toBeGreaterThanOrEqual(2);
       for (const [, init] of calls) {
@@ -506,11 +486,6 @@ describe('ApiClient', () => {
     });
 
     test('throws ApiError (not CliError) for non-JSON 4xx body so callers can classify', async () => {
-      // Regression guard for Chunk H: WAF / CloudFront HTML error pages
-      // used to come back as CliError without a status, defeating the
-      // watch retry loop's 4xx-vs-5xx classification. Non-JSON HTTP
-      // errors must still be ApiError so ``isTransientError`` can see
-      // the 4xx status and NOT retry.
       mockFetch.mockResolvedValue({
         ok: false,
         status: 403,
@@ -543,7 +518,6 @@ describe('ApiClient', () => {
       expect(result.task).toEqual(taskDetail);
       expect(result.recentEvents).toEqual(events);
 
-      // Two HTTP calls; the events call must carry ``desc=1`` and a bounded limit.
       expect(mockFetch).toHaveBeenCalledTimes(2);
       const urls = mockFetch.mock.calls.map(c => c[0] as string);
       expect(urls.some(u => u === 'https://api.example.com/tasks/abc')).toBe(true);
@@ -554,9 +528,6 @@ describe('ApiClient', () => {
     });
 
     test('surfaces a getTask failure from the parallel pair', async () => {
-      // Regression guard against a future refactor to ``Promise.allSettled``
-      // that would silently render a broken snapshot. The current contract
-      // is fail-fast: if either leg errors, the CLI surfaces the error.
       mockFetch
         .mockRejectedValueOnce(new Error('network down'))
         .mockResolvedValueOnce({
@@ -672,9 +643,6 @@ describe('ApiClient', () => {
     });
 
     test('throws ApiError with HTTP status for non-JSON error response', async () => {
-      // A non-JSON body on an HTTP error (WAF HTML page, edge proxy,
-      // 5xx with a plaintext reason) must still carry the status as an
-      // ``ApiError`` so the watch retry loop can classify 4xx vs 5xx.
       mockFetch.mockResolvedValue({
         ok: false,
         status: 502,
@@ -683,7 +651,6 @@ describe('ApiClient', () => {
       });
 
       await expect(client.getTask('abc')).rejects.toThrow('non-JSON response');
-      // ApiError (not CliError) so isTransientError can see the 502.
       const err: unknown = await client.getTask('abc').catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ApiError);
       expect((err as ApiError).statusCode).toBe(502);
@@ -725,7 +692,6 @@ describe('ApiClient', () => {
 
       const created = await client.createApiKey({ name: 'ci' });
 
-      // The caller still gets the key; only what --verbose prints is masked.
       expect(created.key).toBe('bgak_live_secret');
       const logged = errorSpy.mock.calls.map(args => args.join(' ')).join('\n');
       expect(logged).toContain('Response body');
@@ -745,7 +711,6 @@ describe('ApiClient', () => {
         runtime: { headers: { Authorization: 'Bearer not-a-real-token' } },
       });
 
-      // The server still gets the header; only what --verbose prints is masked.
       expect(JSON.parse(mockFetch.mock.calls[0][1].body).runtime.headers.Authorization).toBe('Bearer not-a-real-token');
       const logged = errorSpy.mock.calls.map(args => args.join(' ')).join('\n');
       expect(logged).toContain('Request body');

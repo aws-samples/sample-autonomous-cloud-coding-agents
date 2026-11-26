@@ -63,13 +63,6 @@ export function buildRepoOnboardNotes(input: RepoOnboardNotesInput): readonly st
   }
 
   if (computeType === 'lambda-microvm') {
-    // Mirrors the ECS note, plus the one thing that has no ECS analogue: the
-    // substrate can be fully deployed and still carry no IMAGE (ADR-021's
-    // three-state table — the artifact bucket must exist before the artifact can
-    // be uploaded), in which case the orchestrator gets no MICROVM_* env block at
-    // all and tasks fail with the strategy's own remedy. The `bgagent repo
-    // onboard` substrate gate cannot see that: `ComputeSubstrate` says the
-    // backend was provisioned, not that an image was configured.
     notes.push(
       'NOTE: compute_type=lambda-microvm requires the MicroVM substrate wired into the stack '
       + '(TaskOrchestrator microvmConfig) AND a MicroVM image configured. A stack deployed with '

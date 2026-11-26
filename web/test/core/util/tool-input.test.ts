@@ -20,7 +20,6 @@
 import { describe, expect, it } from 'vitest';
 import { isCutOff, parseToolInput, previewField } from '../../../src/core/util/tool-input';
 
-/** What the agent stores: the repr cut to 200 characters, plus "...". */
 const cut = (repr: string) => `${repr.slice(0, 200)}...`;
 
 describe('parseToolInput', () => {

@@ -1,14 +1,3 @@
-# First-party repo-less knowledge workflow (#248 Phase 3): research a topic from
-# the task description (+ attachments / URLs) and deliver a cited write-up as an
-# artifact — no repo, branch, build, or PR. The concrete demonstration that the
-# repo-less path runs end-to-end (acceptance criterion #4).
-#
-# Runnable today with built-in capabilities only: registry-resolved assets
-# (custom MCP search servers, research-synthesis skills) are a Phase-4 (#246)
-# enhancement and are deliberately NOT declared here so the file is executable
-# against the current filesystem resolver. WebFetch covers basic research now.
-#
-# See docs/design/WORKFLOWS.md §"requires_repo" and the repo-less example.
 id: knowledge/web-research-v1
 version: 1.0.0
 domain: knowledge
@@ -27,8 +16,6 @@ hydration:
   sources: [task_description, attachments, memory]
 agent_config:
   tier: standard
-  # Read-leaning: research, not mutation. WebFetch is the research surface;
-  # no Bash/Write/Edit (the deliverable is the agent's synthesised text).
   allowed_tools: [Read, Glob, Grep, WebFetch]
   cedar_policy_modules: [builtin/hard_deny, builtin/soft_deny]
 repo_config:

@@ -1,17 +1,3 @@
-"""Coding-lane post-hook gating honors each verify step's declared ``gate`` (#301).
-
-The inline post-hook path in ``pipeline.run_task`` consults the workflow's
-``verify_build`` / ``verify_lint`` steps through the runner's ``gate_status`` —
-the single place gate semantics live — instead of hardcoding regression-only
-gating. These tests pin:
-
-- ``gate: strict`` fails the task on a build regression on the coding lane
-  (and ``informational`` never gates) — end-to-end through ``run_task``.
-- The three shipped coding workflows keep their exact pre-#301 effective
-  gating: inline verdict == runner verdict == legacy verdict for the
-  ``regression_only`` and ``read_only`` cases.
-"""
-
 from __future__ import annotations
 
 from typing import ClassVar
@@ -62,8 +48,6 @@ def _wf_with_build_gate(gate: str | None, **over) -> Workflow:
 
 
 class TestApplyPostHookGates:
-    """Unit semantics of the inline gate resolution."""
-
     def test_strict_gates_on_regression(self):
         wf = _wf_with_build_gate("strict")
         assert not _apply_post_hook_gates(
@@ -76,8 +60,6 @@ class TestApplyPostHookGates:
         )
 
     def test_strict_gates_even_preexisting_failure(self):
-        # strict means ANY failure gates — including a build that was already
-        # red before the agent ran (the case regression_only forgives).
         wf = _wf_with_build_gate("strict")
         assert not _apply_post_hook_gates(
             wf,
@@ -152,8 +134,6 @@ class TestApplyPostHookGates:
         )
 
     def test_undeclared_verify_lint_never_gates(self):
-        # Legacy: lint is not used for terminal status unless a workflow
-        # declares the step (the shipped coding workflows do not).
         wf = _wf_with_build_gate("regression_only")
         assert _apply_post_hook_gates(
             wf,
@@ -182,8 +162,6 @@ class TestApplyPostHookGates:
         )
 
     def test_advisory_on_failure_continue_does_not_gate(self):
-        # on_failure: continue marks the step advisory — the runner records the
-        # failure and proceeds, so the inline verdict must not gate either.
         steps = [
             *_BASE_STEPS,
             {"kind": "verify_build", "name": "build", "gate": "regression_only"},
@@ -206,8 +184,6 @@ class TestApplyPostHookGates:
         )
 
     def test_workflow_none_falls_back_to_legacy(self):
-        # Post-hook reload failed: build keeps legacy regression-only gating,
-        # lint never gates — a corrupt file cannot strand the agent's work.
         assert not _apply_post_hook_gates(
             None,
             read_only=False,
@@ -227,13 +203,6 @@ class TestApplyPostHookGates:
 
 
 class TestShippedWorkflowParity:
-    """Lock: no behavior change for the three shipped coding workflows.
-
-    For every (build_passed, build_before) combination, the inline verdict
-    (``_apply_post_hook_gates``), the runner verdict (``gate_status`` on the
-    declared step), and the legacy pre-#301 inline logic must agree.
-    """
-
     SHIPPED: ClassVar[list[str]] = [
         "coding/new-task-v1",
         "coding/pr-iteration-v1",
@@ -242,7 +211,6 @@ class TestShippedWorkflowParity:
 
     @staticmethod
     def _legacy_build_ok(*, read_only: bool, build_passed: bool, build_before: bool) -> bool:
-        # The pre-#301 inline logic, verbatim.
         if read_only:
             return True
         return build_passed or not build_before
@@ -278,8 +246,6 @@ class TestShippedWorkflowParity:
 
     @pytest.mark.parametrize("workflow_id", SHIPPED)
     def test_lint_failure_never_gates_shipped_workflows(self, workflow_id):
-        # None of the shipped coding workflows declare verify_lint, so a lint
-        # failure must not gate — exactly the legacy behavior.
         wf = load_workflow(workflow_id)
         assert all(s.kind != "verify_lint" for s in wf.steps)
         assert _apply_post_hook_gates(
@@ -293,8 +259,6 @@ class TestShippedWorkflowParity:
 
 
 class TestRunTaskHonorsGate:
-    """End-to-end through run_task: the declared gate decides the task verdict."""
-
     @staticmethod
     def _span() -> MagicMock:
         span = MagicMock()
@@ -360,21 +324,15 @@ class TestRunTaskHonorsGate:
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         result, mock_ensure_pr = self._run(gate="strict", build_passed=False, build_before=True)
         assert result["status"] == "error"
-        # The inline ordering is preserved: ensure_pr still ran (the PR is the
-        # reviewable artifact even when the gate fails the task).
         mock_ensure_pr.assert_called_once()
 
     def test_strict_gate_fails_task_even_when_broken_before(self, monkeypatch):
-        # The case the legacy regression-only inline logic would have passed —
-        # strict must gate it (this is exactly what #301 makes effective).
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         result, _ = self._run(gate="strict", build_passed=False, build_before=False)
         assert result["status"] == "error"
 
     def test_informational_gate_never_fails_task(self, monkeypatch):
-        # A build regression that regression_only/strict would gate — the
-        # author opted out via gate: informational, so the task succeeds.
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         result, mock_ensure_pr = self._run(
@@ -384,10 +342,6 @@ class TestRunTaskHonorsGate:
         mock_ensure_pr.assert_called_once()
 
     def test_read_only_workflow_survives_a_build_killed_by_the_host(self, monkeypatch):
-        # A read-only workflow never gates (WORKFLOWS.md), and pr-review declares
-        # its build informational. On ECS that build runs on the 8 GB planning
-        # task; when it is killed for memory (exit 137 -> infra_failed) the review
-        # the agent has already posted must not be reported as a failed task.
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         result, _ = self._run(
@@ -401,9 +355,6 @@ class TestRunTaskHonorsGate:
         assert result["status"] == "success"
 
     def test_writeable_workflow_still_fails_on_a_build_killed_by_the_host(self, monkeypatch):
-        # What the infra marker is for: code the agent changed and nobody could
-        # build must not read as a success, even where the regression-only gate
-        # would pass because the baseline was red.
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         result, _ = self._run(

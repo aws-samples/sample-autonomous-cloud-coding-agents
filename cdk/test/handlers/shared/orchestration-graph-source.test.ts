@@ -26,7 +26,6 @@ import {
   linearGraphSource,
 } from '../../../src/handlers/shared/orchestration-graph-source';
 
-/** A `fetch` impl returning a Linear children payload, for the Linear source. */
 function linearFetch(children: Array<{ id: string; blockedBy?: string[] }>): typeof fetch {
   return (async () => ({
     ok: true,
@@ -64,8 +63,6 @@ describe('declarativeGraphSource', () => {
   });
 
   test('never errors — validity is enforced downstream, not here', async () => {
-    // A cyclic graph is still "ok" from the source's perspective; validateDag
-    // (in discoverOrchestration) is what rejects it.
     const result = await declarativeGraphSource([
       { id: 'x', depends_on: ['y'] },
       { id: 'y', depends_on: ['x'] },

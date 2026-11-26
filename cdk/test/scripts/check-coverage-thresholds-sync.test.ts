@@ -17,23 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for `scripts/check-coverage-thresholds-sync.ts`, the coverage contract
- * drift gate.
- *
- * Almost every case here is an edit that the gate used to accept: it compared
- * only the jest floors and looked for the agent floor as a substring, so it
- * printed "in sync" while a floor was switched off, lowered or measured over
- * fewer files. A gate that fails by passing has to be tested by making it fail.
- *
- * As in check-constants-sync.test.ts (which explains why a root script is
- * tested from cdk/), the real script is spawned against a copy of the files it
- * reads. The script has mise parse TOML, so `mise` must be on PATH; it is
- * wherever this suite runs through `mise //cdk:test`. It also evaluates
- * web/vite.config.ts, whose imports the copy finds through links to the
- * repository's node_modules directories.
- */
-
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -48,7 +31,6 @@ const VITE_CONFIG = 'web/vite.config.ts';
 const FORGE = 'integrations/jira-forge-app/package.json';
 const FORGE_SOURCE = 'integrations/jira-forge-app/src/proxy.js';
 
-/** Every file the script reads, relative to the repo root. */
 const FIXTURE_FILES = [
   SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE, VITE_CONFIG, 'web/package.json', FORGE,
   'mise.toml', 'cdk/mise.toml', 'cli/mise.toml', 'web/mise.toml', FORGE_SOURCE,
@@ -70,10 +52,7 @@ interface Contract {
   pytest?: { agent: { report: { fail_under: number } } };
 }
 
-/**
- * The environment without what a Git hook exports. Under a hook those variables name the developer's repository, and
- * the script and the fixture commands would ask about it instead of the copy.
- */
+/** Git exports GIT_* variables to its hooks, and a child git that inherits them acts on the hook's repository. */
 const ENV = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
 
 interface RunResult {
@@ -82,7 +61,6 @@ interface RunResult {
   readonly stderr: string;
 }
 
-/** Copy the files the script reads into a temp root, apply `mutate`, and run it there. */
 function runInMutatedRepo(mutate: (root: string) => void): RunResult {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-coverage-sync-'));
   try {
@@ -91,8 +69,6 @@ function runInMutatedRepo(mutate: (root: string) => void): RunResult {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(REPO_ROOT, rel), dest);
     }
-    // The copy of web/vite.config.ts has to find its imports where the original does: in the hoisted node_modules
-    // and, when yarn keeps a package out of the hoist, in web's own.
     for (const dir of ['node_modules', 'web/node_modules']) {
       if (fs.existsSync(path.join(REPO_ROOT, dir))) {
         fs.symlinkSync(path.join(REPO_ROOT, dir), path.join(root, dir));
@@ -116,7 +92,6 @@ function runInMutatedRepo(mutate: (root: string) => void): RunResult {
   }
 }
 
-/** Rewrite a text file in the temp root. An edit that changes nothing would make its test vacuous. */
 function edit(root: string, rel: string, change: (text: string) => string): void {
   const before = fs.readFileSync(path.join(root, rel), 'utf-8');
   const after = change(before);
@@ -126,7 +101,6 @@ function edit(root: string, rel: string, change: (text: string) => string): void
   fs.writeFileSync(path.join(root, rel), after);
 }
 
-/** Patch a JSON file in the temp root. */
 function editJson<T>(root: string, rel: string, change: (json: T) => void): void {
   edit(root, rel, (text) => {
     const json = JSON.parse(text) as T;
@@ -135,7 +109,6 @@ function editJson<T>(root: string, rel: string, change: (json: T) => void): void
   });
 }
 
-/** Run with one edit and expect drift that names `where`. */
 function expectDrift(mutate: (root: string) => void, ...where: string[]): void {
   const result = runInMutatedRepo(mutate);
   expect(result.stderr).toContain('Coverage contract drift detected');
@@ -148,7 +121,6 @@ function expectDrift(mutate: (root: string) => void, ...where: string[]): void {
 const agentFloor = (JSON.parse(fs.readFileSync(path.join(REPO_ROOT, CONTRACT), 'utf-8')) as Contract).pytest!.agent.report.fail_under;
 
 describe('check-coverage-thresholds-sync', () => {
-  // A handful of subprocess spawns; give them room on a cold cache.
   jest.setTimeout(60_000);
 
   test('the real repository is in sync, and the check says how much it compared', () => {
@@ -157,7 +129,6 @@ describe('check-coverage-thresholds-sync', () => {
     if (result.status !== 0) {
       throw new Error(result.stderr);
     }
-    // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
     expect(Number(checked)).toBeGreaterThanOrEqual(42);
   });
@@ -199,8 +170,6 @@ describe('check-coverage-thresholds-sync', () => {
     });
 
     // Each of these lets a run of one test file, or of none, exit 0 with the floors still in the block (jest 30.4).
-    // None is a coverage setting, which is why the block is pinned whole except for a short list of harmless keys.
-    // One run plants them all: each is the same comparison, and each has to be reported.
     test('settings the contract does not list', () => {
       const unlisted: [string, unknown][] = [
         ['testFailureExitCode', 0],
@@ -268,8 +237,6 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${AGENT_MISE} tasks.test.run coverage flags`, '"--no-cov"');
     });
 
-    // pytest adds addopts to the command line of the test task, so a flag there changes the run as one on the task
-    // line would. The value is pinned whole: no flag is special, and neither is the way the value is written.
     test.each([
       ['one more flag', 'addopts = "-ra --collect-only"'],
       ['a list', 'addopts = ["-ra", "--no-cov"]'],
@@ -279,16 +246,13 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${PYPROJECT} [tool.pytest.ini_options] addopts: `, `does not match ${CONTRACT} pytest.agent.addopts: "-ra"`);
     });
 
-    // pytest 9 reads [tool.pytest] itself when [tool.pytest.ini_options] is empty: the pinned table would be one
-    // that is no longer in force.
+    // pytest 9 reads [tool.pytest] itself when [tool.pytest.ini_options] is empty.
     test('the pytest settings moved to the table that pytest 9 reads natively', () => {
       expectDrift((root) => {
         edit(root, PYPROJECT, text => `${text.replace('[tool.pytest.ini_options]', '[tool.pytest]')}\n[tool.pytest.ini_options]\n`);
       }, `cannot read tool.pytest.ini_options.addopts from ${PYPROJECT}`);
     });
 
-    // pytest runs the tests these settings let it collect, and a suite that lost test modules still meets the floor.
-    // testpaths is pinned to the value in the contract; the others are not in the contract, so they must not be set.
     test.each([
       ['testpaths', '["tests/test_config.py"]', '["tests"]'],
       ['python_files', '["test_[!c]*.py"]', 'not set'],
@@ -304,8 +268,6 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${PYPROJECT} [tool.pytest.ini_options] ${setting}: ${value} does not match ${CONTRACT} pytest.agent.${setting}: ${pinned}`);
     });
 
-    // Those settings are read one by one. Their table also holds the warning filters, and mise prints a pattern
-    // with a backslash in a form this check cannot read: such a filter must not stop it.
     test('a warning filter with a backslash in its pattern, in the table of the collection settings', () => {
       const result = runInMutatedRepo((root) => {
         edit(root, PYPROJECT, text => text.replace('    "error",\n', '    "error",\n    "ignore:the method run\\\\(\\\\) is deprecated:DeprecationWarning",\n'));
@@ -315,9 +277,8 @@ describe('check-coverage-thresholds-sync', () => {
       expect(result.status).toBe(0);
     });
 
-    // Without the flag coverage.py reads the file that a COVERAGE_RCFILE variable names, and the source and omit
-    // lists of that file decide what the floor measures. The task line is pinned verbatim as well, so the flag is
-    // taken off both copies here: the check has to ask for it by itself.
+    // Without --cov-config, coverage.py reads the file that a COVERAGE_RCFILE variable names, and the source and omit
+    // lists of that file decide what the floor measures.
     test('--cov-config taken off the test task and off the copy of its line in the contract', () => {
       expectDrift((root) => {
         edit(root, AGENT_MISE, text => text.replace(' --cov-config=pyproject.toml', ''));
@@ -325,8 +286,7 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${AGENT_MISE} tasks.test.run coverage flags`, '"--cov-config=pyproject.toml"');
     });
 
-    // Each of these is read before pyproject.toml (pytest 9.1 findpaths.py, coverage 7.15 config.py): with an omit list
-    // or a --no-cov in it, the floor measures less, or nothing, while pyproject.toml still matches the contract.
+    // The order of reading is in pytest 9.1 findpaths.py and coverage 7.15 config.py.
     test('config files that would be read before pyproject.toml, each of the eight names', () => {
       const names = ['pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini'];
       expectDrift((root) => {
@@ -350,8 +310,7 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${VITE_CONFIG} test.coverage exclude`);
     });
 
-    // As for jest, the block is pinned whole but for a few harmless keys. The root is why: moved, at either level, the
-    // coverage patterns match no file, and vitest 5.1 counts a floor over no file as met.
+    // vitest 5.1 counts a floor over no file as met, and a moved root leaves the coverage patterns matching no file.
     test.each([
       ["environment: 'jsdom',", "environment: 'jsdom', root: './test',", 'test root: "./test"'],
       ["environment: 'jsdom',", "environment: 'jsdom', passWithNoTests: true,", 'test passWithNoTests: true'],
@@ -365,8 +324,6 @@ describe('check-coverage-thresholds-sync', () => {
   });
 
   describe('test scripts', () => {
-    // A runner takes a flag over its settings, and takes it in several spellings. The scripts are pinned whole, so
-    // no spelling is special: one flag and one second command stand for all of them, in each of the three scripts.
     test.each(['--no-coverage', '|| true'])('the cdk, cli and web test scripts with "%s" appended', (suffix) => {
       const packages = ['cdk', 'cli', 'web'];
       expectDrift((root) => {
@@ -386,7 +343,6 @@ describe('check-coverage-thresholds-sync', () => {
       }, 'web/package.json scripts.test', `does not match ${CONTRACT} commands.web/package.json`);
     });
 
-    // node:test has no config file: the floors of the Forge app and its one test file are arguments of the script.
     test.each([
       ['a floor lowered', /--test-coverage-lines=\d+/, '--test-coverage-lines=1'],
       ['its test file left to discovery, which passes when there is none', / test\/proxy\.test\.js$/, ''],
@@ -399,8 +355,6 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${FORGE} scripts.test`, `does not match ${CONTRACT} commands.${FORGE}`);
     });
 
-    // Node leaves out of its coverage the code that one of its coverage comments marks (the edit below spells one), and
-    // nothing lints the Forge app: the floors of its script would then measure whatever is left.
     test('a comment in the Forge app that takes code out of the measurement', () => {
       expectDrift((root) => {
         edit(root, FORGE_SOURCE, text => `/* node:coverage disable */\n${text}`);
@@ -417,8 +371,6 @@ describe('check-coverage-thresholds-sync', () => {
   });
 
   describe('mise tasks', () => {
-    // The build reaches each test script, and the agent's pytest, through a mise task. What follows the script's name
-    // on the task line reaches the runner as a flag in the script would, so each task is pinned too.
     test('a suffix on the command line of each of the five test tasks', () => {
       expectDrift((root) => {
         edit(root, 'cdk/mise.toml', text => text.replace('"yarn test"]', '"yarn test --coverage=false"]'));
@@ -434,8 +386,6 @@ describe('check-coverage-thresholds-sync', () => {
       'mise.toml [tasks.test:jira-forge-app] run: "npm test --prefix integrations/jira-forge-app || true" does not match');
     });
 
-    // Other keys of a task decide whether and how its line runs, so a task is pinned whole: a key the contract does
-    // not list is drift. Its description and its dependencies cannot change what runs, and are free.
     test('a task key the contract does not list, next to one that is free', () => {
       const result = runInMutatedRepo((root) => {
         edit(root, 'cli/mise.toml', text => text.replace('run = "yarn test"', 'run = "yarn test"\nshell = "bash -c"'));
@@ -455,9 +405,7 @@ describe('check-coverage-thresholds-sync', () => {
   });
 
   describe('config files that a launcher reads on top of a pinned manifest', () => {
-    // What mise 2026.10 reads next to a mise.toml, in each directory that holds a pinned task, and the rc files that
-    // yarn 1.22 and npm read next to a pinned script. Any of them can change how a pinned command runs while the
-    // text the contract pins stays the same.
+    // What mise 2026.10 reads next to a mise.toml, and the rc files that yarn 1.22 and npm read next to a pinned script.
     const MISE = [
       '.mise.toml', 'mise.local.toml', '.mise.local.toml', '.miserc.toml', '.miserc.local.toml', 'mise', '.mise',
       '.config/mise.toml', '.config/mise.local.toml', '.config/miserc.toml', '.config/mise',
@@ -480,8 +428,6 @@ describe('check-coverage-thresholds-sync', () => {
       }, ...LAUNCHER_CONFIGS.map(file => `  - ${file} is in the repository`));
     });
 
-    // In a checkout only what git tracks counts: a config file kept for one machine is not drift until it is
-    // committed, and CI never sees it.
     test('in a git checkout, the one that is tracked and not the one that is not', () => {
       const result = runInMutatedRepo((root) => {
         const git = (...args: string[]) => execFileSync('git', args, { cwd: root, env: ENV, stdio: 'pipe' });
@@ -509,8 +455,6 @@ describe('check-coverage-thresholds-sync', () => {
       expect(result.status).toBe(1);
     });
 
-    // The check evaluates web/vite.config.ts. Without the packages that file imports there is nothing to put back
-    // in line, so the message names the cause and leaves the advice about drift out.
     test('when dependencies are not installed, and says so', () => {
       const result = runInMutatedRepo((root) => {
         for (const link of ['node_modules', 'web/node_modules']) {

@@ -49,12 +49,9 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     // `runtimeUserId` triggers AgentCore Identity's workload-access-token
     // injection: when set, AgentCore exchanges the caller's identity for
     // a workload token and delivers it to the agent container via the
-    // `WorkloadAccessToken` request header (read by
-    // `BedrockAgentCoreContext.set_workload_access_token` in server.py).
-    // Without it, the agent's `resolve_linear_api_token()` short-circuits
-    // before reaching the Identity SDK call. Requires the orchestrator
-    // role to have `bedrock-agentcore:InvokeAgentRuntimeForUser` in
-    // addition to `InvokeAgentRuntime`.
+    // `WorkloadAccessToken` request header. Requires
+    // `bedrock-agentcore:InvokeAgentRuntimeForUser` in addition to
+    // `InvokeAgentRuntime`.
     const command = new InvokeAgentRuntimeCommand({
       agentRuntimeArn: runtimeArn,
       runtimeSessionId: sessionId,

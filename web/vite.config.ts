@@ -5,19 +5,8 @@ import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 
 /**
- * Modes:
- *  - `vite --mode mock`  local development against the in-browser mock API (MSW) and mock sign-in.
- *  - `vite build`        production bundle; reads `/config.json` at runtime (written by the CDK stack).
- *  - `vitest`            unit/component tests against an MSW node server.
- *
- * Mock data and mock sign-in exist only behind the compile-time `__MOCK__` flag, so they are
- * tree-shaken out of every production bundle. Building in mock mode is refused outright.
- */
-/**
- * Production builds only: the dev server injects inline scripts (React Refresh) that this policy would block.
- * The API and login domain are per-deployment, so connect-src allows their AWS-owned parent domains.
- * Cloudscape sets inline style attributes, hence style-src 'unsafe-inline'. frame-ancestors cannot be set from
- * a meta tag; CloudFront's managed SECURITY_HEADERS policy sends X-Frame-Options instead.
+ * The dev server injects inline scripts (React Refresh) that this policy would block.
+ * frame-ancestors cannot be set from a meta tag.
  */
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -41,11 +30,6 @@ function contentSecurityPolicy(): Plugin {
   };
 }
 
-/**
- * `mise //web:dev:live` only: serves `.config.local.json` (your deployment's public
- * config, fetched by scripts/fetch-live-config.mjs) as /config.json, so the dev server
- * talks to the real API and Cognito. Never part of a build.
- */
 function localRuntimeConfig(): Plugin {
   return {
     name: 'abca-local-runtime-config',
@@ -75,14 +59,12 @@ export default defineConfig(({ command, mode }) => {
   return {
     plugins: [react(), contentSecurityPolicy(), ...(mock ? [msw({ mode: 'worker-only' })] : [localRuntimeConfig()])],
     define: { __MOCK__: JSON.stringify(mock) },
-    // Loopback only; never expose the dev server to the network.
     server: { host: '127.0.0.1', port: 5173, strictPort: true },
     preview: { host: '127.0.0.1', port: 4173, strictPort: true },
     build: {
       outDir: 'dist',
       emptyOutDir: true,
       sourcemap: false,
-      // Cloudscape dominates the bundle and changes rarely; a separate chunk keeps it cached across console releases.
       chunkSizeWarningLimit: 1200,
       rolldownOptions: {
         output: {
@@ -98,7 +80,6 @@ export default defineConfig(({ command, mode }) => {
     test: {
       environment: 'jsdom',
       setupFiles: ['./test/setup.ts'],
-      // CI runners are several times slower than a laptop; page tests render the whole app.
       testTimeout: 20_000,
       include: ['test/**/*.test.{ts,tsx}'],
       css: false,
@@ -107,8 +88,6 @@ export default defineConfig(({ command, mode }) => {
         include: ['src/**'],
         exclude: ['src/main.tsx', 'src/env.d.ts', 'src/mocks/browser.ts'],
         reporter: ['text', 'html'],
-        // Floors for `mise //web:test`. The settings that decide what they measure (this block and `include` above)
-        // are copies of vitest.web in contracts/coverage-thresholds.json: the drift check fails when they differ.
         thresholds: { statements: 88, branches: 80, functions: 89, lines: 91 },
       },
     },

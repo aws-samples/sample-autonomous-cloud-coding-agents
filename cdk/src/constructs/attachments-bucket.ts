@@ -21,15 +21,10 @@ import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 
-/** Lifecycle expiry for task attachments — matches task record retention. */
 const ATTACHMENT_TTL_DAYS = 90;
 
-/** Noncurrent version expiry — covers the longest-running tasks. */
 const NONCURRENT_VERSION_TTL_DAYS = 7;
 
-/**
- * Properties for AttachmentsBucket construct.
- */
 export interface AttachmentsBucketProps {
   /**
    * Removal policy for the bucket.
@@ -47,13 +42,6 @@ export interface AttachmentsBucketProps {
 /**
  * S3 bucket for task attachment storage.
  *
- * Attachments (images, files, URL-fetched content) are uploaded during task
- * creation (inline or presigned), screened for security, and delivered to
- * the agent runtime during execution.
- *
- * Security:
- *  - ``blockPublicAccess: BLOCK_ALL`` + ``enforceSSL: true``
- *  - ``encryption: S3_MANAGED`` — server-side encryption at rest.
  *  - Versioning enabled — pins object versions at screening time to prevent
  *    TOCTOU attacks (client uploads benign content, replaces with malicious
  *    content before agent downloads).
@@ -61,7 +49,6 @@ export interface AttachmentsBucketProps {
  *  - 7-day noncurrent version expiration (covers longest-running tasks).
  */
 export class AttachmentsBucket extends Construct {
-  /** The underlying S3 bucket. */
   public readonly bucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: AttachmentsBucketProps = {}) {

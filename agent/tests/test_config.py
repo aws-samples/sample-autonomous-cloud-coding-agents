@@ -1,5 +1,3 @@
-"""Unit tests for config.py — build_config and constants."""
-
 import os
 from datetime import UTC
 from unittest.mock import MagicMock, call, patch
@@ -15,10 +13,8 @@ from config import (
 )
 from models import TaskConfig
 
-# Stamps that both `_is_expiring` helpers must treat as malformed. The two with a "Z"
-# that is not the zone suffix pin the explicit `.replace("Z", "+00:00")`: parsed raw
-# (ruff FURB162's unsafe fix) the first raises TypeError out of the resolver and the
-# second is trusted until 2099.
+# `datetime.fromisoformat` accepts the last two, whose "Z" is not the zone suffix: parsed raw (ruff
+# FURB162's unsafe fix) the first raises TypeError in the resolver, the second is valid until 2099.
 _MALFORMED_EXPIRES_AT = ["this is not a date", "2099-01-01Z00:00:00", "2099-01-01Z00:00:00+00:00"]
 
 
@@ -46,7 +42,6 @@ class TestPRWorkflowIds:
 
 class TestWorkflowResolution:
     def test_default_workflow_when_omitted(self):
-        # No resolved_workflow ⇒ defaults to the coding workflow + new_task principal.
         config = build_config(
             repo_url="owner/repo",
             task_description="fix bug",
@@ -58,10 +53,6 @@ class TestWorkflowResolution:
         assert config.is_pr_workflow is False
 
     def test_haiku_model_defaults_to_inference_profile(self, monkeypatch):
-        # No override, no env → platform default, which must be a GEO-PREFIXED
-        # inference profile (Claude 4.x can't be invoked on-demand by bare model
-        # id). The geography must match the deployment's bedrockGeoRegion, or a run
-        # with no env set calls a profile the IAM grant does not cover.
         monkeypatch.delenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", raising=False)
         config = build_config(
             repo_url="owner/repo",
@@ -72,8 +63,6 @@ class TestWorkflowResolution:
         assert config.haiku_model == "global.anthropic.claude-haiku-5-5"
 
     def test_haiku_model_resolves_from_env(self, monkeypatch):
-        # The deployed ANTHROPIC_DEFAULT_HAIKU_MODEL (set by agent.ts) flows
-        # through config rather than being hardcoded in the runner.
         monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-x")
         config = build_config(
             repo_url="owner/repo",
@@ -93,9 +82,6 @@ class TestWorkflowResolution:
             )
 
     def test_pr_review_workflow_is_read_only_with_pr_review_principal(self):
-        # #248 Phase 2a: pr-review keeps its "pr_review" identity principal, but
-        # read-only enforcement now rides config.read_only (→ context.read_only),
-        # not the principal literal.
         config = build_config(
             repo_url="owner/repo",
             github_token="ghp_test123",
@@ -116,12 +102,9 @@ class TestWorkflowResolution:
             pr_number="42",
         )
         assert config.policy_principal == "pr_iteration"
-        # pr_iteration is a writeable workflow — must NOT be read-only (else the
-        # context.read_only hard-deny would wrongly block its Write/Edit).
         assert config.read_only is False
 
     def test_repoless_default_workflow_does_not_require_repo(self):
-        # #248 Phase 3: default/agent-v1 is the repo-less platform default.
         config = build_config(
             task_description="Summarise these papers",
             aws_region="us-east-1",
@@ -131,21 +114,14 @@ class TestWorkflowResolution:
         assert config.repo_url == ""
 
     def test_workflow_load_failure_fails_closed(self, monkeypatch):
-        # When the pinned workflow file can't load, the fallback must fail CLOSED:
-        # an unrecognised id is treated as read-only (deny writes) and repo-bound,
-        # rather than fail-open to writeable. Coding ids that ARE known-writeable
-        # keep their writeable posture.
         import workflow as workflow_mod
         from workflow import WorkflowValidationError
 
         def boom(_workflow_id):
             raise WorkflowValidationError("simulated load failure")
 
-        # build_config does `from workflow import load_workflow` at call time, so
-        # patch the name on the workflow package the import resolves against.
         monkeypatch.setattr(workflow_mod, "load_workflow", boom)
 
-        # Unknown id → read-only + requires repo (fail closed on both axes).
         cfg = build_config(
             repo_url="owner/repo",
             github_token="ghp_test123",
@@ -156,7 +132,6 @@ class TestWorkflowResolution:
         assert cfg.read_only is True
         assert cfg.requires_repo is True
 
-        # Known-writeable coding id keeps writeable even on load failure.
         cfg2 = build_config(
             repo_url="owner/repo",
             github_token="ghp_test123",
@@ -202,23 +177,13 @@ class TestBuildConfig:
 
 
 class TestResolveLinearApiToken:
-    """Phase 2.0b-O2: token resolves from per-workspace Secrets Manager.
-
-    The orchestrator stamps `linear_oauth_secret_arn` into the task's
-    channel_metadata at creation time. resolve_linear_api_token reads
-    the secret JSON via boto3 and caches the access_token in
-    `LINEAR_API_TOKEN` for linear_reactions.
-    """
-
     def test_returns_cached_value_without_calling_secrets_manager(self, monkeypatch):
-        """Fast-path: if LINEAR_API_TOKEN is already set, no SDK call fires."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_oauth_cached")
         with patch("boto3.client") as mock_boto:
             assert resolve_linear_api_token() == "lin_oauth_cached"
             mock_boto.assert_not_called()
 
     def test_returns_empty_when_secret_arn_missing(self, monkeypatch):
-        """Without channel_metadata.linear_oauth_secret_arn or env, no source — empty."""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.delenv("LINEAR_OAUTH_SECRET_ARN", raising=False)
         with patch("boto3.client") as mock_boto:
@@ -226,7 +191,6 @@ class TestResolveLinearApiToken:
             mock_boto.assert_not_called()
 
     def test_returns_empty_when_region_missing(self, monkeypatch):
-        """No region → can't construct boto3 client → empty + WARN, no SDK call."""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
@@ -235,7 +199,6 @@ class TestResolveLinearApiToken:
             mock_boto.assert_not_called()
 
     def test_resolves_from_secrets_manager_and_caches_in_env(self, monkeypatch):
-        """Happy path: channel_metadata carries the ARN, secret has access_token + future expiry."""
         from datetime import datetime, timedelta
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
@@ -262,15 +225,12 @@ class TestResolveLinearApiToken:
             resolved = resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"})
             assert resolved == "lin_oauth_fresh"
 
-        # Cached for subsequent reads.
         import os as _os
 
         assert _os.environ.get("LINEAR_API_TOKEN") == "lin_oauth_fresh"
-        # Reset for other tests.
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_returns_empty_on_secrets_manager_access_denied(self, monkeypatch):
-        """ClientError surfaces as empty + ERROR log, never crashes the agent."""
         from botocore.exceptions import ClientError
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
@@ -284,7 +244,6 @@ class TestResolveLinearApiToken:
             assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"}) == ""
 
     def test_falls_back_to_env_var_when_channel_metadata_omits_arn(self, monkeypatch):
-        """LINEAR_OAUTH_SECRET_ARN env var is the back-compat fallback."""
         from datetime import datetime, timedelta
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
@@ -314,11 +273,6 @@ class TestResolveLinearApiToken:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_force_replaces_the_cached_token_with_the_stored_one(self, monkeypatch):
-        """The token cached when the task started may have expired by the time it ends.
-
-        ``force`` reads the secret again, so the final reaction is sent with the
-        token a Lambda has stored in the meantime.
-        """
         import json
         from datetime import datetime, timedelta
 
@@ -336,11 +290,9 @@ class TestResolveLinearApiToken:
 
         assert resolved == "lin_new"
         assert os.environ.get("LINEAR_API_TOKEN") == "lin_new"
-        # The agent only reads the secret: what it holds was written by a Lambda.
         assert mock_sm.method_calls == [call.get_secret_value(SecretId="arn:t")]
 
     def test_force_keeps_the_cached_token_when_there_is_nothing_to_resolve(self, monkeypatch):
-        """A local run with a preset token and no secret: the preset stays in place."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_preset")
         monkeypatch.delenv("LINEAR_OAUTH_SECRET_ARN", raising=False)
         with patch("boto3.client") as mock_boto:
@@ -351,13 +303,6 @@ class TestResolveLinearApiToken:
 
 
 class TestResolveLinearApiTokenVaultPath:
-    """RFC #249 Phase 1: token minted via the AgentCore Identity Token Vault.
-
-    When LINEAR_VAULT_ENABLED and the task carries linear_provider_name +
-    linear_workspace_id, the vault path is tried first; any failure falls back
-    to the Secrets-Manager path so the vault never blocks a task.
-    """
-
     def _enable_vault(self, monkeypatch):
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
@@ -372,13 +317,6 @@ class TestResolveLinearApiTokenVaultPath:
         }
 
     def test_prefers_the_recorded_vault_user_id(self, monkeypatch):
-        """The subject comes from the task, not from the workspace UUID.
-
-        Consent binds the grant to a slug-derived subject, because the organization
-        UUID is not knowable until a token exists. Deriving it here would look up a
-        grant that was never created, so every mint on a correctly onboarded
-        workspace would fail as "consent required" and fall back to Secrets Manager.
-        """
         self._enable_vault(monkeypatch)
         mock_client = MagicMock()
         mock_client.get_workload_access_token_for_user_id.return_value = {
@@ -393,11 +331,6 @@ class TestResolveLinearApiTokenVaultPath:
         )
 
     def test_falls_back_to_derived_user_id_when_none_recorded(self, monkeypatch):
-        """Workspaces onboarded before the id was recorded keep working.
-
-        Their grant really is under linear-workspace-<orgId>; preferring the
-        recorded id must not orphan them.
-        """
         self._enable_vault(monkeypatch)
         mock_client = MagicMock()
         mock_client.get_workload_access_token_for_user_id.return_value = {
@@ -411,7 +344,6 @@ class TestResolveLinearApiTokenVaultPath:
         )
 
     def test_mints_via_vault_and_caches(self, monkeypatch):
-        """Happy path: user-bound workload token then exchange → access token, no SM read."""
         self._enable_vault(monkeypatch)
         mock_client = MagicMock()
         mock_client.get_workload_access_token_for_user_id.return_value = {
@@ -421,13 +353,9 @@ class TestResolveLinearApiTokenVaultPath:
         with patch("boto3.client", return_value=mock_client):
             resolved = resolve_linear_api_token(self._meta())
         assert resolved == "lin_oauth_vault"
-        # User id is per-workspace; SM secret was never read.
         mock_client.get_workload_access_token_for_user_id.assert_called_once_with(
             workloadName="abca_linear_oauth", userId="linear-workspace-org-abc"
         )
-        # customParameters are part of the vault's cache key: omitting them made
-        # every resolve a cache miss ("needs consent") despite a valid cached
-        # grant, silently degrading to Secrets Manager. Live-proven.
         assert mock_client.get_resource_oauth2_token.call_args.kwargs["customParameters"] == {
             "actor": "app",
             "prompt": "consent",
@@ -436,7 +364,6 @@ class TestResolveLinearApiTokenVaultPath:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_force_asks_the_vault_again_instead_of_returning_the_cached_token(self, monkeypatch):
-        """At the end of a task the vault hands out the token that is valid then."""
         self._enable_vault(monkeypatch)
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_oauth_vault_at_start")
         mock_client = MagicMock()
@@ -450,7 +377,6 @@ class TestResolveLinearApiTokenVaultPath:
         assert os.environ.get("LINEAR_API_TOKEN") == "lin_oauth_vault"
 
     def test_consent_required_falls_back_to_secrets_manager(self, monkeypatch):
-        """authorizationUrl (no accessToken) → fall through to the SM token."""
         from datetime import datetime, timedelta
 
         self._enable_vault(monkeypatch)
@@ -486,7 +412,6 @@ class TestResolveLinearApiTokenVaultPath:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_vault_error_falls_back_to_secrets_manager(self, monkeypatch):
-        """A ClientError on the vault call degrades to the SM path, never raises."""
         from datetime import datetime, timedelta
 
         from botocore.exceptions import ClientError
@@ -521,13 +446,6 @@ class TestResolveLinearApiTokenVaultPath:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_vault_error_with_a_secret_that_carries_no_grant_yields_no_token(self, monkeypatch):
-        """A workspace onboarded straight onto the vault stores no token in its secret.
-
-        When the vault call fails, the Secrets Manager fallback has nothing to
-        use: ``bgagent linear setup`` writes the four grant fields as empty
-        strings. The agent used to post the empty refresh_token to Linear
-        before it gave up.
-        """
         from botocore.exceptions import ClientError
 
         self._enable_vault(monkeypatch)
@@ -564,7 +482,6 @@ class TestResolveLinearApiTokenVaultPath:
             urlopen_mock.assert_not_called()
 
     def test_skips_vault_when_no_provider_name(self, monkeypatch):
-        """SM-only install (no linear_provider_name) → vault never called."""
         from datetime import datetime, timedelta
 
         self._enable_vault(monkeypatch)
@@ -594,7 +511,6 @@ class TestResolveLinearApiTokenVaultPath:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_disabled_flag_skips_vault(self, monkeypatch):
-        """LINEAR_VAULT_ENABLED unset → vault never called even with provider_name."""
         from datetime import datetime, timedelta
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
@@ -627,25 +543,10 @@ class TestResolveLinearApiTokenVaultPath:
 
 
 class TestResolveLinearApiTokenNoRefresh:
-    """The agent NEVER refreshes the Linear OAuth token.
-
-    Linear rotates the refresh_token on every use, and the agent role has
-    `secretsmanager:GetSecretValue` only (no Put). If the agent refreshed it
-    would keep the rotated replacement only in memory for this one task and
-    leave Secrets Manager holding the spent refresh_token. Linear accepts a
-    spent one again for 30 minutes; on a workspace where no Lambda asks for a
-    token in that time the next refresh is rejected and the workspace needs
-    re-onboarding. So the resolver uses a still-valid stored token verbatim and
-    fails CLOSED (empty string, reactions no-op) when the stored token is
-    expiring. The trusted Lambda path (linear-oauth-resolver.ts, which has
-    PutSecretValue) owns all refreshes.
-    """
-
     @staticmethod
     def _stored(**overrides):
         from datetime import datetime, timedelta
 
-        # Default: token expires in 30s so _is_expiring returns True.
         soon = (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
         base = {
             "access_token": "lin_old",
@@ -664,11 +565,6 @@ class TestResolveLinearApiTokenNoRefresh:
         return base
 
     def test_expiring_token_fails_closed_without_network_call(self, monkeypatch, capfd):
-        """Expiring stored token → empty string, and NO /oauth/token POST.
-
-        This is the regression guard for the rotating-refresh-token bug: the
-        agent must not consume the stored refresh_token.
-        """
         import json
         from unittest.mock import patch as upatch
 
@@ -687,20 +583,12 @@ class TestResolveLinearApiTokenNoRefresh:
         ):
             assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}) == ""
             urlopen_mock.assert_not_called()
-        # The secret is read and never written: the Lambdas are its only writers.
         assert mock_sm.method_calls == [call.get_secret_value(SecretId="arn:t")]
-        # Nothing cached on the fail-closed path: linear_reactions then skips its calls.
         assert os.environ.get("LINEAR_API_TOKEN") in (None, "")
-        # ``shell.log`` writes to fd 1 directly, hence capfd.
         assert "stored token is expiring and the agent does not refresh" in capfd.readouterr().out
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_expiring_token_at_task_end_leaves_the_cached_one_in_place(self, monkeypatch):
-        """``force`` at the end of a task, and no Lambda has stored a new token yet.
-
-        Nothing is asked of Linear, and the final reaction is tried with the
-        token the task started with.
-        """
         import json
         from unittest.mock import patch as upatch
 
@@ -726,7 +614,6 @@ class TestResolveLinearApiTokenNoRefresh:
 
     @pytest.mark.parametrize("bad_stamp", _MALFORMED_EXPIRES_AT)
     def test_malformed_expires_at_fails_closed_with_warn_log(self, monkeypatch, capfd, bad_stamp):
-        """Unparseable expires_at is treated as expiring → fail closed, no network call."""
         import json
         from unittest.mock import patch as upatch
 
@@ -747,7 +634,6 @@ class TestResolveLinearApiTokenNoRefresh:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_corrupted_secret_json_returns_empty_with_error_log(self, monkeypatch):
-        """A corrupted SM payload → empty string return, no traceback."""
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
@@ -761,28 +647,13 @@ class TestResolveLinearApiTokenNoRefresh:
 
 
 class TestResolveJiraOauthToken:
-    """Jira Cloud OAuth token resolves from per-tenant Secrets Manager.
-
-    The orchestrator stamps `jira_oauth_secret_arn` into the task's
-    channel_metadata at creation time. resolve_jira_oauth_token reads the
-    secret JSON via boto3 and caches the access_token in `JIRA_API_TOKEN`
-    for the agent-side Jira REST calls (jira_reactions).
-
-    Unlike the Linear resolver, the agent NEVER refreshes the Jira token:
-    Atlassian rotates the refresh_token on every use and the agent role has
-    GetSecretValue only (no Put), so a refresh would burn the stored
-    refresh_token and brick the tenant. See TestResolveJiraOauthTokenNoRefresh.
-    """
-
     def test_returns_cached_value_without_calling_secrets_manager(self, monkeypatch):
-        """Fast-path: if JIRA_API_TOKEN is already set, no SDK call fires."""
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_oauth_cached")
         with patch("boto3.client") as mock_boto:
             assert resolve_jira_oauth_token() == "jira_oauth_cached"
             mock_boto.assert_not_called()
 
     def test_returns_empty_when_secret_arn_missing(self, monkeypatch):
-        """Without channel_metadata.jira_oauth_secret_arn or env, no source — empty."""
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
         monkeypatch.delenv("JIRA_OAUTH_SECRET_ARN", raising=False)
         with patch("boto3.client") as mock_boto:
@@ -812,7 +683,6 @@ class TestResolveJiraOauthToken:
         self,
         monkeypatch,
     ):
-        """A malformed next task cannot inherit another tenant's Forge credentials."""
         monkeypatch.delenv("JIRA_OAUTH_SECRET_ARN", raising=False)
         monkeypatch.setenv("JIRA_API_TOKEN", "previous-human-token")
         monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
@@ -832,7 +702,6 @@ class TestResolveJiraOauthToken:
         assert "JIRA_APP_ACTOR_SHARED_SECRET" not in os.environ
 
     def test_returns_empty_when_region_missing(self, monkeypatch):
-        """No region → can't construct boto3 client → empty + WARN, no SDK call."""
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
@@ -841,7 +710,6 @@ class TestResolveJiraOauthToken:
             mock_boto.assert_not_called()
 
     def test_resolves_from_secrets_manager_and_caches_in_env(self, monkeypatch):
-        """Happy path: channel_metadata carries the ARN, secret has access_token + future expiry."""
         from datetime import datetime, timedelta
 
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
@@ -868,16 +736,12 @@ class TestResolveJiraOauthToken:
             resolved = resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:test"})
             assert resolved == "jira_oauth_fresh"
 
-        # Cached for subsequent reads.
         import os as _os
 
         assert _os.environ.get("JIRA_API_TOKEN") == "jira_oauth_fresh"
-        # Reset for other tests.
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     def test_obtains_secretsmanager_client_via_platform_client(self, monkeypatch):
-        """The Secrets Manager client is built through aws_session.platform_client
-        (carrying the md/ solution User-Agent), not a naked boto3.client. (#319)"""
         from datetime import datetime, timedelta
 
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
@@ -908,8 +772,6 @@ class TestResolveJiraOauthToken:
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     def test_graceful_skip_when_boto3_imports_unavailable(self, monkeypatch):
-        """If the in-function boto3/platform_client import fails, the resolver
-        degrades to '' rather than raising — the graceful-skip guard is preserved."""
         import builtins
 
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
@@ -926,7 +788,6 @@ class TestResolveJiraOauthToken:
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     def test_resolves_forge_app_actor_even_when_oauth_token_is_expiring(self, monkeypatch):
-        """Forge credentials are independent of the human 3LO token lifetime."""
         import json
         from datetime import datetime, timedelta
 
@@ -989,7 +850,6 @@ class TestResolveJiraOauthToken:
         monkeypatch.delenv("JIRA_APP_ACTOR_CONFIGURED", raising=False)
 
     def test_returns_empty_on_secrets_manager_access_denied(self, monkeypatch):
-        """ClientError surfaces as empty + ERROR log, never crashes the agent."""
         from botocore.exceptions import ClientError
 
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
@@ -1004,7 +864,6 @@ class TestResolveJiraOauthToken:
 
     @pytest.mark.parametrize("payload", [[], 5, "scalar", True])
     def test_returns_empty_on_valid_non_object_secret_json(self, monkeypatch, payload):
-        """Valid JSON scalars/lists must not escape as AttributeError."""
         import json
 
         monkeypatch.setenv("AWS_REGION", "us-east-1")
@@ -1018,7 +877,6 @@ class TestResolveJiraOauthToken:
         assert "JIRA_APP_ACTOR_CONFIGURED" not in os.environ
 
     def test_falls_back_to_env_var_when_channel_metadata_omits_arn(self, monkeypatch):
-        """JIRA_OAUTH_SECRET_ARN env var is the back-compat fallback."""
         from datetime import datetime, timedelta
 
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
@@ -1049,24 +907,10 @@ class TestResolveJiraOauthToken:
 
 
 class TestResolveJiraOauthTokenNoRefresh:
-    """The agent NEVER refreshes the Jira OAuth token.
-
-    Atlassian rotates the refresh_token on every use, and the agent role has
-    `secretsmanager:GetSecretValue` only (no Put). If the agent refreshed it
-    would consume the stored refresh_token, keep the rotated replacement only
-    in memory for this task, and leave Secrets Manager holding a dead
-    refresh_token — bricking the tenant on the next resolve. So the resolver
-    uses a still-valid stored token verbatim and fails CLOSED (empty string,
-    advisory comments no-op) when the stored token is expiring. The trusted
-    Lambda path (jira-oauth-resolver.ts, which has PutSecretValue) owns all
-    refreshes.
-    """
-
     @staticmethod
     def _stored(**overrides):
         from datetime import datetime, timedelta
 
-        # Default: token expires in 30s so _is_expiring returns True.
         soon = (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
         base = {
             "access_token": "jira_old",
@@ -1085,11 +929,6 @@ class TestResolveJiraOauthTokenNoRefresh:
         return base
 
     def test_expiring_token_fails_closed_without_network_call(self, monkeypatch):
-        """Expiring stored token → empty string, and NO /oauth/token POST.
-
-        This is the regression guard for the rotating-refresh-token bug: the
-        agent must not consume the stored refresh_token.
-        """
         import json
         from unittest.mock import patch as upatch
 
@@ -1105,14 +944,12 @@ class TestResolveJiraOauthTokenNoRefresh:
         ):
             assert resolve_jira_oauth_token({"jira_oauth_secret_arn": "arn:t"}) == ""
             urlopen_mock.assert_not_called()
-        # Nothing cached on the fail-closed path.
         import os as _os
 
         assert _os.environ.get("JIRA_API_TOKEN") in (None, "")
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     def test_valid_token_used_verbatim_without_network_call(self, monkeypatch):
-        """A still-valid stored token is returned as-is, with no refresh POST."""
         import json
         from datetime import datetime, timedelta
         from unittest.mock import patch as upatch
@@ -1135,7 +972,6 @@ class TestResolveJiraOauthTokenNoRefresh:
 
     @pytest.mark.parametrize("bad_stamp", _MALFORMED_EXPIRES_AT)
     def test_malformed_expires_at_fails_closed(self, monkeypatch, bad_stamp):
-        """Unparseable expires_at is treated as expiring → fail closed, no network call."""
         import json
         from unittest.mock import patch as upatch
 
@@ -1155,7 +991,6 @@ class TestResolveJiraOauthTokenNoRefresh:
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     def test_corrupted_secret_json_returns_empty_with_error_log(self, monkeypatch):
-        """Corrupted SM payload → empty string return, no traceback."""
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 

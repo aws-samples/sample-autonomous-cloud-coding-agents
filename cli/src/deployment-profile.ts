@@ -22,7 +22,6 @@ import * as path from 'path';
 import { CAPABILITY_CATALOG } from './deployment-capabilities';
 import { CliError } from './errors';
 
-/** Mirrors ``cdk/src/deployment/features.ts``; parity is enforced by tests. */
 export const DEPLOYMENT_FEATURES = [
   'slack', 'linear', 'jira', 'deployPreviewScreenshots', 'agentRegistry', 'toolGateway',
 ] as const;
@@ -34,7 +33,6 @@ const DEPLOYMENT_PROFILE_SCHEMA_VERSION = 1;
 /** Stack output listing deployed features; absent on stacks that predate profiles. */
 export const DEPLOYMENT_FEATURES_OUTPUT = 'DeploymentFeatures';
 
-/** Mirrors `ComputeBackend` in `cdk/src/handlers/shared/compute-backend.ts`. */
 export const COMPUTE_BACKENDS = ['agentcore', 'ecs', 'lambda-microvm'] as const;
 export type ComputeBackend = typeof COMPUTE_BACKENDS[number];
 
@@ -53,7 +51,6 @@ export const MINIMAL_DEPLOYMENT_FEATURES: DeploymentFeatures = {
   toolGateway: false,
 };
 
-/** Outputs that identify each feature on stacks deployed before `DeploymentFeatures` existed. */
 const LEGACY_FEATURE_OUTPUTS: Readonly<Record<Exclude<DeploymentFeature, 'toolGateway'>, string>> = {
   slack: 'SlackAppManifestJson',
   linear: 'LinearWebhookSecretArn',
@@ -66,7 +63,6 @@ function isFeature(value: string): value is DeploymentFeature {
   return (DEPLOYMENT_FEATURES as readonly string[]).includes(value);
 }
 
-/** Same validation as CDK synthesis, so the CLI never writes a profile synthesis rejects. */
 export function parseDeploymentProfile(raw: unknown, source: string): DeploymentProfile {
   const fail = (detail: string): never => {
     throw new CliError(`Invalid deployment profile ${source}: ${detail}`);
@@ -130,13 +126,11 @@ export function parseComputeList(value: string): ComputeBackend[] {
   return names as ComputeBackend[];
 }
 
-/** The profile inside an operator-chosen checkout; the file name is a literal. */
 function profilePath(repoRoot: string, fileName: string = DEPLOYMENT_PROFILE_FILE): string {
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- repoRoot is the operator's own checkout (cwd or --repo-root) and the file name is a literal or built from a validated stack name; no privilege boundary is crossed
   return path.join(repoRoot, fileName);
 }
 
-/** Stack that owns the shared `abca.deployment.json`; mirrors `DEFAULT_PROFILE_STACK_NAME` in CDK. */
 const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 
@@ -172,7 +166,6 @@ export function readDeploymentProfile(repoRoot: string, stackName: string = DEFA
   }
 }
 
-/** Write atomically so an interrupted run never leaves a half-written profile for CI to synthesize. */
 /** Writes the stack's own profile file (the shared one for the default stack). */
 export function writeDeploymentProfile(
   repoRoot: string,
@@ -242,7 +235,6 @@ export function detectDeployedFeatures(
   if (published !== undefined) {
     const unknown = publishedFeatureNames(published).filter(name => !isFeature(name));
     if (unknown.length > 0) {
-      // Never let an older CLI rewrite a profile it cannot fully represent.
       throw new CliError(
         `The stack deploys features this bgagent does not know (${unknown.join(', ')}). Upgrade the CLI before running setup.`,
       );
@@ -266,7 +258,6 @@ export function enabledFeatures(features: DeploymentFeatures): DeploymentFeature
   return DEPLOYMENT_FEATURES.filter(feature => features[feature]);
 }
 
-/** Actionable error for commands whose module the stack omits. */
 export function featureNotDeployedError(feature: DeploymentFeature, stackName: string): CliError {
   const { label } = CAPABILITY_CATALOG.features[feature];
   return new CliError(

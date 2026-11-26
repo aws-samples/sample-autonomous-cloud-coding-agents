@@ -38,11 +38,6 @@ const WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.GITHUB_WEBHOOK_DEDUP_TABLE_NAME!;
 const PROCESSOR_FUNCTION_NAME = process.env.GITHUB_WEBHOOK_PROCESSOR_FUNCTION_NAME!;
 
-/**
- * Dedup window. GitHub redelivers a webhook up to 5 times when our
- * receiver returns 5xx (each retry ~ exponential backoff, max ~30s
- * apart). 1h is generous coverage with slack for clock skew.
- */
 const DEDUP_TTL_SECONDS = 60 * 60;
 
 /**
@@ -57,12 +52,7 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  * on `(repo, deployment_id, status_id)` with a separate `amplify#` namespace
  * for check runs, and async-invokes the
  * processor Lambda so we can ack within GitHub's 10s timeout. Other
- * event types (push, pull_request, ping, …) get an immediate 200 so
- * GitHub doesn't retry them.
- *
- * Deployment statuses carry the deployed URL and SHA. Amplify Hosting instead
- * supplies those in its successful preview check's details_url and head_sha.
- * Both feed the same capture, persistence, and channel delivery pipeline.
+ * event types (push, pull_request, ping, …) get an immediate 200.
  */
 // eslint-disable-next-line complexity -- predates the ceiling (49 when it landed); must not grow
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
@@ -84,9 +74,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const eventType = event.headers['X-GitHub-Event'] ?? event.headers['x-github-event'] ?? '';
 
-    // GitHub fires `ping` once when the webhook is first registered. Ack with
-    // 200 so the GitHub UI shows the webhook as "delivered successfully" and
-    // operators don't think setup failed.
     if (eventType === 'ping') {
       return jsonResponse(200, { ok: true, ping: true });
     }
@@ -96,7 +83,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true });
     }
 
-    // GitHub delivery IDs are UUIDs. Validate before logging header content.
     const delivery = event.headers['X-GitHub-Delivery'] ?? event.headers['x-github-delivery'];
     const correlation = delivery && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(delivery)
       ? { delivery_id: delivery } : {};
@@ -121,17 +107,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     const raw = normalized?.payload ?? parsed as GitHubDeploymentStatusPayload;
 
-    // Filter pre-validate so common skip-paths return early without
-    // logging a "missing fields" warn for an in-progress event.
     if (raw.deployment_status?.state !== 'success') {
       return jsonResponse(200, { ok: true, skipped_state: raw.deployment_status?.state });
     }
 
-    // Filter deployment statuses to SCREENSHOT_TARGET_ENVIRONMENT (default
-    // `Preview`, matching Vercel). Amplify deployment statuses use branch names;
-    // GitHub Actions uses the workflow's environment; Netlify uses `Deploy Preview
-    // <PR#>`. Operators can override the Lambda variable and redeploy.
-    // Validated Amplify checks already identify a PR preview and bypass this filter.
+    // Vercel names its preview environment `Preview`. Amplify uses branch names,
+    // GitHub Actions the workflow's environment, Netlify `Deploy Preview <PR#>`.
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
     if (!normalized && raw.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
@@ -140,20 +121,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
-    // GitHub sometimes fires `success` deployment_status events without
-    // an `environment_url` (e.g. when the provider hasn't published the
-    // URL yet but the build itself succeeded). 200-skip these so GitHub
-    // doesn't retry — the next status update will carry the URL.
+    // A `success` deployment_status can arrive without `environment_url` when the
+    // provider has not published the URL yet; a later status carries it.
     if (!raw.deployment_status?.environment_url) {
       return jsonResponse(200, { ok: true, skipped_no_url: true });
     }
 
-    // Single validate call shared with the processor — guarantees the
-    // processor doesn't reject a payload the receiver admitted (closes
-    // the "missing deployment.sha" gap where the processor would drop
-    // events the receiver had dispatched). Runs after the state /
-    // environment / env-url skip-paths so 200s don't log a "missing
-    // fields" warn.
     const payload = validateDeploymentStatusPayload(raw);
     if (!payload) {
       logger.warn('GitHub deployment_status webhook missing required fields', {
@@ -165,11 +138,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Missing required deployment_status fields' });
     }
 
-    // Dedup on (repo, deployment_id, status_id). A single deploy lifecycle
-    // can emit multiple statuses; using the status id as the third leg
-    // keeps reruns of the same status (GitHub retries on 5xx) collapsed
-    // while distinct status transitions stay distinct. The amplify# namespace
-    // keeps check-run IDs independent of deployment/status IDs.
     const dedupKey = `${eventType === 'check_run' ? 'amplify#' : ''}${payload.repoFullName}#${payload.deploymentId}#${payload.statusId}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
@@ -209,7 +177,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         deployment_id: payload.deploymentId,
         status_id: payload.statusId,
       });
-      // Roll the dedup row back so GitHub's retry can try dispatch again.
       try {
         await ddb.send(new DeleteCommand({
           TableName: DEDUP_TABLE_NAME,

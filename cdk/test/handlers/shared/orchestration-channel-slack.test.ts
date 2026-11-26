@@ -17,8 +17,6 @@
  *  SOFTWARE.
  */
 
-// Mock at the Slack transport so the adapter's real mapping (channel op → Slack
-// method + params) is what's asserted, with no network.
 const slackFetchMock = jest.fn();
 const slackFetchTsMock = jest.fn();
 jest.mock('../../../src/handlers/shared/slack-api', () => ({
@@ -39,10 +37,7 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
 import { lookupFailed, lookupFound } from '../../../src/handlers/shared/lookup-result';
 import { type IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
-// slackFetchTs now returns a LookupResult (not string|null); the transport mock
-// resolves real results so the adapter's lookupValueOr collapse is exercised.
 
-/** A Slack "issue" is a thread: channel + thread_ts, keyed by team_id. */
 const thread: IssueRef = { issueId: slackThreadRef('C123', '1700000000.001'), credentialsRef: 'T99' };
 
 beforeEach(() => {
@@ -58,9 +53,6 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   test('kind is slack', () => expect(ch.kind).toBe('slack'));
 
   test('OMITS the workflow-state ops, because Slack has no workflow state', () => {
-    // The point of the whole capability split: these must be ABSENT, not stubbed
-    // to a silent success. A no-op that returns true would tell the engine the
-    // platform mirrored a state it never moved.
     expect('transitionState' in ch).toBe(false);
     expect('revertState' in ch).toBe(false);
   });
@@ -72,7 +64,6 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('resolves the bot token per WORKSPACE, from the ref credentials', () => {
-    // A wrong token would post into a different customer's Slack.
     return ch.postComment(thread, 'hi').then(() => {
       expect(getSlackSecretMock).toHaveBeenCalledWith('bgagent/slack/T99');
     });
@@ -88,15 +79,13 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('upsertComment EDITS the given message in place — the maturing panel', async () => {
-    // Without edit-in-place a Slack epic would stream a new message per
-    // transition, which is the surface this design exists to avoid.
     slackFetchTsMock.mockResolvedValue(lookupFound('1700000000.005'));
     const res = await ch.upsertComment(thread, 'panel v2', { commentId: '1700000000.005' });
     expect(res).toEqual({ commentId: '1700000000.005' });
     const [, method, body] = slackFetchTsMock.mock.calls[0];
     expect(method).toBe('chat.update');
     expect(body).toMatchObject({ channel: 'C123', ts: '1700000000.005', text: 'panel v2' });
-    expect(body).not.toHaveProperty('thread_ts'); // an edit targets a ts, not a thread
+    expect(body).not.toHaveProperty('thread_ts'); // chat.update targets a message ts, not a thread
   });
 
   test('upsertComment with no existing ref posts a fresh in-thread message', async () => {
@@ -113,14 +102,12 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('replaceCommentReaction clears only its OWN prior markers, then adds the target', async () => {
-    // Slack has no atomic swap. Removing every emoji would strip a human's
-    // reaction; removing none would leave contradictory markers on a settled
-    // message. So: remove this adapter's own set, minus the target, then add.
+    // Slack has no atomic reaction swap.
     await ch.replaceCommentReaction!({ commentId: '1700000000.009' }, thread, 'succeeded');
     const removes = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.remove');
     const adds = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add');
     expect(removes.map((c) => (c[2] as { name: string }).name).sort())
-      .toEqual(['eyes', 'question', 'x']); // own markers, excluding the target
+      .toEqual(['eyes', 'question', 'x']);
     expect(adds).toHaveLength(1);
     expect((adds[0][2] as { name: string }).name).toBe('white_check_mark');
   });
@@ -130,15 +117,10 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('reports FAILURE when a stale marker could not be removed', async () => {
-    // Returning the add's result alone would claim the promised end state — one
-    // marker — while the message still shows "saw it" beside "done". That
-    // contradiction is what a caller checks this result to rule out.
     slackFetchMock.mockImplementation((_token: string, method: string, body: { name: string }) =>
       Promise.resolve(!(method === 'reactions.remove' && body.name === 'eyes')));
 
     expect(await ch.replaceCommentReaction!({ commentId: '1700000000.009' }, thread, 'succeeded')).toBe(false);
-    // The target is still attempted — a partial improvement beats leaving only
-    // the stale marker.
     expect(slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add')).toHaveLength(1);
   });
 
@@ -180,7 +162,6 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('an uninstalled workspace skips cleanly instead of throwing', async () => {
-    // Feedback is advisory and must never gate the orchestration.
     getSlackSecretMock.mockResolvedValue(null);
     await expect(ch.postComment(thread, 'x')).resolves.toBeNull();
     await expect(ch.reportFailure(thread, 'x')).resolves.toBeUndefined();
@@ -188,7 +169,6 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('a malformed thread ref is refused rather than posting to a guessed channel', async () => {
-    // Posting into the wrong channel is worse than posting nowhere.
     const bad: IssueRef = { issueId: 'no-separator', credentialsRef: 'T99' };
     await expect(ch.postComment(bad, 'x')).resolves.toBeNull();
     expect(slackFetchTsMock).not.toHaveBeenCalled();
@@ -203,8 +183,6 @@ describe('Slack channel adapter — the capability-gated surface', () => {
 
 describe('slackThreadRef', () => {
   test('round-trips through the adapter that parses it', async () => {
-    // The seeding side and the adapter must agree on the ref format, or every
-    // Slack orchestration silently posts nowhere.
     const ch = makeSlackChannel();
     await ch.postComment({ issueId: slackThreadRef('CABC', '123.456'), credentialsRef: 'T1' }, 'x');
     expect(slackFetchTsMock.mock.calls[0][2]).toMatchObject({ channel: 'CABC', thread_ts: '123.456' });

@@ -73,9 +73,6 @@ function deploymentStatusBody(overrides: {
   statusId?: number | null;
   repo?: string | null;
 } = {}): string {
-  // `??` only short-circuits on undefined/null — so for fields where we
-  // want to keep an explicit null in the payload (to test missing-field
-  // behaviour), distinguish on `=== undefined`.
   return JSON.stringify({
     deployment_status: {
       id: overrides.statusId === undefined ? 99 : overrides.statusId,
@@ -153,10 +150,6 @@ describe('github-webhook receiver', () => {
   });
 
   test('200 silently ignores pull_request events (re-stack is no longer a GitHub-webhook path)', async () => {
-    // Re-stack is driven by the reconciler off a Linear
-    // @bgagent comment, not a GitHub pull_request webhook (those are
-    // WAF-blocked anyway). pull_request events are a plain 200 no-op — no
-    // restack invoke.
     const res = await handler(event(
       JSON.stringify({ action: 'synchronize', pull_request: { head: { ref: 'branch-A', sha: 's' } } }),
       { 'X-GitHub-Event': 'pull_request' },
@@ -231,7 +224,6 @@ describe('github-webhook receiver', () => {
     const res = await handler(event(deploymentStatusBody()));
     expect(res.statusCode).toBe(200);
     expect(lambdaSend).toHaveBeenCalledTimes(1);
-    // Forwarded payload preserves the raw body verbatim.
     const invokeArg = (lambdaSend.mock.calls[0][0] as { input: { Payload: Uint8Array } }).input;
     const decoded = JSON.parse(new TextDecoder().decode(invokeArg.Payload));
     expect(decoded).toEqual({ raw_body: deploymentStatusBody() });
@@ -239,12 +231,11 @@ describe('github-webhook receiver', () => {
 
   test('rolls back the dedup row when processor invoke fails', async () => {
     ddbSend
-      .mockResolvedValueOnce({}) // PutCommand
-      .mockResolvedValueOnce({}); // DeleteCommand cleanup
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
     lambdaSend.mockRejectedValueOnce(new Error('lambda throttled'));
     const res = await handler(event(deploymentStatusBody()));
     expect(res.statusCode).toBe(500);
-    // Two ddb calls: put then delete-rollback.
     expect(ddbSend).toHaveBeenCalledTimes(2);
     const second = (ddbSend.mock.calls[1][0] as { _type: string }) ;
     expect(second._type).toBe('Delete');
@@ -308,7 +299,6 @@ describe('github-webhook receiver', () => {
     const log = jest.spyOn(logger, 'info');
     const res = await handler(event(amplifyBody(overrides), { 'X-GitHub-Event': 'check_run' }));
     expect(JSON.parse(res.body)).toEqual({ ok: true, skipped_check: true, reason });
-    // Only a static reason is logged, never the URL, credentials, or raw payload.
     expect(log).toHaveBeenCalledWith('Amplify preview check rejected', {
       event: 'screenshot.amplify_check_rejected', reason,
     });

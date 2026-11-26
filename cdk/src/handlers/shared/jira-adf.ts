@@ -17,26 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Jira ADF (Atlassian Document Format) → best-effort markdown conversion.
- *
- * Extracted from the webhook processor so both the processor (issue
- * description) and the context-enrichment helper (issue comments, #577) can
- * render ADF bodies without a circular import. Intentionally minimal — extract
- * paragraphs, headings, and list items as plain text. Anything else (panels,
- * tables, embeds) is collapsed to its textual content.
- *
- * The full ADF spec has dozens of node types; rolling a complete converter
- * here would dwarf the rest of the integration and add a new dependency
- * surface. The agent gets a coherent text rendering; richer rendering (tables,
- * text marks) can land in a follow-up.
- *
- * Tests: cdk/test/handlers/shared/jira-adf.test.ts (lists),
- * cdk/test/handlers/jira-webhook-processor.test.ts (via the processor)
- * and cdk/test/handlers/shared/jira-attachments.test.ts (comment rendering).
- */
-
-/** Deepest markdown heading level (`######`) ADF heading nodes are clamped to. */
 const MAX_MARKDOWN_HEADING_LEVEL = 6;
 
 interface AdfNode {
@@ -102,8 +82,6 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
           .trim();
         const bullet = node.type === 'orderedList' ? `${idx + 1}.` : '-';
         if (itemText) out.push(`${' '.repeat(depth * 2)}${bullet} ${itemText}`);
-        // What an item holds besides its own text (a nested list, a code
-        // block, an image), one level deeper.
         (item.content ?? [])
           .filter((sub) => sub.type !== 'paragraph' && sub.type !== 'text')
           .forEach((sub) => walkAdf(sub, out, depth + 1));
@@ -121,14 +99,9 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
     }
     case 'mediaSingle':
     case 'mediaGroup':
-      // Container nodes — descend to the `media` children below.
       (node.content ?? []).forEach((c) => walkAdf(c, out, depth));
       return;
     case 'media': {
-      // Jira embeds images as `media` nodes (not markdown image text). Only
-      // `external` media carry a directly-usable URL; `file`/`link` media
-      // reference an attachment `id` resolved separately (#577 fetches those
-      // authenticated via the Jira REST attachment API), so we skip them here.
       const url = node.attrs?.url;
       if (node.attrs?.type === 'external' && typeof url === 'string' && url.startsWith('https://')) {
         const alt = node.attrs?.alt ?? '';
@@ -144,8 +117,6 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
       if (node.attrs?.text) out.push(node.attrs.text);
       return;
     default:
-      // Unknown node — descend into its content if any so embedded text
-      // (e.g. inside a panel or quote) isn't lost.
       (node.content ?? []).forEach((c) => walkAdf(c, out, depth));
   }
 }

@@ -20,16 +20,10 @@
 import * as crypto from 'crypto';
 import { API_KEY_SCOPES, type ApiKeyScope } from './types';
 
-/**
- * Prefix on every platform API key. Lets secret scanners (e.g. gitleaks)
- * recognize a leaked key and lets callers tell key material apart from a JWT.
- */
 export const API_KEY_PREFIX = 'bgak';
 
-/** Secret entropy per key (bytes; 256-bit). */
 const API_KEY_SECRET_BYTES = 32;
 
-/** Number of underscore-delimited segments in a well-formed key. */
 const KEY_PART_COUNT = 3;
 
 /**
@@ -49,8 +43,7 @@ export function hashApiKeySecret(secret: string): string {
 
 /**
  * Mint a new key for a given key_id. The wire format is
- * `bgak_<key_id>_<secret>` so the authorizer can recover key_id without a
- * secondary index and look the record up directly by partition key.
+ * `bgak_<key_id>_<secret>`.
  * @param keyId - the ULID partition key for the record.
  * @returns the plaintext (return-once) and the hash to persist.
  */
@@ -63,7 +56,6 @@ export function generateApiKey(keyId: string): GeneratedApiKey {
   };
 }
 
-/** Parsed components of a presented key. */
 export interface ParsedApiKey {
   readonly keyId: string;
   readonly secret: string;
@@ -71,8 +63,7 @@ export interface ParsedApiKey {
 
 /**
  * Parse a presented `bgak_<key_id>_<secret>` value into its parts. Returns null
- * for any value that is not well-formed, so callers deny without branching on
- * the specific failure (avoids leaking which part was wrong).
+ * for any value that is not well-formed.
  * @param presented - the raw `X-API-Key` header value.
  * @returns the parsed key_id and secret, or null if malformed.
  */
@@ -86,9 +77,7 @@ export function parseApiKey(presented: string): ParsedApiKey | null {
 }
 
 /**
- * Constant-time comparison of two hex-encoded hashes. Both are fixed-length
- * (SHA-256 → 64 hex chars) so a length mismatch means malformed input, not a
- * timing signal.
+ * Constant-time comparison of two hex-encoded hashes of equal length.
  * @param a - first hex digest.
  * @param b - second hex digest.
  * @returns true if the digests are byte-for-byte equal.

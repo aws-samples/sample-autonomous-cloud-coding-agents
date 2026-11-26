@@ -53,8 +53,6 @@ describe('parseComputeSubstrateOutput', () => {
   test.each([[null], [undefined], [''], ['   '], [',']])(
     'reports %p as UNKNOWN (undefined), not as an empty substrate set',
     (raw) => {
-      // Load-bearing distinction: "unknown" must not hard-block onboarding
-      // against a stack deployed before the output existed.
       expect(parseComputeSubstrateOutput(raw)).toBeUndefined();
     },
   );
@@ -68,8 +66,6 @@ describe('assertComputeSubstrateDeployed with legacy outputs', () => {
   });
 
   test('never gates an unspecified compute type', () => {
-    // The effective type may be inherited from the existing repo row, which this
-    // function cannot see; `onboardRepo` resolves and probes that case.
     expect(assertFor(undefined, 'agentcore')).not.toThrow();
   });
 
@@ -100,8 +96,6 @@ describe('assertComputeSubstrateDeployed with legacy outputs', () => {
     expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/without the Lambda MicroVMs substrate/);
     expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/ComputeSubstrate=agentcore/);
     expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/--context compute_type=lambda-microvm/);
-    // The MicroVM remedy is more specific than ECS's about WHERE it fails,
-    // because the strategy's env-var guard fires before any AWS call.
     expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/fail at session start/);
   });
 

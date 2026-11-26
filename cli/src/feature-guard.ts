@@ -50,7 +50,6 @@ export function requireDeployedFeature(command: Command, feature: DeploymentFeat
       debug(`[feature-guard] skipping ${feature} check: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    // Lenient: a newer stack may publish features this CLI does not know.
     if (published !== null && !publishedFeatureNames(published).includes(feature)) {
       throw featureNotDeployedError(feature, stackName);
     }

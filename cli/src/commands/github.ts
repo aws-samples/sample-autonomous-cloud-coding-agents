@@ -35,7 +35,6 @@ import { promptSecret } from '../prompt-secret';
 import { getStackOutput } from '../stack-outputs';
 import { makeClient } from '../ua';
 
-/** Width of the `═` banner rules printed around webhook-info output. */
 const BANNER_WIDTH = 72;
 
 export function makeGithubCommand(): Command {
@@ -48,10 +47,6 @@ export function makeGithubCommand(): Command {
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .action(async (opts) => {
-        // Read-only convenience — surfaces the values an operator needs
-        // to wire a GitHub repo's webhook to the screenshot pipeline.
-        // Mirrors `bgagent linear webhook-info` so the docs don't have
-        // to embed stack-specific URLs.
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
@@ -105,13 +100,6 @@ export function makeGithubCommand(): Command {
       .option('--region <region>', 'AWS region (defaults to configured region)')
       .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
       .action(async (opts) => {
-        // Companion to `webhook-info`: after the operator pastes the
-        // webhook config into GitHub, this command captures the
-        // signing secret they generated and stores it where the
-        // receiver Lambda reads it. No-frills wrapper around
-        // PutSecretValue — but operators were copy-pasting aws CLI
-        // before, which is more error-prone (wrong --secret-id format,
-        // no validation that the stack output even exists).
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
@@ -126,9 +114,6 @@ export function makeGithubCommand(): Command {
 
         const sm = makeClient(SecretsManagerClient, { region });
 
-        // A GitHub signing secret is operator-chosen, and CloudFormation creates
-        // this secret with a random password, so a stored secret cannot be told
-        // from one nobody has set. Say what the command does instead of guessing.
         console.log('  This replaces the signing secret stored for the stack.');
         console.log('  Make sure the new value matches what you pasted into GitHub.');
         console.log();
@@ -207,7 +192,6 @@ export function makeGithubCommand(): Command {
       }),
   );
 
-  // `set-token` is core; only the screenshot webhook commands need the feature.
   for (const sub of github.commands) {
     if (sub.name() === 'webhook-info' || sub.name() === 'set-webhook-secret') {
       requireDeployedFeature(sub, 'deployPreviewScreenshots');

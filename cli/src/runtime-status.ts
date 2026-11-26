@@ -44,12 +44,6 @@ interface RuntimeProbeBase {
   readonly used_by_repos: readonly string[];
 }
 
-/**
- * AgentCore runtime probe outcome, discriminated on `probe_status` so the
- * control-plane fields and the error string can never coexist: an `'ok'` probe
- * carries the GetAgentRuntime response, an `'error'` probe carries only the
- * failure message.
- */
 type RuntimeProbeResult =
   | (RuntimeProbeBase & {
     readonly probe_status: 'ok';

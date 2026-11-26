@@ -17,14 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * `hydrateAndTransition`: the event it writes when the guardrail blocks a task's
- * context, and its URL-attachment branch. That branch runs only when
- * ATTACHMENTS_BUCKET_NAME is set before the module loads, which the main suite
- * (test/handlers/orchestrate-task.test.ts) does not do.
- */
-
-// --- Mocks ---
 const mockDdbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -51,7 +43,6 @@ jest.mock('../../../src/handlers/shared/resolve-url-attachments', () => ({
 const mockLoadRepoConfig = jest.fn();
 jest.mock('../../../src/handlers/shared/repo-config', () => ({ loadRepoConfig: mockLoadRepoConfig }));
 
-// Set env vars before importing (module-level constants are captured at import time)
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.ATTACHMENTS_BUCKET_NAME = 'attachments-bucket';
@@ -63,7 +54,6 @@ import type { HydratedContext } from '../../../src/handlers/shared/context-hydra
 import { hydrateAndTransition, loadBlueprintConfig } from '../../../src/handlers/shared/orchestrator';
 import type { AttachmentRecord, TaskRecord } from '../../../src/handlers/shared/types';
 
-/** A task on issue #42 of a private repository. It has no pull request. */
 const task: TaskRecord = {
   task_id: 'TASK001',
   user_id: 'user-123',
@@ -93,7 +83,6 @@ interface SentCommand {
   readonly input: Record<string, unknown>;
 }
 
-/** Commands of one type that the mocked document client received, in order. */
 function commandsOfType(type: string): SentCommand[] {
   return mockDdbSend.mock.calls.map(c => c[0]).filter(c => c._type === type);
 }
@@ -119,8 +108,7 @@ describe('hydrateAndTransition: guardrail_blocked event', () => {
       .map(c => c.input.Item as { event_type: string; metadata: Record<string, unknown> })
       .filter(item => item.event_type === 'guardrail_blocked');
     expect(blocked).toHaveLength(1);
-    // The document client leaves out an undefined attribute of the item itself but
-    // throws on one inside a map: an undefined value here loses the whole event.
+    // The document client omits an undefined attribute of the item itself but throws on one inside a map.
     expect(Object.values(blocked[0].metadata)).not.toContain(undefined);
     expect(blocked[0].metadata).toEqual({
       reason: 'Task context blocked by content policy',
@@ -141,7 +129,6 @@ describe('hydrateAndTransition: URL attachments', () => {
     source_url: 'https://raw.githubusercontent.com/acme/private-app/main/docs/spec.md',
     screening: { status: 'pending' },
   };
-  /** What `resolveUrlAttachments` returns for it once fetched, screened and uploaded. */
   const stored: AttachmentRecord = {
     attachment_id: 'att-1',
     type: 'file',
@@ -156,7 +143,6 @@ describe('hydrateAndTransition: URL attachments', () => {
   };
   const taskWithUrl: TaskRecord = { ...task, attachments: [pending] };
 
-  /** True for the write that puts the attachment records on the task. */
   function isAttachmentsWrite(cmd: SentCommand): boolean {
     return cmd._type === 'Update'
       && Object.values((cmd.input.ExpressionAttributeNames ?? {}) as Record<string, string>).includes('attachments');

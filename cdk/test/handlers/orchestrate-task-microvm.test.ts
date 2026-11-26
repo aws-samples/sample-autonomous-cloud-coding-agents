@@ -17,20 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Drives the FULL orchestrate-task durable handler for a `lambda-microvm` task
- * with a fake durable-execution context, so the wiring the unit tests can't see
- * is covered end to end: strategy resolution → RunMicrovm → compute_metadata
- * persistence → substrate poll cross-check → **TerminateMicrovm on finalize**.
- *
- * The finalize terminate is an ADR-021 normative requirement ("When the
- * orchestrator finalizes a `lambda-microvm` task, the orchestrator shall call
- * terminate-microvm") and is invisible to strategy-level unit tests, which is
- * exactly how it was missed the first time.
- */
-
-// `withDurableExecution` wraps the handler at import time; unwrap it so the raw
-// (event, context) function is testable (same trick as orchestrate-task-feedback).
 jest.mock('@aws/durable-execution-sdk-js', () => ({
   withDurableExecution: (fn: unknown) => fn,
 }));
@@ -61,9 +47,6 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   },
 }));
 
-// ONE shared send, not a fresh `jest.fn()` per client construction: the payload
-// PUT and the finalize DELETE are both assertions this file needs to make, and a
-// per-instance mock silently discards them.
 const mockS3Send = jest.fn().mockResolvedValue({});
 const mockDdbSend = jest.fn().mockResolvedValue({});
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
@@ -89,10 +72,6 @@ jest.mock('@aws-sdk/client-s3', () => ({
   DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
 }));
 
-// Real orchestrator helpers would talk to DynamoDB; stub them and assert on the
-// calls. `buildComputeMetadata` is kept REAL (re-exported from the actual module,
-// `realOrchestrator` below) so the persisted metadata shape is genuinely
-// exercised, not mirrored.
 const mockTransitionTask = jest.fn();
 const mockEmitTaskEvent = jest.fn();
 const mockFinalizeTask = jest.fn();
@@ -142,7 +121,6 @@ jest.mock('../../src/handlers/shared/strategies/ecs-strategy', () => ({
   EcsComputeStrategy: jest.fn(),
 }));
 
-// MICROVM_* env must be set before the strategy module is imported.
 process.env.MICROVM_IMAGE_IDENTIFIER = 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent';
 process.env.MICROVM_EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMicrovmExecution';
 process.env.MICROVM_EGRESS_CONNECTOR_ARNS = 'arn:aws:lambda:us-east-1:123456789012:network-connector/egress-1';
@@ -153,13 +131,10 @@ process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 process.env.TASK_RETENTION_DAYS = '90';
 
-// Required platform configuration is supplied at launch, never baked into the image.
 process.env.GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
 
-// Loaded after the env block: the orchestrator module imports the MicroVM
-// supervisor, and through it the strategy module.
 const realOrchestrator = jest.requireActual('../../src/handlers/shared/orchestrator');
 
 import type { DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
@@ -168,16 +143,8 @@ import { handler as exportedHandler } from '../../src/handlers/orchestrate-task'
 import type { MicrovmLifecycleSnapshot } from '../../src/handlers/shared/microvm/lifecycle';
 import { LambdaMicrovmComputeStrategy, MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
-// The mock at the top of this file makes `withDurableExecution` return the function it is
-// given, so the export is the raw durable handler here: it takes the task event and a
-// durable context, not the Lambda invocation envelope its declared type describes.
 const handler = exportedHandler as unknown as DurableExecutionHandler<{ task_id: string }, void>;
 
-/**
- * Minimal stand-in for the durable-execution context: `step` runs its body
- * inline, `waitForCondition` runs the poll body ONCE and returns the resulting
- * state (enough to exercise the substrate cross-check without looping).
- */
 function fakeContext(opts: { pollOnce?: boolean } = {}) {
   const steps: string[] = [];
   const stepConfigs: Record<string, any> = {};
@@ -203,17 +170,6 @@ function fakeContext(opts: { pollOnce?: boolean } = {}) {
   };
 }
 
-/**
- * A context that HONORS `waitStrategy`, so the poll loop's exit decision is part
- * of the test rather than assumed.
- *
- * `fakeContext` above runs the poll body once and ignores `waitStrategy` entirely,
- * which means the composition the heartbeat work exists FOR — a stale heartbeat
- * stops the poll, finalize runs, and `TerminateMicrovm` reclaims the reservation —
- * was never asserted end to end for any backend. This drives real iterations until
- * the strategy says stop (bounded, so a broken exit condition fails as a timeout
- * rather than hanging the suite).
- */
 function loopingContext(maxIterations = 10) {
   const steps: string[] = [];
   const iterations: Array<Record<string, unknown>> = [];
@@ -260,7 +216,6 @@ function commandsOfType(type: string) {
   return mockMicrovmSend.mock.calls.map(c => c[0]).filter(c => c._type === type);
 }
 
-/** S3 commands of a given type — the payload bucket lives on its own client. */
 function s3CommandsOfType(type: string) {
   return mockS3Send.mock.calls.map(c => c[0]).filter(c => c._type === type);
 }
@@ -387,8 +342,6 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       runtime_arn: '',
       mcp_servers: ['registry://mcp_server/acme/large@1.0.0'],
     });
-    // Exercise the real registry resolution, payload assembly and audit writes;
-    // only external service boundaries are stubbed on this hydration path.
     mockHydrateAndTransition.mockImplementationOnce(realOrchestrator.hydrateAndTransition);
     runMicrovmOk();
 
@@ -470,13 +423,12 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(commandsOfType('RunMicrovm')).toHaveLength(1);
     expect(failed).toBe(true);
     expect(stepConfigs['start-session'].retryStrategy(new Error('failed'), 1)).toEqual({ shouldRetry: false });
-    expect(stepConfigs['record-start-failure']).toBeUndefined(); // default retries
+    expect(stepConfigs['record-start-failure']).toBeUndefined();
     expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
   });
 
   test('emits session_started once when the guest marks the task RUNNING first', async () => {
     runMicrovmOk();
-    // The strategy saved the handle and the guest already reported RUNNING.
     mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
       task_id: 'TASK001',
       user_id: 'user-1',
@@ -513,7 +465,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     const replayContext = {
       ...ctx,
       step: async (name: string, fn: () => Promise<unknown>, config?: unknown) => {
-        if (name === 'start-session') await fn(); // response/checkpoint lost
+        if (name === 'start-session') await fn();
         return ctx.step(name, fn, config);
       },
     };
@@ -563,18 +515,12 @@ describe('orchestrate-task for a lambda-microvm task', () => {
   });
 
   test('a replayed start for a task that is already cancelled terminates the saved MicroVM', async () => {
-    // An interrupted run of start-session launched the MicroVM and saved its
-    // handle on the start receipt. The task was cancelled while RunMicrovm was
-    // in flight, so the cancel had no session to stop. When Durable Execution
-    // runs the step again, the start claim answers "closed" with that handle.
     let inStartSession = false;
     mockClaimStart.mockResolvedValue({
       clientToken: 'TASK001',
       closed: true,
       handle: { strategyType: 'lambda-microvm', sessionId: MICROVM_ID, microvmId: MICROVM_ID, endpoint: ENDPOINT },
     });
-    // Unlike the double of this suite, every read of the step answers the
-    // committed status, strongly consistent or not.
     mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
       task_id: 'TASK001',
       user_id: 'user-1',
@@ -653,7 +599,6 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
     await handler({ task_id: 'TASK001' }, ctx as never);
 
-    // RunMicrovm actually went out.
     expect(commandsOfType('RunMicrovm')).toHaveLength(1);
 
     expect(mockTransitionTask).toHaveBeenCalledTimes(1);
@@ -661,13 +606,10 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(from).toBe(TaskStatus.HYDRATING);
     expect(to).toBe(TaskStatus.RUNNING);
     expect(attrs.compute_type).toBe('lambda-microvm');
-    // ADR-021: the P3 approve/deny Lambdas resume from exactly these two keys.
     expect(attrs.compute_metadata).toEqual({
       microvmId: MICROVM_ID, endpoint: ENDPOINT, imageArn: 'arn:image', imageVersion: '7',
     });
-    // sessionId is the microvmId (substrate identifier, mirroring ECS).
     expect(attrs.session_id).toBe(MICROVM_ID);
-    // agent_runtime_arn is an AgentCore-only attribute and must not appear.
     expect(attrs.agent_runtime_arn).toBeUndefined();
   });
 
@@ -707,7 +649,6 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     err.name = 'InternalServerException';
     mockMicrovmSend.mockRejectedValueOnce(err);
 
-    // stopSession swallows every failure internally, so the handler resolves.
     await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never)).resolves.toBeUndefined();
     expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
   });
@@ -720,11 +661,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(mockDeleteEcsPayload).not.toHaveBeenCalled();
   });
 
-  // --- finalize-time payload delete (review NB3) ---
-
   test('deletes its own payload object on finalize', async () => {
-    // The execution role can read the whole payload bucket, so finalize deletes
-    // this task's prompt instead of leaving it to the one-day lifecycle rule.
     runMicrovmOk();
 
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
@@ -735,20 +672,12 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       Bucket: 'test-microvm-payload-bucket',
       Key: 'TASK001/payload.json',
     });
-    // ...and it did not reach for the ECS deleter.
     expect(mockDeleteEcsPayload).not.toHaveBeenCalled();
   });
 
-  // --- heartbeat -> stop polling -> finalize -> TerminateMicrovm (review test gap) ---
-  //
-  // The composition the heartbeat change EXISTS for: a hung guest inside a healthy
-  // VM is invisible to `GetMicrovm`, so only the stale heartbeat can stop the poll —
-  // and if it stops the poll but nothing terminates, the 8-hour reservation is still
-  // billed. `fakeContext` runs one iteration and ignores `waitStrategy`, so this
-  // needed `loopingContext` to be assertable at all.
-
   test('a stale agent heartbeat stops the real supervisor and reclaims the MicroVM', async () => {
     runMicrovmOk();
+    // A hung guest inside a healthy VM is invisible to `GetMicrovm`.
     mockMicrovmSend.mockResolvedValue({ microvmId: MICROVM_ID, state: 'RUNNING' });
     mockReadLifecycle.mockResolvedValue({ ...lifecycle(), heartbeatAtMs: Date.now() - 300_000 });
     const looping = loopingContext();
@@ -855,8 +784,6 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
   describe('orphan reap when session start fails AFTER RunMicrovm succeeded', () => {
     test('terminates the known MicroVM when registration fails before committing', async () => {
-      // The service created the computer, but registration did not commit.
-      // Its start receipt retains the ID; normal task polling has not started.
       runMicrovmOk();
       mockTransitionTask.mockRejectedValueOnce(new Error('ConditionalCheckFailedException'));
 
@@ -891,18 +818,11 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       reapErr.name = 'AccessDeniedException';
       mockMicrovmSend.mockRejectedValueOnce(reapErr);
 
-      // stopSession is internally best-effort (it logs AccessDenied at error level
-      // and returns), so the reap is a no-op here — the user must still see why
-      // session start actually failed.
       await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
       expect(failedTransition()[3].error_message).toContain('persist exploded');
     });
 
     test('even a stopSession that BREAKS its no-throw contract cannot mask the original error', async () => {
-      // Defense in depth for the handler's inner try/catch: `stopSession` is
-      // contractually non-throwing for this backend, but "contractually" is not
-      // "structurally". If it ever regresses, the reap must still not become the
-      // error the user is shown — the session-start failure is the actionable one.
       runMicrovmOk();
       mockTransitionTask.mockRejectedValueOnce(new Error('persist exploded'));
       const stopSpy = jest.spyOn(LambdaMicrovmComputeStrategy.prototype, 'stopSession')
@@ -933,7 +853,6 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
       await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
 
-      // Exactly ONE terminate — the finalize one, not an extra reap.
       expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
     });
   });

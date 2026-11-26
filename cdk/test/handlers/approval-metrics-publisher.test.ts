@@ -25,8 +25,6 @@ import { TaskDashboard } from '../../src/constructs/task-dashboard';
 import { handler, parseApprovalRecord } from '../../src/handlers/approval-metrics-publisher';
 import { METRIC_NAMESPACE } from '../../src/handlers/shared/approval-metrics';
 
-// --- Helpers ----------------------------------------------------------------
-
 interface RecordOpts {
   readonly eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
   readonly taskId?: string;
@@ -52,9 +50,6 @@ function streamRecord(opts: RecordOpts = {}): DynamoDBRecord {
     sequenceNumber = '1',
   } = opts;
 
-  // Encode metadata into DDB Stream attribute shape. Matches what
-  // `progress_writer.py::_put_event` would produce for typical
-  // approval-milestone metadata (string, number, list of string).
   const metaAttr: Record<string, any> = { milestone: { S: milestone } };
   for (const [k, v] of Object.entries(metadata)) {
     if (typeof v === 'string') {metaAttr[k] = { S: v };} else if (typeof v === 'number') {metaAttr[k] = { N: String(v) };} else if (typeof v === 'boolean') {metaAttr[k] = { BOOL: v };} else if (Array.isArray(v)) {
@@ -87,20 +82,10 @@ function streamEvent(records: DynamoDBRecord[]): DynamoDBStreamEvent {
   return { Records: records };
 }
 
-/**
- * Capture process.stdout writes during a handler invocation.
- * Returns the list of written lines (EMF JSON strings) parsed as
- * objects, so tests can assert on specific metric emissions.
- */
 function captureEmfLines(): { lines: Record<string, unknown>[]; restore: () => void } {
   const lines: Record<string, unknown>[] = [];
   const originalWrite = process.stdout.write.bind(process.stdout);
   (process.stdout.write as unknown as (chunk: string) => boolean) = (chunk: string): boolean => {
-    // Handler emits '<json>\n' — split so a multi-line chunk would
-    // still be parsed correctly. In practice each call is one line.
-    // Filter to EMF lines (containing ``_aws``) — the shared logger
-    // also writes JSON INFO/WARN lines to stdout, which we don't
-    // want to count as metric emissions.
     for (const segment of String(chunk).split('\n')) {
       const trimmed = segment.trim();
       if (!trimmed) continue;
@@ -124,7 +109,6 @@ function captureEmfLines(): { lines: Record<string, unknown>[]; restore: () => v
   };
 }
 
-/** Shape guard: narrows an EMF line to metric-name + value + dims. */
 function metricOf(line: Record<string, unknown>): { name: string; value: number; dimensions: Record<string, string> } | null {
   const aws = line._aws as any;
   if (!aws?.CloudWatchMetrics?.[0]?.Metrics?.[0]) return null;
@@ -135,8 +119,6 @@ function metricOf(line: Record<string, unknown>): { name: string; value: number;
   for (const dn of dimNames) dimensions[dn] = String(line[dn]);
   return { name, value, dimensions };
 }
-
-// --- parseApprovalRecord ----------------------------------------------------
 
 describe('parseApprovalRecord', () => {
   test('parses a valid approval_requested INSERT record', () => {
@@ -158,9 +140,6 @@ describe('parseApprovalRecord', () => {
   });
 
   test('rejects unknown milestone name (service-layer filter passed but handler catches)', () => {
-    // Defense-in-depth with the event-source filter-pattern — a new
-    // agent_milestone kind that's not approval-related gets dropped
-    // at the handler layer instead of polluting the publisher.
     const rec = streamRecord({ milestone: 'pr_created' });
     expect(parseApprovalRecord(rec)).toBeNull();
   });
@@ -179,26 +158,18 @@ describe('parseApprovalRecord', () => {
   });
 
   test('drops NaN numeric attributes', () => {
-    // A malformed ``N`` value in the stream record (theoretical — DDB
-    // wouldn't let it happen for real) must not poison downstream
-    // metrics. Parser omits the field; classifier's skip branch fires.
     const rec = streamRecord({
       milestone: 'approval_timed_out',
       metadata: { created_at: '2026-05-08T12:00:00.000Z' },
     });
-    // Manually corrupt the effective_timeout_s to a non-numeric N value
     (rec.dynamodb!.NewImage!.metadata!.M as any).effective_timeout_s = { N: 'not-a-number' };
     const view = parseApprovalRecord(rec);
     expect(view?.metadata.effective_timeout_s).toBeUndefined();
   });
 });
 
-// --- handler ----------------------------------------------------------------
-
 describe('approval-metrics-publisher handler', () => {
   afterEach(() => {
-    // Safety net — each test restores its own capture, but a thrown
-    // assertion between install and restore could leak. Guard.
     jest.restoreAllMocks();
   });
 
@@ -213,12 +184,10 @@ describe('approval-metrics-publisher handler', () => {
     const metrics = capture.lines.map(metricOf).filter((m) => m !== null);
     const names = metrics.map((m) => m!.name).sort();
     expect(names).toEqual(['ApprovalRequestCount', 'MetricsPublisherHeartbeat']);
-    // Namespace is set on every line.
     for (const line of capture.lines) {
       const ns = (line._aws as any).CloudWatchMetrics[0].Namespace;
       expect(ns).toBe(METRIC_NAMESPACE);
-      // Neither metric has dimensions: one empty DimensionSet each. With no
-      // set at all CloudWatch has no metric to create from the line.
+      // EMF: with no DimensionSet at all, CloudWatch creates no metric from the line.
       expect((line._aws as any).CloudWatchMetrics[0].Dimensions).toEqual([[]]);
     }
   });
@@ -250,9 +219,6 @@ describe('approval-metrics-publisher handler', () => {
   });
 
   test('approval_granted missing created_at → MetricEmitSkipped, no latency emit', async () => {
-    // Critical silent-failure defense: a stale container (pre-Chunk-8a
-    // shape) must not cause the publisher to emit latency=0 into
-    // percentile widgets. Explicit skip counter instead.
     const capture = captureEmfLines();
     try {
       await handler(
@@ -306,16 +272,12 @@ describe('approval-metrics-publisher handler', () => {
     }
     expect(byName.get('ApprovalDecisionLatencyMs')?.value).toBe(30_000);
     expect(byName.get('ApprovalDecisionLatencyMs')?.dimensions).toEqual({ outcome: 'timed_out' });
-    // The breakdown is written twice: per rule, and without dimensions.
     const breakdown = capture.lines.map(metricOf).filter((m) => m?.name === 'TimedOutEffectiveTimeout');
     expect(breakdown.map((m) => m!.value)).toEqual([30, 30]);
     expect(breakdown.map((m) => m!.dimensions)).toEqual([{ rule_id: 'force_push_any' }, {}]);
   });
 
   test('heartbeat fires even on a batch of all-non-approval records', async () => {
-    // Operator signal: heartbeat means the pipeline is live, even if
-    // no approval traffic is hitting TaskEventsTable right now. Gap
-    // on heartbeat = pipeline is broken.
     const capture = captureEmfLines();
     try {
       await handler(
@@ -330,22 +292,11 @@ describe('approval-metrics-publisher handler', () => {
 
     const names = capture.lines.map(metricOf).filter((m) => m !== null).map((m) => m!.name);
     expect(names).toContain('MetricsPublisherHeartbeat');
-    // No approval-event metrics emitted.
     expect(names.filter((n) => n.startsWith('Approval') || n.startsWith('Clipped') || n.startsWith('TimedOut'))).toHaveLength(0);
   });
 
   test('poison pill: handler exception flags record for partial-batch retry', async () => {
-    // Simulate a record that parseApprovalRecord tolerates but
-    // classifyApprovalEvent throws on. We can't easily force the
-    // pure classifier to throw; instead, corrupt the stream shape
-    // in a way that slips past the parser. A malformed timestamp
-    // is not a poison pill (we fall back to Date.now()). A thrown
-    // ``metadata`` accessor — via a DDB NewImage missing ``M`` — IS
-    // a poison pill because parseApprovalRecord returns null, which
-    // is a skip, not a throw. So we mock the classifier indirectly
-    // via a getter that throws on metadata access.
     const poison = streamRecord({ milestone: 'approval_requested', eventID: 'poison-1', sequenceNumber: '4901' });
-    // Replace metadata M with a getter that throws on iteration.
     Object.defineProperty(poison.dynamodb!.NewImage!.metadata!, 'M', {
       get() {
         throw new Error('simulated parse poison');
@@ -358,14 +309,12 @@ describe('approval-metrics-publisher handler', () => {
         poison,
         streamRecord({ milestone: 'approval_requested', eventID: 'good-1', sequenceNumber: '4902' }),
       ]));
-      // The stream sequence number, which is what Lambda checkpoints on — not
-      // the eventID ('poison-1'), which is no position in the shard.
+      // Lambda checkpoints a DynamoDB stream on the sequence number, not the eventID.
       expect(result.batchItemFailures).toEqual([{ itemIdentifier: '4901' }]);
     } finally {
       capture.restore();
     }
 
-    // Sibling record still emitted.
     const names = capture.lines.map(metricOf).filter((m) => m !== null).map((m) => m!.name);
     expect(names).toContain('ApprovalRequestCount');
     expect(names).toContain('MetricsPublisherHeartbeat');
@@ -387,14 +336,6 @@ describe('approval-metrics-publisher handler', () => {
   });
 
   test('heartbeat still emits even when every record in the batch is a poison pill', async () => {
-    // Invariant guarded by this test: the ``MetricsPublisherHeartbeat``
-    // emit lives AFTER the per-record for loop, so an all-poison batch
-    // still produces the "pipeline is alive" signal. A future refactor
-    // that moves the heartbeat INSIDE the try/catch (e.g. "only count
-    // as alive if we parsed at least one record") would break the
-    // operator's ability to distinguish "no approval traffic" from
-    // "pipeline is broken" during a DLQ-driven replay of poison
-    // records. Regression guard per Chunk 8 silent-failure M5.
     const poison1 = streamRecord({ milestone: 'approval_requested', eventID: 'poison-a', sequenceNumber: '4901' });
     const poison2 = streamRecord({ milestone: 'approval_requested', eventID: 'poison-b', sequenceNumber: '4902' });
     for (const rec of [poison1, poison2]) {
@@ -413,27 +354,17 @@ describe('approval-metrics-publisher handler', () => {
       capture.restore();
     }
 
-    // Both records flagged for partial-batch retry, by sequence number.
     expect(result!.batchItemFailures).toEqual([
       { itemIdentifier: '4901' },
       { itemIdentifier: '4902' },
     ]);
-    // Heartbeat MUST fire despite 100% of records being poison.
     const names = capture.lines.map(metricOf).filter((m) => m !== null).map((m) => m!.name);
     expect(names).toContain('MetricsPublisherHeartbeat');
-    // No approval-event metrics since nothing parsed successfully.
     expect(names.filter((n) => n.startsWith('ApprovalRequestCount'))).toHaveLength(0);
   });
 
   test('parse anomalies (missing required keys) emit MetricEmitSkipped + structured warn', async () => {
-    // Silent-failure H1: parseApprovalRecord distinguishes "expected"
-    // skips (non-approval records — high volume, silenced) from
-    // "anomaly" skips (missing task_id / missing metadata.M /
-    // missing milestone name — rare, surfaced). Anomalies MUST emit
-    // a MetricEmitSkipped with a reason dimension so the dashboard's
-    // absence-of-data becomes observable.
     const rec = streamRecord({ milestone: 'approval_requested' });
-    // Force missing task_id to trigger ``anomaly_missing_required_keys``.
     delete (rec.dynamodb!.NewImage! as any).task_id;
 
     const capture = captureEmfLines();
@@ -449,11 +380,6 @@ describe('approval-metrics-publisher handler', () => {
   });
 
   test('expected skips (non-milestone event_type) do NOT emit MetricEmitSkipped', async () => {
-    // The inverse: expected skip reasons (REMOVE records, non-
-    // agent_milestone records, non-approval milestones) are high
-    // volume and must NOT emit MetricEmitSkipped — that would drown
-    // real anomaly signal. They only bump the per-reason counter
-    // visible in the batch.complete log.
     const rec = streamRecord({ eventType: 'task_created' });
 
     const capture = captureEmfLines();
@@ -465,14 +391,11 @@ describe('approval-metrics-publisher handler', () => {
 
     const skipped = capture.lines.map(metricOf).filter((m) => m?.name === 'MetricEmitSkipped');
     expect(skipped).toHaveLength(0);
-    // Heartbeat still fires — pipeline is alive.
     const names = capture.lines.map(metricOf).filter((m) => m !== null).map((m) => m!.name);
     expect(names).toContain('MetricsPublisherHeartbeat');
   });
 
   test('unparseable event timestamp → skip counter + emission uses Date.now fallback', async () => {
-    // Malformed ISO timestamp shouldn't drop the metric, but we
-    // want an observability signal that the timestamp path failed.
     const capture = captureEmfLines();
     try {
       await handler(
@@ -495,13 +418,10 @@ describe('approval-metrics-publisher handler', () => {
   });
 });
 
-// --- dashboard parity -------------------------------------------------------
-
 describe('the dashboard and the publisher agree on metric dimensions', () => {
   const key = (name: string, dimensions: Record<string, string>): string =>
     `${name} ${JSON.stringify(Object.entries(dimensions).sort())}`;
 
-  /** Every ABCA/Cedar-HITL metric a dashboard widget reads, with its dimensions. */
   function dashboardMetrics(): string[] {
     const stack = new Stack(new App(), 'TestStack');
     new TaskDashboard(stack, 'TaskDashboard', {

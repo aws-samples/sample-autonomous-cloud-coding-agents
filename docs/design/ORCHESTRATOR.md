@@ -1,10 +1,10 @@
 # Orchestrator
 
-The orchestrator drives the task lifecycle from submission to completion. It runs every deterministic step (admission, context hydration, session start, result inference, cleanup) and delegates the non-deterministic step (the agent workload) to an isolated compute session. This separation keeps bookkeeping cheap and predictable while containing the expensive, unpredictable agent work inside the compute environment.
+The orchestrator drives the task lifecycle from submission to completion. It runs every deterministic step (admission, context hydration, session start, result inference, cleanup) and delegates the non-deterministic step (the agent workload) to an isolated compute session. The split keeps bookkeeping cheap and predictable, and it contains the expensive, unpredictable agent work inside the compute environment.
 
-The orchestrator is implemented as a Lambda Durable Function. Durable execution provides checkpoint/replay across process restarts, suspension without compute charges during long waits, and condition-based polling for session completion. See the Implementation section for details.
+The orchestrator is a Lambda Durable Function. Durable execution provides checkpoint and replay across process restarts, suspension without compute charges during long waits, and condition-based polling for session completion. See the Implementation section for details.
 
-- **Use this doc for:** task state machine, admission/finalization flow, cancellation behavior, failure recovery, and concurrency management.
+- **Use this doc for:** task state machine, admission and finalization flow, cancellation behavior, failure recovery, and concurrency management.
 - **Related docs:** [ARCHITECTURE.md](./ARCHITECTURE.md) for the high-level blueprint model, [COMPUTE.md](./COMPUTE.md) for the session runtime, [MEMORY.md](./MEMORY.md) for context sources, [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for per-repo customization.
 
 ## API and agent contracts
@@ -13,13 +13,13 @@ The orchestrator sits between the API layer and the agent runtime. Changes to ta
 
 | Concern | Location | Notes |
 |---------|----------|-------|
-| REST request/response types | `cdk/src/handlers/shared/types.ts` | Mirror in `cli/src/types.ts`; the console mirrors a subset in `web/src/core/api/types.ts` |
+| REST request/response types | `cdk/src/handlers/shared/types.ts` | Mirror in `cli/src/types.ts`. The console mirrors a subset in `web/src/core/api/types.ts` |
 | HTTP handlers and orchestration | `cdk/src/handlers/` | Tests under `cdk/test/handlers/` |
 | Agent runtime | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `prompts/`) | See `agent/README.md` for env vars and local run |
 
 ## Responsibilities
 
-The orchestrator is deliberately scoped. It handles coordination and bookkeeping but never touches agent logic, compute infrastructure, or memory storage. This clear boundary means a crashed agent does not leave orphaned state, and platform invariants (concurrency limits, event audit, cancellation) cannot be bypassed by agent code.
+The orchestrator's scope is limited on purpose. It handles coordination and bookkeeping and never touches agent logic, compute infrastructure, or memory storage. Because of this boundary, a crashed agent does not leave orphaned state, and agent code cannot bypass platform invariants (concurrency limits, event audit, cancellation).
 
 ### What the orchestrator owns
 
@@ -40,13 +40,13 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 |---|---|---|
 | Request authentication | Input gateway | [INPUT_GATEWAY.md](./INPUT_GATEWAY.md) |
 | Agent logic (clone, code, test, PR) | Agent runtime | [COMPUTE.md](./COMPUTE.md) |
-| Compute substrate internals (VM/task provisioning, image pull) | Selected compute service | [COMPUTE.md](./COMPUTE.md) |
+| Compute substrate internals (VM or task provisioning, image pull) | Selected compute service | [COMPUTE.md](./COMPUTE.md) |
 | Memory storage and retrieval | AgentCore Memory | [MEMORY.md](./MEMORY.md) |
 | Repository onboarding | Blueprint construct | [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) |
 
 ## Task state machine
 
-Every task moves through a finite set of states from creation to a terminal outcome. The state machine is the backbone of the orchestrator: it determines what actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the eleven states are terminal, meaning the task is done and no further transitions occur.
+Every task moves through a finite set of states from creation to a terminal outcome. The state machine determines which actions are valid at each point, when resources are acquired or released, and how the platform recovers from failures. Four of the eleven states are terminal. In a terminal state the task is done and no further transitions occur.
 
 ### States
 
@@ -57,7 +57,7 @@ Every task moves through a finite set of states from creation to a terminal outc
 | `SUBMITTED` | Task accepted, awaiting orchestration | Milliseconds |
 | `HYDRATING` | Fetching GitHub data, querying memory, assembling prompt | Seconds |
 | `RUNNING` | Agent session active in compute environment | Minutes to hours |
-| `AWAITING_APPROVAL` | Cedar HITL soft-deny gate fired; paused on human decision | Minutes to hours |
+| `AWAITING_APPROVAL` | Cedar HITL soft-deny gate fired. Paused on human decision | Minutes to hours |
 | `FINALIZING` | Result inference and cleanup in progress | Seconds |
 | `COMPLETED` | Terminal. Task finished successfully | - |
 | `FAILED` | Terminal. Task could not complete | - |
@@ -111,9 +111,9 @@ stateDiagram-v2
 | `PENDING_UPLOADS` | `FAILED` | Screening blocked | Any attachment fails security screening |
 | `PENDING_UPLOADS` | `CANCELLED` | User cancels or auto-cancel | Upload window expired (30 min) or explicit cancel |
 | `SUBMITTED` | `HYDRATING` | Admission passes | Concurrency slot acquired |
-| `SUBMITTED` | `QUEUED` | Concurrency cap hit | Per-user cap reached; task parked in FIFO admission queue (#441). No slot held. |
+| `SUBMITTED` | `QUEUED` | Concurrency cap hit | Per-user cap reached. Task parked in FIFO admission queue (#441). No slot held. |
 | `SUBMITTED` | `FAILED` | Admission rejected | Repo not onboarded, validation error |
-| `QUEUED` | `SUBMITTED` | Queue pickup | Admission-queue pickup Lambda sees free capacity; re-invokes the orchestrator. FIFO by `created_at`. |
+| `QUEUED` | `SUBMITTED` | Queue pickup | Admission-queue pickup Lambda sees free capacity and re-invokes the orchestrator. FIFO by `created_at`. |
 | `QUEUED` | `CANCELLED` | User cancels | Explicit cancel removes the task from the queue |
 | `QUEUED` | `FAILED` | Queue-age backstop | Task waited longer than `QUEUE_MAX_AGE_SECONDS` (default 24h) without admission |
 | `HYDRATING` | `RUNNING` | Hydration complete | Selected `ComputeStrategy.startSession` returns a session handle |
@@ -121,9 +121,9 @@ stateDiagram-v2
 | `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, guardrail blocks content, Bedrock unavailable |
 | `RUNNING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during execution |
 | `RUNNING` | `FINALIZING` | Session ends | Response received or session terminated |
-| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore and Lambda MicroVMs have an 8h substrate cap; the orchestrator's own safety-net poll window is `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h, after which a still-`RUNNING` task is driven to `TIMED_OUT` |
+| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore and Lambda MicroVMs have an 8h substrate cap. The orchestrator's own safety-net poll window is `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h. After that window, a task that is still `RUNNING` is driven to `TIMED_OUT` |
 | `RUNNING` | `FAILED` | Session crash | Heartbeat or substrate liveness lost (see Liveness monitoring) |
-| `AWAITING_APPROVAL` | `RUNNING` | Approved or denied | Human decision received; agent resumes |
+| `AWAITING_APPROVAL` | `RUNNING` | Approved or denied | Human decision received. Agent resumes |
 | `AWAITING_APPROVAL` | `CANCELLED` | User cancels | Explicit cancel while awaiting approval |
 | `AWAITING_APPROVAL` | `FAILED` | Stranded reconciler | Approval request orphaned (agent died mid-wait) |
 | `FINALIZING` | `COMPLETED` | Success inferred | PR exists or commits on branch |
@@ -131,7 +131,7 @@ stateDiagram-v2
 
 ### Cancellation
 
-Users can cancel a task at any point. The orchestrator's response depends on how far the task has progressed. The key guarantee: every cancel request either transitions the task to `CANCELLED` or is rejected because the task already reached a terminal state. No task is left in limbo.
+Users can cancel a task at any point. The orchestrator's response depends on how far the task has progressed. The guarantee is that every cancel request either transitions the task to `CANCELLED` or is rejected because the task already reached a terminal state.
 
 | State when cancel arrives | Action |
 |---|---|
@@ -144,15 +144,15 @@ Users can cancel a task at any point. The orchestrator's response depends on how
 | `FINALIZING` | Let finalization complete. Mark `CANCELLED` only if the terminal state was not yet written. |
 | Terminal | Reject the cancel request. |
 
-For a running cancellation, backend dispatch calls ECS `StopTask`, Lambda `TerminateMicrovm`, or AgentCore `StopRuntimeSession`. The `lambda-microvm` branch is evaluated before the AgentCore `RUNTIME_ARN` fallback; otherwise a mixed deployment could stop an unrelated AgentCore session and leave the MicroVM billing until its cap.
+When a running task is cancelled, backend dispatch calls ECS `StopTask`, Lambda `TerminateMicrovm`, or AgentCore `StopRuntimeSession`. The `lambda-microvm` branch is evaluated before the AgentCore `RUNTIME_ARN` fallback. Otherwise a mixed deployment could stop an unrelated AgentCore session and leave the MicroVM billing until its cap.
 
 ### Timeouts
 
-Multiple timeout mechanisms work together to prevent runaway tasks. Substrate time limits vary by backend; cost-based limits (turns, budget) are enforced by the agent SDK. The orchestrator acts as a safety net when external timeouts fire.
+Several timeout mechanisms work together to stop runaway tasks. The time limits of the substrate vary by backend. The agent SDK enforces the cost-based limits (turns, budget). The orchestrator acts as a safety net when external timeouts fire.
 
 | Type | Default | Effect |
 |---|---|---|
-| Max session duration | 8 hours | AgentCore caps a session at 8h; Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h; a task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
+| Max session duration | 8 hours | AgentCore caps a session at 8h. Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h. A task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
 | Idle timeout | Backend-specific | AgentCore has an idle timeout. Lambda MicroVMs omit `idlePolicy` because inbound-traffic idleness would suspend an outbound-only agent while it is working. See Liveness monitoring. |
 | Max turns | 100 (range 1-500) | Agent stops after N model invocations. Configurable per task or per repo. |
 | Max cost budget | $0.01-$100 | Agent stops when budget is reached. Per-task or per-repo via Blueprint. |
@@ -160,7 +160,7 @@ Multiple timeout mechanisms work together to prevent runaway tasks. Substrate ti
 
 ## Blueprint execution
 
-Every task follows a blueprint: a sequence of deterministic steps wrapping one agentic step. The default blueprint is the sequence described in [ARCHITECTURE.md](./ARCHITECTURE.md). Per-repo customization (see [REPO_ONBOARDING.md](./REPO_ONBOARDING.md)) changes which steps run without affecting the framework guarantees.
+Every task follows a blueprint, a sequence of deterministic steps that wrap one agentic step. The default blueprint is the sequence described in [ARCHITECTURE.md](./ARCHITECTURE.md). Per-repo customization (see [REPO_ONBOARDING.md](./REPO_ONBOARDING.md)) changes which steps run without affecting the framework guarantees.
 
 ```mermaid
 flowchart LR
@@ -171,57 +171,57 @@ flowchart LR
     E --> F[Finalize]
 ```
 
-The orchestrator (`orchestrate-task.ts`) runs these as distinct durable-execution steps in order: `admission-control` → `pre-flight` → `hydrate-context` → `start-session` → `await-agent-completion` → `finalize`. Pre-flight runs **before** hydration so that GitHub-permission and reachability failures are caught before any prompt assembly or Bedrock screening work.
+The orchestrator (`orchestrate-task.ts`) runs these as distinct durable-execution steps in this order: `admission-control`, `pre-flight`, `hydrate-context`, `start-session`, `await-agent-completion`, `finalize`. Pre-flight runs **before** hydration, so that GitHub-permission and reachability failures are caught before any prompt assembly or Bedrock screening work.
 
 ### Step 1: Admission control
 
-Validates the task before any compute is consumed. Checks run in order:
+Admission control validates the task before any compute is consumed. The checks run in this order:
 
-1. **Repo onboarding** - `GetItem` on `RepoTable`. If not found or inactive, reject with `REPO_NOT_ONBOARDED`. This runs at the API handler level (`createTaskCore`) for fast rejection.
-2. **User concurrency** - Atomic check-and-increment on `UserConcurrency` counter. If at limit (default 10), the task is **queued, not failed** (#441): it transitions `SUBMITTED → QUEUED` and a scheduled admission-queue pickup Lambda re-attempts admission in FIFO order (by `created_at`) as slots free up, flipping `QUEUED → SUBMITTED` and re-invoking the orchestrator. The pickup Lambda does a read-only capacity pre-check; the orchestrator's atomic increment remains the single writer of the counter, so a pickup that loses the race harmlessly re-queues without losing FIFO position. `GET /tasks/{id}` surfaces `queue_position` and `estimated_wait_s` while queued.
-3. **System concurrency** - Compare total running + hydrating tasks to the configured system limit and selected-backend quotas.
-4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Rate-limit rejections happen at submit time and are rejected, not queued (unlike the concurrency cap, which queues).
-5. **Idempotency** - If the request includes an idempotency key and a task with that key exists, return the existing task.
+1. **Repo onboarding.** `GetItem` on `RepoTable`. If the repo is not found or is inactive, reject with `REPO_NOT_ONBOARDED`. This check runs at the API handler level (`createTaskCore`) for fast rejection.
+2. **User concurrency.** Atomic check-and-increment on the `UserConcurrency` counter. If the user is at the limit (default 10), the task is **queued, not failed** (#441). It transitions `SUBMITTED → QUEUED`, and a scheduled admission-queue pickup Lambda re-attempts admission in FIFO order (by `created_at`) as slots free up. It does so by flipping the task `QUEUED → SUBMITTED` and re-invoking the orchestrator. The pickup Lambda does a read-only capacity pre-check. The orchestrator's atomic increment remains the single writer of the counter, so a pickup that loses the race re-queues the task without harm and without losing its FIFO position. `GET /tasks/{id}` returns `queue_position` and `estimated_wait_s` while the task is queued.
+3. **System concurrency.** Compare the total of running and hydrating tasks to the configured system limit and to the quotas of the selected backend.
+4. **Rate limiting.** A sliding window counter (10 tasks per hour per user). A task over the rate limit is rejected at submit time, not queued. The concurrency cap queues instead.
+5. **Idempotency.** If the request includes an idempotency key and a task with that key exists, return the existing task.
 
 On acceptance, the concurrency slot is acquired and the orchestrator proceeds to pre-flight.
 
 ### Step 2: Pre-flight checks
 
-Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs and PRs that come from a fork, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before a compute session is consumed.
+Pre-flight runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration. Failures of an external dependency are therefore caught before any prompt assembly or Bedrock screening consumes work. Pre-flight verifies that the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs and PRs that come from a fork, and confirms that the GitHub API is reachable. On failure it drives the task to `FAILED` and emits a `preflight_failed` event. A clear error such as `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` is reported before a compute session is consumed.
 
 ### Step 3: Context hydration
 
-Assembles the agent's user prompt and transitions the task to `HYDRATING`. The implementation lives in `context-hydration.ts`. What it does, by resolved workflow:
+Context hydration assembles the agent's user prompt and transitions the task to `HYDRATING`. The implementation is in `context-hydration.ts`. What it does depends on the resolved workflow:
 
-**Non-PR workflows (e.g. `coding/new-task-v1`):** Fetches the GitHub issue (title, body, comments) if `issue_number` is set, loads memory from past tasks, and combines everything with the user's task description.
+**Non-PR workflows (for example `coding/new-task-v1`).** Hydration fetches the GitHub issue (title, body, comments) if `issue_number` is set, loads memory from past tasks, and combines everything with the user's task description.
 
-**PR workflows (`coding/pr-iteration-v1` / `coding/pr-review-v1`):** Fetches PR metadata, conversation comments, changed files (REST), and inline review comments (GraphQL, resolved threads filtered out) in four parallel calls. Extracts `head_ref` and `base_ref` for branch resolution.
+**PR workflows (`coding/pr-iteration-v1` and `coding/pr-review-v1`).** Hydration fetches PR metadata, conversation comments, changed files (REST), and inline review comments (GraphQL, resolved threads filtered out) in four parallel calls. It extracts `head_ref` and `base_ref` for branch resolution.
 
-Regardless of workflow, the external GitHub content (issue or PR title, body, comment authors and bodies, plus PR branch names, rendered review paths and diff) is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
+For every workflow, Amazon Bedrock Guardrails screens the external GitHub content for prompt injection: issue or PR title, body, comment authors and bodies, plus PR branch names, rendered review paths and diff. The screening is fail-closed, so unscreened content never reaches the agent. A token budget (default 100K tokens, by a heuristic of about 4 characters per token) trims the oldest comments first when it is exceeded.
 
 ### Step 4: Session start
 
-The orchestrator resolves the repository's `ComputeStrategy` and calls `startSession` with the hydrated payload. AgentCore invokes the runtime, ECS starts a Fargate task, and Lambda MicroVMs launch a snapshot and deliver the payload through `/run`. The orchestrator persists the returned backend handle in `compute_metadata`, records the `(task_id, session_id)` mapping, and transitions to `RUNNING`.
+The orchestrator resolves the repository's `ComputeStrategy` and calls `startSession` with the hydrated payload. AgentCore invokes the runtime, ECS starts a Fargate task, and Lambda MicroVMs launch a snapshot and deliver the payload through `/run`. The orchestrator persists the returned backend handle in `compute_metadata`, records the `(task_id, session_id)` mapping, and transitions the task to `RUNNING`.
 
 AgentCore's session ID is pre-generated and reused on retry. ECS and Lambda MicroVMs use their substrate identifiers as session IDs.
 
-If `RunMicrovm` succeeds but persisting the session handle or emitting the start event fails, the start step terminates the MicroVM best-effort using its in-memory handle before propagating the original error. This orphan reap is required because no later poll or finalization step can recover an unpersisted handle.
+If `RunMicrovm` succeeds but persisting the session handle or emitting the start event fails, the start step terminates the MicroVM best-effort with its in-memory handle before it propagates the original error. This cleanup of the orphaned MicroVM is required because no later poll or finalization step can recover an unpersisted handle.
 
 ### Step 5: Await completion
 
-The orchestrator polls for completion using `waitForCondition` from the Durable Execution SDK at configurable intervals (default 30s). DynamoDB task status is common to all backends; backend-specific checks supplement it:
+The orchestrator polls for completion with `waitForCondition` from the Durable Execution SDK at a configurable interval (default 30s). The DynamoDB task status is common to all backends. Backend-specific checks supplement it:
 
 | Backend | Additional poll signal |
 |---|---|
-| AgentCore | Agent heartbeat; `/ping` keeps the runtime healthy while the task thread works |
+| AgentCore | Agent heartbeat. `/ping` keeps the runtime healthy while the task thread works |
 | ECS | `DescribeTasks`, including container exit status and exit code |
 | Lambda MicroVMs | `GetMicrovm` state plus agent heartbeat |
 
-While waiting between polls, the durable orchestrator suspends without compute charges. If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization using GitHub-based result inference as fallback.
+Between polls, the durable orchestrator suspends without compute charges. If the session is terminated externally (crash, timeout, cancellation), the poll detects the termination. The orchestrator then proceeds to finalization and uses GitHub-based result inference as a fallback.
 
 ### Step 6: Finalization
 
-After the session ends, the orchestrator determines the outcome from multiple signals.
+After the session ends, the orchestrator determines the outcome from several signals.
 
 **Completion signals (layered reliability):**
 
@@ -242,60 +242,60 @@ After the session ends, the orchestrator determines the outcome from multiple si
 | error | No | any | `FAILED` |
 | unknown | - | - | `FAILED` |
 
-**Cleanup:** Update task status with metadata (PR URL, cost, duration). Set TTL for data retention (default 90 days). Emit task events. Release concurrency counter. Send notifications. Persist code attribution to memory. For `lambda-microvm`, finalization must call `TerminateMicrovm` after writing the terminal outcome: nothing in the guest self-terminates, and the 28,800-second maximum is a safety bound rather than cleanup.
+**Cleanup.** Update the task status with metadata (PR URL, cost, duration). Set the TTL for data retention (default 90 days). Emit task events. Release the concurrency counter. Send notifications. Persist code attribution to memory. For `lambda-microvm`, finalization must call `TerminateMicrovm` after it writes the terminal outcome. Nothing in the guest self-terminates, and the 28,800-second maximum is a safety bound, not cleanup.
 
 ### Step execution contract
 
 Every step in the pipeline satisfies these properties:
 
-- **Idempotent** - Safe to retry after crashes. Context hydration produces the same prompt for the same inputs; session-start retry semantics are implemented by each backend strategy.
-- **Timeout-bounded** - Each step has a configurable timeout to prevent blocking the pipeline.
-- **Failure-aware** - Returns `success` or `failed`. Infrastructure failures (throttle, transient errors) trigger exponential backoff retries (default: 2 retries, base 1s, max 10s). Explicit failures transition to `FAILED` without retry.
-- **Least-privilege input** - Each step receives only the `blueprintConfig` fields it needs. Custom Lambda steps get credential ARNs stripped.
-- **Bounded output** - `StepOutput.metadata` is limited to 10KB. `previousStepResults` is pruned to the last 5 steps to stay within the 256KB checkpoint limit.
+- **Idempotent.** A step is safe to retry after crashes. Context hydration produces the same prompt for the same inputs. Each backend strategy implements the retry semantics of session start.
+- **Timeout-bounded.** Each step has a configurable timeout, so that it cannot block the pipeline.
+- **Failure-aware.** A step returns `success` or `failed`. Infrastructure failures (throttle, transient errors) trigger exponential backoff retries (by default 2 retries, base 1s, max 10s). Explicit failures transition to `FAILED` without retry.
+- **Least-privilege input.** Each step receives only the `blueprintConfig` fields it needs. Credential ARNs are stripped from the input of custom Lambda steps.
+- **Bounded output.** `StepOutput.metadata` is limited to 10KB. `previousStepResults` is pruned to the last 5 steps to stay within the 256KB checkpoint limit.
 
 ### Extension points
 
-Per [REPO_ONBOARDING.md](./REPO_ONBOARDING.md), blueprints customize execution through three layers:
+As [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) describes, blueprints customize execution through three layers:
 
-1. **Parameterized strategies** - Select built-in implementations without code: `agentcore`, `ecs`, or `lambda-microvm`.
-2. **Lambda-backed custom steps** - Inject custom logic at `pre-agent` or `post-agent` phases. Example: SAST scan before the agent, custom lint after.
-3. **Custom step sequences** - Override the default step order entirely via an ordered `step_sequence` list.
+1. **Parameterized strategies.** Select built-in implementations without code: `agentcore`, `ecs`, or `lambda-microvm`.
+2. **Lambda-backed custom steps.** Inject custom logic at the `pre-agent` or `post-agent` phase. For example, run a SAST scan before the agent or a custom lint after it.
+3. **Custom step sequences.** Override the default step order entirely with an ordered `step_sequence` list.
 
 The framework enforces state transitions, event emission, cancellation checks, concurrency management, and timeouts regardless of customization.
 
 ## Session management
 
-Agent sessions run for minutes to hours inside isolated compute environments. The orchestrator does not control the agent's behavior, but it needs to know whether the session is alive, healthy, and eventually done. This section covers how the orchestrator maintains that visibility without blocking or burning compute.
+Agent sessions run for minutes to hours inside isolated compute environments. The orchestrator does not control the agent's behavior, but it needs to know whether the session is alive, healthy, and eventually done. This section describes how the orchestrator gets that information without blocking or consuming compute.
 
 ### Liveness monitoring
 
-Liveness detection varies by compute backend. AgentCore sessions use DynamoDB heartbeats and a `/ping` health endpoint; ECS Fargate tasks rely on the ECS `DescribeTasks` API; Lambda MicroVMs combine control-plane state with the same in-guest heartbeat used by AgentCore.
+Liveness detection varies by compute backend. AgentCore sessions use DynamoDB heartbeats and a `/ping` health endpoint. ECS Fargate tasks rely on the ECS `DescribeTasks` API. Lambda MicroVMs combine control-plane state with the same in-guest heartbeat used by AgentCore.
 
-**DynamoDB heartbeat (AgentCore and Lambda MicroVMs).** The agent writes `agent_heartbeat_at` every 45 seconds via a daemon thread. The orchestrator applies the same thresholds to both backends, only while task status is `RUNNING`:
+**DynamoDB heartbeat (AgentCore and Lambda MicroVMs).** The agent writes `agent_heartbeat_at` every 45 seconds from a daemon thread. The orchestrator applies the same thresholds to both backends, and only while the task status is `RUNNING`:
 
-- **Grace period** (120s) - After entering `RUNNING`, the orchestrator waits before expecting heartbeats (covers container startup).
-- **Stale threshold** (240s) - If the heartbeat exists but is older than this, the session is treated as lost.
-- **Early crash** - If no heartbeat is ever set after the combined window (360s), the agent died before the pipeline started.
+- **Grace period (120s).** After the task enters `RUNNING`, the orchestrator waits before it expects heartbeats. The wait covers container startup.
+- **Stale threshold (240s).** If the heartbeat exists but is older than this threshold, the session is treated as lost.
+- **Early crash.** If no heartbeat is ever set after the combined window (360s), the agent died before the pipeline started.
 
 When the session is unhealthy, the task transitions to `FAILED` with "Agent session lost: no recent heartbeat."
 
-**ECS task status polling (ECS only).** The orchestrator calls `computeStrategy.pollSession` (ECS `DescribeTasks`) on each poll cycle. Three failure modes are detected: container failure (immediate `FAILED`), container exit without DynamoDB terminal write (fail after 5 consecutive completed polls), and repeated API failures (fail after 3 consecutive errors). ECS does not have heartbeat-based hung-process detection; a hung but alive container polls for the full `MAX_POLL_ATTEMPTS` window (~8.5h) before timing out.
+**ECS task status polling (ECS only).** The orchestrator calls `computeStrategy.pollSession` (ECS `DescribeTasks`) on each poll cycle. It detects three failure modes: container failure (immediate `FAILED`), container exit without DynamoDB terminal write (fail after 5 consecutive completed polls), and repeated API failures (fail after 3 consecutive errors). ECS has no heartbeat-based detection of a hung process. A hung but alive container is polled for the full `MAX_POLL_ATTEMPTS` window (about 8.5h) before the task times out.
 
-**Task status reads that fail (AgentCore and ECS).** Each poll reads the task row. A read that is refused (`AccessDeniedException`, `ValidationException`, `UnrecognizedClientException`, `InvalidSignatureException`) ends the orchestration at that poll with the error. Finalization would have to read the same row, so the task row is left as it is: the agent's own terminal write, or a cancel, still ends the task. Any other failed read (a throttle, a 5xx, a timeout) is one missed poll: the wait goes on with the last known status, however many reads fail in a row, and the missed polls count toward the poll window. Lambda MicroVM tasks do not go through this poll. Their supervisor ends the wait at the first refused read of the task row or of `GetMicrovm`, or at the third failed read in a row; finalization then stops the MicroVM and, when it can read the task row, fails the task with `MicroVM supervisor: <stage>-failed`.
+**Task status reads that fail (AgentCore and ECS).** Each poll reads the task row. A read that is refused (`AccessDeniedException`, `ValidationException`, `UnrecognizedClientException`, `InvalidSignatureException`) ends the orchestration at that poll with the error. Finalization would have to read the same row, so the task row is left as it is. The agent's own terminal write, or a cancel, still ends the task. Any other failed read (a throttle, a 5xx, a timeout) is one missed poll. The wait goes on with the last known status, however many reads fail in a row, and the missed polls count toward the poll window. Lambda MicroVM tasks do not go through this poll. Their supervisor ends the wait at the first refused read of the task row or of `GetMicrovm`, or at the third failed read in a row. Finalization then stops the MicroVM and, when it can read the task row, fails the task with `MicroVM supervisor: <stage>-failed`.
 
-**Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
+**Lambda MicroVM state polling.** Liveness has two signals. The strategy maps the `GetMicrovm` state mechanically: `PENDING` and `RUNNING` report `running`, `SUSPENDING` and `SUSPENDED` report `suspended`, and `TERMINATING` and `TERMINATED` report terminal completion. The orchestrator interprets what the state means for health:
 
-- `suspended` is healthy only while the task is `AWAITING_APPROVAL` and the supervisor recorded a suspend intent for that exact gate; any other suspension is woken.
-- A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
-- Substrate state detects a dead VM; heartbeat staleness detects a hung, deadlocked, or OOM-killed pipeline inside a VM that still reports `RUNNING`.
+- `suspended` is healthy only while the task is `AWAITING_APPROVAL` and the supervisor recorded a suspend intent for that exact gate. Any other suspension is woken.
+- A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm that the agent did not write a terminal result between the original read and the VM termination.
+- Substrate state detects a dead VM. Heartbeat staleness detects a hung, deadlocked, or OOM-killed pipeline inside a VM that still reports `RUNNING`.
 
-`TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
+`TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually removed. Polling does not wait for `NotFound`.
 
-**Lambda MicroVM approval-wait supervision (ADR-021 P3).** For MicroVM tasks the durable poll runs a supervisor instead of the generic loop. It persists its state (worker ID, first observation, session deadline, failure counters) across durable replays, so later polls never extend the original service deadline. While the task is `AWAITING_APPROVAL` it decides, from the task row, the approval row and `GetMicrovm`, whether to keep waiting, suspend or resume:
+**Lambda MicroVM approval-wait supervision (ADR-021 P3).** For MicroVM tasks the durable poll runs a supervisor instead of the generic loop. The supervisor persists its state (worker ID, first observation, session deadline, failure counters) across durable replays, so later polls never extend the original service deadline. While the task is `AWAITING_APPROVAL`, the supervisor decides, from the task row, the approval row and `GetMicrovm`, whether to keep waiting, to suspend or to resume:
 
-- **Suspend** after the task's `microvm_sleep_after_s` grace (default 60 s), only when the live suspend switch is on, the launched image version declares the lifecycle protocol, and at least 30 s of sleep remain before the wake time. It records a suspend intent for the gate before calling `SuspendMicrovm` and re-checks the gate immediately before the call.
-- **Resume** when the decision is recorded (inline from `ApproveTaskFn`/`DenyTaskFn`, with the supervisor as backstop), when the gate's original deadline is 60 s away, when a suspension does not match a recorded intent, or when the gate cannot be read. A failed inline wake records `microvm_resume_orphan`; the supervisor retries.
+- **Suspend** after the task's `microvm_sleep_after_s` grace (default 60 s), only when the live suspend switch is on, the launched image version declares the lifecycle protocol, and at least 30 s of sleep remain before the wake time. It records a suspend intent for the gate before it calls `SuspendMicrovm` and re-checks the gate immediately before the call.
+- **Resume** when the decision is recorded (inline from `ApproveTaskFn`/`DenyTaskFn`, with the supervisor as backstop), when the gate's original deadline is 60 s away, when a suspension does not match a recorded intent, or when the gate cannot be read. A failed inline wake records `microvm_resume_orphan`. The supervisor retries.
 - **Fail** the task, conditionally on its own worker ID, when the substrate is terminal before the agent wrote a result, the session deadline passes, or wake requests keep failing.
 
 At finalization the supervisor's worker is always asked to stop, even if the database update fails. A stop that is not acknowledged is logged and recorded as a `microvm_cleanup_unconfirmed` event.
@@ -304,13 +304,13 @@ At finalization the supervisor's worker is always asked to stop, even if the dat
 
 ### The idle timeout problem
 
-AgentCore terminates sessions after 15 minutes of inactivity. Since coding tasks may have long pauses between tool calls (builds, complex reasoning), the agent uses `add_async_task` to register background work. The SDK reports `HealthyBusy` via `/ping` while any async task is active, preventing idle termination.
+AgentCore terminates sessions after 15 minutes of inactivity. Because coding tasks can pause for a long time between tool calls (builds, complex reasoning), the agent registers background work with `add_async_task`. The SDK reports `HealthyBusy` through `/ping` while any async task is active, so the session is not terminated as idle.
 
-Risk: if the agent process becomes entirely unresponsive (not just a thread), `/ping` may not respond, triggering termination. The defense is running the coding task in a separate thread that does not starve the main thread.
+One risk is that the whole agent process becomes unresponsive, not only one thread. Then `/ping` may not respond, and the session is terminated. The defense is to run the coding task in a separate thread that does not starve the main thread.
 
 ## Failure modes and recovery
 
-Long-running distributed systems fail. The orchestrator is designed so that every failure mode has a defined recovery path and every task eventually reaches a terminal state. The table below maps each step to its known failure modes and what the orchestrator does about them.
+The orchestrator is designed so that every failure mode has a defined recovery path and every task eventually reaches a terminal state. The table below lists the known failure modes of each step and what the orchestrator does about them.
 
 ### By pipeline step
 
@@ -318,7 +318,7 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 |---|---|---|
 | Admission | DynamoDB unavailable | Retry 3x with backoff, then reject |
 | Admission | Concurrency counter drifted | Reconciliation Lambda corrects every 15 minutes |
-| Hydration | GitHub API down/rate limited | Retry with backoff. Fail if issue is essential; degrade if user also provided a description |
+| Hydration | GitHub API down or rate limited | Retry with backoff. Fail if the issue is essential. Degrade if the user also provided a description |
 | Hydration | Memory service unavailable | Proceed without memory (it is enrichment, not required) |
 | Hydration | Guardrail blocks content | Fail the task (content is adversarial, no retry) |
 | Hydration | Guardrail API unavailable | Fail the task (fail-closed: unscreened content never reaches agent) |
@@ -332,15 +332,15 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 
 ### Recovery mechanisms
 
-1. **Durable execution** - Lambda Durable Functions checkpoints at each state transition and replays after crashes.
-2. **Idempotent operations** - All steps are safe to retry.
-3. **Stuck-task scanner** - Periodic Lambda detects tasks stuck beyond expected durations and either resumes or fails them.
-4. **Counter reconciliation** - Lambda runs every 15 minutes, compares counters to actual running task counts, corrects drift. Emits `counter_drift_corrected` CloudWatch metric.
-5. **Dead-letter queue** - Tasks that exhaust retries go to DLQ for investigation.
+1. **Durable execution.** Lambda Durable Functions checkpoints at each state transition and replays after crashes.
+2. **Idempotent operations.** All steps are safe to retry.
+3. **Stuck-task scanner.** A periodic Lambda detects tasks stuck beyond expected durations and either resumes or fails them.
+4. **Counter reconciliation.** A Lambda runs every 15 minutes, compares the counters to the actual running task counts, and corrects drift. It emits the `counter_drift_corrected` CloudWatch metric.
+5. **Dead-letter queue.** Tasks that exhaust retries go to a DLQ for investigation.
 
 ## Concurrency and scaling
 
-Each task runs in its own isolated compute session with no shared mutable state at the compute layer. The orchestrator manages concurrency purely at the coordination layer: atomic counters track how many tasks are active per user and system-wide, and admission control enforces limits before resources are consumed.
+Each task runs in its own isolated compute session with no shared mutable state at the compute layer. The orchestrator manages concurrency at the coordination layer only. Atomic counters track how many tasks are active per user and system-wide, and admission control enforces limits before resources are consumed.
 
 ### Capacity limits
 
@@ -353,19 +353,19 @@ Each task runs in its own isolated compute session with no shared mutable state 
 
 ### Counter management
 
-- **UserConcurrency** - DynamoDB item per user with `active_count`. Incremented atomically (`active_count < max`) at admission, decremented at finalization.
-- **SystemConcurrency** - Single DynamoDB item, same pattern.
+- **UserConcurrency.** A DynamoDB item per user with `active_count`. It is incremented atomically (`active_count < max`) at admission and decremented at finalization.
+- **SystemConcurrency.** A single DynamoDB item with the same pattern.
 
-Concurrency is always released in `finalizeTask` (step 6), never inside the poll loop. ECS poll failure paths call `failTask` with `releaseConcurrency: false` to transition the task to `FAILED` without decrementing — `finalizeTask` handles the single decrement after re-reading the task state. The heartbeat-detected crash path also guards against double-decrement by only releasing the counter after a successful state transition. If the transition fails (task already terminal), it re-reads and acts accordingly.
+Concurrency is always released in `finalizeTask` (step 6), never inside the poll loop. ECS poll failure paths call `failTask` with `releaseConcurrency: false` to transition the task to `FAILED` without decrementing. `finalizeTask` handles the single decrement after it re-reads the task state. The heartbeat-detected crash path also guards against a double decrement. It releases the counter only after a successful state transition. If the transition fails because the task is already terminal, it re-reads the task and acts accordingly.
 
 ## Implementation
 
-The orchestrator needed a runtime that survives hours-long waits without burning compute, recovers from crashes without losing progress, and expresses the blueprint as readable code rather than a DSL. [Lambda Durable Functions](https://docs.aws.amazon.com/lambda/latest/dg/durable-functions.html) fits all three requirements. The blueprint is written as sequential TypeScript with durable operations (`step`, `wait`, `waitForCondition`). Each operation creates a checkpoint; if the function is interrupted, it suspends without compute charges and replays from the last checkpoint on resumption.
+The orchestrator needed a runtime that survives hours-long waits without consuming compute, recovers from crashes without losing progress, and expresses the blueprint as readable code rather than a DSL. [Lambda Durable Functions](https://docs.aws.amazon.com/lambda/latest/dg/durable-functions.html) fits all three requirements. The blueprint is written as sequential TypeScript with durable operations (`step`, `wait`, `waitForCondition`). Each operation creates a checkpoint. If the function is interrupted, it suspends without compute charges and replays from the last checkpoint when it resumes.
 
 Key properties:
 - **No compute during waits.** The orchestrator pays nothing while the agent runs for hours. At 30-second poll intervals over an 8-hour session, total orchestrator compute is minutes.
-- **Execution duration up to 1 year.** Far exceeds the 8-hour agent session limit.
-- **Sequential code, not a DSL.** The blueprint maps naturally to TypeScript with durable operations. No Amazon States Language or state machine abstractions.
+- **Execution duration up to 1 year.** That far exceeds the 8-hour agent session limit.
+- **Sequential code, not a DSL.** The blueprint maps to TypeScript with durable operations. It needs no Amazon States Language and no state machine abstractions.
 - **Built-in retry with checkpointing.** Steps support configurable retry strategies without re-executing completed work.
 
 ### AgentCore session monitoring pattern
@@ -404,11 +404,11 @@ sequenceDiagram
 | 200 | ~192,000 | ~6.7 | ~$0.04 |
 | 500 | ~480,000 | ~16.7 | ~$0.10 |
 
-At 500 concurrent tasks, peak TPS is ~16.7 - well within the 25 TPS AgentCore quota. The bottleneck is the concurrent session quota, not the poll mechanism.
+At 500 concurrent tasks, peak TPS is about 16.7, within the 25 TPS AgentCore quota. The bottleneck is the concurrent session quota, not the poll mechanism.
 
 ## Data model
 
-Three DynamoDB tables back the orchestrator: one for task state, one for the audit log, and one for concurrency counters. The Tasks table is the source of truth for every task; the orchestrator reads and writes it at every state transition. TaskEvents is append-only and powers the `GET /v1/tasks/{id}/events` API. UserConcurrency is a lightweight counter table used only during admission and finalization.
+Three DynamoDB tables back the orchestrator: one for task state, one for the audit log, and one for concurrency counters. The Tasks table is the source of truth for every task. The orchestrator reads and writes it at every state transition. TaskEvents is append-only and backs the `GET /v1/tasks/{id}/events` API. UserConcurrency is a counter table used only during admission and finalization.
 
 ### Tasks table (DynamoDB)
 
@@ -418,15 +418,15 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `user_id` | String | Cognito sub |
 | `status` | String | Current state |
 | `repo` | String | `owner/repo` |
-| `workflow_ref` | String? | Workflow reference as submitted (e.g. `coding/new-task-v1`); default when absent |
-| `resolved_workflow` | Map | Resolved workflow snapshot `{id, version}` — replaces the former `task_type` enum (#248) |
+| `workflow_ref` | String? | Workflow reference as submitted (for example `coding/new-task-v1`). Default when absent |
+| `resolved_workflow` | Map | Resolved workflow snapshot `{id, version}`. Replaces the former `task_type` enum (#248) |
 | `issue_number` | Number? | GitHub issue number |
 | `pr_number` | Number? | PR number (required for PR workflows) |
 | `task_description` | String? | Free-text description |
-| `branch_name` | String | `bgagent/{task_id}/{slug}` for new tasks; PR's `head_ref` for PR tasks |
+| `branch_name` | String | `bgagent/{task_id}/{slug}` for new tasks. PR's `head_ref` for PR tasks |
 | `session_id` | String? | Backend session identifier (AgentCore session ID, ECS task ARN, or MicroVM ID) |
 | `compute_type` | String? | Selected backend: `agentcore`, `ecs`, or `lambda-microvm` |
-| `compute_metadata` | Map? | Backend lifecycle handle; Lambda MicroVMs persist `microvmId` and `endpoint` |
+| `compute_metadata` | Map? | Backend lifecycle handle. Lambda MicroVMs persist `microvmId` and `endpoint` |
 | `execution_id` | String? | Durable execution ID |
 | `pr_url` | String? | PR URL (set during finalization) |
 | `error_message` | String? | Error reason if FAILED |
@@ -440,19 +440,19 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `ttl` | Number? | DynamoDB TTL (default: created_at + 90 days) |
 | `created_at` / `updated_at` | String | ISO 8601 timestamps |
 
-> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/blocked/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
+> **Derived field.** `error_classification` is not stored in DynamoDB. The API computes it at response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). The classifier returns a structured object with `category` (auth, network, concurrency, compute, agent, guardrail, config, timeout, blocked, or unknown), `title`, `description`, `remedy`, and a `retryable` flag. Because the field is derived, classifier updates take effect immediately for all existing tasks without data migration.
 
 **GSIs:** `UserStatusIndex` (PK: `user_id`, SK: `status#created_at`), `UserCreatedAtIndex` (PK: `user_id`, SK: `created_at`; the task list, newest first), `StatusIndex` (PK: `status`, SK: `created_at`), `IdempotencyIndex` (PK: `idempotency_key`, sparse), `LinearIssueIndex` (PK: `linear_issue_id`, SK: `created_at`, sparse), `JiraIssueIndex` (PK: `jira_issue_identity`, SK: `created_at`, sparse).
 
 ### TaskEvents table
 
-Append-only audit log. See [OBSERVABILITY.md](./OBSERVABILITY.md).
+TaskEvents is an append-only audit log. See [OBSERVABILITY.md](./OBSERVABILITY.md).
 
 | Field | Type | Description |
 |---|---|---|
 | `task_id` (PK) | String | Task ID |
 | `event_id` (SK) | String (ULID) | Sortable event ID |
-| `event_type` | String | `task_created`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, etc. |
+| `event_type` | String | For example `task_created`, `hydration_complete`, `session_started`, `pr_created`, `task_completed` |
 | `timestamp` | String | ISO 8601 |
 | `metadata` | Map? | Event-specific data |
 | `ttl` | Number | Same retention as tasks |

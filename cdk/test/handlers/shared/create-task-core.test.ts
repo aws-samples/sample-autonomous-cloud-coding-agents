@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -39,14 +38,6 @@ jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
   ApplyGuardrailCommand: jest.fn((input: unknown) => ({ _type: 'ApplyGuardrail', input })),
 }));
 
-// create-task-core collapsed the prior checkRepoOnboarded +
-// loadRepoConfig pair into a single ``lookupRepo`` call (see
-// ``cdk/src/handlers/shared/repo-config.ts::lookupRepo``). The mock
-// exposes the one function the submit path now calls; the two
-// convenience wrappers are still exported on the real module but
-// create-task-core doesn't reach for them, so leaving them off the
-// mock keeps test failures load-bearing if the import surface
-// drifts.
 const mockLookupRepo = jest.fn();
 jest.mock('../../../src/handlers/shared/repo-config', () => ({
   lookupRepo: mockLookupRepo,
@@ -57,10 +48,6 @@ jest.mock('../../../src/handlers/shared/budgets', () => ({
   checkBudgetAdmission: (...args: unknown[]) => mockCheckBudgetAdmission(...args),
 }));
 
-// Partial-mock the workflows module: keep every real resolver/descriptor, but
-// make ``disallowedWorkflowModel`` controllable so the rule-13 admission path
-// can be exercised without shipping a workflow that pins a bad model. Defaults
-// to the real implementation (null for all shipped workflows) via beforeEach.
 const mockDisallowedWorkflowModel = jest.fn();
 jest.mock('../../../src/handlers/shared/workflows', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/workflows');
@@ -97,11 +84,7 @@ beforeEach(() => {
   mockSend.mockResolvedValue({});
   mockLambdaSend.mockResolvedValue({});
   mockBedrockSend.mockResolvedValue({ action: 'NONE' });
-  // Default: repo is onboarded, no blueprint config (submit path
-  // resolves to the platform-default approval_gate_cap of 50).
   mockLookupRepo.mockResolvedValue({ onboarded: true, config: null });
-  // Default: the resolved workflow's model is permitted (matches the real
-  // implementation for every shipped workflow). Rule-13 tests override this.
   mockDisallowedWorkflowModel.mockReturnValue(null);
   mockCheckBudgetAdmission.mockImplementation(
     (_userId: string, teamIds?: readonly string[]) => Promise.resolve({
@@ -124,7 +107,7 @@ describe('createTaskCore', () => {
     expect(body.data.task_id).toBeDefined();
     expect(body.data.status).toBe('SUBMITTED');
     expect(body.data.repo).toBe('org/repo');
-    expect(mockSend).toHaveBeenCalledTimes(2); // task + event
+    expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockLambdaSend).toHaveBeenCalledTimes(1);
   });
 
@@ -272,11 +255,6 @@ describe('createTaskCore', () => {
   });
 
   test('accepts an initial_approvals pattern whose value contains a colon', async () => {
-    // Regression: the degenerate-pattern guard used split(':', 2)[1], which
-    // truncated the value at the next colon. For "ab:cdefgh" that yields the
-    // 2-char fragment "ab", which isDegeneratePattern flags as degenerate —
-    // a spurious 400. The full value "ab:cdefgh" is not degenerate, so the
-    // scope must be accepted.
     const result = await createTaskCore(
       {
         repo: 'org/repo',
@@ -306,8 +284,6 @@ describe('createTaskCore', () => {
   test.each(['this_call', 'tool_type_session', 'tool_group_session'])(
     'rejects the pre-approval %s, which stands for a call that is waiting for approval',
     async (scope) => {
-      // The agent cannot seed its allowlist from these: the task would be
-      // accepted and then fail when the agent starts.
       const result = await createTaskCore(
         { repo: 'org/repo', task_description: 'Fix the bug', initial_approvals: [scope] } as any,
         makeContext(),
@@ -330,7 +306,6 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
-  // One row for each way a single entry is refused, with the whole message.
   test.each([
     ['is no scope', 42, 'Invalid initial_approvals entry "42": missing prefix.'],
     [
@@ -382,8 +357,6 @@ describe('createTaskCore', () => {
   });
 
   test('accepts a repo-less submission', async () => {
-    // No repo + the repo-optional default workflow ⇒ 201, no onboarding lookup,
-    // no repo persisted on the record.
     const result = await createTaskCore(
       { workflow_ref: 'default/agent-v1', task_description: 'Summarise these papers' },
       makeContext(),
@@ -393,12 +366,9 @@ describe('createTaskCore', () => {
     const body = JSON.parse(result.body);
     expect(body.data.status).toBe('SUBMITTED');
     expect(body.data.repo).toBeNull();
-    // Repo-less ⇒ no branch is created (the agent never clones/branches/PRs), so
-    // branch_name is empty rather than a misleading bgagent/<id>/... slug.
     expect(body.data.branch_name).toBe('');
-    // Repo-less ⇒ the onboarding/blueprint RepoTable lookup is skipped entirely.
     expect(mockLookupRepo).not.toHaveBeenCalled();
-    expect(mockSend).toHaveBeenCalledTimes(2); // task + event
+    expect(mockSend).toHaveBeenCalledTimes(2);
   });
 
   test('returns 400 for an unsatisfiable @version pin', async () => {
@@ -425,8 +395,6 @@ describe('createTaskCore', () => {
   });
 
   test('rejects a malformed repo on a repo-bound workflow', async () => {
-    // The repo-present-but-malformed branch: a repo-bound workflow with a
-    // bad-format repo is a 400 with the new "Invalid repo." message.
     const result = await createTaskCore(
       { workflow_ref: 'coding/new-task-v1', repo: 'not-a-repo', task_description: 'Fix it' } as any,
       makeContext(),
@@ -437,9 +405,6 @@ describe('createTaskCore', () => {
   });
 
   test('repo-OPTIONAL workflow given a valid repo runs the repo-bound path', async () => {
-    // default/agent-v1 is repo-optional; when a repo IS supplied it must still
-    // be onboarded-checked and persisted (requires_repo:false means optional,
-    // not forbidden).
     const result = await createTaskCore(
       { workflow_ref: 'default/agent-v1', repo: 'org/repo', task_description: 'Do it' },
       makeContext(),
@@ -448,13 +413,10 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
     const body = JSON.parse(result.body);
     expect(body.data.repo).toBe('org/repo');
-    // Repo present ⇒ the onboarding/blueprint lookup DID run.
     expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
   });
 
   test('returns 400 when the resolved workflow pins a disallowed model (rule 13)', async () => {
-    // WORKFLOWS.md rule 13: a workflow whose agent_config.model.id is not on the
-    // platform allow-list FAILS admission (no silent downgrade).
     mockDisallowedWorkflowModel.mockReturnValue('anthropic.some-unapproved-model');
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
@@ -465,7 +427,6 @@ describe('createTaskCore', () => {
     const body = JSON.parse(result.body);
     expect(body.error.code).toBe('VALIDATION_ERROR');
     expect(body.error.message).toContain('not on the platform allow-list');
-    // Rejected at admission — no task/event writes, no orchestrator invoke.
     expect(mockSend).not.toHaveBeenCalled();
     expect(mockLambdaSend).not.toHaveBeenCalled();
   });
@@ -486,7 +447,6 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
   });
 
-  // The body is parsed JSON, so the field can hold any JSON type.
   const NOT_A_STRING: [string, unknown][] = [
     ['a number', 42],
     ['an object', { text: 'Fix the bug' }],
@@ -507,7 +467,6 @@ describe('createTaskCore', () => {
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  // With an issue number the workflow's inputs are satisfied without reading the description.
   test.each(NOT_A_STRING)('returns 400 for a task_description that is %s beside an issue number', async (_what, description) => {
     const result = await createTaskCore(
       { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: 7, task_description: description } as any,
@@ -608,9 +567,6 @@ describe('createTaskCore', () => {
   });
 
   test('returns 200 for a repo-less idempotency replay despite empty branch_name', async () => {
-    // Regression: a repo-less record legitimately persists branch_name='' (and
-    // no repo). The replay completeness check must not treat those falsy fields
-    // as "missing" and 500 — only true identity/audit fields are required.
     const existingItem = {
       task_id: 'existing-repoless',
       user_id: 'user-123',
@@ -673,7 +629,6 @@ describe('createTaskCore', () => {
         Item: {
           task_id: 'existing',
           user_id: 'user-123',
-          // missing status, repo, branch_name, channel_source, created_at, updated_at
         },
       });
 
@@ -693,7 +648,6 @@ describe('createTaskCore', () => {
       .mockResolvedValueOnce({
         Item: {
           task_id: 'existing',
-          // user_id missing entirely — must deny, not match
           status: 'SUBMITTED',
           repo: 'org/repo',
           branch_name: 'bgagent/existing/slug',
@@ -708,7 +662,6 @@ describe('createTaskCore', () => {
       makeContext({ idempotencyKey: 'my-key' }),
       'req-1',
     );
-    // Missing user_id → incomplete record → 500 (fail-closed)
     expect(result.statusCode).toBe(500);
     expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
     expect(mockLambdaSend).not.toHaveBeenCalled();
@@ -717,9 +670,9 @@ describe('createTaskCore', () => {
   test('creates new task when GSI matches but base-table item is gone (TTL race)', async () => {
     mockSend
       .mockResolvedValueOnce({ Items: [{ task_id: 'gone-task' }] })
-      .mockResolvedValueOnce({ Item: undefined }) // GetCommand returns nothing
-      .mockResolvedValueOnce({}) // PutCommand for new task
-      .mockResolvedValueOnce({}); // PutCommand for event
+      .mockResolvedValueOnce({ Item: undefined })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
 
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix it' },
@@ -749,7 +702,6 @@ describe('createTaskCore', () => {
       'req-1',
     );
     expect(result.statusCode).toBe(201);
-    // The event metadata should include channel_source: 'webhook'
     const putCalls = mockSend.mock.calls;
     const eventPut = putCalls[1][0];
     expect(eventPut.input.Item.metadata.channel_source).toBe('webhook');
@@ -762,7 +714,7 @@ describe('createTaskCore', () => {
       'req-1',
     );
     const putCalls = mockSend.mock.calls;
-    const eventPut = putCalls[1][0]; // second DDB call is the event
+    const eventPut = putCalls[1][0];
     expect(eventPut.input.Item.ttl).toBeDefined();
     expect(typeof eventPut.input.Item.ttl).toBe('number');
     expect(eventPut.input.Item.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
@@ -779,9 +731,8 @@ describe('createTaskCore', () => {
   });
 
   test('returns 201 even when event write fails', async () => {
-    // First call succeeds (task record), second call fails (event write)
     mockSend
-      .mockResolvedValueOnce({}) // PutCommand for task record
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error('Event write error'));
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix it' },
@@ -884,12 +835,6 @@ describe('createTaskCore', () => {
   });
 
   test('resolves the platform default when workflow_ref is omitted (repo present)', async () => {
-    // createTaskCore does NOT infer the coding workflow from the mere presence
-    // of a repo — that "repo task ⇒ coding workflow" decision is pinned by each
-    // CHANNEL processor at its call site (Linear/Jira/Slack pass
-    // workflow_ref: CODING_WORKFLOW_ID; see those processors' tests). A raw
-    // createTaskCore call with no ref falls through the resolution ladder to the
-    // repo-less platform default, whether or not a repo is attached.
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
       makeContext(),
@@ -901,9 +846,6 @@ describe('createTaskCore', () => {
   });
 
   test('resolves the platform default when workflow_ref is omitted AND no repo (symmetric)', async () => {
-    // §6 symmetric coverage: the repo-less path through the real caller. Guards
-    // against a future fallback-branch inversion that a repo-pinned test would
-    // miss (the repo-less default must stay default/agent-v1).
     const result = await createTaskCore(
       { task_description: 'Do some research' },
       makeContext(),
@@ -950,8 +892,6 @@ describe('createTaskCore', () => {
   test.each([0, -1, 1.5, '12', '../../../other-org/private-repo/issues/7'])(
     'returns 400 for issue_number %j',
     async (issueNumber) => {
-      // Hydration requests /repos/<repo>/issues/<issue_number> with the
-      // repository's token: a text with dot segments names another repository.
       const result = await createTaskCore(
         { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: issueNumber } as any,
         makeContext(),
@@ -979,7 +919,6 @@ describe('createTaskCore', () => {
   });
 
   test('takes an issue_number of null for an absent one', async () => {
-    // What a typed client sends for an optional field it leaves out.
     const result = await createTaskCore(
       { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', task_description: 'fix the typo', issue_number: null } as any,
       makeContext(),
@@ -1053,8 +992,6 @@ describe('createTaskCore', () => {
     expect(mockSend.mock.calls.some(([command]) => command._type === 'Put')).toBe(false);
   });
 
-  // -- trace flag (design §10.1) --------------------------------------
-
   test('trace: true persists on the task record and surfaces in the response', async () => {
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'deep debug', trace: true },
@@ -1065,7 +1002,6 @@ describe('createTaskCore', () => {
     const body = JSON.parse(result.body);
     expect(body.data.trace).toBe(true);
 
-    // Verify the PutCommand carried trace on the record.
     const putCall = mockSend.mock.calls.find(
       c => (c[0] as { _type?: string; input?: { Item?: { trace?: unknown } } })._type === 'Put'
         && (c[0] as { input?: { Item?: unknown } }).input?.Item !== undefined,
@@ -1094,8 +1030,6 @@ describe('createTaskCore', () => {
   });
 
   test('trace with non-boolean type returns 400 (strict boolean validation)', async () => {
-    // Prevents a misbehaving client from accidentally enabling trace
-    // with ``"trace": "false"`` (truthy string).
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'x', trace: 'true' } as any,
       makeContext(),
@@ -1112,10 +1046,6 @@ describe('createTaskCore', () => {
     ['null', null],
     ['empty object', {}],
   ])('trace as %s is rejected with 400', async (_label, value) => {
-    // Adversarial inputs: the strict ``typeof === 'boolean'`` check
-    // must reject every non-boolean shape, not just the obvious string
-    // case. A future refactor that switches to a truthy test would
-    // pass the single "'true'" test above but break on these.
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'x', trace: value } as any,
       makeContext(),
@@ -1125,8 +1055,6 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.message).toContain('trace');
   });
 
-  // --- approval_gate_cap resolution ---
-
   function getPersistedTaskRecord() {
     const putCall = mockSend.mock.calls.find(
       (c: any) => c[0]?._type === 'Put' && c[0]?.input?.TableName === 'Tasks',
@@ -1134,10 +1062,6 @@ describe('createTaskCore', () => {
     return putCall?.[0]?.input?.Item;
   }
 
-  // Wrap the ``lookupRepo`` mock for the "onboarded + config" case
-  // used by every blueprint-cap test below. Keeps each test focused
-  // on the cap value under test rather than repeating the full
-  // RepoConfig shape.
   function mockOnboardedWithConfig(config: Record<string, unknown>): void {
     mockLookupRepo.mockResolvedValueOnce({
       onboarded: true,
@@ -1164,7 +1088,6 @@ describe('createTaskCore', () => {
   });
 
   test('persists default-50 when RepoConfig exists but lacks approval_gate_cap', async () => {
-    // Legacy blueprint predating Chunk 7b: cedar_policies set, cap unset.
     mockOnboardedWithConfig({
       cedar_policies: ['permit (principal, action, resource);'],
     });
@@ -1210,12 +1133,6 @@ describe('createTaskCore', () => {
     ['exceeds max', 501],
     ['exceeds max big', 10000],
   ])('returns 503 when blueprint approval_gate_cap is %s (out-of-bounds)', async (_label, cap) => {
-    // Blueprint synth validation should catch these, but a hand-edited
-    // RepoConfig row could bypass it. Fail closed so we never persist
-    // a bad cap onto a TaskRecord. 503 SERVICE_UNAVAILABLE (not 500)
-    // because the condition is permanent platform misconfiguration,
-    // not a transient internal error — 500 would misleadingly suggest
-    // retry-will-fix.
     mockOnboardedWithConfig({ approval_gate_cap: cap });
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'x' },
@@ -1244,9 +1161,6 @@ describe('createTaskCore', () => {
   });
 
   test('only performs one RepoTable GetItem on the submit path', async () => {
-    // Regression guard: the submit path previously issued two
-    // back-to-back GetItems on the same key (onboarding gate +
-    // blueprint cap). ``lookupRepo`` collapses them into one.
     await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the bug' },
       makeContext(),
@@ -1255,8 +1169,6 @@ describe('createTaskCore', () => {
     expect(mockLookupRepo).toHaveBeenCalledTimes(1);
     expect(mockLookupRepo).toHaveBeenCalledWith('org/repo');
   });
-
-  // --- pre-screened attachments + caller-supplied taskId ---
 
   describe('preScreenedAttachments and taskId', () => {
     function persistedTaskItem() {
@@ -1290,16 +1202,12 @@ describe('createTaskCore', () => {
       expect(item.attachments).toHaveLength(1);
       expect(item.attachments[0].attachment_id).toBe('att-jira-1');
       expect(item.attachments[0].screening.status).toBe('passed');
-      // The pre-screened path must NOT re-run the guardrail on the attachment
-      // bytes. createTaskCore still screens the task DESCRIPTION text, so the
-      // guardrail may be called — but only with the description, never with any
-      // attachment content (the record carries no bytes to screen).
       const guardrailContents = mockBedrockSend.mock.calls.map(
         (c: any) => JSON.stringify(c[0]?.input?.content ?? []),
       );
       for (const content of guardrailContents) {
         expect(content).not.toContain('error.log');
-        expect(content).toContain('Fix'); // only the description was screened
+        expect(content).toContain('Fix');
       }
     });
 
@@ -1322,23 +1230,16 @@ describe('createTaskCore', () => {
       };
       const result = await createTaskCore(
         { repo: 'org/repo', task_description: 'Fix' },
-        // Cast: this is a contract violation we deliberately construct to prove
-        // the fail-closed guard rejects it rather than persisting it.
         makeContext({ preScreenedAttachments: [badRecord as never] }),
         'req-577-c',
       );
 
       expect(result.statusCode).toBe(500);
       expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
-      // No task persisted.
       expect(persistedTaskItem()).toBeUndefined();
     });
 
     test('rejects when COMBINED attachment size exceeds the task-wide limit (aggregate check)', async () => {
-      // Review: each source's own subtotal can pass while the merged set blows
-      // past the 50 MB task cap. Simulate that with several large passed records
-      // (the shape both Linear-hosted files and resolved public images arrive as
-      // by the time they reach createTaskCore). 6 × 10 MB = 60 MB > 50 MB.
       const tenMB = 10 * 1024 * 1024;
       const big = Array.from({ length: 6 }, (_, i) => ({
         ...passedRecord,
@@ -1364,7 +1265,7 @@ describe('createTaskCore', () => {
         attachment_id: `att-ok-${i}`,
         filename: `ok-${i}.bin`,
         s3_key: `attachments/user-123/T/att-ok-${i}/ok-${i}.bin`,
-        size_bytes: fiveMB, // 4 × 5 MB = 20 MB < 50 MB
+        size_bytes: fiveMB,
       }));
       const result = await createTaskCore(
         { repo: 'org/repo', task_description: 'Fix', workflow_ref: 'coding/new-task-v1' },

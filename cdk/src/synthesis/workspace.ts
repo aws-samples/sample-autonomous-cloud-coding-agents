@@ -68,7 +68,6 @@ export function sourceProvenance(root: string): SourceProvenance {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       entry = { file, kind: 'deleted' };
     }
-    // Typed, framed records distinguish deletions, file bytes, symlinks, and modes.
     digest.update(JSON.stringify(entry)).update('\n');
   }
   return {
@@ -81,7 +80,6 @@ export function sourceProvenance(root: string): SourceProvenance {
   };
 }
 
-/** Use versioned CDK defaults, then let the named profile and structural overrides win. */
 export function projectContext(root: string): Record<string, unknown> {
   const config = JSON.parse(readFileSync(path.join(root, 'cdk/cdk.json'), 'utf8'));
   const context: unknown = config.context ?? {};
@@ -99,7 +97,7 @@ export function createOutputDirectory(root: string, output?: string, temporaryRo
     throw new Error('Census output must be outside the checkout to avoid recursive asset fingerprinting');
   }
   if (requested) {
-    mkdirSync(target); // Reject existing directories and symlinks, including dangling symlinks.
+    mkdirSync(target); // Fails on an existing directory or symlink, dangling symlinks included.
     return target;
   }
   return mkdtempSync(path.join(parent, 'abca-census-'));

@@ -14,8 +14,6 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'ABCA Docs',
-      // Fails `astro build` on a broken internal link or anchor in any page. No options on
-      // purpose: there is no list of excluded links, and no report file is written into the tree.
       plugins: [starlightLinksValidator()],
       social: [
         {

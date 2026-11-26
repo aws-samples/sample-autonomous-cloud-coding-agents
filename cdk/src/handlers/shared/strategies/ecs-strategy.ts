@@ -43,34 +43,15 @@ function getS3Client(): S3Client {
 
 const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN;
 const ECS_TASK_DEFINITION_ARN = process.env.ECS_TASK_DEFINITION_ARN;
-/**
- * The smaller, read-only "planning" task definition. Read-only workflows (which
- * clone and read the repo to produce a plan but never build) run here instead of
- * on the large build task. Falls back to the build task definition when unset
- * (e.g. a deployment that hasn't provisioned the planning task) — never worse
- * than running everything on the build task.
- */
 const ECS_PLANNING_TASK_DEFINITION_ARN = process.env.ECS_PLANNING_TASK_DEFINITION_ARN;
 const ECS_SUBNETS = process.env.ECS_SUBNETS;
 
 /**
- * Reduce a task-definition reference to its FAMILY (drop the `:revision` suffix),
- * so `RunTask` always resolves the LATEST ACTIVE revision instead of a pinned one.
- *
- * Why: the orchestrator env carries a revision-pinned ARN
- * (`…:task-definition/<family>:<rev>`, from `taskDefinition.taskDefinitionArn`).
- * Every deploy that rebuilds the agent image registers a NEW revision and CDK/ECS
- * deregisters the old one. A task dispatched against the now-stale pinned revision
- * (e.g. minutes after a deploy) fails at RunTask with
- * "InvalidParameterException: TaskDefinition is inactive". ECS accepts `family`
- * (bare, no revision) and resolves it to the latest ACTIVE revision at call time,
- * which is immune to that deploy race. We accept either a full ARN
- * (`arn:aws:ecs:…:task-definition/<family>:<rev>`) or a plain `<family>:<rev>` and
- * return just `<family>`; a value with no `/` and no `:` is returned unchanged.
+ * ECS accepts `family` (bare, no revision) and resolves it to the latest ACTIVE
+ * revision at call time. A deregistered pinned revision fails at RunTask with
+ * "InvalidParameterException: TaskDefinition is inactive".
  */
 function toTaskDefinitionFamily(ref: string): string {
-  // Take the segment after `task-definition/` when it's a full ARN, else the whole
-  // value; then strip a trailing `:<digits>` revision suffix.
   const afterSlash = ref.includes('task-definition/')
     ? ref.slice(ref.lastIndexOf('task-definition/') + 'task-definition/'.length)
     : ref;
@@ -81,27 +62,18 @@ const ECS_CONTAINER_NAME = process.env.ECS_CONTAINER_NAME ?? 'AgentContainer';
 const ECS_PAYLOAD_BUCKET = process.env.ECS_PAYLOAD_BUCKET;
 
 /**
- * Inline-payload size (bytes) above which we warn that RunTask will likely
- * reject the call when no payload bucket is configured. ECS caps the TOTAL
- * containerOverrides blob at 8192 bytes; the other env vars + command consume
- * some of that, so 6 KB of payload is the practical danger line.
+ * ECS caps the TOTAL containerOverrides blob at 8192 bytes; the other env vars +
+ * command consume some of that.
  */
 const INLINE_PAYLOAD_WARN_BYTES = 6144;
 
-/**
- * S3 object key for a task's ECS payload. One object per task under its own
- * task-id prefix; deleted by the orchestrator at finalize (see
- * ``deleteEcsPayload``), with the bucket's 1-day lifecycle rule as a backstop.
- */
 function ecsPayloadKey(taskId: string): string {
   return `${taskId}/payload.json`;
 }
 
 /**
- * Delete a task's ECS payload object. Best-effort: a failed delete must never
- * fail the task — the bucket's 1-day lifecycle rule reaps it regardless. Called
- * from the orchestrator's ``finalize`` step once the task is terminal. No-ops
- * when the payload bucket isn't configured (AgentCore-only deployments).
+ * Delete a task's ECS payload object. Best-effort: a failed delete never
+ * fails the task. No-ops when the payload bucket isn't configured.
  */
 export async function deleteEcsPayload(taskId: string): Promise<void> {
   if (!ECS_PAYLOAD_BUCKET) return;
@@ -112,7 +84,6 @@ export async function deleteEcsPayload(taskId: string): Promise<void> {
     }));
     logger.info('Deleted ECS payload object', { task_id: taskId });
   } catch (err) {
-    // Non-fatal — the lifecycle rule is the backstop.
     logger.warn('Failed to delete ECS payload object (non-fatal)', {
       task_id: taskId,
       error: err instanceof Error ? err.message : String(err),
@@ -135,20 +106,12 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
   async startSession(input: {
     taskId: string;
-    /** Accepted to satisfy the ComputeStrategy interface; ECS doesn't
-     *  use a workload-token-injecting runtime so this is unused. */
     userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
     readOnly?: boolean;
   }): Promise<SessionHandle> {
     if (!ECS_CLUSTER_ARN || !ECS_TASK_DEFINITION_ARN || !ECS_SUBNETS || !ECS_SECURITY_GROUP) {
-      // Config/deploy mismatch: this repo is compute_type=ecs but the stack was
-      // deployed WITHOUT the ECS substrate (no `--context compute_type=ecs`), so
-      // the orchestrator has no ECS_* env vars. Name the root cause + remedy so an
-      // admin doesn't have to reverse-engineer it from a bare env-var list. (The
-      // CLI `repo onboard --compute-type ecs` guard normally prevents this; a repo
-      // onboarded before that guard, or edited directly, can still reach here.)
       throw new Error(
         'This repository is configured compute_type=ecs, but this stack was deployed without the ECS '
         + 'substrate (missing ECS_CLUSTER_ARN/ECS_TASK_DEFINITION_ARN/ECS_SUBNETS/ECS_SECURITY_GROUP). '
@@ -160,34 +123,13 @@ export class EcsComputeStrategy implements ComputeStrategy {
     const subnets = ECS_SUBNETS.split(',').map(s => s.trim()).filter(Boolean);
     const { taskId, payload, blueprintConfig, readOnly } = input;
 
-    // A read-only workflow (e.g. planning that only clones and reads the repo)
-    // runs on the smaller planning task def when it's wired; everything else runs
-    // on the large build def. Falls back to the build def if the planning def
-    // isn't configured — safe, just runs planning on the build-sized task.
     const taskDefinitionRef = readOnly && ECS_PLANNING_TASK_DEFINITION_ARN
       ? ECS_PLANNING_TASK_DEFINITION_ARN
       : ECS_TASK_DEFINITION_ARN;
-    // Dispatch against the task-def FAMILY (not the pinned revision) so ECS
-    // resolves the latest ACTIVE revision at call time. A deploy that rebuilds the
-    // agent image registers a new revision + deregisters the old one; a task
-    // dispatched minutes after a deploy against the stale pinned revision fails
-    // with "InvalidParameterException: TaskDefinition is inactive". Using the
-    // family is immune to that deploy race.
     const taskDefinition = toTaskDefinitionFamily(taskDefinitionRef);
 
-    // The ECS container's default CMD starts the FastAPI server (uvicorn) which
-    // waits for HTTP POST to /invocations — but in standalone ECS nobody sends
-    // that request. We override the container command to invoke run_task()
-    // directly with the full orchestrator payload (including hydrated_context).
-    // This avoids the server entirely and runs the agent in batch mode.
     const payloadJson = JSON.stringify(payload);
 
-    // The payload (especially hydrated_context) routinely exceeds the 8192-byte
-    // cap that ECS RunTask enforces on the TOTAL containerOverrides blob, which
-    // rejected the call with InvalidParameterException. Write the payload to S3
-    // and pass only a small pointer (AGENT_PAYLOAD_S3_URI); the container fetches
-    // it on boot. The inline AGENT_PAYLOAD remains as a fallback for small
-    // payloads / deployments without a payload bucket configured.
     let payloadS3Uri: string | undefined;
     if (ECS_PAYLOAD_BUCKET) {
       const key = ecsPayloadKey(taskId);
@@ -204,9 +146,6 @@ export class EcsComputeStrategy implements ComputeStrategy {
         uri: payloadS3Uri,
       });
     } else if (payloadJson.length > INLINE_PAYLOAD_WARN_BYTES) {
-      // No bucket configured AND the payload is large enough that the inline
-      // path will almost certainly blow the 8192-byte overrides cap. Surface a
-      // clear cause rather than a raw InvalidParameterException from RunTask.
       logger.warn('ECS payload is large but ECS_PAYLOAD_BUCKET is not set — RunTask may reject it (see #502)', {
         task_id: taskId,
         bytes: payloadJson.length,
@@ -218,18 +157,11 @@ export class EcsComputeStrategy implements ComputeStrategy {
       { name: 'REPO_URL', value: String(payload.repo_url ?? '') },
       ...(payload.prompt ? [{ name: 'TASK_DESCRIPTION', value: String(payload.prompt) }] : []),
       ...(payload.issue_number ? [{ name: 'ISSUE_NUMBER', value: String(payload.issue_number) }] : []),
-      // Single source of truth with the hydrate path in `orchestrator.ts`, which
-      // resolves the same default via `DEFAULT_MAX_TURNS`. A literal here would
-      // silently disagree with it whenever the payload omits `max_turns`, and a
-      // turn ceiling that depends on which code path filled it in is a bug.
       { name: 'MAX_TURNS', value: String(payload.max_turns ?? DEFAULT_MAX_TURNS) },
       ...(payload.max_budget_usd !== undefined ? [{ name: 'MAX_BUDGET_USD', value: String(payload.max_budget_usd) }] : []),
       ...(blueprintConfig.model_id ? [{ name: 'ANTHROPIC_MODEL', value: blueprintConfig.model_id }] : []),
       ...(blueprintConfig.system_prompt_overrides ? [{ name: 'SYSTEM_PROMPT_OVERRIDES', value: blueprintConfig.system_prompt_overrides }] : []),
       { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
-      // Prefer the S3 pointer; fall back to the inline payload when no bucket is
-      // configured (keeps small-payload / AgentCore-only deployments working with
-      // no behavior change).
       ...(payloadS3Uri
         ? [{ name: 'AGENT_PAYLOAD_S3_URI', value: payloadS3Uri }]
         : [{ name: 'AGENT_PAYLOAD', value: payloadJson }]),
@@ -239,20 +171,6 @@ export class EcsComputeStrategy implements ComputeStrategy {
       ...(payload.memory_id ? [{ name: 'MEMORY_ID', value: String(payload.memory_id) }] : []),
     ];
 
-    // Override the container command to run a Python one-liner that:
-    // 1. Loads the payload — from S3 (AGENT_PAYLOAD_S3_URI) when set, else the
-    //    inline AGENT_PAYLOAD env var (fallback).
-    // 2. Calls entrypoint.run_task_from_payload(p), which maps the WHOLE payload
-    //    dict to run_task's signature (rename prompt→task_description /
-    //    model_id→anthropic_model, filter to accepted params, coerce str/int).
-    //    This replaces an older hand-listed kwarg subset that silently dropped
-    //    fields such as channel_source/channel_metadata (which meant no
-    //    Linear/Jira reactions or channel MCP on ECS), build_command,
-    //    cedar_policies, base_branch/merge_branches, attachments, trace, user_id,
-    //    etc. Single source of truth in the agent, unit-tested (see
-    //    test_run_task_from_payload).
-    // 3. Exits with code 0 on success, 1 on failure.
-    // This bypasses the uvicorn server entirely — no HTTP, no OTEL noise.
     const bootCommand = [
       'python', '-c',
       'import json, os, sys; '
@@ -272,14 +190,8 @@ export class EcsComputeStrategy implements ComputeStrategy {
       cluster: ECS_CLUSTER_ARN,
       taskDefinition,
       launchType: 'FARGATE',
-      // ECS RunTask idempotency. Without a clientToken, a client-side timeout on a
-      // RunTask that ACTUALLY launched (the SDK send() threw after AWS accepted it)
-      // makes the session-start auto-retry fire a SECOND RunTask with the same
-      // TASK_ID env — two Fargate containers cloning/committing/PRing in parallel,
-      // the first untrackable. clientToken makes AWS itself dedup an identical
-      // RunTask within its window: the retry returns the SAME task instead of
-      // launching another. taskId is a ULID (26 chars, well under the 64-char
-      // clientToken limit) and unique per task — the natural token.
+      // ECS dedups an identical RunTask on clientToken (64-char limit) within its
+      // window: a retry returns the SAME task instead of launching another.
       clientToken: taskId,
       networkConfiguration: {
         awsvpcConfiguration: {
@@ -309,7 +221,6 @@ export class EcsComputeStrategy implements ComputeStrategy {
       task_id: taskId,
       ecs_task_arn: ecsTask.taskArn,
       cluster: ECS_CLUSTER_ARN,
-      // Which task def was selected — planning (read-only) vs build.
       task_definition: taskDefinition,
       read_only: Boolean(readOnly),
     });
@@ -336,9 +247,8 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
     const ecsTask = result.tasks?.[0];
     if (!ecsTask) {
-      // Thrown, not reported as `failed`: the ECS API is eventually consistent, so
-      // a read right after RunTask can miss a task that is starting normally. The
-      // caller counts a throw as one failed poll and fails the task after several.
+      // The ECS API is eventually consistent: a read right after RunTask can miss a
+      // task that is starting normally.
       throw new Error(`ECS task ${taskArn} not found`);
     }
 
@@ -358,7 +268,6 @@ export class EcsComputeStrategy implements ComputeStrategy {
       return { status: 'failed', error: `Exit code ${exitCode}: ${stoppedReason}` };
     }
 
-    // PENDING, PROVISIONING, ACTIVATING, RUNNING, DEACTIVATING, DEPROVISIONING
     return { status: 'running' };
   }
 

@@ -26,87 +26,43 @@ import { abortableSleep, isTransientError, transientRetryDelayMs } from '../retr
 import { TERMINAL_STATUSES, TaskDetail, TaskEvent, TaskStatusType } from '../types';
 import { EXIT_CODE_WAIT_ABORTED, exitCodeForStatus } from '../wait';
 
-/**
- * Adaptive polling cadence (design INTERACTIVE_AGENTS.md §5.3).
- *
- * While events are arriving we stay at ``POLL_FAST_INTERVAL_MS``. When a
- * poll returns zero events we back off through the ``BACKOFF_INTERVALS_MS``
- * ladder, resetting to fast on the next poll that delivers events. The
- * ladder caps at 5 s to keep status freshness bounded during idle
- * stretches without hammering DDB.
- */
 const POLL_FAST_INTERVAL_MS = 500;
 // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- the ladder IS the named constant
 const BACKOFF_INTERVALS_MS: readonly number[] = [1_000, 2_000, 5_000];
 
-/** Adaptive polling state, threaded through the poll loop. */
 interface PollCadenceState {
   intervalMs: number;
   consecutiveEmptyPolls: number;
 }
 
-/** Compute the next cadence from whether the last poll delivered events.
- *  Pure so the state machine is test-coverable without timers. */
 export function nextCadence(state: PollCadenceState, sawEvents: boolean): PollCadenceState {
   if (sawEvents) {
     return { intervalMs: POLL_FAST_INTERVAL_MS, consecutiveEmptyPolls: 0 };
   }
   const nextEmpty = state.consecutiveEmptyPolls + 1;
-  // Ladder index is ``nextEmpty - 1`` (first empty poll picks slot 0 =
-  // 1 s). After the ladder is exhausted we pin at the cap.
   const idx = Math.min(nextEmpty - 1, BACKOFF_INTERVALS_MS.length - 1);
   return { intervalMs: BACKOFF_INTERVALS_MS[idx], consecutiveEmptyPolls: nextEmpty };
 }
 
-/** Retry budget for transient 5xx / network failures. Exhausting it exits
- *  the watch loop with a clear "rerun to resume" message. 4xx errors are
- *  deterministic and never retried. */
 const MAX_TRANSIENT_RETRIES = 5;
 
-/**
- * Session-level retry counter (L3 item 5). ``withTransientRetry`` resets
- * its per-op ``attempt`` counter on every successful poll, which means a
- * flapping upstream at ~50% success rate never trips the 5-retry budget
- * even though the user is watching a degraded stream for minutes on end.
- * The session counter accumulates across all retries for the life of the
- * watch process so a ``SESSION_FLAP_THRESHOLD`` crossing can surface the
- * "upstream is flapping" stderr signal exactly once.
- *
- * Not exposed on any public surface — underscore-prefixed getter is for
- * tests only (module-level state makes this awkward to inject, and the
- * tradeoff isn't worth a full dependency-injection refactor).
- */
 let sessionRetries = 0;
 let flapWarnEmitted = false;
 
-/** Emit-once threshold for the "upstream is flapping" warning. Picked so
- *  a sustained ~30% failure rate over a few-minute poll window lands
- *  above it without a transient 2-failure blip crossing. */
 const SESSION_FLAP_THRESHOLD = 10;
 
-/** Test-only accessor for the module-level retry counter. Prefixed with
- *  ``_`` to signal "not part of the stable API". */
 export function _getSessionRetries(): number {
   return sessionRetries;
 }
 
-/** Test-only reset of the module-level state. Tests that exercise the
- *  flap warning need a clean slate because the counter is process-lived
- *  and Jest's module reset does not apply to values captured at import. */
 export function _resetSessionRetries(): void {
   sessionRetries = 0;
   flapWarnEmitted = false;
 }
 
-/** Exit code 130 is the conventional POSIX code for "terminated by
- *  SIGINT". Using it lets shell scripts distinguish Ctrl+C from a failed
- *  task run. */
 const EXIT_CODE_SIGINT = 130;
-/** Size of the initial snapshot fetch used to detect already-terminal tasks
- *  and seed the catch-up cursor. */
 const SNAPSHOT_PAGE_SIZE = 100;
 
-/** Progress event types emitted by the agent ProgressWriter. */
 const PROGRESS_EVENT_TYPES = new Set([
   'agent_turn',
   'agent_tool_call',
@@ -117,7 +73,6 @@ const PROGRESS_EVENT_TYPES = new Set([
   'agent_blocked',
 ]);
 
-/** Format an event timestamp to a short local time string. */
 function formatTime(isoTimestamp: string): string {
   try {
     const date = new Date(isoTimestamp);
@@ -127,25 +82,8 @@ function formatTime(isoTimestamp: string): string {
   }
 }
 
-/** Metadata keys that are noise in a compact milestone dump — either already
- *  rendered elsewhere (``milestone``) or carry no human-salient value. */
 const MILESTONE_NOISE_KEYS = new Set(['milestone', 'details']);
 
-/**
- * Render the trailing detail for an ``agent_milestone`` line (text mode only).
- *
- * The simple case is a ``details`` string (``repo_setup_complete: branch=main``).
- * But approval / policy milestones (``approval_requested``, ``approval_granted``,
- * ``approval_denied``, ``approval_timed_out``, ``policy_decision``, …) carry
- * structured metadata (``request_id``, ``severity``, ``timeout_s``,
- * ``matching_rule_ids``, ``scope``) and NO ``details`` key — so the old
- * renderer printed a bare "★ approval_requested" and dropped every salient
- * field. Here we surface the salient fields inline; only when NONE of them
- * are present do we fall back to a compact JSON dump of the remaining
- * metadata (minus noisy keys). When salient fields ARE present, any extra
- * unrecognized keys are intentionally omitted from the text line —
- * inspect with ``--output json``, which serializes the raw event verbatim.
- */
 function renderMilestoneSuffix(meta: Record<string, unknown>): string {
   const details = meta.details;
   if (typeof details === 'string' && details.length > 0) {
@@ -165,9 +103,6 @@ function renderMilestoneSuffix(meta: Record<string, unknown>): string {
     return ` ${parts.join(' ')}`;
   }
 
-  // No recognized salient fields, but there may still be other metadata
-  // (a milestone variant we don't special-case). Dump it compactly, minus
-  // the keys that are noise or already rendered, so the signal survives.
   const rest: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(meta)) {
     if (!MILESTONE_NOISE_KEYS.has(k)) rest[k] = v;
@@ -178,7 +113,6 @@ function renderMilestoneSuffix(meta: Record<string, unknown>): string {
   return '';
 }
 
-/** Render a single progress event as a human-readable line. */
 export function renderEvent(event: TaskEvent): string {
   const time = formatTime(event.timestamp);
   const meta = event.metadata;
@@ -224,9 +158,6 @@ export function renderEvent(event: TaskEvent): string {
       return `[${time}] ✖ ${errType}: ${msg}`;
     }
     case 'agent_blocked': {
-      // #251: environmental blocker (missing secret, egress denial, …). Render
-      // distinctly with the kind, the named resource (secret/host), and the
-      // remediation hint so the operator sees the fix without a status round-trip.
       const kind = String(meta.kind ?? 'unknown_environmental');
       const resource = meta.resource != null ? ` [${String(meta.resource)}]` : '';
       const detail = meta.detail ? `: ${String(meta.detail)}` : '';
@@ -241,43 +172,24 @@ export function renderEvent(event: TaskEvent): string {
   }
 }
 
-/* ------------------------------------------------------------------------ */
-/*  Structured logging helpers                                               */
-/* ------------------------------------------------------------------------ */
-
-/** Log an INFO-level message to stderr. Stdout stays pure NDJSON in either
- *  mode because info messages never go there; the ``isJson`` parameter is
- *  kept for call-site documentation of the mode. */
 function logInfo(_isJson: boolean, message: string): void {
   process.stderr.write(`${message}\n`);
 }
 
-/** Log an ERROR-level message to stderr regardless of output mode. */
 function logError(message: string): void {
   process.stderr.write(`ERROR: ${message}\n`);
 }
 
 /**
  * Render the terminal-line message shown when a watch session ends
- * because the task reached a terminal state. Includes the task_id (so
- * a user with multiple watches or a scroll-back log can correlate)
+ * because the task reached a terminal state. Includes the task_id
  * and, for non-COMPLETED terminals, a short failure-classification
- * hint so the cause is visible without a separate ``bgagent status``
- * round-trip.
- *
- * Exported for tests. Safe to call with a bare ``{task_id, status}``
- * shape or a full ``TaskDetail`` — only those fields plus
- * ``error_classification`` / ``error_message`` are read.
+ * hint.
  */
 export function formatTerminalMessage(task: Pick<TaskDetail, 'task_id' | 'status' | 'error_classification' | 'error_message'>): string {
   const status = task.status.toLowerCase();
   const prefix = `Task ${task.task_id} ${status}.`;
   if (task.status === 'COMPLETED') return prefix;
-  // See ``format.ts::describeReason`` for the full rationale. In short:
-  // when the classifier's category is ``unknown`` (catch-all), the
-  // title "Unexpected error" hides the concrete error string the
-  // agent surfaced. Prefer the raw ``error_message`` in that case so
-  // novel failure modes remain diagnosable inline.
   const cls = task.error_classification;
   const msg = task.error_message?.trim();
   if (cls && cls.category !== 'unknown') {
@@ -292,14 +204,6 @@ export function formatTerminalMessage(task: Pick<TaskDetail, 'task_id' | 'status
   return prefix;
 }
 
-/* ------------------------------------------------------------------------ */
-/*  Formatter boundary                                                        */
-/* ------------------------------------------------------------------------ */
-
-/**
- * A formatter that accepts `TaskEvent` rows (from REST polling) and
- * produces human-readable output (text mode) or NDJSON (json mode).
- */
 interface Formatter {
   emit(ev: TaskEvent): void;
 }
@@ -318,10 +222,6 @@ function makeFormatter(isJson: boolean): Formatter {
   };
 }
 
-/* ------------------------------------------------------------------------ */
-/*  Polling loop                                                             */
-/* ------------------------------------------------------------------------ */
-
 interface PollOptions {
   readonly signal: AbortSignal;
   readonly afterEventId?: string;
@@ -329,21 +229,6 @@ interface PollOptions {
   readonly onTerminal: (finalTask: TaskDetail) => void;
 }
 
-/**
- * Poll ``GET /tasks/{id}/events`` and ``GET /tasks/{id}`` on an adaptive
- * cadence: 500 ms while events are arriving, backing off through
- * 1 s / 2 s / 5 s on consecutive empty polls and resetting to fast on
- * the next event. Invokes ``onEvent`` for each new event and
- * ``onTerminal`` once the task reaches a terminal status. Resolves when
- * the task terminates or the abort signal fires.
- *
- * Transient 5xx / network errors are retried with jittered exponential
- * backoff up to ``MAX_TRANSIENT_RETRIES`` times; 4xx errors propagate
- * immediately (the next call would return the same failure). On retry
- * exhaustion we throw a ``CliError`` with exit code 2 that tells the
- * user to re-run ``bgagent watch`` — the event cursor is durable, so
- * resuming is safe.
- */
 async function pollTaskEvents(
   apiClient: ApiClient,
   taskId: string,
@@ -354,9 +239,6 @@ async function pollTaskEvents(
   debug(`[watch/poll] starting polling loop afterEventId=${lastSeenEventId ?? '<none>'}`);
 
   while (!options.signal.aborted) {
-    // Fetch every event past our cursor. ``catchUpEvents`` seeds with
-    // ``after=lastSeenEventId`` and drains the server's ``next_token``
-    // pagination so we see all events — not just the first 100.
     const newEvents = await withTransientRetry(
       () => (lastSeenEventId
         ? apiClient.catchUpEvents(taskId, lastSeenEventId, { signal: options.signal })
@@ -396,19 +278,6 @@ async function pollTaskEvents(
   }
 }
 
-/**
- * Execute an API call with retry-on-transient semantics:
- *   - 5xx / network errors → retry after jittered backoff, up to
- *     ``MAX_TRANSIENT_RETRIES`` total attempts.
- *   - 4xx errors → rethrow immediately (deterministic; retrying is futile).
- *   - Exhausted retries → throw with a "re-run to resume" hint and exit
- *     code 2 (the task may still be running; 1 means it ended badly).
- *   - Abort during retry sleep → throw the original error up (caller will
- *     check ``signal.aborted`` and exit cleanly).
- *
- * ``label`` is used only for debug logging so operators can see *which*
- * call is retrying during a degraded poll window.
- */
 async function withTransientRetry<T>(
   op: () => Promise<T>,
   signal: AbortSignal,
@@ -426,9 +295,6 @@ async function withTransientRetry<T>(
         throw err;
       }
       attempt += 1;
-      // Session-level counter (L3 item 5). ``attempt`` resets on every
-      // successful op; ``sessionRetries`` does not, so a flapping upstream
-      // that never exhausts the per-op budget still accumulates here.
       sessionRetries += 1;
       if (sessionRetries >= SESSION_FLAP_THRESHOLD && !flapWarnEmitted) {
         flapWarnEmitted = true;
@@ -438,8 +304,6 @@ async function withTransientRetry<T>(
       }
       if (attempt > MAX_TRANSIENT_RETRIES) {
         const e = err instanceof Error ? err : new Error(String(err));
-        // The count of failed requests (the retries and the one that tripped), and the
-        // exit code of a wait that gave up: the task may still be running.
         throw new CliError(
           `Exceeded retry budget after ${attempt} transient failures `
           + `(${label}): ${e.message}. Re-run \`bgagent watch <id>\` to resume.`,
@@ -453,37 +317,12 @@ async function withTransientRetry<T>(
   }
 }
 
-/* ------------------------------------------------------------------------ */
-/*  Initial snapshot — detect already-terminal tasks and seed cursor         */
-/* ------------------------------------------------------------------------ */
-
 interface SnapshotResult {
   readonly latestEventId: string | null;
   readonly events: TaskEvent[];
   readonly taskStatus: TaskStatusType;
 }
 
-/** Fetch the latest events + current task status. Used both to detect a
- *  task that already terminated before ``bgagent watch`` connected, and to
- *  seed the polling cursor so we don't re-emit the snapshot's contents on
- *  the first poll iteration.
- *
- *  Both API calls are wrapped in ``withTransientRetry`` so a cold-start
- *  hiccup on the Lambda (``fetch failed`` / 5xx / network transients)
- *  does not crash the watch command before the polling loop gets a
- *  chance to stabilise. The polling loop itself wraps every subsequent
- *  call; without the same wrap here, the first request was the weakest
- *  link (observed Scenario 2 deploy validation, where a cold-start
- *  failed once then succeeded on re-run).
- *
- *  ``signal`` is required so callers commit to a concrete abort
- *  controller — otherwise SIGINT during the snapshot's retry backoff
- *  could never abort a retrying call. The production watch command
- *  always passes its shared ``AbortController`` signal; tests that
- *  exercise this path do the same via ``makeWatchCommand``.
- *
- *  Emitted event ordering: events are returned in ascending event_id
- *  order (REST contract). */
 async function fetchInitialSnapshot(
   apiClient: ApiClient,
   taskId: string,
@@ -512,10 +351,6 @@ async function fetchInitialSnapshot(
   return { latestEventId, events, taskStatus: task.status };
 }
 
-/* ------------------------------------------------------------------------ */
-/*  Command definition                                                        */
-/* ------------------------------------------------------------------------ */
-
 export function makeWatchCommand(): Command {
   return new Command('watch')
     .description('Watch task progress in real-time')
@@ -527,7 +362,6 @@ export function makeWatchCommand(): Command {
 
       debug(`[watch] task=${taskId} isJson=${isJson} verbose=${isVerbose()}`);
 
-      // Abort controller for SIGINT / SIGTERM.
       const abortController = new AbortController();
       const onSignal = (): void => {
         debug('[watch] SIGINT/SIGTERM received, aborting');
@@ -537,26 +371,13 @@ export function makeWatchCommand(): Command {
       process.on('SIGTERM', onSignal);
 
       try {
-        // -------- Snapshot: detect already-terminal tasks, seed cursor. --
         let snapshot: SnapshotResult;
         try {
           snapshot = await fetchInitialSnapshot(apiClient, taskId, { signal: abortController.signal });
         } catch (err) {
-          // Capture the pre-abort state so the SIGINT-vs-real-error
-          // disambiguation below works. Then abort the shared controller
-          // so any sibling ``Promise.all`` leg still inside
-          // ``withTransientRetry`` stops backing off and burning retries
-          // against the API. Idempotent — calling ``abort`` on an
-          // already-aborted controller is a no-op.
           const wasUserAborted = abortController.signal.aborted;
           abortController.abort();
 
-          // Only exit 130 if the error IS the abort — i.e., an AbortError
-          // from our signal THAT WAS ALREADY ABORTED when the error fired.
-          // Checking post-abort state would swallow a real 401 from an
-          // expired token that happens to throw at the same moment the
-          // user Ctrl+Cs as a clean interrupt, and the user would miss
-          // the ``bgagent login`` hint.
           const isAbortError = err instanceof Error && err.name === 'AbortError';
           if (isAbortError && wasUserAborted) {
             process.exitCode = EXIT_CODE_SIGINT;
@@ -569,19 +390,12 @@ export function makeWatchCommand(): Command {
 
         const formatter = makeFormatter(isJson);
 
-        // Task already terminated — print the snapshot tail and exit.
         if (TERMINAL_STATUSES.includes(snapshot.taskStatus)) {
           debug(`[watch] task already terminal status=${snapshot.taskStatus} — printing tail`);
           for (const ev of snapshot.events) {
             formatter.emit(ev);
           }
           if (!isJson) {
-            // Fetch the current task detail so the terminal-line can
-            // include the error classification (``guardrail: PR context
-            // blocked``, ``timeout: Exceeded max turns``, etc.). The
-            // snapshot only carried ``taskStatus``. Best-effort: if the
-            // GET fails transiently we still print a minimal message
-            // rather than erroring out after already streaming the tail.
             let terminalTask: Pick<TaskDetail, 'task_id' | 'status' | 'error_classification' | 'error_message'> = {
               task_id: taskId,
               status: snapshot.taskStatus,
@@ -603,8 +417,6 @@ export function makeWatchCommand(): Command {
           return;
         }
 
-        // Emit the snapshot events first so the user sees history before
-        // live events start flowing.
         for (const ev of snapshot.events) {
           formatter.emit(ev);
         }
@@ -621,10 +433,6 @@ export function makeWatchCommand(): Command {
       }
     });
 }
-
-/* ------------------------------------------------------------------------ */
-/*  Polling runner                                                           */
-/* ------------------------------------------------------------------------ */
 
 async function runPolling(
   apiClient: ApiClient,
@@ -644,11 +452,6 @@ async function runPolling(
     onTerminal: (task) => { finalTask = task; },
   });
 
-  // SIGINT always wins. Check ``signal.aborted`` BEFORE ``finalTask``
-  // so a user who Ctrl+C's between ``onTerminal`` firing and this block
-  // evaluating still gets exit 130 — their intent to interrupt is the
-  // load-bearing signal, not the coincidental terminal status. POSIX:
-  // 128 + SIGINT (2) = 130.
   if (signal.aborted) {
     logInfo(isJson, 'Aborted.');
     process.exitCode = EXIT_CODE_SIGINT;

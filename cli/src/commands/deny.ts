@@ -24,15 +24,6 @@ import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import { DENY_REASON_MAX_LENGTH } from '../types';
 
-/**
- * `bgagent deny <task-id> <request-id> [--reason ... | --reason-file ...]`
- * — deny a pending Cedar HITL gate (design §8.1).
- *
- * Reason is optional; when supplied the server sanitizes + truncates
- * to `DENY_REASON_MAX_LENGTH` chars before persisting. `--reason-file`
- * is useful for multi-line reasons that would otherwise need careful
- * shell quoting.
- */
 export function makeDenyCommand(): Command {
   return new Command('deny')
     .description('Deny a pending Cedar HITL approval gate')
@@ -66,8 +57,6 @@ export function makeDenyCommand(): Command {
         reason = String(opts.reason).trim();
       }
 
-      // Client-side cap — server will also truncate, but a fast fail
-      // here saves a round-trip when the reason is obviously too long.
       if (reason && reason.length > DENY_REASON_MAX_LENGTH) {
         throw new CliError(
           `Reason exceeds ${DENY_REASON_MAX_LENGTH} characters (got ${reason.length}). `

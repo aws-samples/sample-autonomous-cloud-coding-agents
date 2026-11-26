@@ -55,7 +55,6 @@ function SessionGate({ config }: { config: RuntimeConfig }) {
   const queryClient = useQueryClient();
   const signedIn = state.status === 'signed-in';
 
-  // Never let one user's cached data survive into the next session.
   useEffect(() => {
     if (!signedIn) queryClient.clear();
   }, [signedIn, queryClient]);

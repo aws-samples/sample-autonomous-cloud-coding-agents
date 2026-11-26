@@ -63,7 +63,6 @@ function errorMessage(error: unknown): string {
 async function synthesize(profile: SynthesisProfile, directory: string): Promise<void> {
   let result: WorkerResult;
   try {
-    // Only workers construct the app; the parent never synthesizes with its environment.
     const app = await buildApp({
       account: FIXTURE.account,
       region: FIXTURE.region,
@@ -183,7 +182,6 @@ async function main(): Promise<void> {
   process.exitCode = failed ? 1 : 0;
 }
 
-// Not reachable under jest: exercised through the command-line smoke checks.
 if (require.main === module) {
   void main().catch(error => {
     process.stderr.write(`${errorMessage(error)}\n`);

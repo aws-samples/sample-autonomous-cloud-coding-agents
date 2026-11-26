@@ -31,10 +31,6 @@ describe('ScreenshotBucket', () => {
     template = Template.fromStack(stack);
   });
 
-  // Lock in the screenshot bucket lifecycle defaults.
-  // fully-private posture so a future "simplify" doesn't drop
-  // BlockPublicAccess. The synth-time assertion is the cheapest way to
-  // catch a regression before it hits the deployed stack.
   test('S3 bucket has all-true BlockPublicAccess (fully private)', () => {
     template.hasResourceProperties('AWS::S3::Bucket', {
       PublicAccessBlockConfiguration: {
@@ -61,9 +57,6 @@ describe('ScreenshotBucket', () => {
   });
 
   test('exposes a CloudFront distribution as the public host', () => {
-    // CloudFront serves anonymously via OAC; the bucket itself stays
-    // private. Asserting both pieces exist is enough — exact OAC config
-    // is a CDK construct internal we trust.
     template.resourceCountIs('AWS::CloudFront::Distribution', 1);
     template.resourceCountIs('AWS::CloudFront::OriginAccessControl', 1);
   });

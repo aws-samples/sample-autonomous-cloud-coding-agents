@@ -17,19 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Unit tests for the registry provisioning custom-resource handlers (#246):
- * onEvent (Create/Update/Delete) and isComplete (Create/Update/Delete). The
- * handler drives an async Agent Registry lifecycle, so these lock in the
- * non-obvious branches the source comments flag as prior bugs: idempotent
- * create tokens, the Update branch actually issuing UpdateRegistry,
- * asynchronous delete completion, and the deletion of a registry's records
- * before the registry.
- */
-
-// Command classes are tagged so the mock `send` can dispatch on constructor.
-// The exception class must be a real (throwable) class because the
-// handler branches on `instanceof`.
 const mockSend = jest.fn();
 
 class ResourceNotFoundException extends Error {
@@ -93,7 +80,6 @@ beforeEach(() => {
   mockSend.mockReset();
 });
 
-/** Route mockSend by command type using the provided handlers. The registry holds no record unless a test routes ListRegistryRecords. */
 function routeSend(handlers: Record<string, (input: Record<string, unknown>) => unknown>): void {
   const routes: typeof handlers = { ListRegistryRecords: () => ({ registryRecords: [] }), ...handlers };
   mockSend.mockImplementation((cmd: TaggedCommand) => {
@@ -128,8 +114,8 @@ describe('onEvent Create', () => {
     await onEvent({ RequestType: 'Create', RequestId: 'req-1', ResourceProperties: props });
     await onEvent({ RequestType: 'Create', RequestId: 'req-2', ResourceProperties: props });
     const token = (n: number) => (mockSend.mock.calls[n][0].input as Record<string, unknown>).clientToken;
-    expect(token(0)).toBe(token(1)); // same RequestId → same token → substrate no-op on retry
-    expect(token(0)).not.toBe(token(2)); // different RequestId → different token
+    expect(token(0)).toBe(token(1));
+    expect(token(0)).not.toBe(token(2));
   });
 });
 
@@ -145,7 +131,7 @@ describe('onEvent Update', () => {
     expect(mockSend).toHaveBeenCalledTimes(1);
     const input = mockSend.mock.calls[0][0].input as Record<string, unknown>;
     expect(input.name).toBe('new-name');
-    expect(input.description).toBeUndefined(); // description unchanged → not sent
+    expect(input.description).toBeUndefined();
   });
 
   test('clears the description via the optionalValue wrapper when it is removed', async () => {
@@ -233,28 +219,18 @@ describe('onEvent Delete', () => {
     ).rejects.toThrow('AccessDenied');
   });
 
-  // A cancelled create (a sibling resource failed first, so CreateRegistry never
-  // returned) still gets a Delete during rollback, carrying a CFN placeholder rather
-  // than a registry id. Calling DeleteRegistry with it earns a ValidationException,
-  // which is neither absent nor retryable — the resource sticks in DELETE_FAILED and
-  // the stack then needs `--retain-resources` to remove at all.
-  //
-  // Each row asserts the returned PhysicalResourceId explicitly. The framework rejects
-  // a Delete response whose id differs from the request's, so echoing verbatim —
-  // including `undefined` — is the contract, and a synthesized value would itself wedge
-  // the delete.
-  // Fixtures taken from the framework's own constants where possible. Note it filters
-  // CREATE_FAILED upstream — `safeHandler` answers SUCCESS for a Delete carrying
-  // `AWSCDK::CustomResourceProviderFramework::CREATE_FAILED` without invoking this
-  // handler at all — so the reachable marker is MISSING_PHYSICAL_ID, which a prior
-  // response with no id can leave as the stored physical id.
+  // A cancelled create still gets a Delete during rollback, carrying a CFN placeholder rather than
+  // a registry id. DeleteRegistry answers a placeholder with a ValidationException.
   test.each([
+    // The CDK Provider framework answers a Delete carrying its CREATE_FAILED marker itself, without
+    // invoking the handler, so MISSING_PHYSICAL_ID is the marker that reaches it.
     ['the MISSING_PHYSICAL_ID marker', 'AWSCDK::CustomResourceProviderFramework::MISSING_PHYSICAL_ID'],
     ['a hyphenated non-id', 'AgentReg-1234'],
     ['an empty string', ''],
     ['undefined', undefined],
   ])('treats a Delete for a never-created registry (%s) as a no-op', async (_label, physicalId) => {
     routeSend({});
+    // The CDK Provider framework rejects a Delete response whose id differs from the request's.
     await expect(
       onEvent({
         RequestType: 'Delete',
@@ -272,9 +248,7 @@ describe('onEvent Delete', () => {
       PhysicalResourceId: ARN,
       ResourceProperties: { RegistryName: 'abca' },
     });
-    // Normalised for the API, in the record list and in the delete...
     expect(mockSend.mock.calls.map((c) => (c[0] as TaggedCommand).input.registryId)).toEqual([REGISTRY_ID, REGISTRY_ID]);
-    // ...but echoed verbatim back to CloudFormation, which requires an exact match.
     expect(res.PhysicalResourceId).toBe(ARN);
   });
 
@@ -288,9 +262,6 @@ describe('onEvent Delete', () => {
     expect(mockSend.mock.calls.map((c) => (c[0] as TaggedCommand).input.registryId)).toEqual([REGISTRY_ID, REGISTRY_ID]);
   });
 
-  // Pins both ends of the length bound. Without these, {12,64} could drift to {1,64}
-  // (placeholders start being deleted against) or back to {12,16} (real ids start being
-  // skipped and orphaned) with the rest of the suite still green.
   test.each([
     ['11 chars — below the minimum', 'AbCdEfGh123', false],
     ['12 chars — at the minimum', 'AbCdEfGh1234', true],
@@ -306,12 +277,9 @@ describe('onEvent Delete', () => {
       PhysicalResourceId: physicalId,
       ResourceProperties: { RegistryName: 'abca' },
     });
-    // The record list and the delete, or nothing.
     expect(mockSend).toHaveBeenCalledTimes(shouldCallApi ? 2 : 0);
   });
 
-  // The guard fails open on shape drift; this fails open on a request the service
-  // rejects. Delete-only — Create and Update must still fail closed on a bad request.
   test('treats a service-rejected id as absent rather than wedging the delete', async () => {
     routeSend({
       DeleteRegistry: () => {
@@ -328,10 +296,6 @@ describe('onEvent Delete', () => {
   });
 });
 
-// N-1/N-2 from review round 2: both were mutation-proven gaps — deleting the isComplete
-// normalisation, or any of the three warns, left the suite green. The warns are not
-// cosmetic: they are what makes a skipped delete (a possible billable orphan) visible, so
-// nothing should be able to downgrade them to info or drop them with CI still passing.
 describe('isComplete Delete — normalisation and orphan visibility', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const loggerModule = require('../../../src/handlers/shared/logger') as {
@@ -345,8 +309,8 @@ describe('isComplete Delete — normalisation and orphan visibility', () => {
   let infoSpy: jest.SpyInstance;
 
   beforeEach(() => {
-    warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => { /* silence */ });
-    infoSpy = jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => { /* silence */ });
+    warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => {});
+    infoSpy = jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -407,8 +371,8 @@ describe('onEvent Delete — orphan visibility', () => {
   let warnSpy: jest.SpyInstance;
 
   beforeEach(() => {
-    warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => { /* silence */ });
-    jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => { /* silence */ });
+    warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => {});
+    jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -478,9 +442,6 @@ describe('isComplete Create/Update', () => {
 });
 
 describe('isComplete Delete', () => {
-  // Companion to the onEvent no-op guard: the Provider polls isComplete after
-  // onEvent, so a never-created registry must terminate here too rather than
-  // reaching GetRegistry with a placeholder id.
   test('reports a never-created registry as already deleted without calling GetRegistry', async () => {
     routeSend({});
     await expect(
@@ -582,8 +543,6 @@ describe('isComplete Delete', () => {
     expect(res.IsComplete).toBe(false);
   });
 
-  // Reported complete, a registry that may still exist would be left behind.
-  // Polled again, the Provider would wait out its 15 minutes.
   test('rethrows a GetRegistry failure that is neither absent nor retryable', async () => {
     routeSend({
       GetRegistry: () => {
@@ -616,9 +575,6 @@ describe('isComplete Delete', () => {
 });
 
 // AWS refuses DeleteRegistry with a ConflictException while the registry holds a record.
-// The handler used to retry that refusal as if it would pass, and deleted no record: a
-// stack whose registry held a published asset could not be deleted, and after 15 minutes
-// of polling the Provider reported "Operation timed out".
 describe('Delete of a registry that holds records', () => {
   const DELETE = {
     RequestType: 'Delete' as const,
@@ -626,13 +582,6 @@ describe('Delete of a registry that holds records', () => {
     ResourceProperties: { RegistryName: 'abca' },
   };
 
-  /**
-   * Routes for a registry that answers as AWS does: DeleteRegistry is refused while a
-   * record exists, and an accepted DeleteRegistry removes the registry.
-   * @param records - ids of the records the registry holds; a deleted record leaves the list.
-   * @param beforeDelete - runs before a record is deleted; when it throws, the record stays.
-   * @returns the routes for `routeSend`.
-   */
   function registryHolding(records: string[], beforeDelete: (recordId: unknown) => void = () => undefined) {
     let deleted = false;
     return {
@@ -654,7 +603,6 @@ describe('Delete of a registry that holds records', () => {
     };
   }
 
-  /** The commands sent so far, each with the record or the page it names. */
   function sent(): string[] {
     return mockSend.mock.calls.map((c) => {
       const { _type, input } = c[0] as TaggedCommand;
@@ -662,11 +610,6 @@ describe('Delete of a registry that holds records', () => {
     });
   }
 
-  /**
-   * Poll isComplete as the Provider's waiter does. It polls every 10 seconds and gives up
-   * after 15 minutes (constructs/registry.ts), so 90 polls are what a delete can use.
-   * @returns the number of polls it took.
-   */
   async function pollsUntilDeleted(): Promise<number> {
     for (let poll = 1; poll <= 90; poll++) {
       if ((await isComplete(DELETE)).IsComplete) return poll;
@@ -748,9 +691,6 @@ describe('Delete of a registry that holds records', () => {
     await expect(onEvent(DELETE)).rejects.toThrow('AccessDenied');
   });
 
-  // The record list is the first call to carry the registry id, so it is the one that
-  // meets a registry that is gone or an id the service rejects. Like the same answers to
-  // DeleteRegistry, none of them may fail the delete.
   test.each([
     ['not found: the registry is already gone', ResourceNotFoundException],
     ['a validation error: the service rejects the id', ValidationException],
@@ -766,8 +706,6 @@ describe('Delete of a registry that holds records', () => {
     expect(sent()).toEqual(['ListRegistryRecords']);
   });
 
-  // The handler's Lambda is stopped after 60 seconds, and that would fail the delete at
-  // once. Here every record takes that long, so one invocation has time for one record.
   test('stops deleting records when its time is up, and the next poll goes on', async () => {
     let now = 0;
     jest.spyOn(Date, 'now').mockImplementation(() => now);

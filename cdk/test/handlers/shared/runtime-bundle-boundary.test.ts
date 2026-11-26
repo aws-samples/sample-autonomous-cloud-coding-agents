@@ -21,66 +21,23 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { buildSync, type Metafile } from 'esbuild';
 
-/**
- * The runtime/construct layering boundary, enforced by actually bundling.
- *
- * A runtime handler that imports from `src/constructs/` can pull all of
- * `aws-cdk-lib` into its deploy artifact, because several construct modules evaluate
- * CDK values at module top level and esbuild cannot tree-shake a module whose top
- * level `require`s the library. `aws-cdk-lib` appears in no construct's
- * `externalModules` (only `@aws-sdk/*` does), so nothing downstream strips it.
- *
- * This is not theoretical. `handlers/shared/workflows.ts` imported two constants from
- * `constructs/bedrock-models.ts`, whose geography list was
- * `Object.values(CrossRegionInferenceProfileRegion)` — a runtime read of an alpha-CDK
- * enum. Measured effect on `workflows.ts` alone: **6.8 KB and zero `aws-cdk-lib`
- * references became 57 MB and 9,679**, on every Lambda that reaches it — the
- * orchestrator, create-task, webhook create-task, the Slack/Linear/Jira webhook
- * processors and the reconcilers. Nothing failed: synth passed, CI passed, and there
- * is no bundle-size gate. The fix was to move the values into a dependency-free
- * module; this test is what stops the import from creeping back.
- *
- * It then crept back where this test was not looking. The test bundled two shared
- * modules; eight imports of a string constant from three other construct modules put
- * the library into 11 Lambda bundles while it stayed green. So it now bundles every
- * entrypoint. A clean bundle takes about 10 ms, the whole list under a second.
- */
 describe('runtime handlers do not bundle aws-cdk-lib', () => {
   const repoCdkRoot = path.resolve(__dirname, '../../..');
   const handlersDir = path.join(repoCdkRoot, 'src/handlers');
 
-  /**
-   * Every Lambda entrypoint: each `NodejsFunction` takes its `entry` from this directory,
-   * as `<name>.ts` or `<name>/index.ts`. Everything outside `shared/` counts as one; a
-   * file that is only a helper for an entrypoint gets bundled on its own as well, which
-   * is cheaper than telling the two apart.
-   */
   const entrypoints = fs.readdirSync(handlersDir, { recursive: true, encoding: 'utf8' })
     .map((rel) => rel.split(path.sep).join('/'))
     .filter((rel) => rel.endsWith('.ts') && !rel.startsWith('shared/'))
     .map((rel) => `src/handlers/${rel}`)
     .sort();
 
-  /**
-   * What the real build keeps out of a bundle. Each `NodejsFunction` passes its own list,
-   * so this is their union: `externalModules` is `@aws-sdk/*`, part of it or empty,
-   * `nodeModules: ['pdf-parse']` ships pdf-parse beside the bundle, and get-policies takes
-   * cedar-wasm from a layer. A function that bundles some of the SDK is still covered,
-   * because no SDK package imports the CDK. Only list what the constructs list: anything
-   * else stays in the real bundle whatever this test says.
-   */
   const EXTERNAL = ['@aws-sdk/*', 'pdf-parse', '@cedar-policy/cedar-wasm', '@cedar-policy/cedar-wasm/nodejs'];
 
-  /** `aws-cdk-lib` and `constructs`, wherever module resolution found them. */
   const CDK_MODULE = /(^|\/)node_modules\/(aws-cdk-lib|constructs)\//;
 
-  // 1 MB is above every handler bundle built this way (the largest,
-  // `github-webhook-processor.ts`, is 0.63 MB) and far below the failure mode (~57 MB).
-  // It is a second net under the CDK check: for a heavyweight import that is not the
-  // CDK, and for the day the path match above stops matching.
+  // Measured: a bundle that pulls in aws-cdk-lib is about 57 MB.
   const CDK_LEAK_BYTES = 1_000_000;
 
-  /** Bundle one entry the way the CDK does (`esbuild --bundle --target=node24 --platform=node`). */
   function bundle(relEntry: string): { bytes: number; metafile: Metafile } {
     const result = buildSync({
       entryPoints: [relEntry],
@@ -97,21 +54,16 @@ describe('runtime handlers do not bundle aws-cdk-lib', () => {
     return { bytes: result.outputFiles[0].contents.byteLength, metafile: result.metafile };
   }
 
-  /** `:<line>` of the first line of `file` that quotes `specifier`, or '' when none does. */
   function lineOf(file: string, specifier: string): string {
     const lines = fs.readFileSync(path.join(repoCdkRoot, file), 'utf8').split('\n');
     const index = lines.findIndex((line) => line.includes(`'${specifier}'`) || line.includes(`"${specifier}"`));
     return index < 0 ? '' : `:${index + 1}`;
   }
 
-  /**
-   * Shortest import chain from the entry to the first bundled file matching `isTarget`,
-   * one `file:line imports 'specifier'` step per hop. Empty when no such file is bundled.
-   */
   function importChain(inputs: Metafile['inputs'], entry: string, isTarget: (file: string) => boolean): string[] {
     const importedBy = new Map<string, { importer: string; specifier: string } | undefined>([[entry, undefined]]);
     const queue = [entry];
-    for (const importer of queue) { // breadth-first: the loop also visits what it appends
+    for (const importer of queue) {
       for (const { path: file, original, external } of inputs[importer].imports) {
         if (external || importedBy.has(file)) continue;
         importedBy.set(file, { importer, specifier: original ?? file });
@@ -128,11 +80,8 @@ describe('runtime handlers do not bundle aws-cdk-lib', () => {
     return [];
   }
 
-  /** What is wrong with the bundle of `relEntry`, how it got there and what to do; undefined when it is clean. */
   function bundleProblem(relEntry: string): string | undefined {
     const { bytes, metafile } = bundle(relEntry);
-    // The CDK first: it names the actual defect, so the failure message is
-    // "you imported the CDK" rather than "this file got big".
     const cdkFiles = Object.keys(metafile.inputs).filter((file) => CDK_MODULE.test(file));
     if (cdkFiles.length > 0) {
       return [
@@ -164,18 +113,12 @@ describe('runtime handlers do not bundle aws-cdk-lib', () => {
   }, 60_000);
 
   it('reports the CDK, with the import chain, when a construct module is bundled', () => {
-    // The control for the cases above. If the CDK stopped being detected (a change in
-    // esbuild's metafile or the node_modules layout, the CDK added to EXTERNAL), every
-    // entrypoint would pass vacuously; this fails instead.
     const problem = bundleProblem('src/constructs/trace-artifacts-bucket.ts');
     expect(problem).toContain('bundles the CDK into its Lambda');
     expect(problem).toMatch(/src\/constructs\/trace-artifacts-bucket\.ts:\d+ imports 'aws-cdk-lib'/);
   }, 60_000);
 
   it('the constants module imports nothing from the construct layer', () => {
-    // A cheap static backstop for the same rule. It catches a construct import that
-    // happens not to bundle the CDK today but would the moment that construct grows
-    // a top-level CDK evaluation — the exact shape of the original regression.
     const src = fs.readFileSync(
       path.join(repoCdkRoot, 'src/handlers/shared/bedrock-model-constants.ts'), 'utf8',
     );

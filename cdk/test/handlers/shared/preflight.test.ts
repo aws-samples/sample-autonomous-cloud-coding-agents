@@ -17,10 +17,7 @@
  *  SOFTWARE.
  */
 
-// --- Mocks (before imports) ---
 const mockSmSend = jest.fn();
-// Stand-in for the SDK's ResourceNotFoundException so the `instanceof` check in
-// resolveGitHubToken (#251) has a real constructor to test against.
 class MockResourceNotFoundException extends Error {
   constructor(message = 'Secrets Manager can’t find the specified secret.') {
     super(message);
@@ -45,7 +42,6 @@ import {
 } from '../../../src/handlers/shared/preflight';
 import type { BlueprintConfig } from '../../../src/handlers/shared/repo-config';
 
-// Mock global fetch
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
@@ -55,7 +51,6 @@ const baseBlueprintConfig: BlueprintConfig = {
   github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token',
 };
 
-/** Successful GET /repos/... with a `permissions` object (preflight parses JSON). */
 function githubRepoOk(permissions: { push?: boolean; pull?: boolean } = { push: true }) {
   return {
     ok: true,
@@ -64,7 +59,6 @@ function githubRepoOk(permissions: { push?: boolean; pull?: boolean } = { push: 
   };
 }
 
-/** Successful GET /repos/.../pulls/{n}: an open pull request from a branch of `owner/repo` itself. */
 function githubOpenPrOk() {
   return {
     ok: true,
@@ -78,10 +72,6 @@ beforeEach(() => {
   clearTokenCache();
   delete process.env.PREFLIGHT_CHECK_RUNTIME;
 });
-
-// ---------------------------------------------------------------------------
-// runPreflightChecks
-// ---------------------------------------------------------------------------
 
 describe('runPreflightChecks', () => {
   test('all checks pass when token configured and both GitHub calls return 200', async () => {
@@ -247,9 +237,6 @@ describe('runPreflightChecks', () => {
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
     expect(result.passed).toBe(false);
-    // #251 review fix: an unreadable token secret is a misconfiguration, not
-    // GitHub being unreachable — the failureReason now reflects that, and the
-    // detail carries the canonical auth_failure reason (raw SM error on .cause).
     expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_TOKEN_SECRET_UNREADABLE);
     expect(result.failureDetail).toContain('BLOCKED[auth_failure]');
     expect(result.checks).toHaveLength(1);
@@ -263,7 +250,6 @@ describe('runPreflightChecks', () => {
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig);
 
     expect(result.passed).toBe(false);
-    // #251 review fix: empty/absent secret → missing, distinct from unreachable.
     expect(result.failureReason).toBe(PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING);
     expect(result.failureDetail).toContain('BLOCKED[missing_secret]');
     expect(mockFetch).not.toHaveBeenCalled();
@@ -325,7 +311,6 @@ describe('runPreflightChecks', () => {
 
   test('handles Promise.allSettled unexpected rejection fail-closed', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
-    // Both promises reject — inner functions should catch, but test defensive path
     mockFetch
       .mockImplementationOnce(() => { throw new Error('sync throw in reachability'); })
       .mockImplementationOnce(() => { throw new Error('sync throw in repo access'); });
@@ -334,13 +319,11 @@ describe('runPreflightChecks', () => {
 
     expect(result.passed).toBe(false);
     expect(result.checks.length).toBeGreaterThanOrEqual(1);
-    // At least one check should be failed
     const failedChecks = result.checks.filter(c => !c.passed);
     expect(failedChecks.length).toBeGreaterThanOrEqual(1);
   });
 
   test('repo-less workflow (requiresRepo=false) short-circuits to passed (#248 Phase 3)', async () => {
-    // No repo to pre-flight: returns passed with no checks and no GitHub calls.
     const result = await runPreflightChecks(undefined, baseBlueprintConfig, undefined, false, false);
 
     expect(result.passed).toBe(true);
@@ -349,8 +332,6 @@ describe('runPreflightChecks', () => {
   });
 
   test('repo-bound workflow with no repo fails closed (internal invariant) (#248 Phase 3)', async () => {
-    // requiresRepo=true but repo undefined should never happen (admission
-    // enforces it); if it does, the guard fails closed and loud, not crash/pass.
     const result = await runPreflightChecks(undefined, baseBlueprintConfig, undefined, false, true);
 
     expect(result.passed).toBe(false);
@@ -362,9 +343,9 @@ describe('runPreflightChecks', () => {
   test('passes when prNumber is provided and PR is open', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
-      .mockResolvedValueOnce({ ok: true, status: 200 }) // reachability
-      .mockResolvedValueOnce(githubRepoOk()) // repo access
-      .mockResolvedValueOnce(githubOpenPrOk()); // PR
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
+      .mockResolvedValueOnce(githubOpenPrOk());
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
 
@@ -428,10 +409,6 @@ describe('runPreflightChecks', () => {
     expect(result.failureReason).toBe(PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED);
   });
 
-  // The agent fetches the branch of the pull request by its name from the task's
-  // repository, and an iteration pushes to it there. The branch of a pull request
-  // from a fork is in the fork. GET /repos/{repo}/pulls/{n} says so: `head.repo`
-  // is another repository than `base.repo`, or null once the fork is deleted.
   test.each([
     ['comes from a fork', { repo: { full_name: 'contributor/repo' } }],
     ['comes from a fork that was deleted since', { repo: null }],
@@ -454,13 +431,11 @@ describe('runPreflightChecks', () => {
     expect(result.failureDetail).toBe(
       'PR #42 in owner/repo comes from another repository (a fork): its branch is not in owner/repo, so it cannot be checked out or pushed to',
     );
-    // The error classifier finds the reason in the task's error message.
     expect(classifyError(`Pre-flight check failed: ${result.failureReason} — ${result.failureDetail}`)?.title).toBe('Pull request from a fork');
   });
 
   test('passes a pull request of the repository itself when the task spells the repository in another letter case', async () => {
-    // GitHub answers to any spelling of a name and reports its own: the head is
-    // compared with the base of the answer, not with the spelling of the task.
+    // GitHub answers to any letter case of a repository name and reports its own spelling.
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })

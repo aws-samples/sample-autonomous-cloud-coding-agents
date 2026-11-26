@@ -18,25 +18,12 @@
  */
 
 /**
- * Linear native Agents API (agent-session interaction) — ADR-018 Phase 2.
- *
- * Wire shapes and GraphQL helpers for the flag-gated agent-session channel:
- * Linear delivers ``AgentSessionEvent`` webhooks (``created`` when bgagent is
- * @-mentioned or delegated an issue, ``prompted`` when a human sends a
- * follow-up into the session), and ABCA answers by emitting typed
- * **activities** (``thought`` / ``action`` / ``elicitation`` / ``response`` /
- * ``error``) from which Linear derives the session state and renders its
- * native agent UI.
- *
  * Timing contract (Linear docs): the webhook receiver acks within 5s; the
  * first activity must land within 10s of ``created`` or the session is marked
  * unresponsive; a session with no activity for 30 minutes goes ``stale`` (any
- * new activity recovers it). The processor emits an immediate ``thought``; the
- * fan-out dispatcher keeps long runs alive with throttled ephemeral thoughts.
+ * new activity recovers it).
  *
- * Same conventions as ``linear-feedback.ts``: helpers never throw and return a
- * {@link LinearPostResult} so callers with a retry path (the fan-out stream
- * consumer) can escalate transient failures only.
+ * Helpers here never throw.
  */
 
 import type { AgentSessionRequest } from './linear-agent-session-event';
@@ -69,8 +56,7 @@ query AgentSessionIssue($id: String!) {
 
 /**
  * Emit one activity into a session. ``ephemeral`` (only valid for
- * ``thought``/``action``) shows it until the next activity replaces it — used
- * for keep-alive progress so it does not pile up in the thread.
+ * ``thought``/``action``) shows it until the next activity replaces it.
  */
 export async function emitAgentActivity(
   accessToken: string,
@@ -109,8 +95,7 @@ export interface AgentSessionIssue {
 
 /**
  * Fetch the session's issue. The webhook's embedded issue does not reliably
- * carry the project, which ABCA needs to resolve the target repository, and
- * reading it with the workspace's own token also scopes it to that tenant.
+ * carry the project.
  */
 export async function fetchAgentSessionIssue(
   accessToken: string,
@@ -132,24 +117,18 @@ export async function fetchAgentSessionIssue(
   });
 }
 
-/** Separator + heading that introduces Linear's `promptContext` in the description. */
 const SESSION_CONTEXT_PREFIX = '\n\n## Linear session context\n\n';
 const CONTEXT_TRUNCATION_NOTICE = '\n\n_(session context truncated)_';
 
 /**
  * Build the task description for a session-triggered task. Leads with the
- * human's directive (if any), then the issue heading, then the issue body.
+ * human's directive (if any), then the issue heading, then ``promptContext``
+ * when present, else the fetched issue description.
  *
  * Linear's ``promptContext`` already carries the issue (identifier, title,
- * description) together with the thread and team guidance, so when it is
- * present it IS the body: adding the fetched description as well would state
- * the issue twice and, for a long description, push the thread and guidance —
- * the part only ``promptContext`` has — out of the length budget. The fetched
- * description is the fallback for deliveries without it (``prompted``).
+ * description) with the thread and team guidance; ``prompted`` deliveries lack it.
  *
- * Never exceeds ``MAX_TASK_DESCRIPTION_LENGTH`` so createTaskCore's length
- * check cannot turn long context into a rejection. The result is screened by
- * createTaskCore's input guardrail like any other task description.
+ * Never exceeds ``MAX_TASK_DESCRIPTION_LENGTH``.
  */
 export function buildAgentSessionTaskDescription(
   issue: AgentSessionIssue,
@@ -182,9 +161,8 @@ export function buildAgentSessionTaskDescription(
 
 /**
  * Idempotency key for a session-triggered task: one task per delivery
- * (``created`` → session id, ``prompted`` → prompt activity id), so a webhook
- * or async-invoke retry never double-creates. Sanitised to createTaskCore's
- * key alphabet and length.
+ * (``created`` → session id, ``prompted`` → prompt activity id). Sanitised to
+ * createTaskCore's key alphabet and length.
  */
 export function agentSessionIdempotencyKey(request: AgentSessionRequest): string {
   return `linear-session-${request.action}-${request.deliveryId}`

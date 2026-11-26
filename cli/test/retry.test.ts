@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// The backoff-curve pins live in watch.test.ts (they exercise the curve
-// through withTransientRetry). This suite covers the classifier directly.
-
 import { CliError, ApiError } from '../src/errors';
 import { abortableSleep, isTransientError } from '../src/retry';
 
@@ -29,7 +26,6 @@ describe('isTransientError', () => {
     expect(isTransientError(new ApiError(404, 'NOT_FOUND', 'missing', 'r2'))).toBe(false);
   });
 
-  // 500 is what the platform's handlers answer for any unhandled failure.
   test.each([
     [499, false],
     [500, true],
@@ -44,11 +40,7 @@ describe('isTransientError', () => {
   });
 
   test('mid-stream socket failure via err.cause.code is transient', () => {
-    // undici "terminated" (body interrupted after headers) is NOT a
-    // TypeError with "fetch failed" — without the cause.code check it was
-    // misclassified as fatal, defeating the retry budget.
-    // (cause assigned structurally: the compile target's lib predates
-    // the ErrorOptions constructor overload.)
+    // undici "terminated" (body interrupted after headers) is not a TypeError with "fetch failed".
     const cause = new Error('read ECONNRESET') as Error & { code: string };
     cause.code = 'ECONNRESET';
     const err = new Error('terminated') as Error & { cause?: Error };
@@ -73,8 +65,6 @@ describe('isTransientError', () => {
 
 describe('abortableSleep', () => {
   test('resolves (not rejects) when the signal aborts mid-sleep', async () => {
-    // Poll loops check signal.aborted after the sleep; a rejection here
-    // would crash them instead of letting them exit cleanly.
     const controller = new AbortController();
     const sleep = abortableSleep(60_000, controller.signal);
     controller.abort();

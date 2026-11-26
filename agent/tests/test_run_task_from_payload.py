@@ -1,11 +1,3 @@
-"""Unit tests for pipeline.run_task_from_payload — the ECS payload→run_task map.
-
-Regression cover for a silent contract gap: the ECS boot command used to hand-list a subset
-of run_task kwargs and silently dropped channel_source/channel_metadata (no
-Linear/Jira reactions on ECS), build_command, cedar_policies, base_branch, etc.
-run_task_from_payload maps the WHOLE payload so nothing is dropped again.
-"""
-
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -14,7 +6,6 @@ from pipeline import _RUN_TASK_PARAMS, run_task_from_payload
 
 
 def _capture(payload: dict) -> dict:
-    """Run the mapper with run_task replaced by a capturing stub; return kwargs."""
     seen: dict = {}
 
     def fake_run_task(**kwargs):
@@ -31,23 +22,16 @@ class TestRunTaskFromPayload:
         seen = _capture({"prompt": "do the thing", "model_id": "anthropic.claude-x"})
         assert seen["task_description"] == "do the thing"
         assert seen["anthropic_model"] == "anthropic.claude-x"
-        # The original payload keys must NOT leak through as-is (run_task rejects them).
         assert "prompt" not in seen
         assert "model_id" not in seen
 
     def test_forwards_every_channel_field_to_the_agent(self):
-        # THE regression: channel_source/channel_metadata must reach run_task so
-        # the Linear/Jira reaction + channel MCP fire on ECS.
         cm = {"linear_issue_id": "iss-1", "linear_oauth_secret_arn": "arn:sm:...:lin"}
         seen = _capture({"channel_source": "linear", "channel_metadata": cm})
         assert seen["channel_source"] == "linear"
         assert seen["channel_metadata"] == cm
 
     def test_forwards_build_and_lint_and_cedar_and_branch_fields(self):
-        # On this branch build_command/lint_command/base_branch/merge_branches ARE
-        # real run_task params (configurable verify #1 + #247 stacking), alongside
-        # cedar_policies/attachments/trace/user_id — all must reach run_task on ECS
-        # (the hand-listed boot command used to drop them).
         seen = _capture(
             {
                 "build_command": "npm ci && npm test",
@@ -77,8 +61,6 @@ class TestRunTaskFromPayload:
         assert isinstance(seen["max_turns"], int)
 
     def test_ignores_unknown_payload_keys(self):
-        # github_token_secret_arn is on the payload but is NOT a run_task param
-        # (it's consumed platform-side); passing it as **kwargs would TypeError.
         seen = _capture(
             {
                 "repo_url": "org/repo",
@@ -91,10 +73,6 @@ class TestRunTaskFromPayload:
         assert "sources" not in seen
 
     def test_github_token_secret_arn_dropped_quietly(self):
-        # github_token_secret_arn is ALWAYS present and ALWAYS resolved via
-        # the GITHUB_TOKEN_SECRET_ARN env (never a run_task param), so its drop is
-        # 100% expected and must NOT fire the known-key WARN — that channel is for
-        # genuine future contract gaps, not this always-dropped key.
         logs: list[tuple[str, str]] = []
         with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
             _capture({"github_token_secret_arn": "arn:aws:secretsmanager:...", "repo_url": "r"})
@@ -118,9 +96,6 @@ class TestRunTaskFromPayload:
         assert seen["aws_region"] == "eu-west-1"
 
     def test_every_forwarded_key_is_a_real_run_task_param(self):
-        # Guard: whatever the mapper forwards must be accepted by run_task, so a
-        # future payload key can never smuggle an invalid kwarg through. Compare
-        # against the module's real param set (run_task is patched in _capture).
         accepted = _RUN_TASK_PARAMS
         seen = _capture(
             {
@@ -144,39 +119,26 @@ class TestRunTaskFromPayload:
         assert set(seen).issubset(accepted)
 
     def test_max_turns_rejects_surprising_inputs(self):
-        # int() accepts a bool (int(True)==1) and truncates a float
-        # (int(3.9)==3). The orchestrator always emits a real int, but a corrupt
-        # / hand-edited payload must not silently become a bogus turn count —
-        # drop with a breadcrumb and let run_task's default apply.
+        # int() accepts a bool (int(True) == 1) and truncates a float (int(3.9) == 3).
         assert "max_turns" not in _capture({"repo_url": "r", "max_turns": True})
         assert "max_turns" not in _capture({"repo_url": "r", "max_turns": 3.9})
-        # Valid inputs still pass: a real int and an int-valued string / float.
         assert _capture({"repo_url": "r", "max_turns": 50})["max_turns"] == 50
         assert _capture({"repo_url": "r", "max_turns": "50"})["max_turns"] == 50
         assert _capture({"repo_url": "r", "max_turns": 50.0})["max_turns"] == 50
 
     def test_does_NOT_warn_when_dropping_a_foreign_key(self):
-        # A genuinely-foreign key (not a known orchestrator field) is dropped
-        # quietly — no log noise for keys we never expected to forward.
         logs: list[tuple[str, str]] = []
         with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
             _capture({"some_future_unrelated_key": "v", "repo_url": "r"})
         assert not [m for level, m in logs if "some_future_unrelated_key" in m]
 
     def test_warns_when_dropping_task_started_at_HITL_parity(self):
-        # task_started_at drives the AgentCore HITL maxLifetime clip via
-        # TASK_STARTED_AT; the ECS path doesn't set it yet, so its drop must WARN
-        # (surface the AgentCore↔ECS parity gap, not silently fail-open). It is the
-        # one _KNOWN_ORCHESTRATOR_KEYS entry on this branch (build_command etc. are
-        # real run_task params here and forward, so they never hit the drop path).
         logs: list[tuple[str, str]] = []
         with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
             _capture({"task_started_at": "2026-07-14T00:00:00Z", "repo_url": "r"})
         assert [m for level, m in logs if level == "WARN" and "task_started_at" in m]
 
     def test_malformed_max_turns_is_dropped_not_raised(self):
-        # A non-integer max_turns must not crash the boot — it's dropped (run_task
-        # default applies) with a WARN, matching how every other field defaults.
         logs: list[tuple[str, str]] = []
         with patch("pipeline.log", side_effect=lambda level, msg, **kw: logs.append((level, msg))):
             seen = _capture({"repo_url": "r", "max_turns": "not-a-number"})

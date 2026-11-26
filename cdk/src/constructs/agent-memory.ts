@@ -22,12 +22,8 @@ import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import type * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 
-/** Default short-term memory event expiration (days). */
 const DEFAULT_EXPIRATION_DAYS = 365;
 
-/**
- * Properties for the AgentMemory construct.
- */
 export interface AgentMemoryProps {
   /**
    * Name for the Memory resource.
@@ -47,12 +43,6 @@ export interface AgentMemoryProps {
  * CDK construct wrapping an AgentCore Memory resource with semantic and episodic
  * extraction strategies for cross-task learning.
  *
- * The Memory resource stores:
- * - **Semantic records**: factual knowledge extracted from task episodes
- *   (e.g. repo conventions, build quirks, testing patterns)
- * - **Episodic records**: summarized interaction slices (task outcome, cost,
- *   duration, self-feedback) for pattern recognition
- *
  * Namespace design:
  *   Events are written with `actorId = "owner/repo"` and `sessionId = taskId`.
  *   The extraction strategies use namespace templates to place extracted records
@@ -63,9 +53,6 @@ export interface AgentMemoryProps {
  *   - Episodic reflection: `/{actorId}/episodes/`  →  cross-task summaries
  */
 export class AgentMemory extends Construct {
-  /**
-   * The underlying AgentCore Memory resource.
-   */
   public readonly memory: agentcore.Memory;
 
   constructor(scope: Construct, id: string, props?: AgentMemoryProps) {
@@ -91,10 +78,6 @@ export class AgentMemory extends Construct {
     });
   }
 
-  /**
-   * Grant read + write access to the memory (for the agent runtime).
-   * @param grantee - the principal to grant access to.
-   */
   grantReadWrite(grantee: iam.IGrantable): void {
     this.memory.grantRead(grantee);
     this.memory.grantWrite(grantee);

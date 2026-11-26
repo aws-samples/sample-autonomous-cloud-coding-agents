@@ -120,7 +120,6 @@ describe('per-workspace agent-session marker', () => {
     expect(inputs()[0]).toEqual(expect.objectContaining({
       Key: { linear_workspace_id: 'org-1' },
       UpdateExpression: 'SET agent_sessions_seen_at = :now',
-      // Never creates a registry row; rewrites only an absent or day-old marker.
       ConditionExpression: 'attribute_exists(linear_workspace_id) AND '
         + '(attribute_not_exists(agent_sessions_seen_at) OR agent_sessions_seen_at < :stale)',
       ExpressionAttributeValues: { ':now': '2026-11-20T12:00:00.000Z', ':stale': '2026-11-19T12:00:00.000Z' },
@@ -157,7 +156,7 @@ describe('per-workspace agent-session marker', () => {
   });
 
   test('the evidence expires: a workspace that stopped delivering sessions gets its comment trigger back', async () => {
-    // e.g. an admin turned "Agent session events" off; Linear sends no signal for that.
+    // Linear sends no signal when an admin turns "Agent session events" off.
     send.mockResolvedValue(seenAt(NOW - AGENT_SESSION_EVIDENCE_TTL_MS + MINUTE));
     await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(true);
     resetSessionWorkspaceCacheForTests();
@@ -168,7 +167,6 @@ describe('per-workspace agent-session marker', () => {
   test('a warm container does not keep answering "yes" forever', async () => {
     send.mockResolvedValue(seenAt(NOW - AGENT_SESSION_EVIDENCE_TTL_MS + MINUTE));
     await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(true);
-    // Six minutes on, the cached answer has lapsed and the marker has expired.
     await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW + 6 * MINUTE)).resolves.toBe(false);
   });
 

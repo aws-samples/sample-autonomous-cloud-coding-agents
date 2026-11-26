@@ -1,5 +1,3 @@
-"""Agent configuration: constants and config-builder."""
-
 import os
 import sys
 import uuid
@@ -11,28 +9,10 @@ from shell import log
 
 AGENT_WORKSPACE = os.environ.get("AGENT_WORKSPACE", "/workspace")
 
-# The platform default workflow id used when a payload omits resolved_workflow
-# (local/batch runs). Mirrors the create-task boundary's coding default.
 DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
-# The repo-less platform default workflow (#248 Phase 3) — the one first-party
-# id whose ``requires_repo`` is false. Used by the load-failure fallback to
-# decide repo-optionality without loading the file.
 REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
-# First-party workflow ids that operate on an existing pull request — they
-# check out the existing PR branch instead of creating a fresh one. restack-v1
-# (#305) re-merges a changed predecessor into an existing stacked-child PR.
 PR_WORKFLOW_IDS = frozenset(("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"))
-# Clarify-before-spend (customer UX #4): the exact marker a coding/new-task agent
-# puts on the FIRST line of its final message when a request is too ambiguous to
-# implement without guessing. Its presence tells the pipeline to hold — post the
-# question, open NO PR, and surface it as "needs input" rather than a finished
-# task. Kept as an unusual sentinel so it can't collide with ordinary prose.
 NEEDS_INPUT_MARKER = "[[ABCA_NEEDS_INPUT]]"
-# First-party workflow ids that are writeable (NOT read-only). Used only by the
-# load-failure fallback to bias an unrecognised id toward read-only (fail closed
-# on the write-deny invariant). pr-review-v1 is intentionally excluded (it is
-# read-only); default/agent-v1 is excluded because its conservative posture
-# should fail closed too.
 _KNOWN_WRITEABLE_WORKFLOW_IDS = frozenset(
     (
         "coding/new-task-v1",
@@ -49,7 +29,6 @@ def resolve_github_token() -> str:
     from Secrets Manager on first call, then cached in os.environ.
     For local development, falls back to GITHUB_TOKEN.
     """
-    # Return cached value if already resolved
     cached = os.environ.get("GITHUB_TOKEN", "")
     if cached:
         return cached
@@ -61,46 +40,24 @@ def resolve_github_token() -> str:
         client = platform_client("secretsmanager", region_name=region)
         resp = client.get_secret_value(SecretId=secret_arn)
         token = resp["SecretString"]
-        # Cache in env so downstream tools (git, gh CLI) work unchanged
         os.environ["GITHUB_TOKEN"] = token
         return token
     return ""
 
 
-# Sourced from contracts/constants.json, not re-declared. AgentCore keys a cached
-# grant by the WHOLE token request, customParameters included — live-proven that the
-# same user and provider return the cached token when these are passed and "needs
-# consent" when they are omitted. So a one-token divergence between any two of the
-# four copies (here, the Lambda resolver, and both CLI paths) makes every resolve a
-# cache miss, which since #812 is reported as consent-required and can latch a healthy
-# workspace `revoked`. Four "keep in sync" comments could not enforce that; the
-# contract plus check:constants-sync can.
+# AgentCore keys a cached grant by the whole token request, customParameters
+# included: the same user and provider return the cached token when these are
+# passed and "needs consent" when they are omitted.
 _LINEAR_VAULT_CONTRACT = SHARED_CONSTANTS["linear_vault"]
 _LINEAR_VAULT_SCOPES = list(_LINEAR_VAULT_CONTRACT["scopes"])
 _LINEAR_VAULT_CUSTOM_PARAMS = dict(_LINEAR_VAULT_CONTRACT["custom_parameters"])
-# USER_FEDERATION requires a return URL (spike F7) even though the grant is
-# already consented in this non-interactive path, so it is never visited. The
-# CLI localhost loopback is always on the workload identity allowlist.
+# USER_FEDERATION requires a return URL; it is never visited here.
 _LINEAR_VAULT_RETURN_URL = "http://localhost:8080/oauth/callback"
 
 
 def _resolve_linear_token_via_vault(
     channel_metadata: dict[str, str] | None = None,
 ) -> str:
-    """Mint a Linear access token via the AgentCore Identity Token Vault.
-
-    Returns the access token, or "" if the vault is not enabled / not
-    applicable / unavailable for any reason — the caller then falls back to the
-    Secrets-Manager token, so a vault hiccup must never raise.
-
-    Self-mints through boto3 (``get_workload_access_token_for_user_id`` then
-    ``get_resource_oauth2_token``) rather than reading the AgentCore-injected
-    ``WorkloadAccessToken`` header, so it behaves identically on the AgentCore
-    and ECS substrates (both authorize against the agent session role's IAM).
-    The grant must already be consented (done at ``bgagent linear setup`` time);
-    if the vault returns an ``authorizationUrl`` instead of a token, that means
-    consent is required and we fall back rather than block on a browser.
-    """
     if os.environ.get("LINEAR_VAULT_ENABLED") != "true":
         return ""
     workload_name = os.environ.get("LINEAR_WORKLOAD_IDENTITY_NAME", "")
@@ -115,7 +72,6 @@ def _resolve_linear_token_via_vault(
         workspace_id = channel_metadata.get("linear_workspace_id", "")
         recorded_user_id = channel_metadata.get("linear_vault_user_id", "")
     if not provider_name or not workspace_id:
-        # SM-only install (or missing context) — skip the vault entirely.
         return ""
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
@@ -133,17 +89,11 @@ def _resolve_linear_token_via_vault(
         # nosemgrep: py-silent-success-masking -- optional vault token; boto3 unavailable
         return ""
 
-    # One bot identity per workspace. Prefer the id recorded at consent time — see
-    # `linearVaultUserIdForSlug` in cli/src/linear-vault.ts for why it is recorded
-    # rather than derived. The derived form below is the pre-#809 fallback, and must
-    # stay in step with `legacyWorkspaceUserId` in the Lambda resolver.
     user_id = recorded_user_id.strip() or f"linear-workspace-{workspace_id}"
 
     try:
-        # Inside the try: client construction raises UnknownServiceError on an SDK that
-        # predates AgentCore and InvalidRegionError on a bad region, neither of which is
-        # caught outside it — so this function, documented to return "" on any failure,
-        # would instead abort the task before the 👀 acknowledgement.
+        # Client construction raises UnknownServiceError on an SDK that predates
+        # AgentCore and InvalidRegionError on a bad region.
         client = platform_client("bedrock-agentcore", region_name=region)
         wat = client.get_workload_access_token_for_user_id(
             workloadName=workload_name,
@@ -169,12 +119,10 @@ def _resolve_linear_token_via_vault(
                 f"linear_vault_token_ok workspace_id={workspace_id} provider={provider_name}",
             )
             return access
-        # No token → consent required; fall back to SM.
         log(
             "WARN",
             "_resolve_linear_token_via_vault: consent required (no cached grant); SM fallback",
         )
-        # vault needs consent; SM fallback follows
         return ""
     except (ClientError, BotoCoreError) as e:
         log(
@@ -188,65 +136,32 @@ def _resolve_linear_token_via_vault(
 def resolve_linear_api_token(  # noqa: C901 -- 34 when the ceiling of 15 was set; must not grow
     channel_metadata: dict[str, str] | None = None, *, force: bool = False
 ) -> str:
-    """Resolve the Linear OAuth access token from Secrets Manager.
+    """Resolve the Linear OAuth access token and cache it in ``LINEAR_API_TOKEN``.
 
-    Phase 2.0b-O2: the orchestrator stamps ``linear_oauth_secret_arn``
-    into the task record's ``channel_metadata`` at task-creation time.
-    Pass that dict in via ``channel_metadata`` (the pipeline does this
-    automatically). We fetch the per-workspace secret, parse the token
-    JSON, and cache the access_token in
-    ``LINEAR_API_TOKEN`` so the one remaining consumer —
-    ``linear_reactions.py``'s direct-GraphQL Authorization header (reactions +
-    state transitions) — keeps working. (ADR-016: there is no Linear MCP; this
-    token no longer feeds an ``.mcp.json`` placeholder.)
+    Tries the AgentCore Identity Token Vault first, for workspaces onboarded
+    through the vault, then the per-workspace Secrets Manager secret named by
+    ``linear_oauth_secret_arn`` in ``channel_metadata``.
 
-    **The agent never refreshes the token**, for the reason given in
-    :func:`resolve_jira_oauth_token`: Linear rotates the refresh_token on every
-    use and the agent runtime has ``secretsmanager:GetSecretValue`` only, so it
-    could not store the replacement. Linear accepts a spent refresh_token again
-    for 30 minutes only (https://linear.app/developers/oauth-2-0-authentication);
-    a workspace on which no Lambda asked for a token in that time would need
-    re-onboarding. If the stored token is expiring we fail closed (empty
-    string) and leave the refresh to the Lambda path
-    (``linear-oauth-resolver.ts``, which has ``PutSecretValue``).
+    **The agent never refreshes the token**: Linear rotates the refresh_token on
+    every use (https://linear.app/developers/oauth-2-0-authentication) and the
+    agent runtime has ``secretsmanager:GetSecretValue`` only. If the stored
+    token is expiring this fails closed (empty string).
 
-    For local development, a pre-set ``LINEAR_API_TOKEN`` env var
-    short-circuits the lookup so the agent can run outside the runtime.
-    ``force`` skips that short-circuit and resolves again: the pipeline passes
-    it before the final reaction, because the token cached when the task
-    started may have expired since. When nothing can be resolved then, the
-    cached value stays in place.
+    A pre-set ``LINEAR_API_TOKEN`` env var short-circuits the lookup. ``force``
+    skips that short-circuit and resolves again; when nothing can be resolved
+    then, the cached value stays in place.
 
-    Returns an empty string when the credential is absent — ``linear_reactions``
-    then skips its reactions/state calls (best-effort, logged). This function is
-    only called when ``channel_source == 'linear'``.
-
-    RFC #249 Phase 1 re-introduces AgentCore Identity as the PREFERRED path
-    (``_resolve_linear_token_via_vault``, tried first above) for workspaces
-    onboarded through the vault; Secrets Manager remains the fallback and the
-    only path for SM-only installs. The Phase-0 spike confirmed the
-    USER_FEDERATION service-side issue that parked Phase 2.0a no longer
-    reproduces and that the flow forwards the ``actor=app`` agent install.
+    Returns an empty string when the credential is absent.
     """
     cached = os.environ.get("LINEAR_API_TOKEN", "")
     if cached and not force:
         return cached
 
-    # RFC #249 Phase 1: when the vault is enabled AND this task carries a
-    # provider name (vault-onboarded workspace), mint the token through the
-    # AgentCore Identity Token Vault first. Any failure returns "" here, so we
-    # fall through to the Secrets-Manager path below — the vault never blocks a
-    # task. The Phase-0 spike proved USER_FEDERATION forwards the actor=app
-    # install and re-enables the path that was parked in 2.0a (the service-side
-    # USER_FEDERATION bug it cited no longer reproduces).
     vault_token = _resolve_linear_token_via_vault(channel_metadata)
     if vault_token:
         os.environ["LINEAR_API_TOKEN"] = vault_token
         return vault_token
 
-    # Prefer the per-task channel_metadata; fall back to env var so the
-    # function can be called early (e.g. before pipeline construction)
-    # via LINEAR_OAUTH_SECRET_ARN if the orchestrator set it that way.
     secret_arn = ""
     if channel_metadata:
         secret_arn = channel_metadata.get("linear_oauth_secret_arn", "")
@@ -264,9 +179,6 @@ def resolve_linear_api_token(  # noqa: C901 -- 34 when the ceiling of 15 was set
         import json
         from datetime import datetime
 
-        # boto3 is imported here (not just via platform_client, which imports it
-        # lazily at call time) so a missing SDK still degrades gracefully — skip
-        # Linear MCP — instead of raising an uncaught ImportError. (#319)
         import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -279,14 +191,6 @@ def resolve_linear_api_token(  # noqa: C901 -- 34 when the ceiling of 15 was set
     sm = platform_client("secretsmanager", region_name=region)
 
     def _fetch_token() -> dict | None:
-        """Fetch + parse the per-workspace OAuth secret.
-
-        Returns the parsed dict, or None if the SM payload can't be
-        decoded as JSON (corrupted byte, missing SecretString key,
-        etc.). The caller treats None like a missing secret — agent
-        proceeds without the Linear reactions token rather than crashing
-        the task pipeline thread on a raw traceback.
-        """
         resp = sm.get_secret_value(SecretId=secret_arn)
         try:
             return json.loads(resp["SecretString"])
@@ -303,9 +207,6 @@ def resolve_linear_api_token(  # noqa: C901 -- 34 when the ceiling of 15 was set
         try:
             expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))  # noqa: FURB162 -- the rewrite is not equivalent for malformed input
         except ValueError:
-            # Malformed timestamp: treat as expiring, so the token is not used.
-            # Log so a bad write earlier in the chain doesn't silently switch
-            # the reactions off on every single task with no diagnostic trace.
             log(
                 "WARN",
                 f"_is_expiring: malformed expires_at '{expires_at_iso}'; treating as expiring",
@@ -325,13 +226,8 @@ def resolve_linear_api_token(  # noqa: C901 -- 34 when the ceiling of 15 was set
         # nosemgrep: py-silent-success-masking -- SM fetch logged; empty token disables Linear
         return ""
     if token_obj is None:
-        # Corrupted secret JSON; already logged inside _fetch_token.
-        # Corrupted secret JSON → no token; linear_reactions skips (best-effort).
         return ""
 
-    # Fail closed if the stored token is expiring: the agent cannot refresh it
-    # without spending the refresh_token that Secrets Manager keeps (see
-    # docstring). The Lambda path owns refresh.
     if _is_expiring(token_obj.get("expires_at", "")):
         log(
             "WARN",
@@ -364,34 +260,15 @@ def clear_jira_task_credentials() -> None:
 def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:  # noqa: C901 -- 21 when the ceiling of 15 was set; must not grow
     """Resolve Jira outbound credentials from Secrets Manager.
 
-    The orchestrator stamps ``jira_oauth_secret_arn`` into the task
-    record's ``channel_metadata`` at task-creation time. A tenant configured
-    with a Forge app actor gets ``JIRA_APP_ACTOR_*`` environment variables;
-    older tenants retain ``JIRA_API_TOKEN`` as an explicit migration fallback.
-    ``jira_reactions`` always prefers the app actor and never falls back to
-    OAuth when an app configuration is present but broken.
+    Reads the secret named by ``jira_oauth_secret_arn`` in ``channel_metadata``.
+    A tenant configured with a Forge app actor gets ``JIRA_APP_ACTOR_*``
+    environment variables; older tenants retain ``JIRA_API_TOKEN`` as an
+    explicit migration fallback.
 
-    **The agent never refreshes the token.** Atlassian
-    *rotates the refresh_token on every use* — a successful refresh
-    invalidates the stored refresh_token and returns a new one. The agent
-    runtime has ``secretsmanager:GetSecretValue`` ONLY (no ``PutSecretValue``;
-    a compromised agent must not be able to overwrite any tenant's OAuth
-    bundle), so it cannot persist the rotated token. If the agent refreshed,
-    it would consume the stored refresh_token, keep the replacement only in
-    memory for this one task, and leave Secrets Manager holding a dead
-    refresh_token — the next Lambda/agent resolve would get ``invalid_grant``
-    and the tenant would require re-onboarding. So we deliberately do NOT
-    refresh here: the trusted Lambda path (``jira-oauth-resolver.ts``, which
-    has ``PutSecretValue``) owns all refreshes, and the agent uses whatever
-    access_token the Lambdas have most-recently written.
-
-    If the stored token is already expiring/expired, we fail closed — return
-    an empty string and let the advisory Jira comments no-op. The
-    orchestrator resolves (and refreshes) the token just before starting the
-    session, so in practice the agent reads a freshly-written token with a
-    full lifetime ahead of it.
-
-    This function is only called when ``channel_source == 'jira'``.
+    **The agent never refreshes the token**: Atlassian rotates the refresh_token
+    on every use and the agent runtime has ``secretsmanager:GetSecretValue``
+    only. If the stored token is already expiring/expired this fails closed
+    (empty string).
     """
     secret_arn = ""
     if channel_metadata:
@@ -402,9 +279,6 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     if cached and not secret_arn and channel_metadata is None:
         return cached
 
-    # AgentCore can reuse a warm process. Clear the prior task's tenant
-    # credentials before resolving a metadata-bound task so a missing ARN or
-    # failed SM read cannot reuse another tenant's token or proxy secret.
     if channel_metadata is not None or secret_arn:
         clear_jira_task_credentials()
     if not secret_arn:
@@ -419,9 +293,6 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
         import json
         from datetime import datetime
 
-        # boto3 is imported here (not just via platform_client, which imports it
-        # lazily at call time) so a missing SDK still degrades gracefully — skip
-        # Jira feedback — instead of raising an uncaught ImportError. (#319)
         import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -487,18 +358,12 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     app_proxy_url = raw_app_proxy_url if isinstance(raw_app_proxy_url, str) else ""
     app_shared_secret = raw_app_shared_secret if isinstance(raw_app_shared_secret, str) else ""
     if any(field in token_obj for field in app_actor_fields):
-        # The marker makes partial/corrupt app setup fail closed in
-        # jira_reactions. Do not silently post as the OAuth authorizing user.
         os.environ["JIRA_APP_ACTOR_CONFIGURED"] = "1"
         if app_proxy_url:
             os.environ["JIRA_APP_ACTOR_PROXY_URL"] = app_proxy_url
         if app_shared_secret:
             os.environ["JIRA_APP_ACTOR_SHARED_SECRET"] = app_shared_secret
 
-    # Fail closed if the stored token is expiring — the agent cannot refresh
-    # without burning Atlassian's rotating refresh_token (see docstring). The
-    # Lambda path owns refresh. A configured Forge app actor remains usable
-    # because its signed proxy credential is independent of 3LO expiry.
     if _is_expiring(token_obj.get("expires_at", "")):
         suffix = (
             " Forge app-actor writes remain enabled."
@@ -561,30 +426,15 @@ def build_config(
     resolved_anthropic_model = anthropic_model or os.environ.get(
         "ANTHROPIC_MODEL", "global.anthropic.claude-opus-5-5"
     )
-    # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
-    # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must
-    # be a geo-prefixed inference-profile id, not a bare model id (see runner).
-    #
-    # This fallback is a SEPARATE value from the env var the stack injects, which
-    # derives its prefix from the bedrockGeoRegion context key. Only a run with no
-    # env set at all reaches this literal, so the two must be moved together or a
-    # local run silently uses a different geography than a deployed one.
+    # Bedrock needs a geo-prefixed inference-profile id here, not a bare model id.
     resolved_haiku_model = haiku_model or os.environ.get(
         "ANTHROPIC_DEFAULT_HAIKU_MODEL", "global.anthropic.claude-haiku-5-5"
     )
 
-    # Resolve the workflow id (the create-task boundary already pinned it; local
-    # batch runs default to the coding workflow). Required-input validation is
-    # owned by the create-task boundary now; the agent re-checks only the
-    # pr_number/issue/description shape needed to run.
     workflow = resolved_workflow or {"id": DEFAULT_WORKFLOW_ID, "version": "1.0.0"}
     workflow_id = workflow.get("id", DEFAULT_WORKFLOW_ID)
     is_pr_workflow = workflow_id in PR_WORKFLOW_IDS
 
-    # Load the workflow up-front: it drives the Cedar principal, the read_only
-    # flag, AND whether a repo is required (#248 Phase 3). Fall back to id-based
-    # mapping when the file can't be loaded (e.g. a registry-only id in a future
-    # phase) — a repo-less default is the safe assumption only for non-coding.
     from workflow import WorkflowValidationError, load_workflow, policy_principal_for
 
     try:
@@ -594,27 +444,13 @@ def build_config(
         workflow_requires_repo = workflow_obj.resolved_requires_repo
         workflow_allowed_tools = list(workflow_obj.agent_config.allowed_tools)
     except WorkflowValidationError as exc:
-        # The pinned workflow file failed to load (corrupt YAML, schema drift, a
-        # future registry-only id). This is the one place read_only/requires_repo
-        # can be wrong without a loud failure, so: (1) log it, and (2) fail
-        # *closed* — assume read-only (deny writes) for any id we don't recognise
-        # as a known writeable coding workflow, rather than fail-open to writeable.
         log("ERROR", f"workflow {workflow_id!r} failed to load ({exc}); using fallback policy")
         policy_principal = "pr_review" if workflow_id == "coding/pr-review-v1" else "new_task"
-        # Known writeable coding workflows are the only ids that fall back to
-        # writeable; everything else (incl. an unrecognised id) is read-only.
         workflow_read_only = workflow_id not in _KNOWN_WRITEABLE_WORKFLOW_IDS
-        # requires_repo: the repo-less platform default is the only id that does
-        # NOT require a repo; every other id (coding or unknown) requires one.
         workflow_requires_repo = workflow_id != REPO_LESS_DEFAULT_WORKFLOW_ID
-        # Tool surface is unknown without the file; empty = the runner falls back
-        # to its built-in full surface. read_only (above, fail-closed) still drops
-        # Write/Edit, so the write-deny invariant holds even on this path.
         workflow_allowed_tools = []
 
     errors = []
-    # Repo + GitHub token are required only for repo-bound workflows; a repo-less
-    # workflow (requires_repo:false) runs from task_description/attachments alone.
     if workflow_requires_repo:
         if not resolved_repo_url:
             errors.append("repo_url is required (e.g., 'owner/repo')")
@@ -631,8 +467,6 @@ def build_config(
     if errors:
         raise ValueError("; ".join(errors))
 
-    # Validate attachment descriptors into typed models (Pydantic validation
-    # surfaces schema mismatches between the orchestrator and agent early).
     validated_attachments: list[AttachmentConfig] = []
     if attachments:
         for i, raw_att in enumerate(attachments):
@@ -692,12 +526,6 @@ def get_config() -> TaskConfig:
             max_budget_usd=float(os.environ.get("MAX_BUDGET_USD", "0")) or None,
             aws_region=os.environ.get("AWS_REGION", ""),
             dry_run=os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes"),
-            # Local-batch ``--trace`` parity (design §10.1). Without
-            # these env vars a developer running the agent outside
-            # AgentCore could never exercise the trace path. Both are
-            # opt-in; empty ``USER_ID`` with ``TRACE=1`` logs a skip
-            # warning (see ``pipeline.run_task``) rather than writing
-            # an unreachable ``traces//`` key.
             trace=os.environ.get("TRACE", "").lower() in ("1", "true", "yes"),
             user_id=os.environ.get("USER_ID", ""),
         )

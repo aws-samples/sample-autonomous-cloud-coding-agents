@@ -1,5 +1,3 @@
-"""Unit tests for pipeline task outcome resolution and error chaining."""
-
 import pytest
 
 from config import NEEDS_INPUT_MARKER
@@ -16,8 +14,6 @@ from pipeline import (
 
 
 class TestNeedsInputMarker:
-    """Clarify-before-spend (UX #4): detect + strip the hold-and-ask marker."""
-
     def test_detects_marker_on_first_line(self):
         text = f"{NEEDS_INPUT_MARKER}\nWhich page feels slow — the dashboard or the list?"
         assert _starts_with_needs_input_marker(text) is True
@@ -27,7 +23,6 @@ class TestNeedsInputMarker:
         assert _starts_with_needs_input_marker(text) is True
 
     def test_ignores_marker_buried_mid_message(self):
-        # A stray mention deep in prose is NOT a hold signal — only the first line.
         text = f"I made the change.\nBy the way {NEEDS_INPUT_MARKER} is our sentinel."
         assert _starts_with_needs_input_marker(text) is False
 
@@ -39,7 +34,6 @@ class TestNeedsInputMarker:
     def test_strip_removes_leading_marker_only(self):
         text = f"{NEEDS_INPUT_MARKER}\nWhich part is slow?"
         assert _strip_needs_input_marker(text) == "Which part is slow?"
-        # Idempotent-ish: no marker → unchanged (trimmed).
         assert _strip_needs_input_marker("  plain question?  ") == "plain question?"
 
 
@@ -57,7 +51,6 @@ class TestResolveOverallTaskStatus:
         assert err is None
 
     def test_success_preserves_existing_error(self):
-        """If agent reports success with a non-fatal error, it's preserved on success."""
         ar = AgentResult(status="success", error="non-fatal warning")
         status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
         assert status == "success"
@@ -72,9 +65,6 @@ class TestResolveOverallTaskStatus:
         assert "build_ok=False" in err
 
     def test_success_with_build_TIMED_OUT_marks_timeout_distinctly(self):
-        # A build that exceeded the time limit must read as a
-        # TIMEOUT, not a generic build failure. The error_message carries
-        # ``build_ok=timeout`` so the platform's failure copy says "timed out".
         ar = AgentResult(status="success")
         status, err = _resolve_overall_task_status(
             ar, build_ok=False, pr_url="https://pr", build_timed_out=True
@@ -82,7 +72,7 @@ class TestResolveOverallTaskStatus:
         assert status == "error"
         assert err is not None
         assert "build_ok=timeout" in err
-        assert "build_ok=False" not in err  # not the generic-failure marker
+        assert "build_ok=False" not in err
 
     def test_build_failed_but_not_timeout_keeps_false_marker(self):
         ar = AgentResult(status="success")
@@ -94,11 +84,6 @@ class TestResolveOverallTaskStatus:
         assert "timeout" not in err
 
     def test_infra_failed_build_forces_error_even_when_gate_would_pass(self):
-        # The build was killed by ENOSPC/OOM (build_infra_failed).
-        # Even if the regression-only gate would pass (build_ok=True — e.g. the
-        # pre-agent baseline was ALSO infra-killed, so "already red → not a
-        # regression"), we must NOT report a false ✅ on unverified code. Forces
-        # an error with a build_ok=infra marker for the platform's honest copy.
         ar = AgentResult(status="success", error=None)
         overall, err = _resolve_overall_task_status(
             ar,
@@ -156,8 +141,6 @@ class TestResolveOverallTaskStatus:
         assert err == "OOM killed"
 
     def test_error_promotes_latched_blocker_reason(self):
-        # #251 carry-path: a hook-detected blocker with no SDK error message is
-        # promoted into the terminal reason so the CDK classifier gives a remedy.
         _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
         ar = AgentResult(status="error", error=None)
         overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
@@ -165,7 +148,6 @@ class TestResolveOverallTaskStatus:
         assert err == "BLOCKED[egress_denied]: blocked host (resource: pypi.org)"
 
     def test_specific_agent_error_wins_over_latched_blocker(self):
-        # A concrete SDK error must NOT be overwritten by the latch.
         _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
         ar = AgentResult(status="error", error="receive_response() failed: boom")
         overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
@@ -173,9 +155,6 @@ class TestResolveOverallTaskStatus:
         assert err == "receive_response() failed: boom"
 
     def test_unknown_status_promotes_latched_blocker(self):
-        # An egress denial that kills outbound calls is a likely cause of a
-        # missing ResultMessage (agent_status=unknown). The precise blocker
-        # reason must win over the generic SDK-no-result message.
         _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
         ar = AgentResult(status="unknown", error=None)
         overall, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
@@ -189,7 +168,6 @@ class TestResolveOverallTaskStatus:
         assert "ResultMessage" in (err or "")
 
     def test_error_status_preserves_bedrock_entitlement_message(self):
-        """Runner maps ResultMessage.is_error to agent_status=error; pipeline must fail."""
         ar = AgentResult(
             status="error",
             error=(
@@ -204,12 +182,6 @@ class TestResolveOverallTaskStatus:
 
 
 class TestDeliveryGate:
-    """A create-strategy new-work task that reported success but shipped
-    NOTHING (no PR AND no commit) must be failed loudly, not COMPLETED —
-    otherwise the platform reports success for work that was lost.
-
-    Common args factory keeps each case to just the axis under test."""
-
     @staticmethod
     def _gate(
         overall_status: str = "success",
@@ -222,8 +194,6 @@ class TestDeliveryGate:
         pr_url: str | None = None,
         commit_landed: bool = False,
     ) -> tuple[str, str | None]:
-        # Explicit typed kwargs (not **overrides) so `ty` can check each arg
-        # against _apply_delivery_gate's signature.
         return _apply_delivery_gate(
             overall_status,
             result_error,
@@ -236,15 +206,12 @@ class TestDeliveryGate:
         )
 
     def test_success_no_pr_no_commit_becomes_lost(self):
-        # The lost-deliverable case: agent-success, create strategy, nothing shipped.
         overall, err = self._gate()
         assert overall == "error"
         assert err is not None
         assert "deliverable=lost" in err
 
     def test_success_no_pr_but_commit_landed_is_no_pr(self):
-        # A commit reached the branch but the PR failed to open — recoverable,
-        # and the copy must say the work is NOT gone.
         overall, err = self._gate(commit_landed=True)
         assert overall == "error"
         assert err is not None
@@ -256,46 +223,37 @@ class TestDeliveryGate:
         assert err is None
 
     def test_read_only_success_no_pr_stays_success(self):
-        # pr_review ships no PR by design — never gate it.
         overall, err = self._gate(workflow_read_only=True)
         assert overall == "success"
         assert err is None
 
     def test_artifact_workflow_success_no_pr_stays_success(self):
-        # An artifact workflow delivers an artifact_uri, not a PR.
         overall, err = self._gate(artifact_workflow=True)
         assert overall == "success"
         assert err is None
 
     def test_needs_input_success_no_pr_stays_success(self):
-        # Clarify-and-hold is the one sanctioned new_task no-op.
         overall, err = self._gate(needs_input=True)
         assert overall == "success"
         assert err is None
 
     def test_non_create_strategy_success_no_pr_stays_success(self):
-        # pr_iteration (push_resolve/resolve) legitimately opens no NEW PR.
         overall, err = self._gate(ensure_pr_strategy="push_resolve")
         assert overall == "success"
         assert err is None
 
     def test_already_error_is_left_error(self):
-        # A task that already failed for another reason keeps that reason —
-        # the gate only promotes a FALSE success, never rewrites a real error.
         overall, err = self._gate(overall_status="error", result_error="build failed")
         assert overall == "error"
         assert err == "build failed"
 
     def test_lost_reason_matches_classifier_pattern(self):
-        # Contract with the CDK error-classifier: the reason must carry the
-        # ``deliverable=lost`` token the classifier keys on.
         _, err = self._gate()
         assert err is not None
         assert "agent_status=success" in err
         assert "deliverable=lost" in err
 
     def test_lost_reason_names_both_lost_work_and_a_run_that_changed_nothing(self):
-        # The gate cannot tell the two apart (#751). Slack and the CLI print this reason as it is.
         _, err = self._gate()
         assert err is not None
         assert "the agent made no change" in err
@@ -331,15 +289,8 @@ class TestChainPriorAgentError:
 
 
 class TestComputeTurnsCompleted:
-    """Rev-5 DATA-1: ``turns_completed`` never exceeds ``max_turns``; a count at or
-    below the cap passes through. The agent status plays no part: the runner
-    reports a max-turns stop as ``error``, so a clamp that waited for
-    ``error_max_turns`` never fired."""
-
     @pytest.mark.parametrize("turns", [3, 5, 6, 7])
     def test_turns_below_the_cap_pass_through_unchanged(self, turns):
-        # The agent stopped before the cap, cleanly or on an error. No clamp,
-        # and no invented turns.
         assert _compute_turns_completed(turns, max_turns=10) == turns
 
     def test_count_above_the_cap_is_clamped(self):
@@ -350,26 +301,17 @@ class TestComputeTurnsCompleted:
 
     def test_limit_of_zero_is_no_cap(self):
         # The SDK hands --max-turns to the CLI only for a truthy value, so a run
-        # with max_turns 0 (MAX_TURNS=0 in batch mode, a Blueprint with
-        # agent.maxTurns 0 on ECS) has no turn limit. Its turns are not zero.
+        # with max_turns 0 has no turn limit.
         assert _compute_turns_completed(37, max_turns=0) == 37
 
     def test_missing_count_round_trips(self):
-        # A missing count must round-trip as None so writers can detect
-        # "no turn counter available" vs "zero turns".
         assert _compute_turns_completed(None, max_turns=10) is None
 
     def test_zero_count_round_trips(self):
-        # Zero is treated the same as None (falsy) so we don't clamp it to a
-        # negative / nonsensical value.
         assert _compute_turns_completed(0, max_turns=10) == 0
 
 
 class TestMaxTurnsStuckEnrichment:
-    """Wiring seam (#600): _resolve_overall_task_status enriches a max_turns
-    reason with the stuck-guard summary (hooks.last_stuck_summary). Previously
-    tested only at its two pure endpoints; this drives the append itself."""
-
     def test_max_turns_appends_stuck_summary(self, monkeypatch):
         import hooks
 
@@ -385,7 +327,6 @@ class TestMaxTurnsStuckEnrichment:
         assert summary in err
 
     def test_non_max_turns_error_is_not_enriched(self, monkeypatch):
-        # A generic failure must NOT pull in the stuck summary — only max_turns.
         import hooks
 
         monkeypatch.setattr(hooks, "last_stuck_summary", lambda: "last tool calls repeated: X")
@@ -395,8 +336,6 @@ class TestMaxTurnsStuckEnrichment:
         assert "last tool calls repeated" not in err
 
     def test_max_turns_with_no_stuck_summary_left_unchanged(self, monkeypatch):
-        # A task that used its turns productively (window not failure-dominated →
-        # summary None) leaves the max_turns reason unchanged.
         import hooks
 
         monkeypatch.setattr(hooks, "last_stuck_summary", lambda: None)
@@ -408,8 +347,6 @@ class TestMaxTurnsStuckEnrichment:
         assert err == "Agent session error (subtype=error_max_turns)"
 
     def test_stuck_summary_not_double_appended(self, monkeypatch):
-        # Idempotent: if the summary is already in the reason (e.g. a durable
-        # re-resolution of the same result), it must not be appended twice.
         import hooks
 
         summary = "last tool calls repeated: git push — invalid credentials"

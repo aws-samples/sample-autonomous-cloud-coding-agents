@@ -5,7 +5,7 @@
 
 ## Context
 
-When merged code breaks something, the response is ad-hoc. Agents operating autonomously may merge code that passes CI but breaks integration. No protocol defines when to revert vs. fix forward, who decides, or how stacked PR chains recover.
+When merged code breaks something, the response is improvised. Agents that operate autonomously may merge code that passes CI but breaks integration. No protocol defines when to revert and when to fix forward, who decides, or how stacked PR chains recover.
 
 ## Decision
 
@@ -25,20 +25,20 @@ Broken thing detected
 
 ### Revert protocol
 
-1. Create a revert commit (not force-push) — preserves history
-2. Open an issue: what broke, why CI did not catch it, what the fix needs
-3. The fix goes through normal review (no rushing, no skipping gates)
+1. Create a revert commit, not a force-push. A revert commit preserves history.
+2. Open an issue that says what broke, why CI did not catch it, and what the fix needs.
+3. The fix goes through normal review (no rushing, no skipping gates).
 
 ### Fix-forward protocol
 
-1. Only if the fix is obvious, small, and low-risk
-2. Must still go through PR + review
-3. If the fix introduces new complexity — revert instead
+1. Fix forward only if the fix is obvious, small, and low-risk.
+2. The fix must still go through a PR and review.
+3. If the fix introduces new complexity, revert instead.
 
 ### Stacked PR chain recovery
 
 1. Identify which PR introduced the breakage
-2. Pause/close all PRs above it
+2. Pause or close all PRs above it
 3. Fix the base PR
 4. Rebase and re-evaluate dependent PRs
 5. Re-run CI on each before re-opening
@@ -53,17 +53,17 @@ Broken thing detected
 
 ## Consequences
 
-- (+) Clear decision tree prevents analysis paralysis during incidents
+- (+) A clear decision tree prevents indecision during incidents
 - (+) Revert-first default limits blast radius
 - (+) Stacked chain recovery is defined (not improvised)
 - (+) History is preserved (revert commits, not force-push)
 - (-) Reverts create noise in git history
 - (-) Fix-forward temptation may lead to rushed fixes
-- (!) "Production affected" requires definition per deployment (self-hosted varies)
+- (!) "Production affected" requires a definition for each deployment (self-hosted deployments vary)
 
 ## References
 
-- Issue #141 — full RFC with open questions
-- ADR-003 — governance (no bypasses during recovery)
-- ADR-001 — stacked PRs (chain recovery protocol)
-- ADR-009 — security (revert authority tied to role)
+- Issue #141, the full RFC with open questions
+- ADR-003, governance (no bypasses during recovery)
+- ADR-001, stacked PRs (chain recovery protocol)
+- ADR-009, security (revert authority tied to role)

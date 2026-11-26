@@ -1,13 +1,3 @@
-"""Workflow section for restack — re-merge a changed predecessor.
-
-A stacked child's predecessor PR was edited after the child already merged the
-predecessor's code in, so the child is stale. The platform re-runs the child on
-its EXISTING branch with the updated predecessor branch(es) merged into the
-working tree before the agent starts (the same merge mechanism used when a child
-is first built on top of its predecessors). The agent's job is narrow:
-reconcile, verify, push to the same branch — NOT new feature work.
-"""
-
 RESTACK_WORKFLOW = """\
 ## Workflow
 

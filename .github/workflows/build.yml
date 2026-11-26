@@ -1,9 +1,7 @@
 name: build
 on:
   pull_request: {}
-  # Required-status-check support: a check must run on the `merge_group` event to
-  # report inside the merge queue. Without this trigger, marking `build` a required
-  # check would deadlock the queue (the check never reports). See issue #327.
+  # A required check must run on `merge_group`, or the merge queue deadlocks (#327).
   merge_group: {}
   workflow_dispatch: {}
 permissions:
@@ -22,10 +20,6 @@ permissions:
   repository-projects: none
   security-events: none
   statuses: none
-# One build per pull request: a new push cancels the superseded run instead of
-# both holding a runner. Merge-queue and manual runs each get a group of their
-# own (the run id) and cancel-in-progress is false for them, so this block can
-# never cancel a queued merge group or make it wait behind another run.
 concurrency:
   group: build-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -33,11 +27,8 @@ jobs:
   build:
     permissions:
       contents: read
-    # A hung build must not hold a runner for the 360-minute default. The longest
-    # of 194 recorded jobs took 27 minutes (on one jest worker), and the merge
-    # queue gives up on an entry after 60.
+    # The job default is 360 minutes; the merge queue gives up on an entry after 60.
     timeout-minutes: 45
-    # Runner priority: vars.DEFAULT_RUNNER_LABEL > PR label 'self-hosted' > PR label 'ubuntu-latest-4-cores' > 'ubuntu-latest'
     runs-on: >-
       ${{
         vars.DEFAULT_RUNNER_LABEL
@@ -49,9 +40,8 @@ jobs:
             && 'ubuntu-latest-4-cores')
         || 'ubuntu-latest'
       }}
-    # The one-value matrix names this job `build (agentcore)`, the check that the
-    # ruleset of `main` requires. Without it the check is `build`: the required
-    # one never reports and nothing merges.
+    # The ruleset of `main` requires the check named `build (agentcore)`: the one-value matrix
+    # gives the job that name.
     strategy:
       matrix:
         compute_type: [agentcore]
@@ -59,7 +49,6 @@ jobs:
       self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
     services:
       dynamodb:
-        # Pin the multi-architecture image used for real transaction assertions.
         image: amazon/dynamodb-local@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
         ports:
           - 8000/tcp
@@ -68,14 +57,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # The `build` task DAG does not invoke any `security:*` task, so this only
-      # pre-disables the heavy scanners if a future build step pulls one in. Fast
-      # secret/dependency/workflow scanning runs as required PR checks in
-      # security-pr.yml (issue #327); the full image/SAST suite runs in security.yml.
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
-      # cdk's test script defaults to `--maxWorkers=25%`, which is ONE worker on
-      # the 4-core runner: the whole jest suite ran serially. Three workers leave
-      # a core for the other build tasks (the ECS agent box runs four).
       JEST_MAX_WORKERS: "3"
     steps:
       - name: Free Disk Space
@@ -88,7 +70,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1  # shallow clone
+          fetch-depth: 1
           persist-credentials: false
       - name: Install mise
         uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
@@ -143,12 +125,6 @@ jobs:
           SECONDS=0
           mise run install
           echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
-      # The yarn install is not frozen: a package.json that disagrees with
-      # yarn.lock makes it rewrite the lockfile. Fail here and name the file,
-      # instead of at the end of the build as an anonymous "files were changed".
-      # The agent install (`uv sync --locked`) fails by itself on such a mismatch
-      # and never rewrites agent/uv.lock; the step still requires that file to be
-      # tracked (git ls-files --error-unmatch, as for yarn.lock) and unchanged.
       - name: Fail on lockfile drift
         shell: bash
         run: |
@@ -177,9 +153,6 @@ jobs:
           SECONDS=0
           mise run build 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
-      # A failed build must say which mise task failed and why, without anyone
-      # reading a thousand interleaved log lines (#256, CA-06): the task name and
-      # the last lines of its own output go to the job summary and an annotation.
       - name: Summarize build failure
         if: failure() && steps.build.outcome == 'failure'
         shell: bash
@@ -230,9 +203,8 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: cdk/coverage/lcov.info,cli/coverage/lcov.info,agent/coverage/lcov.info
-          # Information only, never a gate: the coverage floors are enforced by the
-          # test tasks themselves. Without disable_search the uploader also sends
-          # every file that looks like coverage, e.g. contracts/coverage-thresholds.json.
+          # Without disable_search the uploader also sends every file that looks like coverage,
+          # e.g. contracts/coverage-thresholds.json.
           disable_search: true
           fail_ci_if_error: false
       - name: Find mutations

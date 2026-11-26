@@ -33,51 +33,25 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { CEDAR_WASM_MIN_LAMBDA_MEMORY_MB } from './cedar-wasm-layer';
 
-/** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/** Default webhook-record retention used for TTL computation (days). */
 const DEFAULT_WEBHOOK_RETENTION_DAYS = 30;
 
-/**
- * Standard API-handler Lambda timeout (seconds). Lambda's 3s default is
- * not enough once cold-start TLS handshakes / SDK loads are added; 15s
- * gives comfortable headroom while staying well under API Gateway's 29s
- * integration cap.
- */
 const API_HANDLER_TIMEOUT_SECONDS = 15;
 
-/**
- * Confirm-uploads Lambda timeout (seconds). Downloads + screens up to
- * ten attachments (Guardrail image scan, PDF text extraction) in one
- * invocation, so it gets a much larger budget than the standard handlers.
- *
- * After a gateway timeout `bgagent submit` waits before it confirms again,
- * and derives that wait from this value (`CONFIRM_MAX_POLLS` in
- * `cli/src/commands/submit.ts`: this long, less the gateway's 29 s, plus room
- * for a cold start). Change the two together: with a longer timeout here and
- * the same wait there, the second confirmation can run beside the first and
- * screen every upload again.
- */
 const CONFIRM_UPLOADS_TIMEOUT_SECONDS = 180;
 
-/** Standard API-handler Lambda memory (MB). */
 const API_HANDLER_MEMORY_MB = 256;
 
-/** Memory for handlers with attachment screening or heavy SDK init (MB). */
 const SCREENING_HANDLER_MEMORY_MB = 512;
 
-/** Memory for confirm-uploads / webhook-create attachment path (MB). */
 const HEAVY_ATTACHMENT_HANDLER_MEMORY_MB = 1024;
 
-/** Webhook routes that bypass the body-size rule; each is HMAC-verified in its Lambda. */
 const LARGE_BODY_WEBHOOK_PATHS = ['/v1/linear/webhook', '/v1/jira/webhook', '/v1/github/webhook'] as const;
 export type LargeBodyWebhookPath = typeof LARGE_BODY_WEBHOOK_PATHS[number];
 
-/** Metric (and rule) name of the count rule for XSS matches let through on signed webhook routes. */
 const SIGNED_WEBHOOK_XSS_METRIC = 'SignedWebhookXssCounted';
 
-/** XSS-shaped bodies per hour on the signed webhook routes that raise the alarm. */
 const SIGNED_WEBHOOK_XSS_ALARM_PER_HOUR = 20;
 
 const uriPathMatch = (positionalConstraint: 'STARTS_WITH' | 'EXACTLY', searchString: string) => ({
@@ -93,39 +67,27 @@ const uriPathMatch = (positionalConstraint: 'STARTS_WITH' | 'EXACTLY', searchStr
 const anyOf = (statements: object[]) => statements.length === 1 ? statements[0] : { orStatement: { statements } };
 const allOf = (statements: object[]) => statements.length === 1 ? statements[0] : { andStatement: { statements } };
 
-/**
- * Properties for TaskApi construct.
- */
 export interface TaskApiProps {
-  /**
-   * The DynamoDB task table.
-   */
   readonly taskTable: dynamodb.ITable;
 
-  /**
-   * The DynamoDB task events table.
-   */
   readonly taskEventsTable: dynamodb.ITable;
 
   /**
-   * The DynamoDB task nudges table (Phase 2). When provided, the
+   * The DynamoDB task nudges table. When provided, the
    * `POST /tasks/{task_id}/nudge` endpoint is created.
    */
   readonly taskNudgesTable?: dynamodb.ITable;
 
   /**
    * Cedar HITL approvals table. When provided, POST /approve, POST
-   * /deny, and GET /pending endpoints are created. See design §7.1,
-   * §7.2, §7.7.
+   * /deny, and GET /pending endpoints are created.
    */
   readonly taskApprovalsTable?: dynamodb.ITable;
 
   /**
-   * Cedar-wasm Lambda layer (CedarWasmLayer.layer). Required by the
-   * handlers that parse blueprint policies (`GetPoliciesFn`,
-   * `CreateTaskFn`). Attached only when all approval-gate plumbing
-   * (TaskApprovalsTable, this layer, blueprint / cedar_policies on
-   * RepoTable) is present.
+   * Cedar-wasm Lambda layer (CedarWasmLayer.layer). When provided together
+   * with `taskApprovalsTable` and `repoTable`, the
+   * `GET /repos/{repo_id}/policies` endpoint is created.
    */
   readonly cedarWasmLayer?: LayerVersion;
 
@@ -167,11 +129,9 @@ export interface TaskApiProps {
   readonly orchestratorFunctionArn?: string;
 
   /**
-   * Maximum concurrent tasks per user (#441). Threaded to the get-task
-   * handler so the queue-wait ETA heuristic agrees with the
-   * orchestrator's admission cap, and to the confirm-uploads handler,
-   * which admits against it. Must match
-   * ``TaskOrchestrator.maxConcurrentTasksPerUser``.
+   * Maximum concurrent tasks per user. The confirm-uploads handler admits
+   * against it and the get-task handler derives the queue-wait ETA from it.
+   * Must match ``TaskOrchestrator.maxConcurrentTasksPerUser``.
    * @default 10
    */
   readonly maxConcurrentTasksPerUser?: number;
@@ -188,14 +148,8 @@ export interface TaskApiProps {
    */
   readonly removalPolicy?: RemovalPolicy;
 
-  /**
-   * Bedrock Guardrail ID for screening task input.
-   */
   readonly guardrailId?: string;
 
-  /**
-   * Bedrock Guardrail version for screening task input.
-   */
   readonly guardrailVersion?: string;
 
   /**
@@ -220,7 +174,7 @@ export interface TaskApiProps {
   /**
    * S3 bucket storing ``--trace`` trajectory artifacts. When provided,
    * a ``GET /v1/tasks/{task_id}/trace`` route is created that issues
-   * short-lived presigned download URLs (design §10.1).
+   * short-lived presigned download URLs.
    */
   readonly traceArtifactsBucket?: s3.IBucket;
 
@@ -231,23 +185,9 @@ export interface TaskApiProps {
   readonly ecsClusterArn?: string;
 
   /**
-   * IAM resource ARN of the MicroVM image this deployment provisioned (ADR-021
-   * sub-decision 4). When provided, cancel gets TerminateMicrovm and the approval
-   * decision handlers get GetMicrovm/ResumeMicrovm, scoped to that one image.
-   *
-   * An ARN rather than an on/off boolean so the grant is exactly scoped. `TaskApi`
-   * is constructed before `LambdaMicrovmCompute` (the cancel Lambda's ARN is
-   * needed earlier), so the stack passes a `Lazy.string` that resolves after the
-   * image exists — the same cycle-breaking pattern `agentCoreStopSessionRuntimeArn`
-   * uses for the AgentCore runtime ARN.
-   *
-   * Absent ⇒ no grant. That is the correct behaviour in the "backend enabled but
-   * no image configured yet" bootstrap state too: with no image there can be no
-   * MicroVM-backed task to cancel.
-   *
-   * No matching env var: `cancel-task.ts` reads the `microvmId` from the task
-   * row's `compute_metadata` and — unlike the AgentCore path — never falls back
-   * to a stack-level identifier.
+   * IAM resource ARN of the MicroVM image this deployment provisioned. When
+   * provided, cancel gets TerminateMicrovm and the approval decision handlers
+   * get GetMicrovm/ResumeMicrovm, scoped to that one image. Absent ⇒ no grant.
    */
   readonly lambdaMicrovmImageArn?: string;
 
@@ -270,28 +210,13 @@ export interface TaskApiProps {
   readonly budgetTable?: dynamodb.ITable;
 
   /**
-   * Deployed webhook routes whose payloads exceed CRS SizeRestrictions_BODY
-   * (#836). Only these are exempted, so an omitted integration leaves no WAF
-   * exemption behind. @default every large-body webhook (legacy topology)
+   * Deployed webhook routes whose payloads exceed CRS SizeRestrictions_BODY.
+   * Only these are exempted from it.
+   * @default every large-body webhook
    */
   readonly largeBodyWebhookPaths?: readonly LargeBodyWebhookPath[];
 }
 
-/**
- * WAF rules for the HMAC-signed webhook routes (#1063). Their bodies carry user-written
- * issue and PR text, and a Linear agent session opened by an @-mention adds XML-like
- * `promptContext` (`<issue identifier=…>`), so CrossSiteScripting_BODY blocked them with a
- * 403 before the receiver ran and the task or session never started. Here that rule (and
- * SizeRestrictions_BODY: payloads > 8 KB) only counts. That is safe on these routes alone:
- * each receiver verifies the signature over the raw body before it dispatches the event
- * (Linear and Jira first read the tenant id from the body to choose the signing secret),
- * and nothing renders a webhook body as HTML. Every other rule of the set still blocks, every other
- * route still blocks XSS, and the priority-4 rate limit still applies. The second rule
- * counts the XSS matches let through under their own metric, which signedWebhookXssAlarm
- * watches (a counted rule inside a managed group has no metric of its own).
- * @param paths - the deployed signed webhook routes.
- * @returns the rules, or none when no webhook route is deployed.
- */
 function signedWebhookRules(paths: readonly string[]): wafv2.CfnWebACL.RuleProperty[] {
   if (paths.length === 0) return [];
   return [
@@ -304,9 +229,12 @@ function signedWebhookRules(paths: readonly string[]): wafv2.CfnWebACL.RulePrope
           vendorName: 'AWS',
           name: 'AWSManagedRulesCommonRuleSet',
           // WAF rejects `excludedRules` alongside `ruleActionOverrides`, and an excluded
-          // rule is a count override, so both rules are overrides here.
+          // rule is a count override.
           ruleActionOverrides: [
+            // Matches a body over 8 KB.
             { name: 'SizeRestrictions_BODY', actionToUse: { count: {} } },
+            // Matches the XML-like `promptContext` (`<issue identifier=…>`) of a Linear
+            // agent session opened by an @-mention (#1063).
             { name: 'CrossSiteScripting_BODY', actionToUse: { count: {} } },
           ],
           scopeDownStatement: anyOf(paths.map(webhookPath => uriPathMatch('EXACTLY', webhookPath))),
@@ -319,6 +247,7 @@ function signedWebhookRules(paths: readonly string[]): wafv2.CfnWebACL.RulePrope
       },
     },
     {
+      // A rule counted inside a managed rule group has no metric of its own.
       name: SIGNED_WEBHOOK_XSS_METRIC,
       priority: 6,
       action: { count: {} },
@@ -334,15 +263,6 @@ function signedWebhookRules(paths: readonly string[]): wafv2.CfnWebACL.RulePrope
   ];
 }
 
-/**
- * The alarm on XSS-shaped bodies let through on the signed webhook routes. One now and
- * then is expected (issue text with HTML, a session's prompt context); a sustained run is
- * worth a look.
- * @param scope - the construct to create the alarm in.
- * @param webAcl - the web ACL whose count rule the alarm reads.
- * @param paths - the deployed signed webhook routes.
- * @returns the alarm, or undefined when no webhook route is deployed.
- */
 function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths: readonly string[]): cloudwatch.Alarm | undefined {
   if (paths.length === 0) return undefined;
   return new cloudwatch.Alarm(scope, 'SignedWebhookXssCountedAlarm', {
@@ -350,9 +270,7 @@ function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths:
       namespace: 'AWS/WAFV2',
       metricName: 'CountedRequests',
       // The ACL's Ref is `name|id|scope`. WAF dimensions its metrics by the web ACL's
-      // name (here generated, e.g. `TaskApiWebAcl28D7DCC9-…`), not its visibilityConfig
-      // metric name: observed on a deployed stack, where every CountedRequests series
-      // carries the name and none carries `TaskApiWebAcl`.
+      // name, not its visibilityConfig metric name.
       dimensionsMap: { WebACL: Fn.select(0, Fn.split('|', webAcl.ref)), Rule: SIGNED_WEBHOOK_XSS_METRIC, Region: Stack.of(scope).region },
       statistic: 'Sum',
       period: Duration.hours(1),
@@ -370,41 +288,14 @@ function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths:
 /**
  * CDK construct that creates the Task API — an API Gateway REST API backed by
  * Cognito User Pool authentication and Lambda handler integrations.
- *
- * Exposes endpoints:
- * - POST   /tasks                → createTask (Cognito)
- * - GET    /tasks                → listTasks (Cognito)
- * - GET    /tasks?view=budget    → personal monthly budget status (Cognito)
- * - GET    /tasks/{task_id}      → getTask (Cognito)
- * - DELETE /tasks/{task_id}      → cancelTask (Cognito)
- * - GET    /tasks/{task_id}/events → getTaskEvents (Cognito)
- * - POST   /webhooks             → createWebhook (Cognito, or JWT/API-key when apiKeyTable set)
- * - GET    /webhooks             → listWebhooks (Cognito, or JWT/API-key when apiKeyTable set)
- * - DELETE /webhooks/{webhook_id} → deleteWebhook (Cognito, or JWT/API-key when apiKeyTable set)
- * - POST   /webhooks/tasks       → webhookCreateTask (REQUEST authorizer)
- * - POST   /api-keys             → createApiKey (Cognito)
- * - GET    /api-keys             → listApiKeys (Cognito)
- * - DELETE /api-keys/{key_id}    → deleteApiKey (Cognito)
  */
 export class TaskApi extends Construct {
-  /**
-   * The API Gateway REST API.
-   */
   public readonly api: apigw.RestApi;
 
-  /**
-   * The Cognito User Pool for authentication.
-   */
   public readonly userPool: cognito.UserPool;
 
-  /**
-   * The Cognito User Pool App Client.
-   */
   public readonly appClient: cognito.UserPoolClient;
 
-  /**
-   * The Cognito User Pool App Client ID.
-   */
   public readonly appClientId: string;
 
   /**
@@ -421,7 +312,6 @@ export class TaskApi extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
     const stageName = props.stageName ?? 'v1';
 
-    // --- Cognito User Pool ---
     this.userPool = new cognito.UserPool(this, 'UserPool', {
       selfSignUpEnabled: false,
       signInAliases: { email: true },
@@ -444,13 +334,11 @@ export class TaskApi extends Construct {
     });
     this.appClientId = this.appClient.userPoolClientId;
 
-    // Suppress Cognito rules not applicable for dev environment
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
       { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment (advanced security)' },
     ]);
 
-    // --- REST API ---
     const apiAccessLogGroup = new logs.LogGroup(this, 'ApiAccessLogs', {
       removalPolicy,
       retention: logs.RetentionDays.ONE_MONTH,
@@ -469,14 +357,10 @@ export class TaskApi extends Construct {
       defaultCorsPreflightOptions: {
         allowOrigins: apigw.Cors.ALL_ORIGINS,
         allowMethods: apigw.Cors.ALL_METHODS,
-        // Browsers send only the request headers listed here. `POST /tasks` takes an
-        // `Idempotency-Key`; without it in the list the browser blocks the request
-        // before it is sent (the CLI is not a browser, so it never hit this).
         allowHeaders: [...apigw.Cors.DEFAULT_HEADERS, 'Idempotency-Key'],
       },
     });
 
-    // --- WAF Web ACL ---
     const largeBodyWebhookPaths: readonly string[] = props.largeBodyWebhookPaths ?? LARGE_BODY_WEBHOOK_PATHS;
     const signedWebhookPaths = LARGE_BODY_WEBHOOK_PATHS.filter(webhookPath => largeBodyWebhookPaths.includes(webhookPath));
     const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
@@ -487,12 +371,8 @@ export class TaskApi extends Construct {
         metricName: 'TaskApiWebAcl',
         sampledRequestsEnabled: true,
       },
-      // Sampling keeps the name and value of every header of a sampled request
-      // for three hours, readable with wafv2:GetSampledRequests. Two headers are
-      // a complete credential: `Authorization` (the Cognito token) and
-      // `X-API-Key` (the platform stores only the hash of that key). WAF writes
-      // REDACTED in their place; the rules still inspect the real request, and
-      // the header names match in any letter case.
+      // WAF keeps every header of a sampled request for three hours (wafv2:GetSampledRequests).
+      // The protected header names match in any letter case.
       dataProtectionConfig: {
         dataProtections: [{
           action: 'SUBSTITUTION',
@@ -501,12 +381,6 @@ export class TaskApi extends Construct {
       },
       rules: [
         {
-          // CRS for task paths that accept large bodies (inline base64
-          // attachments up to 3 MB, presigned upload metadata). Excludes
-          // SizeRestrictions_BODY only; all other CRS rules apply, XSS
-          // included. Payload size is bounded by API GW (10 MB) and
-          // validateAttachments(). The signed webhook routes have their own
-          // rule (AWSManagedRulesCommonRuleSet-SignedWebhooks, below).
           name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
@@ -514,6 +388,7 @@ export class TaskApi extends Construct {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
+              // API Gateway bounds the payload at 10 MB.
               excludedRules: [{ name: 'SizeRestrictions_BODY' }],
               scopeDownStatement: uriPathMatch('STARTS_WITH', '/v1/tasks'),
             },
@@ -525,7 +400,6 @@ export class TaskApi extends Construct {
           },
         },
         {
-          // Full CRS (including SizeRestrictions_BODY) for all other paths.
           name: 'AWSManagedRulesCommonRuleSet',
           priority: 2,
           overrideAction: { none: {} },
@@ -533,7 +407,6 @@ export class TaskApi extends Construct {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
-              // Order preserved from the original rule so the legacy template is unchanged.
               scopeDownStatement: allOf(['/v1/tasks', '/v1/jira/webhook', '/v1/linear/webhook', '/v1/github/webhook']
                 .filter(uriPath => uriPath === '/v1/tasks' || largeBodyWebhookPaths.includes(uriPath))
                 .map(uriPath => ({
@@ -589,7 +462,6 @@ export class TaskApi extends Construct {
       webAclArn: webAcl.attrArn,
     });
 
-    // --- Cognito Authorizer ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'Authorizer', {
       cognitoUserPools: [this.userPool],
     });
@@ -606,25 +478,17 @@ export class TaskApi extends Construct {
       requestValidator,
     };
 
-    // --- Shared Lambda configuration ---
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const commonEnv = {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
-      // Solution-attribution component label (#319): the `md/` segment for the
-      // REST API surface. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
-      // set separately by the stack-level SolutionUaAspect.
       ABCA_COMPONENT: 'api',
     };
-    // The Node.js Lambda runtime ships an AWS SDK, but its pinned version
-    // lags current. `@aws-sdk/client-bedrock-agentcore` in particular has
-    // shipped new commands (e.g. StopRuntimeSessionCommand) that are not in
-    // the runtime's bundled SDK, so externalizing it causes Lambdas to throw
-    // `<Command> is not a constructor` at runtime — a silent failure mode
-    // because catch blocks swallow the error and log a best-effort warning.
-    // Bundle bedrock-agentcore explicitly; keep stable clients external to
-    // keep Lambda sizes small.
+    // The Node.js Lambda runtime ships an AWS SDK whose pinned version lags:
+    // a command missing from it (e.g. StopRuntimeSessionCommand of
+    // `@aws-sdk/client-bedrock-agentcore`) throws `<Command> is not a
+    // constructor` when its client is external.
     const commonBundling: lambda.BundlingOptions = {
       externalModules: [
         '@aws-sdk/client-dynamodb',
@@ -637,13 +501,11 @@ export class TaskApi extends Construct {
       ],
     };
 
-    // pdf-parse is used for PDF attachment screening (text extraction).
     const attachmentScreeningBundling: lambda.BundlingOptions = {
       ...commonBundling,
       nodeModules: ['pdf-parse'],
     };
 
-    // --- Lambda handlers ---
     const createTaskEnv: Record<string, string> = { ...commonEnv };
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
@@ -674,8 +536,6 @@ export class TaskApi extends Construct {
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
     });
 
-    // The per-user cap for the handlers here that read it. It has to match the
-    // orchestrator's (see the prop).
     const maxConcurrentTasksPerUser = String(props.maxConcurrentTasksPerUser ?? 10);
 
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
@@ -685,8 +545,6 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: {
         ...commonEnv,
-        // #441: queue-position ETA heuristic must agree with the
-        // orchestrator's per-user admission cap.
         MAX_CONCURRENT_TASKS_PER_USER: maxConcurrentTasksPerUser,
       },
       bundling: commonBundling,
@@ -703,9 +561,6 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: listTasksEnv,
       bundling: commonBundling,
-      // Task rows are large: a filtered list pages through up to 10 Queries of up to 1 MB
-      // each, and the scoreboard view through up to 24, four at a time. So this gets the
-      // API-handler settings, not the 3s / 128MB defaults.
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       memorySize: API_HANDLER_MEMORY_MB,
     });
@@ -726,10 +581,6 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: cancelTaskEnv,
       bundling: commonBundling,
-      // Cancel performs: DDB GetItem + DDB UpdateItem + ECS StopTask or
-      // AgentCore StopRuntimeSession + DDB PutItem.  The default 3s timeout
-      // is not enough once cold-start TLS handshakes for bedrock-agentcore
-      // are added.  15s gives comfortable headroom.
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       memorySize: API_HANDLER_MEMORY_MB,
     });
@@ -743,12 +594,6 @@ export class TaskApi extends Construct {
       bundling: commonBundling,
     });
 
-    // Operator replay bundle: aggregates TaskRecord + chronological
-    // TaskEvents. Reads both tables; commonEnv already carries both table names.
-    // Heaviest read path — GetItem + a multi-page Query loop (up to
-    // MAX_REPLAY_EVENTS / ~5 pages) + full-bundle serialization — so it gets the
-    // raised timeout/memory the other heavy handlers use rather than the 3s /
-    // 128MB defaults, which risk INIT-timeout 502s and OOM on long histories.
     const getTaskReplayFn = new lambda.NodejsFunction(this, 'GetTaskReplayFn', {
       entry: path.join(handlersDir, 'get-task-replay.ts'),
       handler: 'handler',
@@ -757,13 +602,9 @@ export class TaskApi extends Construct {
       environment: commonEnv,
       bundling: commonBundling,
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
-      // 512MB (not the 256MB standard): the bundle holds up to
-      // MAX_REPLAY_EVENT_BYTES of events in memory during serialization.
       memorySize: SCREENING_HANDLER_MEMORY_MB,
     });
 
-    // --- IAM grants ---
-    // Read-write for create and cancel (write task + event)
     props.taskTable.grantReadWriteData(createTaskFn);
     props.taskEventsTable.grantReadWriteData(createTaskFn);
     props.taskTable.grantReadWriteData(cancelTaskFn);
@@ -788,27 +629,8 @@ export class TaskApi extends Construct {
       }));
     }
 
-    // ADR-021: cancelling a `lambda-microvm` task must actively terminate the
-    // MicroVM — leaving it to the 8-hour `maximumDurationInSeconds` cap would
-    // keep billing 16 vCPU and would hold account memory quota that gates
-    // admission of new tasks. Conditional for the same reason the AgentCore and
-    // ECS grants above are: a deployment without the backend gets no grant.
-    //
-    // ONLY `lambda:TerminateMicrovm`. `cancel-task.ts` sends
-    // `TerminateMicrovmCommand` and nothing else — it does not read MicroVM
-    // state first — so `lambda:GetMicrovm` would be a permission with no caller.
-    // The approve/deny Lambdas separately get ResumeMicrovm + GetMicrovm below.
-    //
-    // Resource is the MicroVM *image*, not the running instance: every MicroVM
-    // lifecycle action authorizes against `microvm-image:<name>` (Service
-    // Authorization Reference), so the per-session `microvmId` never appears in
-    // IAM — which is what lets this be scoped to the one platform-created image
-    // rather than an account-wide `microvm-image:*`. The ARN arrives as a
-    // `Lazy.string` because TaskApi is built before the MicroVM construct.
-    //
-    // `<arn>:*` sibling: version-suffix hedge, same rationale as the
-    // orchestrator's lifecycle grant in `task-orchestrator.ts` — still pinned to
-    // this image's name, so it can never match a different image.
+    // IAM authorizes MicroVM lifecycle actions against the image
+    // (`microvm-image:<name>`), not the running MicroVM.
     if (props.lambdaMicrovmImageArn) {
       cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['lambda:TerminateMicrovm'],
@@ -816,7 +638,6 @@ export class TaskApi extends Construct {
       }));
     }
 
-    // Repo table read for onboarding gate
     if (props.repoTable) {
       props.repoTable.grantReadData(createTaskFn);
     }
@@ -825,16 +646,13 @@ export class TaskApi extends Construct {
       props.budgetTable.grantReadData(listTasksFn);
     }
 
-    // Read-only for get, list, and events
     props.taskTable.grantReadData(getTaskFn);
     props.taskTable.grantReadData(listTasksFn);
     props.taskTable.grantReadData(getTaskEventsFn);
     props.taskEventsTable.grantReadData(getTaskEventsFn);
-    // Replay reads the task record (ownership + fields) and its events.
     props.taskTable.grantReadData(getTaskReplayFn);
     props.taskEventsTable.grantReadData(getTaskReplayFn);
 
-    // Grant createTask permission to invoke the orchestrator
     if (props.orchestratorFunctionArn) {
       createTaskFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['lambda:InvokeFunction'],
@@ -842,7 +660,6 @@ export class TaskApi extends Construct {
       }));
     }
 
-    // Grant createTask permission to apply the guardrail
     if (props.guardrailId) {
       createTaskFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['bedrock:ApplyGuardrail'],
@@ -856,19 +673,16 @@ export class TaskApi extends Construct {
       }));
     }
 
-    // Grant create-task Lambda put/delete on attachments bucket for inline upload + cleanup
     if (props.attachmentsBucket) {
       props.attachmentsBucket.grantPut(createTaskFn);
       props.attachmentsBucket.grantDelete(createTaskFn);
     }
 
-    // --- Confirm-uploads Lambda (presigned upload flow) ---
     let confirmUploadsFn: lambda.NodejsFunction | undefined;
     if (props.attachmentsBucket && props.userConcurrencyTable) {
       const confirmUploadsEnv: Record<string, string> = { ...commonEnv };
       confirmUploadsEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
       confirmUploadsEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
-      // Without it the handler admits against its own fallback of 3.
       confirmUploadsEnv.MAX_CONCURRENT_TASKS_PER_USER = maxConcurrentTasksPerUser;
       if (props.orchestratorFunctionArn) {
         confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
@@ -889,7 +703,6 @@ export class TaskApi extends Construct {
         timeout: Duration.seconds(CONFIRM_UPLOADS_TIMEOUT_SECONDS),
       });
 
-      // Grants: DDB read-write, S3 read-write-delete, orchestrator invoke, guardrail
       props.taskTable.grantReadWriteData(confirmUploadsFn);
       props.taskEventsTable.grantReadWriteData(confirmUploadsFn);
       props.attachmentsBucket.grantReadWrite(confirmUploadsFn);
@@ -917,19 +730,9 @@ export class TaskApi extends Construct {
       }
     }
 
-    // Collect all Lambda functions for cdk-nag suppressions
     const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn, getTaskReplayFn];
     if (confirmUploadsFn) allFunctions.push(confirmUploadsFn);
 
-    // Every `LambdaIntegration` below passes `allowTestInvoke: false`, dropping the
-    // second `AWS::Lambda::Permission` per method that CDK emits by default for the
-    // API Gateway console's "TEST" button, which nothing here invokes. Real traffic is
-    // unaffected: `scopePermissionToMethod` stays at its default `true`, so each route
-    // keeps its own narrowly-scoped `SourceArn`. Keep new routes consistent;
-    // `test/synthesis/deployment.test.ts` checks method-scoped permissions and
-    // rejects `test-invoke-stage` grants in every parent/nested deployment template.
-
-    // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');
     tasks.addMethod('POST', new apigw.LambdaIntegration(createTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
     tasks.addMethod('GET', new apigw.LambdaIntegration(listTasksFn, { allowTestInvoke: false }), cognitoAuthOptions);
@@ -941,18 +744,14 @@ export class TaskApi extends Construct {
     const events = taskById.addResource('events');
     events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
-    // Operator replay bundle: GET /tasks/{task_id}/replay. Same Cognito
-    // owner-scoped auth as GET /tasks/{task_id} (cognitoAuthOptions).
     const replay = taskById.addResource('replay');
     replay.addMethod('GET', new apigw.LambdaIntegration(getTaskReplayFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
-    // --- Confirm-uploads endpoint: POST /tasks/{task_id}/confirm-uploads ---
     if (confirmUploadsFn) {
       const confirmUploads = taskById.addResource('confirm-uploads');
       confirmUploads.addMethod('POST', new apigw.LambdaIntegration(confirmUploadsFn, { allowTestInvoke: false }), cognitoAuthOptions);
     }
 
-    // --- Trace URL endpoint (design §10.1): GET /tasks/{task_id}/trace ---
     if (props.traceArtifactsBucket) {
       const traceBucket = props.traceArtifactsBucket;
       const getTraceUrlFn = new lambda.NodejsFunction(this, 'GetTraceUrlFn', {
@@ -966,32 +765,16 @@ export class TaskApi extends Construct {
         },
         bundling: {
           ...commonBundling,
-          // Defensive future-proofing: if ``@aws-sdk/client-s3`` or
-          // ``@aws-sdk/s3-request-presigner`` are ever added to
-          // ``commonBundling.externalModules`` (e.g. because a future
-          // Node runtime ships them), this filter ensures they stay
-          // bundled for *this* function — the Node 24 Lambda runtime
-          // does not ship either, and ``getSignedUrl`` will throw
-          // ``Cannot find module`` at cold start if it's externalized.
-          // Today this is a no-op (neither module is in the common
-          // external list); the filter exists to guard against drift.
           externalModules: commonBundling.externalModules?.filter(
             m => m !== '@aws-sdk/client-s3' && m !== '@aws-sdk/s3-request-presigner',
           ),
         },
-        // Cold-start SDK load (s3-client + s3-request-presigner + lib-dynamodb)
-        // exceeds Lambda's 3s default, causing INIT timeout → 502 Bad Gateway.
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         memorySize: SCREENING_HANDLER_MEMORY_MB,
       });
 
       props.taskTable.grantReadData(getTraceUrlFn);
-      // Minimal grant — the handler only needs ``s3:GetObject`` (which
-      // implicitly covers ``s3:HeadObject``) on trace objects to sign
-      // presigned URLs and HEAD-check for existence before presigning.
-      // ``grantRead`` would expand to ``s3:GetObject*`` + ``s3:GetBucket*``
-      // + ``s3:List*``; ``ListBucket`` / ``GetBucketLocation`` / etc. are
-      // unnecessary scope. Tightening to an explicit statement (L3 item 2).
+      // ``s3:GetObject`` also covers ``s3:HeadObject``.
       getTraceUrlFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['s3:GetObject'],
         resources: [`${traceBucket.bucketArn}/*`],
@@ -1003,7 +786,6 @@ export class TaskApi extends Construct {
       allFunctions.push(getTraceUrlFn);
     }
 
-    // --- Nudge endpoint (Phase 2): POST /tasks/{task_id}/nudge ---
     if (props.taskNudgesTable) {
       const nudgeTaskEnv: Record<string, string> = {
         ...commonEnv,
@@ -1024,7 +806,6 @@ export class TaskApi extends Construct {
         bundling: commonBundling,
       });
 
-      // Read tasks (ownership + state), read/write nudges (persist + rate-limit counter).
       props.taskTable.grantReadData(nudgeTaskFn);
       props.taskNudgesTable.grantReadWriteData(nudgeTaskFn);
 
@@ -1047,18 +828,12 @@ export class TaskApi extends Construct {
       allFunctions.push(nudgeTaskFn);
     }
 
-    // --- Cedar HITL approval endpoints (§7.1, §7.2, §7.6, §7.7) ---
-    // Activated only when the approvals table is provided. The layer
-    // attachment on GetPoliciesFn is conditional on the cedar-wasm
-    // layer being supplied — without it the handler cannot parse
-    // policies and the route is skipped.
     if (props.taskApprovalsTable) {
       const approvalEnv: Record<string, string> = {
         ...commonEnv,
         TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
       };
 
-      // ApproveTaskFn — POST /tasks/{task_id}/approve
       const approveTaskFn = new lambda.NodejsFunction(this, 'ApproveTaskFn', {
         entry: path.join(handlersDir, 'approve-task.ts'),
         handler: 'handler',
@@ -1073,7 +848,6 @@ export class TaskApi extends Construct {
       props.taskApprovalsTable.grantReadWriteData(approveTaskFn);
       props.taskEventsTable.grantReadWriteData(approveTaskFn);
 
-      // DenyTaskFn — POST /tasks/{task_id}/deny
       const denyTaskFn = new lambda.NodejsFunction(this, 'DenyTaskFn', {
         entry: path.join(handlersDir, 'deny-task.ts'),
         handler: 'handler',
@@ -1096,7 +870,6 @@ export class TaskApi extends Construct {
         }
       }
 
-      // GetPendingFn — GET /pending
       const getPendingFn = new lambda.NodejsFunction(this, 'GetPendingFn', {
         entry: path.join(handlersDir, 'get-pending.ts'),
         handler: 'handler',
@@ -1107,14 +880,6 @@ export class TaskApi extends Construct {
         timeout: Duration.seconds(10),
         memorySize: API_HANDLER_MEMORY_MB,
       });
-      // Least-privilege: GetPendingFn only reads (Query on
-      // user_id-status-index for the user's pending rows) and writes
-      // a synthetic ``RATE#<user_id>#PENDING`` rate-limit row
-      // (UpdateItem with TTL). Full grantReadWriteData would also
-      // grant PutItem, BatchWrite, and DeleteItem on every approval
-      // record — orders of magnitude broader than needed (PR review
-      // S6). Pinned to the table ARN + its GSI, not the wildcard
-      // "/*" suffix that grantReadWriteData uses.
       getPendingFn.addToRolePolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['dynamodb:Query'],
@@ -1129,7 +894,6 @@ export class TaskApi extends Construct {
         resources: [props.taskApprovalsTable.tableArn],
       }));
 
-      // --- Routes ---
       const approveTask = taskById.addResource('approve');
       approveTask.addMethod(
         'POST',
@@ -1151,8 +915,6 @@ export class TaskApi extends Construct {
 
       allFunctions.push(approveTaskFn, denyTaskFn, getPendingFn);
 
-      // GetPoliciesFn — GET /repos/{repo_id}/policies. Requires the
-      // cedar-wasm layer to parse blueprint policy text.
       if (props.cedarWasmLayer && props.repoTable) {
         const getPoliciesEnv: Record<string, string> = {
           ...approvalEnv,
@@ -1166,9 +928,6 @@ export class TaskApi extends Construct {
           environment: getPoliciesEnv,
           bundling: {
             ...commonBundling,
-            // Keep cedar-wasm in the layer, not the function bundle.
-            // esbuild externalizes the import at build time; the layer
-            // provides it at runtime.
             externalModules: [
               ...(commonBundling.externalModules ?? []),
               '@cedar-policy/cedar-wasm',
@@ -1176,14 +935,11 @@ export class TaskApi extends Construct {
             ],
           },
           layers: [props.cedarWasmLayer],
-          // Cedar-wasm needs ≥512 MB per the §15.2 task 10 note; also
-          // the wasm binary is ~4 MB which pushes init time.
           memorySize: CEDAR_WASM_MIN_LAMBDA_MEMORY_MB,
           timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         });
         props.taskApprovalsTable.grantReadData(getPoliciesFn);
         props.repoTable.grantReadData(getPoliciesFn);
-        // Allow the rate-limit Update path on TaskApprovalsTable.
         props.taskApprovalsTable.grantWriteData(getPoliciesFn);
 
         const repos = this.api.root.addResource('repos');
@@ -1198,25 +954,15 @@ export class TaskApi extends Construct {
       }
     }
 
-    // --- Platform API key infrastructure (only when apiKeyTable is provided) ---
-    //
-    // Default: webhook management routes stay Cognito-only. When an API key
-    // table is wired, a unified REQUEST authorizer replaces Cognito on those
-    // routes so they accept EITHER a Cognito JWT OR a `webhooks:manage` API
-    // key. Key *creation* stays Cognito-gated.
     let webhookMgmtAuthOptions: apigw.MethodOptions = cognitoAuthOptions;
 
     if (props.apiKeyTable) {
       const apiKeyEnv: Record<string, string> = {
         API_KEY_TABLE_NAME: props.apiKeyTable.tableName,
         API_KEY_RETENTION_DAYS: String(props.apiKeyRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
-        // Solution-attribution component label (#319): API-key management is
-        // part of the REST API surface. apiKeyEnv does NOT spread commonEnv, so
-        // set it explicitly here rather than relying on the `api` default fallback.
         ABCA_COMPONENT: 'api',
       };
 
-      // --- Unified authorizer: Cognito JWT OR platform API key ---
       const apiKeyAuthorizerFn = new lambda.NodejsFunction(this, 'ApiKeyAuthorizerFn', {
         entry: path.join(handlersDir, 'api-key-authorizer.ts'),
         handler: 'handler',
@@ -1227,17 +973,15 @@ export class TaskApi extends Construct {
           API_KEY_REQUIRED_SCOPE: 'webhooks:manage',
           USER_POOL_ID: this.userPool.userPoolId,
           APP_CLIENT_ID: this.appClient.userPoolClientId,
-          // #319: REST API surface (see apiKeyEnv above).
           ABCA_COMPONENT: 'api',
         },
         bundling: commonBundling,
       });
       props.apiKeyTable.grantReadData(apiKeyAuthorizerFn);
 
-      // No fixed identity source: a request carries EITHER Authorization OR
-      // X-API-Key, never a guaranteed one. Multiple identity sources are AND-ed
-      // and would short-circuit to 401 before the Lambda runs, so we leave them
-      // empty and disable caching (the Lambda decides on every request).
+      // API Gateway requires every identity source of a REQUEST authorizer and
+      // answers 401 without calling the Lambda when one is missing. It accepts
+      // an empty list only with caching off.
       const webhookMgmtAuthorizer = new apigw.RequestAuthorizer(this, 'ApiKeyOrJwtAuthorizer', {
         handler: apiKeyAuthorizerFn,
         identitySources: [],
@@ -1250,8 +994,6 @@ export class TaskApi extends Construct {
         requestValidator,
       };
 
-      // --- API key management Lambdas (Cognito-authenticated — minting a key
-      // requires a real interactive user) ---
       const createApiKeyFn = new lambda.NodejsFunction(this, 'CreateApiKeyFn', {
         entry: path.join(handlersDir, 'create-api-key.ts'),
         handler: 'handler',
@@ -1293,17 +1035,13 @@ export class TaskApi extends Construct {
       allFunctions.push(apiKeyAuthorizerFn, createApiKeyFn, listApiKeysFn, deleteApiKeyFn);
     }
 
-    // --- Webhook endpoints (only when webhookTable is provided) ---
     if (props.webhookTable) {
       const webhookEnv: Record<string, string> = {
         WEBHOOK_TABLE_NAME: props.webhookTable.tableName,
         WEBHOOK_RETENTION_DAYS: String(props.webhookRetentionDays ?? DEFAULT_WEBHOOK_RETENTION_DAYS),
-        // Solution-attribution component label (#319): webhook ingest surface.
-        // (webhookEnv does NOT spread commonEnv, so set it explicitly here.)
         ABCA_COMPONENT: 'webhook',
       };
 
-      // --- Webhook management Lambdas (Cognito-authenticated) ---
       const createWebhookFn = new lambda.NodejsFunction(this, 'CreateWebhookFn', {
         entry: path.join(handlersDir, 'create-webhook.ts'),
         handler: 'handler',
@@ -1331,7 +1069,6 @@ export class TaskApi extends Construct {
         bundling: commonBundling,
       });
 
-      // --- Webhook authorizer Lambda ---
       const webhookAuthorizerFn = new lambda.NodejsFunction(this, 'WebhookAuthorizerFn', {
         entry: path.join(handlersDir, 'webhook-authorizer.ts'),
         handler: 'handler',
@@ -1341,10 +1078,6 @@ export class TaskApi extends Construct {
         bundling: commonBundling,
       });
 
-      // --- Webhook task creation Lambda ---
-      // Same env as createTask, but this is the webhook ingest surface, so
-      // relabel the #319 solution-attribution component to `webhook` (matches
-      // the sibling webhook Lambdas above; createTaskEnv inherits `api`).
       const webhookCreateTaskEnv: Record<string, string> = { ...createTaskEnv, ABCA_COMPONENT: 'webhook' };
       const webhookCreateTaskFn = new lambda.NodejsFunction(this, 'WebhookCreateTaskFn', {
         entry: path.join(handlersDir, 'webhook-create-task.ts'),
@@ -1357,13 +1090,11 @@ export class TaskApi extends Construct {
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       });
 
-      // --- IAM grants for webhook Lambdas ---
       props.webhookTable.grantReadWriteData(createWebhookFn);
       props.webhookTable.grantReadData(listWebhooksFn);
       props.webhookTable.grantReadWriteData(deleteWebhookFn);
       props.webhookTable.grantReadData(webhookAuthorizerFn);
 
-      // Webhook task creation needs same grants as createTask
       props.taskTable.grantReadWriteData(webhookCreateTaskFn);
       props.taskEventsTable.grantReadWriteData(webhookCreateTaskFn);
       if (props.repoTable) {
@@ -1397,7 +1128,6 @@ export class TaskApi extends Construct {
         }));
       }
 
-      // Secrets Manager grants — prefix-scoped
       const secretArnPrefix = Stack.of(this).formatArn({
         service: 'secretsmanager',
         resource: 'secret',
@@ -1428,7 +1158,6 @@ export class TaskApi extends Construct {
         resources: [secretArnPrefix],
       }));
 
-      // --- REQUEST authorizer for webhook endpoints ---
       const webhookRequestAuthorizer = new apigw.RequestAuthorizer(this, 'WebhookAuthorizer', {
         handler: webhookAuthorizerFn,
         identitySources: [
@@ -1444,9 +1173,6 @@ export class TaskApi extends Construct {
         requestValidator,
       };
 
-      // --- API resource tree: /webhooks ---
-      // Management routes use the unified authorizer when an API key table is
-      // wired (JWT or `webhooks:manage` key), else fall back to Cognito-only.
       const webhooks = this.api.root.addResource('webhooks');
       const createWebhookMethod = webhooks.addMethod('POST', new apigw.LambdaIntegration(createWebhookFn, { allowTestInvoke: false }), webhookMgmtAuthOptions);
       const listWebhooksMethod = webhooks.addMethod('GET', new apigw.LambdaIntegration(listWebhooksFn, { allowTestInvoke: false }), webhookMgmtAuthOptions);
@@ -1454,9 +1180,6 @@ export class TaskApi extends Construct {
       const webhookById = webhooks.addResource('{webhook_id}');
       const deleteWebhookMethod = webhookById.addMethod('DELETE', new apigw.LambdaIntegration(deleteWebhookFn, { allowTestInvoke: false }), webhookMgmtAuthOptions);
 
-      // When the unified authorizer is in use these methods are CUSTOM, not
-      // Cognito — suppress COG4 (the authorizer still enforces a Cognito JWT
-      // or a scoped API key).
       if (props.apiKeyTable) {
         NagSuppressions.addResourceSuppressions([createWebhookMethod, listWebhooksMethod, deleteWebhookMethod], [
           {
@@ -1476,16 +1199,9 @@ export class TaskApi extends Construct {
         },
       ]);
 
-      // Add webhook functions to nag suppression list
       allFunctions.push(createWebhookFn, listWebhooksFn, deleteWebhookFn, webhookAuthorizerFn, webhookCreateTaskFn);
     }
 
-    // Agent asset registry endpoints (#246) live in their own NestedStack with a
-    // separate RestApi (see RegistryApi + agent.ts) so their ~35 resources don't
-    // count against this root stack's 500-resource CloudFormation limit. Nothing
-    // for the registry API is created here.
-
-    // --- cdk-nag suppressions for CDK-generated IAM policies ---
     for (const fn of allFunctions) {
       NagSuppressions.addResourceSuppressions(fn, [
         {

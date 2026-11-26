@@ -1,12 +1,3 @@
-"""Memory write functions for AgentCore Memory.
-
-Best-effort (fail-open): all write operations are wrapped in try/except
-so a Memory API outage never blocks the agent pipeline. Infrastructure
-errors (network, auth, throttling) are caught and logged at WARN level;
-programming errors (TypeError, ValueError, AttributeError) are logged at
-ERROR level to surface bugs quickly.
-"""
-
 import hashlib
 import os
 import re
@@ -16,22 +7,14 @@ from sanitization import sanitize_external_content
 
 _client = None
 
-# Validates "owner/repo" format — must match the TypeScript-side isValidRepo pattern.
 _REPO_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 
-# Current event schema version:
-#   v1 = repos/ prefix
-#   v2 = namespace templates (/{actorId}/...)
-#   v3 = adds source_type provenance + content_sha256 integrity hash
 _SCHEMA_VERSION = "3"
 
-# Valid source_type values for provenance tracking (schema v3).
-# Must stay in sync with MemorySourceType in cdk/src/handlers/shared/memory.ts.
 MEMORY_SOURCE_TYPES = frozenset({"agent_episode", "agent_learning", "orchestrator_fallback"})
 
 
 def _get_client():
-    """Lazy-init and cache the AgentCore client for memory operations."""
     global _client
     if _client is not None:
         return _client
@@ -45,7 +28,6 @@ def _get_client():
 
 
 def _validate_repo(repo: str) -> None:
-    """Raise ValueError if repo does not match expected owner/repo format."""
     if not _REPO_PATTERN.match(repo):
         raise ValueError(
             f"repo '{repo}' does not match expected owner/repo format "
@@ -54,12 +36,6 @@ def _validate_repo(repo: str) -> None:
 
 
 def _validate_actor(actor: str) -> None:
-    """Validate a memory actorId: an ``owner/repo`` OR a ``user:{id}`` namespace.
-
-    Repo-less knowledge tasks (#248 Phase 3) key memory on ``user:{user_id}``
-    instead of a repo (ADR-014 addendum). Accept both forms so the same write
-    path serves coding and knowledge tasks; reject anything else.
-    """
     if actor.startswith("user:"):
         if not actor[len("user:") :]:
             raise ValueError("actor 'user:' namespace requires a non-empty user id")
@@ -68,7 +44,6 @@ def _validate_actor(actor: str) -> None:
 
 
 def _log_error(func_name: str, err: Exception, memory_id: str, task_id: str) -> None:
-    """Log memory write failure with severity based on exception type."""
     is_programming_error = isinstance(err, (TypeError, ValueError, AttributeError, KeyError))
     level = "ERROR" if is_programming_error else "WARN"
     label = "unexpected error" if is_programming_error else "infra failure"
@@ -91,17 +66,12 @@ def write_task_episode(
 ) -> bool:
     """Write a task episode to AgentCore Memory as a short-term event.
 
-    The event captures the outcome of one task execution, including
-    status, PR URL, cost, duration, and any self-feedback from the
-    agent's "## Agent notes" section in the PR body.
+    Uses actorId=``actor`` and sessionId=task_id. ``actor`` is an
+    ``owner/repo`` for coding tasks or a ``user:{user_id}`` namespace for
+    repo-less knowledge tasks.
 
-    Uses actorId=``actor`` and sessionId=task_id so the extraction strategy
-    namespace templates (/{actorId}/episodes/{sessionId}/) place records into
-    the correct namespace. ``actor`` is an ``owner/repo`` for coding tasks or a
-    ``user:{user_id}`` namespace for repo-less knowledge tasks (#248 Phase 3).
-
-    Metadata includes source_type='agent_episode' for provenance tracking
-    and content_sha256 for integrity auditing on read (schema v3).
+    Metadata includes source_type='agent_episode' and content_sha256
+    (schema v3).
 
     Returns True on success, False on failure (fail-open).
     """
@@ -122,8 +92,6 @@ def write_task_episode(
             parts.append(f"Agent notes: {self_feedback}")
 
         episode_text = " ".join(parts)
-        # Hash the sanitized form; store the original. The read path re-sanitizes
-        # and checks against this hash: sanitize(original) at write == sanitize(stored) at read.
         sanitized_text = sanitize_external_content(episode_text)
         content_hash = hashlib.sha256(sanitized_text.encode("utf-8")).hexdigest()
 
@@ -168,19 +136,10 @@ def write_repo_learnings(
 ) -> bool:
     """Write repository learnings to AgentCore Memory.
 
-    Captures patterns, conventions, and insights discovered about the
-    repository during task execution. Stored as a separate event so
-    the semantic extraction strategy can surface them in future tasks.
+    Uses actorId=repo and sessionId=task_id.
 
-    Uses actorId=repo and sessionId=task_id so the extraction strategy
-    namespace templates (/{actorId}/knowledge/) place records into
-    the correct per-repo namespace.
-
-    Metadata includes source_type='agent_learning' for provenance tracking
-    and content_sha256 for integrity auditing on read (schema v3).
-    Note: hash auditing only happens on the TS orchestrator read path
-    (loadMemoryContext in memory.ts) where mismatches are logged but
-    records are kept — the Python side does not independently check hashes.
+    Metadata includes source_type='agent_learning' and content_sha256
+    (schema v3).
 
     Returns True on success, False on failure (fail-open).
     """
@@ -189,8 +148,6 @@ def write_repo_learnings(
         client = _get_client()
 
         learnings_text = f"Repository learnings: {learnings}"
-        # Hash the sanitized form; store the original. The read path re-sanitizes
-        # and checks against this hash: sanitize(original) at write == sanitize(stored) at read.
         sanitized_text = sanitize_external_content(learnings_text)
         content_hash = hashlib.sha256(sanitized_text.encode("utf-8")).hexdigest()
 
@@ -224,5 +181,4 @@ def write_repo_learnings(
 
 
 def _iso_now() -> str:
-    """Return current time as ISO 8601 string."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

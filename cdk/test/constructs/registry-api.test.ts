@@ -30,8 +30,6 @@ function synth(): { template: Template; registryApi: RegistryApi } {
     agentRegistryId: 'AbCdEfGh1234',
     userPool,
   });
-  // A NestedStack renders as AWS::CloudFormation::Stack in the parent; assert on
-  // the nested stack's own synthesized template.
   return { template: Template.fromStack(registryApi), registryApi };
 }
 
@@ -42,10 +40,7 @@ describe('RegistryApi nested stack', () => {
   });
 
   test('the publish function gets 28 s, the three read functions the standard 15 s', () => {
-    // Publish waits up to 20 s for the new record to leave CREATING (the poll budget
-    // in agent-registry-client.ts) between its other calls. With the standard 15 s the
-    // function is stopped during that wait, and the caller gets a gateway error that
-    // names no record. API Gateway gives an integration 29 s, so 28 is the ceiling.
+    // API Gateway caps an integration at 29 s.
     const { template } = synth();
     const timeouts = Object.fromEntries(
       Object.entries(template.findResources('AWS::Lambda::Function')).map(
@@ -101,10 +96,7 @@ describe('RegistryApi nested stack', () => {
     const { template } = synth();
     const policies = template.findResources('AWS::IAM::Policy');
     const serialized = JSON.stringify(policies);
-    // The wired registry id must appear in the resource ARNs...
     expect(serialized).toContain('AbCdEfGh1234');
-    // ...and no registry statement may grant a bare "*" resource (the finding-10
-    // regression: a resource:['*'] would let a read handler reach other registries).
     for (const policy of Object.values(policies)) {
       const statements = (policy as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } })
         .Properties.PolicyDocument.Statement;

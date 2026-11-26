@@ -257,10 +257,8 @@ describe('budget rollup handler', () => {
       name: 'TransactionCanceledException',
     });
     sendMock
-      // First delivery: spend commits, then the read needed for alerts fails.
       .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error('read throttled'))
-      // Retry: marker proves the spend is already applied.
       .mockRejectedValueOnce(canceled)
       .mockResolvedValueOnce({ Item: { scope_key: 'TASK#task-1' } })
       .mockResolvedValueOnce({
@@ -312,11 +310,9 @@ describe('budget rollup handler', () => {
       },
     };
     sendMock
-      // First delivery commits spend and emits, but cannot persist the claim.
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce(budgetState)
       .mockRejectedValueOnce(new Error('claim throttled'))
-      // Retry proves spend was already applied, then re-emits and claims.
       .mockRejectedValueOnce(canceled)
       .mockResolvedValueOnce({ Item: { scope_key: 'TASK#task-1' } })
       .mockResolvedValueOnce(budgetState)

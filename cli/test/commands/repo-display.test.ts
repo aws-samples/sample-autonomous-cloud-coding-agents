@@ -33,7 +33,7 @@ const PLATFORM = {
   bedrockGeoRegion: null,
 };
 const BLUEPRINT_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:AcmeRepoToken-XyZ123';
-/** The shipped default without its geography (no geography name holds a dot). */
+// The default starts with its Bedrock geography, and no geography name holds a dot.
 const BARE_DEFAULT_MODEL = PLATFORM_REPO_DEFAULTS.model_id.slice(PLATFORM_REPO_DEFAULTS.model_id.indexOf('.') + 1);
 
 describe('formatRepoConfigForDisplay', () => {
@@ -149,8 +149,6 @@ describe('formatRepoConfigForDisplay', () => {
       PLATFORM,
     );
 
-    // `repo show --output json` serializes blueprint_overrides verbatim, so the
-    // raw secret ARN must never appear here.
     expect(display.blueprint_overrides.github_token_secret_arn).toBe(
       'arn:aws:secretsmanager:us-east-1:123456789012:secret:****-XyZ123',
     );
@@ -170,19 +168,11 @@ describe('buildRepoShowLines', () => {
     const cedar = lines.find((l) => l.key === 'cedar_policies');
 
     expect(compute?.text).toBe('(platform default) agentcore');
-    // Assert against the constant, not a literal: the point of the line is "it
-    // shows the platform default", and hardcoding the number here is what let the
-    // constant drift out of step with the runtime unnoticed.
     expect(maxTurns?.text).toBe(`(platform default) ${PLATFORM_REPO_DEFAULTS.max_turns}`);
     expect(cedar).toBeUndefined();
   });
 
   test('the advertised default model matches the one the agent actually falls back to', () => {
-    // Drift guard. This constant is not display-only: `platform doctor` derives the
-    // model it probes for ACCESS from it, so if it names a different model than the
-    // runtime invokes, doctor can report a healthy stack while every task fails at
-    // turn 0 with AccessDenied. Read the agent's own fallback rather than trusting
-    // a second copy of the string.
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../agent/src/config.py'), 'utf8',
     );
@@ -211,7 +201,6 @@ describe('buildRepoShowLines', () => {
   });
 
   test('the advertised default memory token budget matches the one hydration applies', () => {
-    // The CLI cannot import the orchestrator's constant, so read it from the source.
     const memoryTs = fs.readFileSync(
       path.resolve(__dirname, '../../../cdk/src/handlers/shared/memory.ts'), 'utf8',
     );

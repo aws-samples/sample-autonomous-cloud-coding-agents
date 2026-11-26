@@ -1,20 +1,20 @@
 # Memory
 
-Agents are stateless by default: each task starts from scratch with no knowledge of what happened before. The memory system fixes this by giving agents access to repository knowledge, past task episodes, and review feedback across sessions. A well-configured `CLAUDE.md` in the repository is often more impactful than any external memory, but external memory fills gaps the repo cannot: execution history, reviewer preferences, operational quirks, and cross-task patterns.
+Agents are stateless by default. Each task starts with no knowledge of what happened before. The memory system gives agents access to repository knowledge, past task episodes, and review feedback across sessions. A well-configured `CLAUDE.md` in the repository often helps more than any external memory, but external memory fills gaps that the repo cannot: execution history, reviewer preferences, operational quirks, and cross-task patterns.
 
 - **Use this doc for:** understanding what memory stores, how it flows through the pipeline, the security threat model, and the tiered implementation plan.
 - **Related docs:** [SECURITY.md](./SECURITY.md) for prompt injection and memory poisoning mitigations, [EVALUATION.md](./EVALUATION.md) for how memory quality is measured, [ORCHESTRATOR.md](./ORCHESTRATOR.md) for context hydration.
 
 ## Design principles
 
-- **Fail-open** - Memory failures never block task execution, PR creation, or finalization. Memory is enrichment, not a prerequisite.
-- **Repo-scoped** - All memory is namespaced per repository. Cross-repo knowledge sharing is opt-in, not default.
-- **Lightweight writes** - Memory writes happen at task end and must not delay finalization.
-- **Swappable backend** - The core uses a `MemoryStore` interface so implementations can be swapped (AgentCore Memory today; DynamoDB, vector store, or others later).
+- **Fail-open.** Memory failures never block task execution, PR creation, or finalization. Memory is enrichment, not a prerequisite.
+- **Repo-scoped.** All memory is namespaced per repository. Cross-repo knowledge sharing is opt-in, not default.
+- **Lightweight writes.** Memory writes happen at task end and must not delay finalization.
+- **Swappable backend.** The core uses a `MemoryStore` interface so that implementations can be swapped. AgentCore Memory is the implementation today. DynamoDB, a vector store, or others can follow later.
 
 ## What the repo already provides
 
-Before designing external memory, recognize that the repository itself is a rich memory source:
+Before you design external memory, recognize that the repository itself is a memory source:
 
 | Source | What it provides |
 |---|---|
@@ -49,7 +49,7 @@ flowchart LR
 
 ### Phase 1: Load (context hydration)
 
-Before the agent touches code, the orchestrator loads external memory via two parallel `RetrieveMemoryRecordsCommand` calls (semantic + episodic, 5-second timeout). Results are trimmed to a token budget and injected into the agent's system prompt. The budget is 2,000 tokens unless the repository's `RepoConfig` record holds a `memory_token_budget`, which a Blueprint sets with `agent.memoryTokenBudget` (see [Repository onboarding](./REPO_ONBOARDING.md#platform-defaults)).
+Before the agent touches code, the orchestrator loads external memory with two parallel `RetrieveMemoryRecordsCommand` calls (semantic and episodic, 5-second timeout). Results are trimmed to a token budget and injected into the agent's system prompt. The budget is 2,000 tokens unless the repository's `RepoConfig` record holds a `memory_token_budget`, which a Blueprint sets with `agent.memoryTokenBudget` (see [Repository onboarding](./REPO_ONBOARDING.md#platform-defaults)).
 
 | Retrieval | Strategy | Namespace | What it returns |
 |---|---|---|---|
@@ -60,26 +60,26 @@ Before the agent touches code, the orchestrator loads external memory via two pa
 
 ### Phase 2: Work (agent execution)
 
-The agent operates with its loaded context. No additional memory reads are needed for most tasks. For complex tasks, the agent may query memory mid-execution.
+The agent works with its loaded context. Most tasks need no additional memory reads. For complex tasks, the agent may query memory mid-execution.
 
 ### Phase 3: Write (task end)
 
 After the PR is opened, the agent writes:
 
-1. **Task episode** - Structured summary: approach, files changed, PR number, difficulties, outcome
-2. **Repo learnings** - New knowledge discovered about the codebase
-3. **Self-feedback** - What context was missing that would have helped (see [EVALUATION.md](./EVALUATION.md))
+1. **Task episode.** A structured summary: approach, files changed, PR number, difficulties, outcome.
+2. **Repo learnings.** New knowledge discovered about the codebase.
+3. **Self-feedback.** What context was missing that would have helped (see [EVALUATION.md](./EVALUATION.md)).
 
-If the agent crashes before writing memory, the orchestrator writes a minimal episode as fallback (also fail-open).
+If the agent crashes before it writes memory, the orchestrator writes a minimal episode as a fallback. That write is also fail-open.
 
 All writes use `actorId = "owner/repo"` and `sessionId = taskId`. The extraction pipeline places records at the configured namespace paths.
 
 ### Phase 4: Feedback loop (async)
 
-Triggered by GitHub webhooks, not by agent execution:
+GitHub webhooks trigger this phase, not agent execution:
 
-- **PR review events** - Extract actionable rules via LLM, write to review feedback memory
-- **PR close/merge events** - Record outcome signal (positive/negative) on the task episode
+- **PR review events.** Extract actionable rules with an LLM and write them to review feedback memory.
+- **PR close and merge events.** Record the outcome signal (positive or negative) on the task episode.
 
 For the new pull requests that the hourly read of GitHub follows, the merge or close itself is already on the task record, and in the task's events as `pr_outcome_recorded` (see [Pull-request outcomes](./OBSERVABILITY.md#pull-request-outcomes) in OBSERVABILITY.md).
 
@@ -87,32 +87,32 @@ For the new pull requests that the hourly read of GitHub follows, the merge or c
 
 ### Short-term memory
 
-Session-scoped context (conversation, reasoning, tool results) that is lost when the session ends. Backed by AgentCore Memory within the MicroVM. Anything that must outlive the session is explicitly written to long-term memory.
+Short-term memory is session-scoped context (conversation, reasoning, tool results) that is lost when the session ends. AgentCore Memory within the MicroVM backs it. Anything that must outlive the session is explicitly written to long-term memory.
 
 ### Long-term memory
 
-Cross-session, durable memory with semantic search. The agent writes after each task; the orchestrator retrieves during context hydration.
+Long-term memory is durable across sessions and supports semantic search. The agent writes it after each task. The orchestrator retrieves it during context hydration.
 
 ### Code attribution
 
-Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers (via a git hook installed during `setup_repo()`; it also names the workflow and its step, see [OBSERVABILITY.md](./OBSERVABILITY.md#code-attribution)). The prompt version is a SHA-256 hash of deterministic prompt parts only (memory context is excluded because it varies per run). This enables queries like "what prompt led to this code change?" and supports the evaluation pipeline.
+Every agent commit carries `Task-Id:` and `Prompt-Version:` trailers. A git hook installed during `setup_repo()` adds them. The hook also names the workflow and its step (see [OBSERVABILITY.md](./OBSERVABILITY.md#code-attribution)). The prompt version is a SHA-256 hash of the deterministic prompt parts only. Memory context is excluded because it varies per run. The trailers allow queries like "what prompt led to this code change?" and support the evaluation pipeline.
 
 ### Review feedback memory
 
-The most novel component and the primary feedback loop between human reviewers and the agent. No shipping coding agent autonomously learns from PR reviews today.
+Review feedback memory is the most novel component and the primary feedback loop between human reviewers and the agent. No shipping coding agent learns from PR reviews autonomously today.
 
-**How it works:** A GitHub webhook fires on PR review events. A Lambda fetches the comments, calls Bedrock to extract generalizable rules (not one-off corrections), and writes them to memory namespaced per repository. At task start, these rules are retrieved and injected into the prompt.
+**How it works.** A GitHub webhook fires on PR review events. A Lambda fetches the comments, calls Bedrock to extract generalizable rules (not one-off corrections), and writes them to memory that is namespaced per repository. At task start, these rules are retrieved and injected into the prompt.
 
 **Design considerations:**
 
-- **Reviewer authority** - Maintainer feedback should carry more weight than contributor feedback
-- **Rule expiry** - Rules not relevant in N tasks may be stale. Consider TTL or relevance checks.
-- **Extraction quality** - The LLM prompt that extracts rules is critical. Vague extraction produces vague rules that match poorly on retrieval.
-- **Security** - PR review comments are attacker-controlled input. See [SECURITY.md](./SECURITY.md).
+- **Reviewer authority.** Maintainer feedback should carry more weight than contributor feedback.
+- **Rule expiry.** Rules not relevant in N tasks may be stale. Consider TTL or relevance checks.
+- **Extraction quality.** The LLM prompt that extracts rules is critical. Vague extraction produces vague rules that match poorly on retrieval.
+- **Security.** PR review comments are attacker-controlled input. See [SECURITY.md](./SECURITY.md).
 
 ### User preference memory
 
-Per-user preferences extracted from task descriptions (explicit) and review patterns (implicit). Lower priority than repo knowledge and review feedback.
+User preference memory holds per-user preferences extracted from task descriptions (explicit) and from review patterns (implicit). It has lower priority than repo knowledge and review feedback.
 
 ## AgentCore strategy mapping
 
@@ -127,18 +127,18 @@ Per-user preferences extracted from task descriptions (explicit) and review patt
 Namespace conventions:
 - `{actorId}` and `{sessionId}` are the only valid AgentCore template variables. Templates are set on extraction strategies at resource creation.
 - `actorId = "owner/repo"` for all writes. `sessionId = taskId` for episodic partitioning.
-- Changing namespace templates requires recreating the Memory resource (breaking infrastructure change).
-- Reads use the `namespacePath` field on [`RetrieveMemoryRecords`](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_RetrieveMemoryRecords.html) for hierarchical retrieval — episodic records live one level below the parent path so a hierarchical query is required to surface them.
+- A change to the namespace templates is a breaking infrastructure change, because the Memory resource must be recreated.
+- Reads use the `namespacePath` field on [`RetrieveMemoryRecords`](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_RetrieveMemoryRecords.html) for hierarchical retrieval. Episodic records live one level below the parent path, so a hierarchical query is required to return them.
 
 ## Memory consolidation
 
-Over time, memory accumulates contradictory records (e.g. "team uses Jest" from task #10, "team migrated to Vitest" from task #25). Without resolution, the agent receives conflicting guidance.
+Over time, memory accumulates contradictory records (for example, "team uses Jest" from task #10 and "team migrated to Vitest" from task #25). Without resolution, the agent receives conflicting guidance.
 
 **Strategy:**
-- **Favor recency** as baseline. Newer records supersede older contradictory records within the same scope.
-- **Scope-aware** - Contradictions within the same module favor recency. Contradictions across scopes coexist (both may be correct).
-- **Explicit supersession** for review rules - When a new rule contradicts an existing one, mark the old as superseded.
-- **Episodic reflection** - After every N tasks on a repo, AgentCore's episodic reflection generates higher-order patterns from episodes.
+- **Favor recency.** Recency is the baseline. Newer records supersede older contradictory records within the same scope.
+- **Scope-aware.** Contradictions within the same module favor recency. Contradictions across scopes coexist, because both may be correct.
+- **Explicit supersession for review rules.** When a new rule contradicts an existing one, mark the old rule as superseded.
+- **Episodic reflection.** After every N tasks on a repo, AgentCore's episodic reflection generates higher-order patterns from episodes.
 
 ## Error handling
 
@@ -151,7 +151,7 @@ Over time, memory accumulates contradictory records (e.g. "team uses Jest" from 
 
 ## Tiered implementation
 
-Memory components are validated incrementally. Each tier must demonstrate measurable improvement before proceeding.
+Memory components are validated tier by tier. Each tier must show a measurable improvement before the next tier starts.
 
 | Tier | Components | Status | What it tests |
 |---|---|---|---|
@@ -163,7 +163,7 @@ Memory components are validated incrementally. Each tier must demonstrate measur
 
 ## Security
 
-The memory system is an attack surface. OWASP classifies memory poisoning as **ASI06** (2026 Top 10 for Agentic Applications), recognizing that persistent memory attacks are fundamentally different from single-session prompt injection: a single poisoned entry can affect all future tasks on a repository.
+The memory system is an attack surface. OWASP classifies memory poisoning as **ASI06** (2026 Top 10 for Agentic Applications). The classification recognizes that persistent memory attacks differ from single-session prompt injection, because a single poisoned entry can affect all future tasks on a repository.
 
 ### Threat model
 
@@ -188,7 +188,7 @@ The memory system is an attack surface. OWASP classifies memory poisoning as **A
 
 ### Defense layers
 
-No single layer is sufficient. The target architecture follows six layers:
+No single layer is sufficient. The target architecture has six layers:
 
 ```mermaid
 flowchart TB
@@ -201,8 +201,8 @@ flowchart TB
 
 | Layer | Status | What it does |
 |---|---|---|
-| 1. Input moderation | **Implemented** | `sanitizeExternalContent()` strips HTML, injection patterns, control chars, bidi overrides. Content trust metadata tags each source. |
-| 2. Provenance tagging | **Implemented** | Source type, SHA-256 hash, and schema version on every write. Hash is audit trail (AgentCore transforms content, so read-path sanitization is the real defense). |
+| 1. Input moderation | **Implemented** | `sanitizeExternalContent()` strips HTML, injection patterns, control characters, and bidi overrides. Content trust metadata tags each source. |
+| 2. Provenance tagging | **Implemented** | Source type, SHA-256 hash, and schema version on every write. The hash is an audit trail. AgentCore transforms content, so read-path sanitization is the real defense. |
 | 3. Storage isolation | **Partial** | Per-repo namespace isolation. Token budget limits blast radius. Repo format validation prevents namespace confusion. |
 | 4. Trust-scored retrieval | Open | Planned: temporal decay, source reliability weighting, threshold filtering |
 | 5. Write-ahead validation | Open | Planned: separate model evaluates proposed memory updates before commit |

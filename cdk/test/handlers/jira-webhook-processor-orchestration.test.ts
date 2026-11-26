@@ -107,8 +107,6 @@ process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.ORCHESTRATION_TABLE_NAME = 'Orchestrations';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'Concurrency';
 process.env.MAX_CONCURRENT_TASKS_PER_USER = '10';
-// The processor screens and stores a parent's attachments only with these set
-// (read at module load); the clients it builds from them are never called here.
 process.env.ATTACHMENTS_BUCKET_NAME = 'attachments-bucket';
 process.env.GUARDRAIL_ID = 'gr-1';
 process.env.GUARDRAIL_VERSION = '1';
@@ -488,9 +486,6 @@ describe('jira-webhook-processor orchestration adapter', () => {
     );
   });
 
-  // A subtask is started from the summary and description stored on its row,
-  // which the first read of the parent wrote. One that was refused for its text
-  // and then reworded was sent again as it was, on every retry.
   describe('parent retry reads the subtasks again first', () => {
     const failedSnapshot = {
       ...snapshot,
@@ -531,7 +526,6 @@ describe('jira-webhook-processor orchestration adapter', () => {
         failedSnapshot.children,
         [reworded],
       );
-      // Before the rows are read again for the release, which sends their text.
       expect(refreshUnstartedTextMock.mock.invocationCallOrder[0])
         .toBeLessThan(loadOrchestrationMock.mock.invocationCallOrder[1]);
       expect(releaseReadyChildrenMock).toHaveBeenCalledTimes(1);
@@ -650,9 +644,6 @@ describe('jira-webhook-processor orchestration adapter', () => {
   });
 
   test('deletes its own attachment copies when a concurrent delivery seeded the graph first', async () => {
-    // The label is added twice within seconds: both deliveries read no
-    // orchestration and both store the parent's attachment under their own
-    // task id. The one that loses the seed is handed an empty extend.
     const stored = {
       attachment_id: 'att-1',
       type: 'file' as const,
@@ -803,8 +794,6 @@ describe('jira-webhook-processor orchestration adapter', () => {
   });
 
   describe('a graph stored under the same issue key by another Jira site', () => {
-    // The orchestration id hashes the bare issue key, and the rows of a site
-    // that was onboarded earlier stay in the table.
     const otherSiteSnapshot = {
       ...snapshot,
       meta: { ...snapshot.meta, credentials_ref: 'cloud-old' },
@@ -843,7 +832,6 @@ describe('jira-webhook-processor orchestration adapter', () => {
 
       expect(claimCommentAckMock).not.toHaveBeenCalled();
       expect(releaseReadyChildrenMock).not.toHaveBeenCalled();
-      // The comment is then handled like one on any issue without a graph.
       expect(reportIssueFailureMock).toHaveBeenCalledWith(
         expect.anything(),
         'ENG-1',

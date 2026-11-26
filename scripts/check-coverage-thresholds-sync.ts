@@ -26,12 +26,6 @@
  * test runners read those values from their own manifests, so each manifest
  * carries a copy; this script fails when a copy says something else.
  *
- * It compares the values a runner will read, never text: package.json through
- * ``JSON.parse``, TOML through mise's parser (``mise config get``) and
- * vite.config.ts by evaluating it. A number left behind in a comment, a
- * contract value that is a prefix of the real one and a setting that narrows
- * what is measured are all drift.
- *
  *   cdk, cli   the jest block of package.json, every key except those in
  *              JEST_FREE_KEYS; scripts.test, verbatim
  *   agent      [tool.coverage.run] and [tool.coverage.report] in
@@ -65,55 +59,27 @@ type Json = Record<string, unknown>;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CONTRACT = 'contracts/coverage-thresholds.json';
 
-/**
- * jest settings that cannot change which files a floor counts, which tests run or how a failed
- * run exits. Every other key of a jest block must be in the contract with the same value, so a
- * setting nobody thought of here (rootDir, projects, passWithNoTests, ...) is drift, not a way in.
- */
 const JEST_FREE_KEYS = [
   'cacheDirectory', 'clearMocks', 'coverageDirectory', 'coverageReporters', 'globalSetup', 'maxWorkers', 'reporters',
   'setupFiles', 'setupFilesAfterEnv', 'transform', 'watchPathIgnorePatterns', 'workerIdleMemoryLimit',
 ];
 
-/** The same for the test block of web/vite.config.ts. */
 const VITEST_FREE_KEYS = ['css', 'environment', 'setupFiles', 'testTimeout'];
 
-/**
- * The package.json files whose test script is the command the build runs. A flag there wins over
- * the settings of the runner, so the contract pins each script verbatim: a flag in any spelling,
- * a second command or another list of test files is drift.
- */
 const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json', 'web/package.json', 'integrations/jira-forge-app/package.json'];
 
-/**
- * The mise tasks the root build runs those scripts and the agent's pytest through, as mise names
- * them: ``//<directory>:<task>``. What comes after the script's name on a task line reaches the
- * runner as a flag would, and other keys of a task decide whether and how its line runs, so the
- * contract pins each task whole but for TASK_FREE_KEYS.
- */
 const TEST_TASKS = ['//cdk:test', '//cli:test', '//web:test', '//agent:test', '//:test:jira-forge-app'];
 
-/** Task keys that cannot change what a task runs. */
 const TASK_FREE_KEYS = ['depends', 'description'];
 
-/**
- * Files that pytest 9 and coverage.py 7 read before pyproject.toml, or in place of it, when they
- * sit next to it. With one of them present the tables pinned here are no longer the ones in force.
- */
+/** Files that pytest 9 and coverage.py 7 read before pyproject.toml, or in place of it, when they sit next to it. */
 const AGENT_SHADOW_CONFIGS = ['pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini'];
 
-/**
- * The settings of [tool.pytest.ini_options] that decide which tests pytest 9 collects. With a pattern that leaves
- * test modules out, pytest runs fewer tests and every gate stays green, so each of these has to be in the contract
- * with the same value, or in neither.
- */
 const PYTEST_COLLECTION_KEYS = ['testpaths', 'python_files', 'python_classes', 'python_functions', 'norecursedirs', 'collect_imported_tests'];
 
 /**
- * Config files that the launcher of a pinned command reads on top of the manifest the contract pins,
- * by the directories it looks in. mise 2026.10 merges each of these names into the mise.toml next
- * to it, or reads it in its place; yarn 1.22 and npm take settings for the way a script is run from
- * an rc file. With one of them a pinned task or script runs differently and its text stays the same.
+ * mise 2026.10 merges each of these names into the mise.toml next to it, or reads it in its place;
+ * yarn 1.22 and npm take settings for the way a script is run from an rc file.
  * Not listed: mise.<env>.toml, which mise reads only when MISE_ENV names that environment.
  */
 const LAUNCHER_CONFIGS = [
@@ -129,7 +95,6 @@ const LAUNCHER_CONFIGS = [
   { reader: 'npm', directories: ['integrations/jira-forge-app'], names: ['.npmrc'] },
 ];
 
-/** The files that the Forge test script holds to its floors (--test-coverage-include). */
 const FORGE_SOURCES = 'integrations/jira-forge-app/src';
 
 const errors: string[] = [];
@@ -139,7 +104,6 @@ function readJson(file: string): Json {
   return JSON.parse(readFileSync(join(root, file), 'utf8')) as Json;
 }
 
-/** A section of the contract. A missing one is an error, not a reason to skip a package. */
 function section(contract: Json, ...path: string[]): Json {
   const value = path.reduce<unknown>((node, key) => (node as Json | undefined)?.[key], contract);
   if (typeof value !== 'object' || value === null) {
@@ -148,7 +112,7 @@ function section(contract: Json, ...path: string[]): Json {
   return value as Json;
 }
 
-/** A value from a TOML file as mise's parser prints it: a scalar bare, a table as ``key = value`` lines. */
+/** ``mise config get`` prints a scalar bare, a table as ``key = value`` lines. */
 function toml(file: string, key: string): string {
   try {
     return execFileSync('mise', ['config', 'get', '--file', join(root, file), key], {
@@ -161,10 +125,6 @@ function toml(file: string, key: string): string {
   }
 }
 
-/**
- * A TOML table of plain values (booleans, numbers, strings, arrays of those) as an object: every key, or only
- * ``keys`` of a table that also holds values this check cannot read.
- */
 function tomlTable(file: string, key: string, keys?: string[]): Json {
   const lines = toml(file, key).split('\n').filter(line => line && (!keys || keys.some(name => line.startsWith(`${name} = `))));
   return Object.fromEntries(lines.map((line) => {
@@ -178,11 +138,6 @@ function tomlTable(file: string, key: string, keys?: string[]): Json {
   }));
 }
 
-/**
- * Of ``paths``, the files git tracks. A config file kept for one machine is not drift until it is
- * committed, and a CI checkout holds nothing else. A tree without ``.git`` (a source archive)
- * cannot tell the two apart: there, the paths that exist.
- */
 function tracked(paths: string[]): string[] {
   if (!existsSync(join(root, '.git'))) {
     return paths.filter(path => existsSync(join(root, path)));
@@ -196,14 +151,12 @@ function tracked(paths: string[]): string[] {
   }
 }
 
-/** The arguments of a shell command line, quotes removed. */
 function args(command: unknown): string[] {
   return String(command).replace(/['"]/g, '').split(/\s+/).filter(Boolean);
 }
 
 const show = (value: unknown): string => (value === undefined ? 'not set' : JSON.stringify(value));
 
-/** Record drift unless the value a runner reads equals the contract's. */
 function pin(where: string, actual: unknown, contractKey: string, expected: unknown): void {
   checked += 1;
   if (!isDeepStrictEqual(actual, expected)) {
@@ -211,14 +164,12 @@ function pin(where: string, actual: unknown, contractKey: string, expected: unkn
   }
 }
 
-/** Pin ``keys`` and every key the contract names. A key that only one side has is drift. */
 function pinKeys(where: string, actual: Json, contractKey: string, expected: Json, keys: string[] = Object.keys(actual)): void {
   for (const key of new Set([...keys, ...Object.keys(expected)])) {
     pin(`${where} ${key}`, actual[key], `${contractKey}.${key}`, expected[key]);
   }
 }
 
-/** The keys of a runner's settings that the contract has to pin: all but the free ones. */
 const notFree = (settings: Json, free: string[]): string[] => Object.keys(settings).filter(key => !free.includes(key));
 
 function checkJest(contract: Json, pkg: string): void {
@@ -227,7 +178,6 @@ function checkJest(contract: Json, pkg: string): void {
 }
 
 async function checkWeb(contract: Json): Promise<void> {
-  // The config is code, so read what it returns for a vitest run rather than its text.
   const { default: exported } = await import(pathToFileURL(join(root, 'web/vite.config.ts')).href) as { default: unknown };
   const env = { command: 'serve', mode: 'test', isSsrBuild: false, isPreview: false };
   const config = (typeof exported === 'function' ? await exported(env) : exported) as Json;
@@ -236,7 +186,6 @@ async function checkWeb(contract: Json): Promise<void> {
   pinKeys('web/vite.config.ts test', test, 'vitest.web', pinned, notFree(test, VITEST_FREE_KEYS));
   pinKeys('web/vite.config.ts test.coverage', (coverage ?? {}) as Json, 'vitest.web.coverage', (pinnedCoverage ?? {}) as Json);
 
-  // The patterns above are relative to the root. Moved, they match no file, and a floor over no file is met.
   pin('web/vite.config.ts root', config.root, 'vitest.web (no root: the patterns are relative to web/)', undefined);
 }
 
@@ -271,7 +220,7 @@ function checkLauncherConfigs(): void {
 
 /**
  * Node leaves out of its coverage the code that a ``node:coverage`` comment marks, so one comment takes a
- * module out of the floors, and nothing lints the Forge app that could refuse it.
+ * module out of the floors.
  */
 function checkForgeIgnoreComments(): void {
   checked += 1;
@@ -289,8 +238,8 @@ function checkAgent(contract: Json): void {
   pinKeys('agent/pyproject.toml [tool.coverage.run]', tomlTable('agent/pyproject.toml', 'tool.coverage.run'), 'pytest.agent.run', run);
   pinKeys('agent/pyproject.toml [tool.coverage.report]', tomlTable('agent/pyproject.toml', 'tool.coverage.report'), 'pytest.agent.report', report);
 
-  // pytest-cov flags win over pyproject.toml. --cov-report only chooses output formats. --cov-config names the file
-  // that holds the two tables above: without it coverage.py reads the file a COVERAGE_RCFILE variable names instead.
+  // pytest-cov flags win over pyproject.toml, and --cov-report only chooses output formats. Without --cov-config,
+  // coverage.py reads the file that a COVERAGE_RCFILE variable names.
   const flags = args(toml('agent/mise.toml', 'tasks.test.run')).filter(arg => /^--(no-)?cov/.test(arg) && !arg.startsWith('--cov-report='));
   const expected = [
     ...(run.source as string[]).map(source => `--cov=${source}`),
@@ -300,14 +249,11 @@ function checkAgent(contract: Json): void {
   ];
   pin('agent/mise.toml tasks.test.run coverage flags', flags.sort(), 'pytest.agent (run.source, run.branch, report.fail_under) with --cov-config=pyproject.toml', expected.sort());
 
-  // pytest puts its addopts setting in front of that command line, where a flag can switch coverage off or keep the
-  // tests from running. It is pinned whole: no list of such flags is ever complete. pytest 9 refuses a pyproject.toml
-  // that also fills [tool.pytest] itself, so this table is the one in force.
+  // pytest 9 refuses a pyproject.toml that fills both [tool.pytest] and [tool.pytest.ini_options], so this table
+  // is the one in force.
   const pytest = section(contract, 'pytest', 'agent');
   pin('agent/pyproject.toml [tool.pytest.ini_options] addopts', toml('agent/pyproject.toml', 'tool.pytest.ini_options.addopts'), 'pytest.agent.addopts', pytest.addopts);
 
-  // Only these keys are read: the table also holds the warning filters, and mise prints a pattern with a backslash
-  // or a double quote in a form tomlTable does not parse.
   const collection = tomlTable('agent/pyproject.toml', 'tool.pytest.ini_options', PYTEST_COLLECTION_KEYS);
   for (const key of PYTEST_COLLECTION_KEYS) {
     pin(`agent/pyproject.toml [tool.pytest.ini_options] ${key}`, collection[key], `pytest.agent.${key}`, pytest[key]);
@@ -331,7 +277,6 @@ try {
   checkForgeIgnoreComments();
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err);
-  // Not drift, so not the advice below: evaluating web/vite.config.ts takes the packages it imports.
   if ((err as { code?: string }).code === 'ERR_MODULE_NOT_FOUND' && message.startsWith('Cannot find package')) {
     console.error(`Cannot check ${CONTRACT}: ${message}.`);
     console.error('The check evaluates web/vite.config.ts, so dependencies have to be installed: run `mise run install`.');

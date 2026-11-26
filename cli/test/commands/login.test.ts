@@ -33,15 +33,11 @@ jest.mock('@aws-sdk/client-cognito-identity-provider', () => ({
   ChallengeNameType: { NEW_PASSWORD_REQUIRED: 'NEW_PASSWORD_REQUIRED' },
 }));
 
-// Stub the confirmed-password prompt so the interactive first-login path can be
-// exercised without a real TTY.
 const mockPromptNewPassword = jest.fn();
 jest.mock('../../src/commands/change-password', () => ({
   promptNewPasswordWithConfirmation: () => mockPromptNewPassword(),
 }));
 
-// Controllable readline so the non-TTY `promptPassword` path (piped stdin) can
-// be driven deterministically — including the resolve-before-close ordering.
 type RlHandlers = { line?: (line: string) => void; close?: () => void };
 const rlHandlers: RlHandlers = {};
 let rlCloseEmitsSynchronously = false;
@@ -52,7 +48,6 @@ jest.mock('readline', () => ({
       if (event === 'close') rlHandlers.close = handler as () => void;
     },
     close: () => {
-      // Mirror readline: 'close' fires synchronously from close().
       if (rlCloseEmitsSynchronously) rlHandlers.close?.();
     },
   })),
@@ -111,10 +106,6 @@ describe('login command', () => {
   });
 
   test('piped password (non-TTY, no --password): resolves before close so the race does not reject', async () => {
-    // The regression: promptPassword closed the readline *before* resolving, and
-    // 'close' fires synchronously and rejects "No password provided." — so a
-    // successfully-read line was lost. With resolve-before-close a piped
-    // password logs in cleanly.
     const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
     mockSend.mockResolvedValue({
@@ -124,8 +115,6 @@ describe('login command', () => {
     try {
       const cmd = makeLoginCommand();
       const done = cmd.parseAsync(['node', 'test', '--username', 'user@example.com']);
-      // Deliver the piped line; promptPassword then calls rl.close() (which our
-      // mock fires synchronously) — resolve must have already won.
       rlHandlers.line?.('PipedPass1!');
       await done;
 
@@ -155,16 +144,8 @@ describe('login command', () => {
     }
   });
 
-  // Command-layer seam test crossing login.ts → auth.ts. The auth-layer
-  // "no callback" case tests a shape the CLI must actually produce; this proves
-  // the command does not hand `login` a prompt when the account challenges for
-  // a new password on a non-interactive invocation (`--password`), so the guard
-  // in `login` fires with a clear error instead of hanging on stdin. This is
-  // the seam that regressed when the callback was passed unconditionally.
   test('first-login challenge + non-interactive (--password) throws the guard error and never reads stdin', async () => {
     mockSend.mockResolvedValue({ ChallengeName: 'NEW_PASSWORD_REQUIRED', Session: 'sess-abc' });
-    // If the command wrongly reached a stdin prompt this would hang the test;
-    // spy so any read attempt is an assertable failure rather than a timeout.
     const stdinOn = jest.spyOn(process.stdin, 'on');
     const stdinResume = jest.spyOn(process.stdin, 'resume').mockImplementation(() => process.stdin);
 
@@ -177,8 +158,6 @@ describe('login command', () => {
       ]),
     ).rejects.toThrow(/requires a new password on first login/);
 
-    // The callback console line must not have been emitted, and no stdin
-    // 'data' listener should have been attached to answer a prompt.
     expect(consoleSpy).not.toHaveBeenCalledWith('This account requires a new password on first login.');
     expect(stdinResume).not.toHaveBeenCalled();
     expect(stdinOn.mock.calls.some((c) => c[0] === 'data')).toBe(false);
@@ -201,12 +180,7 @@ describe('login command', () => {
     });
     mockPromptNewPassword.mockResolvedValue('N3w$trongPass!');
 
-    // Force the interactive branch: TTY present, --password absent — this is the
-    // only path that supplies the new-password callback to `login`. The initial
-    // masked `promptPassword` reads from raw-mode stdin, so fake a TTY stdin and
-    // feed the temp password through the 'data' handler it registers. Assigning
-    // the methods directly (rather than jest.spyOn) is required because a piped
-    // test stdin has no `setRawMode` to spy on.
+    // A piped stdin has no `setRawMode`, and jest.spyOn rejects a property that does not exist.
     const original: Record<string, unknown> = {};
     const patch = (key: string, value: unknown): void => {
       original[key] = (process.stdin as unknown as Record<string, unknown>)[key];
@@ -224,7 +198,6 @@ describe('login command', () => {
     patch('removeListener', () => process.stdin);
     patch('on', (event: string, handler: (chunk: Buffer) => void) => {
       if (event === 'data') {
-        // Deliver the temp password + Enter so promptPassword resolves.
         setImmediate(() => handler(Buffer.from('TempPass1!\n')));
       }
       return process.stdin;

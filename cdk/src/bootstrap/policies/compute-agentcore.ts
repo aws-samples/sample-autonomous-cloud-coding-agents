@@ -21,9 +21,6 @@ import { aws_iam as iam } from 'aws-cdk-lib';
 
 /**
  * Returns the IAM PolicyDocument for the IaCRole-ABCA-Compute-AgentCore role.
- *
- * Covers: Bedrock AgentCore permissions (extracted from Observability policy
- * to enable per-compute-variant bootstrap configuration).
  */
 export function computeAgentcorePolicy(): iam.PolicyDocument {
   return new iam.PolicyDocument({

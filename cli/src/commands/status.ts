@@ -42,11 +42,6 @@ export function makeStatusCommand(): Command {
 
       const client = new ApiClient();
 
-      // ``--wait`` is a pure blocking flag: it polls until terminal,
-      // then renders the SAME snapshot the default path would. There
-      // is no "rich vs compact" split — the snapshot is the status
-      // surface, ``--wait`` just delays it until there is a final
-      // answer. JSON output follows the same rule: same shape, later.
       if (opts.wait) {
         const task = await waitForTask(client, taskId, {
           maxWaitMs: opts.maxWait !== undefined ? opts.maxWait * 1_000 : undefined,
@@ -55,9 +50,6 @@ export function makeStatusCommand(): Command {
         if (opts.output === 'json') {
           console.log(formatJson(task));
         } else {
-          // Fetch recent events so the snapshot renders consistently
-          // with the no-wait path. Cheap follow-up call; the task has
-          // already terminated, so the event window is stable.
           const { recentEvents } = await client.getStatusSnapshot(taskId);
           console.log(formatStatusSnapshot(task, recentEvents));
         }

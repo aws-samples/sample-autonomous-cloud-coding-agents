@@ -1,8 +1,7 @@
 """Cedar policy engine — three-outcome (allow / deny / require-approval).
 
 Uses cedarpy (in-process Cedar evaluation) to enforce per-task-type tool
-restrictions. See ``docs/design/CEDAR_HITL_GATES.md`` for the full design;
-short summary below.
+restrictions. See ``docs/design/CEDAR_HITL_GATES.md`` for the full design.
 
 **Three outcomes** (§2, §6.2). Each ``evaluate_tool_use`` call walks up to
 two Cedar evaluations interleaved with in-process caches:
@@ -20,24 +19,20 @@ two Cedar evaluations interleaved with in-process caches:
        match → ALLOW; no match → fall through to step 4.
     4. Default ALLOW.
 
-**Cedar-entity conventions** preserved from Phase 1: user-supplied values
-(bash commands, file paths) use sentinel resource IDs (``Agent::File::file``,
+**Cedar-entity conventions**: user-supplied values (bash commands, file
+paths) use sentinel resource IDs (``Agent::File::file``,
 ``Agent::BashCommand::command``) with the real value in ``context.command`` /
-``context.file_path``, because Cedar entity UIDs cannot contain arbitrary
-characters.
+``context.file_path``.
 
 **Annotations** expected on every rule in hard_deny/soft_deny files
 (§5.2): ``@rule_id`` (globally unique, kebab/snake_case), ``@tier``
 ("hard"|"soft"), ``@approval_timeout_s`` (int seconds ≥ 30; soft-deny
 only), ``@severity`` ("low"|"medium"|"high"; soft-deny only), ``@category``
-(free-form; UX grouping). Annotation recovery goes through cedarpy's
-``policies_to_json_str()``; the round-trip contract is locked by
-``tests/test_cedarpy_annotations_contract.py``.
+(free-form; UX grouping).
 
 **Fail-closed posture** (§13): any cedarpy exception during evaluation
 returns ``Outcome.DENY`` with reason ``"fail-closed: <ExceptionType>"``.
-Invalid blueprint policies raise at ``PolicyEngine.__init__`` (task fails
-to start rather than running with broken rules).
+Invalid blueprint policies raise at ``PolicyEngine.__init__``.
 
 Example — correct custom policy::
 
@@ -72,31 +67,24 @@ from shell import log
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-# ---------------------------------------------------------------------------
-# Constants (§3, §5.2, §12.9)
-# ---------------------------------------------------------------------------
-
-WARN_TIMEOUT_S: int = 120  # IMPL-25: sub-120s emits WARN on blueprint load
+WARN_TIMEOUT_S: int = 120
 
 
 _SHARED_CONSTANTS = SHARED_CONSTANTS
 _AGC = _SHARED_CONSTANTS["approval_gate_cap"]
-DEFAULT_APPROVAL_GATE_CAP: int = int(_AGC["default"])  # decision #13 default
+DEFAULT_APPROVAL_GATE_CAP: int = int(_AGC["default"])
 APPROVAL_GATE_CAP_MIN: int = int(_AGC["min"])
 APPROVAL_GATE_CAP_MAX: int = int(_AGC["max"])
 _ATS = _SHARED_CONSTANTS["approval_timeout_s"]
-FLOOR_TIMEOUT_S: int = int(_ATS["min"])  # §6 decision #6: rejected below this at load
-DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])  # §6 decision #6 default
-#: Canonical ``created_at`` format of approval rows (UTC, whole seconds).
+FLOOR_TIMEOUT_S: int = int(_ATS["min"])
+DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])
 APPROVAL_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def approval_deadline_epoch(created_at: str, timeout_s: int) -> int:
     """Wall-clock expiry (epoch seconds) of an approval row: ``created_at + timeout_s``.
 
-    The single definition shared by the gate that writes ``deadline_epoch``, the
-    in-process wait and the MicroVM suspend/resume identity check, so all three
-    agree with the coordinator. Raises ValueError for a non-canonical timestamp.
+    Raises ValueError for a non-canonical timestamp.
     """
     created = datetime.strptime(created_at, APPROVAL_TIMESTAMP_FORMAT).replace(tzinfo=UTC)
     if created.strftime(APPROVAL_TIMESTAMP_FORMAT) != created_at:
@@ -105,7 +93,6 @@ def approval_deadline_epoch(created_at: str, timeout_s: int) -> int:
 
 
 def _validate_constants() -> None:
-    """Fail-fast on invariant violations in contracts/constants.json."""
     if FLOOR_TIMEOUT_S <= 0:
         raise ValueError(
             f"contracts/constants.json: approval_timeout_s.min must be > 0, got {FLOOR_TIMEOUT_S}"
@@ -139,30 +126,21 @@ def _validate_constants() -> None:
 
 
 _validate_constants()
-CACHE_MAX_ENTRIES: int = 50  # §12.9: decoupled from approvalGateCap
-CACHE_TTL_S: float = 60.0  # §12.8 sliding-window TTL on DENIED/TIMED_OUT
-POLICIES_MAX_BYTES: int = 64 * 1024  # finding #12: reject blueprints > 64 KB
-APPROVAL_RATE_LIMIT: int = 20  # §12.9 per-container per-minute approval writes
-APPROVAL_RATE_WINDOW_S: float = 60.0  # sliding window paired with APPROVAL_RATE_LIMIT
+CACHE_MAX_ENTRIES: int = 50
+CACHE_TTL_S: float = 60.0
+POLICIES_MAX_BYTES: int = 64 * 1024
+APPROVAL_RATE_LIMIT: int = 20
+APPROVAL_RATE_WINDOW_S: float = 60.0
 
 _SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 _DEFAULT_SEVERITY = "medium"
 _VALID_SEVERITIES = frozenset(_SEVERITY_ORDER)
 
-# Tool group membership (§6.4 decision #21). Resolves tool_group:file_write
-# scope to {Write, Edit} at runtime.
 TOOL_GROUPS: dict[str, frozenset[str]] = {
     "file_write": frozenset({"Write", "Edit"}),
 }
 
-# Location of built-in policy files. Resolved relative to this module so the
-# Docker image can ship them alongside src/.
 _POLICIES_DIR = Path(__file__).resolve().parent.parent / "policies"
-
-
-# ---------------------------------------------------------------------------
-# Outcome + PolicyDecision (§6.1)
-# ---------------------------------------------------------------------------
 
 
 class Outcome(StrEnum):
@@ -182,10 +160,8 @@ class Outcome(StrEnum):
 class PolicyDecision:
     """Result of a Cedar policy evaluation.
 
-    Fields beyond ``outcome`` + ``reason`` + ``duration_ms`` are populated
-    only on ``REQUIRE_APPROVAL``. ``.allowed`` is the backward-compat shim
-    for Phase 1a/1b/2 callers that predate the three-outcome engine and
-    treat this as a simple allow/deny boolean.
+    ``timeout_s``, ``severity`` and ``matching_rule_ids`` are populated only
+    on ``REQUIRE_APPROVAL``.
     """
 
     outcome: Outcome
@@ -194,32 +170,11 @@ class PolicyDecision:
     severity: str | None = None
     matching_rule_ids: tuple[str, ...] = ()
     duration_ms: float = 0.0
-    # IMPL-23: populated only when Step 2.5 of evaluate_tool_use returns
-    # a cache-hit DENY. Contains the payload for the `policy_decision`
-    # milestone with `decision_source="recent_decision_cache"`; the hook
-    # forwards it to progress_writer.write_policy_decision_cached().
-    # Observability-only — NOT part of __eq__/__hash__: two cache-hit
-    # decisions with different original_decision_ts values still
-    # represent the same deny outcome.
     cache_hit_metadata: dict | None = field(default=None, compare=False)
-    # #251 (decision E): structured discriminator for environmental
-    # fail-closed denies (Cedar engine errored / unavailable) vs.
-    # intentional hard-denies and cache-driven denies. The hook branches
-    # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
-    # string match — to decide whether to emit a ``policy_fail_closed``
-    # blocker event. Set True ONLY at engine-error/unavailable deny sites;
-    # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
-    # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
-    # legacy equality-based tests predate the field).
     fail_closed: bool = field(default=False, compare=False)
 
     @property
     def allowed(self) -> bool:
-        """True only when outcome == ALLOW. DENY and REQUIRE_APPROVAL both
-        map to False so legacy ``if not decision.allowed: return deny`` callers
-        keep blocking soft-deny hits (preserving at-rest behavior until the
-        PreToolUse hook is extended to the three-outcome path in Chunk 3).
-        """
         return self.outcome == Outcome.ALLOW
 
     @classmethod
@@ -256,23 +211,9 @@ class PolicyDecision:
         )
 
 
-# ---------------------------------------------------------------------------
-# Allowlist (§6.4)
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class _CachedDecision:
-    """In-process recent-decision cache entry.
-
-    ``inserted_at`` is a monotonic timestamp used for TTL/LRU; it is NOT
-    safe to surface in events (monotonic clocks aren't wall-clock and
-    restart at container boot). ``original_decision_ts`` is the ISO-8601
-    wall-clock string captured at record time so IMPL-23 cache-hit
-    events can report when the original decision landed.
-    """
-
-    decision: str  # "DENIED" | "TIMED_OUT"
+    decision: str
     reason: str
     inserted_at: float
     original_decision_ts: str
@@ -281,10 +222,9 @@ class _CachedDecision:
 class ApprovalAllowlist:
     """Runtime scope allowlist, seeded from ``initial_approvals`` at task start.
 
-    See §6.4. ``matches`` checks tool-scope fast paths (all_session,
-    tool_type, tool_group, bash_pattern, write_path); rule-scope matches
-    are checked POST soft-deny-eval in ``evaluate_tool_use`` because
-    rule_ids are not known until Cedar reports matching policies.
+    ``matches`` checks tool-scope fast paths (all_session, tool_type,
+    tool_group, bash_pattern, write_path); rule-scope matches are checked
+    after the soft-deny eval in ``evaluate_tool_use``.
     """
 
     def __init__(self, initial_scopes: list[str] | None = None) -> None:
@@ -303,13 +243,9 @@ class ApprovalAllowlist:
 
         Whitespace around both the prefix and the value is stripped so
         ``"tool_type: Read"`` and ``" tool_type:Read "`` normalize to the
-        same internal state; empty-after-strip values are rejected so
-        ``"tool_type:"`` fails loud (finding #6 from Chunk 2 review).
+        same internal state; empty-after-strip values are rejected.
         Case is preserved verbatim — ``"tool_type:read"`` will not match
-        the ``"Read"`` tool name at runtime. That's intentional (Cedar
-        `like` is case-sensitive) but the CLI surfaces a WARN on uppercase
-        ``write_path:`` globs to flag the dev-vs-prod fnmatch footgun
-        (§5.5 finding #15).
+        the ``"Read"`` tool name at runtime.
         """
         normalized = scope.strip()
         if normalized == "all_session":
@@ -338,7 +274,6 @@ class ApprovalAllowlist:
 
     @property
     def rule_ids(self) -> frozenset[str]:
-        """Snapshot of rule-ID scopes, checked post-soft-deny in the engine."""
         return frozenset(self._rule_ids)
 
     def matches(self, tool_name: str, tool_input: dict) -> bool:
@@ -352,7 +287,6 @@ class ApprovalAllowlist:
                 return True
         if tool_name == "Bash":
             cmd = tool_input.get("command", "")
-            # fnmatch semantics documented as Cedar-`like` superset (§5.5).
             if any(fnmatch(cmd, pat) for pat in self._bash_patterns):
                 return True
         if tool_name in ("Write", "Edit"):
@@ -362,26 +296,14 @@ class ApprovalAllowlist:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Recent-decision cache (§6.2, §12.8, §12.9)
-# ---------------------------------------------------------------------------
-
-
 class RecentDecisionCache:
     """In-process LRU cache of recent DENIED/TIMED_OUT outcomes.
 
-    Bounded at 50 entries (``CACHE_MAX_ENTRIES``) INDEPENDENT of the per-task
-    ``approvalGateCap`` (§12.9): a blueprint that raises the gate cap to 200
-    does NOT get a larger cache. Two concerns, two bounds: cap = UX ceiling,
-    cache = engine memory bound.
+    Bounded at ``CACHE_MAX_ENTRIES`` entries, independent of the per-task
+    ``approvalGateCap``. TTL is ``CACHE_TTL_S`` on each entry. Populated only
+    on DENIED/TIMED_OUT, never on APPROVED.
 
-    TTL is 60s on each entry; ``get`` skips expired entries without eviction
-    (eviction happens lazily on overflow). Cache is populated only on
-    DENIED/TIMED_OUT — NEVER on APPROVED (so a just-approved call does not
-    auto-deny on the next identical invocation).
-
-    **Session-scoped**: cleared on container restart. Documented caveat in
-    §12.8 — not a bug. Persistent cache is §17.5 future work.
+    Session-scoped: cleared on container restart.
     """
 
     def __init__(
@@ -392,16 +314,6 @@ class RecentDecisionCache:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._entries: OrderedDict[tuple[str, str], _CachedDecision] = OrderedDict()
-        # Rule-level cache: keyed by ``(tool_name, rule_id)``, populated
-        # alongside the input-hash cache whenever a DENIED outcome
-        # carries ``matching_rule_ids``. The input-hash cache catches
-        # literal retries of the same command; the rule cache catches
-        # *semantic* retries — e.g. a user denied ``git push --force
-        # origin branch-a`` should also fast-deny ``git push --force
-        # origin branch-b`` because both resolve to the same
-        # ``force_push_any`` rule. Without this the agent can burn
-        # through its max_turns budget hammering on variations the
-        # user has already said no to (observed in E2E Phase 4).
         self._rule_entries: OrderedDict[tuple[str, str], _CachedDecision] = OrderedDict()
         self._max_entries = max_entries
         self._ttl_s = ttl_s
@@ -418,11 +330,8 @@ class RecentDecisionCache:
         """Insert a DENIED/TIMED_OUT entry. Evicts LRU on overflow.
 
         ``original_decision_ts`` is the ISO-8601 wall-clock time of the
-        original approval decision that seeded this cache entry. Surfaced
-        on subsequent cache-hit events (IMPL-23) so operators can correlate
-        cache-driven denies back to the originating gate. Falsy values
-        (``None`` or empty string) fall back to "now" at record time, so
-        legacy test callers and corrupted outcome rows keep working.
+        original approval decision that seeded this cache entry. Falsy values
+        (``None`` or empty string) fall back to "now" at record time.
         """
         if decision not in ("DENIED", "TIMED_OUT"):
             raise ValueError(f"RecentDecisionCache only accepts DENIED/TIMED_OUT, got {decision!r}")
@@ -446,14 +355,10 @@ class RecentDecisionCache:
         reason: str,
         original_decision_ts: str | None = None,
     ) -> None:
-        """Insert a rule-level DENIED/TIMED_OUT entry.
+        """Insert a rule-level entry. Evicts LRU on overflow.
 
-        Called once per ``matching_rule_ids`` entry on a DENIED outcome
-        so subsequent tool calls that hit the same rule are
-        auto-denied without a fresh approval round-trip. Only ``DENIED``
-        is recorded here — ``TIMED_OUT`` is more ambiguous (user was
-        away, not actively refusing) so the existing input-hash cache
-        is the safer bound for it.
+        Only ``DENIED`` is recorded here; any other ``decision`` raises
+        ValueError.
         """
         if decision != "DENIED":
             raise ValueError(
@@ -479,21 +384,15 @@ class RecentDecisionCache:
         if entry is None:
             return None
         if self._clock() - entry.inserted_at > self._ttl_s:
-            # Expired; drop it opportunistically.
             del self._entries[key]
             return None
-        # LRU-touch so an active retry pattern stays in the window.
         self._entries.move_to_end(key)
         return entry
 
     def get_rule_decision(
         self, tool_name: str, rule_ids: Iterable[str]
     ) -> tuple[str, _CachedDecision] | None:
-        """Return ``(rule_id, entry)`` for the first non-expired rule hit, or None.
-
-        Returns the matched rule_id separately from the entry so the
-        caller can surface it on the cache-hit metadata for operators.
-        """
+        """Return ``(rule_id, entry)`` for the first non-expired rule hit, or None."""
         for rule_id in rule_ids:
             key = (tool_name, rule_id)
             entry = self._rule_entries.get(key)
@@ -507,19 +406,12 @@ class RecentDecisionCache:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Annotation handling (§5.2, §6.3, §12.4)
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class _ParsedRule:
-    """Internal shape: one Cedar policy's annotations, keyed by policy_id."""
-
     policy_id: str  # Internal cedarpy ID (e.g. "policy0")
     rule_id: str | None
     tier: str | None
-    effect: str | None  # "permit" or "forbid" — used to gate base_permit exemption
+    effect: str | None
     approval_timeout_s: int | None
     severity: str | None
 
@@ -532,7 +424,6 @@ def _parse_policy_set(cedarpy_module, policies_text: str) -> dict:
 
 
 def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_ParsedRule]:
-    """Read every static policy's annotations in cedarpy's positional order."""
     parsed = _parse_policy_set(cedarpy_module, policies_text)
     rules: list[_ParsedRule] = []
     for pid, body in parsed.get("staticPolicies", {}).items():
@@ -562,7 +453,6 @@ def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_Parse
 def _route_operator_policies(
     cedarpy_module, extra_policies: list[str], blueprint_policies: list[str]
 ) -> tuple[list[str], list[str]]:
-    """Keep each entry intact. Only entries without a tier or rule ID get a generated ID."""
     hard: list[str] = []
     soft: list[str] = []
     legacy_count = 0
@@ -607,21 +497,8 @@ def _route_operator_policies(
 
 
 def _validate_tier(rules: list[_ParsedRule], expected_tier: str, source: str) -> None:
-    """Every rule in a tier file MUST declare matching @tier + @rule_id.
-
-    Exception: ``base_permit`` is allowed without @tier ONLY when it's a
-    ``permit`` effect — the neutral catch-all at the top of each tier.
-    A misnamed ``forbid`` annotated ``@rule_id("base_permit")`` would
-    otherwise bypass validation entirely (silent-failure finding #7 from
-    Chunk 2 review); restricting the exemption to ``effect == "permit"``
-    forces genuine forbid rules through the regular validation path.
-    """
     seen_rule_ids: set[str] = set()
     for rule in rules:
-        # Unannotated base permit with `permit` effect is the reserved
-        # catch-all; any other shape (forbid with rule_id "base_permit",
-        # permit with a non-neutral tier annotation) falls through to the
-        # regular validation below.
         if rule.rule_id == "base_permit" and rule.tier is None and rule.effect == "permit":
             seen_rule_ids.add("base_permit")
             continue
@@ -646,7 +523,6 @@ def _validate_tier(rules: list[_ParsedRule], expected_tier: str, source: str) ->
                         f"floor {FLOOR_TIMEOUT_S}s"
                     )
                 if rule.approval_timeout_s < WARN_TIMEOUT_S:
-                    # IMPL-25: advisory WARN, not strict reject.
                     log(
                         "WARN",
                         f"{source}: rule {rule.rule_id!r} has "
@@ -666,13 +542,6 @@ def _merge_annotations(
     matching_policy_ids: list[str],
     task_default_timeout_s: int,
 ) -> tuple[list[str], int, str]:
-    """Merge annotations across multiple matching soft-deny policies (§6.3).
-
-    Timeout: min across rules (clamped by FLOOR_TIMEOUT_S). Severity: max.
-    rule_ids preserved in order of match. If a matching rule has no
-    annotation data (shouldn't happen post-validation), falls back to the
-    policy ID.
-    """
     by_id = {r.policy_id: r for r in rules}
     rule_ids: list[str] = []
     timeouts: list[int] = []
@@ -687,9 +556,6 @@ def _merge_annotations(
         severities.append(rule.severity or _DEFAULT_SEVERITY)
 
     timeouts.append(task_default_timeout_s)
-    # Defensive only: load-time validation already rejects below-floor values,
-    # but the clamp costs nothing and protects against a future caller that
-    # bypasses validation (e.g. programmatic rule injection).
     effective_timeout = max(FLOOR_TIMEOUT_S, min(timeouts))
 
     if severities:
@@ -700,17 +566,7 @@ def _merge_annotations(
     return rule_ids, effective_timeout, effective_severity
 
 
-# ---------------------------------------------------------------------------
-# Policy-text loaders
-# ---------------------------------------------------------------------------
-
-
 def _load_builtin_policies() -> tuple[str, str]:
-    """Read hard_deny.cedar + soft_deny.cedar from the agent/policies/ dir.
-
-    Returns (hard_text, soft_text). Raises on missing files so the engine
-    fails loudly rather than running with stale or absent defaults.
-    """
     hard_path = _POLICIES_DIR / "hard_deny.cedar"
     soft_path = _POLICIES_DIR / "soft_deny.cedar"
     if not hard_path.is_file():
@@ -721,17 +577,10 @@ def _load_builtin_policies() -> tuple[str, str]:
 
 
 def _sha256_tool_input(tool_input: dict) -> str:
-    """Stable SHA-256 over the tool_input dict (sorted keys, utf-8)."""
     return hashlib.sha256(json.dumps(tool_input, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# PolicyEngine — the main three-outcome engine (§6.2)
-# ---------------------------------------------------------------------------
-
-
 def _recent_reason(prefix: str, reason: str | None) -> str:
-    """Recent-decision deny text; omit the reason when the human gave none."""
     return f"{prefix}: {reason}" if reason else prefix
 
 
@@ -769,7 +618,6 @@ class PolicyEngine:
         self._disabled = False
         self._task_default_timeout_s = task_default_timeout_s
 
-        # Bounds check on approval_gate_cap (decision #13).
         if not APPROVAL_GATE_CAP_MIN <= approval_gate_cap <= APPROVAL_GATE_CAP_MAX:
             raise ValueError(
                 f"approval_gate_cap must be in "
@@ -778,36 +626,16 @@ class PolicyEngine:
             )
         self._approval_gate_cap = approval_gate_cap
 
-        # Negative seeds are a caller bug, not a container-restart state.
         if initial_approval_gate_count < 0:
             raise ValueError(
                 f"initial_approval_gate_count must be >= 0, got {initial_approval_gate_count}"
             )
 
-        # §12.9 per-task gate counter + per-container sliding-window rate limit.
-        # The counter is session-scoped within a container but seeded from the
-        # persisted TaskTable value (§13.6) so container restarts resume the
-        # cumulative gate budget instead of resetting to 0. The rate-limit
-        # window stays per-container by design (§13.6 finding #10 scenario).
         self._approval_gate_count: int = initial_approval_gate_count
         self._approvals_last_minute: deque[float] = deque()
-        # §6.5 queue consumed by ``_denial_between_turns_hook``. Each entry
-        # is ``{"request_id", "reason", "decided_at"}``; reason is already
-        # sanitized by DenyTaskFn (§12.6).
         self._denial_injection_queue: list[dict] = []
-        # IMPL-26: ``approval_ceiling_shrinking`` is emit-once per task.
         self._emitted_ceiling_shrinking: bool = False
 
-        # ``task_type`` here is the workflow-derived Cedar principal identity
-        # (config.policy_principal): new_task / pr_iteration / pr_review.
-        # Read-only enforcement no longer keys off this principal literal —
-        # since #248 Phase 2a it keys off the ``read_only`` context attribute
-        # (threaded below into every Cedar request), so the hard-deny Write/Edit
-        # rules fire for *any* read-only workflow, not just coding/pr-review.
-        # See ADR-014 addendum 2026-06-08.
-
-        # Import cedarpy lazily so the module still loads in environments
-        # without the native extension (tests can monkey-patch).
         try:
             import cedarpy
 
@@ -816,8 +644,6 @@ class PolicyEngine:
             log("ERROR", "cedarpy not available — policy engine disabled (fail-closed)")
             self._cedarpy = None
             self._disabled = True
-            # Still construct empty state so legacy callers do not crash
-            # during attribute access.
             self._hard_policies = ""
             self._soft_policies = ""
             self._hard_rules: list[_ParsedRule] = []
@@ -826,15 +652,11 @@ class PolicyEngine:
             self._cache = RecentDecisionCache()
             return
 
-        # Load built-in tiers.
         try:
             builtin_hard, builtin_soft = _load_builtin_policies()
         except FileNotFoundError as exc:
-            # Fatal: without built-ins the engine's hard-deny invariants
-            # (rm -rf /, .git writes, DROP TABLE) are missing.
             raise RuntimeError(str(exc)) from exc
 
-        # Cap all operator-authored bytes before asking Cedar to parse any of them.
         operator_bytes = sum(
             len(text.encode("utf-8"))
             for text in (
@@ -856,25 +678,18 @@ class PolicyEngine:
         hard_text = "\n".join(filter(None, [builtin_hard, blueprint_hard_policies, *hard]))
         soft_text = "\n".join(filter(None, [builtin_soft, blueprint_soft_policies, *soft]))
 
-        # Parse + validate annotations on each tier.
         try:
             self._hard_rules = _parse_policy_annotations(self._cedarpy, hard_text)
             _validate_tier(self._hard_rules, "hard", "hard_deny")
         except ValueError as exc:
-            # Blueprint or built-in problem — fail loud at task start.
             raise ValueError(f"hard-deny policy validation failed: {exc}") from exc
 
         try:
             self._soft_rules = _parse_policy_annotations(self._cedarpy, soft_text)
-            # Legacy extra_policies synthetic rules get generic "legacy_extra_N"
-            # @rule_id values; those are accepted by the validator.
             _validate_tier(self._soft_rules, "soft", "soft_deny")
         except ValueError as exc:
             raise ValueError(f"soft-deny policy validation failed: {exc}") from exc
 
-        # blueprint_disable: reject any entry that names a built-in hard-deny
-        # rule (finding #9, §5.1). Built-in hard rule IDs come from the
-        # original builtin_hard text, NOT the concatenated hard_text.
         builtin_hard_rule_ids = {
             r.rule_id
             for r in _parse_policy_annotations(self._cedarpy, builtin_hard)
@@ -886,32 +701,22 @@ class PolicyEngine:
                     f"blueprint disable[{disable_id!r}]: cannot disable built-in "
                     f"hard-deny rule; hard-deny is absolute (§5.1, §12.5)"
                 )
-        # Disabled soft rules are filtered at evaluate_tool_use time: if a
-        # soft-deny eval's matching rule_ids are ALL in the disable set,
-        # the match is treated as no-match (fall through to ALLOW). If some
-        # are disabled but others match, the surviving rule_ids drive the
-        # REQUIRE_APPROVAL outcome. See evaluate_tool_use Step 3.
         self._disabled_rule_ids: set[str] = set(blueprint_disable or [])
 
-        # Rule-ID uniqueness ACROSS tiers. The reserved ``base_permit`` ID
-        # is expected to appear in both tiers (each tier needs its own
-        # catch-all permit so cedarpy doesn't default-deny non-matching
-        # inputs in isolation).
+        # Cedar denies by default, so each tier carries its own ``base_permit``
+        # catch-all.
         hard_ids = {r.rule_id for r in self._hard_rules if r.rule_id}
         soft_ids = {r.rule_id for r in self._soft_rules if r.rule_id}
         cross = (hard_ids & soft_ids) - {"base_permit"}
         if cross:
             raise ValueError(f"duplicate @rule_id across tiers: {sorted(cross)}")
 
-        # Probe authorizations on each tier to catch runtime Cedar errors
-        # before the first evaluate_tool_use call.
         self._probe_cedar(hard_text, "hard")
         self._probe_cedar(soft_text, "soft")
 
         self._hard_policies = hard_text
         self._soft_policies = soft_text
 
-        # Approval allowlist + recent-decision cache.
         try:
             self._allowlist = ApprovalAllowlist(initial_approvals)
         except ValueError as exc:
@@ -926,8 +731,6 @@ class PolicyEngine:
             f"approval_gate_cap={approval_gate_cap}, "
             f"initial_approval_gate_count={initial_approval_gate_count}",
         )
-
-    # ---- Public properties -------------------------------------------------
 
     @property
     def repo(self) -> str:
@@ -949,35 +752,26 @@ class PolicyEngine:
     def recent_decisions(self) -> RecentDecisionCache:
         return self._cache
 
-    # ---- Approval-gate counters + denial queue (§6.5, §12.9) --------------
-
     @property
     def approval_gate_count(self) -> int:
-        """Session-scoped count of REQUIRE_APPROVAL gates emitted this task."""
         return self._approval_gate_count
 
     def increment_approval_gate_count(self) -> None:
-        """Bump the per-task gate counter (called at row-write time)."""
         self._approval_gate_count += 1
 
     def record_approval_gate_timestamp(self, now: float | None = None) -> None:
-        """Record a new approval-gate timestamp for the sliding rate-limit window."""
         ts = time.monotonic() if now is None else now
         self._approvals_last_minute.append(ts)
         self._prune_rate_window(ts)
 
     def _prune_rate_window(self, now: float) -> None:
-        """Drop timestamps older than ``APPROVAL_RATE_WINDOW_S``."""
         cutoff = now - APPROVAL_RATE_WINDOW_S
         while self._approvals_last_minute and self._approvals_last_minute[0] < cutoff:
             self._approvals_last_minute.popleft()
 
     @property
     def approvals_in_last_minute(self) -> int:
-        """Count of approval-gate writes in the last ``APPROVAL_RATE_WINDOW_S``.
-
-        Prunes the window before returning so callers see the current count.
-        """
+        """Count of approval-gate writes in the last ``APPROVAL_RATE_WINDOW_S``."""
         self._prune_rate_window(time.monotonic())
         return len(self._approvals_last_minute)
 
@@ -994,13 +788,12 @@ class PolicyEngine:
         )
 
     def drain_denial_injections(self) -> list[dict]:
-        """Pop and return the queued denial-injection payloads."""
         out = list(self._denial_injection_queue)
         self._denial_injection_queue.clear()
         return out
 
     def mark_ceiling_shrinking_emitted(self) -> bool:
-        """Idempotency latch for ``approval_ceiling_shrinking`` (IMPL-26).
+        """Idempotency latch for ``approval_ceiling_shrinking``.
 
         Returns ``True`` the first time it is called (caller should emit the
         milestone) and ``False`` on every subsequent call.
@@ -1010,23 +803,14 @@ class PolicyEngine:
         self._emitted_ceiling_shrinking = True
         return True
 
-    # ---- Probes + low-level evaluation ------------------------------------
-
     def _probe_cedar(self, policies_text: str, tier_name: str) -> None:
-        """Evaluate one call of each kind of tool ``_eval_for_tool`` tells apart.
-
-        A rule Cedar cannot evaluate (bad syntax, or a ``when`` clause reading
-        a context attribute the request does not carry) makes ``_eval_tier``
-        raise, which at run time denies every call the rule is evaluated for.
-        Raised here, it fails the task at start instead. ``Read`` stands for
-        the tools that are neither a file write nor Bash: a rule that names
-        another one of those is evaluated when that tool is called, not here.
-        """
         base_context = {
             "task_type": self._task_type,
             "repo": self._repo,
             "read_only": self._read_only,
         }
+        # Cedar cannot evaluate a ``when`` clause that reads a context attribute
+        # the request does not carry, so each kind of request is probed.
         try:
             for tool_name, tool_input in (
                 ("Read", {}),
@@ -1050,18 +834,6 @@ class PolicyEngine:
         resource_id: str,
         context: dict,
     ) -> tuple[str, list[str]]:
-        """Run a single Cedar authorization check against a single tier.
-
-        Returns (decision, matching_policy_ids). ``decision`` is one of
-        ``"allow"`` / ``"deny"`` / ``"no_decision"`` (lowercase string).
-        ``matching_policy_ids`` is cedarpy's ``diagnostics.reasons`` list
-        (internal positional IDs like ``["policy2", "policy3"]``).
-
-        Raises ``RuntimeError`` if cedarpy reports policy-parse errors —
-        these are fail-closed hazards (policy text is unusable). The
-        outer ``evaluate_tool_use`` catches and maps to Outcome.DENY with
-        reason ``"fail-closed: RuntimeError"``.
-        """
         request = {
             "principal": f'Agent::TaskAgent::"{self._task_type}"',
             "action": f'Agent::Action::"{action}"',
@@ -1076,27 +848,18 @@ class PolicyEngine:
             },
             {"uid": {"type": resource_type, "id": resource_id}, "attrs": {}, "parents": []},
         ]
-        # _eval_tier is only reached from evaluate_tool_use AFTER the
-        # ``_disabled``/``_cedarpy is None`` guard, so the attribute is
-        # narrowed to a live module here.
-        if self._cedarpy is None:  # invariant guard
+        if self._cedarpy is None:
             raise RuntimeError("eval called on disabled engine")
         result = self._cedarpy.is_authorized(request, policies_text, entities)
         if getattr(result.diagnostics, "errors", []):
             # cedarpy reports parse errors via diagnostics.errors and returns
-            # Decision.NoDecision rather than raising — we re-raise so the
-            # outer fail-closed handler catches it.
+            # Decision.NoDecision rather than raising.
             errors = "; ".join(str(e) for e in result.diagnostics.errors)
             raise RuntimeError(f"Cedar policy parse/eval errors: {errors}")
         decision = result.decision.value.lower()
         if decision not in ("allow", "deny"):
-            # NoDecision with no errors → treat as no match at the tier
-            # level; caller decides whether that's fail-closed (hard tier)
-            # or fall-through (soft).
             return "no_decision", list(result.diagnostics.reasons)
         return decision, list(result.diagnostics.reasons)
-
-    # ---- Three-outcome pipeline -------------------------------------------
 
     def evaluate_tool_use(self, tool_name: str, tool_input: dict) -> PolicyDecision:
         """Walk the three-outcome pipeline for a single tool call.
@@ -1119,9 +882,6 @@ class PolicyEngine:
             "read_only": self._read_only,
         }
 
-        # Compute input_sha separately so a TypeError from json.dumps
-        # surfaces with a distinct fail-closed reason instead of being
-        # mis-attributed to Cedar evaluation (finding #5 from review).
         try:
             input_sha = _sha256_tool_input(tool_input)
         except (TypeError, ValueError) as exc:
@@ -1136,7 +896,6 @@ class PolicyEngine:
             )
 
         try:
-            # STEP 1 — Hard-deny evaluation (absolute).
             hard_decision = self._eval_for_tool(
                 self._hard_policies,
                 tool_name,
@@ -1153,19 +912,14 @@ class PolicyEngine:
                     reason=reason, duration_ms=(time.monotonic() - start) * 1000
                 )
 
-            # STEP 2 — Allowlist fast-path (tool-scope).
             if self._allowlist.matches(tool_name, tool_input):
                 return PolicyDecision.allow(
                     reason="Pre-approved by allowlist",
                     duration_ms=(time.monotonic() - start) * 1000,
                 )
 
-            # STEP 2.5 — Recent-decision cache.
             cached = self._cache.get(tool_name, input_sha)
             if cached is not None:
-                # IMPL-23: attach cache-hit metadata so the hook can emit a
-                # `policy_decision` milestone to TaskEventsTable. Keeps the
-                # engine pure — policy.py never calls the progress writer.
                 return PolicyDecision(
                     outcome=Outcome.DENY,
                     reason=_recent_reason(
@@ -1181,7 +935,6 @@ class PolicyEngine:
                     },
                 )
 
-            # STEP 3 — Soft-deny evaluation.
             soft_decision = self._eval_for_tool(
                 self._soft_policies,
                 tool_name,
@@ -1193,30 +946,18 @@ class PolicyEngine:
                 all_matching_ids = _matching_rule_ids(
                     self._soft_rules, soft_decision[1], tier_name="soft"
                 )
-                # Filter out blueprint-disabled rules (§5.1 `disable:` list).
-                # If ALL matches are disabled, the soft-deny hit is neutralized
-                # and we fall through to default ALLOW. If some are disabled
-                # but others remain, the surviving rules drive REQUIRE_APPROVAL.
                 active_ids = [rid for rid in all_matching_ids if rid not in self._disabled_rule_ids]
                 if not active_ids:
-                    # Every matching rule was disabled by the blueprint.
                     return PolicyDecision.allow(
                         reason="permitted (all matching soft-deny rules disabled by blueprint)",
                         duration_ms=(time.monotonic() - start) * 1000,
                     )
-                # Rule-scope allowlist check AFTER the eval: rule_ids are
-                # only known once Cedar reports which policies matched.
                 if any(rid in self._allowlist.rule_ids for rid in active_ids):
                     return PolicyDecision.allow(
                         reason=f"Allowlist rule: {', '.join(active_ids)}",
                         duration_ms=(time.monotonic() - start) * 1000,
                     )
 
-                # Rule-level recent-deny cache (§12.8 extension).
-                # If the user recently denied any of these rule_ids on
-                # this tool, fast-deny without a new approval gate.
-                # Catches semantic retries the input-hash cache misses
-                # (e.g. force-push to a different branch name).
                 rule_hit = self._cache.get_rule_decision(tool_name, active_ids)
                 if rule_hit is not None:
                     matched_rule_id, cached = rule_hit
@@ -1237,8 +978,6 @@ class PolicyEngine:
                             "original_decision_ts": cached.original_decision_ts,
                         },
                     )
-                # Rebuild the policy-id list for annotation merging, keeping
-                # only the policy IDs whose rule_id survived the disable filter.
                 active_policy_ids = [
                     pid
                     for pid in soft_decision[1]
@@ -1257,7 +996,6 @@ class PolicyEngine:
                     duration_ms=(time.monotonic() - start) * 1000,
                 )
 
-            # STEP 4 — Default allow.
             return PolicyDecision.allow(
                 reason="permitted",
                 duration_ms=(time.monotonic() - start) * 1000,
@@ -1271,8 +1009,6 @@ class PolicyEngine:
                 fail_closed=True,
             )
 
-    # ---- Per-action routing ------------------------------------------------
-
     def _eval_for_tool(
         self,
         policies_text: str,
@@ -1282,21 +1018,6 @@ class PolicyEngine:
         *,
         tier_name: str,
     ) -> tuple[str, list[str]] | None:
-        """Run the appropriate Cedar eval(s) for a given tool + input.
-
-        Returns the first deny decision + matching policy IDs, or None if
-        no eval at this tier matched anything. Mirrors the Phase 1 routing
-        so existing tests (invoke_tool sentinel for tool-type, write_file
-        for Write/Edit, execute_bash for Bash) keep working.
-
-        ``no_decision`` responses are logged at WARN — Cedar should always
-        reach a definite allow/deny given the base_permit catch-all, so
-        no_decision means the catch-all is missing or malformed (finding
-        #9 from Chunk 2 review). Fall-through to subsequent action evals
-        continues either way; the log gives operators signal without
-        changing behavior.
-        """
-
         def _run(action: str, resource_type: str, resource_id: str, ctx: dict):
             decision, reasons = self._eval_tier(
                 policies_text, action, resource_type, resource_id, ctx
@@ -1310,14 +1031,12 @@ class PolicyEngine:
                 )
             return decision, reasons
 
-        # Check tool-type eval first (invoke_tool on the real tool sentinel).
         invoke_decision, invoke_reasons = _run(
             "invoke_tool", "Agent::Tool", tool_name, base_context
         )
         if invoke_decision == "deny":
             return ("deny", invoke_reasons)
 
-        # Write/Edit: evaluate write_file with file_path in context.
         if tool_name in ("Write", "Edit"):
             file_path = tool_input.get("file_path", "")
             if file_path:
@@ -1330,7 +1049,6 @@ class PolicyEngine:
                 if write_decision == "deny":
                     return ("deny", write_reasons)
 
-        # Bash: evaluate execute_bash with command in context.
         if tool_name == "Bash":
             command = tool_input.get("command", "")
             if command:
@@ -1352,13 +1070,6 @@ def _matching_rule_ids(
     *,
     tier_name: str,
 ) -> list[str]:
-    """Map positional Cedar policy IDs to their @rule_id annotations.
-
-    Logs WARN on any policy ID that doesn't resolve to a parsed rule —
-    the condition indicates a state inconsistency (e.g. ``_hard_policies``
-    mutated without re-parsing) and was silently ignored in earlier
-    revisions (finding #3 from Chunk 2 review).
-    """
     by_id = {r.policy_id: r for r in rules}
     resolved: list[str] = []
     for pid in matching_policy_ids:
@@ -1375,7 +1086,6 @@ def _matching_rule_ids(
 
 
 def _rule_id_for_policy(rules: list[_ParsedRule], policy_id: str) -> str | None:
-    """Return the @rule_id annotation for a given positional policy ID."""
     for rule in rules:
         if rule.policy_id == policy_id:
             return rule.rule_id

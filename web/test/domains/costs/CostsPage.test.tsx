@@ -29,7 +29,6 @@ import { server, TEST_API_BASE } from '../../helpers/server';
 describe('CostsPage', () => {
   it('shows this month\'s spend, tasks and spend on failed work', async () => {
     renderRoute('/costs');
-    // Fixture tasks finished this month: completed $2.31 + failed $5.00 + no-change $0.11 (+ others outside the month).
     expect(await screen.findByRole('group', { name: /^Spent this month: \$/ })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: /^Spent on failed or stopped tasks: \$/ })).toBeInTheDocument();
     expect(await screen.findByText(/of your \$100\.00 monthly limit/)).toBeInTheDocument();
@@ -37,8 +36,6 @@ describe('CostsPage', () => {
 
   it('names each tile with its number', async () => {
     renderRoute('/costs?range=30d');
-    // All fourteen fixture tasks changed in the last 30 days. The six that finished with a cost are four done and two
-    // failed; the unfinished ones, the cancelled one and the one that ran out of time have none.
     expect(await screen.findByRole('group', { name: 'Spent last 30 days: $10.84' })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Tasks: 14' })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Average per task: $1.81' })).toBeInTheDocument();
@@ -79,7 +76,6 @@ describe('CostsPage', () => {
     expect(await screen.findByRole('group', { name: 'Tasks: 1,204' })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Spent this month: $5,418.00' })).toBeInTheDocument();
     expect(within(screen.getByRole('table', { name: /By repository/i })).getByRole('cell', { name: '1,204' })).toBeInTheDocument();
-    // On the axis of the chart too.
     expect(Array.from(document.querySelectorAll('svg text'), (tick) => tick.textContent)).toContain('$5,000');
   });
 
@@ -129,7 +125,6 @@ describe('CostsPage', () => {
       : HttpResponse.json({ data: [], pagination: { next_token: null, has_more: false } }))));
     renderRoute('/costs');
     expect(await screen.findByText('No monthly limit set')).toBeInTheDocument();
-    // No task, so no cost to average: the tile shows a dash and says why.
     expect(await screen.findByRole('group', { name: 'Average per task: no data' })).toHaveTextContent(/-$/);
     expect(screen.getByRole('group', { name: 'Tasks: 0' })).toBeInTheDocument();
   });

@@ -28,8 +28,7 @@ describe('census workspace evidence', () => {
   let checkout: string;
   function createCheckout(root: string): void {
     mkdirSync(root);
-    // Under a Git hook, GIT_DIR and friends point at the developer's repository;
-    // without stripping them the fixture commands would write there instead.
+    // A Git hook exports GIT_DIR and related variables, and git honors them over `cwd`.
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
     const git = (...args: string[]) => execFileSync('git', [
       '-c', `core.hooksPath=${devNull}`, '-c', 'commit.gpgSign=false',

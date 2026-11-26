@@ -76,7 +76,6 @@ function environment(path = '/', search = '') {
   return { env, storage };
 }
 
-/** Runs signIn and returns the authorize URL it redirected to. */
 async function startSignIn(env: CognitoAuthEnvironment): Promise<URL> {
   void createCognitoAuthAdapter(OPTIONS, env).signIn();
   await vi.waitFor(() => expect(env.redirect).toHaveBeenCalled());
@@ -239,7 +238,6 @@ describe('createCognitoAuthAdapter', () => {
     await expect(session!.getToken()).rejects.toThrow('invalid_grant');
     expect(storage.has('abca-console-tokens')).toBe(false);
     expect(expired).toHaveBeenCalledTimes(1);
-    // Nothing left to retry with: later calls fail without asking Cognito again.
     await expect(session!.getToken()).rejects.toThrow('signed out');
     expect(env.fetch).toHaveBeenCalledTimes(1);
   });

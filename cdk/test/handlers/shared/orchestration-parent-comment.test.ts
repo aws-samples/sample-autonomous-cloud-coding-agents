@@ -60,10 +60,6 @@ describe('parseParentNodeReference — routing a parent-epic comment to one sub-
   });
 
   test('a node written under the NEUTRAL id name routes identically', () => {
-    // Rows persisted before and after the id was renamed coexist with no
-    // backfill, so reading only one name would silently drop name-the-node
-    // routing for half of them — the commenter types ABCA-307 and gets the
-    // "which sub-issue?" reply instead of their change.
     const neutral: ParentCommentNode[] = [
       { sub_issue_id: 'uuid-307', display_id: 'ABCA-307', title: 'Add a hero image', child_task_id: 't4' },
     ];
@@ -74,19 +70,12 @@ describe('parseParentNodeReference — routing a parent-epic comment to one sub-
   });
 
   test('nodeDisplayId is what USER-FACING text must use, under either naming', () => {
-    // Not only routing: the disambiguation and no-PR replies print this id back to
-    // the human. A legacy-only read there shows a raw UUID instead of ABCA-957 on
-    // any row written after the rename.
     expect(nodeDisplayId({ sub_issue_id: 'u1', display_id: 'ABCA-957' })).toBe('ABCA-957');
     expect(nodeDisplayId({ sub_issue_id: 'u1', linear_identifier: 'ABCA-957' })).toBe('ABCA-957');
-    // No id recorded at all → undefined, so the caller can fall back to the raw id
-    // deliberately rather than printing "undefined".
     expect(nodeDisplayId({ sub_issue_id: 'u1' })).toBeUndefined();
   });
 
   test('a MIXED epic disambiguates across both namings', () => {
-    // The realistic shape mid-migration: one epic extended after the rename has
-    // rows of both kinds, and ambiguity must be judged over all of them.
     const mixed: ParentCommentNode[] = [
       { sub_issue_id: 'a', linear_identifier: 'ABCA-1', title: 'Add a pricing banner' },
       { sub_issue_id: 'b', display_id: 'ABCA-2', title: 'Add a newsletter block' },
@@ -125,7 +114,6 @@ describe('parseParentNodeReference — routing a parent-epic comment to one sub-
   });
 
   test('noise-only overlap does NOT match (e.g. "add", "page", "section")', () => {
-    // "add a section" shares only noise words with the titles → no match.
     const r = parseParentNodeReference('please add a section somewhere', NODES);
     expect(r.reason).toBe('none');
     expect(r.matches).toHaveLength(0);
@@ -135,15 +123,11 @@ describe('parseParentNodeReference — routing a parent-epic comment to one sub-
     const r1 = parseParentNodeReference('check the integration result', NODES);
     expect(r1.reason).toBeNull();
     expect(r1.matches[0].sub_issue_id).toBe('orch_x__integration');
-    // A generic word from its title ("results") must NOT pull it in.
     const r2 = parseParentNodeReference('the results look off', NODES);
     expect(r2.matches.some((m) => m.sub_issue_id === 'orch_x__integration')).toBe(false);
   });
 
   test('"combined" targets the integration node too — it is what the panel calls it', () => {
-    // The panel says "Integration — combined result", "Combined PR", "Combined
-    // preview". A user reaches for the word they were shown, so both must work or
-    // the vocabulary we display is not the vocabulary we accept.
     const r = parseParentNodeReference('the combined result is broken', NODES);
     expect(r.reason).toBeNull();
     expect(r.matches).toHaveLength(1);
@@ -151,10 +135,6 @@ describe('parseParentNodeReference — routing a parent-epic comment to one sub-
   });
 
   test('the keyword the reply ADVERTISES is the keyword the parser ACCEPTS', () => {
-    // Guards the drift that makes a helpful reply into a dead end: the
-    // disambiguation text tells the user to type `@bgagent integration: …`, and
-    // this asserts that exact word still routes. Both read the same constant, so
-    // this fails if either side is edited alone.
     const advertised = renderParentDisambiguationReply('none', NODES);
     expect(advertised).toContain(`@bgagent ${INTEGRATION_KEYWORD}:`);
     const routed = parseParentNodeReference(`${INTEGRATION_KEYWORD} the dates are wrong`, NODES);
@@ -169,8 +149,6 @@ describe('parseParentNodeReference — routing a parent-epic comment to one sub-
 
 describe('suggestClosestNode', () => {
   test('returns the single best title-overlap node', () => {
-    // "footers" won't exact-match (plural) but "footer" stem won't either;
-    // use a word that overlaps a significant title word.
     const s = suggestClosestNode('the newsletter box looks cramped', NODES);
     expect(s?.linear_identifier).toBe('ABCA-306');
   });
@@ -181,7 +159,7 @@ describe('suggestClosestNode', () => {
 
   test('never suggests the integration node', () => {
     const s = suggestClosestNode('the combined integration result', NODES);
-    expect(s).toBeNull(); // integration excluded from suggestions
+    expect(s).toBeNull();
   });
 });
 
@@ -190,13 +168,10 @@ describe('renderParentDisambiguationReply', () => {
     const body = renderParentDisambiguationReply('none', NODES);
     expect(body).toContain('ABCA-305 — Add a site-wide footer');
     expect(body).toContain('ABCA-306 — Add a newsletter signup section');
-    expect(body).toContain('@bgagent ENG-123:'); // the how-to hint
-    expect(body.toLowerCase()).toContain('new work'); // the create-a-sub-issue path
+    expect(body).toContain('@bgagent ENG-123:');
+    expect(body.toLowerCase()).toContain('new work');
   });
 
-  // The trigger label is set per project, and what folds a new sub-issue into
-  // the epic is re-applying it on the EPIC. A label on the sub-issue alone starts
-  // a separate task, and a label the project does not trigger on starts nothing.
   test.each([
     ['which-sub-issue', false],
     ['new-work', true],
@@ -211,23 +186,11 @@ describe('renderParentDisambiguationReply', () => {
   });
 
   test('offers the integration node as an EXPLICIT target, with the exact phrasing', () => {
-    // The combined PR is the only place an integration defect can be reproduced —
-    // a symptom that only appears once the siblings are merged is invisible in any
-    // one child's PR. This reply used to hide the integration node entirely, so a
-    // reviewer had no way to ask for a fix there and their comment landed on
-    // whichever child looked closest; the backend code they were describing was
-    // not even present in it.
-    //
-    // The phrasing is asserted verbatim because it is an instruction the user is
-    // expected to copy. If it drifts from what the parser accepts, the reply tells
-    // people to type something that does nothing.
     const body = renderParentDisambiguationReply('none', NODES);
     expect(body).toContain('- Integration — combined result; target with `@bgagent integration: <request>`');
   });
 
   test('does NOT mention integration when the epic has no integration node', () => {
-    // A 0–1 leaf graph has none: the final child IS the combined result, so there
-    // is nothing separate to target and offering it would be a dead end.
     const realOnly = NODES.filter((n) => !n.sub_issue_id.endsWith('__integration'));
     const body = renderParentDisambiguationReply('none', realOnly);
     expect(body).not.toMatch(/integration/i);
@@ -240,9 +203,6 @@ describe('renderParentDisambiguationReply', () => {
   });
 
   test('"Otherwise" appears ONLY when there is something to contrast with', () => {
-    // The word only makes sense against the "Did you mean …?" sentence, and that
-    // sentence is conditional — with no suggestion the reply opened by contrasting
-    // with nothing ("👋 I couldn't tell … Otherwise, comment on…").
     const withSuggestion = renderParentDisambiguationReply('none', NODES, NODES[0]);
     expect(withSuggestion).toContain('Otherwise, comment on the specific sub-issue');
 
@@ -252,9 +212,6 @@ describe('renderParentDisambiguationReply', () => {
   });
 
   test('the commands footer does NOT bill a label re-apply as the same as retry', () => {
-    // Re-applying the label resolves to one of four outcomes from graph state
-    // (add sub-issues / retry / still running / already complete), so it is only
-    // equivalent in this one state — claiming equivalence taught the wrong model.
     const body = renderParentDisambiguationReply('none', NODES, null, false, true);
     expect(body).toContain('`@bgagent retry`');
     expect(body).toContain('keeps the ones that succeeded');
@@ -270,22 +227,15 @@ describe('renderParentDisambiguationReply', () => {
     const body = renderParentDisambiguationReply('none', NODES, null, true);
     expect(body).toContain('new work');
     expect(body).toContain('create a new sub-issue');
-    // Leads with the new-work framing, not the generic "couldn't tell".
     expect(body).not.toContain("couldn't tell");
-    // Still lists the existing sub-issues for context.
     expect(body).toContain('ABCA-305');
     expect(body).toContain('ABCA-306');
   });
 
-  // When the epic has failures, EVERY can't-act reply surfaces the `retry`
-  // command — so an unrecognised comment always shows what the user CAN type
-  // (no intent-guessing). Consistent with re-labelling.
   test('hasFailures=true appends a Commands footer surfacing `@bgagent retry`', () => {
     const body = renderParentDisambiguationReply('none', NODES, null, false, true);
     expect(body).toContain('Commands:');
     expect(body).toContain('`@bgagent retry`');
-    // Deliberately does NOT name a label re-apply as the equivalent — see the
-    // dedicated test below for why that framing was wrong.
     expect(body).toContain('keeps the ones that succeeded');
   });
 
@@ -303,10 +253,6 @@ describe('renderParentDisambiguationReply', () => {
 });
 
 describe('suggestClosestNode scores descriptions (not just titles)', () => {
-  // The header node's TITLE has no "blue"/"color"/"yellow"; only its
-  // DESCRIPTION does. The "header color to yellow instead of blue" class of
-  // comment should still surface it as a did-you-mean, the gap that produced a
-  // generic "couldn't tell" reply instead.
   const DESC_NODES: ParentCommentNode[] = [
     {
       sub_issue_id: 'uuid-h',
@@ -330,8 +276,6 @@ describe('suggestClosestNode scores descriptions (not just titles)', () => {
   });
 
   test('a title hit outranks a description-only hit', () => {
-    // "footer" is a significant TITLE word of 402; "blue" is only a DESC word of
-    // 401. Title weight must win.
     const s = suggestClosestNode('the footer, but more blue', DESC_NODES);
     expect(s?.linear_identifier).toBe('ABCA-402');
   });

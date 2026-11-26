@@ -39,7 +39,6 @@ describe('validateDag — valid graphs', () => {
   });
 
   test('linear chain A→B→C produces three single-node layers', () => {
-    // B depends on A, C depends on B.
     const result = validateDag([node('C', 'B'), node('B', 'A'), node('A')]);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.layers).toEqual([['A'], ['B'], ['C']]);
@@ -62,7 +61,6 @@ describe('validateDag — valid graphs', () => {
   });
 
   test('tolerates a duplicated edge to the same predecessor', () => {
-    // depends_on lists A twice — should not double-count in-degree.
     const result = validateDag([node('A'), { id: 'B', depends_on: ['A', 'A'] }]);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.layers).toEqual([['A'], ['B']]);
@@ -89,7 +87,6 @@ describe('validateDag — rejected graphs', () => {
   });
 
   test('cycle is reported even when valid roots exist', () => {
-    // R is a clean root; X→Y→Z→X is a cycle hanging off nothing.
     const result = validateDag([
       node('R'),
       node('X', 'Z'),
@@ -122,7 +119,6 @@ describe('validateDag — rejected graphs', () => {
   });
 
   test('duplicate-id check precedes dangling/cycle checks', () => {
-    // Duplicate A plus a dangling edge — duplicate wins (checked first).
     const result = validateDag([node('A'), node('A', 'GHOST')]);
     if (!result.ok) expect(result.reason).toBe('duplicate_id');
   });

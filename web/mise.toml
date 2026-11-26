@@ -23,21 +23,13 @@ run = "yarn typecheck"
 
 [tasks.test]
 description = "Run Vitest component and unit tests (coverage floors enforced)"
-# The package's test script, which contracts/coverage-thresholds.json pins verbatim:
-#   --coverage               without it vitest collects nothing and applies no floor
-#   --config vite.config.ts  the one config file; a vitest.config.* next to it would otherwise be read instead
-#   --allowOnly=false        a committed `.only` fails the run; vitest allows it by default wherever CI is not set
-# For one file while iterating: `yarn vitest run test/<file>` (no coverage, no floors).
 run = "yarn test"
 
-# --config in both eslint tasks: see the note on the same tasks in cdk/mise.toml.
+# Without --config, ESLint looks for a configuration from each file's directory.
 [tasks.eslint]
 description = "Run ESLint with --fix"
 run = "../node_modules/.bin/eslint --config eslint.config.mjs --max-warnings 0 --fix src test"
 
-# The same command without --fix, for checks that must not rewrite files (the root
-# `lint` task). Keep the targets of the two tasks identical. --max-warnings 0 in both:
-# a warning fails the task like an error.
 [tasks."eslint:check"]
 description = "Run ESLint without --fix: reports findings and rewrites nothing"
 run = "../node_modules/.bin/eslint --config eslint.config.mjs --max-warnings 0 src test"
@@ -48,6 +40,4 @@ run = "yarn vite build"
 
 [tasks.build]
 description = "Type-check, test, lint and bundle the console"
-# `:bundle` is a dependency, not a second `yarn vite build` here: //cdk:synth
-# depends on the same task and packages web/dist, so one build must write it.
 depends = [":typecheck", ":test", ":eslint", ":bundle"]

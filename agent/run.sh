@@ -3,9 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ---------------------------------------------------------------------------
-# Usage
-# ---------------------------------------------------------------------------
 usage() {
     cat <<'EOF'
 Usage: ./agent/run.sh [--server] [--local-events] <owner/repo> [args...]
@@ -65,9 +62,6 @@ EOF
     exit 1
 }
 
-# ---------------------------------------------------------------------------
-# Parse flags
-# ---------------------------------------------------------------------------
 MODE="local"
 LOCAL_EVENTS=false
 
@@ -94,7 +88,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# In local mode, repo is required. In server mode, it's optional.
 if [[ "$MODE" == "local" && $# -lt 1 ]]; then
     usage
 fi
@@ -112,9 +105,6 @@ if [[ $# -ge 2 ]]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Validate
-# ---------------------------------------------------------------------------
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
     echo "ERROR: GITHUB_TOKEN is not set" >&2
     exit 1
@@ -124,12 +114,6 @@ if [[ -z "${AWS_REGION:-}" ]]; then
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Resolve AWS credentials (before Docker build to fail fast)
-# ---------------------------------------------------------------------------
-# Store resolved credentials in variables so they can be applied to DOCKER_ARGS
-# after the image is built. This avoids a lengthy Docker build only to discover
-# that AWS credentials are missing or expired.
 AWS_CRED_MODE=""
 RESOLVED_KEY=""
 RESOLVED_SECRET=""
@@ -142,11 +126,7 @@ if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
     RESOLVED_TOKEN="${AWS_SESSION_TOKEN:-}"
     echo "  AWS:       using explicit credentials (AWS_ACCESS_KEY_ID)"
 elif command -v aws &>/dev/null && [[ "$(aws --version 2>&1)" != aws-cli/1.* ]]; then
-    # Resolve credentials from the AWS CLI (handles SSO, profiles, credential files).
-    # This avoids the need to mount ~/.aws and replicate the full credential chain
-    # inside the container — SSO tokens in particular don't resolve well there.
-    # Not with AWS CLI v1, which has no `configure export-credentials`: it goes on
-    # to the ~/.aws mount below.
+    # AWS CLI v1 has no `configure export-credentials`.
     echo "  AWS:       resolving credentials via AWS CLI${AWS_PROFILE:+ (profile '${AWS_PROFILE}')}..."
     EXPORT_CMD=(aws configure export-credentials --format process)
     [[ -n "${AWS_PROFILE:-}" ]] && EXPORT_CMD+=(--profile "${AWS_PROFILE}")
@@ -176,14 +156,9 @@ else
     echo "WARNING: No AWS credentials detected. Set AWS_ACCESS_KEY_ID or AWS_PROFILE, or ensure ~/.aws exists." >&2
 fi
 
-# ---------------------------------------------------------------------------
-# Build
-# ---------------------------------------------------------------------------
 echo "Building Docker image..."
-# The build context is the repository root: the Dockerfile copies agent/... and contracts/.
 docker build --build-arg CACHE_BUST="$(date +%s)" -f "$SCRIPT_DIR/Dockerfile" -t bgagent-local "$SCRIPT_DIR/.."
 
-# Print image size
 IMAGE_SIZE=$(docker image inspect bgagent-local --format='{{.Size}}')
 IMAGE_SIZE_MB=$((IMAGE_SIZE / 1024 / 1024))
 echo "Image size: ${IMAGE_SIZE_MB} MB (limit: 2048 MB)"
@@ -192,11 +167,6 @@ if [[ $IMAGE_SIZE_MB -gt 2048 ]]; then
     echo "WARNING: Image exceeds AgentCore 2 GB limit!" >&2
 fi
 
-# ---------------------------------------------------------------------------
-# Run with AgentCore-matching constraints
-# ---------------------------------------------------------------------------
-
-# Remove any leftover container from a previous run
 docker rm -f bgagent-run 2>/dev/null || true
 
 CONTAINER_NAME="bgagent-run"
@@ -211,12 +181,8 @@ DOCKER_ARGS=(
     -e "GITHUB_TOKEN=${GITHUB_TOKEN}"
 )
 
-# Repo URL (may be empty in server mode — sent via payload)
 [[ -n "${REPO_URL}" ]] && DOCKER_ARGS+=(-e "REPO_URL=${REPO_URL}")
 
-# Optional env vars. Pass each through only when the caller actually set it, so an
-# unset variable leaves the agent runtime's own default (agent/src/config.py) intact
-# instead of being shadowed by a second default defined here.
 [[ -n "${ANTHROPIC_MODEL:-}" ]] && DOCKER_ARGS+=(-e "ANTHROPIC_MODEL=${ANTHROPIC_MODEL}")
 [[ -n "${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}" ]] && DOCKER_ARGS+=(-e "ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}")
 [[ -n "${ISSUE_NUMBER}" ]] && DOCKER_ARGS+=(-e "ISSUE_NUMBER=${ISSUE_NUMBER}")
@@ -226,9 +192,7 @@ DOCKER_ARGS=(
 [[ -n "${MAX_BUDGET_USD:-}" ]] && DOCKER_ARGS+=(-e "MAX_BUDGET_USD=${MAX_BUDGET_USD}")
 [[ -n "${LINEAR_API_TOKEN:-}" ]] && DOCKER_ARGS+=(-e "LINEAR_API_TOKEN=${LINEAR_API_TOKEN}")
 
-# Local events mode: connect to DynamoDB Local via the agent-local network
 if [[ "$LOCAL_EVENTS" == true ]]; then
-    # Verify DynamoDB Local is running
     if ! docker inspect dynamodb-local >/dev/null 2>&1; then
         echo "ERROR: DynamoDB Local is not running." >&2
         echo "  Start it and create the tables with: mise //agent:local:up" >&2
@@ -243,12 +207,10 @@ if [[ "$LOCAL_EVENTS" == true ]]; then
     echo "  Events:    DynamoDB Local (http://localhost:8000)"
 fi
 
-# Server mode: expose port 8080
 if [[ "$MODE" == "server" ]]; then
     DOCKER_ARGS+=(-p 8080:8080)
 fi
 
-# Apply previously resolved AWS credentials to DOCKER_ARGS
 if [[ "$AWS_CRED_MODE" == "explicit" || "$AWS_CRED_MODE" == "resolved" ]]; then
     DOCKER_ARGS+=(
         -e "AWS_ACCESS_KEY_ID=${RESOLVED_KEY}"
@@ -256,7 +218,6 @@ if [[ "$AWS_CRED_MODE" == "explicit" || "$AWS_CRED_MODE" == "resolved" ]]; then
     )
     [[ -n "${RESOLVED_TOKEN}" ]] && DOCKER_ARGS+=(-e "AWS_SESSION_TOKEN=${RESOLVED_TOKEN}")
 elif [[ "$AWS_CRED_MODE" == "mount" ]]; then
-    # Fallback: mount ~/.aws directly (works for static credential files, not SSO)
     DOCKER_ARGS+=(-v "${HOME}/.aws:/home/agent/.aws:ro")
     [[ -n "${AWS_PROFILE:-}" ]] && DOCKER_ARGS+=(-e "AWS_PROFILE=${AWS_PROFILE}")
 fi

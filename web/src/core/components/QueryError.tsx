@@ -20,7 +20,7 @@
 import Alert from '@cloudscape-design/components/alert';
 import { ApiError } from '../api/client';
 
-/** Renders a failed request with the API's error code and request id, which support needs. */
+/** Renders a failed request with the API's error code and request id. */
 export function QueryError({ error, what }: { error: unknown; what: string }) {
   const detail = error instanceof ApiError
     ? `${error.message} (${error.code}${error.requestId ? `, request ${error.requestId}` : ''})`

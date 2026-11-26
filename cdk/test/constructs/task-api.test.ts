@@ -102,8 +102,6 @@ function createStackWithBudget(): { stack: Stack; template: Template } {
   return { stack, template: Template.fromStack(stack) };
 }
 
-// Presigned-upload flow: the attachments bucket and the user-concurrency table
-// together are what make TaskApi create the confirm-uploads Lambda.
 function createStackWithAttachments(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
@@ -127,8 +125,6 @@ function createStackWithAttachments(overrides?: Partial<TaskApiProps>): { stack:
   return { stack, template: Template.fromStack(stack) };
 }
 
-// Full surface: webhookTable AND apiKeyTable both provided (all tables in the
-// same app/stack — CDK forbids cross-app resource references).
 function createStackWithWebhooksAndApiKeys(): { stack: Stack; template: Template } {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
@@ -196,7 +192,6 @@ describe('TaskApi construct', () => {
   });
 
   test('lets browsers send the Idempotency-Key header that POST /tasks accepts', () => {
-    // The operator console sends it; a preflight that omits it makes the browser drop the POST.
     const options = baseTemplate.findResources('AWS::ApiGateway::Method', { Properties: { HttpMethod: 'OPTIONS' } });
     expect(Object.keys(options).length).toBeGreaterThan(0);
     for (const method of Object.values(options)) {
@@ -217,7 +212,6 @@ describe('TaskApi construct', () => {
   });
 
   test('creates 6 Lambda functions without webhookTable', () => {
-    // 6 = create, get, list, cancel, get-events, get-replay (#515).
     baseTemplate.resourceCountIs('AWS::Lambda::Function', 6);
   });
 
@@ -264,8 +258,6 @@ describe('TaskApi construct', () => {
   });
 
   test('GetTaskReplayFn gets raised timeout/memory, not the 3s/128MB defaults (#523)', () => {
-    // Replay is the heaviest read path (GetItem + multi-page Query + full-bundle
-    // serialization); inheriting the defaults risks INIT-timeout 502s and OOM.
     const functions = baseTemplate.findResources('AWS::Lambda::Function');
     const replayFn = Object.entries(functions).find(([id]) => id.startsWith('TaskApiGetTaskReplayFn'));
     expect(replayFn).toBeDefined();
@@ -274,7 +266,6 @@ describe('TaskApi construct', () => {
   });
 
   test('ListTasksFn gets raised timeout/memory, not the 3s/128MB defaults (#51)', () => {
-    // A filtered list pages until the page is full (up to 10 Queries).
     const functions = baseTemplate.findResources('AWS::Lambda::Function');
     const listTasksFn = Object.entries(functions).find(([id]) => id.startsWith('TaskApiListTasksFn'));
     expect(listTasksFn).toBeDefined();
@@ -313,21 +304,13 @@ describe('TaskApi construct', () => {
   });
 
   test('webhook + api-key Lambdas carry the correct ABCA_COMPONENT label (#319)', () => {
-    // Exercise the full surface: both webhookTable AND apiKeyTable set, so the
-    // webhook ingest Lambdas (including WebhookCreateTaskFn, which inherits the
-    // createTask env) are labeled `webhook`, and the API-key management Lambdas
-    // are labeled `api`. The base-template test above never sees these, so it
-    // passed vacuously for the webhook/api-key surfaces.
     const { template } = createStackWithWebhooksAndApiKeys();
     const functions = template.findResources('AWS::Lambda::Function');
 
-    // WebhookCreateTaskFn is the trap: same env as createTask (which is `api`),
-    // but it is a webhook surface and must be relabeled `webhook`.
     const webhookCreate = Object.entries(functions).find(([id]) => id.includes('WebhookCreateTaskFn'));
     expect(webhookCreate).toBeDefined();
     expect(webhookCreate![1].Properties.Environment?.Variables?.ABCA_COMPONENT).toBe('webhook');
 
-    // API-key management Lambdas (Create/List/Delete + authorizer) are `api`.
     const apiKeyFns = Object.entries(functions).filter(([id]) =>
       id.includes('ApiKey') || id.includes('CreateApiKey') || id.includes('ListApiKeys') || id.includes('DeleteApiKey'),
     );
@@ -336,7 +319,6 @@ describe('TaskApi construct', () => {
       expect(fn.Properties.Environment?.Variables?.ABCA_COMPONENT).toBe('api');
     }
 
-    // Webhook management Lambdas (Create/List/Delete/Authorizer) are `webhook`.
     const webhookMgmtFns = Object.entries(functions).filter(([id]) =>
       (id.includes('CreateWebhook') || id.includes('ListWebhooks') || id.includes('DeleteWebhook') || id.includes('WebhookAuthorizer')),
     );
@@ -359,7 +341,6 @@ describe('TaskApi construct', () => {
       PathPart: 'events',
     });
 
-    // Replay sub-resource (#515): GET /tasks/{task_id}/replay.
     baseTemplate.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'replay',
     });
@@ -370,7 +351,6 @@ describe('TaskApi construct', () => {
     const nonOptionsMethods = Object.entries(methods).filter(
       ([_, resource]) => (resource as any).Properties.HttpMethod !== 'OPTIONS',
     );
-    // 6 = POST /tasks, GET /tasks, GET+DELETE /tasks/{id}, GET events, GET replay.
     expect(nonOptionsMethods.length).toBe(6);
 
     for (const [_, resource] of nonOptionsMethods) {
@@ -407,17 +387,15 @@ describe('TaskApi construct', () => {
     const rules = wafRules(baseTemplate);
     const rule = rules.find(r => r.Name === 'AWSManagedRulesCommonRuleSet-SignedWebhooks');
     const group = rule.Statement.ManagedRuleGroupStatement;
-    // Overrides only: WAF rejects excludedRules alongside ruleActionOverrides.
+    // WAF rejects excludedRules alongside ruleActionOverrides.
     expect(group.ExcludedRules).toBeUndefined();
     expect(group.RuleActionOverrides).toEqual([
       { Name: 'SizeRestrictions_BODY', ActionToUse: { Count: {} } },
       { Name: 'CrossSiteScripting_BODY', ActionToUse: { Count: {} } },
     ]);
     expect(byteMatchPaths(group.ScopeDownStatement).sort()).toEqual(['/v1/github/webhook', '/v1/jira/webhook', '/v1/linear/webhook']);
-    // The full rule set still excludes the webhook routes, so nothing else changes for them.
     const fullCommon = rules.find(r => r.Name === 'AWSManagedRulesCommonRuleSet');
     expect(JSON.stringify(fullCommon.Statement.ManagedRuleGroupStatement.ScopeDownStatement)).toContain('/v1/linear/webhook');
-    // The XSS matches let through are counted under their own metric, and alarmed.
     expect(rules.find(r => r.Name === 'SignedWebhookXssCounted')).toMatchObject({
       Action: { Count: {} },
       Statement: { LabelMatchStatement: { Scope: 'LABEL', Key: 'awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body' } },
@@ -429,8 +407,7 @@ describe('TaskApi construct', () => {
       MetricName: 'CountedRequests',
       Dimensions: Match.arrayWith([
         { Name: 'Rule', Value: 'SignedWebhookXssCounted' },
-        // The web ACL's name, which WAF uses as the metric dimension (not the
-        // visibilityConfig metric name `TaskApiWebAcl`).
+        // WAF publishes the WebACL dimension as the web ACL's name, not its visibilityConfig metric name.
         { Name: 'WebACL', Value: { 'Fn::Select': [0, { 'Fn::Split': ['|', { Ref: Match.stringLikeRegexp('WebAcl') }] }] } },
       ]),
       Threshold: 20,
@@ -448,9 +425,7 @@ describe('TaskApi construct', () => {
   });
 
   test('WAF replaces the two credential headers in the request samples it keeps', () => {
-    // WAF keeps the headers of sampled requests for three hours. The L1 types
-    // both enumerations as string: these are the values CloudFormation accepts
-    // for AWS::WAFv2::WebACL DataProtect.Action and FieldToProtect.FieldType.
+    // The L1 types DataProtect.Action and FieldToProtect.FieldType as string; these are the values CloudFormation accepts.
     const [webAcl] = Object.values(baseTemplate.findResources('AWS::WAFv2::WebACL'));
     expect(webAcl.Properties.DataProtectionConfig).toEqual({
       DataProtections: [{
@@ -591,15 +566,12 @@ describe('TaskApi construct', () => {
   describe('Lambda MicroVMs cancel wiring (ADR-021)', () => {
     const MICROVM_IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
 
-    // One synth per configuration, cached (cdk/AGENTS.md): the backend enabled,
-    // and — via the outer describe's `baseTemplate` — the backend disabled.
     let microvmTemplate: Template;
 
     beforeAll(() => {
       microvmTemplate = createStack({ lambdaMicrovmImageArn: MICROVM_IMAGE_ARN }).template;
     });
 
-    /** Every MicroVM-related IAM action granted anywhere in the template. */
     function microvmActions(template: Template): string[] {
       return Object.values(template.findResources('AWS::IAM::Policy'))
         .flatMap((p) => (p as any).Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
@@ -607,7 +579,6 @@ describe('TaskApi construct', () => {
         .filter((action) => action.includes('Microvm'));
     }
 
-    /** MICROVM_* env keys across every Lambda in the template. */
     function microvmEnvKeys(template: Template): string[] {
       return Object.values(template.findResources('AWS::Lambda::Function'))
         .flatMap((fn) => Object.keys(((fn as any).Properties?.Environment?.Variables ?? {}) as Record<string, unknown>))
@@ -615,8 +586,6 @@ describe('TaskApi construct', () => {
     }
 
     test('grants ONLY lambda:TerminateMicrovm when the backend is enabled', () => {
-      // cancel-task.ts sends TerminateMicrovmCommand and nothing else — it never
-      // reads MicroVM state — so lambda:GetMicrovm would be an unused grant.
       expect(microvmActions(microvmTemplate)).toEqual(['lambda:TerminateMicrovm']);
     });
 
@@ -625,8 +594,7 @@ describe('TaskApi construct', () => {
         .flatMap((p) => (p as any).Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>)
         .find((stmt) => stmt.Action === 'lambda:TerminateMicrovm')!;
 
-      // Every MicroVM lifecycle action authorizes against the image resource, so
-      // the per-session microvmId never appears in IAM and this can be exact.
+      // Every MicroVM lifecycle action authorizes against the image resource.
       expect(statement.Resource).toEqual([MICROVM_IMAGE_ARN, `${MICROVM_IMAGE_ARN}:*`]);
       expect(statement.Resource).not.toBe('*');
       expect(JSON.stringify(statement.Resource)).not.toContain('microvm-image:*');
@@ -686,7 +654,6 @@ describe('TaskApi construct with webhooks', () => {
     const nonOptionsMethods = Object.entries(methods).filter(
       ([_, resource]) => (resource as any).Properties.HttpMethod !== 'OPTIONS',
     );
-    // 6 base (incl. GET replay #515) + 4 webhook (POST/GET /webhooks, DELETE /webhooks/{id}, POST /webhooks/tasks)
     expect(nonOptionsMethods.length).toBe(10);
   });
 
@@ -730,7 +697,6 @@ describe('TaskApi construct with webhooks', () => {
 });
 
 describe('TaskApi construct — confirm-uploads admission cap', () => {
-  /** MAX_CONCURRENT_TASKS_PER_USER as the confirm-uploads Lambda receives it. */
   function confirmUploadsCap(template: Template): unknown {
     const confirmUploadsFn = Object.entries(template.findResources('AWS::Lambda::Function'))
       .find(([id]) => id.startsWith('TaskApiConfirmUploadsFn'));

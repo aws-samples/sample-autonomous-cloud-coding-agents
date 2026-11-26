@@ -8,7 +8,6 @@ from typing import Any
 
 
 def _load_shared_constants() -> dict[str, Any]:
-    """Read the contract in deployed and local repository layouts."""
     here = Path(__file__).resolve()
     candidates = [
         here.parent.parent / "contracts" / "constants.json",

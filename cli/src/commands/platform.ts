@@ -24,7 +24,6 @@ import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context'
 import { doctorChecksPassed, runPlatformDoctor } from '../platform-doctor';
 import { listStackOutputs } from '../stack-outputs';
 
-/** Stack outputs most operators need during setup (shown first in text mode). */
 const HIGHLIGHT_OUTPUT_KEYS = [
   'ApiUrl',
   'RegistryApiUrl',

@@ -43,44 +43,19 @@ import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { getStackOutputs } from './stack-outputs';
 import { makeClient } from './ua';
 
-/**
- * Strips a leading `<geo>.` inference-profile prefix, if present.
- *
- * Built from the ONE geography list (`model-id.ts`) rather than a second copy. Two
- * copies is how this broke: the list here matched only `us|eu|apac`, so when the
- * platform default moved to `global.` the strip silently did nothing and
- * `GetFoundationModel` was handed a profile id it cannot resolve.
- */
 const GEO_PREFIX_RE = new RegExp(`^(?:${BEDROCK_GEO_PREFIXES.join('|')})\\.`);
 
 /**
- * Default foundation model checked when no onboarded repo specifies model_id.
- *
- * Derived from the platform default model so the two never drift on a model
- * bump: `PLATFORM_REPO_DEFAULTS.model_id` is the cross-Region inference profile
- * used at invoke time, while `GetFoundationModel` requires the bare
- * foundation-model id, so the geo prefix is stripped.
+ * `GetFoundationModel` takes the bare foundation-model id, not an inference-profile id.
  */
 const DEFAULT_BEDROCK_MODEL_ID =
   PLATFORM_REPO_DEFAULTS.model_id.replace(GEO_PREFIX_RE, '');
 
 export type DoctorCheckStatus = 'pass' | 'fail' | 'warn';
 
-/**
- * Why a probe failed, which decides whether its remedy may be stated as fact.
- *
- * `fail` remedies here are directive — "remove the model", "enable model access",
- * "check the Region" — so they may only be given when the service ANSWERED and the
- * answer was negative. A binary `accessDenied ? warn : fail` also routed throttling,
- * 5xx, timeouts and expired credentials into that branch, reporting healthy
- * deployments as broken and exiting doctor non-zero because one call happened to fail.
- */
 type ProbeFailure = 'denied' | 'absent' | 'unverified';
 
 function classifyProbeFailure(err: unknown): ProbeFailure {
-  // Name AND message: a real denial carries the identifier only in `err.name`
-  // (`AccessDeniedException`), while its message reads "User: … is not authorized to
-  // perform: …", so matching the message alone never fires.
   const text = `${err instanceof Error ? err.name : ''} ${err instanceof Error ? err.message : String(err)}`;
   if (/AccessDenied|Unauthorized|not authorized/i.test(text)) return 'denied';
   if (/ResourceNotFound|ValidationException|NoSuchResource|not found|does not exist/i.test(text)) {
@@ -89,7 +64,6 @@ function classifyProbeFailure(err: unknown): ProbeFailure {
   return 'unverified';
 }
 
-/** `absent` is the only definite negative, so it is the only one that fails. */
 const statusFor = (f: ProbeFailure): DoctorCheckStatus => (f === 'absent' ? 'fail' : 'warn');
 
 export interface DoctorCheckResult {
@@ -107,9 +81,8 @@ export interface RunPlatformDoctorOptions {
   /** Injectable Linear auth probe (tests supply a fake; production uses the default). */
   readonly linearProbe?: LinearProbe;
   /**
-   * Opt-in resolver for the indeterminate auth state. Absent by default because
-   * it rotates a real token (safely — it persists the rotation), which an
-   * operator should choose rather than have a read-only-looking command do.
+   * Opt-in resolver for the indeterminate auth state. It rotates a real token and
+   * persists the rotation.
    */
   readonly linearVerifyRefresh?: LinearRefreshVerifier;
 }
@@ -141,8 +114,6 @@ export async function runPlatformDoctor(
     'JiraWorkspaceRegistryTableName',
     'BedrockGeoRegion',
     'BedrockModelIds',
-    // Absent unless the stack was deployed with the Linear identity vault enabled.
-    // Its absence is the signal that no workspace here is vault-managed.
     'LinearVaultWorkloadName',
     'LinearProjectMappingTableName',
   ]);
@@ -176,15 +147,6 @@ export async function runPlatformDoctor(
 
 /**
  * Report workspaces whose signing secret is not recorded as provably their own.
- *
- * These are the workspaces whose deliveries get rejected once a stack has two or more
- * active workspaces, because a secret shared between tenants attests only that the sender
- * knows *some* tenant's secret. Reported before that bites rather than after: the failure
- * mode otherwise is every webhook 401ing at once with the cause two layers down.
- *
- * Severity follows the workspace count, matching the enforcement path exactly. With one
- * active workspace a shared secret cannot cross a boundary, so an unrecorded provenance
- * is the normal, harmless state for every row written before that field existed.
  */
 export async function checkLinearSecretProvenance(
   region: string,
@@ -261,10 +223,6 @@ export async function checkLinearSecretProvenance(
   }
 }
 
-/**
- * Active rows in the Linear workspace registry, or undefined when it cannot be read —
- * the caller then words its verdict without assuming a count either way.
- */
 async function countActiveWorkspaces(
   ddb: ReturnType<typeof documentClient>,
   registryTableName: string,
@@ -291,12 +249,6 @@ async function countActiveWorkspaces(
 
 /**
  * Report project mappings that do not record which workspace owns them.
- *
- * The mapping table is keyed on the project id alone, so a row with no
- * `linear_workspace_id` gives the webhook path nothing to check a body-supplied
- * `projectId` against. Those rows are the population that must be backfilled before
- * the enforcement path can move from warning to rejecting — this check is how an
- * operator knows whether that work is finished.
  */
 export async function checkLinearProjectWorkspaces(
   region: string,
@@ -344,21 +296,15 @@ export async function checkLinearProjectWorkspaces(
       };
     }
 
-    // Named, but capped: the point of listing ids is to give the operator somewhere to
-    // start, and an uncapped list on a large install buries every other doctor line.
     const NAMED_LIMIT = 10;
     const allIds = unbacked.map((row) => row.linear_project_id ?? '<unknown-project-id>');
     const projectIds = allIds.length > NAMED_LIMIT
       ? `${allIds.slice(0, NAMED_LIMIT).join(', ')} (and ${allIds.length - NAMED_LIMIT} more)`
       : allIds.join(', ');
-    // --label too: onboard-project rewrites the whole mapping and stores the default label when it is left out.
     const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo> --label <its trigger label>` for each of them';
     const unbackedSummary = `${unbacked.length} of ${active.length} active Linear project mapping(s) do not `
       + 'record an owning workspace, so a webhook naming them cannot be checked against the workspace that '
       + `signed it: ${projectIds}.`;
-    // How serious this is depends on how many tenants share the stack. With one, there is
-    // no other tenant to reach. With several, the webhook path admits these rows with only
-    // a warning, so any active workspace can name one and steer a task at its repository.
     const workspaces = registryTableName ? await countActiveWorkspaces(ddb, registryTableName) : undefined;
     if (workspaces !== undefined && workspaces > 1) {
       return {
@@ -486,7 +432,6 @@ async function checkApiReachable(apiUrl: string | null): Promise<DoctorCheckResu
   const url = `${apiUrl.replace(/\/+$/, '')}/tasks`;
   try {
     const response = await fetch(url, { method: 'GET' });
-    // Unauthenticated list returns 401 when the gateway + authorizer are wired.
     if (response.status === 401 || response.status === 403) {
       return { id, label, status: 'pass', detail: `API responded (${response.status}) at ${url}` };
     }
@@ -673,24 +618,6 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
   }
 }
 
-/**
- * Check the cross-Region inference profile the deployment will actually invoke.
- *
- * Distinct from the catalog check above, and the reason both exist: the catalog
- * answers "is this model published in this Region", while the agent invokes a
- * `<geo>.<modelId>` PROFILE and the IAM grant is scoped to profile ARNs. A stack
- * configured for a geography whose profile does not exist — or whose entitlements
- * the account lacks — passes the catalog check and then fails every task at turn 0
- * with AccessDenied, which is exactly what doctor is supposed to pre-empt.
- *
- * Keeping the two separate also keeps the remedies distinct: a missing catalog
- * entry means the model is unavailable here at all, while a missing profile means
- * the geography is wrong for this model or Region.
- *
- * `geoRegion` is null when the stack predates the `BedrockGeoRegion` output. That
- * is reported rather than defaulted: guessing `us` and passing would state a
- * verification that never happened.
- */
 async function checkBedrockInferenceProfile(
   region: string,
   bareModelId: string,
@@ -709,10 +636,6 @@ async function checkBedrockInferenceProfile(
   }
 
   const profileId = `${geoRegion}.${bareModelId}`;
-  // Labelled as VISIBILITY, not readiness. This resolves under the operator's
-  // credentials while tasks invoke under the workload role, so a PASS here can
-  // coexist with AccessDenied at turn 0 — and a PASS feeding "All checks passed"
-  // would otherwise read as "the workload can call this".
   const label = `Bedrock inference profile visible (${profileId})`;
   const bedrock = makeClient(BedrockClient, { region });
   try {
@@ -721,9 +644,6 @@ async function checkBedrockInferenceProfile(
       id,
       label,
       status: 'pass',
-      // Deliberately not claiming invocability: resolving a profile proves it
-      // exists and is reachable, not that a task can call it. Only InvokeModel
-      // proves that, and doctor does not spend a token to find out.
       detail: `Inference profile ${profileId} resolves in ${region} for these operator `
         + 'credentials. Does not prove the workload role can invoke it — that grant is '
         + 'checked at task time.',
@@ -731,10 +651,6 @@ async function checkBedrockInferenceProfile(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const failure = classifyProbeFailure(err);
-    // The remedy depends on WHICH happened, so it cannot be shared. Rendering the
-    // denial case showed why the old shared string was wrong: it appended "Either
-    // <model> has no profile in that geography … tasks would fail at turn 0", drawing
-    // a conclusion about the PROFILE from an error about the CALLER.
     let detail: string;
     if (failure === 'denied') {
       detail = `${message} That is a permissions gap on the caller, not evidence the profile is `
@@ -754,25 +670,6 @@ async function checkBedrockInferenceProfile(
   }
 }
 
-/**
- * Every model the stack GRANTS, not just the one it defaults to.
- *
- * A granted model with no inference profile is invisible to every other check the
- * platform has, because they all read the same grant list: `repo onboard --model`
- * admits it (it is granted), workflow admission admits it (same list), and the IAM
- * policy carries a grant for a profile ARN that cannot exist. The first signal is a
- * task failing at turn 0. That was live —
- * `anthropic.claude-opus-4-20250514-v1:0` was granted with no profile in any
- * geography — and removing it only stays fixed if something notices the next one.
- *
- * Reported as ONE check rather than N so a wide grant list cannot bury the rest of
- * doctor's output, and named per-model in the detail so the offender is actionable.
- *
- * Severity mirrors {@link checkBedrockInferenceProfile}: a denial is a `warn`
- * (the operator's own credentials are least-privilege, which says nothing about
- * the model), while a genuine not-found is a `fail` — that one is a real defect in
- * the grant list regardless of who is looking.
- */
 async function checkGrantedModelProfiles(
   region: string,
   bedrockModelIds: string | null,
@@ -801,13 +698,6 @@ async function checkGrantedModelProfiles(
   }
 
   const bedrock = makeClient(BedrockClient, { region });
-  // THREE buckets, not two. The remedy for a missing profile is "remove this model
-  // from the grant set", and that is destructive advice: applied to a model that is
-  // actually fine, it narrows a working deployment. So it may only be given for an
-  // error that PROVES the profile does not exist. A binary
-  // `accessDenied ? warn : fail` sent every throttle, 5xx, expired credential, and
-  // unreachable-endpoint into that branch — telling an operator to delete a healthy
-  // model because the check happened to run during a blip.
   const missing: string[] = [];
   const denied: string[] = [];
   const unverified: string[] = [];
@@ -822,12 +712,9 @@ async function checkGrantedModelProfiles(
           denied.push(profileId);
           break;
         case 'absent':
-          // The service answered, and its answer was "no such profile".
           missing.push(profileId);
           break;
         default:
-          // Throttling, 5xx, timeouts, DNS, expired creds — the check did not run, which
-          // is not evidence about the model either way.
           unverified.push(`${profileId} (${errorName || 'unknown error'})`);
       }
     }
@@ -875,13 +762,6 @@ async function checkGrantedModelProfiles(
   };
 }
 
-/**
- * Linear workspaces whose OAuth authorization has died. This is the one failure
- * mode that is otherwise INVISIBLE: the webhook processor can't resolve a token,
- * drops the event, and the user sees their label do nothing at all. A revoked
- * authorization is a total outage for that workspace, so it fails the check; an
- * expired-but-refreshable token is normal and self-healing, so it doesn't.
- */
 async function checkLinearAuth(
   region: string,
   registryTableName: string | null,
@@ -892,7 +772,6 @@ async function checkLinearAuth(
   const id = 'linear_workspace_auth';
   const label = 'Linear workspace authorizations live';
   if (!registryTableName) {
-    // Linear is optional — a stack with no Linear integration is not broken.
     return { id, label, status: 'pass', detail: 'No Linear workspace registry on this stack (integration not deployed).' };
   }
 
@@ -902,9 +781,6 @@ async function checkLinearAuth(
       registryTableName,
       ...(probe && { probe }),
       ...(verifyRefresh && { verifyRefresh }),
-      // Without this a vault-managed workspace can only be reported `unknown`:
-      // its Secrets Manager bundle holds no token by design, so there is nothing
-      // to probe. Read-only — minting a token grants nothing and rotates nothing.
       ...(vaultWorkloadName && {
         mintVaultToken: makeLinearVaultTokenMinter(region, vaultWorkloadName),
       }),
@@ -914,12 +790,6 @@ async function checkLinearAuth(
     }
 
     const revoked = health.filter((w) => w.state === 'revoked');
-    // Indeterminate is NOT healthy. It is the exact shape of the workspace whose
-    // authorization died on 2026-07-25 — expired access token, refresh token
-    // present but dead — and reporting it as a pass is how that outage stayed
-    // invisible for over an hour. It is a warn rather than a fail because the
-    // same shape is also a perfectly healthy idle workspace, and failing every
-    // quiet workspace would train operators to ignore the check.
     const indeterminate = health.filter((w) => w.state === 'expired_indeterminate');
     const unknown = health.filter((w) => w.state === 'unknown');
     const summary = health
@@ -955,8 +825,6 @@ async function checkLinearAuth(
         detail: `Could not assess ${unknown.length} of ${health.length} workspace(s): ${summary}`,
       };
     }
-    // Disabled rows (operator-disabled or admin-removed) are intentionally not authorized,
-    // so they are named but not counted as authorized.
     const live = health.filter((w) => w.state !== 'disabled').length;
     const disabled = health.length - live;
     return {

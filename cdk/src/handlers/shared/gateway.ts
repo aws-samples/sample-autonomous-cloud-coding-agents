@@ -42,9 +42,6 @@ export function getHeader(headers: Record<string, string | undefined> | null, na
  * - The native Cognito authorizer sets `authorizer.claims.sub`.
  * - A custom REQUEST authorizer (webhook / API-key) sets `authorizer.userId`
  *   as a top-level context value.
- *
- * Both resolve to the same IdP-namespaced platform user ID, so a handler behind
- * either authorizer reads identity through this one call.
  * @param event - the API Gateway proxy event.
  * @returns the platform user ID, or null if missing.
  */
@@ -56,10 +53,7 @@ export function extractUserId(event: APIGatewayProxyEvent): string | null {
   return null;
 }
 
-/**
- * Extract Cognito group membership from the authenticated JWT. Group names are
- * the platform's team identifiers for monthly budgets.
- */
+/** Extract Cognito group membership from the authenticated JWT. */
 export function extractUserGroups(event: APIGatewayProxyEvent): string[] {
   const raw = event.requestContext.authorizer?.claims?.['cognito:groups'];
   if (!raw) return [];
@@ -72,7 +66,7 @@ export function extractUserGroups(event: APIGatewayProxyEvent): string[] {
  * Check whether the authenticated caller is in a Cognito group. Cognito places
  * group membership in the `cognito:groups` claim, which the authorizer surfaces
  * either as a comma/space-separated string or an array depending on the token
- * shape — this normalizes both. Used to gate registry publish/approve (#246).
+ * shape — this normalizes both.
  * @param event - the API Gateway proxy event.
  * @param group - the Cognito group name to check for.
  * @returns true if the caller is a member of `group`.
@@ -139,12 +133,6 @@ export function buildWebhookChannelMetadata(
   };
 }
 
-/**
- * Convert a description string to a URL-safe slug.
- * Lowercases, replaces non-alphanumeric with hyphens, collapses consecutive hyphens,
- * trims leading/trailing hyphens, and truncates to 50 characters.
- */
-/** Maximum slug length for gateway path segments. */
 const SLUG_MAX_LENGTH = 50;
 
 function slugify(text?: string): string {

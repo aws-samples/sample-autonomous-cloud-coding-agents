@@ -17,21 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Bootstrap preflight validator (#126): is the account's CDKToolkit stack carrying
- * the bootstrap policy bundle this checkout needs?
- *
- * A stale bundle does not fail fast on its own. `cdk deploy` builds and uploads
- * every asset (the agent image alone is several hundred MB) BEFORE CloudFormation
- * evaluates the execution role's permissions, so a missing statement surfaces as
- * an `iam:...` AccessDenied many minutes in. The CDKToolkit stack publishes
- * `BootstrapPolicyVersion`, `BootstrapPolicyHash` and `BootstrapPolicySet`;
- * comparing them up front turns that into an actionable result in seconds.
- *
- * Results, per #126: PASS deploys; WARN (same version, different hash: likely
- * console drift) is advisory and deploys; FAIL stops the deploy.
- */
-
 import type { ComputeBackend } from '../handlers/shared/compute-backend';
 
 export interface CfnOutput {
@@ -55,7 +40,6 @@ export interface BootstrapVerdict {
 
 const REBOOTSTRAP = 'Re-bootstrap with `mise //cdk:bootstrap` (same account, Region and profile), then deploy again.';
 
-/** Enough of a SHA-256 to tell two bundles apart in a message. */
 const HASH_DISPLAY_LENGTH = 12;
 
 const BASE_POLICIES = ['Infrastructure', 'Application', 'Observability', 'Compute-Agentcore'] as const;

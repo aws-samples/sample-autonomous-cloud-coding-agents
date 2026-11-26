@@ -23,9 +23,6 @@ import { CliError } from '../errors';
 import { formatEvents, formatJson } from '../format';
 import { Pagination, TaskEvent } from '../types';
 
-/** Defensive cap on pagination drains with ``--all`` so a runaway/looping
- *  ``next_token`` cannot spin forever. At 100 events/page this covers 10k
- *  events — far beyond any real task's event stream. */
 const MAX_PAGES = 100;
 
 export function makeEventsCommand(): Command {
@@ -41,8 +38,6 @@ export function makeEventsCommand(): Command {
     .option('--all', 'Drain all pages of events (follows next_token)')
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (taskId: string, opts) => {
-      // Validate --limit as a positive integer (mirrors submit.ts numeric-flag
-      // validation) rather than silently forwarding NaN / a negative.
       if (opts.limit !== undefined) {
         if (isNaN(opts.limit) || !Number.isInteger(opts.limit) || opts.limit < 1) {
           throw new CliError('--limit must be a positive integer.');
@@ -58,10 +53,6 @@ export function makeEventsCommand(): Command {
         } else {
           console.log(formatEvents(events));
           if (pagination.has_more) {
-            // Only reachable when the defensive MAX_PAGES cap tripped with
-            // pages still remaining — without this notice a capped drain
-            // looks identical to a complete one. (The --limit cap clears
-            // has_more, so it never lands here.)
             console.error(
               `\n(Stopped after ${MAX_PAGES} pages — more events exist. `
               + 'Use --output json to get a resume token.)',
@@ -86,23 +77,6 @@ export function makeEventsCommand(): Command {
     });
 }
 
-/** Follow ``next_token`` until the server reports no more pages, the
- *  defensive ``MAX_PAGES`` cap trips, or ``limit`` total events have been
- *  collected. With ``--all``, ``limit`` caps the TOTAL events returned, so
- *  it is enforced here client-side rather than forwarded as a per-page
- *  size (the server's ``limit`` param is a page size, which would make
- *  ``--all --limit 5`` return everything in 5-event pages).
- *
- *  Pagination in the result:
- *  - clean full drain → the final page's ``has_more=false`` cursor;
- *  - ``limit`` cap hit → ``{ has_more: false, next_token: null }``. The
- *    raw last-page cursor must NOT be returned here: events were sliced
- *    off the end, so that cursor points PAST the dropped events and a
- *    script following it would silently skip them. The cap is the caller
- *    saying "I only want N" — the honest cursor is "done".
- *  - ``MAX_PAGES`` cap hit → the last page's live cursor (``has_more``
- *    still true) so JSON consumers can resume; the text path prints a
- *    truncation notice. */
 async function drainAllEvents(
   client: ApiClient,
   taskId: string,

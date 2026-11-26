@@ -17,10 +17,6 @@
  *  SOFTWARE.
  */
 
-// Mock the durable execution SDK before importing orchestrate-task — its
-// `withDurableExecution` wraps the handler at module import time. We only
-// care about `notifyLinearOnConcurrencyCap` and `notifyJiraOnConcurrencyCap`
-// here, which are plain async functions exported alongside the durable handler.
 jest.mock('@aws/durable-execution-sdk-js', () => ({
   withDurableExecution: (fn: unknown) => fn,
 }));
@@ -44,8 +40,6 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   reportIssueFailure: (...args: unknown[]) => reportJiraIssueFailureMock(...args),
 }));
 
-// Stub the unused-but-imported orchestrator helpers so module-init side
-// effects don't try to talk to AWS.
 jest.mock('../../src/handlers/shared/orchestrator', () => ({
   admissionControl: jest.fn(),
   emitTaskEvent: jest.fn(),
@@ -135,8 +129,6 @@ describe('notifyLinearOnConcurrencyCap', () => {
       },
     }));
 
-    // The task is queued, not failed: a comment without the ❌ reaction that
-    // `reportIssueFailure` adds to it.
     expect(reportIssueFailureMock).not.toHaveBeenCalled();
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
     const [ctx, issueId, message] = postIssueCommentMock.mock.calls[0];
@@ -153,7 +145,7 @@ describe('notifyLinearOnConcurrencyCap', () => {
       postIssueCommentMock.mockClear();
       await notifyLinearOnConcurrencyCap(task({
         channel_source: source,
-        channel_metadata: { linear_issue_id: 'lin-issue-1' }, // even if metadata is set
+        channel_metadata: { linear_issue_id: 'lin-issue-1' },
       }));
       expect(postIssueCommentMock).not.toHaveBeenCalled();
     }
@@ -162,7 +154,7 @@ describe('notifyLinearOnConcurrencyCap', () => {
   test('no-ops when channel_metadata is missing the issue id (defensive)', async () => {
     await notifyLinearOnConcurrencyCap(task({
       channel_source: 'linear',
-      channel_metadata: {}, // no linear_issue_id
+      channel_metadata: {},
     }));
 
     expect(postIssueCommentMock).not.toHaveBeenCalled();
@@ -191,11 +183,6 @@ describe('notifyLinearOnConcurrencyCap', () => {
   });
 
   test('postIssueComment rejection is swallowed (best-effort, never blocks the admission step)', async () => {
-    // Round-3 review B2 moved the try/catch inside this function so a
-    // synchronous throw from the Linear helper (e.g., transient DDB
-    // throttle on the registry lookup) cannot crash the durable-execution
-    // step and trigger a retry that re-runs queueTask. Contract
-    // is now: this helper never rejects.
     postIssueCommentMock.mockRejectedValue(new Error('boom'));
     await expect(
       notifyLinearOnConcurrencyCap(task({
@@ -249,7 +236,7 @@ describe('notifyJiraOnConcurrencyCap', () => {
   test('no-ops when channel_metadata is missing cloudId or issue key (defensive)', async () => {
     await notifyJiraOnConcurrencyCap(task({
       channel_source: 'jira',
-      channel_metadata: { jira_cloud_id: 'cloud-1' }, // no issue key
+      channel_metadata: { jira_cloud_id: 'cloud-1' },
     }));
     expect(reportJiraIssueFailureMock).not.toHaveBeenCalled();
   });

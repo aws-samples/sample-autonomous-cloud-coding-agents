@@ -17,28 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * The hourly sweep of pull-request outcomes against the AWS Emulator (ADR-013 Tier 2a).
- *
- * The real handler runs in-process. Its tables are created from the TaskTable and
- * TaskEventsTable constructs and its token is a secret the emulator holds, so the
- * candidate query (the status index, the filter, the projection, the pages), the three
- * conditional writes and the event run as the expressions they are, and the token takes
- * the real way from Secrets Manager to the request. GitHub is outside this tier: `fetch`
- * is a stub that answers per pull-request number, and the tests assert that it was asked.
- *
- * One case takes its task from the real writers: the create-task handler and the status
- * transitions of a run, the last of which carries the pull request the agent reports.
- * The others need tasks that finished days ago, which no writer can leave: those are put
- * into the table as the agent's terminal write leaves a record. The state of a pull
- * request always comes from its writer, the sweep.
- *
- * A run reads every finished task of the table, those of earlier tests too: the tests
- * assert on the tasks they wrote, never on how many a run read.
- *
- * Runs only through `jest.emulator.config.js` (see ./harness).
- */
-
 import { randomUUID } from 'node:crypto';
 import { CreateSecretCommand, DeleteSecretCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -48,8 +26,6 @@ import { TaskEventsTable } from '../../src/constructs/task-events-table';
 import { type TaskStatusType } from '../../src/constructs/task-status';
 import { TaskTable } from '../../src/constructs/task-table';
 
-// The handlers read their configuration at module load, so the environment is set
-// before any of them is imported. Names are unique to this file's run.
 const run = randomUUID().slice(0, 8);
 process.env.TASK_TABLE_NAME = `emu-${run}-pr-outcome-tasks`;
 process.env.TASK_EVENTS_TABLE_NAME = `emu-${run}-pr-outcome-events`;
@@ -72,30 +48,25 @@ const TOKEN = 'token-held-by-the-emulator';
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
-/** Seconds a task record is kept; the terminal write stamps `ttl` this far ahead. */
 const RETENTION_S = 90 * 24 * 3600;
-/** The tasks of the paging case. A page of an index holds 1 MB of whole records: five of 300 KB need a second one. */
+/** A page of an index holds 1 MB of whole records: five of 300 KB need a second one. */
 const LARGE_TASKS = 5;
 const LARGE_TASK_BYTES = 300 * 1024;
-/** Timeout of the paging case (ms): it writes and reads 1.5 MB. Jest's default is 5 seconds. */
 const PAGING_TIMEOUT_MS = 30_000;
 
 const ddb = makeDocClient();
 const secrets = makeClient(SecretsManagerClient);
 const context = { getRemainingTimeInMillis: () => 5 * MINUTE_MS } as Context;
 
-/** A time as the platform stores it, with milliseconds, and as the agent and GitHub write it, in whole seconds. */
 const platformStamp = (ms: number): string => new Date(ms).toISOString();
+/** GitHub writes its times in whole seconds. */
 const wholeSecondStamp = (ms: number): string => platformStamp(ms).replace(/\.\d{3}Z$/, 'Z');
 
-/** A pull request as the stubbed GitHub returns it. */
 type PullRequest = Record<string, unknown>;
 
-/** What GitHub knows, by pull-request number. Tests add to it, and what an earlier test added stays for the runs of later ones. */
 const pullRequests = new Map<number, PullRequest>();
 let nextNumber = 1;
 
-/** The pull request of a task: open, opened by ABCA's account from the task's branch in the repository itself, not reviewed. */
 const openedBy = (taskId: string, fields: PullRequest = {}): PullRequest => ({
   state: 'OPEN',
   mergedAt: null,
@@ -107,11 +78,9 @@ const openedBy = (taskId: string, fields: PullRequest = {}): PullRequest => ({
   ...fields,
 });
 
-/** A review by an account that can push to the repository. */
 const review = (state: string, submittedAt: string, login: string) =>
   ({ state, submittedAt, authorCanPushToRepository: true, author: { login, __typename: 'User' } });
 
-/** GitHub's GraphQL endpoint, as far as the sweep asks: the pull request under a number, or that there is none. */
 function answer(number: number): Response {
   const pullRequest = pullRequests.get(number);
   const body = pullRequest
@@ -128,12 +97,6 @@ function answer(number: number): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
 }
 
-/**
- * Write a task record straight to the table: new work that opened a pull request and ended
- * normally two days ago, as the agent's terminal write leaves it.
- * @param fields - attributes to add or replace; `undefined` leaves one out.
- * @returns the record, and the number of its pull request.
- */
 async function seedTask(fields: Partial<TaskRecord> = {}): Promise<{ task: TaskRecord; number: number }> {
   const number = nextNumber++;
   const taskId = `task-${randomUUID()}`;
@@ -164,7 +127,6 @@ async function seedTask(fields: Partial<TaskRecord> = {}): Promise<{ task: TaskR
   return { task, number };
 }
 
-/** A task as the table holds it. Undefined when the table holds no such task. */
 async function storedTask(taskId: string): Promise<Record<string, unknown> | undefined> {
   const { Item } = await ddb.send(new GetCommand({
     TableName: process.env.TASK_TABLE_NAME,
@@ -174,7 +136,6 @@ async function storedTask(taskId: string): Promise<Record<string, unknown> | und
   return Item;
 }
 
-/** The events of a task as the events table holds them, oldest first. */
 async function storedEvents(taskId: string): Promise<Record<string, unknown>[]> {
   const { Items } = await ddb.send(new QueryCommand({
     TableName: process.env.TASK_EVENTS_TABLE_NAME,
@@ -185,15 +146,9 @@ async function storedEvents(taskId: string): Promise<Record<string, unknown>[]> 
   return Items ?? [];
 }
 
-/**
- * One run of the real handler against the stubbed GitHub.
- * @returns the pull-request numbers it asked GitHub about, the metric lines it wrote, and how its summary says it stopped.
- */
 async function sweep(): Promise<{ asked: number[]; lines: Record<string, unknown>[]; stopped: unknown }> {
   const github = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) =>
     answer((JSON.parse(init?.body as string).variables as { number: number }).number));
-  // The handler writes its metric lines to stdout, and its log lines to stdout or, for an
-  // error, to stderr: all are JSON, and are told apart below.
   const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
   const stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
   try {
@@ -202,7 +157,6 @@ async function sweep(): Promise<{ asked: number[]; lines: Record<string, unknown
       .map(([chunk]) => String(chunk))
       .filter((text) => text.startsWith('{'))
       .map((text) => JSON.parse(text) as Record<string, unknown>);
-    // Every request went to GitHub's endpoint, with the token the emulator's secret holds.
     for (const [url, init] of github.mock.calls) {
       expect(url).toBe('https://api.github.com/graphql');
       expect(init?.headers).toMatchObject({ Authorization: `Bearer ${TOKEN}` });
@@ -225,7 +179,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     new TaskEventsTable(stack, 'Events', { tableName: process.env.TASK_EVENTS_TABLE_NAME });
     new RepoTable(stack, 'Repos', { tableName: process.env.REPO_TABLE_NAME });
   }, async () => {
-    // The row a Blueprint writes at deploy time; create-task gates on it.
     const now = new Date().toISOString();
     await ddb.send(new PutCommand({
       TableName: process.env.REPO_TABLE_NAME,
@@ -250,7 +203,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     await transitionTask(taskId, 'SUBMITTED', 'HYDRATING');
     await transitionTask(taskId, 'HYDRATING', 'RUNNING');
     await transitionTask(taskId, 'RUNNING', 'FINALIZING');
-    // The terminal write is the agent's: the status attributes, as here, and what its session did.
     const number = nextNumber++;
     await transitionTask(taskId, 'FINALIZING', 'COMPLETED', {
       completed_at: wholeSecondStamp(Date.now()),
@@ -259,7 +211,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     });
     const finished = await storedTask(taskId);
     expect(finished).toMatchObject({ status: 'COMPLETED', ttl: expect.any(Number), branch_name: expect.stringContaining(taskId) });
-    // The agent pushes the branch the platform named for the task, and GitHub reports that name.
     const pullRequest = { ...openedBy(taskId), headRefName: finished?.branch_name };
     pullRequests.set(number, pullRequest);
 
@@ -273,7 +224,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
 
     const second = await sweep();
 
-    // The whole record: the `ttl` and the `updated_at` of the terminal write are among what did not move.
     expect(await storedTask(taskId)).toEqual({ ...finished, pr_state: 'merged', pr_closed_at: mergedAt, pr_changes_requested: 0 });
     expect(second.lines.filter((line) => line.task_id === taskId)).toMatchObject([{
       _aws: { Timestamp: Date.parse(mergedAt) },
@@ -296,11 +246,9 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     const recorded = await storedTask(task.task_id);
     expect(recorded).toEqual({ ...task, pr_state: 'open' });
 
-    // The filter keeps a pull request recorded as open among the candidates: it is asked about again.
     const second = await sweep();
     expect(second.asked).toContain(number);
     expect(await storedTask(task.task_id)).toEqual(recorded);
-    // And the open write itself cannot land a second time.
     await expect(ddb.send(new UpdateCommand(firstStateUpdate(process.env.TASK_TABLE_NAME!, task.task_id, 'open'))))
       .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
     expect(await storedTask(task.task_id)).toEqual(recorded);
@@ -313,7 +261,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     await sweep();
     expect(await storedTask(task.task_id)).toMatchObject({ pr_state: 'open' });
 
-    // Merged two hours ago: sent back once, answered by ABCA's own account, then approved.
     const mergedAtMs = Math.floor(Date.now() / 1000) * 1000 - 2 * HOUR_MS;
     const mergedAt = wholeSecondStamp(mergedAtMs);
     const firstReviewAt = wholeSecondStamp(mergedAtMs - 5 * HOUR_MS);
@@ -334,7 +281,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
 
     expect(merged.asked).toContain(number);
     const recorded = await storedTask(task.task_id);
-    // The whole record: `updated_at` and `ttl` are among what did not move.
     expect(recorded).toEqual({
       ...task,
       pr_state: 'merged',
@@ -351,7 +297,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
       repo: REPO,
       workflow: 'coding/new-task-v1',
     }]);
-    // The whole event, in the shape of the platform's other events and kept as long: with what the write recorded.
     const outcomeEvents = (await storedEvents(task.task_id)).filter((event) => event.event_type === 'pr_outcome_recorded');
     expect(outcomeEvents).toEqual([{
       task_id: task.task_id,
@@ -365,12 +310,10 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     }]);
     expect(Math.abs((outcomeEvents[0].ttl as number) - (Date.now() / 1000 + RETENTION_S))).toBeLessThan(MINUTE_MS / 1000);
 
-    // A final state takes the pull request out of the candidates: it is not asked about again.
     const after = await sweep();
     expect(after.asked).not.toContain(number);
     expect(after.lines.filter((line) => line.task_id === task.task_id)).toEqual([]);
     expect((await storedEvents(task.task_id)).filter((event) => event.event_type === 'pr_outcome_recorded')).toHaveLength(1);
-    // And a final write cannot land on a record that holds a final state.
     const closedLater = {
       state: 'closed' as const,
       headRef: task.branch_name,
@@ -392,7 +335,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
     const { asked, lines } = await sweep();
 
     expect(asked).toContain(number);
-    // No `pr_first_review_at` at all: the write names the attribute only when there is a review.
     expect(await storedTask(task.task_id)).toEqual({
       ...task,
       pr_state: 'closed',
@@ -405,8 +347,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
   });
 
   test('a pull request GitHub does not have as the task\'s is recorded as not found, with nothing else, and is not asked about again', async () => {
-    // The record of the first names a number the repository does not have. The pull request
-    // under the number of the second was opened from the branch of another task.
     const missing = await seedTask();
     const foreign = await seedTask();
     pullRequests.set(foreign.number, openedBy(`task-${randomUUID()}`, { state: 'MERGED', mergedAt: wholeSecondStamp(Date.now() - 2 * HOUR_MS) }));
@@ -415,31 +355,23 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
 
     expect(first.asked).toEqual(expect.arrayContaining([missing.number, foreign.number]));
     for (const { task } of [missing, foreign]) {
-      // The whole record: `updated_at` and `ttl` are among what did not move.
       expect(await storedTask(task.task_id)).toEqual({ ...task, pr_state: 'not_found' });
       expect(first.lines.filter((line) => line.task_id === task.task_id)).toEqual([]);
       expect(await storedEvents(task.task_id)).toEqual([]);
     }
 
-    // The filter takes a record that says so out of the candidates.
     const second = await sweep();
     expect(second.asked).not.toContain(missing.number);
     expect(second.asked).not.toContain(foreign.number);
-    // And the write cannot land on a record that holds a state.
     await expect(ddb.send(new UpdateCommand(firstStateUpdate(process.env.TASK_TABLE_NAME!, missing.task.task_id, 'not_found'))))
       .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
   });
 
   test('the tasks whose pull request is not followed are not asked about and not touched, in a run that reads the others', async () => {
     const tasks = [
-      // Ended normally without a pull request.
       await seedTask({ pr_url: undefined, build_passed: undefined, answer_text: 'Which environment should this deploy to?' }),
-      // Opened a pull request, then failed.
       await seedTask({ status: 'FAILED', error_message: 'Agent session ended without a result.' }),
-      // Already holds a final state.
       await seedTask({ pr_state: 'merged', pr_closed_at: wholeSecondStamp(Date.now() - DAY_MS), pr_changes_requested: 0 }),
-      // The tasks of an orchestration, a sub-task whose build failed and the node that combines them:
-      // the filter lets their records through, the sweep does not follow them.
       await seedTask({ channel_metadata: { orchestration_id: 'orch_1', orchestration_sub_issue_id: 'issue-1' }, build_passed: false }),
       await seedTask({ channel_metadata: { orchestration_id: 'orch_1', orchestration_sub_issue_id: `issue-1${INTEGRATION_NODE_SUFFIX}` } }),
     ];
@@ -468,7 +400,7 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
       changesRequested: 0,
     };
 
-    // An update without the condition on the key creates the item.
+    // DynamoDB: an update without a condition on the key creates the item.
     await expect(ddb.send(new UpdateCommand(firstStateUpdate(process.env.TASK_TABLE_NAME!, taskId, 'open'))))
       .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
     await expect(ddb.send(new UpdateCommand(finalStateUpdate(process.env.TASK_TABLE_NAME!, taskId, merged))))
@@ -482,7 +414,6 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
       large.push(await seedTask({ task_description: 'x'.repeat(LARGE_TASK_BYTES) }));
     }
     for (const { task, number } of large) pullRequests.set(number, openedBy(task.task_id));
-    // The premise: the finished tasks of the table do not fit one page, whatever the read projects.
     const firstPage = await ddb.send(new QueryCommand({
       TableName: process.env.TASK_TABLE_NAME,
       IndexName: TaskTable.STATUS_INDEX,

@@ -1,18 +1,9 @@
-"""The server's own log lines are redacted like every other line the agent logs.
-
-``_debug_cw``, ``_warn_cw`` and the stdout-only hook log carry exception texts and
-fragments of the invocation payload to stdout and to CloudWatch. All three pass
-their text through ``shell.redact_secrets``: a credential the process holds is
-replaced by its value, a token it does not hold by its shape.
-"""
-
 from __future__ import annotations
 
 import pytest
 
 import server
 
-# One call into each of the three places where the server redacts a line.
 _SINKS = {
     "debug": lambda text: server._debug_cw(text, task_id="t-1"),
     "stdout-only": lambda text: server._aws_silent_log(text, tag="build-hook"),
@@ -22,7 +13,6 @@ _SINKS = {
 
 @pytest.fixture(autouse=True)
 def _no_log_group(monkeypatch):
-    """Without a log group the writers print the line and start no CloudWatch thread."""
     monkeypatch.delenv("LOG_GROUP_NAME", raising=False)
 
 
@@ -49,8 +39,6 @@ class TestServerLogLinesAreRedacted:
         assert " was refused" in out
 
     def test_github_token_the_process_does_not_hold(self, capfd, sink):
-        # The token of another installation in an error text: no variable holds
-        # it, only its shape gives it away.
         _SINKS[sink]("remote: ghu_abc123XYZ rejected")
 
         assert "remote: *** rejected" in capfd.readouterr().out

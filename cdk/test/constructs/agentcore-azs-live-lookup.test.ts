@@ -17,14 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Covers the **default** (live) lookups in `agentcore-azs.ts`, which every other
- * test replaces by injection. The SDK modules are mocked, so nothing here talks
- * to AWS; what is asserted is the request shape those lookups depend on —
- * `state=available` filtering, bounded timeouts/attempts, and the solution
- * User-Agent required by AGENTS.md (#319).
- */
-
 const ec2Send = jest.fn();
 const stsSend = jest.fn();
 const ec2Ctor = jest.fn();
@@ -64,7 +56,6 @@ describe('default live lookups', () => {
         { ZoneName: 'us-east-1a', ZoneId: 'use1-az2' },
         { ZoneName: 'us-east-1b', ZoneId: 'use1-az4' },
         { ZoneName: 'us-east-1c', ZoneId: 'use1-az6' },
-        // Malformed entries must be skipped, not crash the resolver.
         { ZoneName: undefined, ZoneId: 'use1-az1' },
         { ZoneName: 'us-east-1z', ZoneId: undefined },
       ],
@@ -97,7 +88,6 @@ describe('default live lookups', () => {
       expect(cfg.region).toBe('us-east-1');
       expect(cfg.maxAttempts).toBe(2);
       expect(cfg.requestHandler).toEqual({ requestTimeout: 5000, connectionTimeout: 5000 });
-      // makeClient() attribution — a naked client would drop the md/ segment.
       expect(cfg.customUserAgent).toEqual([['md/uksb-wt64nei4u6', expect.any(String)]]);
     }
   });

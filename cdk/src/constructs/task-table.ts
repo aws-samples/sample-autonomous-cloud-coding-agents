@@ -24,9 +24,6 @@ import { JIRA_ISSUE_INDEX_NAME, LINEAR_ISSUE_INDEX_NAME } from './task-table-ind
 
 export { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
 
-/**
- * Properties for TaskTable construct.
- */
 export interface TaskTableProps {
   /**
    * Optional table name override.
@@ -76,8 +73,7 @@ export class TaskTable extends Construct {
 
   /**
    * GSI name for listing a user's tasks newest first (GET /tasks).
-   * PK: user_id, SK: created_at. UserStatusIndex cannot serve the list: its
-   * sort key begins with the status, so a read comes back grouped by status.
+   * PK: user_id, SK: created_at.
    */
   public static readonly USER_CREATED_AT_INDEX = 'UserCreatedAtIndex';
 
@@ -97,9 +93,7 @@ export class TaskTable extends Construct {
    * GSI name for resolving a Linear issue → its newest ABCA task + PR.
    * PK: linear_issue_id, SK: created_at (newest task wins). Sparse —
    * only Linear-origin tasks (which write the top-level ``linear_issue_id``
-   * attribute) are projected; GitHub/Slack/API tasks are absent. Powers the
-   * standalone ``@bgagent`` comment trigger on a plain (non-orchestration)
-   * issue, where no orchestration row records the issue→PR link.
+   * attribute) are projected; GitHub/Slack/API tasks are absent.
    */
   public static readonly LINEAR_ISSUE_INDEX = LINEAR_ISSUE_INDEX_NAME;
 
@@ -109,9 +103,6 @@ export class TaskTable extends Construct {
    */
   public static readonly JIRA_ISSUE_INDEX = JIRA_ISSUE_INDEX_NAME;
 
-  /**
-   * The underlying DynamoDB table. Use this to grant access or read the table name.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: TaskTableProps = {}) {
@@ -128,22 +119,10 @@ export class TaskTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
-      // NEW_IMAGE stream feeds the combined terminal-task reconciler
-      // (`OrchestrationReconciler`), which releases dependency-unblocked
-      // children, rolls up monthly budget spend and writes the factory
-      // scoreboard metric line. This is deliberately on TaskTable rather than
-      // TaskEventsTable, whose stream is already at its 2-consumer limit
-      // (FanOutConsumer + ApprovalMetricsPublisher; see TaskEventsTable). It
-      // uses one of TaskTable's two DynamoDB Streams consumer slots. NEW_IMAGE
-      // contains every field the first two need; the third takes the record
-      // from the write that claims the task.
-      // Enabling a stream on an existing table is an in-place CFN update
-      // (no table replacement).
       stream: dynamodb.StreamViewType.NEW_IMAGE,
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
 
-    // GSI: query tasks by user, optionally filtered by status
     this.table.addGlobalSecondaryIndex({
       indexName: TaskTable.USER_STATUS_INDEX,
       partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
@@ -151,7 +130,6 @@ export class TaskTable extends Construct {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    // GSI: query tasks by status (for queue processing, monitoring)
     this.table.addGlobalSecondaryIndex({
       indexName: TaskTable.STATUS_INDEX,
       partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
@@ -159,35 +137,22 @@ export class TaskTable extends Construct {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    // GSI: idempotency dedup (sparse — only items with idempotency_key)
     this.table.addGlobalSecondaryIndex({
       indexName: TaskTable.IDEMPOTENCY_INDEX,
       partitionKey: { name: 'idempotency_key', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
 
-    // GSI: Linear issue → newest ABCA task + PR (sparse — only Linear-origin
-    // tasks carry the top-level linear_issue_id), for the standalone comment
-    // trigger. INCLUDE-projects just the fields the trigger reads, so
-    // the index stays lean (no full-item copy on every task write).
     this.table.addGlobalSecondaryIndex({
       indexName: TaskTable.LINEAR_ISSUE_INDEX,
       partitionKey: { name: 'linear_issue_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.INCLUDE,
-      // NOTE: a GSI's projection CANNOT be changed in place — DynamoDB rejects it
-      // ("Cannot update GSI's properties other than Provisioned Throughput…";
-      // observed when deploying the iteration reply). So the iteration reply's
-      // running-total query does a per-task GetItem for cost_usd rather than
-      // widening this projection. Keep this list as-is unless you create a NEW
-      // index with a different name.
+      // DynamoDB cannot change a GSI's projection in place: a different list needs a
+      // new index under a new name.
       nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
     });
 
-    // GSI: Jira issue → newest PR-producing task (#640 comment-triggered PR
-    // iteration). Sparse: only Jira-origin tasks with issue metadata carry the
-    // top-level jira_issue_identity attribute. Same lean INCLUDE projection as
-    // the Linear index above — just the fields the comment-trigger resolver reads.
     this.table.addGlobalSecondaryIndex({
       indexName: TaskTable.JIRA_ISSUE_INDEX,
       partitionKey: { name: 'jira_issue_identity', type: dynamodb.AttributeType.STRING },
@@ -196,8 +161,6 @@ export class TaskTable extends Construct {
       nonKeyAttributes: ['pr_url', 'pr_number', 'status', 'repo', 'user_id', 'channel_metadata'],
     });
 
-    // GSI: list a user's tasks newest first (GET /tasks). Declared last so that a
-    // deployed table sees one index appended and no attribute definition moved.
     this.table.addGlobalSecondaryIndex({
       indexName: TaskTable.USER_CREATED_AT_INDEX,
       partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },

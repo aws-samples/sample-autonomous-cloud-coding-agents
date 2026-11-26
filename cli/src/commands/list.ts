@@ -21,10 +21,6 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { followPages, formatJson, formatTaskList } from '../format';
 
-/**
- * Requests one `list` sends at most. `list --status RUNNING` rarely fills a page, so over a long history every call
- * sends them all: 5 keeps a call every two seconds under the 1,000 requests in five minutes the API allows one address.
- */
 const MAX_LIST_REQUESTS = 5;
 
 export function makeListCommand(): Command {

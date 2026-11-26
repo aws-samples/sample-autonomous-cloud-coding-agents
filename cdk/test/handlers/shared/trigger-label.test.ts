@@ -21,9 +21,6 @@ import { hasHelpLabel, DEFAULT_LABEL_FILTER } from '../../../src/handlers/shared
 
 describe('DEFAULT_LABEL_FILTER', () => {
   test('is the documented default a project inherits without a label_filter', () => {
-    // Load-bearing: the project-mapping table treats an absent label_filter as
-    // this value, and the rollup renders it in operator-facing copy. Changing it
-    // silently stops every project that never set one explicitly.
     expect(DEFAULT_LABEL_FILTER).toBe('bgagent');
   });
 });
@@ -41,9 +38,6 @@ describe('hasHelpLabel', () => {
   });
 
   test('is false for the trigger label and for lookalikes', () => {
-    // The help label must not fire on the plain trigger (that would explain the
-    // labels instead of doing the work), nor on a name that merely contains
-    // "help".
     expect(hasHelpLabel(['bgagent'])).toBe(false);
     expect(hasHelpLabel(['helpful', 'bghelp'])).toBe(false);
     expect(hasHelpLabel([])).toBe(false);

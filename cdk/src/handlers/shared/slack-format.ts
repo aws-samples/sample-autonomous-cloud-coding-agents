@@ -17,15 +17,12 @@
  *  SOFTWARE.
  */
 
-/**
- * Truncate a string to `maxLen`, appending "..." if it was cut.
- * @param text - the string to truncate.
- * @param maxLen - the maximum length of the returned string (including the "...").
- * @returns the truncated string.
- */
-/** Length of the "..." suffix appended by {@link truncate}. */
 const TRUNCATE_ELLIPSIS_LENGTH = 3;
 
+/**
+ * Truncate a string to `maxLen`, appending "..." if it was cut.
+ * @param maxLen - the maximum length of the returned string (including the "...").
+ */
 export function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - TRUNCATE_ELLIPSIS_LENGTH) + '...';
@@ -34,7 +31,6 @@ export function truncate(text: string, maxLen: number): string {
 /**
  * Format a duration in seconds as a human-readable string (e.g. "45s", "2m 10s", "1h 5m").
  * @param seconds - the duration in seconds. Non-numeric values are coerced with Number().
- * @returns the formatted duration string.
  */
 export function formatDuration(seconds: number | string): string {
   const s = Math.round(Number(seconds));

@@ -2,10 +2,6 @@
 /**
  * Sync slash-command stubs from `.abca/commands/` into IDE-specific dirs.
  *
- * For each file in `.abca/commands/`, writes the same filename under
- * `.claude/commands/` and `.cursor/commands/` with body = repo-relative
- * path to the canonical `.abca` file (one line, no trailing whitespace).
- *
  * Run: `node scripts/sync-abca-commands.mjs`
  *      `mise run sync:abca-commands`
  */

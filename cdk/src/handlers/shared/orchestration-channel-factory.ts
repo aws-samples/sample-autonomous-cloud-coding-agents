@@ -17,42 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Registry of surface adapters, and the lookup that picks one at runtime.
- *
- * Event-driven paths (the reconciler, the stranded-orchestration sweep) act on an
- * orchestration they LOAD rather than one they were triggered from, so they can't
- * know the surface at build time — it's a property of the stored row. This maps
- * that stored value to an adapter, so the engine picks a surface from data instead
- * of hardcoding one.
- *
- * A REGISTRY rather than a switch, deliberately: a closed ``switch`` (or a closed
- * ``ChannelKind`` union) means adding a tracker requires editing this file, so
- * every consumer would have to merge a core change to support one more surface —
- * the thing the extensibility tenet exists to prevent. Instead each adapter
- * declares how to build itself, and a surface can be registered from outside this
- * module entirely via {@link registerChannelFactory}.
- *
- * What that does and does NOT buy, stated plainly so the claim isn't read too
- * broadly: a downstream surface needs no change to the engine or to this lookup,
- * and resolves an adapter here from any string. It still needs its credentials
- * registry named in each handler that will act on it (see
- * {@link ChannelRegistryTables}) — a deployment decision about which tenants'
- * secrets a Lambda may read, so deliberately explicit — and ``ChannelSource`` in
- * ``types.ts`` remains a closed union shared with task records and the CLI, so a
- * downstream surface can drive feedback before it can be written into a task
- * record. The in-tree adapters are imported here only to seed the common cases;
- * nothing about the mechanism requires it.
- *
- * A surface whose credentials registry isn't configured for the caller, or which
- * has no registered adapter, yields ``undefined``: the caller skips feedback for
- * that orchestration rather than guessing at another surface's adapter (which
- * would address the wrong tenant, or fail every call). Entry points that are
- * surface-specific by definition — a Linear webhook processor only ever handles
- * Linear — should keep building their adapter directly; this exists for the paths
- * that genuinely can't know.
- */
-
 import { logger } from './logger';
 import { type Channel } from './orchestration-channel';
 import { makeJiraChannel } from './orchestration-channel-jira';
@@ -63,47 +27,23 @@ import { makeSlackChannel } from './orchestration-channel-slack';
  * Per-surface credentials-registry table names, keyed by channel source. An
  * absent (or empty) entry means that surface isn't wired for this caller, so no
  * adapter is built for it.
- *
- * An open map rather than named fields, for the same reason the registry itself
- * is open: a new surface adds a key, not a core type change.
  */
 export type ChannelRegistryTables = Readonly<Record<string, string | undefined>>;
 
-/**
- * How to build one surface's adapter from its credentials-registry table name.
- * Returning a {@link Channel} is the whole contract — everything else about the
- * surface (auth, comment format, reaction vocabulary, dependency model) stays
- * inside the adapter.
- */
+/** How to build one surface's adapter from its credentials-registry table name. */
 export type ChannelFactory = (registryTableName: string) => Channel;
 
-/**
- * The surface a stored row with NO recorded channel is treated as. Rows seeded
- * before ``channel_source`` existed carry none, and Linear was the only surface
- * that could have seeded them — so defaulting keeps their feedback working
- * rather than silencing it. Not a statement that Linear is privileged.
- */
 const LEGACY_DEFAULT_CHANNEL_SOURCE = 'linear';
 
-/**
- * Registered adapters, keyed by the ``channel_source`` value that selects them.
- * Mutable so a surface can register from its own module; seeded here with the
- * adapters that ship in-tree.
- */
 const registry = new Map<string, ChannelFactory>([
   ['linear', makeLinearChannel],
   ['jira', makeJiraChannel],
-  // Slack is a chat surface, not a tracker: it omits the workflow-state ops
-  // entirely, which is what proves the engine's capability guards work against a
-  // genuinely different shape of surface rather than only in principle.
   ['slack', makeSlackChannel],
 ]);
 
 /**
- * Register (or replace) the adapter for a channel source. Lets a surface live
- * entirely in its own module — including one added downstream — without editing
- * the lookup below. Returns a function that restores the previous registration,
- * so a test can register a fake surface without leaking into other tests.
+ * Register (or replace) the adapter for a channel source. Returns a function
+ * that restores the previous registration.
  */
 export function registerChannelFactory(source: string, factory: ChannelFactory): () => void {
   const previous = registry.get(source);
@@ -114,7 +54,6 @@ export function registerChannelFactory(source: string, factory: ChannelFactory):
   };
 }
 
-/** Channel sources that currently have a registered adapter (for diagnostics). */
 export function registeredChannelSources(): readonly string[] {
   return [...registry.keys()].sort();
 }
@@ -135,9 +74,6 @@ export function channelForSource(
   if (!factory) return undefined;
   const registryTableName = tables[key];
   if (!registryTableName) {
-    // Distinguishable from "no such surface": the surface IS supported, this
-    // caller just can't reach its credentials — which is why its feedback goes
-    // silent, and worth a breadcrumb rather than an indistinguishable skip.
     logger.warn('No credentials registry configured for this channel — skipping its feedback', {
       channel_source: key,
     });

@@ -19,7 +19,6 @@
 
 import { createHash } from 'crypto';
 
-/** Hex prefix length for prompt-version fingerprints. */
 const PROMPT_VERSION_HASH_HEX_LENGTH = 12;
 
 /**

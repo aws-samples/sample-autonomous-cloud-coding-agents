@@ -90,14 +90,14 @@ describe('series and breakdown', () => {
     expect(order).toHaveLength(MAX_SERIES);
     const series = dailySpend(tasks, 'repo', '7d', order, NOW);
     expect(series.map((s) => s.name)).toEqual([...order, OTHER]);
-    expect(series.find((s) => s.name === OTHER)!.values.at(-2)).toBe(5 + 4); // r6 and r7
+    expect(series.find((s) => s.name === OTHER)!.values.at(-2)).toBe(5 + 4);
   });
 
   it('keeps series order (and so colors) independent of the selected range', () => {
     const older = t('big-old', 50, '2026-09-10T10:00:00Z', { repo: 'acme/legacy' });
     expect(seriesOrder([...tasks, older], 'repo')[0]).toBe('acme/legacy');
     const series = dailySpend([...tasks, older], 'repo', '7d', seriesOrder([...tasks, older], 'repo'), NOW);
-    expect(series.map((s) => s.name)).not.toContain('acme/legacy'); // no spend in range: dropped, not recolored
+    expect(series.map((s) => s.name)).not.toContain('acme/legacy');
   });
 
   it('groups by outcome and source in plain words', () => {

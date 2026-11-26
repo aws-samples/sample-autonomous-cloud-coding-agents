@@ -17,31 +17,9 @@
  *  SOFTWARE.
  */
 
-/**
- * Linear workspace binding, end to end.
- *
- * A delivery runs through the REAL receiver, the receiver's processor invoke is
- * handed to the REAL processor, and the processor runs the REAL token resolver,
- * user lookup, orchestration store and `createTaskCore`. Every table and secret is
- * one stateful fake shared by both handlers, so the receiver's workspace count and
- * the processor's binding read the same registry — which is what the per-handler
- * unit tests cannot show.
- *
- * Each case asserts the outcome that matters: whether a task record was persisted,
- * and for which repository, platform user and workspace. Only the modules that call
- * Linear's API are mocked; network access is otherwise refused.
- *
- * Tenants:
- *   A — owns its signing secret (recorded).
- *   B — owns its signing secret (recorded).
- *   C — onboarded before per-workspace secrets: verifies via the stack-wide secret.
- *   D — holds a copy of A's secret, ownership not recorded.
- */
-
 import * as crypto from 'crypto';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// ── Stateful fakes ──────────────────────────────────────────────────────
 type Item = Record<string, unknown>;
 
 const TABLE = {
@@ -86,7 +64,6 @@ function conditionalFail(): never {
 function resolveName(token: string, names?: Record<string, string>): string {
   return token.startsWith('#') ? (names?.[token] ?? token) : token;
 }
-/** `attribute_not_exists(x)` / `attribute_exists(x)` — the only conditions these paths rely on. */
 function checkCondition(expr: string | undefined, existing: Item | undefined, names?: Record<string, string>): void {
   if (!expr) return;
   const notExists = /attribute_not_exists\(([#\w]+)\)/.exec(expr);
@@ -94,7 +71,6 @@ function checkCondition(expr: string | undefined, existing: Item | undefined, na
   const exists = /(?<!not_)attribute_exists\(([#\w]+)\)/.exec(expr);
   if (exists && (!existing || existing[resolveName(exists[1], names)] === undefined)) conditionalFail();
 }
-/** Equality filter from a KeyConditionExpression like `a = :x AND b = :y`. */
 function keyMatcher(expr: string, values: Item, names?: Record<string, string>): (i: Item) => boolean {
   const clauses = expr.split(/\s+AND\s+/i).map((c) => /([#\w]+)\s*=\s*(:\w+)/.exec(c)).filter(Boolean) as RegExpExecArray[];
   return (i) => clauses.every((m) => i[resolveName(m[1], names)] === values[m[2]]);
@@ -206,7 +182,6 @@ jest.mock('./../../src/handlers/shared/logger', () => {
   return { logger: { debug: rec('debug'), info: rec('info'), warn: rec('warn'), error: rec('error') } };
 });
 
-// ── Linear API boundary ────────────────────────────────────────────────
 const mockFeedback = {
   reportIssueFailure: jest.fn(async () => true),
   swapIssueReaction: jest.fn(async () => true),
@@ -252,7 +227,6 @@ jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
   renderIssueContextHint: jest.fn(() => ''),
 }));
 
-// ── Environment (read at module load) ───────────────────────────────────
 const STACK_WIDE_ARN = 'arn:aws:secretsmanager:us-east-1:000000000000:secret:bgagent/linear/webhook-TEST';
 process.env.LINEAR_WEBHOOK_SECRET_ARN = STACK_WIDE_ARN;
 process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME = TABLE.dedup;
@@ -270,16 +244,11 @@ import { _resetCachesForTesting } from '../../src/handlers/shared/linear-oauth-r
 import * as linearVerify from '../../src/handlers/shared/linear-verify';
 import { deriveOrchestrationId } from '../../src/handlers/shared/orchestration-store';
 
-// Optional so this file also runs against code that predates the count cache, which
-// is how it was checked to fail on the unfixed handlers.
 const _resetActiveWorkspaceCountCache = (): void => {
   (linearVerify as { _resetActiveWorkspaceCountCache?: () => void })._resetActiveWorkspaceCountCache?.();
 };
 const invalidateLinearSecretCache = linearVerify.invalidateLinearSecretCache;
 
-// ── Tenants ─────────────────────────────────────────────────────────────
-// UUID-shaped ids whose last group is not twelve digits, so nothing here reads as
-// an account number to the repo's scanners.
 const STACK_WIDE_SECRET = 'lin_wh_stackwide_0000000000000000';
 interface Tenant { id: string; slug: string; secret?: string; owned: boolean; repo: string; project: string; actor: string; platformUser: string }
 const T: Record<'A' | 'B' | 'C' | 'D', Tenant> = {
@@ -334,7 +303,6 @@ function mapProject(projectId: string, repo: string, ownerWorkspaceId: string | 
   });
 }
 
-/** An orchestration owned by `owner`: an epic with one started child that has a PR. */
 function seedEpic(owner: Tenant, epicId: string, childId: string, childIdentifier: string): void {
   const orchestrationId = deriveOrchestrationId(epicId);
   const base = {
@@ -358,7 +326,6 @@ function seedEpic(owner: Tenant, epicId: string, childId: string, childIdentifie
   mockParentOf.set(childId, epicId);
 }
 
-/** A plain (non-orchestration) issue that already has a task with a PR, owned by `owner`. */
 function seedStandaloneTask(owner: Tenant, issueId: string): void {
   table(TABLE.tasks).set(`task-${issueId}`, {
     task_id: `task-${issueId}`,
@@ -372,7 +339,6 @@ function seedStandaloneTask(owner: Tenant, issueId: string): void {
   });
 }
 
-// ── Deliveries ──────────────────────────────────────────────────────────
 let seq = 0;
 function issueEvent(org: string | undefined, projectId: string, actor: string): string {
   seq += 1;
@@ -408,11 +374,8 @@ function commentEvent(org: string, issueId: string, actor: string, text: string)
 interface Outcome {
   status: number;
   error?: string;
-  /** What the receiver told the processor, when it invoked it. */
   forwarded?: Record<string, unknown>;
-  /** Tasks persisted by this delivery. */
   tasks: Item[];
-  /** Warn/error log messages emitted while handling it. */
   warnings: string[];
 }
 
@@ -452,7 +415,6 @@ function expectOneTask(o: Outcome, t: Tenant): Item {
   expect((task.channel_metadata as Record<string, string>).linear_workspace_id).toBe(t.id);
   return task;
 }
-/** No Linear write of any kind — a silent drop tells the sender nothing. */
 function expectNoLinearWrites(): void {
   for (const fn of Object.values(mockFeedback)) {
     if (fn === mockFeedback.fetchRecentComments) continue;
@@ -471,11 +433,9 @@ beforeEach(() => {
   _resetCachesForTesting();
   _resetActiveWorkspaceCountCache();
   mockSecrets.set(STACK_WIDE_ARN, STACK_WIDE_SECRET);
-  // Nothing in these flows may reach the network; a stray call fails loudly.
   global.fetch = jest.fn(async () => { throw new Error('unexpected network call in e2e test'); }) as never;
 });
 
-// ═══════════════════════════════════════════════════════════════════════
 describe('several workspaces: the signature must attest the workspace', () => {
   beforeEach(() => {
     onboard(T.A);
@@ -534,8 +494,6 @@ describe('several workspaces: the signature must attest the workspace', () => {
   });
 
   test('a secret held by two workspaces attests neither, whichever one is named', async () => {
-    // D holds a copy of A's secret. Signing with it and naming D must not pass,
-    // because the signer could equally be A.
     const asD = await deliver(issueEvent(T.D.id, T.D.project, T.D.actor), T.D.secret!);
     expectNoTask(asD);
     expect(asD.status).toBe(401);
@@ -561,7 +519,6 @@ describe('several workspaces: the signature must attest the workspace', () => {
   });
 
   test('...and naming the other workspace\'s user as the actor changes nothing', async () => {
-    // User links are keyed by workspace, so B's user does not exist inside A.
     const o = await deliver(issueEvent(T.A.id, T.B.project, T.B.actor), T.A.secret!);
     expectNoTask(o);
   });
@@ -572,7 +529,6 @@ describe('several workspaces: the signature must attest the workspace', () => {
   });
 
   test('a project mapped before owners were recorded is still served (reported by platform doctor)', async () => {
-    // Pins the documented back-compat behaviour so a change to it is deliberate.
     mapProject('proj-legacy', 'org-legacy/repo', null);
     const o = await deliver(issueEvent(T.A.id, 'proj-legacy', T.A.actor), T.A.secret!);
     expect(o.tasks).toHaveLength(1);
@@ -588,10 +544,8 @@ describe('several workspaces: the signature must attest the workspace', () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════
 describe('one workspace: the stack-wide secret binds to it, never to the body', () => {
   beforeEach(() => {
-    // A single install that predates per-workspace secrets: C has no secret of its own.
     onboard(T.C);
   });
 
@@ -624,16 +578,12 @@ describe('one workspace: the stack-wide secret binds to it, never to the body', 
   });
 
   test('a second workspace arriving inside the receiver\'s cache window is caught by the processor', async () => {
-    // Warm the receiver's count cache at 1.
     await deliver(issueEvent(T.C.id, T.C.project, T.C.actor), STACK_WIDE_SECRET);
-    // A second workspace is onboarded; the receiver still believes there is one.
     onboard(T.A);
     const o = await deliver(issueEvent(T.A.id, T.A.project, T.A.actor).replace(T.A.id, UNREGISTERED), STACK_WIDE_SECRET);
     expectNoTask(o);
-    // The receiver lets it through on its stale count, flagged as stack-wide…
     expect(o.status).toBe(200);
     expect(o.forwarded?.verified_via_stack_wide).toBe(true);
-    // …and the processor, reading the registry itself, refuses to pick a tenant.
     expect(o.warnings).toContain('Dropping stack-wide-verified Linear delivery: cannot determine the sending workspace');
   });
 
@@ -654,7 +604,6 @@ describe('one workspace: the stack-wide secret binds to it, never to the body', 
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════
 describe('@bgagent comments act only on the sending workspace\'s work', () => {
   beforeEach(() => {
     onboard(T.A);
@@ -723,7 +672,6 @@ describe('@bgagent comments on a single-workspace stack', () => {
   test('a stack-wide comment claiming another organization is bound to the only workspace', async () => {
     onboard(T.C);
     seedEpic(T.C, 'epic-c', 'child-c', 'CCC-1');
-    // The body claims B; the only workspace is C, and C's epic is what it reaches.
     const o = await deliver(commentEvent(T.B.id, 'epic-c', T.C.actor, '@bgagent CCC-1: x'), STACK_WIDE_SECRET);
     expectOneTask(o, T.C);
   });

@@ -30,22 +30,14 @@ import { decodePaginationToken, encodePaginationToken, parseLimit } from './shar
 const ddb = makeDocClient();
 const TABLE_NAME = process.env.API_KEY_TABLE_NAME!;
 
-/** Default page size when the caller omits ``?limit=``. */
 const DEFAULT_PAGE_LIMIT = 20;
 
-/** Hard page-size ceiling. */
 const MAX_PAGE_LIMIT = 100;
 
-/**
- * Cap on DynamoDB `Query` round-trips per request. `Limit` is applied to
- * *scanned* items before `FilterExpression`, so filtering out revoked keys can
- * leave a page short; we page until it is full (below). This bounds the work a
- * caller with many revoked keys can trigger — the token still advances, so the
- * next request resumes rather than silently truncating.
- */
+// DynamoDB applies `Limit` to the items it reads, before `FilterExpression`: a filtered page can come back short.
 const MAX_QUERY_PAGES = 10;
 
-/** GSI key attributes DynamoDB needs to resume a `UserIndex` query. */
+// The GSI key attributes DynamoDB needs to resume a `UserIndex` query.
 function startKeyForRecord(record: ApiKeyRecord): Record<string, unknown> {
   return { key_id: record.key_id, user_id: record.user_id, created_at: record.created_at };
 }
@@ -73,9 +65,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       expressionAttributeValues[':active'] = 'active';
     }
 
-    // Accumulate until we have a full page of post-filter items (or run out).
-    // Over-fetch one extra so we can tell whether a further page exists without
-    // returning a short page that still advertises `has_more`.
     let startKey = decodePaginationToken(event.queryStringParameters?.next_token);
     if (startKey === null) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid next_token.', requestId);
@@ -101,24 +90,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       startKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
 
       if (items.length > limit) {
-        // Enough for this page plus proof another item exists.
         break;
       }
       if (!startKey) {
-        // Table exhausted — whatever we have is the final page.
         break;
       }
     }
 
     const pageItems = items.slice(0, limit);
 
-    // Build the resume token:
-    // - Trimmed (more accumulated than the page holds): resume from the last
-    //   *returned* record. DynamoDB's LastEvaluatedKey points past the extra
-    //   over-fetched items we dropped, so using it would skip them.
-    // - Not trimmed but a scan cursor is still pending (we hit the page cap
-    //   before filling the page): resume from that raw cursor so the caller can
-    //   continue rather than being told, falsely, that the list is complete.
     let nextToken: string | null = null;
     if (items.length > limit) {
       nextToken = encodePaginationToken(startKeyForRecord(pageItems[pageItems.length - 1]));

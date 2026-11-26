@@ -73,9 +73,6 @@ describe('verifyLinearSignature', () => {
     expect(verifyLinearSignature(SECRET_VALUE, 'deadbeef', body)).toBe(false);
   });
 
-  // Empty-secret fail-open guard, mirroring verifyGitHubSignature (B2):
-  // HMAC('', body) is computable by anyone — an empty secret must never
-  // produce an accepted signature.
   test('rejects empty webhookSecret even with a matching empty-key HMAC', () => {
     const body = '{"action":"create"}';
     const forged = crypto.createHmac('sha256', '').update(body).digest('hex');
@@ -98,7 +95,6 @@ describe('getLinearSecret', () => {
   test('returns the secret and caches it', async () => {
     smSend.mockResolvedValueOnce({ SecretString: SECRET_VALUE });
     await expect(getLinearSecret(SECRET_ID)).resolves.toBe(SECRET_VALUE);
-    // Second call served from cache — no second SM call.
     await expect(getLinearSecret(SECRET_ID)).resolves.toBe(SECRET_VALUE);
     expect(smSend).toHaveBeenCalledTimes(1);
   });
@@ -166,7 +162,6 @@ describe('verifyLinearRequest', () => {
 
   test('returns false when the stored secret is empty (end-to-end fail-closed)', async () => {
     const body = '{"action":"create"}';
-    // An attacker who knows the secret is empty would send HMAC('', body).
     const forged = crypto.createHmac('sha256', '').update(body).digest('hex');
     smSend.mockResolvedValue({ SecretString: '' });
     await expect(verifyLinearRequest(SECRET_ID, forged, body)).resolves.toBe(false);
@@ -227,8 +222,6 @@ describe('countActiveLinearWorkspaces — one tenant versus more than one', () =
   });
 
   test('answers 1 when the registry cannot be read, rather than rejecting every delivery', async () => {
-    // Permissive on purpose. The callers are hardening a signature that already
-    // verified; a DynamoDB throttle must not turn into a stack-wide outage.
     ddbSend.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
     await expect(countActiveLinearWorkspaces('registry')).resolves.toBe(1);
   });

@@ -24,14 +24,8 @@ import { formatJson } from '../format';
 import { formatScoreboard } from '../scoreboard';
 import type { Scoreboard, ScoreboardRange } from '../types';
 
-/** The periods the API serves a scoreboard for. */
 const RANGES: readonly ScoreboardRange[] = ['7d', '30d'];
 
-/**
- * What the command says of a stack that was deployed before the scoreboard. Such a stack refuses
- * the view, in words about a parameter nobody typed; one from before `view` existed ignores it
- * and answers with a page of tasks.
- */
 const OLDER_STACK = 'This stack does not serve the scoreboard: it was deployed before `bgagent stats` existed.'
   + ' Redeploy the stack, then run the command again.';
 
@@ -66,7 +60,6 @@ export function makeStatsCommand(): Command {
         if (err instanceof ApiError && err.message.startsWith('Invalid view value')) throw new CliError(OLDER_STACK);
         throw err;
       }
-      // Before anything is printed: `--output json` would print the page of tasks as if it were the scoreboard.
       if (!board?.current) throw new CliError(OLDER_STACK);
       console.log(opts.output === 'json' ? formatJson(board) : formatScoreboard(board, opts.repo));
     });

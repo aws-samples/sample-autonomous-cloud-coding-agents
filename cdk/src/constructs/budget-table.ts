@@ -25,7 +25,6 @@ import sharedConstants from '../../../contracts/constants.json';
 const BUDGET_CONFIG_INDEX_NAME = sharedConstants.monthly_budgets.config_index_name;
 
 export interface BudgetTableProps {
-  /** Optional physical table name. */
   readonly tableName?: string;
   /** Resource lifecycle on stack deletion. @default RemovalPolicy.DESTROY */
   readonly removalPolicy?: RemovalPolicy;

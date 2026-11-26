@@ -24,7 +24,6 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
-/** Mock fetch returning a Linear children payload. */
 function mockFetch(children: Array<{ id: string; blockedBy?: string[] }>): typeof fetch {
   return (async () => ({
     ok: true,
@@ -74,7 +73,7 @@ describe('discoverOrchestration', () => {
       ...base, ddb: ddb as never, graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: emptyFetch() }),
     });
     expect(result.kind).toBe('single_task');
-    expect(ddb.send).not.toHaveBeenCalled(); // never touches the table
+    expect(ddb.send).not.toHaveBeenCalled();
   });
 
   test('valid DAG → seeded with roots from layer 0', async () => {
@@ -127,9 +126,6 @@ describe('discoverOrchestration', () => {
   });
 
   test('an id collision reports a DIFFERENT message than a transient write failure', async () => {
-    // A collision recurs on every attempt, so the reply must not invite a
-    // re-trigger the way a failed write does — that would loop the user through
-    // something that cannot succeed.
     const ddb = {
       send: jest.fn().mockResolvedValueOnce({
         Item: {
@@ -152,16 +148,10 @@ describe('discoverOrchestration', () => {
   });
 
   test('re-trigger of an existing epic with the SAME graph → extended, no new nodes', async () => {
-    // seedOrchestration's GetCommand sees the meta row (already seeded) →
-    // alreadyExisted, so discovery routes to extendOrchestration. extend's own
-    // loadOrchestration Query returns the existing children (A, B); the fetched
-    // graph is identical → no new nodes → extended with empty addedSubIssueIds.
     const orchId = '#meta';
     const ddb = {
       send: jest.fn()
-      // 1) seedOrchestration GetCommand → meta exists
         .mockResolvedValueOnce({ Item: { sub_issue_id: orchId } })
-      // 2) extendOrchestration loadOrchestration Query → meta + A + B
         .mockResolvedValueOnce({
           Items: [
             { sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1' },
@@ -182,18 +172,17 @@ describe('discoverOrchestration', () => {
   test('re-trigger with a NEW sub-issue → extended, adds the new node', async () => {
     const ddb = {
       send: jest.fn()
-        .mockResolvedValueOnce({ Item: { sub_issue_id: '#meta' } }) // seed: meta exists
+        .mockResolvedValueOnce({ Item: { sub_issue_id: '#meta' } })
         .mockResolvedValueOnce({
-          Items: [ // extend load: A + B exist
+          Items: [
             { sub_issue_id: '#meta', orchestration_id: 'orch_x', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r', platform_user_id: 'u1' },
             { sub_issue_id: 'A', orchestration_id: 'orch_x', depends_on: [], child_status: 'succeeded', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r' },
             { sub_issue_id: 'B', orchestration_id: 'orch_x', depends_on: ['A'], child_status: 'succeeded', parent_linear_issue_id: 'P', linear_workspace_id: 'WS', repo: 'o/r' },
           ],
         })
-        .mockResolvedValueOnce({}) // BatchWrite new rows
-        .mockResolvedValueOnce({}), // Update meta child_count
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({}),
     };
-    // Fetched graph adds C (depends on the finished B) → C is new + releasable.
     const result = await discoverOrchestration({
       ...base,
       ddb: ddb as never,
@@ -202,17 +191,13 @@ describe('discoverOrchestration', () => {
     expect(result.kind).toBe('extended');
     if (result.kind === 'extended') {
       expect(result.addedSubIssueIds).toEqual(['C']);
-      expect(result.releasableSubIssueIds).toEqual(['C']); // B already succeeded
+      expect(result.releasableSubIssueIds).toEqual(['C']);
     }
   });
 
-  // Trigger-agnostic seam: a custom graphSource (declarative /
-  // planner) drives the SAME validate→seed→reconcile pipeline, bypassing the
-  // Linear fetch entirely.
   describe('graphSource seam (non-Linear)', () => {
     test('declarative graph → seeded; never touches the Linear fetch', async () => {
       const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
-      // No fetchOptions/fetchImpl — if discovery hit the Linear fetch it would throw on the real network.
       const result = await discoverOrchestration({
         ...base,
         ddb: ddb as never,
@@ -225,7 +210,7 @@ describe('discoverOrchestration', () => {
       expect(result.kind).toBe('seeded');
       if (result.kind === 'seeded') {
         expect(result.childCount).toBe(3);
-        expect(result.rootSubIssueIds).toEqual(['phase-1']); // layer 0
+        expect(result.rootSubIssueIds).toEqual(['phase-1']);
       }
     });
 
@@ -253,23 +238,19 @@ describe('discoverOrchestration', () => {
     });
   });
 
-  // Auto-integration node for fan-out.
   describe('fan-out integration node', () => {
     test('pure fan-out (A→B, A→C) → seeds a synthetic integration node over the leaves', async () => {
       const ddb = { send: jest.fn().mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({}) };
       const result = await discoverOrchestration({
         ...base,
         ddb: ddb as never,
-        // two leaves B, C both depending on A
         graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }, { id: 'C', blockedBy: ['A'] }]) }),
       });
       expect(result.kind).toBe('seeded');
       if (result.kind === 'seeded') {
-        // A, B, C + 1 synthetic integration node
         expect(result.childCount).toBe(4);
-        expect(result.rootSubIssueIds).toEqual(['A']); // integration node is NOT a root
+        expect(result.rootSubIssueIds).toEqual(['A']);
       }
-      // The BatchWrite (2nd ddb call) includes the synthetic node depending on B + C.
       const puts = ddb.send.mock.calls[1][0].input.RequestItems[Object.keys(ddb.send.mock.calls[1][0].input.RequestItems)[0]] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
       const integ = puts.map((p) => p.PutRequest.Item).find((i) => String(i.sub_issue_id).endsWith('__integration'));
       expect(integ).toBeDefined();
@@ -284,7 +265,7 @@ describe('discoverOrchestration', () => {
         graphSource: linearGraphSource(base.accessToken, base.parentIssueRef, { fetchImpl: mockFetch([{ id: 'A' }, { id: 'B', blockedBy: ['A'] }]) }),
       });
       expect(result.kind).toBe('seeded');
-      if (result.kind === 'seeded') expect(result.childCount).toBe(2); // no synthetic node
+      if (result.kind === 'seeded') expect(result.childCount).toBe(2);
     });
 
     test('declarative fan-out also gets an integration node', async () => {
@@ -298,7 +279,7 @@ describe('discoverOrchestration', () => {
         ]),
       });
       expect(result.kind).toBe('seeded');
-      if (result.kind === 'seeded') expect(result.childCount).toBe(3); // x, y + integration
+      if (result.kind === 'seeded') expect(result.childCount).toBe(3);
     });
   });
 });

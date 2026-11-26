@@ -17,14 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * A choice a page keeps in its URL (`?range=7d`) and offers as a segmented control.
- * The choices are a record of id to label, in the order they are shown.
- */
-
 /** The choice a URL parameter names; `fallback` when it is absent or names none. */
 export function parseChoice<T extends string>(value: string | null, labels: Readonly<Record<T, string>>, fallback: T): T {
-  // Own keys only: `in` also finds what every object inherits, such as `constructor`.
   return value !== null && Object.hasOwn(labels, value) ? (value as T) : fallback;
 }
 

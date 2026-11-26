@@ -27,51 +27,35 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** Default stranded-timeout (seconds; 20 minutes). */
 const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
 
-/** Default approval-stranded timeout (seconds; 2 hours). */
 const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 7200;
 
-/** Default retention (days): the ttl of a task row the sweep fails and of the events it writes. */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/** Reconciler Lambda timeout (minutes). */
 const RECONCILER_TIMEOUT_MINUTES = 5;
 
-/** Reconciler Lambda memory (MB). */
 const RECONCILER_MEMORY_MB = 256;
 
-/** Default reconciliation schedule interval (minutes). */
 const DEFAULT_SCHEDULE_MINUTES = 5;
 
-/**
- * Properties for StrandedTaskReconciler construct.
- */
 export interface StrandedTaskReconcilerProps {
   /** TaskTable (has StatusIndex GSI used by the query). */
   readonly taskTable: dynamodb.ITable;
 
-  /** TaskEventsTable (handler writes task_stranded + task_failed events). */
   readonly taskEventsTable: dynamodb.ITable;
 
-  /** UserConcurrencyTable (handler decrements active_count on fail). */
   readonly userConcurrencyTable: dynamodb.ITable;
 
   /**
-   * How often to run the reconciler. Short enough to clear stranded
-   * tasks in a reasonable user-facing time, long enough to amortise the
-   * Lambda + DDB cost. Defaults to 5 minutes.
-   *
+   * How often to run the reconciler.
    * @default Duration.minutes(5)
    */
   readonly schedule?: Duration;
 
   /**
    * Stranded-timeout (seconds). Tasks in SUBMITTED or HYDRATING older
-   * than this are transitioned to FAILED. Set via
-   * `STRANDED_TIMEOUT_SECONDS`.
-   *
+   * than this are transitioned to FAILED.
    * @default 1200 (20 minutes)
    */
   readonly strandedTimeoutSeconds?: number;
@@ -79,11 +63,7 @@ export interface StrandedTaskReconcilerProps {
   /**
    * Cedar HITL approval-stranded timeout (seconds). Tasks in
    * AWAITING_APPROVAL older than this are transitioned to FAILED.
-   * Longer than the stranded-timeout because approvals legitimately
-   * sit for up to an hour (§7.3). Set via
-   * ``APPROVAL_STRANDED_TIMEOUT_SECONDS``.
-   *
-   * @default 7200 (2 hours — double §7.3's 1-hour ceiling + an hour grace)
+   * @default 7200 (2 hours)
    */
   readonly approvalStrandedTimeoutSeconds?: number;
 
@@ -92,16 +72,8 @@ export interface StrandedTaskReconcilerProps {
 }
 
 /**
- * Scheduled Lambda that fails stranded tasks.
- *
- * A stranded task is one admitted into TaskTable (SUBMITTED or HYDRATING)
- * whose pipeline never started — typically because the orchestrator
- * Lambda crashed between admission and InvokeAgentRuntime, or because the
- * agent container crashed during startup. Left alone these permanently
- * consume a user's concurrency slot.
- *
- * RUNNING / FINALIZING tasks are handled separately by `pollTaskStatus`
- * in `orchestrator.ts` via the `agent_heartbeat_at` timeout.
+ * Scheduled Lambda that fails stranded tasks: ones admitted into TaskTable
+ * (SUBMITTED or HYDRATING) whose pipeline never started.
  */
 export class StrandedTaskReconciler extends Construct {
   public readonly fn: lambda.NodejsFunction;
@@ -123,7 +95,6 @@ export class StrandedTaskReconciler extends Construct {
       timeout: Duration.minutes(RECONCILER_TIMEOUT_MINUTES),
       memorySize: RECONCILER_MEMORY_MB,
       environment: {
-        // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
@@ -137,12 +108,8 @@ export class StrandedTaskReconciler extends Construct {
       },
     });
 
-    // TaskTable: read (query by StatusIndex) + conditional UpdateItem to
-    // transition stranded rows to FAILED.
     props.taskTable.grantReadWriteData(this.fn);
-    // TaskEvents: write task_stranded + task_failed events.
     props.taskEventsTable.grantWriteData(this.fn);
-    // Concurrency: decrement active_count on fail.
     props.userConcurrencyTable.grantReadWriteData(this.fn);
 
     const schedule = props.schedule ?? Duration.minutes(DEFAULT_SCHEDULE_MINUTES);

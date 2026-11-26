@@ -91,7 +91,6 @@ describe('AgentSessionRole construct', () => {
           }),
         ]),
       },
-      // Role chaining caps at 1h regardless; documented explicitly.
       MaxSessionDuration: 3600,
     });
   });
@@ -108,7 +107,6 @@ describe('AgentSessionRole construct', () => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
       return actions.some((a: string) => a.startsWith('dynamodb:'));
     });
-    // Four task-scoped tables → four conditioned statements.
     expect(ddbStatements).toHaveLength(4);
     for (const s of ddbStatements) {
       expect(s.Condition).toEqual({
@@ -117,7 +115,7 @@ describe('AgentSessionRole construct', () => {
         },
       });
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-      // Scan must NOT be granted — it ignores leading-keys.
+      // dynamodb:Scan returns every item regardless of a LeadingKeys condition.
       expect(actions).not.toContain('dynamodb:Scan');
     }
   });
@@ -129,8 +127,6 @@ describe('AgentSessionRole construct', () => {
     )![1];
     const statements = sessionPolicy.Properties.PolicyDocument.Statement;
 
-    // There are two s3:PutObject statements (traces + artifacts, #248 Phase 3);
-    // pick the one whose resource embeds the traces/user_id prefix.
     const putObjects = statements.filter((s: { Action: string | string[] }) => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
       return actions.includes('s3:PutObject');
@@ -226,7 +222,6 @@ describe('AgentSessionRole construct', () => {
       return actions.some((a: string) => a.startsWith('bedrock:InvokeModel'));
     });
     expect(bedrockStatement).toBeDefined();
-    // The model ARN must be present, scoped (no Resource:'*').
     expect(JSON.stringify(bedrockStatement.Resource)).toContain('anthropic.claude-sonnet-4-6');
     expect(bedrockStatement.Resource).not.toBe('*');
   });
@@ -325,8 +320,6 @@ describe.each([false, true])('session-role IAM audit with concrete environment %
     const computeRole = new iam.Role(stack, 'Compute', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
     });
-    // Let CDK split the actual model grants during synthesis. Do not create an
-    // overflow policy in the fixture: the late creation caused the regression.
     const invokableModels = Array.from({ length: 16 }, (_, index) => {
       const model = new bedrock.BedrockFoundationModel(`anthropic.session-audit-${index}-v1:0`, {
         supportsCrossRegion: true,

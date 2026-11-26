@@ -22,10 +22,7 @@ import { pullRequestEnd, stepArea, type StepArea } from './activity';
 import { formatDuration } from './format';
 import { hasStaleHeartbeat } from './task-health';
 
-/**
- * The same five steps for every task, whatever the workflow underneath:
- * Queued → Setting up → Working → Checking → Pull request.
- */
+/** The same five steps for every task, whatever the workflow underneath. */
 export const PROGRESS_STEPS = ['Queued', 'Setting up', 'Working', 'Checking', 'Pull request'] as const;
 
 export type StepState = 'done' | 'current' | 'todo' | 'stopped' | 'skipped';
@@ -47,7 +44,6 @@ export function reachedStep(task: Pick<TaskDetail, 'status' | 'pr_url'>, events:
     if (step) reached = Math.max(reached, AREA_INDEX[stepArea(step[1])]);
     if (name === 'pr_created') reached = 4;
   }
-  // Workflows without step milestones: tool activity alone means the work has started.
   if (reached === 1 && events.some((e) => e.event_type === 'agent_tool_call')) reached = 2;
   if (task.pr_url) reached = 4;
   return reached;
@@ -97,8 +93,6 @@ export function outcomeOf(task: TaskDetail, events: readonly TaskEvent[], now: D
     case 'COMPLETED': {
       if (!task.pr_url) return { type: 'success', title: 'Done' };
       const pullRequest = `pull request${task.pr_number ? ` #${task.pr_number}` : ''}`;
-      // The task the API returns does not say how its pull request ended. The event of ABCA's read of GitHub
-      // does, once it is written and among the events: until then the pull request is the one the task left.
       const end = events.map(pullRequestEnd).find((state) => state !== null);
       if (end === 'merged') return { type: 'success', title: `Done: ${pullRequest} was merged` };
       if (end === 'closed') return { type: 'info', title: `Done: ${pullRequest} was closed without merging` };
@@ -109,9 +103,8 @@ export function outcomeOf(task: TaskDetail, events: readonly TaskEvent[], now: D
     case 'TIMED_OUT':
       return { type: 'error', title: 'Ran out of time', text: 'It hit the time limit before finishing. Try again with a smaller change.', offer: 'retry' };
     case 'FAILED': {
-      // Always the platform's own error. A run that changed nothing looks the same from
-      // here as one whose changes were lost or whose PR failed, so the console does not
-      // guess; telling them apart is the platform's job (#751).
+      // Always the platform's own error: telling a run that changed nothing from one whose
+      // changes were lost is the platform's job (#751).
       const why = task.error_classification;
       return {
         type: 'error',

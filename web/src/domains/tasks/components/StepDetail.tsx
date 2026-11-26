@@ -23,7 +23,6 @@ import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import type { CSSProperties } from 'react';
 import type { ToolStep } from '../../../core/util/turns';
 
-/** Labels for the arguments people look for; others show their own name. */
 const FIELD_LABEL: Readonly<Record<string, string>> = {
   command: 'Command',
   file_path: 'File',
@@ -35,10 +34,8 @@ const FIELD_LABEL: Readonly<Record<string, string>> = {
   url: 'URL',
 };
 
-/** Arguments the step's own line already says (`description`) or not worth a block. */
 const HIDDEN_FIELDS = new Set(['description', 'timeout', 'run_in_background', 'replace_all']);
 
-/** Scrolls long commands and output instead of stretching the page; the tint works in light and dark mode. */
 const CODE_BLOCK: CSSProperties = {
   boxSizing: 'border-box',
   width: '100%',

@@ -1,48 +1,31 @@
-# Build context is repo root (see cdk/src/stacks/agent.ts) so the
-# Dockerfile can COPY contracts/ alongside agent/. Exclusions below
-# keep the context lean — without them the entire monorepo (CDK
-# cdk.out/, node_modules/, docs/dist/, etc.) gets uploaded on every
-# AgentCore deploy.
-
-# CDK output (recursive include if not excluded)
 cdk/cdk.out/
 cdk/lib/
 cdk/node_modules/
 
-# CLI and docs build artifacts
 cli/lib/
 cli/node_modules/
 docs/dist/
 docs/node_modules/
 docs/.astro/
 
-# Operator console: never part of the agent image. Excluded whole because its
-# build rewrites web/dist/ while the parallel CDK suite fingerprints this context.
 web/
 
-# Shared node_modules
 node_modules/
 
-# Agent venv and cache (rebuilt inside image via uv)
 agent/.venv/
 agent/__pycache__/
 agent/**/__pycache__/
 agent/**/*.pyc
 
-# Deployment profile (ADR-024): infrastructure selection only; editing it must not rebuild the image
 abca.deployment*.json
 
-# Emulator test tooling: never part of the agent image, and bumping its pinned
-# version must not change the image hash
 scripts/aws-emulator/
 
-# Git and tooling
 .git/
 .prek/
 .claude/
 **/.DS_Store
 
-# Docs and assets not needed in image
 *.md
 *.png
 *.drawio
@@ -50,30 +33,21 @@ scripts/aws-emulator/
 *.gif
 *.tape
 
-# Worktrees + scratch
 abca-worktrees/
 .next-session-prompt.md
 .e2e-test-plan.md
 
-# Test/coverage output
 coverage/
 **/coverage/
 .pytest_cache/
 **/.pytest_cache/
-# Coverage data FILES, not just the directories above. pytest-cov writes
-# per-process temp files (``.coverage.<host>.<pid>.<random>``) and deletes them as
-# it combines. The agent test suite and the CDK suite run in parallel, and the CDK
-# suite fingerprints this tree for the agent image asset — so a file that vanishes
-# mid-walk fails the build with ENOENT on a path nothing will ever read again.
+# pytest-cov writes per-process files (`.coverage.<host>.<pid>.<random>`) and deletes them as it
+# combines; the CDK asset fingerprint fails with ENOENT on a file that vanishes mid-walk.
 .coverage
 .coverage.*
 **/.coverage
 **/.coverage.*
 
-# Caches and reports other build steps write WHILE the CDK suite fingerprints this
-# tree for the agent image asset (same race as the coverage files above): jest's own
-# cache, ruff's cache, JUnit reports and TypeScript incremental build info. If one
-# changes between the two synths of a test, the image hash differs and the test fails.
 .jest-cache/
 **/.jest-cache/
 .ruff_cache/
@@ -83,7 +57,6 @@ test-reports/
 *.tsbuildinfo
 **/*.tsbuildinfo
 
-# IDE / OS
 .devcontainer/
 .idea/
 .vscode/

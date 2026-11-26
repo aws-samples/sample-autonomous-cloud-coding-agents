@@ -65,8 +65,6 @@ export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<
       return generatePolicy('anonymous', 'Deny', methodArn);
     }
 
-    // 1. Look up webhook record (strongly consistent — a revoked webhook stops
-    // authenticating as soon as the revocation has returned)
     const result = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { webhook_id: webhookId },
@@ -79,7 +77,6 @@ export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<
       return generatePolicy(webhookId, 'Deny', methodArn);
     }
 
-    // 2. Return Allow with user context — signature verification deferred to handler
     return generatePolicy(record.user_id, 'Allow', methodArn, {
       userId: record.user_id,
       webhookId: record.webhook_id,

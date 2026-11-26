@@ -22,7 +22,6 @@ import * as path from 'path';
 import { describeDataLoss, parseStateBearingChanges } from '../src/setup-diff';
 
 const STACK = 'backgroundagent-dev';
-/** Captured from aws-cdk 2.1129 `cdk diff` of the legacy topology without Linear (IAM tables trimmed). */
 const REMOVE_LINEAR = fs.readFileSync(path.join(__dirname, 'fixtures', 'cdk-diff-remove-linear.txt'), 'utf-8');
 
 describe('parseStateBearingChanges', () => {

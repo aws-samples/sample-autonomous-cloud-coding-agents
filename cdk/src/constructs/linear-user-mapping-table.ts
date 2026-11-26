@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for LinearUserMappingTable construct.
- */
 export interface LinearUserMappingTableProps {
   /**
    * Optional table name override.
@@ -60,9 +57,6 @@ export class LinearUserMappingTable extends Construct {
    */
   public static readonly PLATFORM_USER_INDEX = 'PlatformUserIndex';
 
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: LinearUserMappingTableProps = {}) {

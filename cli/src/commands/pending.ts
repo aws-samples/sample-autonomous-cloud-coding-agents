@@ -23,10 +23,6 @@ import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import type { PendingApprovalSummary } from '../types';
 
-/**
- * `bgagent pending [--output text|json]` — list all pending approvals
- * owned by the caller across every active task (design §8.1, §7.7).
- */
 export function makePendingCommand(): Command {
   return new Command('pending')
     .description('List all pending Cedar HITL approvals across your active tasks')

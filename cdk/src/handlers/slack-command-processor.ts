@@ -30,10 +30,6 @@ import { MAX_INLINE_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_INLINE_SIZE_BYTES } from '.
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 import type { SlackCommandPayload } from './slack-commands';
 
-/**
- * Payload fields every inbound event carries, whether it came from a slash
- * command or an @mention.
- */
 interface BasePayload {
   readonly text: string;
   readonly user_id: string;
@@ -41,12 +37,10 @@ interface BasePayload {
   readonly channel_id: string;
 }
 
-/** Slash-command invocation — has a usable response_url, no mention context. */
 export interface SlashCommandEvent extends BasePayload, SlackCommandPayload {
   readonly source: 'slash';
 }
 
-/** Metadata for a file attached to a Slack message. */
 export interface SlackFileRef {
   readonly id: string;
   readonly name: string;
@@ -55,7 +49,6 @@ export interface SlackFileRef {
   readonly url_private_download: string;
 }
 
-/** @mention invocation — no response_url; reply via chat.postMessage in-thread. */
 export interface MentionEvent extends BasePayload {
   readonly source: 'mention';
   /** The thread to reply in: the mention itself, or the thread it was written in. */
@@ -65,14 +58,8 @@ export interface MentionEvent extends BasePayload {
   readonly files?: readonly SlackFileRef[];
 }
 
-/** Discriminated union of the inbound events the processor accepts. */
 export type CommandProcessorEvent = SlashCommandEvent | MentionEvent;
 
-/**
- * Legacy shape — the slash-command acknowledger (`slack-commands.ts`) forwards
- * payloads without a `source` field. Normalize those into SlashCommandEvent so
- * the handler body only has to reason about the discriminated union.
- */
 type RawEvent = CommandProcessorEvent | SlackCommandPayload;
 
 function normalizeEvent(event: RawEvent): CommandProcessorEvent {
@@ -88,19 +75,14 @@ const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
 const INSTALLATION_TABLE = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 const CHANNEL_MAPPING_TABLE = process.env.SLACK_CHANNEL_MAPPING_TABLE_NAME;
 
-/** Link code TTL. */
-const LINK_CODE_TTL_S = 10 * 60; // 10 minutes
+const LINK_CODE_TTL_S = 10 * 60;
 
-/** Random bytes for slash-command account-link codes (→ 6 hex chars). */
 const LINK_CODE_ENTROPY_BYTES = 3;
 
-/** Prefix length when logging Slack response_url values (avoid leaking tokens). */
 const RESPONSE_URL_LOG_PREFIX_LEN = 80;
 
 /**
  * Async processor for Slack slash commands and @mention triggers.
- *
- * Invoked asynchronously by the slash command acknowledger or the events handler.
  * Posts results back to Slack via `response_url` (slash commands) or
  * `chat.postMessage` (@mentions).
  */
@@ -110,7 +92,6 @@ export async function handler(raw: RawEvent): Promise<void> {
   const parts = text.split(/\s+/);
   const subcommand = parts[0]?.toLowerCase() ?? '';
 
-  // Build a reply function that handles both response_url and mention modes.
   const reply = event.source === 'mention'
     ? buildMentionReply(event)
     : (msg: string) => postToSlack(event.response_url, msg);
@@ -118,9 +99,7 @@ export async function handler(raw: RawEvent): Promise<void> {
   try {
     switch (subcommand) {
       case 'submit':
-        // Submit is only used via @mentions — slash commands show usage guidance.
         if (event.source === 'mention') {
-          // The message as written, line breaks included: it becomes the task description.
           await handleSubmit(event, text.slice(subcommand.length).trim(), reply);
         } else {
           await reply('Use `@Shoof` to submit tasks — e.g. `@Shoof fix the bug in org/repo#42`\nFor private submissions, DM Shoof directly.');
@@ -153,9 +132,7 @@ export async function handler(raw: RawEvent): Promise<void> {
     });
     await reply(':warning: Something went wrong. Please try again.');
     if (event.source === 'mention') {
-      // As on every other failure, :eyes: must not stay on a request that
-      // created nothing. Best-effort: an error that escapes this handler makes
-      // Lambda retry the invocation and run the submission again.
+      // An error that escapes this handler makes Lambda retry the invocation.
       try {
         await swapReaction(event, 'eyes', 'x');
       } catch (swapErr) {
@@ -170,7 +147,6 @@ export async function handler(raw: RawEvent): Promise<void> {
 
 type ReplyFn = (text: string) => Promise<void>;
 
-/** Build a reply function that posts in-thread via chat.postMessage for @mentions. */
 function buildMentionReply(event: MentionEvent): ReplyFn {
   return async (text: string) => {
     const botToken = await getBotToken(event.team_id);
@@ -197,24 +173,10 @@ function buildMentionReply(event: MentionEvent): ReplyFn {
   };
 }
 
-// ─── Submit ───────────────────────────────────────────────────────────────────
-
-/**
- * A link is read whole, so that its parts are not taken for words. A word is tried
- * from its first `\w` only, because a start at every dot and hyphen takes quadratic time.
- */
 const REPO_REFERENCE = /<(?<slackLink>https?:\/\/[^\s<>|]+)(?:\|[^<>]*)?>|(?<typedLink>https?:\/\/[^\s<>|]*[^\s<>|.,;:!?)])|(?=\w)(?<!\w[.-]*)(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)(?:#(?<issueNumber>\d+))?\b/gi;
 
-/**
- * Without an issue or pull request number, only a query or a fragment may follow the
- * repo. A link to a file, a branch or another page of the repo names no repo.
- */
 const GITHUB_LINK = /^https?:\/\/(?:www\.)?github\.com\/(?<repo>[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+?)(?:\.git)?(?:\/(?:issues|pull)\/(?<issueNumber>\d+)|\/?(?:[?#].*)?$)/i;
 
-/**
- * What a github.com path begins with, in lower case, when it is a page of the site.
- * A name that an account has must stay out, or links to its repos are ignored.
- */
 const GITHUB_SITE_PAGES = new Set([
   'about', 'account', 'advisories', 'apps', 'codespaces', 'collections', 'enterprise', 'enterprises', 'features',
   'issues', 'login', 'marketplace', 'notifications', 'organizations', 'orgs', 'pulls', 'readme', 'resources',
@@ -248,16 +210,10 @@ function repoReferences(message: string): RepoReference[] {
   return references;
 }
 
-/** The owner part of `owner/repo`, lower-cased: owners compare without case. */
 function ownerOf(repo: string): string {
   return repo.split('/')[0].toLowerCase();
 }
 
-/**
- * The first of these references that certainly means a repo: it is a GitHub
- * link, it carries an issue number, or it names an onboarded repo (one
- * RepoTable read per distinct name).
- */
 async function findRepoReference(references: RepoReference[]): Promise<RepoReference | undefined> {
   const notOnboarded = new Set<string>();
   for (const reference of references) {
@@ -275,7 +231,6 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
     return;
   }
 
-  // Resolve platform user.
   const platformUserId = await lookupPlatformUser(event.team_id, event.user_id);
   if (!platformUserId) {
     await reply(':link: Your Slack account is not linked. Run `/bgagent link` first.');
@@ -283,17 +238,6 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
     return;
   }
 
-  // Resolve the target repo. A slash-joined word is not necessarily a repo
-  // ("CI/CD", "and/or", "src/handlers/foo.ts"), so the first one does not decide.
-  // A repo is known when a word or a link certainly means one (findRepoReference)
-  // or, failing that, when the channel has an onboarded default repo (`bgagent
-  // slack onboard-channel`).
-  //   1. The repo is the first word or link under the owner of the known repo,
-  //      wherever it stands in "fix the bug in org/repo#42": that repo itself or,
-  //      before it, a sibling or a misspelling. The rest of the message is the
-  //      description, and createTaskCore reports a repo that is not onboarded.
-  //   2. With no such word or link, the channel default gets the WHOLE message.
-  //   3. With no repo known at all, the first slash-joined word is taken, as before.
   const references = repoReferences(message);
   const certain = await findRepoReference(references);
   const defaultRepo = certain ? null : await lookupChannelDefaultRepo(event.team_id, event.channel_id);
@@ -302,7 +246,6 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
     ? references.find(candidate => ownerOf(candidate.repo) === ownerOf(known))
     : references[0];
   const repo = reference?.repo ?? defaultRepo;
-  // The message without the word or link that named the repo and the blanks in front of it.
   const description = reference
     ? (message.slice(0, reference.start).replace(/(?<![ \t])[ \t]+$/, '') + message.slice(reference.end)).trim()
     : message;
@@ -312,7 +255,6 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
     return;
   }
 
-  // Check if the bot can post to this channel (private channels need an invite).
   const channelCheck = await checkChannelAccess(event.team_id, event.channel_id);
   if (!channelCheck.ok) {
     await reply(channelCheck.error!);
@@ -320,9 +262,6 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
     return;
   }
 
-  // handleSubmit is only invoked for the mention path, so there's no response_url.
-  // Notifications thread under the user's @mention message using mention_thread_ts;
-  // the reactions of the task go on the mention itself, mention_message_ts.
   const channelMetadata: Record<string, string> = {
     slack_team_id: event.team_id,
     slack_channel_id: event.channel_id,
@@ -335,25 +274,17 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
     channelMetadata.slack_message_ts = event.mention_message_ts;
   }
 
-  // Extract file attachments from the Slack event (if present).
-  // Files are downloaded from Slack CDN and passed as inline base64 attachments.
   const attachments = await extractSlackFileAttachments(event, reply);
   if (attachments === null) {
-    // extractSlackFileAttachments already replied with the error
     await swapReaction(event, 'eyes', 'x');
     return;
   }
 
-  // Create the task through the shared core.
   const result = await createTaskCore(
     {
       repo,
       issue_number: reference?.issueNumber,
       task_description: description || undefined,
-      // Explicit coding workflow: a Slack-submitted task targets a repo, so it
-      // must not fall through the resolution ladder to the repo-less
-      // default/agent-v1 (which never commits or opens a PR). Mirrors the Jira
-      // processor. See CODING_WORKFLOW_ID.
       workflow_ref: CODING_WORKFLOW_ID,
       ...(attachments.length > 0 && { attachments }),
     },
@@ -365,29 +296,21 @@ async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn
     crypto.randomUUID(),
   );
 
-  // Extract task info from the response.
   const body = JSON.parse(result.body);
   if (result.statusCode === 201 && body.data) {
-    // The notify handler posts the task_created message in-thread — don't
-    // duplicate it here on the mention path.
     return;
   }
 
   const errMsg = body.error?.message ?? 'Unknown error';
   await reply(`:x: Failed to create task: ${errMsg}`);
-  // Swap reaction to :x: on the mention message.
   await swapReaction(event, 'eyes', 'x');
 }
 
-// ─── Link ─────────────────────────────────────────────────────────────────────
-
 async function handleLink(event: CommandProcessorEvent, reply: ReplyFn): Promise<void> {
-  // Generate a 6-character alphanumeric code.
   const code = crypto.randomBytes(LINK_CODE_ENTROPY_BYTES).toString('hex').toUpperCase();
   const now = new Date().toISOString();
   const ttl = Math.floor(Date.now() / 1000) + LINK_CODE_TTL_S;
 
-  // Store the pending link record.
   await ddb.send(new PutCommand({
     TableName: USER_MAPPING_TABLE,
     Item: {
@@ -406,8 +329,6 @@ async function handleLink(event: CommandProcessorEvent, reply: ReplyFn): Promise
   );
 }
 
-// ─── Channel Access ──────────────────────────────────────────────────────────
-
 async function getBotToken(teamId: string): Promise<string | null> {
   const installation = await ddb.send(new GetCommand({
     TableName: INSTALLATION_TABLE,
@@ -417,15 +338,14 @@ async function getBotToken(teamId: string): Promise<string | null> {
   return getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
 }
 
-/** Slack error codes that definitively mean the bot cannot post in this channel. */
 const CHANNEL_ACCESS_HARD_FAILURES = new Set([
   'channel_not_found', // private channel the bot hasn't been invited to
-  'not_in_channel', // public channel the bot isn't in (some workspaces require join)
-  'missing_scope', // bot lacks the scope it needs — admin must reinstall
+  'not_in_channel',
+  'missing_scope',
 ]);
 
 async function checkChannelAccess(teamId: string, channelId: string): Promise<{ ok: boolean; error?: string }> {
-  // DM channels always work — notifications fall back to user ID.
+  // A Slack channel id that starts with `D` is a DM.
   if (channelId.startsWith('D')) return { ok: true };
 
   const botToken = await getBotToken(teamId);
@@ -444,15 +364,9 @@ async function checkChannelAccess(teamId: string, channelId: string): Promise<{ 
     const result = await response.json() as { ok: boolean; channel?: { is_private: boolean; is_member: boolean }; error?: string };
 
     if (!result.ok) {
-      // Hard failures: the bot definitively cannot post here. Fail closed so the
-      // task isn't created silently into a dead-letter channel.
       if (result.error && CHANNEL_ACCESS_HARD_FAILURES.has(result.error)) {
         return { ok: false, error: ':lock: This is a private channel and the bot is not a member. Invite the bot first with `/invite @bgagent`, or submit from a public channel or DM.' };
       }
-      // Anything else (ratelimited, internal_error, fatal_error, network blip) is
-      // likely transient — fail open and let slack-notify surface any real delivery
-      // failure downstream. Blocking task submission on a 30-second Slack blip is
-      // a worse UX than creating a task that notifies late.
       logger.warn('Channel access check: transient/unknown Slack error, failing open', {
         error: result.error,
         channel_id: channelId,
@@ -466,7 +380,6 @@ async function checkChannelAccess(teamId: string, channelId: string): Promise<{ 
 
     return { ok: true };
   } catch (err) {
-    // Network-level failure — treat the same as a transient Slack error.
     logger.warn('Channel access check network failure, failing open', {
       error: err instanceof Error ? err.message : String(err),
     });
@@ -474,26 +387,14 @@ async function checkChannelAccess(teamId: string, channelId: string): Promise<{ 
   }
 }
 
-// ─── Slack File Extraction ───────────────────────────────────────────────────
-
-/** Max number of file attachments per Slack message. */
 const SLACK_FILE_MAX_COUNT = 10;
 
-/** MIME types supported for attachments (must match validation.ts — PNG/JPEG only). */
 const SUPPORTED_IMAGE_MIMES = new Set(['image/png', 'image/jpeg']);
 const SUPPORTED_FILE_MIMES = new Set([
   'text/plain', 'text/csv', 'text/markdown', 'application/json',
   'application/pdf', 'text/x-log',
 ]);
 
-/**
- * Download Slack file attachments and convert them to inline Attachment objects.
- * Returns null if validation fails (reply already sent). Returns an empty array
- * if no files are attached.
- *
- * Implements atomic failure semantics: if ANY file fails validation or download,
- * the entire submission is rejected with a descriptive error listing all failures.
- */
 async function extractSlackFileAttachments(
   event: MentionEvent,
   reply: ReplyFn,
@@ -515,9 +416,6 @@ async function extractSlackFileAttachments(
     return null;
   }
 
-  // The bytes accepted so far, and why a file of `bytes` more is refused, if it is.
-  // The files reach createTaskCore as inline attachments, so the limits are those
-  // of validateAttachments for inline data: 500 KB per file and 3 MB per task.
   let totalBytes = 0;
   const sizeError = (bytes: number): string | undefined => {
     if (bytes > MAX_INLINE_ATTACHMENT_SIZE_BYTES) {
@@ -530,14 +428,12 @@ async function extractSlackFileAttachments(
   };
 
   for (const file of files) {
-    // Validate the size Slack declares, before anything is downloaded.
     const declaredSizeError = sizeError(file.size);
     if (declaredSizeError) {
       errors.push(`\`${file.name}\` (${declaredSizeError})`);
       continue;
     }
 
-    // Validate MIME type
     const mime = file.mimetype.toLowerCase();
     const isImage = SUPPORTED_IMAGE_MIMES.has(mime);
     const isFile = SUPPORTED_FILE_MIMES.has(mime);
@@ -546,14 +442,11 @@ async function extractSlackFileAttachments(
       continue;
     }
 
-    // Validate the download URL points to a legitimate Slack domain before
-    // sending the bot token — prevents SSRF and token exfiltration via crafted events.
     if (!isSlackFileUrl(file.url_private_download)) {
       errors.push(`\`${file.name}\` (invalid download URL — not a Slack domain)`);
       continue;
     }
 
-    // Download the file from Slack CDN using the bot token
     try {
       const response = await fetch(file.url_private_download, {
         headers: { Authorization: `Bearer ${botToken}` },
@@ -566,8 +459,6 @@ async function extractSlackFileAttachments(
 
       const buffer = Buffer.from(await response.arrayBuffer());
 
-      // Post-download size validation: Slack's declared file.size may differ
-      // from the actual download (e.g., server-side processing, bug, or manipulation).
       const downloadedSizeError = sizeError(buffer.length);
       if (downloadedSizeError) {
         errors.push(`\`${file.name}\` (${downloadedSizeError})`);
@@ -590,7 +481,6 @@ async function extractSlackFileAttachments(
     }
   }
 
-  // Atomic failure: if any file failed, reject the entire submission
   if (errors.length > 0) {
     const errorList = errors.length === 1
       ? errors[0]
@@ -602,7 +492,6 @@ async function extractSlackFileAttachments(
   return attachments;
 }
 
-/** Validate that a URL points to a legitimate Slack file domain. */
 function isSlackFileUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -612,8 +501,6 @@ function isSlackFileUrl(url: string): boolean {
     return false;
   }
 }
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function lookupPlatformUser(teamId: string, userId: string): Promise<string | null> {
   const key = `${teamId}#${userId}`;
@@ -635,12 +522,6 @@ async function lookupPlatformUser(teamId: string, userId: string): Promise<strin
   return (result.Item.platform_user_id as string) ?? null;
 }
 
-/**
- * Resolve a channel's default repo from the onboarding table
- * (`bgagent slack onboard-channel`). Returns the mapped `owner/repo` when an
- * active mapping exists, else null. Fails open (returns null) on any error so a
- * lookup blip degrades to the "please include a repo" path rather than a 500.
- */
 async function lookupChannelDefaultRepo(teamId: string, channelId: string): Promise<string | null> {
   if (!CHANNEL_MAPPING_TABLE) return null;
   const key = `${teamId}#${channelId}`;
@@ -688,10 +569,6 @@ async function postToSlack(responseUrl: string, text: string): Promise<void> {
   }
 }
 
-/**
- * Swap one reaction for another on the mention. A payload from an events
- * handler that predates mention_message_ts names only the thread.
- */
 async function swapReaction(event: MentionEvent, remove: string, add: string): Promise<void> {
   const messageTs = event.mention_message_ts ?? event.mention_thread_ts;
   if (!messageTs) return;

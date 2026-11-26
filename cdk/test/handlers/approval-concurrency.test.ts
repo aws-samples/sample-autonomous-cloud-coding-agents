@@ -17,19 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Cross-handler concurrency test for approve + deny on the same
- * approval row (S1 from PR review).
- *
- * Pre-S1 the at-most-one-decision invariant was enforced by the
- * ``ConditionExpression: status = :pending`` guard on every mutator,
- * but no test verified that two simultaneous approve/deny calls on
- * the same ``request_id`` actually result in exactly one winner.
- * The DDB primitive guarantees this; this test pins it for the two
- * handler entry points so a future refactor that loosens the
- * condition expression fails here.
- */
-
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 const TASK_APPROVALS_TABLE_NAME = 'TaskApprovalsTable';
@@ -97,37 +84,25 @@ describe('approve+deny concurrency on a single request_id (S1)', () => {
   });
 
   test('one writer wins, the other gets 409 from ConditionalCheckFailed', async () => {
-    // Scenario: user submits both an approve and a deny in quick
-    // succession (e.g. clicked Approve in CLI, then Slack button
-    // fired Deny before the first network round-trip completed).
-    // First call: rate-limit succeeds, TransactWrite succeeds,
-    // audit Put succeeds. Second call: rate-limit succeeds, but
-    // the TransactWrite hits ``ConditionalCheckFailed`` on the
-    // approval row (status is no longer PENDING).
-
     const SHARED_TASK_ID = '01KCONCURRENT_TASK';
     const SHARED_REQUEST_ID = '01KCONCURRENT_REQ';
 
-    // Approve goes through cleanly.
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit Update
-      .mockResolvedValueOnce({}) // TransactWrite (approve)
-      .mockResolvedValueOnce({}); // audit Put
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
 
     const approveRes = await approveHandler(
       makeEvent(SHARED_TASK_ID, { request_id: SHARED_REQUEST_ID, decision: 'approve' }, 'user-alice'),
     );
     expect(approveRes.statusCode).toBe(202);
 
-    // Deny on the same row — TransactWrite cancelled on
-    // ``ConditionalCheckFailed`` because the approval row's status
-    // is now APPROVED, not PENDING.
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit Update for deny
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(
         new MockTransactionCanceledException([
-          { Code: 'ConditionalCheckFailed' }, // approvals row not PENDING
-          { Code: 'None' }, // task row check (would have been fine)
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'None' },
         ]),
       );
 
@@ -139,21 +114,7 @@ describe('approve+deny concurrency on a single request_id (S1)', () => {
       ),
     );
 
-    // The conflicting decision is rejected with 409 (request not
-    // pending) — the API design choice for both approve-task and
-    // deny-task is "first write wins, second gets a clear error".
-    // 404 (REQUEST_NOT_FOUND) is also acceptable because the
-    // condition is "request not in PENDING state", which from the
-    // CLI perspective is indistinguishable from "doesn't exist".
     expect([404, 409]).toContain(denyRes.statusCode);
-
-    // Critical invariant: at most ONE TransactWriteCommand reached
-    // a successful resolution. The mock recorded one
-    // TransactWriteCommand call that resolved without error
-    // (the approve path); the deny's TransactWriteCommand call
-    // also fired but was rejected by the mock. Counting calls
-    // with ``_type === 'TransactWrite'`` proves both were attempted
-    // (the condition guard was actually exercised, not bypassed).
     const transactCalls = mockSend.mock.calls.filter(
       (c) => (c[0] as { _type: string })._type === 'TransactWrite',
     );
@@ -161,19 +122,13 @@ describe('approve+deny concurrency on a single request_id (S1)', () => {
   });
 
   test('reverse order: deny wins, approve gets ConditionalCheckFailed', async () => {
-    // Symmetrical scenario — deny lands first. Same outcome shape:
-    // first transaction succeeds, second is rejected. Pinned
-    // separately so a future change that broke ONE direction
-    // (e.g. by accident omitting the condition on the deny path)
-    // is caught.
-
     const SHARED_TASK_ID = '01KCONCURRENT_TASK_2';
     const SHARED_REQUEST_ID = '01KCONCURRENT_REQ_2';
 
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit Update (deny)
-      .mockResolvedValueOnce({}) // TransactWrite (deny)
-      .mockResolvedValueOnce({}); // audit Put
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
 
     const denyRes = await denyHandler(
       makeEvent(
@@ -185,7 +140,7 @@ describe('approve+deny concurrency on a single request_id (S1)', () => {
     expect(denyRes.statusCode).toBe(202);
 
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit Update (approve)
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(
         new MockTransactionCanceledException([
           { Code: 'ConditionalCheckFailed' },

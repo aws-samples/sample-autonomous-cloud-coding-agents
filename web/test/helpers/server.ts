@@ -30,5 +30,5 @@ export function resetMockData(): void {
   Object.assign(mockData, buildFixtures(new Date()));
 }
 
-/** The same handlers mock mode uses, so tests exercise the documented API contract. */
+/** The same handlers mock mode uses. */
 export const server = setupServer(...createHandlers(TEST_API_BASE, mockData));

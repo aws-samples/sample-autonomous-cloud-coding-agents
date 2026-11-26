@@ -1,5 +1,3 @@
-"""Workflow section for new_task (create a new PR)."""
-
 NEW_TASK_WORKFLOW = """\
 ## Workflow
 

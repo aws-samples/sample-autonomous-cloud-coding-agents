@@ -17,14 +17,6 @@
  *  SOFTWARE.
  */
 
-// PR #79 test gap #34. The construct shipped on issue #64 with no
-// unit-level coverage of its IAM contract — the only synth-level
-// signal lived inside slack-integration.test.ts ("0 EventSourceMapping")
-// which proved the migration didn't regress the OTHER construct.
-// These tests pin the FanOutConsumer's own surface: the Slack secret
-// grant must be guarded by ``slackSecretArnPattern`` (review #2), the
-// stream binding must exist, and the DLQ must be wired.
-
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -47,15 +39,9 @@ describe('FanOutConsumer', () => {
     });
     const template = Template.fromStack(stack);
 
-    // Exactly one event-source mapping — the architectural invariant
-    // issue #64 was about. Adding a second consumer to TaskEventsTable
-    // must fail this test loudly.
     template.resourceCountIs('AWS::Lambda::EventSourceMapping', 1);
     template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
       StartingPosition: 'LATEST',
-      // Larger batch size than the old SlackNotifyFn (10) because the
-      // dispatcher fans out across channels — fewer Lambda
-      // invocations, better throughput.
       BatchSize: 100,
       MaximumRetryAttempts: 3,
       FunctionResponseTypes: ['ReportBatchItemFailures'],
@@ -72,26 +58,18 @@ describe('FanOutConsumer', () => {
 
     template.resourceCountIs('AWS::SQS::Queue', 1);
     template.hasResourceProperties('AWS::SQS::Queue', {
-      MessageRetentionPeriod: 14 * 24 * 60 * 60, // 14 days
+      MessageRetentionPeriod: 14 * 24 * 60 * 60,
     });
   });
 
   test('omits the bgagent/slack/* grant when slackSecretArnPattern is not provided (PR #79 review #2)', () => {
-    // Pre-fix: the policy attached unconditionally so dev stacks
-    // without Slack onboarding accumulated a dangling IAM permission.
-    // Post-fix: the policy only attaches when the prop is set, so
-    // construct consumers stay symmetric with taskTable / repoTable /
-    // githubTokenSecret (also guarded by their respective props).
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     new FanOutConsumer(stack, 'FanOut', {
       taskEventsTable: makeTaskEventsTable(stack),
-      // intentionally no slackSecretArnPattern
     });
     const template = Template.fromStack(stack);
 
-    // Iterate every IAM::Policy and assert NONE of them grant
-    // ``secretsmanager:GetSecretValue`` on a ``bgagent/slack/*`` ARN.
     const policies = template.findResources('AWS::IAM::Policy');
     for (const policy of Object.values(policies)) {
       const stmts = (policy as { Properties?: { PolicyDocument?: { Statement?: unknown[] } } })
@@ -132,11 +110,6 @@ describe('FanOutConsumer', () => {
   });
 
   test('alarms on the first record landing in the DLQ', () => {
-    // The DLQ is the ONLY persistent signal of a fan-out outage —
-    // notifications are best-effort, so every Slack/GitHub/Linear
-    // delivery failing would otherwise accumulate unseen for the
-    // queue's 14-day retention. Pin the alarm's metric binding and
-    // threshold so a refactor can't silently drop or loosen it.
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     new FanOutConsumer(stack, 'FanOut', {
@@ -154,7 +127,6 @@ describe('FanOutConsumer', () => {
       EvaluationPeriods: 1,
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',
       TreatMissingData: 'notBreaching',
-      // The alarm must watch THIS construct's DLQ, not some other queue.
       Dimensions: Match.arrayWith([
         Match.objectLike({
           Name: 'QueueName',
@@ -187,8 +159,6 @@ describe('FanOutConsumer', () => {
         }),
       },
     });
-    // The resolver rotates an expiring token in place → needs Put as well
-    // as Get, scoped to the per-tenant secret prefix (same shape as Linear).
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -207,7 +177,6 @@ describe('FanOutConsumer', () => {
     const stack = new Stack(app, 'TestStack');
     new FanOutConsumer(stack, 'FanOut', {
       taskEventsTable: makeTaskEventsTable(stack),
-      // intentionally no Jira props
     });
     const template = Template.fromStack(stack);
 
@@ -249,9 +218,6 @@ describe('FanOutConsumer', () => {
   });
 
   test('passes TASK_TABLE_NAME env var when taskTable is provided', () => {
-    // The Slack dispatcher requires this env var (review #3); the
-    // construct must wire it from the prop. Its absence triggers the
-    // FANOUT_SLACK_MISSING_TASK_TABLE error on dispatch.
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     const taskTable = new dynamodb.Table(stack, 'TaskTable', {

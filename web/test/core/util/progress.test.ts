@@ -26,7 +26,6 @@ const NOW = new Date();
 const fixtures = buildFixtures(NOW);
 const task = (id: string) => fixtures.tasks.find((t) => t.task_id === id)!;
 const events = (id: string) => fixtures.events[id] ?? [];
-/** The banner of a mock task, from the task and its own events. */
 const outcome = (id: string) => outcomeOf(task(id), events(id), NOW);
 const milestone = (name: string, details = ''): TaskEvent => ({ event_id: name, event_type: 'agent_milestone', timestamp: NOW.toISOString(), metadata: { milestone: name, details } });
 
@@ -67,7 +66,6 @@ describe('outcomeOf', () => {
 
   it('does not call a quiet task on ECS stuck', () => {
     expect(outcome(MOCK_IDS.ecs)).toBeNull();
-    // The mock task is silent for long enough to show the difference: the same silence on AgentCore is a stuck task.
     expect(outcomeOf({ ...task(MOCK_IDS.ecs), compute_type: 'agentcore' }, events(MOCK_IDS.ecs), NOW)).toMatchObject({ offer: 'stuck' });
   });
 
@@ -81,21 +79,16 @@ describe('outcomeOf', () => {
 
   it('reports a finished pull request', () => {
     expect(outcome(MOCK_IDS.completed)?.title).toBe('Done: pull request #482 is ready for review');
-    // A task that opened no pull request is simply done.
     expect(outcomeOf({ ...task(MOCK_IDS.completed), pr_url: null, pr_number: null }, [], NOW)).toEqual({ type: 'success', title: 'Done' });
   });
 
   it('says how the pull request ended, once the event of ABCA\'s read of GitHub is among the task\'s events', () => {
     expect(outcome(MOCK_IDS.prMerged)).toEqual({ type: 'success', title: 'Done: pull request #212 was merged' });
-    // As information, with nothing to offer: the task finished, and its pull request is no longer open.
     expect(outcome(MOCK_IDS.prClosed)).toEqual({ type: 'info', title: 'Done: pull request #1071 was closed without merging' });
-    // Until the events are in, the pull request is the one the task left.
     expect(outcomeOf(task(MOCK_IDS.prMerged), [], NOW)).toEqual({ type: 'success', title: 'Done: pull request #212 is ready for review' });
   });
 
   it('shows a failed run without a pull request as the failure it is, even when the agent reported success', () => {
-    // A clean "no changes" run, a failed PR and lost changes all look alike from here
-    // (FAILED, no PR, agent_execution_complete status=success), so none is softened.
     expect(outcome(MOCK_IDS.noChanges)).toMatchObject({ type: 'error', offer: 'retry' });
   });
 

@@ -17,12 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * MSW request handlers that imitate the REST API contract
- * (docs/design/API_CONTRACT.md): response envelopes, pagination, 401 without
- * a token, 400 on invalid parameters and 404 for unknown tasks.
- */
-
 import { delay, http, HttpResponse } from 'msw';
 import type { CreateTaskRequest, LinearAgentState, TaskDetail, TaskStatusType, TaskSummary } from '../core/api/types';
 import { TERMINAL_STATUSES } from '../core/api/types';
@@ -56,14 +50,12 @@ function toSummary(task: TaskDetail): TaskSummary {
   };
 }
 
-/** Parses `limit` like the API: default 20, integer 1-100. */
 function parseLimit(raw: string | null): number | null {
   if (raw === null) return 20;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 1 && n <= 100 ? n : null;
 }
 
-/** Opaque-looking offset cursor. */
 function page<T>(items: readonly T[], limit: number, token: string | null) {
   const offset = token ? Number(atob(token)) : 0;
   const slice = items.slice(offset, offset + limit);
@@ -73,7 +65,7 @@ function page<T>(items: readonly T[], limit: number, token: string | null) {
 
 
 const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
-/** Submitting to this repository returns 422, to exercise the "not set up" message. */
+/** Submitting to this repository returns 422. */
 export const MOCK_NOT_ONBOARDED_REPO = 'acme/not-onboarded';
 
 let sequence = 0;
@@ -96,7 +88,6 @@ function patchTask(data: MockData, taskId: string, patch: Partial<TaskDetail>, a
   if (i >= 0) data.tasks[i] = { ...data.tasks[i], ...patch, updated_at: at.toISOString() };
 }
 
-/** Applies every scheduled change that is due, so mock tasks move forward as you watch. */
 function advance(data: MockData, nowMs: number) {
   const due = data.scheduled.filter((c) => c.dueMs <= nowMs).sort((a, b) => a.dueMs - b.dueMs);
   if (due.length === 0) return;
@@ -110,7 +101,6 @@ function advance(data: MockData, nowMs: number) {
   }
 }
 
-/** A short, believable run: set up, look around, edit, test, open a pull request. */
 function simulatedRun(task: TaskDetail, startMs: number): ScheduledChange[] {
   const repo = task.repo ?? 'acme/app';
   const file = `/workspace/${repo}/src/game/world.ts`;
@@ -153,7 +143,6 @@ async function jsonBody(request: Request): Promise<Record<string, unknown> | nul
   }
 }
 
-/** Adds a new task that then runs on its own (see {@link simulatedRun}). */
 function createSimulatedTask(
   data: MockData,
   req: {
@@ -174,7 +163,6 @@ function createSimulatedTask(
     status: 'SUBMITTED',
     repo: req.repo,
     issue_number: req.issue_number,
-    // The real platform stores the title once it reads the issue; the mock knows it at once.
     issue_title: data.issues[req.repo]?.find((i) => i.number === req.issue_number)?.title ?? null,
     task_description: req.task_description,
     max_turns: req.max_turns ?? null,
@@ -206,7 +194,6 @@ function createSimulatedTask(
   return created;
 }
 
-/** How long a mock Linear webhook takes to turn a Start into a task. */
 const MOCK_LINEAR_WEBHOOK_DELAY_MS = 4000;
 
 function linearAgentState(data: MockData, issue: MockLinearIssue, label: string): LinearAgentState {
@@ -216,7 +203,6 @@ function linearAgentState(data: MockData, issue: MockLinearIssue, label: string)
   return { kind: 'task', task_id: task.task_id, status: task.status, pr_url: task.pr_url, mine: true };
 }
 
-/** Plays the part of Linear's webhook: a labeled issue becomes a task after a short delay. */
 function advanceLinear(data: MockData, nowMs: number) {
   for (const project of Object.values(data.linear).flat()) {
     for (const issue of project.issues) {
@@ -232,7 +218,6 @@ function advanceLinear(data: MockData, nowMs: number) {
 }
 
 export interface MockHandlerOptions {
-  /** Simulated network latency per request; keeps loading states visible in mock mode. */
   readonly latencyMs?: number;
 }
 
@@ -311,7 +296,6 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       if (!body || typeof body.repo !== 'string' || !REPO_PATTERN.test(body.repo)) {
         return error(400, 'VALIDATION_ERROR', "Field 'repo' must be in owner/repo format.");
       }
-      // Like the server: without a ref the repo-less default workflow runs, which needs a description.
       if (body.workflow_ref === undefined && !body.task_description?.trim()) {
         return error(400, 'VALIDATION_ERROR', 'The "default/agent-v1" workflow requires task_description.');
       }
@@ -352,7 +336,6 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       const projects = (data.linear[repo] ?? []).map((p) => ({
         project_id: p.project_id,
         trigger_label: p.trigger_label,
-        // Mock-only bookkeeping (start time, task id) stays out of the response, like the real API.
         issues: p.issues.map((i) => ({
           id: i.id, identifier: i.identifier, title: i.title, url: i.url, state: i.state, state_type: i.state_type,
           priority_label: i.priority_label, labels: i.labels, assignee: i.assignee, updated_at: i.updated_at,

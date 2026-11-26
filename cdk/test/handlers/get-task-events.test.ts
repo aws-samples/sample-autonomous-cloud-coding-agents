@@ -20,7 +20,6 @@
 import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -64,7 +63,6 @@ const EVENT_ITEMS = [
     event_type: 'session_started',
     timestamp: '2025-03-15T10:31:00Z',
     metadata: { session_id: 'sess-1' },
-    // Correlation envelope (#245) stamped on post-creation events.
     user_id: 'user-123',
     repo: 'org/repo',
     trace_id: 'a'.repeat(32),
@@ -120,7 +118,6 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // Default: GetCommand returns task, QueryCommand returns events
   mockSend
     .mockResolvedValueOnce({ Item: TASK_RECORD })
     .mockResolvedValueOnce({ Items: EVENT_ITEMS });
@@ -135,7 +132,6 @@ describe('get-task-events handler', () => {
     expect(body.data).toHaveLength(2);
     expect(body.data[0].event_type).toBe('task_created');
     expect(body.data[1].event_type).toBe('session_started');
-    // task_id should be stripped from event data
     expect(body.data[0].task_id).toBeUndefined();
     expect(body.pagination.has_more).toBe(false);
   });
@@ -143,11 +139,9 @@ describe('get-task-events handler', () => {
   test('passes through the correlation envelope (#245), omitting absent fields', async () => {
     const result = await handler(makeEvent());
     const body = JSON.parse(result.body);
-    // task_created predates the envelope → no correlation fields.
     expect(body.data[0]).not.toHaveProperty('user_id');
     expect(body.data[0]).not.toHaveProperty('repo');
     expect(body.data[0]).not.toHaveProperty('trace_id');
-    // session_started carries the full envelope.
     expect(body.data[1]).toMatchObject({
       user_id: 'user-123',
       repo: 'org/repo',
@@ -250,8 +244,6 @@ describe('get-task-events handler', () => {
     expect(body.data[0].metadata).toEqual({});
   });
 
-  // -------- ?after= support (Phase 1b Step 4) --------
-
   const VALID_AFTER = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
   const ANOTHER_ULID = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
 
@@ -265,15 +257,12 @@ describe('get-task-events handler', () => {
       ':tid': 'task-1',
       ':after': VALID_AFTER,
     });
-    // ``after`` must NOT carry ExclusiveStartKey through
     expect(queryInput.ExclusiveStartKey).toBeUndefined();
   });
 
   test('lower-case ?after is normalized to upper-case before the DDB query', async () => {
-    // ``isValidUlid`` accepts lower-case callers, but stored event_ids are
-    // upper-case Crockford Base32 and DDB compares raw bytes (lower-case sorts
-    // after upper-case). Without normalization a lower-case cursor would be
-    // "greater than" every stored id and silently return zero events.
+    // DynamoDB compares strings as raw bytes and lower-case sorts after upper-case: a lower-case
+    // cursor is greater than every stored (upper-case Crockford Base32) event_id and matches no row.
     const event = makeEvent({ queryStringParameters: { after: VALID_AFTER.toLowerCase() } });
     await handler(event);
 
@@ -281,7 +270,7 @@ describe('get-task-events handler', () => {
     expect(queryInput.KeyConditionExpression).toBe('task_id = :tid AND event_id > :after');
     expect(queryInput.ExpressionAttributeValues).toEqual({
       ':tid': 'task-1',
-      ':after': VALID_AFTER, // upper-cased, not the lower-case input
+      ':after': VALID_AFTER,
     });
   });
 
@@ -297,11 +286,9 @@ describe('get-task-events handler', () => {
       expect(result.statusCode).toBe(200);
 
       const queryInput = MockQueryCommand.mock.calls[0][0];
-      // Confirms ``after`` was used, not ``next_token``.
       expect(queryInput.KeyConditionExpression).toBe('task_id = :tid AND event_id > :after');
       expect(queryInput.ExclusiveStartKey).toBeUndefined();
 
-      // WARN about the conflict must be emitted.
       const warnLines = stdoutWrite.mock.calls
         .map(c => String(c[0]))
         .filter(line => line.includes('"level":"WARN"'));
@@ -315,7 +302,7 @@ describe('get-task-events handler', () => {
   });
 
   test('invalid ?after (wrong length) returns 400 with VALIDATION_ERROR', async () => {
-    mockSend.mockReset(); // Should short-circuit before any DDB call
+    mockSend.mockReset();
     const event = makeEvent({ queryStringParameters: { after: 'too-short' } });
     const result = await handler(event);
 
@@ -328,7 +315,7 @@ describe('get-task-events handler', () => {
 
   test('invalid ?after (illegal chars) returns 400 with VALIDATION_ERROR', async () => {
     mockSend.mockReset();
-    // Contains Crockford-excluded 'I' and 'L'.
+    // Crockford Base32 excludes 'I'.
     const event = makeEvent({ queryStringParameters: { after: 'IIIIIIIIIIIIIIIIIIIIIIIIII' } });
     const result = await handler(event);
 
@@ -343,7 +330,6 @@ describe('get-task-events handler', () => {
 
     expect(result.statusCode).toBe(200);
     const queryInput = MockQueryCommand.mock.calls[0][0];
-    // No after filter applied.
     expect(queryInput.KeyConditionExpression).toBe('task_id = :tid');
     expect(queryInput.ExpressionAttributeValues).toEqual({ ':tid': 'task-1' });
   });
@@ -359,8 +345,6 @@ describe('get-task-events handler', () => {
   });
 
   test('returns 400 for a next_token that cannot be decoded', async () => {
-    // A token that lost its end. Taken for no token, it restarted the events at the
-    // first page with status 200, and the client took that page for the next one.
     const cut = Buffer.from('{"task_id":"task-1').toString('base64');
     const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
 
@@ -414,8 +398,6 @@ describe('get-task-events handler', () => {
     expect(body.pagination.next_token).toBeTruthy();
   });
 
-  // -------- ?desc= support (status snapshot) --------
-
   test('?desc=1 flips ScanIndexForward to false and logs query_mode=desc', async () => {
     const stdoutWrite = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     try {
@@ -426,7 +408,6 @@ describe('get-task-events handler', () => {
 
       const queryInput = MockQueryCommand.mock.calls[0][0];
       expect(queryInput.ScanIndexForward).toBe(false);
-      // ``desc`` alone does not touch KeyConditionExpression or ExclusiveStartKey.
       expect(queryInput.KeyConditionExpression).toBe('task_id = :tid');
       expect(queryInput.ExclusiveStartKey).toBeUndefined();
 
@@ -447,18 +428,12 @@ describe('get-task-events handler', () => {
   });
 
   test('unknown ?desc= value falls through to ascending (no 400)', async () => {
-    // Lenient parsing — anything other than "1"/"true" is treated as absent.
     await handler(makeEvent({ queryStringParameters: { desc: 'yes' } }));
     const queryInput = MockQueryCommand.mock.calls[0][0];
     expect(queryInput.ScanIndexForward).toBe(true);
   });
 
   test('?desc=1 suppresses next_token even when DDB returns a LastEvaluatedKey', async () => {
-    // DDB populates ``LastEvaluatedKey`` on truncated descending scans, but
-    // the token carries no direction. A follow-up caller that drops
-    // ``desc`` would silently interleave ascending results. The handler
-    // intentionally null-trims the token on descending pages; ``bgagent
-    // status`` only reads one page and does not need continuation.
     mockSend.mockReset();
     mockSend
       .mockResolvedValueOnce({ Item: TASK_RECORD })

@@ -1,12 +1,3 @@
-"""Unit tests for runner.py helpers.
-
-Pipeline tests mock ``pipeline.run_agent``; they do not exercise its SDK loop.
-This module covers client/broker ownership and the narrower
-``_initialize_policy_engine_and_hooks`` helper extracted in Chunk 7 so
-the policy-engine bootstrap + ``pre_approvals_loaded`` emission can be
-verified without spinning up the Claude Agent SDK client.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -41,10 +32,6 @@ from workflow import load_workflow
 
 
 def _config(**overrides: Any) -> TaskConfig:
-    # Use an explicitly typed dict so ty can see the heterogenous field
-    # types across the TaskConfig signature (``bool`` for ``dry_run``,
-    # ``int`` for ``max_turns``, etc.) rather than inferring ``dict[str, str]``
-    # from the homogeneous base literal.
     base: dict[str, Any] = {
         "repo_url": "owner/repo",
         "github_token": "ghp_test",
@@ -173,17 +160,6 @@ class TestClaudeSessionOwnership:
 
 
 class TestInitializePolicyEngineAndHooks:
-    """Bootstrap the per-task PolicyEngine + hooks without the SDK loop.
-
-    Chunk 7 verifies two new behaviors:
-      1. ``initial_approval_gate_count`` from ``TaskConfig`` reaches
-         ``PolicyEngine.__init__`` so a container restart resumes the
-         cumulative gate budget (§13.6).
-      2. ``pre_approvals_loaded`` is emitted to the progress writer
-         right after PolicyEngine init so the live SSE stream reports
-         the starting posture (§4 step 7, §11.1).
-    """
-
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_initial_approval_gate_count_threaded_to_engine(
@@ -203,9 +179,6 @@ class TestInitializePolicyEngineAndHooks:
     def test_zero_initial_approval_gate_count_omits_kwarg(
         self, mock_policy_engine, _mock_build_hooks
     ):
-        # Default path (fresh task, no restart). Helper omits the kwarg
-        # so PolicyEngine falls back to its own default of 0 — avoids
-        # threading 0 explicitly and keeps legacy construction surface.
         config = _config(initial_approval_gate_count=0)
         progress = MagicMock()
 
@@ -232,11 +205,6 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_read_only_threaded_to_engine(self, mock_policy_engine, _mock_build_hooks):
-        # SECURITY (#248 Phase 2a): config.read_only MUST reach
-        # PolicyEngine(read_only=...) — that is the seam between "config computes
-        # read_only" and "Cedar enforces context.read_only". Without this
-        # assertion, dropping the kwarg passes every other test while silently
-        # disabling the Write/Edit hard-deny for read-only workflows.
         config = _config(read_only=True)
         progress = MagicMock()
 
@@ -275,8 +243,6 @@ class TestInitializePolicyEngineAndHooks:
     def test_pre_approvals_loaded_emitted_with_zero_count_when_empty(
         self, _mock_policy_engine, _mock_build_hooks
     ):
-        # §4 step 7: emit even when no pre-approvals — "no seeded scopes"
-        # must be explicit in the live stream, not inferred from silence.
         config = _config()
         progress = MagicMock()
 
@@ -287,12 +253,6 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_user_id_threaded_to_hook_matchers(self, _mock_policy_engine, mock_build_hooks):
-        # E2E regression: a missing user_id on the approval row lands an
-        # empty string on the TaskApprovalsTable ``user_id-status-index``
-        # GSI key, which DynamoDB rejects with ValidationException, and
-        # every approval-gate request fails silently. The hook writer
-        # needs ``user_id`` from the task payload — runner must thread
-        # ``config.user_id`` into ``build_hook_matchers``.
         config = _config(user_id="cog-sub-0123")
         progress = MagicMock()
 
@@ -316,16 +276,11 @@ class TestInitializePolicyEngineAndHooks:
         assert engine is engine_instance
         assert hooks is hooks_instance
 
-    # --- Chunk 7b: approval_gate_cap fanout to PolicyEngine -----------------
-
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_approval_gate_cap_threaded_to_engine_when_set(
         self, mock_policy_engine, _mock_build_hooks
     ):
-        # Chunk 7b: submit-time-resolved cap on TaskConfig must reach
-        # PolicyEngine so blueprint overrides (or the default-50 frozen
-        # at submit) apply on every container, including restarts.
         config = _config(approval_gate_cap=200)
         progress = MagicMock()
 
@@ -337,9 +292,6 @@ class TestInitializePolicyEngineAndHooks:
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_approval_gate_cap_omitted_when_none(self, mock_policy_engine, _mock_build_hooks):
-        # Legacy tasks (pre-Chunk-7b) don't carry approval_gate_cap.
-        # Helper must NOT thread None — the engine's default-50
-        # fallback is what makes the legacy behavior preserved.
         config = _config(approval_gate_cap=None)
         progress = MagicMock()
 
@@ -348,19 +300,11 @@ class TestInitializePolicyEngineAndHooks:
         kwargs = mock_policy_engine.call_args.kwargs
         assert "approval_gate_cap" not in kwargs
 
-    # --- Chunk 7c: cap + source surfaced in the init log line ---------------
-
     @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
     def test_init_log_includes_cap_and_threaded_source(
         self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
-        # Non-None cap came from the orchestrator payload (blueprint value
-        # or the platform-default-50 frozen on the TaskRecord at submit).
-        # Log must surface the value + ``approval_gate_cap_source=threaded``
-        # using the same key name as ``create-task-core.ts`` so
-        # CloudWatch Insights queries can join / filter across both ends
-        # of the cascade without a field-name translation.
         config = _config(approval_gate_cap=200)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
@@ -374,14 +318,6 @@ class TestInitializePolicyEngineAndHooks:
     def test_init_log_marks_engine_default_when_cap_none(
         self, _mock_policy_engine, _mock_build_hooks, capfd
     ):
-        # Legacy task — cap falls through to ``PolicyEngine``'s own
-        # default. Operator signal is ``approval_gate_cap_source=engine_default``
-        # so a deploy with broken cap-plumbing (e.g. payload field
-        # dropped) is visible in logs as every task reporting
-        # engine_default instead of the expected threaded blueprint
-        # values. ``unset`` (not ``<engine_default>``) for the numeric
-        # value to avoid angle-bracket escaping in log-aggregation
-        # tooling.
         config = _config(approval_gate_cap=None)
         _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
 
@@ -391,28 +327,17 @@ class TestInitializePolicyEngineAndHooks:
 
 
 class TestResolveAllowedTools:
-    """The SDK tool surface (``allowed_tools``) is the second enforcement layer
-    the design promises alongside Cedar's ``context.read_only``. These tests pin
-    the seam between "config carries the workflow tool list" and "the SDK
-    receives it" — previously every allowed_tools assertion lived at the
-    validator/loader layer with zero coverage of the runtime hand-off (#248).
-    """
-
     def test_workflow_tool_list_passed_through_verbatim(self):
-        # A writeable workflow's declared list reaches the SDK unchanged.
         config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=False)
         assert _resolve_allowed_tools(config) == ["Bash", "Read", "Write", "Edit"]
 
     def test_empty_list_falls_back_to_full_surface(self):
-        # Legacy/batch callers that never resolved a workflow get the built-in
-        # full surface (preserves pre-#248 behavior). A copy, not the shared list.
         config = _config(allowed_tools=[], read_only=False)
         resolved = _resolve_allowed_tools(config)
         assert resolved == _FULL_TOOL_SURFACE
         assert resolved is not _FULL_TOOL_SURFACE
 
     def test_read_only_drops_write_and_edit_from_full_surface(self):
-        # read_only with no explicit list: full surface minus Write/Edit.
         config = _config(allowed_tools=[], read_only=True)
         resolved = _resolve_allowed_tools(config)
         assert "Write" not in resolved
@@ -420,17 +345,10 @@ class TestResolveAllowedTools:
         assert resolved == ["Bash", "Read", "Glob", "Grep", "WebFetch"]
 
     def test_read_only_drops_write_and_edit_from_workflow_list(self):
-        # Even if a (misconfigured) read-only workflow declares Write/Edit, the
-        # runner strips them — the SDK can never receive a mutating tool on a
-        # read-only lane. This is the defense-in-depth the HIGH finding flagged.
         config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=True)
         assert _resolve_allowed_tools(config) == ["Bash", "Read"]
 
     def test_read_leaning_default_lane_keeps_its_restricted_list(self):
-        # default/agent-v1 and web-research-v1 declare [Read, Glob, Grep,
-        # WebFetch] and are read_only:false — Cedar's read_only rules do NOT
-        # fire, so the tool list is the ONLY thing keeping Write/Bash off the
-        # lane. Verify the restricted list survives intact (no fallback widening).
         restricted = ["Read", "Glob", "Grep", "WebFetch"]
         config = _config(allowed_tools=list(restricted), read_only=False)
         assert _resolve_allowed_tools(config) == restricted
@@ -439,8 +357,6 @@ class TestResolveAllowedTools:
 
 
 class TestBedrockCostAttribution:
-    """#215: wire Claude Code's Bedrock attribution channels (creds + header)."""
-
     def test_writes_attribution_file_and_sets_metadata_header_when_role_set(self, monkeypatch):
         monkeypatch.setenv("AGENT_SESSION_ROLE_ARN", "arn:aws:iam::1:role/SR")
         monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
@@ -465,8 +381,6 @@ class TestBedrockCostAttribution:
         }
 
     def test_no_attribution_file_when_role_unset_but_header_still_set(self, monkeypatch):
-        # Local/dev: no SessionRole → no tagged creds (helper fails open), but the
-        # invocation-log metadata header is still useful and harmless.
         monkeypatch.delenv("AGENT_SESSION_ROLE_ARN", raising=False)
         config = _config(user_id="bob", repo_url="o/r", task_id="t-1")
         with patch("bedrock_creds_helper.write_attribution_file") as mock_write:
@@ -478,23 +392,12 @@ class TestBedrockCostAttribution:
 
 
 class TestToolSurfaceHardening:
-    """The off-session/defer vectors are hard-blocked via disallowed_tools (not
-    the allow-list, which is auto-approve only), and repo-less tasks load no
-    on-disk settings. Regression guard for the background-Workflow bug where a
-    repo-less task launched a detached Workflow and finalized prematurely."""
-
     def test_workflow_task_agent_are_disallowed(self):
-        # These must be present so they are removed from the model's context
-        # even under permission_mode="bypassPermissions".
         assert "Workflow" in _DISALLOWED_TOOLS
         assert "Task" in _DISALLOWED_TOOLS
         assert "Agent" in _DISALLOWED_TOOLS
 
     def test_disallowed_tool_set_is_pinned(self):
-        # #523: the block list is hand-enumerated ("name varies by CLI version"),
-        # so a silent drop/rename would reopen the detached-work bug with nothing
-        # to catch it. Pin the exact set — a deliberate change must update this,
-        # forcing a look at whether a renamed off-session tool needs adding.
         assert set(_DISALLOWED_TOOLS) == {
             "Workflow",
             "Task",
@@ -508,8 +411,6 @@ class TestToolSurfaceHardening:
         }
 
     def test_repo_less_loads_no_setting_sources(self):
-        # requires_repo=False → no cloned repo → load nothing (keeps stray
-        # on-disk skills that could spawn a background Workflow out of reach).
         config = _config(requires_repo=False, repo_url="", github_token="")
         assert _resolve_setting_sources(config) == []
 
@@ -518,28 +419,14 @@ class TestToolSurfaceHardening:
         assert _resolve_setting_sources(config) == ["project"]
 
     def test_repo_optional_with_repo_loads_project_settings(self):
-        # #523: a repo-optional workflow (requires_repo=False) GIVEN a repo takes
-        # the clone path (pipeline gates on `not requires_repo and not repo_url`),
-        # so it must load the cloned repo's ``.claude/`` config. Keying on
-        # requires_repo would wrongly drop it — key on repo presence.
         config = _config(requires_repo=False, repo_url="owner/repo")
         assert _resolve_setting_sources(config) == ["project"]
 
 
 class TestSetupAgentEnv:
-    """Environment the Claude Code subprocess inherits."""
-
     def test_haiku_model_env_is_set_from_config(self, monkeypatch):
-        # The env var is now sourced from config.haiku_model (not hardcoded), so
-        # it is per-task overridable like ANTHROPIC_MODEL. Regression: bare
-        # foundation-model id 400s on Bedrock — WebFetch's Haiku sub-calls hit
-        # this — so config's default must be the us.* inference profile.
         import os
 
-        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL,
-        # CLAUDE_CODE_USE_BEDROCK and CLAUDE_CODE_MODEL_CATALOG straight to
-        # os.environ. Pre-claim them through monkeypatch so its teardown restores
-        # them and this test can't leak into order-dependent neighbors (#523).
         monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
         monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
         monkeypatch.setenv("CLAUDE_CODE_MODEL_CATALOG", "")
@@ -553,9 +440,7 @@ class TestSetupAgentEnv:
 
     def test_model_catalog_is_switched_off(self, monkeypatch):
         # Claude Code 2.1.311 and later fetch model settings on Bedrock from
-        # downloads.claude.ai unless this variable says "off". The platform's DNS
-        # allowlist does not name that host, and a task keeps the model table of
-        # the pinned CLI, whatever value the process was started with.
+        # downloads.claude.ai unless this variable says "off".
         import os
 
         monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
@@ -566,10 +451,8 @@ class TestSetupAgentEnv:
         assert os.environ["CLAUDE_CODE_MODEL_CATALOG"] == "off"
 
     def test_instrumentation_variables_are_removed_from_the_process(self, monkeypatch):
-        # The Claude Code CLI and what it starts (the Bash tool, so the target
-        # repository's own Python) inherit os.environ. What the agent's
-        # opentelemetry-instrument wrapper put there would make that Python try
-        # to instrument itself with packages only the agent has.
+        # What opentelemetry-instrument puts into os.environ makes every Python that inherits
+        # it (the CLI's Bash tool starts the repository's own) try to instrument itself.
         import os
 
         for name in (
@@ -604,34 +487,15 @@ class TestSetupAgentEnv:
         assert "PYTHONPATH" not in os.environ
 
     def test_config_default_haiku_model_is_an_inference_profile(self):
-        # The platform default (no override) must be a GEO-PREFIXED profile, never a
-        # bare foundation-model id — Claude 4.x cannot be invoked on-demand by bare
-        # id. Asserted as "has a geo prefix" rather than "starts with us.": the
-        # geography is a deploy-time choice (bedrockGeoRegion), so pinning one here
-        # would fail the moment the platform default moves, which tells us nothing
-        # about the property that matters.
+        # Claude 4.x cannot be invoked on-demand by bare id.
         geos = ("global.", "us.", "us-gov.", "eu.", "apac.", "jp.", "au.")
         assert _config().haiku_model.startswith(geos)
 
 
 class TestClaudeCliVersionProbe:
-    """The diagnostic probe that killed every MicroVM task at turn 0 (P2-F5).
-
-    ``agent/src/runner.py`` used ``timeout=10`` on ``claude --version``. On the
-    ``lambda-microvm`` backend that failed EVERY task, reproducibly:
-
-        TimeoutExpired: Command '['claude', '--version']' timed out after 10 seconds
-
-    The binary answers in under a second in the same image locally; it is a 225 MiB
-    statically linked ELF whose pages had never been touched before the snapshot was
-    captured, so the first ``exec`` on a restored guest had to fault them all in.
-    The primary fix is warming it in ``/ready`` (``server._warm_snapshot_binaries``);
-    this bound is the backstop, and the point of these tests is that it stays loose.
-    """
-
     def test_the_version_probe_bound_is_loose_enough_for_a_cold_start(self):
-        # A version string for a log line: nothing branches on it, and the failure
-        # mode is a dead task. Any cold-start environment must fit inside it.
+        # Measured on lambda-microvm: the first exec of the 225 MiB static ``claude`` binary
+        # on a restored snapshot faults every page in, and ``--version`` took over 10 s.
         assert _CLAUDE_VERSION_PROBE_TIMEOUT_S >= 60
 
     def test_the_probe_passes_that_timeout_to_the_version_call_only(self, monkeypatch):
@@ -646,9 +510,6 @@ class TestClaudeCliVersionProbe:
 
         assert calls[0][0] == ["which", "claude"]
         assert calls[1][0] == ["claude", "--version"]
-        # The PATH lookup keeps its tight bound — it touches none of the 225 MiB —
-        # while the exec that DOES gets the loose one. Sharing one number would
-        # either loosen a lookup that cannot hang or re-tighten the exec that can.
         assert calls[1][1] == _CLAUDE_VERSION_PROBE_TIMEOUT_S
         assert calls[0][1] < calls[1][1]
 
@@ -661,8 +522,6 @@ class TestClaudeCliVersionProbe:
 
         monkeypatch.setattr(runner.subprocess, "run", fake_run)
         _log_claude_cli_version()
-        # No point exec'ing a binary `which` could not find — and no exception:
-        # this is diagnostics, so it must never be the thing that fails a task.
         assert calls == [["which", "claude"]]
 
     @pytest.mark.parametrize(
@@ -677,9 +536,6 @@ class TestClaudeCliVersionProbe:
     def test_a_failing_version_call_warns_instead_of_killing_the_task(
         self, monkeypatch, capfd, error
     ):
-        # The other half of P2-F5. A looser timeout makes the 10 s failure unlikely,
-        # not impossible — and a probe whose entire output is a log line must not be
-        # able to end a task at turn 0 no matter how it fails.
         def fake_run(argv, **_kwargs):
             if argv[0] == "which":
                 return MagicMock(returncode=0, stdout="/usr/bin/claude\n")
@@ -687,16 +543,14 @@ class TestClaudeCliVersionProbe:
 
         monkeypatch.setattr(runner.subprocess, "run", fake_run)
 
-        _log_claude_cli_version()  # must not raise
+        _log_claude_cli_version()
 
         out = capfd.readouterr().out
         assert "claude CLI version probe failed (non-fatal)" in out
         assert type(error).__name__ in out
-        # Degraded, not silent — and NOT reported as a successful probe.
         assert "claude CLI:" not in out
 
     def test_a_failing_path_lookup_also_only_warns(self, monkeypatch, capfd):
-        # `which` itself can be absent on a minimal image; same rule applies.
         def fake_run(_argv, **_kwargs):
             raise FileNotFoundError(2, "No such file or directory", "which")
 
@@ -723,14 +577,6 @@ class TestClaudeCliVersionProbe:
 
 
 class TestRegisterGatewayServer:
-    """The runner-side wiring that registers the AgentCore Gateway bridge.
-
-    ``gateway_tools`` unit tests cover ``build_gateway_server`` itself; these
-    pin the ``run_agent`` registration path — that a built server lands under
-    ``GATEWAY_SERVER_NAME`` and that a disabled bridge adds nothing (#641 P1
-    review flagged this wiring as untested / N6).
-    """
-
     def test_registers_built_server_under_gateway_name(self):
         sentinel = object()
         with patch("runner.build_gateway_server", return_value=sentinel) as mock_build:
@@ -740,16 +586,12 @@ class TestRegisterGatewayServer:
         assert mcp_servers == {GATEWAY_SERVER_NAME: sentinel}
 
     def test_no_registration_when_bridge_disabled(self):
-        # build_gateway_server returns None when the feature is off (URL unset)
-        # or the SDK is missing — the runner must then offer no gateway tool.
         with patch("runner.build_gateway_server", return_value=None):
             mcp_servers: dict[str, Any] = {}
             _register_gateway_server(mcp_servers)
         assert mcp_servers == {}
 
     def test_preserves_other_servers_already_registered(self):
-        # Registration must be additive — a pre-registered server (e.g. the
-        # clarification tool) is left untouched.
         sentinel = object()
         existing = object()
         with patch("runner.build_gateway_server", return_value=sentinel):
@@ -764,16 +606,6 @@ class TestRegisterGatewayServer:
 def _run_agent(
     monkeypatch, *messages: Any, config: TaskConfig | None = None, **run_agent_kwargs: Any
 ) -> SimpleNamespace:
-    """Run ``run_agent`` over ``messages`` in place of what the Claude Code CLI sends.
-
-    The SDK client is replaced, so no CLI is started and nothing reaches Bedrock;
-    the environment setup, the version probe, the policy engine and the gateway
-    bridge are stubbed too. An exception among ``messages`` is raised in its place:
-    a session that breaks off. ``run_agent_kwargs`` (``cwd``, ``trajectory``) are
-    passed on. Returns the ``AgentResult``, the progress writer the run wrote its
-    events to (a mock), the options the client was built with and the hooks that
-    stand in for those of the policy engine.
-    """
     seen: dict[str, Any] = {}
     hooks: dict[str, Any] = {}
 
@@ -810,7 +642,6 @@ def _run_agent(
 
 
 def _result(**fields: Any) -> sdk.ResultMessage:
-    """The message that ends a run; a clean one unless ``fields`` say otherwise."""
     base: dict[str, Any] = {
         "subtype": "success",
         "duration_ms": 1200,
@@ -824,11 +655,6 @@ def _result(**fields: Any) -> sdk.ResultMessage:
 
 
 class TestClarificationToolIsOfferedPerWorkflow:
-    """``request_clarification`` holds a task for the requester's answer. Only the
-    lane that opens a pull request reads the question the agent asked through it:
-    a workflow whose pipeline path ignores the question must not be given the tool,
-    or the tool tells the model that its question will be posted and nothing is."""
-
     @staticmethod
     def _offered(monkeypatch, workflow_id: str) -> bool:
         config = _config(resolved_workflow={"id": workflow_id, "version": "1.0.0"})
@@ -845,32 +671,21 @@ class TestClarificationToolIsOfferedPerWorkflow:
     def test_excluded_workflow_is_one_that_ships_and_is_not_offered_the_tool(
         self, monkeypatch, workflow_id
     ):
-        # An id that no workflow file has excludes nothing.
         assert load_workflow(workflow_id).id == workflow_id
         assert self._offered(monkeypatch, workflow_id) is False
 
     def test_research_workflow_is_not_offered_the_tool(self, monkeypatch):
-        # Repo-less: its result is the agent's last message, uploaded as the
-        # artifact. A question asked through the tool would be dropped and the
-        # task would end COMPLETED.
         assert self._offered(monkeypatch, "knowledge/web-research-v1") is False
 
 
 class TestOptionsOfTheSdkClient:
-    """``run_agent`` hands the SDK client one options object. The tool lock, the
-    policy hooks and the limits of the task all travel in it, and the session runs
-    without whatever that call leaves out. The helpers that compute the pieces have
-    tests of their own; these check that the pieces arrive."""
-
     def test_session_gets_the_tool_lock_the_hooks_and_the_limits_of_the_task(self, monkeypatch):
         config = _config(max_turns=7, max_budget_usd=1.5)
         run = _run_agent(monkeypatch, _result(), config=config, cwd="/w")
 
         options = run.options
-        # The one hard lock on the tools that leave work running after the
-        # session: under bypassPermissions ``allowed_tools`` restricts nothing.
+        # Under bypassPermissions ``allowed_tools`` restricts nothing.
         assert options.disallowed_tools == _DISALLOWED_TOOLS
-        # Cedar policy, output screening, cancellation and nudges all run as hooks.
         assert options.hooks is run.hooks
         assert options.permission_mode == "bypassPermissions"
         assert options.setting_sources == ["project"]
@@ -888,11 +703,6 @@ class TestOptionsOfTheSdkClient:
 
 
 class TestCleanResult:
-    """The message that ends a run says how the run went. The runner copies it onto
-    the ``AgentResult``: the pipeline takes the task's verdict, its cost and its
-    token counts from there, and the final text is what a task without a repository
-    delivers."""
-
     def test_status_final_text_cost_and_usage_are_recorded(self, monkeypatch):
         run = _run_agent(
             monkeypatch,
@@ -910,17 +720,11 @@ class TestCleanResult:
         assert run.result.usage == TokenUsage(input_tokens=1200, output_tokens=340)
 
 
-# Credential-shaped values, assembled here so that this file holds no such literal:
-# an AWS access key id, a GitHub token in a git URL, the value of a token header.
 _AWS_KEY_ID = "AKIA" + "IOSFODNN7EXAMPLE"
 _GIT_URL_TOKEN = "gh" + "s_" + "a1B2c3D4" * 5
 _HEADER_TOKEN = "made-up-" + "0123456789"
 _SECRETS = (_AWS_KEY_ID, _GIT_URL_TOKEN, _HEADER_TOKEN)
-# 40 characters in the shape of a secret access key, from short pieces. The scanner
-# knows such a key by the name that stands in front of it.
 _AWS_SECRET_KEY = "wJalrXUt" + "nFEMI/K7" + "MDENG/bP" + "xRfiCYEX" + "AMPLEKEY"
-# The key behind its name, with something between the two that a repr escapes:
-# a quote (of a text that holds both kinds), a tab, a newline.
 _KEY_BEHIND_ITS_NAME = [
     pytest.param(f"aws_secret_access_key='{_AWS_SECRET_KEY}' # \"prod\"", id="quoted"),
     pytest.param(f"aws_secret_access_key\t{_AWS_SECRET_KEY}", id="after a tab"),
@@ -929,19 +733,13 @@ _KEY_BEHIND_ITS_NAME = [
 
 
 def _assert_screened(recorded: str) -> None:
-    """``recorded`` holds none of ``_SECRETS``: both steps of the screening ran."""
     for secret in _SECRETS:
         assert secret not in recorded
-    # The marker of the output scanner, and the form the log redaction leaves.
     assert "[REDACTED-AWS_KEY]" in recorded
     assert "Authorization: token ***" in recorded
 
 
 class TestErrorResult:
-    """A result that the CLI marks as an error ends the run with status "error" and
-    an error text. That text becomes the task's error message: the platform
-    classifies the failure by it and quotes it in the reply to the requester."""
-
     def test_error_subtype_carries_the_reason_the_cli_gave(self, monkeypatch):
         # The error subtypes send no ``result``: their reason is in ``errors``.
         run = _run_agent(
@@ -970,8 +768,6 @@ class TestErrorResult:
             ),
         )
 
-        # cdk/src/handlers/shared/error-classifier.ts keys on this wrapper, and
-        # pipeline._resolve_overall_task_status on the subtype in it.
         assert run.result.error == "Agent session error (subtype='error_max_turns')"
 
     def test_several_reasons_are_all_kept(self, monkeypatch):
@@ -998,10 +794,6 @@ class TestErrorResult:
         assert run.result.result_text == ""
 
     def test_reason_is_screened_before_it_is_recorded(self, monkeypatch, capfd):
-        # The reason is the CLI's own account of what failed and may quote a
-        # command or a URL. It is stored on the task record and posted to the
-        # requester, so it is screened like tool output and redacted like a log
-        # line.
         run = _run_agent(
             monkeypatch,
             _result(
@@ -1022,11 +814,8 @@ class TestErrorResult:
 
 
 def _assistant(*blocks: Any, answer: str | None) -> sdk.AssistantMessage:
-    """One message of the model answer ``answer``.
-
-    The CLI sends an answer as one message per content block (thinking, text,
-    each tool call), and every one of them carries the id of the answer.
-    """
+    """The CLI sends an answer as one message per content block (thinking, text,
+    each tool call), and every one of them carries the id of the answer."""
     return sdk.AssistantMessage(content=list(blocks), model="claude-opus-5-5", message_id=answer)
 
 
@@ -1039,21 +828,17 @@ def _bash(tool_use_id: str, command: str) -> sdk.ToolUseBlock:
 
 
 def _tool_result(tool_use_id: str, content: Any, is_error: bool = False) -> sdk.UserMessage:
-    """What the CLI sends when a tool call has ended: a user message with its result."""
     block = sdk.ToolResultBlock(tool_use_id=tool_use_id, content=content, is_error=is_error)
     return sdk.UserMessage(content=[block])
 
 
 def _turns_of(write: MagicMock) -> list[int]:
-    """The ``turn`` of every event written through one progress-writer method."""
     return [call.kwargs["turn"] for call in write.call_args_list]
 
 
 class TestTurnCount:
-    """A turn is one answer of the model, which is what ``max_turns`` limits. The
-    runner numbers its events by it. The CLI's ``num_turns`` is not this number:
-    it grows with every tool result, so an answer that calls two tools adds two."""
-
+    # The CLI's ``num_turns`` grows with every tool result, so an answer that calls
+    # two tools adds two.
     def test_messages_of_one_answer_are_one_turn(self, monkeypatch):
         trajectory = MagicMock()
         run = _run_agent(
@@ -1068,7 +853,6 @@ class TestTurnCount:
 
         assert run.result.turns == 2
         assert run.result.num_turns == 2
-        # One event per message, numbered by the answer it belongs to.
         assert _turns_of(run.progress.write_agent_turn) == [1, 1, 2]
         assert _turns_of(run.progress.write_agent_tool_call) == [1]
         assert _turns_of(run.progress.write_agent_tool_result) == [1]
@@ -1106,8 +890,6 @@ class TestTurnCount:
         assert run.result.num_turns == 3
 
     def test_run_without_a_result_reports_the_turns_it_saw(self, monkeypatch):
-        # No result message (the stream broke off): the task record then takes
-        # its turn counts from this number, and clamps it to max_turns.
         run = _run_agent(
             monkeypatch,
             _assistant(_thinking("Look at the tests first."), answer="msg_1"),
@@ -1132,9 +914,6 @@ class TestTurnCount:
 
 
 class TestClarificationCallIsRecorded:
-    """The agent asks its question by calling ``request_clarification``. The runner
-    records the call, and the pipeline holds the task for whatever is recorded."""
-
     @staticmethod
     def _recorded(monkeypatch, tool_input: dict) -> str:
         call = sdk.ToolUseBlock(id="call_1", name=CLARIFICATION_TOOL_NAME, input=tool_input)
@@ -1152,7 +931,6 @@ class TestClarificationCallIsRecorded:
         ids=["empty", "blank", "missing"],
     )
     def test_call_without_a_question_is_recorded_all_the_same(self, monkeypatch, tool_input):
-        # Not as the empty string, which is what a run without the call leaves.
         recorded = self._recorded(monkeypatch, tool_input)
 
         assert recorded
@@ -1160,7 +938,6 @@ class TestClarificationCallIsRecorded:
 
 
 def _trace(trajectory: _TrajectoryWriter) -> list[dict]:
-    """The events of the trace artifact, as ``bgagent trace download`` prints them."""
     artifact = trajectory.dump_gzipped_jsonl()
     assert artifact is not None
     _header, *events = [json.loads(line) for line in gzip.decompress(artifact).splitlines()]
@@ -1168,11 +945,6 @@ def _trace(trajectory: _TrajectoryWriter) -> list[dict]:
 
 
 class TestToolResultsAreRecorded:
-    """The result of a tool call reaches the runner in a user message, after the
-    message of the model that asked for it. It is written to the log, to the
-    task's events and to the trajectory (the CloudWatch stream and the ``--trace``
-    artifact)."""
-
     def test_trace_holds_what_the_tool_returned(self, monkeypatch):
         trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
         _run_agent(
@@ -1202,8 +974,6 @@ class TestToolResultsAreRecorded:
         }
 
     def test_failed_call_is_recorded_as_an_error(self, monkeypatch):
-        # A call that a hook denied or a command that failed: the CLI marks the
-        # result, and its content can be a list of blocks.
         trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
         run = _run_agent(
             monkeypatch,
@@ -1227,8 +997,6 @@ class TestToolResultsAreRecorded:
     def test_credentials_in_a_list_of_blocks_are_replaced_as_in_a_string(
         self, monkeypatch, capfd, text
     ):
-        # A result that is a list of content blocks is recorded as its repr, and a
-        # repr escapes quotes, tabs and newlines: the strings are screened first.
         recorded = {}
         for shape, content in (("string", text), ("list", [{"type": "text", "text": text}])):
             trajectory = _TrajectoryWriter("t-runner-1", accumulate=True)
@@ -1261,9 +1029,8 @@ class TestToolResultsAreRecorded:
         assert _trace(trajectory)[1]["content"] == "x" * 2000 + "... [truncated, 5000 chars total]"
 
     def test_credentials_in_a_result_are_replaced_before_it_is_recorded(self, monkeypatch, capfd):
-        # The PostToolUse hook screens what a tool returns, but not every result
-        # passes it (a failed command does not) and the CLI does not take every
-        # rewrite. What the runner records is screened here, whatever came before.
+        # Not every result passes the PostToolUse hook (that of a failed command does
+        # not), and the CLI does not take every rewrite the hook returns.
         output = (
             f"remote: https://x-access-token:{_GIT_URL_TOKEN}@github.com/o/r\n"
             f"AWS_ACCESS_KEY_ID={_AWS_KEY_ID}\n"
@@ -1287,12 +1054,6 @@ class TestToolResultsAreRecorded:
 
 
 class TestEventsOfTheRunAreScreened:
-    """What the model thinks, says and hands to a tool is written to the task's
-    events, and so is the text of an exception that ends the session. The events
-    are read outside the session (``bgagent watch``, the web console, a Slack
-    notice of an error), so the runner screens each text before the progress
-    writer cuts it to a preview, as it screens the result of a tool call."""
-
     _TEXT = (
         f"git push https://x-access-token:{_GIT_URL_TOKEN}@github.com/o/r "
         f"with AWS_ACCESS_KEY_ID={_AWS_KEY_ID} "
@@ -1301,7 +1062,6 @@ class TestEventsOfTheRunAreScreened:
 
     @staticmethod
     def _recorded_input(monkeypatch, call: sdk.ToolUseBlock) -> str:
-        """The text that the event of ``call`` holds of its input."""
         run = _run_agent(monkeypatch, _assistant(call, answer="msg_1"), _result())
         return run.progress.write_agent_tool_call.call_args.kwargs["tool_input"]
 
@@ -1335,7 +1095,6 @@ class TestEventsOfTheRunAreScreened:
         assert _AWS_SECRET_KEY not in recorded
 
     def test_secret_under_a_key_of_a_tool_input_is_replaced(self, monkeypatch):
-        # Name and value are two strings of the input: only the repr holds the pair.
         call = sdk.ToolUseBlock(
             id="call_1",
             name="mcp__vault__put",
@@ -1345,8 +1104,6 @@ class TestEventsOfTheRunAreScreened:
         assert _AWS_SECRET_KEY not in self._recorded_input(monkeypatch, call)
 
     def test_arguments_after_a_replaced_value_stay_readable(self, monkeypatch):
-        # The web console reads the arguments back from the repr. What is replaced must leave the
-        # quote and the comma that close one. The quote that closes the header goes with the token.
         command = f'curl https://api.example.com -H "Authorization: token {_HEADER_TOKEN}"'
         call = sdk.ToolUseBlock(
             id="call_1", name="Bash", input={"command": command, "description": "List the items"}
@@ -1358,7 +1115,6 @@ class TestEventsOfTheRunAreScreened:
         )
 
     def test_input_without_a_credential_is_recorded_as_its_repr(self, monkeypatch):
-        # The form the web console reads the fields of a call from.
         run = _run_agent(
             monkeypatch, _assistant(_bash("call_1", "npm test"), answer="msg_1"), _result()
         )
@@ -1375,6 +1131,5 @@ class TestEventsOfTheRunAreScreened:
         assert recorded["error_type"] == "RuntimeError"
         assert recorded["message"].startswith("git push https://")
         _assert_screened(recorded["message"])
-        # The same text is the task's error message, which the failure notice quotes.
         assert run.result.error.startswith("Claude session failed: git push https://")
         _assert_screened(run.result.error)

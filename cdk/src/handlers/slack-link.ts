@@ -57,7 +57,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const code = body.code.trim().toUpperCase();
 
-    // Look up the pending link record.
     const pending = await ddb.send(new GetCommand({
       TableName: USER_MAPPING_TABLE,
       Key: { slack_identity: `pending#${code}` },
@@ -73,7 +72,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const slackUserId = pending.Item.slack_user_id as string;
     const now = new Date().toISOString();
 
-    // Write the confirmed mapping.
     await ddb.send(new PutCommand({
       TableName: USER_MAPPING_TABLE,
       Item: {
@@ -86,7 +84,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       },
     }));
 
-    // Clean up the pending record.
     await ddb.send(new DeleteCommand({
       TableName: USER_MAPPING_TABLE,
       Key: { slack_identity: `pending#${code}` },

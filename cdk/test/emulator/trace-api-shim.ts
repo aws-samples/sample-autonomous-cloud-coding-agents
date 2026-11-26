@@ -17,27 +17,10 @@
  *  SOFTWARE.
  */
 
-/**
- * Stand-in for API Gateway in front of the real `get-trace-url` Lambda handler.
- *
- * Started by `agent/tests_emulator/test_trace_round_trip.py` (through `tsx`) so
- * that pytest and the real `bgagent` CLI can reach the handler over HTTP. It
- * only translates an HTTP request into the proxy event API Gateway would build
- * and writes the handler's result back; every decision is the handler's own.
- *
- * API Gateway's Cognito authorizer would put the verified caller in
- * `requestContext.authorizer.claims.sub`. Here the caller is whoever the
- * `X-API-Key` header names — the header the CLI sends for `BGAGENT_API_KEY`.
- *
- * Prints `{"port": <n>}` on stdout once it is listening.
- */
-
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { handler } from '../../src/handlers/get-trace-url';
 
-// The handler makes real SDK calls and trusts whatever caller the header names,
-// so this serves it only when those calls are bound for an emulator on loopback.
 if (!/^https:\/\/127\.0\.0\.1:\d+$/.test(process.env.AWS_ENDPOINT_URL ?? '')) {
   throw new Error('trace-api-shim serves only against an AWS Emulator (AWS_ENDPOINT_URL=https://127.0.0.1:<port>).');
 }
@@ -57,6 +40,7 @@ const server = createServer((req, res) => {
     headers: req.headers,
     pathParameters: { task_id: decodeURIComponent(match[1]) },
     requestContext: {
+      // API Gateway's Cognito authorizer puts the verified caller in `claims.sub`.
       authorizer: typeof caller === 'string' ? { claims: { sub: caller } } : undefined,
     },
   };

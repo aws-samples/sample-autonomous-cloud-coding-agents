@@ -4,35 +4,35 @@ title: Quick start
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Go from zero to your first agent-created pull request in about 30 minutes. This guide covers only the minimum path - see the [Developer guide](./DEVELOPER_GUIDE.md) and [User guide](./USER_GUIDE.md) for the full details.
+Get your first agent-created pull request in about 30 minutes. This guide covers only the minimum path. See the [Developer guide](./DEVELOPER_GUIDE.md) and [User guide](./USER_GUIDE.md) for the full details.
 
-Steps 4–6 offer **ABCA CLI** and **AWS CLI** tabs on each step (ABCA CLI is the default). Steps 4–5 share the same tab choice; Step 6 uses a separate tab group because submit adds a REST API call via `curl` on the AWS CLI path.
+Steps 4 to 6 each offer an **ABCA CLI** tab and an **AWS CLI** tab (ABCA CLI is the default). Steps 4 and 5 share the same tab choice. Step 6 uses a separate tab group, because submit adds a REST API call with `curl` on the AWS CLI path.
 
 ## Prerequisites
 
 Install these before you begin:
 
-- **AWS account** with credentials configured (`aws configure`). If you use named profiles, set `AWS_PROFILE` before running any commands in this guide.
-- **Amazon Bedrock** — The agent invokes Claude through Bedrock. IAM `grantInvoke` in the CDK stack is required but **not sufficient**: your account must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for the model you use (including Anthropic first-time use where applicable, Marketplace subscription flow on first serverless use, and a valid payment method for Marketplace-backed models). See **Amazon Bedrock before your first task** after Step 3.
-- **Docker** - for building the agent container image. On an **x86_64** host you also need QEMU/binfmt to build the arm64 (Graviton) image — see the caution in Step 3.
-- **Node.js** 22, version 22.23.4 or later (Node 24, version 24.15 or later, is the supported maximum — see CI matrix)
-- **mise** - task runner ([install guide](https://mise.jdx.dev/getting-started.html))
-- **AWS CDK CLI** - `npm install -g aws-cdk` (after mise is active)
-- **GitHub account** — You need a [GitHub profile](https://github.com/join) to fork the sample repository and create a **fine-grained personal access token (PAT)** the agent uses to push branches and open pull requests. A free github.com account is sufficient.
+- **AWS account** with credentials configured (`aws configure`). If you use named profiles, set `AWS_PROFILE` before you run any command in this guide.
+- **Amazon Bedrock.** The agent invokes Claude through Bedrock. IAM `grantInvoke` in the CDK stack is required but **not sufficient**. Your account must also satisfy [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for the model you use. That includes Anthropic first-time use where applicable, the Marketplace subscription flow on first serverless use, and a valid payment method for Marketplace-backed models. See **Amazon Bedrock before your first task** after Step 3.
+- **Docker.** It builds the agent container image. On an **x86_64** host you also need QEMU/binfmt to build the arm64 (Graviton) image. See the caution in Step 3.
+- **Node.js** 22, version 22.23.4 or later. Node 24, version 24.15 or later, is the supported maximum (see the CI matrix).
+- **mise.** The task runner ([install guide](https://mise.jdx.dev/getting-started.html)).
+- **AWS CDK CLI.** Install it with `npm install -g aws-cdk` after mise is active.
+- **GitHub account.** You need a [GitHub profile](https://github.com/join) to fork the sample repository and to create a **fine-grained personal access token (PAT)** that the agent uses to push branches and open pull requests. A free github.com account is sufficient.
 
 :::note[mise provisions Node, Yarn, and the CDK CLI for you]
 
-If a prerequisite check reports Node, Yarn, **and** CDK as "not found" all at once, your environment isn't broken — mise installs those tool versions in Step 1, so they only appear on `PATH` after `mise install` + shell activation. A few mise gotchas worth knowing up front:
+If a prerequisite check reports Node, Yarn, **and** CDK as "not found" all at once, your environment isn't broken. mise installs those tool versions in Step 1, so they appear on `PATH` only after `mise install` and shell activation. Know these mise pitfalls before you start:
 
-- **Non-interactive / spawned shells** (CI, scripts, some agent runners) don't pick up mise's shell hook, so `mise`/`node`/`yarn` may not be on `PATH`. Use the full path `~/.local/bin/mise` or prefix commands with `mise exec --`.
-- **Headless Linux** (EC2, containers) often lacks a working `gpg-agent`, so `mise install` can fail Node on GPG signature verification. If so, run `mise settings set node.gpg_verify false` (downloads are still checksum-verified) and retry.
-- **Two trust prompts**: you may need to `mise trust` both the project `mise.toml` *and* your user-global `~/.config/mise/config.toml` if you change a global setting.
+- **Non-interactive or spawned shells** (CI, scripts, some agent runners) don't pick up mise's shell hook, so `mise`, `node`, and `yarn` may not be on `PATH`. Use the full path `~/.local/bin/mise` or prefix commands with `mise exec --`.
+- **Headless Linux** (EC2, containers) often lacks a working `gpg-agent`, so `mise install` can fail on the GPG signature verification of Node. If it does, run `mise settings set node.gpg_verify false` (downloads are still checksum-verified) and retry.
+- **Two trust prompts.** If you change a global setting, you may need to `mise trust` both the project `mise.toml` *and* your user-global `~/.config/mise/config.toml`.
 
 :::
 
 ## Step 1 - Clone and install
 
-This project uses [mise](https://mise.jdx.dev/) to manage tool versions (Node.js, Python, security scanners) and run tasks across the monorepo. Yarn Classic handles JavaScript workspaces (`cdk/`, `cli/`, `docs/`).
+This project uses [mise](https://mise.jdx.dev/) to manage tool versions (Node.js, Python, security scanners) and to run tasks across the monorepo. Yarn Classic handles the JavaScript workspaces (`cdk/`, `cli/`, `docs/`).
 
 ```bash
 git clone https://github.com/aws-samples/sample-autonomous-cloud-coding-agents.git
@@ -53,9 +53,9 @@ mise run build
 
 `mise run install` installs all JavaScript and Python dependencies across the monorepo. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
 
-:::note[Expect noisy build output — trust the exit code]
+:::note[Expect noisy build output. Trust the exit code.]
 
-`mise run build` prints many `ERROR`/`WARN` lines, cdk-nag warnings, and sometimes `A worker process has failed to exit gracefully`. These are **benign** — test fixtures deliberately exercise failure paths. The only reliable success signal is the **exit code: `0` means the build passed.** Don't be alarmed by the log volume.
+`mise run build` prints many `ERROR` and `WARN` lines, cdk-nag warnings, and sometimes `A worker process has failed to exit gracefully`. These are **benign**, because test fixtures deliberately exercise failure paths. The only reliable success signal is the **exit code: `0` means the build passed.**
 
 :::
 
@@ -71,19 +71,19 @@ Other guides write the short form `bgagent <command>`. If you prefer it, define 
 
 :::
 
-> **Note:** `mise run build` includes CDK synthesis, which queries AWS for availability zones. Your active AWS credentials must have at least `ec2:DescribeAvailabilityZones` permission, or the build will fail. If you use named profiles, make sure `AWS_PROFILE` is set before running the build — the CDK CLI does not forward `--profile` to the app process, so an unexported profile can leave synth reading a different account.
+> **Note:** `mise run build` includes CDK synthesis, which queries AWS for availability zones. Your active AWS credentials must have at least `ec2:DescribeAvailabilityZones` permission, or the build fails. If you use named profiles, set `AWS_PROFILE` before you run the build. The CDK CLI does not forward `--profile` to the app process, so with an unexported profile synth can read a different account.
 >
-> A local deploy uses that same call to pin the VPC to AgentCore-supported zones, and synth fails with an `[AgentCore AZs]` error if it cannot confirm them — see [Known deployment issues](./DEPLOYMENT_GUIDE.md#agentcore-unsupported-availability-zones).
+> A local deploy uses that same call to pin the VPC to AgentCore-supported zones, and synth fails with an `[AgentCore AZs]` error if it cannot confirm them. See [Known deployment issues](./DEPLOYMENT_GUIDE.md#agentcore-unsupported-availability-zones).
 
 ## Step 2 - Prepare a repository
 
-The agent works by cloning a GitHub repository, creating a branch, making code changes, running the build and tests, and opening a pull request. This means it needs **write access** to a real repository you control.
+The agent clones a GitHub repository, creates a branch, makes code changes, runs the build and tests, and opens a pull request. It therefore needs **write access** to a real repository that you control.
 
-The Quick Start uses [`awslabs/agent-plugins`](https://github.com/awslabs/agent-plugins) — a lightweight sample repo designed for testing the platform. **You must fork it to your own GitHub account** before continuing; do not point the platform at the upstream `awslabs/agent-plugins` repo unless you have direct write access there (most users do not).
+The Quick Start uses [`awslabs/agent-plugins`](https://github.com/awslabs/agent-plugins), a lightweight sample repo designed for testing the platform. **You must fork it to your own GitHub account** before you continue. Do not point the platform at the upstream `awslabs/agent-plugins` repo unless you have direct write access there (most users do not).
 
-:::danger[Fork the sample repo — do not skip]
+:::danger[Fork the sample repo. Do not skip this step.]
 
-The agent pushes branches and opens pull requests on whichever `owner/repo` you onboard. If you skip forking and keep the default `awslabs/agent-plugins` name, or your PAT is scoped to a different repository, tasks fail with permission errors that look like platform bugs but are really a repo/token mismatch.
+The agent pushes branches and opens pull requests on the `owner/repo` that you onboard. If you skip the fork and keep the default `awslabs/agent-plugins` name, or if your PAT is scoped to a different repository, tasks fail with permission errors. The errors look like platform bugs, but the cause is a mismatch between the repo and the token.
 
 :::
 
@@ -92,11 +92,11 @@ The agent pushes branches and opens pull requests on whichever `owner/repo` you 
 1. Sign in to GitHub and open [github.com/awslabs/agent-plugins](https://github.com/awslabs/agent-plugins).
 2. Click **Fork** (top-right), choose **your personal account** (or an organization you admin), and confirm.
 3. Wait for the fork to finish. Your copy lives at `https://github.com/<your-username>/agent-plugins`.
-4. Note the **`owner/repo` slug** — for example `jane-doe/agent-plugins`. You will use this exact string in the PAT repository scope, when you onboard the repository in Step 6, and in every `submit --repo …` command.
+4. Note the **`owner/repo` slug**, for example `jane-doe/agent-plugins`. You use this exact string in the PAT repository scope, when you onboard the repository in Step 6, and in every `submit --repo …` command.
 
 ### Create a GitHub personal access token
 
-The agent authenticates to GitHub using a **fine-grained personal access token (PAT)**. Go to GitHub → **Settings** → **Developer settings** → **Fine-grained tokens** → **Generate new token**.
+The agent authenticates to GitHub with a **fine-grained personal access token (PAT)**. In GitHub, go to **Settings**, then **Developer settings**, then **Fine-grained tokens**, and click **Generate new token**.
 
 :::caution[Scope the token to your fork]
 
@@ -113,11 +113,11 @@ Grant these permissions on that repository:
 | **Issues** | Read | Read issue context for tasks that reference an issue |
 | **Metadata** | Read (default) | Required by GitHub for all fine-grained tokens |
 
-Keep the token value — you will store it in AWS Secrets Manager in Step 4.
+Keep the token value. You store it in AWS Secrets Manager in Step 4.
 
 :::note[Collaborator or cross-org repos?]
 
-Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](../../agent/README.md#github-pat--minimal-permissions) for details.
+Fine-grained tokens work only for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with the `repo` and `read:org` scopes instead. See [agent/README.md](../../agent/README.md#github-pat--minimal-permissions) for details.
 
 :::
 
@@ -136,14 +136,14 @@ node lib/bin/bgagent.js setup --region "$REGION"
 The wizard:
 
 1. Shows the AWS account your credentials resolve to and asks you to confirm it.
-2. Asks for a deployment name. Accept the default, `backgroundagent-dev`; the rest of this guide uses it.
+2. Asks for a deployment name. Accept the default, `backgroundagent-dev`. The rest of this guide uses it.
 3. Asks which optional features to include (Slack, Linear, Jira, preview screenshots, Agent Registry, Tool Gateway). For a first deployment, accept the defaults: the **minimal profile**, which has everything this guide needs. You can add features later by running setup again.
 4. Asks where agents run. Accept **AgentCore Runtime**.
 5. Shows a review screen and a one-line `cdk diff` summary, then asks you to confirm.
 6. Installs ABCA's least-privilege CDK bootstrap if the account and Region have none (one time), deploys (around 10 minutes, mostly building the Docker image and provisioning the AgentCore Runtime), and points the CLI at the new stack.
-7. Prints the next steps, which are Steps 4–6 below in the same order: store a GitHub token, create your user, sign in, and onboard a repository.
+7. Prints the next steps, which are Steps 4 to 6 below in the same order: store a GitHub token, create your user, sign in, and onboard a repository.
 
-Setup checks that the Region supports each feature before deploying, and asks you to type the stack name before any later run deletes data (for example, removing a feature that has tables). It saves your choices to `abca.deployment.json` at the repo root; commit that file so later deploys keep the same features. See [Deployment profiles](./DEPLOYMENT_GUIDE.md#deployment-profiles) for every option, including scripted runs (`--features none --yes`).
+Setup checks that the Region supports each feature before it deploys, and asks you to type the stack name before any later run deletes data (for example, when it removes a feature that has tables). Setup saves your choices to `abca.deployment.json` at the repo root. Commit that file so that later deploys keep the same features. See [Deployment profiles](./DEPLOYMENT_GUIDE.md#deployment-profiles) for every option, including scripted runs (`--features none --yes`).
 
 :::note[Advanced: deploy with mise directly (CI, custom scripts)]
 
@@ -154,29 +154,29 @@ mise //cdk:bootstrap
 mise //cdk:deploy -- --require-approval never
 ```
 
-With no `abca.deployment.json`, this deploys the legacy topology, with every optional feature (about 463 resources against the minimal profile's 317). It has no Region check and no data-loss confirmation, and `mise //cdk:bootstrap` replaces a CDK bootstrap that is already in the account and Region: see [Bootstrap with least-privilege](./DEPLOYMENT_GUIDE.md#bootstrap-with-least-privilege). Once setup has written `abca.deployment.json`, `mise //cdk:deploy` uses it. `--require-approval never` lets the deploy run unattended; drop it to review IAM and security-group changes.
+With no `abca.deployment.json`, these commands deploy the legacy topology, with every optional feature (about 463 resources against the minimal profile's 317). This path has no Region check and no data-loss confirmation, and `mise //cdk:bootstrap` replaces a CDK bootstrap that is already in the account and Region. See [Bootstrap with least-privilege](./DEPLOYMENT_GUIDE.md#bootstrap-with-least-privilege). Once setup has written `abca.deployment.json`, `mise //cdk:deploy` uses it. `--require-approval never` lets the deploy run unattended. Drop it to review IAM and security-group changes.
 
 :::
 
 :::caution[Building on an x86 host? Register arm64 emulation first.]
 
-The agent runs on AgentCore (**Graviton / arm64**), so the container image is built for `linux/arm64`. On an **x86_64** build host (most cloud dev boxes, many laptops), the image build fails partway with `exec /bin/sh: exec format error` unless QEMU emulation is registered:
+The agent runs on AgentCore (**Graviton, arm64**), so the container image is built for `linux/arm64`. On an **x86_64** build host (most cloud dev boxes, many laptops), the image build fails partway with `exec /bin/sh: exec format error` unless QEMU emulation is registered:
 
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install arm64
 ```
 
-The registration does **not** survive a reboot. It is kernel state (`binfmt_misc`), not a setting saved on disk, so it is gone after the host restarts, and stopping and starting a cloud dev box is a restart. If a deploy that worked before fails with `exec format error` again, run the command again; repeating it is harmless.
+The registration does **not** survive a reboot. It is kernel state (`binfmt_misc`), not a setting saved on disk, so it is gone after the host restarts, and stopping and starting a cloud dev box is a restart. If a deploy that worked before fails with `exec format error` again, run the command again. Repeating it is harmless.
 
-If `docker run --privileged` is blocked on your host (common on security-managed machines), or you would rather not register again after every reboot, build from a **native arm64 host** instead (Graviton EC2 or Apple Silicon) — no emulation needed. Apple Silicon and other arm64 hosts can skip this step entirely. Note that the emulated build is noticeably slower than a native one.
+If `docker run --privileged` is blocked on your host (common on security-managed machines), or you would rather not register again after every reboot, build from a **native arm64 host** instead (Graviton EC2 or Apple Silicon). A native host needs no emulation. Apple Silicon and other arm64 hosts can skip this step entirely. The emulated build is noticeably slower than a native one.
 
 :::
 
-:::note[X-Ray → CloudWatch Logs tracing is optional — skip it for your first deploy.]
+:::note[X-Ray to CloudWatch Logs tracing is optional. Skip it for your first deploy.]
 
 The stack ships with X-Ray span export to CloudWatch Logs **disabled** (`tracingEnabled` in `cdk/src/stacks/agent.ts`), so the platform deploys and runs fully without any X-Ray account setup. You do **not** need to run `aws xray update-trace-segment-destination` to get a working deployment.
 
-If you later enable tracing, it needs a one-time per-account setup — and on a security-managed AWS Organization account an SCP may block the X-Ray service from writing to `aws/spans` entirely (the `update-trace-segment-destination` call returns `AccessDeniedException` no matter what the deploying identity does; that's an Org-level policy, not a setup mistake). Treat tracing as an opt-in extra, not a prerequisite. See the [Developer Guide](./DEVELOPER_GUIDE.md) for the enable steps.
+If you later enable tracing, it needs a one-time per-account setup. On a security-managed AWS Organization account, an SCP may block the X-Ray service from writing to `aws/spans` entirely. The `update-trace-segment-destination` call then returns `AccessDeniedException` no matter what the deploying identity does. The cause is an Org-level policy, not a setup mistake. Treat tracing as an opt-in extra, not a prerequisite. See the [Developer Guide](./DEVELOPER_GUIDE.md) for the enable steps.
 
 :::
 
@@ -186,16 +186,16 @@ The stack grants the AgentCore runtime `bedrock:InvokeModel*` on the foundation 
 
 You must also be able to **invoke the model in Bedrock** from your account (and Region):
 
-1. **Access and subscription** — Bedrock serverless foundation models are used with the right IAM and, for third-party models, AWS Marketplace permissions; first-time subscription can take up to several minutes. Missing prerequisites often surface as `AccessDeniedException`. See [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) in the Bedrock User Guide.
-2. **Anthropic first-time use** — For Anthropic models, submit use-case details once per account (console model catalog or `PutUseCaseForModelAccess`) before invocation, as described in the same guide (unless you use the documented `bedrock-mantle` exception).
-3. **Inference profile as `modelId`** — A repository that pins a model gives the **inference profile** ID: the geography the stack grants (its `BedrockGeoRegion` output) in front of a model from its `BedrockModelIds` output, for example `global.anthropic.claude-opus-5-5` with the shipped `global` geography. A Blueprint whose `agent.modelId` is anything else (a bare model ID, another geography, an ARN) fails `cdk synth`, and `bgagent repo onboard --model` refuses it. See [Use an inference profile in model invocation](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
-4. **Cross-Region routing** — System-defined inference profiles can route across Regions within a geography. IAM (and any SCPs) must allow the profile and underlying model in **all relevant Regions**; see [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
+1. **Access and subscription.** Bedrock serverless foundation models need the right IAM permissions and, for third-party models, AWS Marketplace permissions. A first-time subscription can take up to several minutes. Missing prerequisites often show up as `AccessDeniedException`. See [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) in the Bedrock User Guide.
+2. **Anthropic first-time use.** For Anthropic models, submit use-case details once per account (console model catalog or `PutUseCaseForModelAccess`) before invocation, as described in the same guide (unless you use the documented `bedrock-mantle` exception).
+3. **Inference profile as `modelId`.** A repository that pins a model gives the **inference profile** ID: the geography the stack grants (its `BedrockGeoRegion` output) in front of a model from its `BedrockModelIds` output, for example `global.anthropic.claude-opus-5-5` with the shipped `global` geography. A Blueprint whose `agent.modelId` is anything else (a bare model ID, another geography, an ARN) fails `cdk synth`, and `bgagent repo onboard --model` refuses it. See [Use an inference profile in model invocation](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
+4. **Cross-Region routing.** System-defined inference profiles can route across Regions within a geography. IAM (and any SCPs) must allow the profile and underlying model in **all relevant Regions**. See [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
 
-If a task fails immediately with text like the model is **not available on your Bedrock deployment**, open the Bedrock console model catalog for your deployment Region, complete access steps for that model family, align the repo `model_id` (DynamoDB / Blueprint) and runtime IAM with an **enabled** inference profile, then redeploy and retry.
+If a task fails immediately with text like the model is **not available on your Bedrock deployment**, open the Bedrock console model catalog for your deployment Region and complete the access steps for that model family. Align the repo `model_id` (DynamoDB or Blueprint) and the runtime IAM with an **enabled** inference profile. Then redeploy and retry.
 
 ## Step 4 - Store the GitHub token
 
-The agent reads the GitHub PAT from **AWS Secrets Manager** at runtime. The CDK stack created a secret with a generated placeholder value for you - now you need to put your token value in it. Replace `ghp_your_token_here` with the actual token from Step 2. Make sure `REGION` matches where you deployed - if it is empty, the AWS CLI builds a malformed endpoint URL and fails silently.
+The agent reads the GitHub PAT from **AWS Secrets Manager** at runtime. The CDK stack created a secret with a generated placeholder value for you. Now put your token value in it. Replace `ghp_your_token_here` with the actual token from Step 2. Make sure that `REGION` matches the Region where you deployed. If `REGION` is empty, the AWS CLI builds a malformed endpoint URL and fails silently.
 
 <Tabs syncKey="quickstart-method">
 
@@ -243,7 +243,7 @@ aws secretsmanager put-secret-value \
 
 ## Step 5 - Create a Cognito user
 
-The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so an operator must create users (AWS credentials with `cognito-idp:AdminCreateUser` and `cognito-idp:AdminSetUserPassword` on the pool — no ABCA CLI `configure` required yet). The pool requires the username to be a valid email, a password of at least 12 characters mixing uppercase, lowercase, digits, and symbols, and the user's email to be pre-verified.
+The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so an operator must create users. The operator needs AWS credentials with `cognito-idp:AdminCreateUser` and `cognito-idp:AdminSetUserPassword` on the pool. The ABCA CLI `configure` step is not required yet. The pool requires that the username is a valid email, that the password has at least 12 characters and mixes uppercase, lowercase, digits, and symbols, and that the user's email is pre-verified.
 
 <Tabs syncKey="quickstart-method">
 
@@ -261,7 +261,7 @@ node lib/bin/bgagent.js admin invite-user you@example.com \
   --stack-name backgroundagent-dev
 ```
 
-The command wraps `AdminCreateUser`: email is pre-verified, the welcome email is suppressed (avoids SES errors on new accounts), and the password is temporary: the first `bgagent login` asks you to set a permanent one. When stack outputs are available, the invite file also includes a configure bundle for Step 6.
+The command wraps `AdminCreateUser`. The email is pre-verified, the welcome email is suppressed (to avoid SES errors on new accounts), and the password is temporary. The first `bgagent login` asks you to set a permanent one. When stack outputs are available, the invite file also includes a configure bundle for Step 6.
 
 To manage users later:
 
@@ -277,7 +277,7 @@ node lib/bin/bgagent.js admin delete-user someone@example.com --region "$REGION"
 
 <TabItem label="AWS CLI">
 
-Requires the AWS CLI with credentials that can call `cognito-idp:Admin*` on the deployment user pool. No ABCA CLI build or `node lib/bin/bgagent.js` invocation is needed on this path.
+This path requires the AWS CLI with credentials that can call `cognito-idp:Admin*` on the deployment user pool. It needs no ABCA CLI build and no `node lib/bin/bgagent.js` invocation.
 
 ```bash
 REGION=us-east-1  # your deployment region (same as Step 4)
@@ -302,7 +302,7 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-The first command creates the user with a temporary password, pre-verifies the email (required or login fails with `User is not confirmed`), and suppresses Cognito's welcome email (which otherwise errors on accounts without SES configured). The second sets a permanent password so you do not have to go through a password change flow on first login. Remember the password you set — you will need it in Step 6.
+The first command creates the user with a temporary password, pre-verifies the email, and suppresses Cognito's welcome email. Without the pre-verified email, login fails with `User is not confirmed`. Without the suppression, the welcome email errors on accounts that have no SES configured. The second command sets a permanent password, so you do not have to go through a password change flow on first login. Remember the password you set. You need it in Step 6.
 
 </TabItem>
 
@@ -310,7 +310,7 @@ The first command creates the user with a temporary password, pre-verifies the e
 
 ## Step 6 - Sign in, onboard your fork, and submit a task
 
-Sign in, register your fork with the platform, then submit your first task. A typical simple task takes 2-5 minutes. When it completes, you will see a PR URL — open it in your browser to review the agent's work.
+Sign in, register your fork with the platform, then submit your first task. A typical simple task takes 2 to 5 minutes. When it completes, you see a PR URL. Open it in your browser to review the agent's work.
 
 <Tabs syncKey="quickstart-submit">
 
@@ -353,15 +353,15 @@ node lib/bin/bgagent.js submit \
   --wait
 ```
 
-`repo onboard` registers the repository with the platform defaults: the GitHub token from Step 4, the default model, and the default egress allowlist. A repository that needs its own settings uses a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories). The `--wait` flag polls until the task reaches a terminal state.
+`repo onboard` registers the repository with the platform defaults: the GitHub token from Step 4, the default model, and the default egress allowlist. A repository that needs its own settings uses a CDK Blueprint instead. See [Onboard your own repositories](#onboard-your-own-repositories). The `--wait` flag polls until the task reaches a terminal state.
 
 </TabItem>
 
 <TabItem label="AWS CLI">
 
-Uses the AWS CLI for Cognito authentication and `curl` for the task REST API. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). A user created on the ABCA CLI tab has a temporary password: sign in once with `bgagent login` before using this tab. Requires `curl` and the AWS CLI.
+This tab uses the AWS CLI for Cognito authentication and `curl` for the task REST API, so it requires both. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). A user created on the ABCA CLI tab has a temporary password. Sign in once with `bgagent login` before you use this tab.
 
-Onboard your fork first. It's a single ABCA CLI command, with no AWS CLI equivalent: `node lib/bin/bgagent.js repo onboard your-username/agent-plugins --region "$REGION"`, run from `cli/` (the ABCA CLI tab shows it in context). You can use a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories).
+Onboard your fork first. Onboarding is a single ABCA CLI command, with no AWS CLI equivalent: `node lib/bin/bgagent.js repo onboard your-username/agent-plugins --region "$REGION"`, run from `cli/` (the ABCA CLI tab shows it in context). You can use a CDK Blueprint instead. See [Onboard your own repositories](#onboard-your-own-repositories).
 
 ```bash
 REGION=us-east-1  # your deployment region (same as Step 4)
@@ -390,19 +390,19 @@ curl -X POST "$API_URL/tasks" \
   }'
 ```
 
-Poll task status until `COMPLETED` (or a terminal failure state):
+Poll the task status until it is `COMPLETED` (or a terminal failure state):
 
 ```bash
 curl "$API_URL/tasks/<TASK_ID>" -H "Authorization: $TOKEN"
 ```
 
-See [User guide → Using the REST API](./USER_GUIDE.md#using-the-rest-api) for list, cancel, and events endpoints.
+See [Using the REST API in the User guide](./USER_GUIDE.md#using-the-rest-api) for the list, cancel, and events endpoints.
 
 </TabItem>
 
 </Tabs>
 
-ABCA CLI-only helpers after submit — use `watch` to stream progress events in real time:
+The following helpers are ABCA CLI only. After you submit, use `watch` to stream progress events in real time:
 
 ```bash
 cd cli
@@ -420,7 +420,7 @@ node lib/bin/bgagent.js nudge <TASK_ID> "Also add a test for the edge case"
 
 ## Step 7 - See an approval gate in action
 
-If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step walks through the flow end-to-end. Run the commands below from the `cli/` directory (`cd cli` from the repo root).
+If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step shows the whole flow. Run the commands below from the `cli/` directory (`cd cli` from the repo root).
 
 First, check which rules apply to your repo:
 
@@ -430,7 +430,7 @@ cd cli
 node lib/bin/bgagent.js policies list --repo owner/repo
 ```
 
-Submit a task that will plausibly trip a soft-deny rule — for example, one of the default blueprint rules guards force-pushes:
+Submit a task that is likely to trigger a soft-deny rule. For example, one of the default blueprint rules guards force-pushes:
 
 ```bash
 cd cli
@@ -447,7 +447,7 @@ cd cli
 node lib/bin/bgagent.js watch <TASK_ID>
 ```
 
-When the agent hits the guarded tool call, `watch` prints an `approval_requested` event and the task status flips to `AWAITING_APPROVAL`. List the pending approval:
+When the agent reaches the guarded tool call, `watch` prints an `approval_requested` event and the task status changes to `AWAITING_APPROVAL`. List the pending approval:
 
 ```bash
 cd cli
@@ -455,7 +455,7 @@ cd cli
 node lib/bin/bgagent.js pending
 ```
 
-The output includes ready-to-run approve/deny lines. Pick one:
+The output includes ready-to-run approve and deny lines. Pick one:
 
 ```bash
 cd cli
@@ -468,9 +468,9 @@ node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> \
   --reason "Don't force-push shared branches; open a revert PR instead"
 ```
 
-The task transitions back to `RUNNING` immediately on a decision. The denial reason is injected into the agent's context so it can adapt rather than retry the same tool call. If no decision arrives within the rule's timeout (300 s by default), the gate is treated as a denial with `timed_out` as the reason.
+The task returns to `RUNNING` immediately on a decision. The platform injects the denial reason into the agent's context, so that the agent can adapt instead of retrying the same tool call. If no decision arrives within the rule's timeout (300 s by default), the gate is treated as a denial with `timed_out` as the reason.
 
-If you want a task to run without interactive gates (e.g. an unattended overnight job), pre-approve the scopes you trust up-front:
+If you want a task to run without interactive gates (for example, an unattended overnight job), pre-approve the scopes you trust up front:
 
 ```bash
 cd cli
@@ -480,17 +480,17 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve 'write_path:tests/**'
 ```
 
-Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](./USER_GUIDE.md#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md).
+Hard-deny rules (no `@tier("soft")` annotation) are always enforced. `--pre-approve` bypasses only soft-deny rules. For the full command reference, see [Approval gates in the User guide](./USER_GUIDE.md#approval-gates-cedar-hitl). To write your own rules, see the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md).
 
 ## What happened behind the scenes
 
 Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 
-1. **Task creation** - The CLI authenticated via Cognito and sent a `POST /v1/tasks` request. The API validated the request, checked idempotency, and stored a task record in DynamoDB with status `SUBMITTED`.
-2. **Orchestration** - The durable orchestrator picked up the task and ran admission control (concurrency limits). It then ran **pre-flight checks** - calling the GitHub API to verify your token can access the repository with push permissions. If the token were read-only, the task would have failed here with a clear error instead of failing later inside the agent.
-3. **Context hydration** - The orchestrator assembled the agent's prompt: your task description, any repository memory from past tasks, and the system prompt that defines the agent's behavioral contract. The task transitioned to `HYDRATING`.
-4. **Agent execution** - An isolated MicroVM started via AgentCore Runtime. The agent cloned your repository, created a branch (`bgagent/<task-id>/<description-slug>`), made the requested changes, ran `mise run build` to verify the build passes, committed incrementally, and opened a pull request. The task transitioned to `RUNNING`.
-5. **Finalization** - The orchestrator detected the agent finished, recorded the PR URL, cost, and duration on the task record, and transitioned to `COMPLETED`.
+1. **Task creation.** The CLI authenticated through Cognito and sent a `POST /v1/tasks` request. The API validated the request, checked idempotency, and stored a task record in DynamoDB with status `SUBMITTED`.
+2. **Orchestration.** The durable orchestrator picked up the task and ran admission control (concurrency limits). It then ran **pre-flight checks**, which call the GitHub API to verify that your token can access the repository with push permissions. If the token were read-only, the task would have failed here with a clear error instead of failing later inside the agent.
+3. **Context hydration.** The orchestrator assembled the agent's prompt: your task description, any repository memory from past tasks, and the system prompt that defines the agent's behavioral contract. The task transitioned to `HYDRATING`.
+4. **Agent execution.** An isolated MicroVM started through AgentCore Runtime. The agent cloned your repository, created a branch (`bgagent/<task-id>/<description-slug>`), made the requested changes, ran `mise run build` to verify that the build passes, committed incrementally, and opened a pull request. The task transitioned to `RUNNING`.
+5. **Finalization.** The orchestrator detected that the agent finished, recorded the PR URL, cost, and duration on the task record, and transitioned the task to `COMPLETED`.
 
 ## Common errors
 
@@ -498,25 +498,25 @@ Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 |---|---|---|
 | `yarn: command not found` | Corepack not enabled or mise not activated in your shell | Run `eval "$(mise activate zsh)"`, then `corepack enable && corepack prepare yarn@1.22.22 --activate` |
 | `exec /bin/sh: exec format error` during image build | x86 host building the arm64 (Graviton) agent image without QEMU/binfmt. A reboot clears the registration, so the error can come back on a host that deployed before | Run `docker run --privileged --rm tonistiigi/binfmt --install arm64` (again after every reboot), or build from a native arm64 host (see Step 3 caution) |
-| `AccessDeniedException` on `update-trace-segment-destination` | X-Ray → CloudWatch Logs tracing is optional and the call may be SCP-blocked on Org accounts | **Skip it** — tracing is disabled by default and not required to deploy (see Step 3 note) |
+| `AccessDeniedException` on `update-trace-segment-destination` | X-Ray to CloudWatch Logs tracing is optional, and the call may be SCP-blocked on Org accounts | **Skip it.** Tracing is disabled by default and not required to deploy (see Step 3 note) |
 | `mise run build` fails with `ec2:DescribeAvailabilityZones` error | AWS credentials missing or insufficient for CDK synth | Set `AWS_PROFILE` or configure credentials with at least EC2 read access |
 | CDK deploy prompts for approval and hangs | `mise //cdk:deploy` in a non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` (the Step 3 advanced note uses it), or use `bgagent setup`, which asks for confirmation itself |
-| Deploy rolled back; can't redeploy (`ROLLBACK_COMPLETE`) | A first-create failure leaves the stack un-updatable | `mise //cdk:destroy` (or delete the stack), then run setup again. If the delete then stalls on VPC resources, see the row "Stack stuck in `DELETE_FAILED` on a security group / subnet" below |
+| Deploy rolled back and can't redeploy (`ROLLBACK_COMPLETE`) | A first-create failure leaves the stack un-updatable | `mise //cdk:destroy` (or delete the stack), then run setup again. If the delete then stalls on VPC resources, see the row "Stack stuck in `DELETE_FAILED` on a security group / subnet" below |
 | Stack stuck in `DELETE_FAILED` on a security group / subnet | AgentCore's service-managed (Hyperplane) ENIs reclaim asynchronously after the runtime is gone, with no fixed delay: it can take hours | You cannot force-detach an `amazon-aws`-owned ENI. Retry `mise //cdk:destroy` once AWS has released the ENIs, or finish the deletion now by retaining the blocked VPC resources, which stay in your account until you delete them (VPCs are quota-capped per Region). See [Teardown blocked by AgentCore network interfaces](./DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentcore-network-interfaces) for the commands |
 | Runtime fails with `ServiceLimitExceeded` / "Failed creating service linked role. Rate limit exceeded from IAM" | Fresh-account race: AgentCore auto-creates its service-linked role and IAM rate-limits the call. Reads like a quota problem but is not | Pre-create the role once, then redeploy: `aws iam create-service-linked-role --aws-service-name bedrock-agentcore.amazonaws.com` |
 | Nested stack stuck in `DELETE_FAILED` on a custom resource, parent in `ROLLBACK_FAILED` | A custom resource whose create was cancelled can reject its own rollback delete, leaving the stack unremovable by normal means | Delete the nested stack retaining the stuck resource, wait for it to drain, then delete the parent: `aws cloudformation delete-stack --stack-name <nested> --retain-resources <LogicalId>`. Deleting the parent before the nested delete finishes fails with "a delete stack operation is already in progress" |
-| Runtime rollback: `NotStabilized` / "subnets are in unsupported availability zones" | VPC subnets landed in AZs AgentCore doesn't support (auto-pin skipped for env-agnostic synth, or region not in the built-in map) | Set the `agentcore:availabilityZones` override to supported zone names — see [Known deployment issues](./DEPLOYMENT_GUIDE.md#agentcore-unsupported-availability-zones) |
-| Synth fails with `[AgentCore AZs] Could not resolve …` or `… Synth credentials resolve to account …` | Auto-pin could not verify supported zones: missing `ec2:DescribeAvailabilityZones`, expired credentials, or the app process resolving a different account than the deploy target | Grant the permission / refresh credentials / `export AWS_PROFILE=<profile>`, or set the `agentcore:availabilityZones` override. Failing closed is intentional — a silent fallback yields a template that looks pinned but isn't |
+| Runtime rollback: `NotStabilized` / "subnets are in unsupported availability zones" | VPC subnets landed in AZs AgentCore doesn't support (auto-pin skipped for env-agnostic synth, or region not in the built-in map) | Set the `agentcore:availabilityZones` override to supported zone names. See [Known deployment issues](./DEPLOYMENT_GUIDE.md#agentcore-unsupported-availability-zones) |
+| Synth fails with `[AgentCore AZs] Could not resolve …` or `… Synth credentials resolve to account …` | Auto-pin could not verify supported zones: missing `ec2:DescribeAvailabilityZones`, expired credentials, or the app process resolving a different account than the deploy target | Grant the permission, refresh the credentials, or run `export AWS_PROFILE=<profile>`. Alternatively, set the `agentcore:availabilityZones` override. Failing closed is intentional. A silent fallback yields a template that looks pinned but isn't |
 | `put-secret-value` returns double-dot endpoint | `REGION` variable is empty | Set `REGION=us-east-1` (or your actual region) before running the command |
-| Model / Bedrock errors in logs (`not available on your bedrock`, zero tokens) | Model not entitled for the account or Region, wrong `modelId` shape, or missing Marketplace / FTU steps | Follow **Amazon Bedrock before your first task** above; confirm [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use an [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID prefixed with the geography the stack grants (its `BedrockGeoRegion` output); the model must be in the stack's `BedrockModelIds` output, which `bedrockModels` CDK context controls |
+| Model / Bedrock errors in logs (`not available on your bedrock`, zero tokens) | Model not entitled for the account or Region, wrong `modelId` shape, or missing Marketplace / FTU steps | Follow **Amazon Bedrock before your first task** above. Confirm [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use an [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID prefixed with the geography the stack grants (its `BedrockGeoRegion` output). The model must be in the stack's `BedrockModelIds` output, which `bedrockModels` CDK context controls |
 | `REPO_NOT_ONBOARDED` on task submit | The repository was never onboarded, or was onboarded under a different `owner/repo` | Run `repo onboard owner/repo` (Step 6) with exactly the slug you pass to `submit`. For a Blueprint, confirm its `repo` (or `BLUEPRINT_REPO` / `blueprintRepo` context for the sample) resolves to that slug |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | PAT is missing required permissions or is scoped to the wrong repo | Regenerate the PAT with Contents (read/write) and Pull requests (read/write) scoped to your fork, then update Secrets Manager |
-| Task stuck in `SUBMITTED` | Orchestrator Lambda may not have been invoked | Check CloudWatch logs for the orchestrator Lambda; verify the stack deployed successfully |
+| Task stuck in `SUBMITTED` | Orchestrator Lambda may not have been invoked | Check CloudWatch logs for the orchestrator Lambda. Verify that the stack deployed successfully |
 | `node: command not found` in `cli/` | mise shell activation missing | Run `eval "$(mise activate zsh)"` and confirm `node --version` shows v22.x |
 
 ## Customizing the platform
 
-Once you have the basic flow working, here are the main ways to customize the platform for your needs.
+Once the basic flow works, you can customize the platform in the following ways.
 
 ### Onboard your own repositories
 
@@ -536,7 +536,7 @@ The stack's sample `AgentPluginsBlueprint` takes its repository from the `BLUEPR
 
 ### Per-repo configuration
 
-Blueprints accept optional overrides to customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, extra system prompt instructions, and network egress rules. See the [User guide - Per-repo overrides](./USER_GUIDE.md) for the full list.
+Blueprints accept optional overrides that customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, extra system prompt instructions, and network egress rules. See [Per-repo overrides in the User guide](./USER_GUIDE.md) for the full list.
 
 ```typescript
 new Blueprint(this, 'CustomBlueprint', {
@@ -552,22 +552,22 @@ new Blueprint(this, 'CustomBlueprint', {
 
 ### Add a CLAUDE.md to your repository
 
-The agent automatically loads project-level instructions from `CLAUDE.md` at the repository root (or `.claude/CLAUDE.md`). This is the most effective way to improve agent output for a specific repo - tell it your build commands, coding conventions, architecture boundaries, and constraints. See the [Prompt guide](./PROMPT_GUIDE.md) for examples and best practices.
+The agent automatically loads project-level instructions from `CLAUDE.md` at the repository root (or `.claude/CLAUDE.md`). A `CLAUDE.md` is the most effective way to improve agent output for a specific repo. Tell the agent your build commands, coding conventions, architecture boundaries, and constraints. See the [Prompt guide](./PROMPT_GUIDE.md) for examples and best practices.
 
 ### Set up webhook integrations
 
-Webhooks let external systems (GitHub Actions, CI pipelines) create tasks without Cognito credentials, using HMAC-SHA256 authentication. This is useful for automating PR review on every PR, or triggering code changes from CI events. See the [User guide - Webhooks](./USER_GUIDE.md) for setup instructions.
+Webhooks let external systems (GitHub Actions, CI pipelines) create tasks without Cognito credentials. They authenticate with HMAC-SHA256. Use webhooks to automate PR review on every PR, or to trigger code changes from CI events. See [Webhooks in the User guide](./USER_GUIDE.md) for setup instructions.
 
 ## Next steps
 
-Run from the `cli/` directory (`cd cli` from the repo root):
+Run these commands from the `cli/` directory (`cd cli` from the repo root):
 
 - **Try an issue-based task**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42`
 - **Iterate on a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --pr 1`
 - **Review a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --review-pr 1`
-- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](./USER_GUIDE.md#workflows)
-- **Watch a task live**: `node lib/bin/bgagent.js watch <TASK_ID>` — stream progress events
-- **Steer a running task**: `node lib/bin/bgagent.js nudge <TASK_ID> "focus on tests"` — mid-run guidance
+- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1`. See [Workflows in the User guide](./USER_GUIDE.md#workflows).
+- **Watch a task live**: `node lib/bin/bgagent.js watch <TASK_ID>` streams progress events.
+- **Steer a running task**: `node lib/bin/bgagent.js nudge <TASK_ID> "focus on tests"` gives mid-run guidance.
 - **Enable tracing**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace` then `node lib/bin/bgagent.js trace download <TASK_ID>`
-- **Manage webhooks**: `node lib/bin/bgagent.js webhook create --name "My CI"` — automate task submission from external systems
-- **Run locally first**: Test with `./agent/run.sh` before deploying - see the [Developer guide](./DEVELOPER_GUIDE.md)
+- **Manage webhooks**: `node lib/bin/bgagent.js webhook create --name "My CI"` automates task submission from external systems.
+- **Run locally first**: Test with `./agent/run.sh` before you deploy. See the [Developer guide](./DEVELOPER_GUIDE.md).

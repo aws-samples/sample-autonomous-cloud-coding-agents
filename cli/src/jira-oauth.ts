@@ -21,22 +21,10 @@ import * as crypto from 'crypto';
 import { CliError } from './errors';
 import { describeTokenShape } from './linear-oauth';
 
-/**
- * Atlassian OAuth (3LO) endpoint URLs. Fixed across all tenants.
- */
 const JIRA_AUTHORIZE_ENDPOINT = 'https://auth.atlassian.com/authorize';
 const JIRA_TOKEN_ENDPOINT = 'https://auth.atlassian.com/oauth/token';
 
-/**
- * Scopes for the agent install. The classic-scope set required for ABCA's
- * v1 surface:
- * - `read:jira-work` / `write:jira-work` — read issues + post comments
- * - `read:jira-user` — resolve accountIds → display names during link
- *   preview
- * - `offline_access` — REQUIRED to receive a refresh_token; without it
- *   the access token expires after 1h and the integration cannot
- *   self-renew.
- */
+/** Atlassian issues a refresh_token only when `offline_access` is requested. */
 const JIRA_OAUTH_SCOPES = [
   'read:jira-work',
   'write:jira-work',
@@ -58,11 +46,8 @@ export interface JiraTokenResponse {
 }
 
 /**
- * One row of the Atlassian `accessible-resources` response. After the
- * authorization-code exchange completes, the CLI calls
- * `https://api.atlassian.com/oauth/token/accessible-resources` to learn
- * which Atlassian Cloud sites the issued token can act on. Each entry is
- * one tenant.
+ * One row of the Atlassian `accessible-resources` response: one Atlassian
+ * Cloud site (tenant) the issued token can act on.
  */
 export interface AccessibleResource {
   readonly id: string;
@@ -74,11 +59,6 @@ export interface AccessibleResource {
 /**
  * Persisted form of a Jira OAuth credential. Stored as the JSON
  * `SecretString` of `bgagent-jira-oauth-<cloudId>` in Secrets Manager.
- *
- * Mirrors the agent-side StoredOauthToken in
- * `cdk/src/handlers/shared/jira-oauth-resolver.ts` — the contract is
- * cross-language so the agent runtime, Lambdas, and CLI all read/write
- * the same JSON shape. Required-field set is enforced at deserialization.
  */
 export interface StoredJiraOauthToken {
   readonly access_token: string;
@@ -112,43 +92,27 @@ export interface StoredJiraOauthToken {
   /** ISO-8601 timestamp of the latest successful app-actor setup. */
   readonly app_actor_configured_at?: string;
   /**
-   * Per-tenant Jira webhook signing secret.
+   * Per-tenant Jira webhook signing secret: Atlassian signs events with
+   * `X-Hub-Signature: sha256=<hex>`. The receiver uses this copy when the
+   * payload carries cloudId. Jira admin-console payloads omit cloudId, so the
+   * sole active tenant also synchronizes its value to the stack-wide verifier.
    *
-   * Atlassian's "Generic webhooks" support a per-webhook secret that signs
-   * events with `X-Hub-Signature: sha256=<hex>`. The receiver uses this copy
-   * when the payload carries cloudId. Jira admin-console payloads omit
-   * cloudId, so the sole active tenant also synchronizes its value to the
-   * stack-wide verifier.
-   *
-   * Optional for back-compat: tokens written before per-tenant signing
-   * was wired up won't have it, so the receiver uses the stack-wide
-   * `JIRA_WEBHOOK_SECRET_ARN` verifier for those installs.
+   * Absent on tokens written before per-tenant signing: the receiver uses the
+   * stack-wide `JIRA_WEBHOOK_SECRET_ARN` verifier for those installs.
    */
   readonly webhook_signing_secret?: string;
 }
 
-/**
- * Common prefix for all per-tenant Jira OAuth secrets. The full secret
- * name is `${JIRA_OAUTH_SECRET_PREFIX}<cloudId>`. Use this when scanning
- * Secrets Manager for every tenant install.
- */
 const JIRA_OAUTH_SECRET_PREFIX = 'bgagent-jira-oauth-';
 
-/**
- * Build the secret name for a given Jira cloudId. Matches the naming
- * convention encoded in the runtime's IAM policy resource pattern, so
- * changes here MUST be matched by the IAM resource pattern in CDK.
- */
 export function jiraOauthSecretName(cloudId: string): string {
   return `${JIRA_OAUTH_SECRET_PREFIX}${cloudId}`;
 }
 
 /**
  * Deserialize and validate a stored Jira OAuth bundle read from Secrets
- * Manager. Enforces the required-field contract so a truncated or
- * malformed secret surfaces an actionable "re-run setup" error instead
- * of a downstream `undefined` deref. `secretId` is echoed into the error
- * so operators know which secret to fix.
+ * Manager. A missing, truncated or malformed secret throws a `CliError`
+ * that names `secretId` and tells the operator to re-run setup.
  */
 export function parseStoredJiraOauthToken(
   secretString: string | undefined,
@@ -186,10 +150,6 @@ export function parseStoredJiraOauthToken(
   return parsed as StoredJiraOauthToken;
 }
 
-/**
- * Compute when an access token should be considered "stale and needs
- * refresh." We refresh if there's <60s left.
- */
 const REFRESH_THRESHOLD_SECONDS = 60;
 
 export function isAccessTokenExpiring(
@@ -205,7 +165,7 @@ export function isAccessTokenExpiring(
 
 /**
  * PKCE pair: a random `code_verifier` and the SHA-256 base64url digest
- * (`code_challenge`). Atlassian supports `S256`; always use that.
+ * (`code_challenge`).
  */
 export function generatePkce(): { codeVerifier: string; codeChallenge: string } {
   const VERIFIER_BYTES = 32;
@@ -220,10 +180,8 @@ export function generatePkce(): { codeVerifier: string; codeChallenge: string } 
  * Build the Atlassian authorization URL the CLI opens in the browser.
  *
  * Atlassian-specific fields:
- * - `audience=api.atlassian.com` — REQUIRED; missing this returns a
- *   confusing "invalid_client" from the consent screen.
- * - `prompt=consent` — forces the consent UI even if the user has
- *   previously authorized the app, so refresh_token is reissued.
+ * - `audience=api.atlassian.com` — required by Atlassian.
+ * - `prompt=consent` — required by Atlassian; shows the consent screen.
  */
 export function buildAuthorizationUrl(opts: {
   clientId: string;
@@ -250,7 +208,7 @@ export function buildAuthorizationUrl(opts: {
  * Exchange an authorization `code` for an access + refresh token.
  *
  * Atlassian's `/oauth/token` endpoint accepts a JSON body, NOT
- * x-www-form-urlencoded — that's the one shape difference from Linear.
+ * x-www-form-urlencoded.
  */
 export async function exchangeAuthorizationCode(args: {
   code: string;
@@ -279,8 +237,8 @@ export async function exchangeAuthorizationCode(args: {
 
 /**
  * Refresh an expiring access token. Atlassian rotates refresh tokens on
- * every refresh (with a 1-year sliding window) — always persist the
- * new `refresh_token` from the response back to storage.
+ * every refresh — always persist the new `refresh_token` from the
+ * response back to storage.
  */
 export async function refreshAccessToken(args: {
   refreshToken: string;
@@ -342,9 +300,6 @@ function isJiraTokenResponse(value: unknown): value is JiraTokenResponse {
   );
 }
 
-/**
- * Compute the `expires_at` ISO timestamp from `expires_in` (seconds).
- */
 export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date()): string {
   return new Date(now.getTime() + expiresInSeconds * 1000).toISOString();
 }
@@ -355,11 +310,6 @@ export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date(
  *
  * Documented at
  * https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/#3-1-make-calls-to-the-api-using-the-access-token.
- *
- * In practice an OAuth 3LO install almost always returns exactly one
- * site (the tenant whose admin clicked Authorize); but if the user
- * picked multiple sites on the consent screen we surface the full list
- * so the caller can pick the right one.
  */
 export async function fetchAccessibleResources(
   accessToken: string,

@@ -15,11 +15,7 @@ from shell import log, log_error_cw
 class ApprovalRow(TypedDict):
     """Schema for the approval row written by ``transact_write_approval_request``.
 
-    Mirrors the column layout of ``TaskApprovalsTable``. Used as
-    the typed contract between the PreToolUse hook (which builds the row)
-    and the transactional writer (which serializes it to DDB attributes).
-    Earlier the function accepted a bare ``dict`` so missing or misspelled
-    fields would fail at runtime, not at the call site.
+    Mirrors the column layout of ``TaskApprovalsTable``.
     """
 
     task_id: str
@@ -28,9 +24,9 @@ class ApprovalRow(TypedDict):
     tool_input_preview: str
     tool_input_sha256: str
     reason: str
-    severity: str  # 'low' | 'medium' | 'high' — matches TS Severity literal.
+    severity: str
     matching_rule_ids: list[str]
-    status: str  # always 'PENDING' on initial write.
+    status: str
     created_at: str
     timeout_s: int
     ttl: int
@@ -42,7 +38,6 @@ _table = None
 
 
 def _get_table():
-    """Lazy-init the DynamoDB Table resource."""
     global _table
     if _table is not None:
         return _table
@@ -66,7 +61,6 @@ def _now_iso() -> str:
 def write_submitted(
     task_id: str, repo_url: str = "", issue_number: str = "", task_description: str = ""
 ) -> None:
-    """Record a task as SUBMITTED (called from the invoke script or server)."""
     try:
         table = _get_table()
         if table is None:
@@ -88,7 +82,7 @@ def write_submitted(
 
 
 def write_heartbeat(task_id: str) -> None:
-    """Update ``agent_heartbeat_at`` while the task is RUNNING (orchestrator crash detection)."""
+    """Update ``agent_heartbeat_at`` while the task is RUNNING."""
     try:
         table = _get_table()
         if table is None:
@@ -114,14 +108,8 @@ def write_heartbeat(task_id: str) -> None:
 def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) -> None:
     """Record session_id + agent_runtime_arn on a pre-RUNNING task.
 
-    The orchestrator Lambda writes these fields on the HYDRATING → RUNNING
-    transition so ``cancel-task`` can ``StopRuntimeSession`` on the right
-    runtime and operators can correlate a stuck task to a specific AgentCore
-    session. Currently only the orchestrator calls this; the agent-side
-    invocation path inherits the fields from the orchestrator's payload.
-
     Idempotent + best-effort. Skips silently if the task is already
-    past SUBMITTED/HYDRATING (concurrent transition winning is fine).
+    past SUBMITTED/HYDRATING.
     """
     if not task_id or (not session_id and not agent_runtime_arn):
         return
@@ -160,7 +148,6 @@ def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) ->
             isinstance(e, ClientError)
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
-            # Task already advanced — concurrent legitimate transition wins.
             return
         log(
             "WARN",
@@ -169,20 +156,11 @@ def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) ->
 
 
 def write_running(task_id: str) -> None:
-    """Transition a task to RUNNING (called at agent start).
+    """Transition a task to RUNNING.
 
     Updates ``status_created_at`` alongside ``status`` so the
-    ``UserStatusIndex`` GSI sort key reflects the current status.  Writers
-    that transition the task (``create-task-core``, ``cancel-task``,
-    ``reconcile-stranded-tasks``) all rewrite this field, and Python must
-    too.  Its readers take the prefix for the current status (the
-    queue-position lookup in ``get-task``) and the timestamp for when that
-    status was entered (the stranded-task sweep in
-    ``reconcile-stranded-tasks`` and ``bgagent ops stuck-tasks``).
-
-    ``updated_at`` moves with the status too, as in every status write of the
-    platform: the API returns it, and the console shows it, as the time of the
-    last change.
+    ``UserStatusIndex`` GSI sort key reflects the current status.
+    ``updated_at`` moves with the status too.
     """
     try:
         table = _get_table()
@@ -230,8 +208,6 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             return
         now = _now_iso()
         expr_names = {"#s": "status"}
-        # Mixed value types: most are strings, but build_passed/lint_passed are
-        # persisted as native booleans (the reconciler reads them via .BOOL).
         expr_values: dict[str, object] = {
             ":s": status,
             ":t": now,
@@ -239,12 +215,6 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             ":running": "RUNNING",
             ":hydrating": "HYDRATING",
             ":finalizing": "FINALIZING",
-            # AWAITING_APPROVAL is included so a container shutdown
-            # mid-gate can still record the terminal transition. Without
-            # it, a crash while the user is deciding leaves the task
-            # stuck until the stranded-task reconciler catches it (~2h).
-            # Approval state machine: RUNNING ↔ AWAITING_APPROVAL, both can
-            # transition straight to a terminal state.
             ":awaiting_approval": "AWAITING_APPROVAL",
         }
         update_parts = [
@@ -270,8 +240,6 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("turns") is not None:
                 update_parts.append("turns = :turns")
                 expr_values[":turns"] = str(result["turns"])
-            # Dual counters so operators can distinguish SDK-attempted vs
-            # pipeline-completed turn counts.
             if result.get("turns_attempted") is not None:
                 update_parts.append("turns_attempted = :ta")
                 expr_values[":ta"] = str(result["turns_attempted"])
@@ -284,52 +252,27 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             if result.get("memory_written") is not None:
                 update_parts.append("memory_written = :mw")
                 expr_values[":mw"] = result["memory_written"]
-            # Persist the post-hook verify outcomes so they're observable on the
-            # task record (orchestration reconciler / dashboards / replay
-            # bundle), not just consumed in-process by the gate. build_passed/
-            # lint_passed were historically dropped here (present on TaskResult but
-            # never written) — persist both so a consumer sees WHY a task passed/
-            # failed verification, as a structured signal.
             if result.get("build_passed") is not None:
                 update_parts.append("build_passed = :bp")
                 expr_values[":bp"] = bool(result["build_passed"])
             if result.get("lint_passed") is not None:
                 update_parts.append("lint_passed = :lp")
                 expr_values[":lp"] = bool(result["lint_passed"])
-            # Whether a PR-iteration advanced the branch HEAD (a real commit
-            # landed) vs. ran with no change (a question-only comment).
-            # The Linear/Slack settle reply reads this to avoid a false
-            # "✅ Updated" on a no-op iteration. None ⇒ not persisted (the
-            # consumer defaults to the change-made side, back-compat).
             if result.get("code_changed") is not None:
                 update_parts.append("code_changed = :cc")
                 expr_values[":cc"] = bool(result["code_changed"])
-            # The pushed HEAD sha — lets the screenshot webhook match a deploy's
-            # commit to the iteration task that pushed it (correct preview-reply
-            # attribution when two iterations overlap on one PR). Skip empties.
             if result.get("head_sha"):
                 update_parts.append("head_sha = :hsha")
                 expr_values[":hsha"] = str(result["head_sha"])
             if result.get("answer_text"):
                 update_parts.append("answer_text = :ans")
-                # Bound the persisted answer so a verbose agent can't bloat the
-                # row; the reply renderer truncates again for display.
                 expr_values[":ans"] = str(result["answer_text"])[:2000]
-            # OTEL trace id for cross-plane correlation. Absent on tasks
-            # that predate this field and when tracing is unavailable.
             if result.get("otel_trace_id"):
                 update_parts.append("otel_trace_id = :otid")
                 expr_values[":otid"] = result["otel_trace_id"]
-            # --trace artifact URI. Written atomically with the
-            # terminal-status transition so a consumer that reads
-            # TaskRecord.trace_s3_uri immediately after status becomes
-            # terminal sees a consistent view.
             if result.get("trace_s3_uri"):
                 update_parts.append("trace_s3_uri = :ts3")
                 expr_values[":ts3"] = result["trace_s3_uri"]
-            # Repo-less delivered artifact URI. Persisted with the terminal
-            # write so TaskDetail.artifact_uri surfaces the deliverable
-            # — otherwise the S3 object exists but its URI is undiscoverable.
             if result.get("artifact_uri"):
                 update_parts.append("artifact_uri = :au")
                 expr_values[":au"] = result["artifact_uri"]
@@ -353,25 +296,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                 "[task_state] write_terminal skipped: "
                 "status precondition not met (task may have been cancelled)",
             )
-            # A ConditionalCheckFailed on the happy path after a
-            # successful S3 trace upload orphans the S3 object — the URI
-            # never lands on the TaskRecord,
-            # so ``get-trace-url`` will 404 ``TRACE_NOT_AVAILABLE``
-            # indefinitely. Without this dedicated log the orphan
-            # is invisible; the generic skip message above doesn't
-            # distinguish benign-racing-cancel from
-            # silently-lost-trace-URI.
-            #
-            # L4 self-heal: attempt a second conditional UpdateItem
-            # scoped to ``attribute_not_exists(trace_s3_uri)`` AND a
-            # terminal status. If the task genuinely raced into a
-            # terminal state (cancel / reconciler), this puts the URI
-            # back on the record and the orphan log below documents
-            # the original race for operators.
             if result and result.get("trace_s3_uri"):
-                # ERROR severity: a real orphan is operator-actionable.
-                # Routed via log_error_cw so it shows up in the
-                # APPLICATION_LOGS group that TaskDashboard reads.
                 log_error_cw(
                     f"[task_state] trace_s3_uri orphaned by "
                     f"ConditionalCheckFailed: task_id={task_id!r} "
@@ -397,10 +322,9 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
 def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
     """Persist ``trace_s3_uri`` on an already-terminal record.
 
-    Used as a self-heal after ``write_terminal`` loses a race with
-    cancel / reconciler. Only writes when:
+    Only writes when:
       1. The status is terminal (CANCELLED / COMPLETED / FAILED / TIMED_OUT).
-      2. ``trace_s3_uri`` is not already set (avoid clobbering).
+      2. ``trace_s3_uri`` is not already set.
 
     Returns True on successful write, False on any conditional-check
     failure or other fail-open path. Never raises.
@@ -435,7 +359,6 @@ def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
             isinstance(e, ClientError)
             and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
         ):
-            # Benign: URI was already persisted, or status isn't terminal yet.
             log(
                 "INFO",
                 f"[task_state] write_trace_uri_conditional skipped for "
@@ -469,14 +392,7 @@ def get_task(task_id: str) -> dict | None:
 
     Raises:
         TaskFetchError: DDB/boto/network failure, distinguished from
-            ``None`` (== "record not found") so callers can choose their
-            failure posture. Current callers
-            (``hooks._cancel_between_turns_hook``, ``pipeline.run_task``'s
-            cancel short-circuit) all fail open on this — they prefer to
-            keep a running task alive through a transient DDB blip rather
-            than stranding it. New callers should make the choice
-            explicitly; silently collapsing the two cases to ``None``
-            erases the signal.
+            ``None`` (== "record not found").
     """
     table = _get_table()
     if table is None:
@@ -489,42 +405,9 @@ def get_task(task_id: str) -> dict | None:
     return resp.get("Item")
 
 
-# ---------------------------------------------------------------------------
-# Approval primitives (Cedar human-in-the-loop gates)
-# ---------------------------------------------------------------------------
-#
-# ``TaskApprovalsTable`` and the AWAITING_APPROVAL status transitions are
-# provisioned by the CDK stack. The agent-side helpers below are written to
-# that contract and exposed so the ``pre_tool_use_hook`` can be implemented +
-# unit-tested (via mocked boto3 clients); once the stack sets
-# ``TASK_APPROVALS_TABLE_NAME`` + grants IAM, the same helpers start making
-# real DDB calls with no further code change on the agent side.
-#
-# Primitives exposed:
-#   - ``transact_write_approval_request`` — atomic Put(TaskApprovals) +
-#     Update(TaskTable: RUNNING → AWAITING_APPROVAL). Raises
-#     ``ApprovalWriteError`` on ``TransactionCanceledException`` so the
-#     hook can return DENY + ``approval_write_failed``.
-#   - ``transact_resume_from_approval`` — atomic Update(TaskTable:
-#     AWAITING_APPROVAL → RUNNING) gated on
-#     ``awaiting_approval_request_id = request_id``. Raises
-#     ``ApprovalResumeError`` on cancellation.
-#   - ``best_effort_update_approval_status`` — conditional Update on the
-#     approval row (``status = :pending`` guard). Returns ``False`` on
-#     ``ConditionCheckFailed`` so the late-approval re-read path fires.
-#   - ``get_approval_row`` — strongly-consistent GetItem; default
-#     ``consistent_read=True`` because the race fix relies on it.
-#
-# Errors beyond the structural conditions (unreachable DDB, IAM drift,
-# missing env var) raise ``ApprovalTablesUnavailable`` so the hook can
-# fail CLOSED without guessing. The hook maps that to DENY so a deploy
-# without the approvals table cannot silently bypass gates.
-
 TASK_APPROVALS_TABLE_ENV = "TASK_APPROVALS_TABLE_NAME"
 TASK_TABLE_ENV = "TASK_TABLE_NAME"
 
-# TaskTable status values referenced by the approval primitives. Kept as
-# constants so a rename in CDK cannot silently diverge the Python path.
 _STATUS_RUNNING = "RUNNING"
 _STATUS_AWAITING_APPROVAL = "AWAITING_APPROVAL"
 
@@ -566,12 +449,6 @@ class ApprovalResumeError(RuntimeError):
 
 
 def _get_ddb_client(*, client=None):
-    """Return a boto3 DDB low-level client, or the injected ``client`` for tests.
-
-    Tests inject a mock client rather than relying on moto because the
-    primitives here touch ``transact_write_items`` with cross-table
-    conditions, which moto's older versions do not fully emulate.
-    """
     if client is not None:
         return client
     from aws_session import tenant_client
@@ -581,10 +458,6 @@ def _get_ddb_client(*, client=None):
 
 
 def _require_tables() -> tuple[str, str]:
-    """Return ``(task_table, approvals_table)`` or raise.
-
-    Kept as a single guard so every caller surfaces the same error class.
-    """
     task_table = os.environ.get(TASK_TABLE_ENV)
     approvals_table = os.environ.get(TASK_APPROVALS_TABLE_ENV)
     if not task_table or not approvals_table:
@@ -595,13 +468,6 @@ def _require_tables() -> tuple[str, str]:
 
 
 def _py_to_ddb_attr(value):
-    """Translate a Python value into the DDB low-level attribute shape.
-
-    Handles the subset we actually write: ``str``, ``int``, ``bool``,
-    ``None``, lists-of-str. More exotic types would need marshalling
-    support; ``approval_row`` values are constrained to the approval-row
-    schema, which falls entirely inside this subset.
-    """
     if value is None:
         return {"NULL": True}
     if isinstance(value, bool):
@@ -611,9 +477,6 @@ def _py_to_ddb_attr(value):
     if isinstance(value, str):
         return {"S": value}
     if isinstance(value, list):
-        # Lists of strings (matching_rule_ids); other shapes are rejected
-        # loudly so a future schema drift surfaces in tests rather than
-        # silently writing an empty list.
         if all(isinstance(v, str) for v in value):
             return {"L": [{"S": v} for v in value]}
         raise TypeError(f"unsupported list element types in approval row: {value!r}")
@@ -621,7 +484,6 @@ def _py_to_ddb_attr(value):
 
 
 def _ddb_attr_to_py(attr):
-    """Inverse of ``_py_to_ddb_attr`` — enough to rehydrate an approval row."""
     if attr is None:
         return None
     if "NULL" in attr:
@@ -630,9 +492,6 @@ def _ddb_attr_to_py(attr):
         return attr["BOOL"]
     if "N" in attr:
         raw = attr["N"]
-        # Keep integers integer-shaped for downstream arithmetic (ttl,
-        # timeout_s). ``decided_at`` is a string so no floats to worry
-        # about.
         try:
             return int(raw)
         except ValueError:
@@ -641,7 +500,6 @@ def _ddb_attr_to_py(attr):
         return attr["S"]
     if "L" in attr:
         return [_ddb_attr_to_py(item) for item in attr["L"]]
-    # Unsupported shape; return raw to aid debugging rather than losing data.
     return attr
 
 
@@ -674,7 +532,6 @@ def transact_write_approval_request(
     ddb = _get_ddb_client(client=client)
 
     approval_item = {k: _py_to_ddb_attr(v) for k, v in approval_row.items()}
-    # Belt-and-braces: ensure the keys we rely on downstream are present.
     approval_item.setdefault("task_id", {"S": task_id})
     approval_item.setdefault("request_id", {"S": request_id})
     approval_item.setdefault("status", {"S": "PENDING"})
@@ -712,9 +569,6 @@ def transact_write_approval_request(
             ]
         )
     except Exception as exc:
-        # TransactionCanceledException carries per-item reasons. Keep the
-        # detection structural (duck-typed on ``response``) so we do not
-        # need botocore at import time.
         reasons = _extract_cancellation_reasons(exc)
         code = _extract_error_code(exc)
         if code == "TransactionCanceledException":
@@ -722,7 +576,6 @@ def transact_write_approval_request(
                 f"approval write cancelled: reasons={reasons}",
                 cancellation_reasons=reasons,
             ) from exc
-        # Otherwise propagate so outer handler classifies it fail-closed.
         raise
 
 
@@ -740,9 +593,7 @@ def transact_resume_from_approval(
       - resuming with a stale request_id after a race with the
         reconciler / a concurrent approval.
 
-    Refresh the heartbeat in the same update: writes pause during approval waits,
-    so restoring RUNNING with the old timestamp could let an orchestrator poll
-    mark this healthy task lost before the next periodic heartbeat.
+    Refreshes ``agent_heartbeat_at`` in the same update.
 
     Raises ``ApprovalResumeError`` on ``TransactionCanceledException`` so
     the hook can emit ``approval_resume_failed`` + DENY.
@@ -845,8 +696,7 @@ def get_approval_row(
     """Fetch an approval row. Defaults to a strongly-consistent read.
 
     Returns a Python dict with unmarshalled attribute values, or ``None`` if
-    the row does not exist (TTL reaped, wrong IDs, etc.). Callers use the
-    ``None`` return to detect the row-gone branch of the late-approval race.
+    the row does not exist (TTL reaped, wrong IDs, etc.).
     """
     _, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
@@ -868,30 +718,11 @@ def increment_approval_gate_count_in_ddb(
 ) -> bool:
     """Best-effort atomic increment of ``approval_gate_count`` on TaskTable.
 
-    Persistence layer for the per-task gate counter. The session counter
-    (``PolicyEngine._approval_gate_count``) stays authoritative WITHIN a
-    container — this write exists so that a container restart can seed the
-    new container's counter from the persisted value instead of resetting to
-    0 and re-exposing the user to another ``approval_gate_cap`` worth of
-    gates.
-
-    **Best-effort semantics:** the counter is a safety bound, not a
-    correctness bound. A DDB write failure here MUST NOT block the gate —
-    the session counter still enforces the cap within this container, and
-    losing at most one increment per restart is acceptable damage. Returns
-    ``True`` on success, ``False`` on any failure (config missing, IAM
+    Returns ``True`` on success, ``False`` on any failure (config missing, IAM
     drift, throttling). Never raises.
 
-    Uses a pure ADD UpdateExpression without a ConditionExpression — the
-    counter is monotonic and concurrent writes from different hooks on the
-    same task are not expected (gates are serialized by the PreToolUse
-    lifecycle). If the attribute is missing, DDB initializes it to 0 before
-    applying the ADD, matching the CreateTaskFn seed of
-    ``approval_gate_count: 0`` (see cdk/src/handlers/shared/create-task-core.ts).
-
-    Deliberately kept separate from the resume TransactWriteItems: the
-    joint-update invariant on ``status`` + ``awaiting_approval_request_id``
-    must not be burdened with a non-safety-critical counter bump.
+    Uses a pure ADD UpdateExpression without a ConditionExpression. If the
+    attribute is missing, DDB initializes it to 0 before applying the ADD.
     """
     try:
         task_table, _ = _require_tables()
@@ -912,8 +743,6 @@ def increment_approval_gate_count_in_ddb(
             ExpressionAttributeValues={":one": {"N": "1"}},
         )
     except Exception as exc:
-        # Best-effort: do not raise. Log at WARN with the error code so
-        # operators can spot IAM drift / throttle / misconfigured tables.
         code = _extract_error_code(exc) or type(exc).__name__
         log(
             "WARN",
@@ -924,15 +753,7 @@ def increment_approval_gate_count_in_ddb(
     return True
 
 
-# ---- Exception-introspection helpers ------------------------------------
-
-
 def _extract_error_code(exc: BaseException) -> str | None:
-    """Pull the AWS error code off a ``ClientError``-shaped exception.
-
-    Duck-typed so tests (and environments without botocore at import time)
-    stay decoupled from the concrete exception type.
-    """
     response = getattr(exc, "response", None)
     if not isinstance(response, dict):
         return None
@@ -944,7 +765,6 @@ def _extract_error_code(exc: BaseException) -> str | None:
 
 
 def _extract_cancellation_reasons(exc: BaseException) -> list:
-    """Pull CancellationReasons (best-effort) off a TransactionCanceledException."""
     response = getattr(exc, "response", None)
     if not isinstance(response, dict):
         return []

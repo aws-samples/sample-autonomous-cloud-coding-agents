@@ -26,20 +26,12 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Construct } from 'constructs';
 
-/**
- * Properties for the ``OperationalAlerts`` construct.
- */
 export interface OperationalAlertsProps {
   /**
    * Optional email address to subscribe to the alerts topic. When set,
    * an SNS email subscription is created and AWS sends a confirmation
    * link the operator must click before delivery starts. When omitted,
-   * the topic ships with no subscriptions — operators wire Slack /
-   * PagerDuty / email manually against {@link OperationalAlerts.topic}
-   * (exported as a stack output by the caller).
-   *
-   * Delivery target is configurable (stack context / Blueprint prop)
-   * rather than hard-coded per issue #629.
+   * the topic ships with no subscriptions.
    */
   readonly alertEmail?: string;
 
@@ -53,33 +45,12 @@ export interface OperationalAlertsProps {
 }
 
 /**
- * Reusable operational notification channel: a single SNS topic that
- * CloudWatch alarms publish to via ``addAlarmAction`` (issue #629,
- * follow-up to the DLQ-depth alarms shipped in #117 / §11.5).
- *
- * **Encryption.** The topic is encrypted with a customer-managed KMS
- * key rather than the AWS-managed ``alias/aws/sns`` key. This is
- * load-bearing, not decorative: CloudWatch cannot publish to a topic
- * encrypted with the AWS-managed key because that key's policy can't be
- * edited to grant the ``cloudwatch.amazonaws.com`` service principal
- * ``kms:GenerateDataKey*`` / ``kms:Decrypt``. The alarm→SNS action would
- * fail at delivery time. The CMK below grants CloudWatch those actions;
- * the topic policy separately grants publish access. Encryption at rest
- * is preserved. Setting a CMK also satisfies cdk-nag
- * ``AwsSolutions-SNS2`` (encryption at rest) with no suppression needed.
- *
- * The topic is intentionally stack-wide (not per-consumer) so every
- * DLQ-depth alarm shares one subscription surface — an operator
- * confirms one email / wires one Slack endpoint and receives all
- * operational alerts.
+ * One stack-wide SNS topic that CloudWatch alarms publish to, encrypted
+ * with a customer-managed KMS key.
  */
 export class OperationalAlerts extends Construct {
-  /** The shared alerts topic. Pass to ``addAlarmActions`` or attach
-   *  additional subscriptions (Slack / PagerDuty) downstream. */
   public readonly topic: sns.Topic;
 
-  /** Customer-managed key encrypting the topic. Exposed for tests and
-   *  for any downstream resource that must publish to the topic. */
   public readonly key: kms.Key;
 
   constructor(scope: Construct, id: string, props: OperationalAlertsProps = {}) {
@@ -87,30 +58,19 @@ export class OperationalAlerts extends Construct {
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
-    // Customer-managed key so the CloudWatch service principal can be
-    // granted decrypt/data-key rights (see class doc). We enable
-    // rotation explicitly (CDK defaults it off) — no reason not to for a
-    // low-throughput alerts key.
+    // CloudWatch cannot publish to a topic encrypted with the AWS-managed
+    // ``alias/aws/sns`` key: that key's policy cannot be edited to grant
+    // ``cloudwatch.amazonaws.com`` ``kms:GenerateDataKey*`` / ``kms:Decrypt``.
     this.key = new kms.Key(this, 'Key', {
       description: 'Encrypts the ABCA operational-alerts SNS topic (DLQ-depth alarms → operators)',
       enableKeyRotation: true,
       removalPolicy,
     });
-    // Tag the key so the CFN deploy role can scope its unavoidably
-    // account-wide KMS-lifecycle grant (PutKeyPolicy / ScheduleKeyDeletion
-    // — CMK ARNs are UUIDs and cannot be ARN-scoped) to keys THIS solution
-    // creates. See the ``KMSCustomerManagedKeys`` statement in
-    // ``cdk/src/bootstrap/policies/observability.ts``.
+    // CMK ARNs are UUIDs and cannot be ARN-scoped: the deploy role's
+    // KMS-lifecycle grant is conditioned on this tag.
     Tags.of(this.key).add('ABCA', 'operational-alerts');
 
-    // Allow CloudWatch Alarms to use the topic's encryption key.
-    // Without these grants alarm actions fail with KMS AccessDenied,
-    // visible in CloudWatch alarm history. The ``aws:SourceAccount`` condition closes
-    // the service-principal confused-deputy hole — a CloudWatch alarm in
-    // another account cannot induce this key's use — matching the
-    // account-pinning precedent in ``lambda-microvm-compute.ts``.
-    // ``Resource: '*'`` here scopes to THIS key (it is the key's own
-    // resource policy), not to every key in the account.
+    // In a KMS key policy ``Resource: '*'`` means this key only.
     this.key.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'AllowCloudWatchAlarmsUseOfKey',
       principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
@@ -123,12 +83,9 @@ export class OperationalAlerts extends Construct {
       displayName: 'ABCA operational alerts',
       masterKey: this.key,
     });
-    // Key and topic share one lifecycle (see ``removalPolicy`` prop).
     this.topic.applyRemovalPolicy(removalPolicy);
 
-    // SnsAction binds the topic ARN without granting publish permission.
-    // KMS access alone does not authorize SNS: allow alarms from this
-    // account and Region to publish to this topic (#925).
+    // ``SnsAction`` does not grant the alarm ``sns:Publish`` on the topic (#925).
     this.topic.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'AllowCloudWatchAlarmsPublish',
       principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
@@ -147,10 +104,6 @@ export class OperationalAlerts extends Construct {
       },
     }));
 
-    // Defense-in-depth: deny any non-TLS publish. cdk-nag's SNS3 rule is
-    // already satisfied by the CMK above (it short-circuits to compliant
-    // once a topic key is set), so this statement is not there to clear a
-    // nag finding — it independently guarantees callers publish over TLS.
     this.topic.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'DenyInsecureTransport',
       effect: iam.Effect.DENY,
@@ -161,9 +114,6 @@ export class OperationalAlerts extends Construct {
     }));
 
     if (props.alertEmail) {
-      // Fail at synth rather than ship a topic with a permanently
-      // unconfirmed junk subscription. A minimal shape check — full RFC
-      // 5322 validation is overkill for an operator alert address.
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(props.alertEmail)) {
         throw new Error(
           `OperationalAlerts: alertEmail "${props.alertEmail}" is not a valid email address`,
@@ -173,16 +123,7 @@ export class OperationalAlerts extends Construct {
     }
   }
 
-  /**
-   * Wire one or more alarms to publish to the alerts topic on state
-   * change. ``addAlarmAction`` lives on the ``AlarmBase`` class (parent
-   * of both ``Alarm`` and ``CompositeAlarm``), not on the ``IAlarm``
-   * interface — so the parameter is typed to the concrete
-   * {@link cloudwatch.Alarm} the DLQ-depth constructs (FanOut /
-   * ApprovalMetricsPublisher / screenshot) already expose. Those
-   * constructs stay decoupled from this one: the caller passes their
-   * alarms in.
-   */
+  /** Makes each alarm publish to the alerts topic when it goes into ALARM. */
   public addAlarmActions(...alarms: cloudwatch.Alarm[]): void {
     const action = new cloudwatchActions.SnsAction(this.topic);
     for (const alarm of alarms) {
@@ -191,21 +132,9 @@ export class OperationalAlerts extends Construct {
   }
 
   /**
-   * Let a principal publish its own notifications to this topic.
-   *
-   * `topic.grantPublish()` already covers the CMK for an encrypted topic in this
-   * CDK version — it emits `kms:Decrypt` + `kms:GenerateDataKey*` alongside
-   * `sns:Publish`, so no separate key grant is needed (adding one just duplicates
-   * the statement, which is not free when the role is near IAM's inline-policy size
-   * limit).
-   *
-   * What the caller DOES still owe is a cdk-nag AwsSolutions-IAM5 suppression for
-   * that CDK-generated `kms:GenerateDataKey*`. It must be applied BY PATH: once a
-   * role's inline policy overflows, CDK spills the excess into an `OverflowPolicy`
-   * created during synth — after `addResourceSuppressions(..., applyToChildren)`
-   * has already resolved the child tree — so a construct-scoped suppression
-   * silently misses it. `OVERFLOW_SUPPRESSIONS` in `cdk/src/stacks/agent.ts` is
-   * where that by-path pass lives; add the grantee's overflow-policy path there.
+   * Lets a principal publish to this topic, use of its key included. The
+   * caller must suppress cdk-nag AwsSolutions-IAM5 for the generated
+   * `kms:GenerateDataKey*`.
    */
   public grantPublish(grantee: iam.IGrantable): void {
     this.topic.grantPublish(grantee);

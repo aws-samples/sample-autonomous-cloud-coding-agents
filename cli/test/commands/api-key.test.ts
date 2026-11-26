@@ -134,7 +134,6 @@ describe('api-key command', () => {
     });
 
     test('follows next_token when a page holds fewer keys than asked for', async () => {
-      // The API reads a bounded number of rows per request: revoked ones can take all of them.
       mockList
         .mockResolvedValueOnce({ data: [], pagination: { next_token: 'T1', has_more: true } })
         .mockResolvedValueOnce({ data: [apiKey('k-0')], pagination: { next_token: null, has_more: false } });
@@ -159,7 +158,6 @@ describe('api-key command', () => {
 
       expect(mockList).toHaveBeenCalledTimes(2);
       expect(mockList).toHaveBeenLastCalledWith({ includeRevoked: undefined, limit: 2, nextToken: 'T1' });
-      // No key is dropped, so the last token resumes right after the last one printed.
       expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify({
         data: [apiKey('k-1'), apiKey('k-2'), apiKey('k-3')],
         pagination: { next_token: 'T2', has_more: true },

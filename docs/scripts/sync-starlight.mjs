@@ -3,16 +3,12 @@ import path from 'node:path';
 
 const docsBase = '/sample-autonomous-cloud-coding-agents';
 const repoUrl = 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
-/** Generated pages are written here. All paths in this file are relative to the repository root. */
 const contentDir = 'docs/src/content/docs';
-/** Pages under `contentDir` that are written by hand: never generated, never pruned. */
 const handAuthored = ['index.md'];
-/** Images are copied from `from` to `to`; Astro serves them at `${docsBase}${route}/`. */
 const assets = { from: 'docs/imgs', to: 'docs/public/imgs', route: '/imgs' };
 
 /**
- * The mirror plan: which source becomes which page under `contentDir`. Link rewriting reads
- * the same table, so a rewritten link can only point at a page that is generated.
+ * The mirror plan: which source becomes which page under `contentDir`.
  *   split  one page per `##` section; the text before the first `##` becomes Introduction.md
  *   file   one source file, one page
  *   dir    every *.md of a directory, under a normalized file name
@@ -23,25 +19,18 @@ const PLAN = [
     split: 'docs/guides/USER_GUIDE.md',
     to: 'using',
     introTitle: 'Using the platform',
-    // These sections belong under the Customizing sidebar group.
     moved: { 'Repository-onboarding.md': 'customizing', 'Per-repo-overrides.md': 'customizing' },
   },
-  // MDX for Starlight Tabs.
   { file: 'docs/guides/QUICK_START.mdx', to: 'getting-started/Quick-start.mdx' },
   { file: 'docs/guides/DEPLOYMENT_GUIDE.md', to: 'getting-started/Deployment-guide.md' },
-  // Operator FinOps setup.
   { file: 'docs/guides/COST_ATTRIBUTION.md', to: 'getting-started/Cost-attribution.md' },
   { file: 'docs/guides/PROMPT_GUIDE.md', to: 'customizing/Prompt-engineering.md' },
   { file: 'docs/guides/SLACK_SETUP_GUIDE.md', to: 'using/Slack-setup-guide.md' },
   { file: 'docs/guides/LINEAR_SETUP_GUIDE.md', to: 'using/Linear-setup-guide.md' },
   { file: 'docs/guides/JIRA_SETUP_GUIDE.md', to: 'using/Jira-setup-guide.md' },
   { file: 'docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md', to: 'using/Deploy-preview-screenshots-guide.md' },
-  // Authoring reference for blueprint authors.
   { file: 'docs/guides/CEDAR_POLICY_GUIDE.md', to: 'customizing/Cedar-policies.md' },
   { file: 'CONTRIBUTING.md', to: 'developer-guide/Contributing.md' },
-  // Source lives at docs/design/ but renders at /architecture/ on the site. The source
-  // directory keeps the name "design" because that is what CLAUDE.md and AGENTS.md reference
-  // for contributors; the rename happens only at the site level.
   { dir: 'docs/design', to: 'architecture' },
   { dir: 'docs/decisions', to: 'decisions' },
 ];
@@ -64,7 +53,6 @@ function routeOf(target) {
   return slug === 'index' ? '/' : `/${slug}`;
 }
 
-/** Marks the lines that belong to a fenced code block (the fence lines included). */
 function fencedLines(lines) {
   let open;
   return lines.map((line) => {
@@ -80,7 +68,6 @@ function fencedLines(lines) {
   });
 }
 
-/** ATX headings outside code fences, in document order. */
 function headingsOf(text) {
   const lines = text.split('\n');
   const fenced = fencedLines(lines);
@@ -90,11 +77,7 @@ function headingsOf(text) {
   });
 }
 
-/**
- * Heading ids as GitHub and Astro compute them (the github-slugger algorithm): lowercase,
- * drop punctuation, spaces become hyphens, repeats get -1, -2, ... The returned function
- * remembers the ids it handed out, so use one per document.
- */
+/** Heading ids as GitHub and Astro compute them (the github-slugger algorithm). */
 function createSlugger() {
   const seen = new Map();
   return (heading) => {
@@ -114,9 +97,8 @@ function createSlugger() {
 }
 
 /**
- * Where links to each source file go: its `route`, and for every heading the page and id
- * it has on the site. GitHub numbers repeated headings across the whole source file; the
- * site numbers them per page and has no id for the heading that became the page title.
+ * GitHub numbers repeated headings across the whole source file; the site numbers them per
+ * page and has no id for the heading that became the page title.
  */
 function indexSources(pages) {
   const docs = new Map(
@@ -145,14 +127,7 @@ function indexSources(pages) {
 
 const fragment = (id) => (id ? `#${id}` : '');
 
-/**
- * The URL for a relative link written in `page.source`, or undefined to leave it as written.
- * A published file becomes its site route (under `docsBase`: Starlight does not prefix links
- * in Markdown bodies), an image its public URL, any other file of the repository a GitHub URL.
- * `shown` marks the target of an image or of an HTML `src`: the page displays that file
- * instead of linking to it, and the site serves no file of the repository but the images of
- * `assets.from`.
- */
+/** Site routes go under `docsBase`: Starlight does not prefix links in Markdown bodies. */
 function resolveLink(target, page, docs, repoRoot, shown) {
   if (target.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(target)) {
     return undefined;
@@ -164,17 +139,14 @@ function resolveLink(target, page, docs, repoRoot, shown) {
     source.startsWith(`${assets.from}/`) &&
     fs.statSync(path.join(repoRoot, source), { throwIfNoEntry: false })?.isFile();
   if (shown && !servable) {
-    // A GitHub URL in its place would be an HTML page: a broken image that no check reports.
     throw new Error(
       `sync-starlight: ${page.source} shows the image ${target}, which is not a file in ${assets.from}/, the only directory the site serves images from. Correct the path, or move the image there.`,
     );
   }
-  // A directory stands for its README when that is a published page.
   const doc = docs.get(source) ?? docs.get(`${source}/README.md`);
   if (doc) {
     const hit = anchor ? doc.anchors.get(anchor.toLowerCase()) : undefined;
     if (file === '') {
-      // An anchor within the same source file: only a split guide moves it to another page.
       if (!hit) {
         return undefined;
       }
@@ -182,33 +154,22 @@ function resolveLink(target, page, docs, repoRoot, shown) {
         ? `#${hit.id || '_top'}`
         : `${docsBase}${hit.route}${fragment(hit.id)}`;
     }
-    // An anchor the source does not have is passed through: the site link check reports it.
     const { route, id } = hit ?? { route: doc.route, id: anchor };
     return `${docsBase}${route}${fragment(id)}`;
   }
   if (source.startsWith('..') || !fs.existsSync(path.join(repoRoot, source))) {
-    // Dangling: left as written, so that the link checks report it.
     return undefined;
   }
   if (source.startsWith(`${assets.from}/`)) {
     return `${docsBase}${assets.route}${source.slice(assets.from.length)}`;
   }
-  // The file exists in the repository but is not published on the site: link to GitHub.
   const kind = fs.statSync(path.join(repoRoot, source)).isDirectory() ? 'tree' : 'blob';
   return `${repoUrl}/${kind}/main/${source}${fragment(anchor)}`;
 }
 
-/**
- * Rewrites the targets of links and images outside code: Markdown `[label](target "title")`,
- * and the `src` and `href` attributes of inline HTML, which is how a source sets the width
- * of an image. `resolve` gets the target and whether the page shows it (an image, a `src`)
- * instead of linking to it, and returns the new target or undefined.
- */
 function rewriteLinks(text, resolve) {
   const lines = text.split('\n');
   const fenced = fencedLines(lines);
-  // First alternative: an inline code span, which is skipped. Second: [label](target "title").
-  // Third: src="target" or href="target", in either kind of quotes.
   const codeOrLink =
     /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|(!?\[[^[\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))|(\b(?:src|href)\s*=\s*(["']))([^"'\s]+)(\6)/gi;
   const rewrite = (run) =>
@@ -223,8 +184,6 @@ function rewriteLinks(text, resolve) {
       const rewritten = resolve(value, /^src/i.test(attribute));
       return rewritten ? `${attribute}${rewritten}${quote}` : match;
     });
-  // The lines between two code fences are searched as one text, not line by line: a label
-  // may wrap over lines. It cannot contain a bracket, so it starts at the nearest `[`.
   const runs = [];
   let start = 0;
   while (start < lines.length) {
@@ -250,7 +209,6 @@ function takeH1(text) {
   }
   const lines = text.split('\n');
   lines.splice(h1.index, 1);
-  // The blank line after the heading goes with it, unless it separates two blocks of text.
   if (lines[h1.index] === '' && (h1.index === 0 || lines[h1.index - 1] === '')) {
     lines.splice(h1.index, 1);
   }
@@ -262,7 +220,6 @@ function writeFile(targetPath, content) {
   try {
     fs.writeFileSync(targetPath, content, 'utf8');
   } catch (error) {
-    // Some generated files can end up read-only in local environments.
     if (error && error.code === 'EACCES' && fs.existsSync(targetPath)) {
       fs.chmodSync(targetPath, 0o644);
       fs.writeFileSync(targetPath, content, 'utf8');
@@ -272,7 +229,6 @@ function writeFile(targetPath, content) {
   }
 }
 
-/** A source named in PLAN that is gone must fail the sync: skipping it would unpublish a page silently. */
 function readSource(repoRoot, source) {
   const sourcePath = path.join(repoRoot, source);
   if (!fs.existsSync(sourcePath)) {
@@ -283,10 +239,8 @@ function readSource(repoRoot, source) {
   return fs.readFileSync(sourcePath, 'utf8');
 }
 
-/** One page for a whole source file. The title is the source's H1 (fallback: the file name). */
 function filePage(repoRoot, source, target) {
   const raw = readSource(repoRoot, source);
-  // A source that brings its own frontmatter (MDX) keeps it verbatim.
   const closing = raw.startsWith('---') ? raw.indexOf('\n---', 3) : -1;
   const frontmatter = closing === -1 ? undefined : raw.slice(0, closing + 4);
   const { h1, body } = takeH1(frontmatter ? raw.slice(frontmatter.length) : raw);
@@ -295,15 +249,11 @@ function filePage(repoRoot, source, target) {
   return [{ source, target, title, heading: h1, frontmatter, body }];
 }
 
-/** One page per `##` section of a guide. */
 function splitPages(repoRoot, { split: source, to, introTitle, moved = {} }) {
   const lines = readSource(repoRoot, source).split('\n');
   const fenced = fencedLines(lines);
-  // A `## ` line inside a code fence is code, not the start of a section.
   const starts = lines.flatMap((line, index) => (!fenced[index] && /^##\s+/.test(line) ? [index] : []));
   const intro = takeH1(lines.slice(0, starts[0] ?? lines.length).join('\n'));
-  // Every section is published. Only an introduction that is nothing but the guide's H1 is
-  // not written (`skip`): it would be an empty page, and links to it go to the first section.
   const skip = intro.body.trim() === '';
   const pages = [{ file: 'Introduction.md', title: introTitle, heading: intro.h1, body: intro.body, skip }];
   starts.forEach((start, n) => {
@@ -341,7 +291,6 @@ function collectPages(repoRoot, plan) {
     }
     return files.flatMap((file) => filePage(repoRoot, `${entry.dir}/${file}`, `${entry.to}/${normalizeFileStem(file)}.md`));
   });
-  // Two pages with one target would overwrite each other without a trace (and routes ignore case).
   const owner = new Map(handAuthored.map((target) => [target.toLowerCase(), 'a hand-authored page']));
   for (const page of pages.filter((candidate) => !candidate.skip)) {
     const key = page.target.toLowerCase();
@@ -355,9 +304,6 @@ function collectPages(repoRoot, plan) {
   return pages;
 }
 
-// Recursively copy a source asset directory into the site's public/ tree so
-// every committed image/diagram is served at its rewritten absolute URL.
-// Filenames are preserved verbatim (markdown references them as-is).
 function copyAssetDir(sourceDir, targetDir) {
   if (!fs.existsSync(sourceDir)) {
     return;
@@ -374,10 +320,6 @@ function copyAssetDir(sourceDir, targetDir) {
   }
 }
 
-/**
- * Every file below `dir`, as POSIX paths relative to it. Only real directories are entered:
- * a link is listed under its own name, whatever it points at.
- */
 function listFiles(dir) {
   if (!fs.existsSync(dir)) {
     return [];
@@ -389,14 +331,6 @@ function listFiles(dir) {
     );
 }
 
-/**
- * Deletes the files of a generated tree that this run did not produce, so that a deleted or
- * renamed source (or `##` heading) takes its page off the site. In CI the mutation check
- * then fails on the stale file that is still committed.
- * It deletes inside the repository only: a link in the tree is a file like any other and is
- * never entered, and a tree that is reached through a link (the tree itself, or a directory
- * above it) fails the sync.
- */
 function prune(repoRoot, tree, keep) {
   const dir = path.join(repoRoot, tree);
   const real = fs.existsSync(dir) ? fs.realpathSync(dir) : undefined;
@@ -417,11 +351,8 @@ function prune(repoRoot, tree, keep) {
 
 export function sync(repoRoot, plan = PLAN) {
   const contentRoot = path.join(repoRoot, contentDir);
-  // Every source is read before the first page is written: a failure leaves the mirrors as they were.
   const pages = collectPages(repoRoot, plan);
   const docs = indexSources(pages);
-  // Likewise every page is complete before the first one is written: an image that cannot be
-  // published fails the sync here.
   const files = pages
     .filter((candidate) => !candidate.skip)
     .map((page) => {
@@ -437,15 +368,9 @@ export function sync(repoRoot, plan = PLAN) {
   }
   prune(repoRoot, contentDir, written);
 
-  // --- Static assets: copy source image dir into the site's public/ ---
-  // Guides reference images as `../imgs/foo.png`; resolveLink() turns
-  // those into absolute `/<base>/imgs/foo.png` URLs, which Astro serves from
-  // public/. Copy the source dir here so every committed image is published —
-  // otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
   copyAssetDir(path.join(repoRoot, assets.from), path.join(repoRoot, assets.to));
   prune(repoRoot, assets.to, new Set(listFiles(path.join(repoRoot, assets.from))));
 
-  // Guardrail: ensure target tree exists when running in a clean checkout.
   fs.mkdirSync(contentRoot, { recursive: true });
 }
 

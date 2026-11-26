@@ -47,18 +47,6 @@ import {
   MAX_BUDGET_USD_MIN,
 } from '../src/types';
 
-/**
- * The CLI hard-codes these bounds as literals in ``src/types.ts`` rather than
- * importing ``contracts/constants.json`` directly: the contract file lives
- * outside the package's published ``files: ["lib"]`` whitelist, so a compiled
- * ``require('../../contracts/constants.json')`` from ``lib/`` would not be
- * packaged and would fail at runtime when the CLI is installed standalone.
- *
- * This test converts the resulting silent-drift risk into a CI failure: if the
- * single source of truth (the CDK side reads the same file via
- * ``resolveJsonModule``) changes, the CLI literals must be updated to match or
- * this test goes red.
- */
 describe('CLI constants parity with contracts/constants.json', () => {
   const contracts = JSON.parse(
     fs.readFileSync(
@@ -91,7 +79,6 @@ describe('CLI constants parity with contracts/constants.json', () => {
   });
 
   test('submit --help states the contract default for approval_timeout_s', () => {
-    // The agent applies the default; the CLI only prints it, as a literal.
     const option = makeSubmitCommand().options.find((o) => o.long === '--approval-timeout');
     expect(option?.description).toContain(
       `platform default of ${contracts.approval_timeout_s.default}s`,
@@ -131,13 +118,8 @@ describe('CLI constants parity with contracts/constants.json', () => {
 });
 
 describe('linear_vault cache-key parity', () => {
-  // AgentCore keys a cached grant by the WHOLE token request, customParameters included,
-  // so consent time and every resolve must send an identical set. Four copies exist —
-  // this file's, the Lambda resolver's, the CLI vault helper's and the agent's — and a
-  // one-token divergence makes every resolve a cache miss, which since #812 is reported
-  // as consent-required and can latch a healthy workspace `revoked`. The agent side is
-  // enforced differently: `check:constants-sync` forbids it re-declaring these literals
-  // at all.
+  // AgentCore keys a cached grant by the whole token request, customParameters included: consent and
+  // every resolve must send an identical set, or the resolve is a cache miss.
   const contract = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', '..', 'contracts', 'constants.json'), 'utf8'),
   ).linear_vault as { scopes: string[]; custom_parameters: Record<string, string> };

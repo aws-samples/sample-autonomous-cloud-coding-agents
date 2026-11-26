@@ -1,21 +1,3 @@
-"""Minimal SDK smoke test — run inside the deployed container.
-
-Tests the actual claude-agent-sdk → Claude Code CLI → Bedrock pipeline
-with a trivial prompt, outside the web server / background thread context.
-If this yields 0 messages, the issue is SDK/CLI/Bedrock — not threading.
-
-Usage (from repo root, with agent venv active):
-
-    python agent/scripts/diagnostics/test_sdk_smoke.py
-
-Requires the same env vars as the agent:
-    CLAUDE_CODE_USE_BEDROCK=1
-    AWS_REGION=<region>
-    ANTHROPIC_MODEL=<model>
-
-Or set them manually before running.
-"""
-
 import asyncio
 import os
 import sys
@@ -23,13 +5,8 @@ import time
 
 
 async def smoke_test():
-    # Ensure required env vars
     os.environ.setdefault("CLAUDE_CODE_USE_BEDROCK", "1")
     region = os.environ.get("AWS_REGION", "")
-    # No hardcoded fallback: this file drifted to a model and geography the platform
-    # no longer defaults to, so the diagnostic silently tested something other than
-    # what runs. Require the caller to state it — a diagnostic that quietly probes the
-    # wrong model is worse than one that refuses.
     model = os.environ.get("ANTHROPIC_MODEL", "")
 
     if not region:
@@ -97,7 +74,6 @@ async def smoke_test():
                 print(f"  [{elapsed:.1f}s] SystemMessage: {message.subtype}")
             elif isinstance(message, AssistantMessage):
                 counts["assistant"] += 1
-                # Print first text block
                 for block in message.content:
                     if hasattr(block, "text"):
                         text = block.text if isinstance(block.text, str) else str(block.text)
@@ -126,7 +102,6 @@ async def smoke_test():
 
 
 def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
-    """Print the verdict on one run. True for PASS only."""
     if errors:
         print(f"\nErrors: {errors}")
     answered = counts["assistant"] > 0 and counts["result"] > 0
@@ -140,14 +115,12 @@ def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
         # When Bedrock refuses the call (no access to the model, a profile the
         # credentials may not invoke) the CLI does not raise. It yields the error as an
         # AssistantMessage and ends with a ResultMessage of subtype "success" that is
-        # marked is_error. Counted as messages, that run printed PASS; src/runner.py
-        # fails a task on the same flag.
+        # marked is_error.
         print("\nFAIL — The run ended in an error (ResultMessage.is_error):")
         print(f"       {failure}")
         print("       Check Bedrock model access for this model in this Region, and")
         print("       that these credentials may invoke it.")
     elif answered:
-        # Only an exception leads here: the run delivered an answer and a clean result, then raised.
         print("\nFAIL — The run raised an exception after it delivered its result")
         print("       (see Errors above). The model answered, but the session did not")
         print("       end cleanly: check the CLI stderr output above.")
@@ -169,10 +142,6 @@ def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
         print("\nFAIL — Zero messages at all. CLI subprocess may not start.")
         print("       Check: is claude-code installed? Run: claude --version")
     else:
-        # Reachable: assistant>0 but result==0 (the model spoke, the run never
-        # terminated cleanly). Without this branch the script printed NO verdict at
-        # all and still exited 1 — a diagnostic that fails silently is the thing this
-        # file exists to rule out.
         print("\nINDETERMINATE — Got AssistantMessages but no ResultMessage.")
         print("       The model responded, so the SDK/CLI/Bedrock path works, but the")
         print("       run did not terminate normally. Treat as a FAILURE of this")
@@ -180,9 +149,6 @@ def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
         print("       above for a mid-stream error, and whether the run was killed")
         print("       (timeout, OOM, cancelled) before it could emit its result.")
 
-    # Exit code must match the verdict. It printed FAIL and exited 0, so any caller
-    # that checked the status — CI, a script, a person using `&&` — read a failure as
-    # success. A diagnostic that lies in its exit code is worse than no diagnostic.
     return ok
 
 

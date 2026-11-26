@@ -17,14 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Unit tests for the AgentCore Identity vault token resolver (#809). The vault
- * path must: mint a USER-BOUND workload token then exchange it (happy path);
- * bind the per-workspace user id; and degrade to null (never throw) on a
- * consent-required response OR any API error, so the caller falls back to the
- * Secrets-Manager token.
- */
-
 const mockSend = jest.fn();
 
 jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
@@ -51,8 +43,6 @@ beforeEach(() => {
 
 describe('legacyWorkspaceUserId', () => {
   test('keeps the pre-vault_user_id form, which existing grants are bound under', () => {
-    // Pinned, not merely exercised: workspaces onboarded before `vault_user_id` was
-    // recorded have grants under this exact string, so changing it orphans them.
     expect(legacyWorkspaceUserId('org-abc')).toBe('linear-workspace-org-abc');
   });
 });
@@ -78,10 +68,6 @@ describe('resolveLinearTokenViaVault', () => {
   const input = { linearWorkspaceId: 'org-abc', providerName: 'bgagent-linear-oauth-acme' };
 
   test('uses the RECORDED vault user id when the row has one', async () => {
-    // The grant is bound at consent time to a slug-derived subject, because the
-    // organization UUID is not knowable until a token exists. Deriving the subject
-    // here instead of reading it would look up a grant that was never created, and
-    // every mint would fail "consent required" on a correctly onboarded workspace.
     mockSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
@@ -92,8 +78,6 @@ describe('resolveLinearTokenViaVault', () => {
   });
 
   test('falls back to the DERIVED id for workspaces onboarded before it was recorded', async () => {
-    // Their grant really is under linear-workspace-<orgId>; preferring the recorded
-    // id must not orphan them.
     mockSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
@@ -115,8 +99,8 @@ describe('resolveLinearTokenViaVault', () => {
 
   test('happy path: mints user-bound workload token, exchanges it, returns the access token', async () => {
     mockSend
-      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' }) // GetWorkloadAccessTokenForUserId
-      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' }); // GetResourceOauth2Token
+      .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
+      .mockResolvedValueOnce({ accessToken: 'lin_oauth_vault' });
 
     const result = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
     expect(result).toEqual({ kind: 'token', accessToken: 'lin_oauth_vault' });
@@ -132,8 +116,8 @@ describe('resolveLinearTokenViaVault', () => {
       resourceCredentialProviderName: 'bgagent-linear-oauth-acme',
       oauth2Flow: 'USER_FEDERATION',
       scopes: ['read', 'write', 'app:assignable', 'app:mentionable'],
-      // Part of the vault's cache key: omitting these made every resolve a cache
-      // miss ("needs consent") even with a valid cached grant — live-proven.
+      // Observed: customParameters are part of the AgentCore vault's cache key; without them every
+      // resolve is a cache miss ("needs consent") even with a valid cached grant.
       customParameters: { actor: 'app', prompt: 'consent' },
     });
   });
@@ -142,8 +126,6 @@ describe('resolveLinearTokenViaVault', () => {
     mockSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({ authorizationUrl: 'https://bedrock-agentcore.../authorize?request_uri=urn:...', sessionStatus: undefined });
-    // The distinction matters: consent-required means the grant is DEAD and an
-    // operator must act (#812), where an unavailable result is transient.
     const result = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
     expect(result).toEqual({
       kind: 'consent-required',
@@ -152,12 +134,6 @@ describe('resolveLinearTokenViaVault', () => {
   });
 
   test('a token-less response with NO authorization URL is transient, not a revocation', async () => {
-    // The verdict that latches a workspace `revoked` must rest on evidence. Any
-    // token-less response used to fall through to consent-required, so an empty
-    // body, a truncated response or an unrecognised sessionStatus all reported
-    // "this workspace is dead" — and once #812 granted the registry write, that
-    // verdict stopped being advisory and took the workspace offline until a human
-    // re-consented.
     mockSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({});
@@ -166,8 +142,6 @@ describe('resolveLinearTokenViaVault', () => {
   });
 
   test('an empty-string authorization URL is also transient, not a revocation', async () => {
-    // Guards the truthiness check specifically: `authorizationUrl in resp` or a
-    // `!== undefined` test would accept '' and reinstate the evidence-free verdict.
     mockSend
       .mockResolvedValueOnce({ workloadAccessToken: 'wat-xyz' })
       .mockResolvedValueOnce({ authorizationUrl: '', sessionStatus: 'FAILED' });
@@ -176,16 +150,13 @@ describe('resolveLinearTokenViaVault', () => {
   });
 
   test('reports unavailable (transient) when no workload token is minted', async () => {
-    mockSend.mockResolvedValueOnce({}); // no workloadAccessToken
+    mockSend.mockResolvedValueOnce({});
     const result = await resolveLinearTokenViaVault(input, 'abca_linear_oauth');
     expect(result).toEqual({ kind: 'unavailable', reason: 'no_workload_access_token' });
-    // Did not attempt the exchange.
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
   test('never throws — an API error degrades to unavailable, NOT consent-required', async () => {
-    // A throttle or permission error must not be mistaken for a dead grant, or
-    // #812 would page an operator for a transient blip.
     mockSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
     await expect(resolveLinearTokenViaVault(input, 'abca_linear_oauth'))
       .resolves.toEqual({ kind: 'unavailable', reason: 'Error' });

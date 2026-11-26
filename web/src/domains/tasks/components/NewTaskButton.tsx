@@ -29,7 +29,6 @@ export interface NewTaskPrefill {
   readonly trace?: boolean;
 }
 
-/** `/tasks/new` with the form pre-filled, e.g. from a repository page or "Try again". */
 function newTaskHref(prefill: NewTaskPrefill = {}): string {
   const query = new URLSearchParams();
   if (prefill.repo) query.set('repo', prefill.repo);

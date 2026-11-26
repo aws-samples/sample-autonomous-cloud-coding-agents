@@ -222,10 +222,6 @@ async function claimAndEmitAlert(
     : state.exceededAlerted;
   if (alreadyAlerted) return;
 
-  // Emit before claiming. If the process fails between these operations, the
-  // stream retry can emit again instead of permanently suppressing the alert.
-  // Concurrent retries may duplicate the metric, which the threshold alarm
-  // tolerates; the conditional claim stops later deliveries.
   emitThresholdMetric(threshold, state);
   const suffix = String(threshold);
   try {
@@ -255,8 +251,6 @@ export async function rollupTaskCost(record: DynamoDBRecord): Promise<boolean> {
   if (!evt) return false;
   const wrote = await writeRollup(evt);
 
-  // Do not return early when the task marker already exists. A prior delivery
-  // may have committed spend and then failed before completing alert delivery.
   const scopeKeys = [
     userBudgetScopeKey(evt.userId),
     ...evt.teamIds.map(teamBudgetScopeKey),

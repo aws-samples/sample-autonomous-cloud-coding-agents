@@ -2,13 +2,13 @@
 
 This Forge app is the outbound Jira identity for ABCA. Its web trigger verifies
 an HMAC-signed request, allows only identity, comment, and transition operations,
-then calls Jira with `api.asApp().requestJira(...)`. The identity response also
-returns Jira's server URL so setup can bind the installation to the intended
-tenant.
+and then calls Jira with `api.asApp().requestJira(...)`. The identity response
+also returns Jira's server URL so that setup can bind the installation to the
+intended tenant.
 
 ## Deploy
 
-Install the [Forge CLI](https://developer.atlassian.com/platform/forge/getting-started/#install-the-forge-cli), then create a [Forge CLI scoped token](https://go.atlassian.com/forge-cli-api-token). Run login in an interactive terminal; a Jira OAuth token or Atlassian password is not a Forge CLI credential.
+Install the [Forge CLI](https://developer.atlassian.com/platform/forge/getting-started/#install-the-forge-cli), then create a [Forge CLI scoped token](https://go.atlassian.com/forge-cli-api-token). Run the login in an interactive terminal. A Jira OAuth token or an Atlassian password is not a Forge CLI credential.
 
 ```bash
 npm ci
@@ -52,16 +52,16 @@ saves the configuration only after Jira reports `accountType=app` for the
 expected tenant.
 
 The web trigger has no Forge-managed caller authentication. ABCA signs
-`timestamp + "." + rawBody` with HMAC-SHA256; the handler enforces a five-minute
+`timestamp + "." + rawBody` with HMAC-SHA256. The handler enforces a five-minute
 clock window and allows only identity, comment, read-transition, and transition
 operations. Jira calls use `api.asApp()`, so their actor is the installed
-`bgagent` app rather than the 3LO setup user.
+`bgagent` app, not the 3LO setup user.
 
-The handler rejects bodies larger than 256 KiB before computing the HMAC. The
+The handler rejects bodies larger than 256 KiB before it computes the HMAC. The
 timestamp freshness check has no nonce store, so an intercepted signed request
-could be replayed within the five-minute window; TLS, the installation-specific
-URL, and the narrow operation allowlist bound that residual risk. The signed
-`cloud_id` is request metadata, not the tenant trust boundary: the Forge
+could be replayed within the five-minute window. TLS, the installation-specific
+URL, and the narrow operation allowlist limit that residual risk. The signed
+`cloud_id` is request metadata, not the tenant trust boundary. The Forge
 installation URL selects the Jira site, and `bgagent jira app-setup` proves that
 site by comparing the app identity probe with the registered tenant before it
 saves the URL.
@@ -84,10 +84,10 @@ npm test
 
 The script names its test file and sets coverage floors for `src/proxy.js`
 (lines 85 %, branches 76 %, functions 81 %). Left to find tests on its own,
-`node --test` exits 0 when it finds none; with the file named and the floors
+`node --test` exits 0 when it finds none. With the file named and the floors
 set, a missing or emptied test file fails. A new test file does not run until
 it is added to the `test` script in `package.json`. That script is pinned in
-`contracts/coverage-thresholds.json`: change both.
+`contracts/coverage-thresholds.json`, so change both.
 
 Node measures only the modules that a run loads, and the script loads
 `src/proxy.js` alone (`--import=./src/proxy.js`). `src/index.js`, which hands

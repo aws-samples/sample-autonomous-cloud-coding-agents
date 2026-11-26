@@ -39,17 +39,6 @@ import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { makeDocClient } from './shared/ua';
 import { isValidRepo } from './shared/validation';
 
-/**
- * Console-only Linear routes (operator console stack):
- *
- *  - GET  /repos/{repo_id}/linear-issues        open issues of the Linear projects mapped to a repo
- *  - POST /linear-issues/{issue_id}/start       hand an issue to the agent by adding its trigger label
- *
- * "Start" adds the label rather than creating a task directly, so everything downstream is
- * the normal Linear flow: the webhook creates the task and the agent comments on the issue.
- * Tokens are resolved server-side and never returned. Titles and status only, no bodies.
- */
-
 const ddb = makeDocClient();
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME;
 const REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
@@ -79,8 +68,6 @@ export interface ConsoleLinearIssueWithAgent extends ConsoleLinearIssue {
 const triggerLabel = (m: Mapping) => (m.label_filter || DEFAULT_LABEL).trim();
 
 async function mappingsForRepo(repo: string): Promise<Mapping[]> {
-  // The mapping table is a handful of rows (one per onboarded project), so a filtered
-  // scan is cheaper than an index that every write would have to maintain.
   const items: Mapping[] = [];
   let startKey: Record<string, unknown> | undefined;
   do {
@@ -99,11 +86,6 @@ async function mappingsForRepo(repo: string): Promise<Mapping[]> {
 
 async function agentState(issue: ConsoleLinearIssue, label: string, userId: string): Promise<AgentState> {
   if (!issue.labels.some((l) => l.toLowerCase() === label.toLowerCase())) return { kind: 'available' };
-  // Labeled, without a task of its own. That is "starting" only while the label's webhook
-  // can still be on its way: the issue was last updated within the life of a start claim.
-  // An older one is an epic, whose tasks belong to its sub-issues, or a start that was
-  // refused on the issue. It is reported like work the caller cannot open, so the console
-  // neither shows a spinner nor polls for a task.
   const noTask: AgentState = Date.now() - Date.parse(issue.updated_at) < START_CLAIM_TTL_SECONDS * 1000
     ? { kind: 'starting' }
     : { kind: 'task', task_id: null, status: null, pr_url: null, mine: false };
@@ -111,7 +93,6 @@ async function agentState(issue: ConsoleLinearIssue, label: string, userId: stri
   const found = await lookupTaskByLinearIssue(ddb, TASK_TABLE, issue.id);
   if (found.kind !== 'found') return noTask;
   const mine = found.task.user_id === userId;
-  // Someone else's task: say it is being worked on, without linking into their task.
   return {
     kind: 'task',
     task_id: mine ? found.task.task_id : null,
@@ -127,14 +108,6 @@ async function tokenFor(workspaceId: string | undefined): Promise<string | null>
   return resolved?.accessToken ?? null;
 }
 
-/**
- * What to do about a mapping {@link tokenFor} has no token for. A row written before
- * `onboard-project` recorded the owning workspace still triggers tasks from the webhook,
- * but leaves the console no workspace to ask. `setup` does not touch the mapping;
- * `onboard-project` rewrites the whole row, so the command names its repository and label.
- * The label is free text: it is printed in POSIX single quotes, so that a pasted command
- * writes the same label whatever characters it holds.
- */
 function workspaceProblem(m: Mapping): string {
   if (m.linear_workspace_id) return 'ABCA cannot reach this Linear workspace. Re-run `bgagent linear setup` to re-authorize it.';
   return 'This project was connected before ABCA recorded which Linear workspace it belongs to. Re-run '
@@ -158,8 +131,6 @@ async function listIssues(event: APIGatewayProxyEvent, userId: string, requestId
     try {
       const issues = await listOpenProjectIssues(token, mapping.linear_project_id);
       const withAgent: ConsoleLinearIssueWithAgent[] = [];
-      // Sequential on purpose: only issues already carrying the label need a task lookup,
-      // which is usually a handful, and one Query at a time keeps DynamoDB use predictable.
       for (const i of issues) withAgent.push({ ...i, agent: await agentState(i, label, userId) });
       projects.push({ ...base, issues: withAgent });
     } catch (err) {
@@ -193,8 +164,6 @@ async function startIssue(event: APIGatewayProxyEvent, userId: string, requestId
   const label = triggerLabel(mapping);
   try {
     const issue = await getIssueForStart(token, issueId);
-    // The issue must really belong to the mapped project: the body names the project,
-    // so this is what stops an issue from another project being steered at this repo.
     if (!issue || issue.projectId !== projectId) {
       return errorResponse(404, ErrorCode.VALIDATION_ERROR, 'That issue is not in this Linear project.', requestId);
     }
@@ -205,7 +174,7 @@ async function startIssue(event: APIGatewayProxyEvent, userId: string, requestId
     if (!labelId) {
       return errorResponse(422, ErrorCode.VALIDATION_ERROR, `Linear has no "${label}" label yet. Create it in Linear (Settings → Labels), then try again.`, requestId);
     }
-    // Claim first: the label's webhook can arrive before addIssueLabel even returns.
+    // Linear's webhook for the label can arrive before addIssueLabel returns.
     const claimed = await writeStartClaim(ddb, DEDUP_TABLE!, { issueId: issue.id, workspaceId: mapping.linear_workspace_id, platformUserId: userId });
     if (!claimed) {
       return errorResponse(409, ErrorCode.DUPLICATE_TASK, `Someone else is starting ${issue.identifier} right now.`, requestId);
@@ -213,7 +182,6 @@ async function startIssue(event: APIGatewayProxyEvent, userId: string, requestId
     try {
       await addIssueLabel(token, issue.id, labelId);
     } catch (err) {
-      // Only our own claim: someone else's may have replaced it once ours expired.
       await releaseStartClaim(ddb, DEDUP_TABLE!, issue.id, userId).catch(() => false);
       throw err;
     }

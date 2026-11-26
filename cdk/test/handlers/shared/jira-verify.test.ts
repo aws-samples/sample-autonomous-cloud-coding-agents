@@ -31,9 +31,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: jest.fn() })) },
 }));
 
-// The per-tenant verification path delegates the registry-row and OAuth-secret
-// lookups to the resolver's *strict* helpers (which rethrow on infra error).
-// Mock them so each verifyJiraRequestForTenant branch is driven directly.
 const getRegistryRowStrict = jest.fn();
 const getOauthSecretStrict = jest.fn();
 jest.mock('../../../src/handlers/shared/jira-oauth-resolver', () => ({
@@ -59,7 +56,6 @@ const CLOUD_ID = '11111111-2222-3333-4444-555555555555';
 const TENANT_SECRET = 'per-tenant-signing-secret';
 const TENANT_OAUTH_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-jira-oauth-tenant';
 
-/** Produce the `sha256=<hex>` header Atlassian sends, signed with `key`. */
 function signedHeader(body: string, key = SECRET_VALUE): string {
   return `sha256=${crypto.createHmac('sha256', key).update(body).digest('hex')}`;
 }
@@ -93,14 +89,9 @@ describe('verifyJiraSignature', () => {
   });
 
   test('does NOT strip a non-sha256 prefix, so a sha1= header fails', () => {
-    // The code only strips `sha256=`; a `sha1=`-prefixed value is compared
-    // literally and must not validate.
     expect(verifyJiraSignature(SECRET_VALUE, `sha1=${rawHex(body, SECRET_VALUE)}`, body)).toBe(false);
   });
 
-  // Empty/whitespace-secret fail-open guard: HMAC('', body) is computable by
-  // anyone, so an empty signing secret must never produce an accepted
-  // signature even when the attacker signs with that same empty key.
   test('rejects an empty webhookSecret even with a matching empty-key HMAC', () => {
     const forged = rawHex(body, '');
     expect(verifyJiraSignature('', forged, body)).toBe(false);
@@ -121,7 +112,6 @@ describe('getJiraSecret', () => {
   test('returns the secret and caches it', async () => {
     smSend.mockResolvedValueOnce({ SecretString: SECRET_VALUE });
     await expect(getJiraSecret(SECRET_ID)).resolves.toBe(SECRET_VALUE);
-    // Second call served from cache — no second SM call.
     await expect(getJiraSecret(SECRET_ID)).resolves.toBe(SECRET_VALUE);
     expect(smSend).toHaveBeenCalledTimes(1);
   });
@@ -189,7 +179,6 @@ describe('verifyJiraRequest (stack-wide secret)', () => {
 
   test('returns false when the stored secret is empty (end-to-end fail-closed)', async () => {
     const body = '{"webhookEvent":"jira:issue_created"}';
-    // An attacker who knows the secret is empty would send HMAC('', body).
     const forged = `sha256=${rawHex(body, '')}`;
     smSend.mockResolvedValue({ SecretString: '' });
     await expect(verifyJiraRequest(SECRET_ID, forged, body)).resolves.toBe(false);
@@ -210,7 +199,6 @@ describe('verifyJiraRequestForTenant (multi-tenant trust boundary)', () => {
     await expect(
       verifyJiraRequestForTenant(REGISTRY_TABLE, CLOUD_ID, signedHeader(body, TENANT_SECRET), body),
     ).resolves.toBe('no-per-tenant-secret');
-    // Must not even look at the OAuth secret when there's no row.
     expect(getOauthSecretStrict).not.toHaveBeenCalled();
   });
 
@@ -234,7 +222,7 @@ describe('verifyJiraRequestForTenant (multi-tenant trust boundary)', () => {
       oauth_secret_arn: TENANT_OAUTH_ARN,
       status: 'active',
     });
-    getOauthSecretStrict.mockResolvedValueOnce({ access_token: 'a' /* no webhook_signing_secret */ });
+    getOauthSecretStrict.mockResolvedValueOnce({ access_token: 'a' });
     await expect(
       verifyJiraRequestForTenant(REGISTRY_TABLE, CLOUD_ID, signedHeader(body, TENANT_SECRET), body),
     ).resolves.toBe('no-per-tenant-secret');
@@ -267,8 +255,6 @@ describe('verifyJiraRequestForTenant (multi-tenant trust boundary)', () => {
   });
 
   test('propagates (does not swallow) a strict registry-lookup infra error', async () => {
-    // The strict helper rethrows so a transient DDB throttle can't silently
-    // downgrade a per-tenant-secured tenant to the stack-wide secret.
     getRegistryRowStrict.mockRejectedValueOnce(Object.assign(new Error('throttled'), { name: 'ThrottlingException' }));
     await expect(
       verifyJiraRequestForTenant(REGISTRY_TABLE, CLOUD_ID, signedHeader(body, TENANT_SECRET), body),
@@ -290,8 +276,6 @@ describe('isWebhookTimestampFresh', () => {
   });
 
   test('rejects a far-future timestamp beyond the clock-skew allowance', () => {
-    // One-sided window: a crafted far-future timestamp must be rejected
-    // (Math.abs would have let it through).
     expect(isWebhookTimestampFresh(Date.now() + CLOCK_SKEW_ALLOWANCE_MS + 60_000)).toBe(false);
   });
 

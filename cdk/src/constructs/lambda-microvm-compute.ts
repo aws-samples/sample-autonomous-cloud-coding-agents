@@ -26,7 +26,6 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, type IConstruct } from 'constructs';
-// Shared hook budgets and Region constants prevent cross-package drift.
 import sharedConstants from '../../../contracts/constants.json';
 import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from '../handlers/shared/microvm-regions';
@@ -34,10 +33,7 @@ import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { inferenceProfileId, resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 
-/**
- * Fallback expiry for /run payloads and private launch references. Finalization
- * deletes task objects; S3 lifecycle also cleans abandoned objects asynchronously.
- */
+/** Fallback expiry (days) for /run payloads and private launch references. */
 export const MICROVM_PAYLOAD_TTL_DAYS = 1;
 
 /**
@@ -45,7 +41,6 @@ export const MICROVM_PAYLOAD_TTL_DAYS = 1;
  */
 export const MICROVM_BACKEND_TAG_KEY = 'abca:compute-backend';
 
-/** Tag value identifying the Lambda MicroVMs backend. */
 export const MICROVM_BACKEND_TAG_VALUE = 'lambda-microvm';
 
 /**
@@ -61,30 +56,15 @@ export const MICROVM_LOG_GROUP_PREFIX = '/aws/lambda-microvms';
  */
 export const MICROVM_ARTIFACT_OBJECT_KEY = 'microvm-images/agent-artifact.zip';
 
-/**
- * TCP port the agent's FastAPI server listens on inside the snapshot
- * (`agent/Dockerfile` → `EXPOSE 8080`), and therefore the port the MicroVM
- * lifecycle-hook listener is configured for.
- */
 const AGENT_HOOK_PORT = sharedConstants.microvm_lifecycle.hook_port;
 const LIFECYCLE_HOOK_TIMEOUT_SECONDS = sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds;
 
-/**
- * Hook fields accept ENABLED/DISABLED, not paths. Managed images enable all six
- * served hooks; the coordinator separately controls automatic suspension.
- */
+/** Hook fields accept ENABLED/DISABLED, not paths. */
 const HOOK_ENABLED = 'ENABLED';
 
-/**
- * Route prefix the MicroVM service POSTs its lifecycle hooks to, and the prefix
- * the agent mounts them under (`MICROVM_HOOK_PREFIX` in `agent/src/server.py`).
- */
 const MICROVM_HOOK_ROUTE_PREFIX = '/aws/lambda-microvms/runtime/v1';
 
-/**
- * Fixed service routes served by agent/src/server.py. Contract tests compare
- * these paths with the guest routes; AWS hook properties take {@link HOOK_ENABLED}.
- */
+/** Fixed service routes served by agent/src/server.py. */
 export const MICROVM_AGENT_HOOK_ROUTES = {
   ready: `${MICROVM_HOOK_ROUTE_PREFIX}/ready`,
   validate: `${MICROVM_HOOK_ROUTE_PREFIX}/validate`,
@@ -94,37 +74,14 @@ export const MICROVM_AGENT_HOOK_ROUTES = {
   resume: `${MICROVM_HOOK_ROUTE_PREFIX}/resume`,
 } as const;
 
-/**
- * /run validates the launch payload and starts the pipeline asynchronously.
- * It must return within the service runtime-hook window.
- */
 const RUN_HOOK_TIMEOUT_SECONDS = 60;
 
-/**
- * /ready warms the required agent binary before the image snapshot is taken.
- * The shared contract keeps the total guest warm-up budget below this hook timeout;
- * scripts/check-constants-sync.ts enforces that relationship.
- */
 const READY_HOOK_TIMEOUT_SECONDS = sharedConstants.microvm_hook_budgets.ready_hook_timeout_seconds;
 
-/**
- * /validate checks local readiness, hook registration and configuration contracts.
- * It makes no AWS calls: the build role lacks runtime data and model permissions.
- */
 const VALIDATE_HOOK_TIMEOUT_SECONDS = 60;
 
-/**
- * /terminate logs and acknowledges teardown without joining the pipeline or
- * writing task status. Termination can interrupt a task; coordinator recovery owns
- * its resulting state. Keep the hook budget short so a stuck guest cannot delay
- * teardown for the full runtime-hook window.
- */
 const TERMINATE_HOOK_TIMEOUT_SECONDS = 15;
 
-/**
- * Baseline values accepted by the al2023-1 image in live validation. This list
- * does not establish guest-visible launch memory or capacity-change timing.
- */
 const MEMORY_512_MIB = 512;
 const MEMORY_1_GIB_IN_MIB = 1024;
 const MEMORY_2_GIB_IN_MIB = 2048;
@@ -138,21 +95,12 @@ export const MICROVM_SUPPORTED_MEMORY_MIB: readonly number[] = [
   MEMORY_8_GIB_IN_MIB,
 ];
 
-/**
- * Baseline used by the verified ABCA workloads. Lower values require workload
- * measurements; the accepted-value probe did not measure a performance advantage.
- */
 export const DEFAULT_MINIMUM_MEMORY_MIB = MEMORY_8_GIB_IN_MIB;
 
-/** Retention for the MicroVM log group — parity with the ECS task log group. */
 const LOG_RETENTION = logs.RetentionDays.THREE_MONTHS;
 
-/** HTTPS port — the only egress allowed out of the MicroVM at RUN time. */
 const HTTPS_PORT = 443;
 
-/**
- * Build-only HTTP egress for apt-get; runtime egress remains HTTPS-only.
- */
 const HTTP_PORT = 80;
 
 /**
@@ -162,9 +110,8 @@ const CPU_ARCHITECTURE = 'ARM_64';
 const MAX_MANAGED_IMAGE_VERSION_LENGTH = 64;
 
 /**
- * Explicit no-ingress connector. Omitting ingress connectors let the service
- * attach HTTP_INGRESS in live validation. NO_INGRESS can still return an endpoint
- * URL; an unauthenticated 403 tests authentication, not valid-token reachability.
+ * Explicit no-ingress connector. When ingress connectors are omitted, the
+ * service attaches a public HTTP_INGRESS connector.
  */
 export const MICROVM_NO_INGRESS_CONNECTOR_RESOURCE = 'aws-network-connector:NO_INGRESS';
 
@@ -197,7 +144,6 @@ export function assertLambdaMicrovmRegionSupported(scope: Construct): void {
   const region = Stack.of(scope).region;
 
   if (Token.isUnresolved(region)) {
-    // Region-agnostic synth — nothing to compare. See the doc comment above.
     return;
   }
   if (isLambdaMicrovmRegionSupported(region)) {
@@ -226,10 +172,6 @@ export function assertLambdaMicrovmRegionSupported(scope: Construct): void {
   );
 }
 
-/**
- * Shared image inputs resolved before TaskApi so lifecycle IAM and this construct
- * use the same image-availability decision.
- */
 export interface LambdaMicrovmImageInputs {
   readonly baseImageArn?: string;
   readonly baseImageVersion?: string;
@@ -239,25 +181,18 @@ export interface LambdaMicrovmImageInputs {
   readonly externalImageVersion?: string;
 }
 
-/**
- * Whether managed or external image inputs select an image. The stack uses this
- * before constructing TaskApi to decide whether to grant lifecycle permissions.
- */
+/** Whether managed or external image inputs select an image. */
 export function isLambdaMicrovmImageConfigured(inputs: LambdaMicrovmImageInputs): boolean {
   return Boolean((inputs.baseImageArn && inputs.baseImageVersion) || inputs.externalImageIdentifier);
 }
 
-/**
- * Properties for {@link LambdaMicrovmCompute}.
- */
 export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
   /** Stable parent deployment name for image/connector names when nested. */
   readonly deploymentName?: string;
 
   /**
-   * Parent-owned execution role. Keeping this beside AgentSessionRole avoids
-   * a parent/child cycle through the session role's trust and AssumeRole grant.
-   * Omitted by standalone constructs, which create their own execution role.
+   * Parent-owned execution role. Omitted by standalone constructs, which create
+   * their own execution role.
    */
   readonly executionRole?: iam.Role;
 
@@ -321,14 +256,13 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
 
   /**
    * Name or ARN of an image built outside this construct. Used only when managed
-   * base-image inputs are absent; enables image iteration without a stack build.
+   * base-image inputs are absent.
    */
   readonly externalImageIdentifier?: string;
 
   /**
    * Version of {@link externalImageIdentifier}. Optional: the service resolves
-   * the latest active version when omitted, which is what a
-   * rebuild-in-place workflow wants.
+   * the latest active version when omitted.
    */
   readonly externalImageVersion?: string;
 
@@ -349,7 +283,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
   /**
    * Service baseline in MiB; must be one of {@link MICROVM_SUPPORTED_MEMORY_MIB}.
    * This setting does not guarantee workload fit or capacity-change timing.
-   * @default 8192 — the baseline used in live ABCA verification
+   * @default 8192
    */
   readonly minimumMemoryInMiB?: number;
 
@@ -363,8 +297,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
 
   /**
    * Secrets Manager name patterns of the channel OAuth bundles the agent may
-   * read (ADR-024): only those of deployed trackers, so an omitted Linear or
-   * Jira leaves no grant on CLI-created secrets that outlive the feature.
+   * read: only those of deployed trackers.
    * @default both `bgagent-linear-oauth-*` and `bgagent-jira-oauth-*` (legacy topology)
    */
   readonly channelOauthSecretPatterns?: readonly string[];
@@ -372,7 +305,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
 
 /**
  * Lambda MicroVM infrastructure: build/runtime VPC connectors, image artifacts,
- * task payloads, logs, roles and an optional managed image (ADR-021).
+ * task payloads, logs, roles and an optional managed image.
  *
  * Runtime egress permits HTTPS; the separate build connector also permits HTTP
  * for apt-get. Every launch explicitly selects NO_INGRESS. The execution role
@@ -387,9 +320,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  *   tasks cannot run until an image is configured.
  *
  * Managed images enable all six served hooks. Automatic approval sleep requires
- * a compatible image and coordinator plus the deployment enable switch. P3 live
- * acceptance is recorded in docs/verification/README.md; new
- * installations must verify their own configuration before enabling sleep.
+ * a compatible image and coordinator plus the deployment enable switch.
  */
 export class LambdaMicrovmCompute extends Construct {
   /** S3 bucket holding the zip + Dockerfile the snapshot is built from. */
@@ -422,7 +353,7 @@ export class LambdaMicrovmCompute extends Construct {
 
   /**
    * Build-time egress network connector (443 **and** 80), used only by the image
-   * build — never by a running MicroVM. See {@link HTTP_PORT}.
+   * build — never by a running MicroVM.
    */
   public readonly buildEgressConnector: lambda.CfnNetworkConnector;
 
@@ -472,9 +403,6 @@ export class LambdaMicrovmCompute extends Construct {
   constructor(scope: Construct, id: string, props: LambdaMicrovmComputeProps) {
     super(scope, id);
 
-    // Regional availability is checked HERE rather than in the stack so it
-    // cannot be lost to a stack refactor: constructing this construct at all
-    // means the backend is enabled.
     assertLambdaMicrovmRegionSupported(this);
 
     const stack = Stack.of(this);
@@ -496,9 +424,6 @@ export class LambdaMicrovmCompute extends Construct {
       : this.artifactBaseObjectKey;
     this.imageName = props.imageName ?? sanitizeImageName(`${deploymentName}-abca-agent`);
 
-    // Fail at SYNTH on an unsupported memory size. The service enumerates the
-    // sizes a base image accepts and rejects anything else at create time, which
-    // an operator otherwise discovers only after packaging + uploading.
     this.minimumMemoryInMiB = props.minimumMemoryInMiB ?? DEFAULT_MINIMUM_MEMORY_MIB;
     if (!MICROVM_SUPPORTED_MEMORY_MIB.includes(this.minimumMemoryInMiB)) {
       throw new Error(
@@ -509,14 +434,8 @@ export class LambdaMicrovmCompute extends Construct {
       );
     }
 
-    // Backend-identifying cost-allocation tags on every resource below
-    // (ADR-021: "MicroVM-specific resources shall carry backend-identifying
-    // cost-allocation tags"). Applied at the construct scope so a resource
-    // added later cannot be forgotten. L1 MicroVM resources are ITaggableV2,
-    // so the aspect reaches them too.
     Tags.of(this).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);
 
-    // --- Networking: egress through the platform VPC ---
     this.securityGroup = new ec2.SecurityGroup(this, 'MicrovmSG', {
       vpc: props.vpc,
       description: 'Lambda MicroVMs agent sessions - egress TCP 443 only',
@@ -528,11 +447,6 @@ export class LambdaMicrovmCompute extends Construct {
       'Allow HTTPS egress (GitHub API, AWS services)',
     );
 
-    // BUILD-TIME security group: 443 + 80. Separate from the runtime group on
-    // purpose — the agent at run time has no business speaking plain HTTP, but
-    // `apt-get` inside `agent/Dockerfile` does, and a 443-only build path fails
-    // every snapshot build (see HTTP_PORT). Keeping them apart means the
-    // narrower runtime posture is unchanged by the build's requirement.
     this.buildSecurityGroup = new ec2.SecurityGroup(this, 'MicrovmBuildSG', {
       vpc: props.vpc,
       description: 'Lambda MicroVMs image BUILD - egress TCP 443 + 80 (apt-get)',
@@ -549,10 +463,8 @@ export class LambdaMicrovmCompute extends Construct {
       'Allow HTTP egress for apt-get during the snapshot build (build path only)',
     );
 
-    // VPC_EGRESS requires an operator role shared by the two connectors.
-    // Live P2 checks rejected source-conditioned trust on all three roles and
-    // conditioned PassRole on the build/execution paths. Keep lambda.amazonaws.com
-    // without source conditions; ADR-021 §4 records evidence and compensating scopes.
+    // The MicroVM service rejects source-conditioned trust on all three roles
+    // and conditioned PassRole on the build/execution paths (ADR-021 §4).
     const microvmAssumedBy = new iam.ServicePrincipal('lambda.amazonaws.com');
     this.connectorOperatorRole = new iam.Role(this, 'ConnectorOperatorRole', {
       roleName: props.connectorOperatorRoleName,
@@ -578,12 +490,9 @@ export class LambdaMicrovmCompute extends Construct {
         'ec2:UnassignPrivateIpAddresses',
         'ec2:CreateTags',
       ],
-      // Describe actions need wildcard resources. ENI mutations share this tested
-      // wildcard statement; their scope is a separate IAM-hardening consideration.
       resources: ['*'],
     }));
 
-    // Connectors own the VPC interfaces. The service accepts MicroVm here.
     const vpcEgressSubnetIds = props.vpc.selectSubnets({
       subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
     }).subnetIds;
@@ -602,9 +511,6 @@ export class LambdaMicrovmCompute extends Construct {
     });
     this.egressConnectorArns = [this.egressConnector.attrArn];
 
-    // Build-time twin of the connector above, differing ONLY in security group
-    // (443 + 80). Referenced by the image resource / packaging script, never by
-    // `RunMicrovm`, so a running agent still gets the 443-only posture.
     this.buildEgressConnector = new lambda.CfnNetworkConnector(this, 'BuildEgressConnector', {
       name: sanitizeImageName(`${deploymentName}-microvm-build-egress`),
       operatorRole: this.connectorOperatorRole.roleArn,
@@ -619,27 +525,14 @@ export class LambdaMicrovmCompute extends Construct {
     });
     this.buildEgressConnectorArns = [this.buildEgressConnector.attrArn];
 
-    // Explicit NO_INGRESS (F7). NOT an empty list: omitting the field makes the
-    // service attach a PUBLIC HTTP_INGRESS connector and mint a public endpoint.
     this.ingressConnectorArns = [microvmNoIngressConnectorArn(this)];
 
-    // --- Logs ---
-    // Explicitly named under the service's `/aws/lambda-microvms/` namespace so
-    // the build/execution role grants can be prefix-scoped AND so retention is
-    // under our control (a service-created group defaults to never expire).
     this.logGroup = new logs.LogGroup(this, 'MicrovmLogGroup', {
       logGroupName: `${MICROVM_LOG_GROUP_PREFIX}/${this.imageName}`,
       retention: LOG_RETENTION,
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // --- Buckets ---
-    // Artifact bucket: the zip + Dockerfile the service builds the snapshot
-    // from. Dedicated (not a prefix on the attachments/trace bucket) for the
-    // same structural reason EcsPayloadBucket is dedicated — the build role's
-    // s3:GetObject then cannot reach tenant data. Deliberately NO expiry rule:
-    // the artifact must survive as long as the image versions built from it,
-    // which the service may re-read.
     this.artifactBucket = new s3.Bucket(this, 'ArtifactBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -648,8 +541,6 @@ export class LambdaMicrovmCompute extends Construct {
         {
           id: 'microvm-artifact-mpu-abort',
           enabled: true,
-          // Abort abandoned multipart uploads from alternative publishers.
-          // The packaging helper currently uses a single PutObject.
           abortIncompleteMultipartUploadAfter: Duration.days(1),
         },
       ],
@@ -657,9 +548,6 @@ export class LambdaMicrovmCompute extends Construct {
       autoDeleteObjects: true,
     });
 
-    // Payload bucket: mirrors EcsPayloadBucket's configuration (BLOCK_ALL +
-    // enforceSSL + S3_MANAGED + tight object expiry). See
-    // MICROVM_PAYLOAD_TTL_DAYS for the one behavioural difference.
     this.payloadBucket = new s3.Bucket(this, 'PayloadBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -676,9 +564,6 @@ export class LambdaMicrovmCompute extends Construct {
       autoDeleteObjects: true,
     });
 
-    // Build and execution roles also require sts:TagSession. Trust constraints
-    // are documented beside microvmAssumedBy above.
-
     this.buildRole = new iam.Role(this, 'BuildRole', {
       roleName: props.buildRoleName,
       assumedBy: microvmAssumedBy,
@@ -688,53 +573,28 @@ export class LambdaMicrovmCompute extends Construct {
     });
     grantTagSession(this.buildRole, microvmAssumedBy);
 
-    // Exact selected artifact plus the legacy manual-build key, never the
-    // bucket or every hash. The managed image only reads its immutable key.
     this.buildRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject'],
       resources: [...new Set([this.artifactObjectKey, this.artifactBaseObjectKey])]
         .map(key => this.artifactBucket.arnForObjects(key)),
     }));
-    // Build role: keeps `logs:CreateLogGroup` — see `grantMicrovmLogWrites`.
     this.grantMicrovmLogWrites(this.buildRole, { allowCreateLogGroup: true });
 
     this.executionRole = props.executionRole ?? createMicrovmExecutionRole(this, 'ExecutionRole');
-    // Execution role: NO `logs:CreateLogGroup`. It runs untrusted repo code and
-    // live evidence shows it only ever writes into the pre-created group — see
-    // `grantMicrovmLogWrites` for the runbook citations and the re-verify note.
     this.grantMicrovmLogWrites(this.executionRole, { allowCreateLogGroup: false });
 
-    // Platform task logs use a separate namespace from MicroVM service logs.
     props.applicationLogGroup?.grantWrite(this.executionRole);
 
-    // The guest reads its oversized `/run` payload from S3 before any tenant
-    // identity exists, so the grant is bucket-wide; finalize deletes the object.
     this.payloadBucket.grantRead(this.executionRole);
 
-    // Tenant access requires the task-scoped role; there is no direct-grant fallback.
     if (props.agentSessionRole) {
       props.agentSessionRole.admitComputeRole(this.executionRole);
     }
 
-    // Runtime startup grants complement task-scoped tenant permissions.
-    // Secrets Manager, part 1: the GitHub PAT, read at startup before the agent
-    // assumes the SessionRole.
     if (props.githubTokenSecret) {
       props.githubTokenSecret.grantRead(this.executionRole);
     }
 
-    // Secrets Manager, part 2: per-workspace Linear/Jira OAuth tokens. Same shape
-    // and same reason as `ecs-agent-cluster`'s grant (ABCA-488): the CLI creates
-    // `bgagent-linear-oauth-<slug>` / `bgagent-jira-oauth-<cloudId>` at setup, so
-    // the name is unknown at synth and a PREFIX grant is the only expressible
-    // scope. For a Linear/Jira-channel task the agent resolves that token at
-    // startup (`config.resolve_linear_api_token` /
-    // `resolve_jira_oauth_token`) to fire the 👀→✅ reaction and drive the channel
-    // MCP; without the grant the fetch hits AccessDenied and both silently no-op
-    // (logged by the token resolver, but invisible to the user in the channel).
-    //
-    // `GetSecretValue` ONLY — the agent reads; the orchestrator owns refresh /
-    // PutSecretValue.
     const channelOauthSecretPatterns = props.channelOauthSecretPatterns ?? CHANNEL_OAUTH_SECRET_PATTERNS;
     if (channelOauthSecretPatterns.length > 0) {
       this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
@@ -748,17 +608,6 @@ export class LambdaMicrovmCompute extends Construct {
       }));
     }
 
-    // Bedrock model invocation — scoped to explicit foundation-model and
-    // cross-Region inference-profile ARNs (parity with the AgentCore runtime and
-    // the ECS task role), NEVER `Resource: '*'`. The model set comes from the
-    // shared, context-overridable list (`constructs/bedrock-models.ts`). Resolve
-    // the same geography as the agent's model IDs so grants and calls cannot drift.
-    //
-    // Required on the COMPUTE role even though the SessionRole carries a
-    // session-tagged Bedrock grant for cost attribution (#215): that attribution
-    // is designed to FAIL OPEN — Claude Code's credential helper falls back to
-    // ambient compute-role credentials when the assume-role fails — so without
-    // this grant the fallback path AccessDenies and the task dies at turn 0.
     const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
     const bedrockResources: string[] = [];
     for (const modelId of resolveBedrockModelIds(this.node)) {
@@ -787,18 +636,15 @@ export class LambdaMicrovmCompute extends Construct {
       resources: bedrockResources,
     }));
 
-    // Memory is a standalone service shared by all compute backends.
     if (props.agentMemory) {
       props.agentMemory.grantReadWrite(this.executionRole);
     }
 
-    // Fresh CDK clones can need the read-only availability-zone context lookup.
     this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['ec2:DescribeAvailabilityZones'],
       resources: ['*'],
     }));
 
-    // --- Image ---
     if (props.managedImageVersion !== undefined
       && (!props.baseImageArn || !props.baseImageVersion
         || typeof props.managedImageVersion !== 'string'
@@ -807,9 +653,6 @@ export class LambdaMicrovmCompute extends Construct {
         || !/^[1-9]\d*(?:\.\d+)?$/.test(props.managedImageVersion))) {
       throw new Error('microvm_managed_image_version requires managed base-image inputs and a literal positive image version');
     }
-    // Branch through the shared predicate's two components rather than an
-    // ad-hoc condition, so this construct and the stack's pre-TaskApi decision
-    // (isLambdaMicrovmImageConfigured) can never disagree.
     if (props.baseImageArn && props.baseImageVersion) {
       const requestedProtocol = props.imageEnvironmentVariables?.[sharedConstants.microvm_lifecycle.image_protocol_env];
       if (requestedProtocol !== undefined && requestedProtocol !== String(sharedConstants.microvm_lifecycle.protocol_version)) {
@@ -824,20 +667,11 @@ export class LambdaMicrovmCompute extends Construct {
         codeArtifact: {
           uri: this.artifactBucket.s3UrlForObject(this.artifactObjectKey),
         },
-        // ARM64 everywhere — the agent image is Graviton on all three backends.
         cpuConfigurations: [{ architecture: CPU_ARCHITECTURE }],
         resources: [{ minimumMemoryInMiB: this.minimumMemoryInMiB }],
-        // Build-time egress uses the DEDICATED build connector (443 + 80), not
-        // the runtime one: `apt-get` in `agent/Dockerfile` speaks plain HTTP and
-        // a 443-only build path fails every snapshot build. Both connectors sit
-        // on the same private-with-egress subnets, so DNS Firewall / NAT / flow
-        // logs still apply to build traffic.
         egressNetworkConnectors: this.buildEgressConnectorArns,
         logging: { cloudWatch: { logGroup: this.logGroup.logGroupName } },
-        // No extra OS capabilities: the agent runs ordinary user-space tooling.
         additionalOsCapabilities: [],
-        // The non-secret protocol marker belongs to this immutable image version.
-        // Task/deployment identity still arrives only through /run.
         environmentVariables: Object.entries({
           ...props.imageEnvironmentVariables,
           [sharedConstants.microvm_lifecycle.image_protocol_env]:
@@ -847,8 +681,6 @@ export class LambdaMicrovmCompute extends Construct {
         hooks: {
           port: AGENT_HOOK_PORT,
           microvmHooks: {
-            // Fixed service routes use enum switches. Automatic sleep remains
-            // coordinator-gated even though the image serves both lifecycle hooks.
             run: HOOK_ENABLED,
             runTimeoutInSeconds: RUN_HOOK_TIMEOUT_SECONDS,
             terminate: HOOK_ENABLED,
@@ -859,8 +691,7 @@ export class LambdaMicrovmCompute extends Construct {
             resumeTimeoutInSeconds: LIFECYCLE_HOOK_TIMEOUT_SECONDS,
           },
           microvmImageHooks: {
-            // Ready is required when runtime hooks are enabled; validate checks
-            // the local image contract without runtime AWS credentials.
+            // The service requires ready when runtime hooks are enabled.
             ready: HOOK_ENABLED,
             readyTimeoutInSeconds: READY_HOOK_TIMEOUT_SECONDS,
             validate: HOOK_ENABLED,
@@ -868,21 +699,15 @@ export class LambdaMicrovmCompute extends Construct {
           },
         },
       });
-      // The image reads the artifact through the build role, so both must exist
-      // (and the artifact bucket policy be in place) before the build starts.
       this.image.node.addDependency(this.buildRole, this.artifactBucket);
 
       this.imageIdentifier = this.image.attrImageArn;
       this.imageArn = this.image.attrImageArn;
-      // Without an explicit runtime pin, the service resolves the latest ACTIVE
-      // version for the redeploy-after-rebuild flow. Pinning automatically to
-      // `attrLatestActiveImageVersion` would be empty on the very first create
-      // (the build has not finished). An operator can instead select a known
-      // version without changing the managed image resource itself.
+      // `attrLatestActiveImageVersion` is empty on the first create: the build
+      // has not finished.
       this.imageVersion = props.managedImageVersion;
     } else if (props.externalImageIdentifier) {
       this.imageVersion = props.externalImageVersion;
-      // Launch and IAM require the full image ARN; version is a separate field.
       this.imageArn = props.externalImageIdentifier.startsWith('arn:')
         ? props.externalImageIdentifier
         : stack.formatArn({
@@ -906,8 +731,6 @@ export class LambdaMicrovmCompute extends Construct {
     }
 
     if (this.imageIdentifier) {
-      // Keep operational guidance independent of one installation's image
-      // numbers and rollout dates. Retain the ID for existing operator filters.
       Annotations.of(this).addWarningV2(
         'abca:microvm-image-p1-smoke-unverified',
         'A MicroVM image is configured. Before enabling automatic suspension, verify the configured '
@@ -992,11 +815,6 @@ export class LambdaMicrovmCompute extends Construct {
     ], true);
   }
 
-  /**
-   * Scope log writes to the MicroVM namespace. Only the build role can create log
-   * groups; runtime logs use the pre-created image group. Investigate a specific
-   * runtime denial before widening the grant.
-   */
   private grantMicrovmLogWrites(
     role: iam.IRole,
     options: { readonly allowCreateLogGroup: boolean },
@@ -1030,8 +848,6 @@ export function createMicrovmExecutionRole(scope: Construct, id: string): iam.Ro
   const principal = new iam.ServicePrincipal('lambda.amazonaws.com');
   const role = new iam.Role(scope, id, {
     assumedBy: principal,
-    // Keep this text byte-stable: the least-privilege bootstrap grants no
-    // iam:UpdateRoleDescription, so any change fails the deploy and its rollback.
     description:
       'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
       + 'lifecycle hooks; writes logs and reads out-of-band /run payloads.',
@@ -1041,10 +857,7 @@ export function createMicrovmExecutionRole(scope: Construct, id: string): iam.Ro
   return role;
 }
 
-/**
- * Add the service-required sts:TagSession action with the same principal and
- * conditions as sts:AssumeRole.
- */
+/** The MicroVM service requires sts:TagSession beside sts:AssumeRole in the trust policy. */
 function grantTagSession(role: iam.Role, principal: iam.ServicePrincipal): void {
   role.assumeRolePolicy?.addStatements(new iam.PolicyStatement({
     actions: ['sts:TagSession'],
@@ -1053,9 +866,6 @@ function grantTagSession(role: iam.Role, principal: iam.ServicePrincipal): void 
   }));
 }
 
-/**
- * Restrict image/connector names to the service character set and length limit.
- */
 function sanitizeImageName(candidate: string): string {
   const MAX_NAME_LENGTH = 64;
   return candidate
@@ -1063,10 +873,6 @@ function sanitizeImageName(candidate: string): string {
     .slice(0, MAX_NAME_LENGTH)
     .replace(/-+$/, '');
 }
-
-// ---------------------------------------------------------------------------
-// Nested-stack layout
-// ---------------------------------------------------------------------------
 
 export interface LambdaMicrovmStackProps extends Omit<
   LambdaMicrovmComputeProps, 'buildRoleName' | 'connectorOperatorRoleName'
@@ -1094,11 +900,9 @@ export class LambdaMicrovmStack extends NestedStack {
       throw new Error('microvm_resource_name_prefix must be 1–40 letters, digits or hyphens and start with a letter or digit');
     }
     // CDK creates bucket-cleanup providers at stack scope, outside Compute.
-    // Those providers are also MicroVM-specific in this child.
     Tags.of(this).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);
     // Automatic IAM names include the generated nested-stack name and can lose
-    // their discriminating role suffix to truncation. Explicit parent names keep
-    // the bootstrap's unconditioned PassRole grant limited to these two roles.
+    // their role suffix to truncation.
     const roleName = (suffix: string): string => {
       const name = `${props.deploymentName}-${suffix}`;
       if (Token.isUnresolved(name) || !/^[A-Za-z0-9+=,.@_-]{1,64}$/.test(name)) {
@@ -1108,9 +912,6 @@ export class LambdaMicrovmStack extends NestedStack {
     };
     this.compute = new LambdaMicrovmCompute(this, 'Compute', {
       ...props,
-      // Keep bootstrap-authorized IAM role names tied to the parent deployment.
-      // Only service names change; the old and new image may coexist during a
-      // reviewed migration without moving the shared execution role.
       deploymentName: props.resourceNamePrefix ?? props.deploymentName,
       buildRoleName: roleName('MicrovmBuildRole'),
       connectorOperatorRoleName: roleName('MicrovmConnectorRole'),

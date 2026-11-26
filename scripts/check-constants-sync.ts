@@ -19,30 +19,8 @@
  */
 
 /**
- * Cross-language constants drift check (S9).
- *
- * ``contracts/constants.json`` is the single source of truth for
- * constants shared across Python (agent runtime) and TypeScript (CDK +
- * CLI). This script catches the failure mode that the contract is
- * designed to prevent: someone re-introducing a declaration of one of
- * these constants in code.
- *
- * The CDK TypeScript side is enforced by the compiler: consumers import
- * the JSON via ``resolveJsonModule``, so a missing or renamed field fails
- * ``tsc``. The Python side has no equivalent, so this script walks every
- * file under ``agent/src`` and rejects an assignment to a known constant
- * that is anything but a plain read of its contract key: a literal, a
- * literal inside a conversion, arithmetic on the contract value, another
- * key. The values the constants hold at import time are covered by
- * ``agent/tests/test_constants_parity.py``; the published CLI's
- * package-safe mirrors by ``cli/test/constants-parity.test.ts``.
- *
- * This is a check of the source text, line by line. It sees ``NAME = …``,
- * annotated, augmented, attribute (``module.NAME = …``) and tuple
- * (``A, B = …``) assignments at any indentation. It does not see a name
- * bound any other way (``setattr``, ``globals()``, ``:=``, the second
- * target of ``A = B = …``): for the constants' home modules the parity
- * test above covers that, whatever the spelling.
+ * Cross-language constants drift check: fails when code declares a constant
+ * that ``contracts/constants.json`` owns instead of reading it from the contract.
  *
  * Run via ``mise run check:constants-sync`` or
  * ``node --experimental-strip-types scripts/check-constants-sync.ts``.
@@ -62,23 +40,9 @@ const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/share
 const MICROVM_STRATEGY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts');
 const TS_CONSUMERS = [MICROVM_COMPUTE_TS, MICROVM_IMAGE_CAPABILITY_TS, MICROVM_STRATEGY_TS];
 
-/** Env var names must be UPPER_SNAKE — they are installed into a process env. */
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
-/** ``platform_config`` wire keys are snake_case. */
 const CONFIG_KEY_PATTERN = /^[a-z][a-z0-9_]*$/;
 
-/**
- * Python constant names that ``contracts/constants.json`` owns, each with
- * the contract key it must be read from. Every assignment to one of these
- * names, in any file under ``agent/src``, has to be a plain read of that
- * key — ``NAME = <contract>["key"]``, optionally inside one conversion —
- * and each name has to be assigned somewhere, so that renaming a constant
- * cannot quietly take it out of this check.
- *
- * The names are looked up in this table rather than compiled into
- * patterns, so no regular expression is built from a variable (semgrep's
- * ``detect-non-literal-regexp`` rule).
- */
 const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
   ['DEFAULT_APPROVAL_GATE_CAP', 'default'],
   ['APPROVAL_GATE_CAP_MIN', 'min'],
@@ -91,37 +55,16 @@ const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
   ['MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS', 'required'],
   ['MICROVM_PLATFORM_CONFIG_ARN_KEYS', 'arn_keys'],
   ['MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY', 'account_anchor_key'],
-  // ADR-021 P2: the `/ready` warm-up ceiling and the CDK-side `/ready` hook
-  // timeout are a RELATIONSHIP (`warmup_total < ready_hook`), and a relationship
-  // cannot be enforced from one side — so neither side may re-declare its half.
   ['_READY_WARMUP_TOTAL_BUDGET_SECONDS', 'warmup_total_budget_seconds'],
   ['_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS', 'warmup_required_timeout_seconds'],
-  // The vault's cache key: a divergence between any two of the four copies makes
-  // every resolve a cache miss that #812 now reports as consent-required.
   ['_LINEAR_VAULT_SCOPES', 'scopes'],
   ['_LINEAR_VAULT_CUSTOM_PARAMS', 'custom_parameters'],
-  // ADR-021 P3: the agent's pause/wake handler must answer inside the hook timeout
-  // the construct configures, so neither half may be re-declared as a literal.
   ['LIFECYCLE_HANDLER_BUDGET_S', 'lifecycle_handler_budget_seconds'],
   ['LIFECYCLE_HOOK_TIMEOUT_S', 'lifecycle_hook_timeout_seconds'],
 ]);
 
-/**
- * The TypeScript half of the same rule, with the contract path spelled out.
- *
- * `tsc` already catches a *renamed* contract field, but it cannot catch a
- * construct that stops reading the contract and goes back to
- * `const READY_HOOK_TIMEOUT_SECONDS = 300;` — which is exactly how the budget
- * invariant got asserted against a hardcoded copy in the first place. So the one
- * TypeScript consumer whose value is half of a cross-language invariant is checked
- * the same way the Python ones are: every declaration must read the contract, and
- * the name has to be declared in a consumer, so that renaming or inlining the
- * constant cannot quietly take it out of this check.
- */
 const OWNED_TS_NAMES: ReadonlyMap<string, string> = new Map([
   ['READY_HOOK_TIMEOUT_SECONDS', 'microvm_hook_budgets.ready_hook_timeout_seconds'],
-  // ADR-021 P3 lifecycle: the hook port, timeout, protocol marker and duration cap
-  // must match the agent image and the service limit, not a local copy.
   ['LIFECYCLE_HOOK_TIMEOUT_SECONDS', 'microvm_hook_budgets.lifecycle_hook_timeout_seconds'],
   ['AGENT_HOOK_PORT', 'microvm_lifecycle.hook_port'],
   ['MICROVM_LIFECYCLE_PROTOCOL', 'microvm_lifecycle.protocol_version'],
@@ -129,14 +72,11 @@ const OWNED_TS_NAMES: ReadonlyMap<string, string> = new Map([
   ['MICROVM_MAX_DURATION_SECONDS', 'microvm_lifecycle.maximum_duration_seconds'],
 ]);
 
-/** `NAME = …`, `NAME: T = …`, `module.NAME = …`, `NAME += …` and `A, B = …`, at any indentation. */
 const PY_ASSIGNMENT = /^\s*((?:[A-Za-z_][\w.]*\s*,\s*)*[A-Za-z_][\w.]*)\s*(?::[^=]*)?(?:\*\*|\/\/|>>|<<|[-+*/%@&|^])?=(?!=)(.*)$/;
-/** A plain contract read: `<name>["key"]` (keys may chain), optionally inside one conversion. */
 const PY_CONTRACT_READ = /^(?:(?:int|float|str|bool|dict|list|tuple|set|frozenset)\( ?)?[A-Za-z_]\w*((?:\[(?:"[a-z_]+"|'[a-z_]+')\])+),? ?\)?$/;
 const PY_LAST_KEY = /\[["']([a-z_]+)["']\]$/;
 const PY_COMMENT = /(?:^|\s)#.*$/;
 const TS_DECLARATION = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=(?!=)(.*)$/;
-/** A plain contract read: `<import>.a.b`, optionally inside one conversion. */
 const TS_CONTRACT_READ = /^(?:(?:String|Number)\( ?)?[A-Za-z_$][\w$]*\.([a-z_.]+) ?\)?;?$/;
 
 interface Drift {
@@ -147,7 +87,6 @@ interface Drift {
   readonly expected: string;
 }
 
-/** Every file under `dir` with the given extension, recursively. */
 function sourceFiles(dir: string, extension: string): string[] {
   return fs
     .readdirSync(dir, { recursive: true, encoding: 'utf-8' })
@@ -156,7 +95,6 @@ function sourceFiles(dir: string, extension: string): string[] {
     .sort();
 }
 
-/** Depth of the brackets `text` leaves open (a statement continues while it is positive). */
 function openBrackets(text: string): number {
   let depth = 0;
   for (const char of text) {
@@ -166,24 +104,17 @@ function openBrackets(text: string): number {
   return depth;
 }
 
-/**
- * Assignments to owned Python names in one file. `seen` collects every owned
- * name the file assigns; the returned drifts are the assignments that are not
- * a plain read of the name's contract key.
- */
 function findDriftInPython(filePath: string, seen: Set<string>): Drift[] {
   const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
   const drifts: Drift[] = [];
   lines.forEach((line, index) => {
     const assignment = PY_ASSIGNMENT.exec(line);
     if (!assignment) return;
-    // `module.NAME` assigns NAME; `A, B = …` assigns both.
     const targets = assignment[1].split(',').map((target) => target.trim().split('.').pop() ?? '');
     for (const name of targets) {
       const key = OWNED_PYTHON_NAMES.get(name);
       if (key === undefined) continue;
       seen.add(name);
-      // Join a parenthesised value that continues on the following lines.
       let value = assignment[2].replace(PY_COMMENT, '');
       for (let next = index + 1; openBrackets(value) > 0 && next < lines.length; next++) {
         value += ` ${lines[next].replace(PY_COMMENT, '')}`;
@@ -202,7 +133,6 @@ function findDriftInPython(filePath: string, seen: Set<string>): Drift[] {
   return drifts;
 }
 
-/** The TypeScript counterpart of `findDriftInPython`: `seen` collects every owned name the file declares. */
 function findDriftInTypeScript(filePath: string, seen: Set<string>): Drift[] {
   const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
   const drifts: Drift[] = [];
@@ -211,7 +141,6 @@ function findDriftInTypeScript(filePath: string, seen: Set<string>): Drift[] {
     const contractPath = declaration ? OWNED_TS_NAMES.get(declaration[1]) : undefined;
     if (!declaration || contractPath === undefined) return;
     seen.add(declaration[1]);
-    // The value may sit on the line after the `=`.
     const value = (declaration[2].trim() || (lines[index + 1] ?? '')).trim();
     if (TS_CONTRACT_READ.exec(value)?.[1] === contractPath) return;
     drifts.push({
@@ -226,7 +155,6 @@ function findDriftInTypeScript(filePath: string, seen: Set<string>): Drift[] {
 }
 
 function main(): number {
-  // Sanity: confirm the JSON is parseable and shaped as expected.
   let json: {
     approval_gate_cap?: { min: number; max: number; default: number };
     approval_timeout_s?: { min: number; max: number; default: number };
@@ -282,7 +210,6 @@ function main(): number {
     return 1;
   }
 
-  // Semantic invariants (belt-and-suspenders — agent also validates at import time)
   const invariantErrors: string[] = [];
   if (agc.min <= 0) invariantErrors.push('approval_gate_cap.min must be > 0');
   if (agc.default < agc.min) invariantErrors.push('approval_gate_cap.default must be >= min');
@@ -297,12 +224,6 @@ function main(): number {
     invariantErrors.push('jira_app_actor.forge_webtrigger_suffix must start with "."');
   }
 
-  // ADR-021 P2: the MicroVM `/run` hook installs `platform_config` into the
-  // agent's process environment, so this block is BOTH a cross-language contract
-  // (agent/src/server.py consumes it; the orchestrator's run-hook envelope
-  // builder produces it) AND a security allowlist. A malformed entry here would
-  // widen what the agent accepts into its env, so the shape is validated, not
-  // just present.
   const mpc = json.microvm_platform_config;
   if (
     !mpc
@@ -352,11 +273,6 @@ function main(): number {
     invariantErrors.push('microvm_platform_config.required contains a duplicate');
   }
 
-  // ARN consistency (ADR-021 P2, review B5). `arn_keys` names the values checked
-  // against the partition/account supplied by `account_anchor_key`. That anchor
-  // comes from the same payload; agreement does not establish deployment identity.
-  // Validate both here and at agent import time so a new ARN field cannot
-  // silently skip the existing consistency check.
   if (!Array.isArray(mpc.arn_keys) || mpc.arn_keys.length === 0) {
     invariantErrors.push('microvm_platform_config.arn_keys must be a non-empty array');
   } else {
@@ -384,8 +300,6 @@ function main(): number {
       );
     }
   }
-  // The anchor MUST be required, or a payload can disarm ARN pinning by simply
-  // omitting the anchor.
   if (!mpc.required.includes(mpc.account_anchor_key)) {
     invariantErrors.push(
       'microvm_platform_config.account_anchor_key must also be listed in required — '
@@ -393,11 +307,6 @@ function main(): number {
     );
   }
 
-  // ADR-021 P2: `/ready` does real work (it warms the 225 MiB `claude` binary), so
-  // the agent's warm-up ceiling and the CDK-declared hook timeout are coupled — the
-  // warm-up MUST finish inside the budget the service holds the hook to, or a fix
-  // for a runtime failure becomes a build failure. Both halves live here precisely
-  // so the relationship is checkable; this is the check.
   const mhb = json.microvm_hook_budgets;
   const lifecycle = json.microvm_lifecycle;
   if (!lifecycle || !Number.isSafeInteger(lifecycle.protocol_version) || lifecycle.protocol_version <= 0
@@ -458,12 +367,8 @@ function main(): number {
     ...pythonFiles.flatMap((file) => findDriftInPython(file, assigned)),
     ...TS_CONSUMERS.flatMap((file) => findDriftInTypeScript(file, declared)),
   ];
-  // A name nothing assigns is a renamed or deleted constant: the check would
-  // otherwise go on reporting OK for a constant it no longer sees.
   const unassigned = [...OWNED_PYTHON_NAMES.keys()].filter((name) => !assigned.has(name));
   const undeclared = [...OWNED_TS_NAMES.keys()].filter((name) => !declared.has(name));
-  // This script checks how a constant is written; the parity test checks the
-  // value it holds. A name only one of the two knows is half-checked.
   const parityTest = fs.readFileSync(path.join(REPO_ROOT, PARITY_TEST), 'utf-8');
   const untested = [...OWNED_PYTHON_NAMES.keys()].filter((name) => !parityTest.includes(`"${name}"`));
 

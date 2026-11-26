@@ -17,50 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Deploy preflight: one-time log-delivery migration for stacks that predate
- * the removal of the log-delivery pin table (#703).
- *
- * WHY THIS RUNS ON EVERY DEPLOY: a stack whose live `AWS::Logs::Delivery*`
- * resources still carry the pinned logical ids (`RuntimeCDKSource…` /
- * `RuntimeCdkLogGroup…`) hits a guaranteed mid-deploy rollback on the first
- * deploy after the pins were removed — CloudFormation renames the resources,
- * creates-before-deletes, and the new DeliverySource collides with the live
- * one (account-unique per runtime ARN + log type → `AlreadyExists`). That
- * rollback message says nothing about the migration, and there is no channel
- * to warn every existing deployment. So the deploy path detects the state and
- * converges it, instead of letting CloudFormation discover it half an hour in.
- * Design rationale: docs/design/OBSERVABILITY.md, "AgentCore log delivery".
- *
- * WHAT IT DOES: reads the stack's own resource list, and if (and only if)
- * legacy-pinned delivery resources are present, deletes exactly those — by the
- * physical ids CloudFormation reports, never by listing the account — then
- * lets the deploy proceed. The deploy recreates the trio under the library's
- * naming; CloudFormation treats the delete of the already-gone old resources
- * as a no-op. Agent log delivery is down from the deletion until the deploy
- * finishes; no delivered log data is touched. Stacks already on the library's
- * ids, and fresh installs (no stack), pass straight through.
- *
- * Scoped-by-construction: the only delete targets are physical ids read off
- * `list-stack-resources` for THIS stack, so delivery configurations belonging
- * to anything else in the account are unreachable, even on a shared account.
- *
- * Uses the AWS CLI rather than SDK clients so the cdk package needs no new
- * dependency for a one-time migration path. Note this DOES add the AWS CLI to
- * the deploy path's prerequisites — `QUICK_START.mdx` otherwise offers an
- * ABCA-CLI route for the post-deploy steps — so a missing `aws` is reported as
- * "state could not be determined" rather than as a stack problem (see the
- * abort handler at the bottom of this file).
- *
- * Exit codes: 0 = nothing to do or migration applied; 2 = legacy resources
- * found in --check-only mode; 1 = could not determine state or a delete
- * failed (deploy must not proceed into a known rollback).
- *
- * Escape hatch: ABCA_SKIP_LOG_DELIVERY_PREFLIGHT=1 skips entirely.
- * Cautious mode: --check-only (or ABCA_LOG_DELIVERY_PREFLIGHT=check) reports
- * and aborts instead of deleting.
- */
-
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -73,12 +29,6 @@ const DELIVERY_TYPES = [
 
 type DeliveryType = (typeof DELIVERY_TYPES)[number];
 
-/**
- * The two logical-id shapes the retired pin table produced
- * (`PINNED_LOG_DELIVERY_BY_STACK`): `RuntimeCDKSource…` for sources and
- * `RuntimeCdkLogGroup…` for destinations and delivery links. The library's
- * own ids (`RuntimeApplicationLogsDeliverySource<hash>` …) match neither.
- */
 const LEGACY_ID = /CDKSource|CdkLogGroup/;
 
 interface StackResource {
@@ -88,15 +38,6 @@ interface StackResource {
   ResourceStatus?: string;
 }
 
-/**
- * Global `aws` options forwarded from the CDK argument list, so this script reads and
- * deletes in the SAME account and region as the deploy it gates.
- *
- * Without this, `mise //cdk:deploy -- --profile prod` deployed to one account while the
- * preflight inspected — and then deleted from — whatever the ambient profile pointed at.
- * A delete in the wrong account is the worst outcome this script has, so the two
- * resolutions must not be able to disagree.
- */
 let awsGlobalArgs: readonly string[] = [];
 
 function aws(args: string[]): string {
@@ -106,14 +47,6 @@ function aws(args: string[]): string {
   });
 }
 
-/**
- * The most informative text available for a failed `execFileSync`.
- *
- * `stderr ?? err` was wrong: an empty-string stderr is not nullish, so a CLI killed by a
- * signal (or one that writes nothing) produced a message ending in a bare colon with no
- * cause at all. `||` falls through on empty, and the status/signal is appended because
- * that is the only signal left in exactly that case.
- */
 function errText(err: unknown): string {
   const e = err as { stderr?: unknown; status?: unknown; signal?: unknown };
   const base = String(e.stderr || err).trim();
@@ -122,7 +55,6 @@ function errText(err: unknown): string {
   return base && how ? `${base} (${how})` : base || how || 'no output';
 }
 
-/** `--profile` / `--region` (space and `=` forms) as they appear in the CDK arg list. */
 function resolveAwsGlobalArgs(argv: readonly string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -135,13 +67,6 @@ function resolveAwsGlobalArgs(argv: readonly string[]): string[] {
   return out;
 }
 
-/**
- * The account (and region) the deletes would land in, for the resolution log line.
- *
- * Best-effort by design: this is reporting, not a precondition, so a failure here must
- * not fail a deploy. Returns `null` when it cannot be determined and the caller prints
- * "target unknown" rather than a guess.
- */
 function describeAwsTarget(): string | null {
   try {
     const account = aws([
@@ -160,35 +85,12 @@ function describeAwsTarget(): string | null {
   }
 }
 
-/** Default stack name, mirroring `buildApp` in src/main.ts. */
 const DEFAULT_STACK_NAME = 'backgroundagent-dev';
 
-/**
- * Resolve which stack to inspect, from the same places the CDK app looks plus this
- * script's own flag.
- *
- * The app takes its stack from `stackName` CDK **context** (`src/main.ts`), so a
- * resolution that only read `--stack-name`/`STACK_NAME` could disagree with the deploy
- * it gates — and this script deletes resources, so disagreeing is not merely untidy.
- * `cdk.json` context is therefore read here too, exactly as `cdk deploy` would.
- *
- * One gap remains and cannot be closed from inside this script: context passed on the
- * CDK command line (`mise //cdk:deploy -- -c stackName=x`) is appended to `cdk deploy`
- * and never reaches a mise `depends` task, so this script cannot observe it. Verified,
- * not assumed. For a non-default stack the operator must therefore set BOTH — the env
- * var for this preflight and the context for the deploy:
- *
- *   STACK_NAME=x mise //cdk:deploy -- -c stackName=x
- *
- * The resolved target is printed on every run so a mismatch is visible in the deploy
- * log rather than inferred from what got deleted. `-c stackName=`/`--context stackName=`
- * are also accepted here, for a direct `mise //cdk:preflight:log-delivery` invocation.
- */
 function resolveStackName(argv: readonly string[]): { stackName: string; source: string } {
   const flag = argv.indexOf('--stack-name');
   if (flag >= 0 && argv[flag + 1]) return { stackName: argv[flag + 1]!, source: '--stack-name' };
 
-  // CDK's own context forms, when handed straight to this script.
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
     if ((a === '-c' || a === '--context') && argv[i + 1]?.startsWith('stackName=')) {
@@ -201,22 +103,8 @@ function resolveStackName(argv: readonly string[]): { stackName: string; source:
 
   if (process.env.STACK_NAME) return { stackName: process.env.STACK_NAME, source: 'STACK_NAME' };
 
-  // Persisted context — what `cdk deploy` would read when no flag is given.
   try {
-    // BOTH context files, because `cdk deploy` reads both. `cdk.context.json` matters
-    // more than it looks: this repo's `cdk.json` sets no `stackName`, so with that file
-    // alone this branch was dead code, and a deploy whose `stackName` is in
-    // `cdk.context.json` resolved to the default here. The preflight would have
-    // inspected, and deleted from, a different stack than the one being deployed.
-    // Bare filenames, so the display name IS the path — no `file.replace('../', '')`,
-    // which CodeQL flags as js/incomplete-sanitization (alert #43, HIGH) because a
-    // single-occurrence replace on a path is the shape of broken traversal sanitization.
     const CONTEXT_FILES = ['cdk.context.json', 'cdk.json'] as const;
-    // Directory the context files are read from — the `cdk/` package root, i.e. one level
-    // up from `scripts/`. Overridable ONLY for tests: the real `cdk/cdk.context.json` is
-    // CDK's own lookup cache, shared with every suite jest runs in parallel, so a test
-    // that wrote or deleted it raced the stack-synth tests. Pointing the tests at a
-    // scratch directory keeps the resolution chain testable without touching the repo.
     const contextDir = process.env.ABCA_PREFLIGHT_CONTEXT_DIR
       ? pathToFileURL(`${process.env.ABCA_PREFLIGHT_CONTEXT_DIR}/`)
       : new URL('../', import.meta.url);
@@ -225,7 +113,6 @@ function resolveStackName(argv: readonly string[]): { stackName: string; source:
       try {
         cfg = JSON.parse(readFileSync(new URL(name, contextDir), 'utf8'));
       } catch {
-        // An absent context file is the normal case (cdk.context.json is generated, and cdk.json sets no stackName here), not a failure; the next source is tried and 'default' is the documented floor
         continue;
       }
       // `cdk.context.json` is a flat map; `cdk.json` nests under `context`.
@@ -235,14 +122,12 @@ function resolveStackName(argv: readonly string[]): { stackName: string; source:
       }
     }
   } catch {
-    // No readable context file — fall through to the default, which is what the app
-    // itself does. Not an error worth failing a deploy over.
+    // Fall through to the default.
   }
 
   return { stackName: DEFAULT_STACK_NAME, source: 'default' };
 }
 
-/** `null` means the stack does not exist (fresh install — nothing to migrate). */
 function listStackResources(stackName: string): StackResource[] | null {
   try {
     const out = aws([
@@ -257,7 +142,7 @@ function listStackResources(stackName: string): StackResource[] | null {
       .StackResourceSummaries;
   } catch (err) {
     const stderr = errText(err);
-    if (stderr.includes('does not exist')) return null; // null is not an empty success: it is the documented fresh-install signal, and main() branches on it explicitly
+    if (stderr.includes('does not exist')) return null;
     throw new Error(`could not list resources of stack '${stackName}': ${stderr.trim()}`, { cause: err });
   }
 }
@@ -277,12 +162,9 @@ function deleteResource(type: DeliveryType, physicalId: string): void {
     aws(args[type]);
   } catch (err) {
     const stderr = errText(err);
-    // Already gone (e.g. a re-run after an interrupted migration): the goal
-    // state — old resource absent — is reached, so this is success, not
-    // failure. Anything else aborts the deploy; see main().
     if (stderr.includes('ResourceNotFoundException')) {
       console.log(`  already gone:   ${type} ${physicalId}`);
-      return; // delete target already absent IS the goal state; treating it as success is what makes an interrupted migration safely re-runnable
+      return;
     }
     throw new Error(`failed to delete ${type} '${physicalId}': ${stderr.trim()}`, { cause: err });
   }
@@ -301,9 +183,6 @@ function main(): number {
   const checkOnly =
     argv.includes('--check-only') || process.env.ABCA_LOG_DELIVERY_PREFLIGHT === 'check';
 
-  // Printed unconditionally, and it names the ACCOUNT as well as the stack: this script
-  // deletes, so the log has to be enough to tell after the fact exactly what was in
-  // scope. A stack name alone is ambiguous across accounts.
   const target = describeAwsTarget();
   console.log(
     `log-delivery preflight: inspecting stack '${stackName}' (from ${source}) in `
@@ -351,18 +230,6 @@ function main(): number {
     return 2;
   }
 
-  // FAIL CLOSED on an ambiguous target. Deletions are pending, arguments were supplied,
-  // and yet the stack name fell all the way through to the built-in default — so the
-  // operator is customizing this deploy in some way this script did not recognize, and
-  // the stack it is about to delete from is a guess rather than a derivation. The
-  // dangerous case is real: an account holding a legacy `backgroundagent-dev` plus a
-  // second stack, deployed with an argument that names the second, would have had the
-  // FIRST one's log delivery deleted — and CloudFormation would not recreate it, because
-  // that stack is not the one being deployed. Its agent logging would simply go dark.
-  //
-  // Refuse rather than guess. `--check-only` is unaffected (it deletes nothing), and an
-  // argument-free deploy is unaffected (default is then the correct derivation, exactly
-  // as in the CDK app).
   if (source === 'default' && argv.length > 0) {
     throw new Error(
       `refusing to delete from '${stackName}': arguments were supplied (${argv.join(' ')}) but the `
@@ -374,15 +241,8 @@ function main(): number {
   }
 
   // Deliveries reference their source and destination, so they go first.
-  //
-  // Iterating BY TYPE also re-applies the resource-type restriction, independently of the
-  // filter above. That redundancy is deliberate and load-bearing: `LEGACY_ID` matches the
-  // library's stack-scoped `AWS::Logs::ResourcePolicy`
-  // (`CdkLogGroupLogsDeliveryPolicy…`) too, and deleting that would break log delivery for
-  // every log type at once — with no rename to make CloudFormation put it back. Flattening
-  // this to `for (const r of legacy)` would do exactly that; the fixture in
-  // `test/scripts/preflight-log-delivery.test.ts` includes such a row so the flattening
-  // fails the suite instead of a deployment.
+  // When the deploy removes the old logical ids, CloudFormation treats the delete of an
+  // already-gone resource as a no-op.
   const order: DeliveryType[] = [
     'AWS::Logs::Delivery',
     'AWS::Logs::DeliverySource',
@@ -410,11 +270,6 @@ try {
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`log-delivery preflight: ${message}`);
-  // The reason for aborting is NOT the same in every case, and asserting the wrong one
-  // sends the reader after the wrong problem. With no `aws` on PATH this printed
-  // "proceeding would fail mid-update with AlreadyExists" — a claim about a resource
-  // collision, when the actual fault was a missing CLI and the collision may not exist at
-  // all. Distinguish "could not determine the state" from "the state is known-bad".
   const couldNotDetermine =
     /ENOENT|not found|could not list resources|AccessDenied|not authorized|ExpiredToken|credential/i
       .test(message);

@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// Companion to jira.test.ts: covers the Linear adapter's CLI helper twins
-// (upsertOauthSecret / command surface). These mirror the Jira helpers and
-// were previously untested at the unit level.
 import { PassThrough } from 'stream';
 import {
   CreateSecretCommand,
@@ -42,7 +39,6 @@ jest.mock('../../src/api-client', () => ({
   ApiClient: jest.fn(() => ({ linearLink: linearLinkMock })),
 }));
 
-// SecretsManagerClient — `list-projects` enumerates OAuth-install secrets.
 const smSend = jest.fn();
 jest.mock('@aws-sdk/client-secrets-manager', () => {
   const actual = jest.requireActual('@aws-sdk/client-secrets-manager');
@@ -52,7 +48,6 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
   };
 });
 
-// CloudFormation — `findStackOutput` resolves stack outputs at setup time.
 const cfnSend = jest.fn();
 jest.mock('@aws-sdk/client-cloudformation', () => {
   const actual = jest.requireActual('@aws-sdk/client-cloudformation');
@@ -62,8 +57,6 @@ jest.mock('@aws-sdk/client-cloudformation', () => {
   };
 });
 
-// DynamoDB — `backfill-secret-provenance` reads the workspace registry and updates its rows;
-// `list-projects` looks a workspace up in it.
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/lib-dynamodb', () => {
   const actual = jest.requireActual('@aws-sdk/lib-dynamodb');
@@ -73,7 +66,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
   };
 });
 
-// linear-vault: PARTIAL mock of the one call that reaches AgentCore.
 const mintLinearTokenFromVaultMock = jest.fn();
 jest.mock('../../src/linear-vault', () => {
   const actual = jest.requireActual('../../src/linear-vault');
@@ -166,9 +158,6 @@ describe('makeLinearCommand', () => {
     const logSpy = jest.spyOn(console, 'log').mockImplementation();
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const readline = require('readline') as typeof import('readline');
-    // The prompt reads through readline (rl.once('line', …)) only when stdin is not a terminal,
-    // which it is when this file is run from a shell. Pinned, so that the test does not wait
-    // for keys.
     const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
     const rlMock = {
@@ -207,9 +196,6 @@ describe('makeLinearCommand', () => {
   );
 
   describe.each(['setup', 'add-workspace', 'invite-user'])('%s, which records the platform user who ran it', (command) => {
-    // The three read that user from the cached ID token. `setup` and `add-workspace` used to
-    // wrap a token they could not read in a sentence of their own, and `invite-user` printed
-    // the bare reason, with no remedy.
     test.each([
       ['no login', null, 'Not authenticated. Run `bgagent login` first.'],
       ['an ID token that cannot be read', { id_token: 'not-a-jwt' }, 'Credentials file is corrupt. Run `bgagent login` to re-authenticate.'],
@@ -269,8 +255,6 @@ describe('makeLinearCommand', () => {
   });
 
   test('app-template offers no --bot-name — Linear\'s app form has no such field', () => {
-    // Verified against the live form: there is no GitHub username field, so a flag
-    // that fills one in only invites operators to look for something absent.
     const program = makeLinearCommand();
     const appTemplate = program.commands.find((c) => c.name() === 'app-template');
     const flags = (appTemplate?.options ?? []).map((o) => o.long);
@@ -279,9 +263,6 @@ describe('makeLinearCommand', () => {
   });
 
   test('app-template offers no --aws-callback-url: the CLI sends no redirect URI of the operator\'s choosing', () => {
-    // The option made the template print any URL as the app's Redirect URI. `setup` and
-    // `add-workspace` send the loopback, the consent page or the vault callback and nothing
-    // else, so an app registered with that URL failed consent with "Invalid redirect_uri".
     const appTemplate = makeLinearCommand().commands.find((c) => c.name() === 'app-template');
     const flags = (appTemplate?.options ?? []).map((o) => o.long);
     expect(flags).not.toContain('--aws-callback-url');
@@ -298,10 +279,8 @@ describe('linear list-projects --slug', () => {
   let errSpy: jest.SpiedFunction<typeof console.error>;
 
   beforeEach(() => {
-    // The command sets the exit code for a workspace it could not query, and one left behind
-    // becomes the exit code of Jest.
+    // A process.exitCode left set becomes the exit code of Jest.
     process.exitCode = undefined;
-    // The bundle of `acme` holds a token; the stack publishes no registry, so no vault lookup.
     smSend.mockReset().mockResolvedValue({ SecretString: JSON.stringify({ access_token: 'tok-acme' }) });
     cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
     out = [];
@@ -319,7 +298,6 @@ describe('linear list-projects --slug', () => {
     errSpy.mockRestore();
   });
 
-  /** Run the command with Linear giving `response` to the projects query. */
   async function listProjects(response: { ok: boolean; status: number; body?: unknown }): Promise<void> {
     global.fetch = jest.fn(async () => ({
       ok: response.ok,
@@ -355,7 +333,6 @@ describe('linear list-projects --slug', () => {
   });
 
   // Linear answers a token it refuses with HTTP 200 and an `errors` array, with no data.
-  // Read as an empty project list, the operator was told to create a project in Linear.
   test.each([
     ['an `errors` answer', { ok: true, status: 200, body: { errors: [{ message: 'Authentication required' }] } }, 'Authentication required'],
     ['an HTTP error', { ok: false, status: 401 }, '401'],
@@ -369,9 +346,6 @@ describe('linear list-projects --slug', () => {
   });
 
   test('asks the Identity vault first for a workspace that is on it', async () => {
-    // Such a workspace has no access token in its bundle, by design. The command has to hand
-    // the registry and the stack's workload name to the lookup, or it fails on the workspaces
-    // that work.
     cfnSend.mockResolvedValue({
       Stacks: [{
         Outputs: [
@@ -417,8 +391,6 @@ describe('linear list-projects --slug', () => {
 
 describe('linear invite-user', () => {
   const originalFetch = global.fetch;
-  // The member pick is read through readline only when stdin is not a terminal, which it is
-  // when one file is run from a shell. Pinned, so that the test does not wait for keys.
   const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 
   afterEach(() => {
@@ -428,8 +400,6 @@ describe('linear invite-user', () => {
   });
 
   test('asks the Identity vault first for a workspace that is on it', async () => {
-    // The command carries its own copy of the rule `list-projects` and `onboard-project` take
-    // from resolveWorkspaceAccessToken: the bundle of such a workspace holds no token.
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
     cfnSend.mockReset().mockResolvedValue({
       Stacks: [{
@@ -461,7 +431,6 @@ describe('linear invite-user', () => {
     const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
     const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue({ id_token: idToken } as ReturnType<typeof configMod.loadCredentials>);
     const logSpy = jest.spyOn(console, 'log').mockImplementation();
-    // The progress line goes to stdout and the prompt to stderr, without console.log.
     const outSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const errSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const readline = jest.requireActual<typeof import('readline')>('readline');
@@ -497,23 +466,14 @@ describe('linear invite-user', () => {
 });
 
 describe('linear add-workspace with its answers on a pipe', () => {
-  // The one Linear command that asks a secret after a visible question: the client id, then,
-  // after the consent in the browser, the webhook signing secret, then the member pick. Real
-  // streams and the real readline: a stream in the place of stdin, as a script or an agent
-  // that runs the command provides one.
   const originalFetch = global.fetch;
   const STATE = 'state-of-this-run';
   let stdin: PassThrough;
-  /** What happens to stdin while the operator is in the browser and no prompt is waiting. */
   let duringConsent: () => void;
-  /** Lines written to stdin when the prompt whose label holds the key is asked. */
   let answers: Record<string, string>;
   let restore: () => void;
 
-  /**
-   * What the run comes to within a short time. A run that never settles is one that node ends
-   * with exit code 0 in the middle: nothing is left for it to wait for.
-   */
+  /** Node ends a process whose run never settles with exit code 0: nothing is left for it to wait for. */
   function outcome(run: Promise<unknown>): Promise<string> {
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve('never settles'), 500);
@@ -527,7 +487,6 @@ describe('linear add-workspace with its answers on a pipe', () => {
   }
 
   beforeEach(() => {
-    // Every test brings its own stdin: each starts with a reader that has read nothing.
     promptSecretMod.__resetPipedSecretStateForTest();
     duringConsent = () => undefined;
     answers = {};
@@ -539,7 +498,6 @@ describe('linear add-workspace with its answers on a pipe', () => {
         ],
       }],
     });
-    // `alpha` is onboarded; its bundle holds the app's client id and secret, which Enter keeps.
     ddbSend.mockReset().mockImplementation(async (cmd: unknown) => {
       if (!(cmd instanceof ScanCommand) || cmd.input.FilterExpression) return {};
       return { Items: [{ workspace_slug: 'alpha', linear_workspace_id: 'org-alpha', oauth_secret_arn: 'arn:alpha', status: 'active' }] };
@@ -549,7 +507,6 @@ describe('linear add-workspace with its answers on a pipe', () => {
         ? { ARN: 'arn:beta' }
         : { SecretString: JSON.stringify({ client_id: 'client-id', client_secret: 'client-secret' }) }
     ));
-    // The code exchange and every Linear query go through fetch.
     global.fetch = jest.fn(async (url: unknown) => ({
       ok: true,
       status: 200,
@@ -581,7 +538,6 @@ describe('linear add-workspace with its answers on a pipe', () => {
       }),
       jest.spyOn(console, 'log').mockImplementation(),
       jest.spyOn(process.stdout, 'write').mockImplementation(() => true),
-      // Every prompt writes its label to stderr before it reads.
       jest.spyOn(process.stderr, 'write').mockImplementation((...written: unknown[]) => {
         const asked = Object.keys(answers).find((label) => String(written[0]).includes(label));
         if (asked) setImmediate(() => stdin.write(answers[asked]));
@@ -600,7 +556,6 @@ describe('linear add-workspace with its answers on a pipe', () => {
   const addWorkspace = (): Promise<string> => outcome(
     makeLinearCommand().parseAsync(['node', 'bgagent', 'add-workspace', 'beta', '--no-browser']),
   );
-  /** What the run stored: the names of the bundles, and the items put into the two tables. */
   const stored = () => ({
     bundles: smSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof CreateSecretCommand)
       .map((cmd) => JSON.parse(String(cmd.input.SecretString)) as StoredLinearOauthToken),
@@ -630,9 +585,6 @@ describe('linear add-workspace with its answers on a pipe', () => {
   });
 
   test('fails, and stores nothing, when the pipe is closed during the consent', async () => {
-    // `printf '\n' | bgagent linear add-workspace beta`. The run used to end here with exit
-    // code 0, after the app was authorized in Linear: the prompt for the signing secret was
-    // printed and never answered.
     stdin.write('\n');
     duringConsent = () => stdin.end();
 
@@ -642,8 +594,6 @@ describe('linear add-workspace with its answers on a pipe', () => {
   });
 
   test('fails after the workspace is stored when the pipe ends before the member pick', async () => {
-    // The command stores the workspace before it asks who the operator is. An input that ends
-    // there is an error: the run must not end with exit code 0 as if the link had been made.
     stdin.end('\nlin_wh_beta\n');
 
     expect(await addWorkspace()).toBe('error: No input provided.');
@@ -667,7 +617,6 @@ describe('linear backfill-secret-provenance', () => {
         ],
       }],
     });
-    // Each workspace stores a signing secret of its own: none equals the stack-wide one.
     smSend.mockReset().mockImplementation(async (cmd: GetSecretValueCommand) => (
       cmd.input.SecretId === STACK_WIDE_ARN
         ? { SecretString: 'lin_wh_stackWide' }
@@ -683,10 +632,6 @@ describe('linear backfill-secret-provenance', () => {
     logSpy.mockRestore();
   });
 
-  /**
-   * Run the command on a registry of active workspaces; `update` answers the write for each.
-   * The rows of `recorded` already say that the workspace owns its secret.
-   */
   async function backfill(
     slugs: string[],
     update: (slug: string) => Promise<unknown>,
@@ -711,9 +656,6 @@ describe('linear backfill-secret-provenance', () => {
   }
 
   test('reports a workspace whose row disappeared during the run as skipped, and does not count it', async () => {
-    // `remove-workspace --purge` between the scan and the write. The write is conditional on
-    // the row still being there, so that it is not put back; the command printed "skipped"
-    // and then "recorded" for that workspace, and counted it.
     const rowGone = Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' });
 
     await backfill(['alpha', 'gamma'], (slug) => (slug === 'gamma' ? Promise.reject(rowGone) : Promise.resolve({})));
@@ -734,14 +676,9 @@ describe('linear backfill-secret-provenance', () => {
   });
 
   describe('on a registry where one workspace of four is known to own its secret', () => {
-    // alpha stores a secret of its own. beta stores a copy of the stack-wide one, from a release
-    // that copied it into the bundles. gamma stores none. delta was recorded by an earlier run.
-    // A workspace recorded as owning a secret it shares is accepted by the webhook receiver for
-    // deliveries that another workspace signed: the one outcome this command exists to prevent.
     const SLUGS = ['alpha', 'beta', 'gamma', 'delta'];
     const recorded = ['delta'];
     const written = async () => ({});
-    /** The registry updates the run sent. */
     const updates = () => ddbSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof UpdateCommand).map((cmd) => cmd.input);
 
     beforeEach(() => {
@@ -789,8 +726,6 @@ describe('linear backfill-secret-provenance', () => {
     });
 
     test('records nothing when the stack-wide secret cannot be read', async () => {
-      // Every bundle holds a copy here. With nothing to compare it against, each copy would
-      // pass for a secret of the workspace's own.
       smSend.mockImplementation(async (cmd: GetSecretValueCommand) => {
         if (cmd.input.SecretId !== STACK_WIDE_ARN) return { SecretString: JSON.stringify({ webhook_signing_secret: 'lin_wh_stackWide' }) };
         throw Object.assign(new Error('not authorized to perform secretsmanager:GetSecretValue'), { name: 'AccessDeniedException' });
@@ -804,7 +739,6 @@ describe('linear backfill-secret-provenance', () => {
 });
 
 describe('linear update-webhook-secret', () => {
-  /** What the bundle of `acme` holds before the command runs. */
   const stored = sampleToken({ webhook_signing_secret: 'lin_wh_old' });
   let cfgSpy: jest.SpiedFunction<typeof configMod.loadConfig>;
   let logSpy: jest.SpiedFunction<typeof console.log>;
@@ -814,7 +748,6 @@ describe('linear update-webhook-secret', () => {
     cfnSend.mockReset().mockResolvedValue({
       Stacks: [{ Outputs: [{ OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' }] }],
     });
-    // The bundle exists, so it is written with PutSecretValue after CreateSecret is refused.
     smSend.mockReset().mockImplementation(async (cmd: unknown) => {
       if (cmd instanceof CreateSecretCommand) throw new ResourceExistsException({ message: 'exists', $metadata: {} });
       if (cmd instanceof PutSecretValueCommand) return { ARN: 'arn:acme' };
@@ -833,14 +766,10 @@ describe('linear update-webhook-secret', () => {
   });
 
   const run = (): Promise<unknown> => makeLinearCommand().parseAsync(['node', 'bgagent', 'update-webhook-secret', 'acme']);
-  /** The bundle writes the run sent. */
   const bundleWrites = () => smSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof PutSecretValueCommand);
-  /** The registry updates the run sent. */
   const registryUpdates = () => ddbSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof UpdateCommand).map((cmd) => cmd.input);
 
   test('replaces the signing secret in the bundle, keeps the rest of it, and records that the workspace owns it', async () => {
-    // The repair takes both writes. The webhook receiver verifies a delivery against the bundle,
-    // and on a stack with two workspaces only for a workspace whose row says the secret is its own.
     await run();
 
     expect(bundleWrites().map((put) => put.input.SecretId)).toEqual(['bgagent-linear-oauth-acme']);

@@ -40,7 +40,6 @@ describe('Not started yet, on the repository page', () => {
   it('leaves out issues that already have a task', async () => {
     renderRoute('/repos/acme/payments-api');
     const table = await screen.findByRole('table', { name: 'GitHub issues not started' });
-    // #214 has a queued task, so only #198 is left to start.
     expect(within(table).queryByRole('button', { name: 'Start issue #214' })).not.toBeInTheDocument();
     expect(within(table).getByRole('button', { name: 'Start issue #198' })).toBeInTheDocument();
   });
@@ -77,7 +76,6 @@ describe('Not started yet, on the repository page', () => {
     server.use(http.post(`${TEST_API_BASE}/tasks`, ({ request }) => {
       keys.push(request.headers.get('Idempotency-Key'));
       calls += 1;
-      // The first attempt "succeeds" upstream but its response never arrives.
       if (calls === 1) return HttpResponse.error();
       return undefined;
     }));
@@ -97,7 +95,6 @@ describe('Not started yet, on the repository page', () => {
     const table = await screen.findByRole('table', { name: 'Linear issues not started' });
     expect(within(table).getByRole('link', { name: 'Add a loading skeleton to the dashboard' })).toHaveAttribute('href', 'https://linear.app/acme/issue/WEB-12');
     expect(within(table).getByRole('button', { name: 'Start WEB-12' })).toBeInTheDocument();
-    // WEB-8 already has a task: it shows under Tasks, not here.
     expect(within(table).queryByText('Fix dark-mode contrast on the settings page')).not.toBeInTheDocument();
   });
 

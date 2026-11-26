@@ -24,7 +24,6 @@ import { TEST_API_BASE } from '../helpers/server';
 
 const DAY_MS = 86_400_000;
 
-/** The mock API must reject what the real API rejects, or mock mode hides bugs. */
 describe('mock API handlers', () => {
   it('rejects requests without a token like the Cognito authorizer', async () => {
     const res = await fetch(`${TEST_API_BASE}/tasks`);
@@ -68,23 +67,19 @@ describe('mock API handlers', () => {
   });
 });
 
-/** The mock tasks must follow what the console says of real ones, or mock mode contradicts its own explanations. */
 describe('mock tasks', () => {
   it('have a cost only once they have finished, and none when they were cancelled or ran out of time', () => {
     const { tasks } = buildFixtures(new Date(), { history: true });
     expect([...new Set(tasks.filter((task) => task.cost_usd !== null).map((task) => task.status))].sort()).toEqual(['COMPLETED', 'FAILED']);
-    // The 30 days of history hold cancelled tasks too, so the rule is checked there as well.
     expect(tasks.filter((task) => task.status === 'CANCELLED').length).toBeGreaterThan(1);
   });
 });
 
-/** The scoreboard samples are written by hand: they must add up the way the API's numbers do, or the page's counts contradict each other. */
 describe('mock scoreboard', () => {
   it.each(['30d', '7d'] as const)('puts every new pull request of the %s sample in one of the four states, in both periods', (range) => {
     const { current, previous } = mockScoreboard(range, new Date());
     const periods = [current, previous].filter((period) => period !== null);
     expect(periods).toHaveLength(2);
-    // No sample holds the pull request of an orchestration, so ABCA follows every new one.
     for (const { pull_requests: { merged, closed, open, unread }, outcomes, merged_clean: clean } of periods) {
       expect(merged + closed + open + unread).toBe(outcomes.verified_pr + outcomes.unverified_pr);
       expect(clean.total).toBe(merged);
@@ -94,7 +89,6 @@ describe('mock scoreboard', () => {
   it('gives no count of the pull requests that wait only where the API would give none: the week before has some, all unread', () => {
     const { previous, open_over_7d: waiting } = mockScoreboard('7d', new Date());
     expect(waiting).toBeNull();
-    // In the 7-day range only the pull requests of the week before are old enough to count.
     expect(previous?.pull_requests).toEqual({ merged: 0, closed: 0, open: 0, unread: 1 });
   });
 });

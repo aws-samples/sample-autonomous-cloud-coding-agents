@@ -25,7 +25,6 @@ jest.mock('../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send:
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
-// The step reads the name of the task table when it loads.
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.BUDGET_TABLE_NAME = 'Budgets';
 
@@ -38,13 +37,8 @@ const NOW = new Date('2026-11-19T12:00:00.000Z');
 const MINUTE_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
 
-/** ISO time `ms` milliseconds before NOW. */
 const ago = (ms: number): string => new Date(NOW.getTime() - ms).toISOString();
 
-/**
- * The stream record of a write to a task that finished a minute ago. `image` replaces
- * attributes of the new image; `undefined` leaves one out.
- */
 function record(image: Record<string, { S: string } | undefined> = {}, eventName: DynamoDBRecord['eventName'] = 'MODIFY'): DynamoDBRecord {
   const attributes = {
     task_id: { S: 'task-1' },
@@ -62,7 +56,6 @@ function record(image: Record<string, { S: string } | undefined> = {}, eventName
   } as DynamoDBRecord;
 }
 
-/** The whole record of that task as the claim returns it: new work that ended in a verified pull request. */
 function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
     task_id: 'task-1',
@@ -86,7 +79,6 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
   };
 }
 
-/** A DynamoDB error as the SDK throws it: the name tells the kind. */
 const ddbError = (name: string): Error => Object.assign(new Error(name), { name });
 
 let stdout: jest.SpyInstance;
@@ -110,7 +102,6 @@ describe('publishTaskMetrics', () => {
       ['an image without a task id', record({ task_id: undefined })],
       ['an image without a status', record({ status: undefined })],
       ['a task that is still running', record({ status: { S: 'RUNNING' } })],
-      // The case the age bound is for: a task from before the deployment, rewritten just now.
       ['a task that finished more than 24 hours ago, whatever its last write', record({ completed_at: { S: ago(DAY_MS + 1) } })],
       [
         'a task without completed_at whose last write is more than 24 hours old',
@@ -128,7 +119,6 @@ describe('publishTaskMetrics', () => {
     });
   });
 
-  /** The table holds `item`, and the marker put lands. */
   function stored(item: TaskRecord = task()): void {
     sendMock.mockResolvedValueOnce({ Item: item }).mockResolvedValueOnce({});
   }
@@ -163,7 +153,6 @@ describe('publishTaskMetrics', () => {
         ConsistentRead: true,
       });
       expect(claim.constructor.name).toBe('PutCommand');
-      // The marker only: the task record is not part of the claim, so the stream does not deliver it.
       expect(claim.input).toEqual({
         TableName: 'Budgets',
         Item: {
@@ -185,9 +174,6 @@ describe('publishTaskMetrics', () => {
     const [written] = stdout.mock.calls[0] as [string];
     expect(written.endsWith('\n')).toBe(true);
     expect(written.indexOf('\n')).toBe(written.length - 1);
-    // What the image does not hold: the user, the repository, the workflow, the cost, and the
-    // times the task was created and started. The line itself is pinned where it is built
-    // (test/handlers/shared/scoreboard.test.ts).
     expect(JSON.parse(written)).toMatchObject({
       user_id: 'user-1',
       repo: 'Owner/Repo',
@@ -213,7 +199,6 @@ describe('publishTaskMetrics', () => {
     await expect(publishTaskMetrics(record())).resolves.toBe(true);
 
     const line = JSON.parse((stdout.mock.calls[0] as [string])[0]);
-    // The raw ref still tells the kind of work; the plain field is the pin, which this record lacks.
     expect(line).toMatchObject({ Outcome: 'verified_pr', Work: 'coding', task_id: 'task-1' });
     expect(line).not.toHaveProperty('workflow');
   });

@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// Resolving which workspace owns a Linear project. The mapping table is keyed on the
-// project id alone, so this resolution is what lets a later webhook check a
-// body-supplied `projectId` against the workspace that actually signed the delivery.
 import { GetSecretValueCommand, ListSecretsCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
@@ -30,8 +27,6 @@ import {
   resolveWorkspaceAccessToken,
 } from '../../src/commands/linear';
 
-// linear-vault: PARTIAL mock of the one call that reaches AgentCore. Only a lookup that is
-// given a registry asks the vault; the names it derives stay the real ones.
 const mintLinearTokenFromVaultMock = jest.fn();
 jest.mock('../../src/linear-vault', () => {
   const actual = jest.requireActual('../../src/linear-vault');
@@ -43,13 +38,9 @@ jest.mock('../../src/linear-vault', () => {
 
 const PROJECT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const PROJECT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-// Hex letters in the final group on purpose: a UUID ending in twelve consecutive
-// digits matches the secret scanner's AWS-account-id rule, which failed CI on a
-// fixture that holds no secret at all.
 const ORG_ACME = 'c0000000-0000-4000-8000-0000000ac0e1';
 const ORG_RIVAL = 'c0000000-0000-4000-8000-0000000b10a2';
 
-/** A Secrets Manager double that answers with a stored OAuth bundle per slug. */
 function fakeSm(bundles: Record<string, unknown>, secretList?: string[]): SecretsManagerClient {
   return {
     send: jest.fn(async (cmd: unknown) => {
@@ -66,7 +57,6 @@ function fakeSm(bundles: Record<string, unknown>, secretList?: string[]): Secret
   } as unknown as SecretsManagerClient;
 }
 
-/** A DynamoDB document-client double that answers Scan with fixed items. */
 function fakeDdb(items: Array<Record<string, unknown>>) {
   return {
     send: jest.fn(async (cmd: unknown) => {
@@ -76,13 +66,6 @@ function fakeDdb(items: Array<Record<string, unknown>>) {
   } as never;
 }
 
-/**
- * A Linear GraphQL double keyed by bearer token.
- *
- * Keyed by token rather than call order because the property under test is precisely
- * that the answer follows the credential: a workspace's own token must not report
- * another workspace's project as visible.
- */
 function fakeLinear(byToken: Record<string, { org: string; projects: string[] }>) {
   return jest.fn(async (_url: string, init?: RequestInit) => {
     const auth = (init?.headers as Record<string, string>)?.Authorization ?? '';
@@ -192,8 +175,6 @@ describe('resolveWorkspaceAccessToken', () => {
   });
 
   describe('for a workspace on the Identity vault', () => {
-    // Such a workspace has no access token in its bundle, by design: read alone, the bundle
-    // makes `onboard-project` and `list-projects` fail on the workspaces that work.
     const VAULT_ROW = {
       workspace_slug: 'acme',
       linear_workspace_id: ORG_ACME,
@@ -225,7 +206,6 @@ describe('resolveWorkspaceAccessToken', () => {
     });
 
     test('derives the subject from the workspace id for a row that records none', async () => {
-      // A workspace onboarded before the subject was recorded has its grant under that form.
       const { vault_user_id: _recorded, ...legacyRow } = VAULT_ROW;
       await resolve(legacyRow, { refresh_token: '' });
       expect(mintLinearTokenFromVaultMock).toHaveBeenCalledWith(
@@ -269,10 +249,6 @@ describe('findProjectOwnerWorkspace', () => {
   });
 
   test('does not attribute a project to a workspace that cannot see it', async () => {
-    // The ordering matters: `rival` is searched first and answers `project: null`.
-    // A resolver that took the first organization id it received rather than the one
-    // that actually resolved the project would record ORG_RIVAL here — which is the
-    // exact cross-tenant mapping this whole change exists to prevent.
     const result = await findProjectOwnerWorkspace({
       projectId: PROJECT_A,
       slugs: ['rival', 'acme'],
@@ -324,8 +300,6 @@ describe('findProjectOwnerWorkspace', () => {
   });
 
   // Linear answers a token it refuses with HTTP 200 and an `errors` array, with no data.
-  // Read as "this workspace does not own the project", it left the operator with
-  // "Searched: rival", no reason, and the advice to record an owner unverified.
   const refusing = (...refused: string[]) => jest.fn(async (url: string, init?: RequestInit) => {
     const auth = (init?.headers as Record<string, string>).Authorization;
     return refused.includes(auth.replace('Bearer ', ''))
@@ -358,9 +332,6 @@ describe('findProjectOwnerWorkspace', () => {
   });
 });
 
-// The asymmetry is the point: "differs from stack-wide" proves ownership because
-// mirroring could copy nothing else, while "equals stack-wide" proves nothing because a
-// healthy first install of an older release stamped the same real secret into both slots.
 describe('classifyWebhookSecretProvenance', () => {
   const STACK_WIDE = 'lin_wh_firstWorkspaceSecret';
 
@@ -369,8 +340,6 @@ describe('classifyWebhookSecretProvenance', () => {
   });
 
   test('a secret equal to the stack-wide one withholds a verdict', () => {
-    // NOT 'own' — it may be a mirror. Also NOT asserted as un-owned, because a
-    // single-workspace install legitimately looks exactly like this.
     expect(classifyWebhookSecretProvenance(STACK_WIDE, STACK_WIDE)).toBe('inherited');
   });
 
@@ -387,14 +356,6 @@ describe('classifyWebhookSecretProvenance', () => {
   });
 
   test('an empty stored secret is absent, not an own secret equal to nothing', () => {
-    // Guards the falsy-vs-undefined edge: '' must not fall through to the comparison and
-    // read as 'own' just because it differs from the stack-wide value.
     expect(classifyWebhookSecretProvenance('', STACK_WIDE)).toBe('absent');
   });
 });
-
-// Regression guard for a copy defect the first LIVE run surfaced: two workspaces had
-// expired grants, so four perfectly valid mappings came back unresolved and the report
-// told the operator they named deleted projects and should be removed. An unresolved
-// mapping means opposite things depending on whether every workspace was reachable, so
-// the conclusion has to branch on that.

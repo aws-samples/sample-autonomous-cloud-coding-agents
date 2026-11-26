@@ -128,7 +128,6 @@ export async function isGithubTokenConfigured(
   }
 }
 
-/** Store a GitHub PAT in Secrets Manager. */
 export async function putGithubToken(
   region: string,
   secretArn: string,

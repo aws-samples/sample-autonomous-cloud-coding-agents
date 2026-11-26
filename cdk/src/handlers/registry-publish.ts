@@ -53,10 +53,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(403, ErrorCode.FORBIDDEN, `Publishing requires the ${REGISTRY_PUBLISHER_GROUP} group.`, requestId);
     }
 
-    // Shared helper, not a local copy: the duplicate this replaced had the same
-    // "missing body or invalid JSON ⇒ null" contract as the seven sibling
-    // handlers but re-implemented it without the contract's justification, so it
-    // read as an unexplained swallow (#756). One implementation, one rationale.
     const body = parseBody<RegistryPublishRequest>(event.body);
     if (!body) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
@@ -97,14 +93,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return successResponse(201, response, requestId);
   } catch (err) {
     if (err instanceof ConflictException) {
-      // The message says which conflict: for a slot held by a corrupt record the
-      // adapter's text tells the publisher to have that record deleted.
       return errorResponse(409, ErrorCode.REGISTRY_VERSION_EXISTS, err.message, requestId);
     }
     if (err instanceof ValidationException) {
-      // AWS refused the record as invalid: a name or version above its length limit, a
-      // descriptor above its size limit or against its schema. That is the publisher's
-      // request, and the message says which part.
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, err.message, requestId);
     }
     if (err instanceof RegistryPublishIncompleteError) {
@@ -121,7 +112,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 }
 
-/** Returns an error message, or null when the request is well-formed. */
 function validate(body: RegistryPublishRequest): string | null {
   if (RESERVED_KINDS.includes(body.kind as (typeof RESERVED_KINDS)[number])) {
     return `kind '${body.kind}' is reserved and cannot be published yet (no loader).`;
@@ -129,9 +119,7 @@ function validate(body: RegistryPublishRequest): string | null {
   if (!REGISTRY_KINDS.includes(body.kind as (typeof REGISTRY_KINDS)[number])) {
     return `unknown kind '${body.kind}' (expected one of: ${REGISTRY_KINDS.join(', ')}).`;
   }
-  // typeof first: RegExp.test and exec convert their argument to a string, so a
-  // one-element array or a number would pass, and the adapter's immutability check
-  // (which compares with ===) would then never find the existing record.
+  // RegExp.test converts its argument to a string: a one-element array or a number would pass.
   if (typeof body.namespace !== 'string' || !NAMESPACE_RE.test(body.namespace)) {
     return 'namespace must match [a-z][a-z0-9-]*.';
   }
@@ -148,8 +136,6 @@ function validate(body: RegistryPublishRequest): string | null {
   if (!isPlainObject(body.runtime)) {
     return 'runtime must be a JSON object.';
   }
-  // The flags are typed boolean? — enforce it so a truthy string like
-  // `custom: "false"` can't silently flip storage mode (#246 review nit).
   if (body.custom !== undefined && typeof body.custom !== 'boolean') {
     return 'custom, when present, must be a boolean.';
   }
@@ -159,23 +145,10 @@ function validate(body: RegistryPublishRequest): string | null {
   return validateRuntime(body.kind, body.runtime);
 }
 
-/** True only for a non-null, non-array object — rejects arrays, which `typeof`
- *  reports as 'object' and which no runtime payload should ever be. */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/**
- * Enforce the discriminated runtime contract per kind (#246 review). Previously
- * `runtime` was only checked as `typeof object`, so arrays, `{}`, and wrong-kind
- * payloads published a 201 that later resolved into a loader that silently
- * skipped it — while the task audit still claimed the pin was used. Reject those
- * at publish so a published record's runtime is always loadable.
- */
-/** Keys each kind's runtime may carry. Publishing any other key is rejected so
- *  the payload is closed at the gateway — a publisher cannot smuggle an
- *  `api_key`/`env`/… field that a denylist-based reader would later leak
- *  (#246 review B2). Kept in sync with the allowlist in registry-resolve.ts. */
 const ALLOWED_RUNTIME_KEYS: Record<string, ReadonlySet<string>> = {
   mcp_server: new Set(['transport', 'url', 'command', 'args', 'headers', 'tool_prefix']),
   cedar_policy_module: new Set(['cedar_text']),
@@ -204,8 +177,6 @@ function validateRuntime(kind: string, runtime: Record<string, unknown>): string
       } else if (typeof runtime.url !== 'string' || !runtime.url) {
         return `mcp_server runtime.url (non-empty string) is required for transport '${transport}'.`;
       }
-      // The agent refuses a pinned server whose header values or arguments are not
-      // strings (the CLI would skip it), so such a record must not be publishable.
       if (runtime.headers !== undefined
         && !(isPlainObject(runtime.headers) && Object.values(runtime.headers).every((v) => typeof v === 'string'))) {
         return 'mcp_server runtime.headers, when present, must be a JSON object with string values.';
@@ -230,7 +201,6 @@ function validateRuntime(kind: string, runtime: Record<string, unknown>): string
       }
       return null;
     default:
-      // Unknown kinds are already rejected above; defensive fallthrough.
       return `no runtime contract defined for kind '${kind}'.`;
   }
 }

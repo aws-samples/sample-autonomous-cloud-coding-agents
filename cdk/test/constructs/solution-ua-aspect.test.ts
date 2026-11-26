@@ -28,7 +28,6 @@ describe('buildAppId', () => {
   });
 
   test('CloudFormation-legal stack names pass through unsanitized', () => {
-    // CFN names are [A-Za-z0-9-]; all already UA-token-safe.
     expect(buildAppId('ABCA-Prod-123')).toBe('uksb-wt64nei4u6#ABCA-Prod-123');
   });
 
@@ -45,16 +44,11 @@ describe('buildAppId', () => {
   });
 
   test('override preserves the # solution separator (no re-mangling)', () => {
-    // Regression: sanitizing the whole override with UA_TOKEN_UNSAFE mangled
-    // `#`->`-`, reintroducing the `app-uksb-wt64nei4u6-{stack}` form this
-    // design exists to avoid. `#` must survive as the segment boundary.
     expect(buildAppId('stack', 'uksb-wt64nei4u6#my-stack')).toBe('uksb-wt64nei4u6#my-stack');
   });
 
   test('override sanitizes unsafe chars per #-delimited segment', () => {
-    // Multi-`#`: every `#` is preserved; only other unsafe chars become `-`.
     expect(buildAppId('stack', 'uksb-wt64nei4u6#my#stack')).toBe('uksb-wt64nei4u6#my#stack');
-    // `#` + slash mix: slashes within a segment sanitize, `#` stays.
     expect(buildAppId('stack', 'uksb-wt64nei4u6#a/b')).toBe('uksb-wt64nei4u6#a-b');
     expect(buildAppId('stack', 'a/b#c/d')).toBe('a-b#c-d');
   });
@@ -69,7 +63,7 @@ describe('buildAppId', () => {
 
   it('does not emit a trailing # when the 50-char clip lands on a separator', () => {
     const first = 'a'.repeat(49);
-    const out = buildAppId('stack', `${first}#tail`); // clip at 50 lands right after '#'
+    const out = buildAppId('stack', `${first}#tail`);
     expect(out!.endsWith('#')).toBe(false);
     expect(out!.length).toBeLessThanOrEqual(50);
   });

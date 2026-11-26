@@ -17,16 +17,10 @@
  *  SOFTWARE.
  */
 
-// ARN partitions are intentionally literal — this policy is a bootstrap
-// template matching the exact resource patterns in DEPLOYMENT_ROLES.md.
-
 import { aws_iam as iam } from 'aws-cdk-lib';
 
 /**
  * Returns the IAM PolicyDocument for the IaCRole-ABCA-Application role.
- *
- * Covers: DynamoDB, Lambda, API Gateway, Cognito, WAFv2, EventBridge,
- * Secrets Manager permissions.
  */
 export function applicationPolicy(): iam.PolicyDocument {
   return new iam.PolicyDocument({
@@ -109,9 +103,7 @@ export function applicationPolicy(): iam.PolicyDocument {
           'lambda:UpdateEventSourceMapping',
           'lambda:GetEventSourceMapping',
           // CDK event-source constructs (e.g. DynamoDBEventSource) tag the
-          // created mapping, so the exec role needs Tag/UntagResource on
-          // event-source-mapping:* (the function:*/layer:*-scoped TagResource
-          // grant elsewhere in this policy does not cover mappings).
+          // created mapping.
           'lambda:TagResource',
           'lambda:UntagResource',
         ],
@@ -152,7 +144,6 @@ export function applicationPolicy(): iam.PolicyDocument {
           'cognito-idp:DeleteUserPoolClient',
           'cognito-idp:DescribeUserPoolClient',
           'cognito-idp:UpdateUserPoolClient',
-          // User pool groups for registry publish/approve gating (#246).
           'cognito-idp:CreateGroup',
           'cognito-idp:DeleteGroup',
           'cognito-idp:GetGroup',
@@ -161,7 +152,6 @@ export function applicationPolicy(): iam.PolicyDocument {
           'cognito-idp:UntagResource',
           'cognito-idp:ListTagsForResource',
           'cognito-idp:GetUserPoolMfaConfig',
-          // Managed-login domain for the operator console stack.
           'cognito-idp:CreateUserPoolDomain',
           'cognito-idp:UpdateUserPoolDomain',
           'cognito-idp:DeleteUserPoolDomain',
@@ -170,7 +160,7 @@ export function applicationPolicy(): iam.PolicyDocument {
       }),
 
       // DescribeUserPoolDomain supports no resource-level scoping (IAM requires "*").
-      // CloudFormation polls it while a UserPoolDomain is created or deleted. Read-only.
+      // CloudFormation polls it while a UserPoolDomain is created or deleted.
       new iam.PolicyStatement({
         sid: 'CognitoDomainRead',
         effect: iam.Effect.ALLOW,
@@ -252,8 +242,8 @@ export function applicationPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
-        // The CDK Provider framework (Agent Registry provisioning, #246)
-        // creates a Step Functions state machine as its async completion waiter.
+        // The CDK Provider framework creates a Step Functions state machine as
+        // its async completion waiter.
         sid: 'StepFunctions',
         effect: iam.Effect.ALLOW,
         actions: [

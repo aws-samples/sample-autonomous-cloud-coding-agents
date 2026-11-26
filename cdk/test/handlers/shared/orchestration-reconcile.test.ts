@@ -32,7 +32,6 @@ const row = (
   depends_on: readonly string[] = [],
 ): ReconcileChild => ({ sub_issue_id, depends_on, child_status });
 
-/** Helper: map sub_issue_id → new status from a plan's updates. */
 function updatesById(plan: ReturnType<typeof computeReconcilePlan>): Record<string, ChildStatus> {
   return Object.fromEntries(plan.statusUpdates.map((u) => [u.sub_issue_id, u.child_status]));
 }
@@ -88,15 +87,14 @@ describe('computeReconcilePlan — case 2: diamond needs ALL predecessors', () =
   test('D depends on B+C; B succeeds while C still running → D NOT released', () => {
     const children = [
       row('B', 'released'),
-      row('C', 'released'), // C's task is running, not yet succeeded
+      row('C', 'released'),
       row('D', 'blocked', ['B', 'C']),
     ];
     const plan = computeReconcilePlan({ sub_issue_id: 'B', status: 'COMPLETED' }, children);
-    expect(plan.toRelease).toEqual([]); // C hasn't succeeded yet
+    expect(plan.toRelease).toEqual([]);
   });
 
   test('D released only once BOTH B and C have succeeded', () => {
-    // C is the last to finish; B already succeeded.
     const children = [
       row('B', 'succeeded'),
       row('C', 'released'),
@@ -125,14 +123,14 @@ describe('computeReconcilePlan — transitive skip + sibling isolation', () => {
       row('A', 'released'),
       row('B', 'blocked', ['A']),
       row('C', 'blocked', ['B']),
-      row('D', 'blocked'), // independent root that hasn't started
+      row('D', 'blocked'),
     ];
     const plan = computeReconcilePlan({ sub_issue_id: 'A', status: 'FAILED' }, children);
     const u = updatesById(plan);
     expect(u.A).toBe('failed');
     expect(u.B).toBe('skipped');
     expect(u.C).toBe('skipped');
-    expect(u.D).toBeUndefined(); // independent sibling not touched
+    expect(u.D).toBeUndefined();
   });
 
   test('CANCELLED and TIMED_OUT are failures for gating', () => {
@@ -145,8 +143,6 @@ describe('computeReconcilePlan — transitive skip + sibling isolation', () => {
   });
 
   test('does not skip a dependent that already started (released)', () => {
-    // B is already released (its task is running) when A fails — leave it
-    // to its own terminal event; do not retroactively skip.
     const children = [row('A', 'released'), row('B', 'released', ['A'])];
     const plan = computeReconcilePlan({ sub_issue_id: 'A', status: 'FAILED' }, children);
     expect(updatesById(plan).B).toBeUndefined();
@@ -163,7 +159,7 @@ describe('computeReconcilePlan — orchestrationComplete', () => {
   test('false while a released sibling is still running', () => {
     const children = [
       row('A', 'released'),
-      row('B', 'released'), // independent, still running
+      row('B', 'released'),
     ];
     const plan = computeReconcilePlan({ sub_issue_id: 'A', status: 'COMPLETED' }, children);
     expect(plan.orchestrationComplete).toBe(false);
@@ -172,12 +168,10 @@ describe('computeReconcilePlan — orchestrationComplete', () => {
   test('true when a failure skips all remaining work', () => {
     const children = [row('A', 'released'), row('B', 'blocked', ['A'])];
     const plan = computeReconcilePlan({ sub_issue_id: 'A', status: 'FAILED' }, children);
-    // A→failed, B→skipped → all terminal.
     expect(plan.orchestrationComplete).toBe(true);
   });
 });
 
-/** Helper: map sub_issue_id → new status from a recovery plan's updates. */
 function recoveryUpdatesById(
   plan: ReturnType<typeof computeRecoveryPlan>,
 ): Record<string, ChildStatus> {
@@ -186,7 +180,6 @@ function recoveryUpdatesById(
 
 describe('computeRecoveryPlan — comment-fixing a failed child re-releases its skipped dependents', () => {
   test('BAD failed, DEP skipped → fixing BAD un-fails it + re-releases DEP', () => {
-    // OK succeeded, BAD failed, DEP (deps=BAD) was transitively skipped.
     const children = [
       row('OK', 'succeeded'),
       row('BAD', 'failed'),
@@ -194,9 +187,7 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
     ];
     const plan = computeRecoveryPlan('BAD', children);
     const u = recoveryUpdatesById(plan);
-    expect(u.BAD).toBe('succeeded'); // un-failed
-    // DEP is reset skipped→blocked (the state the forward cascade understands) and,
-    // since BAD now succeeded, it's also in toRelease for immediate release.
+    expect(u.BAD).toBe('succeeded');
     expect(u.DEP).toBe('blocked');
     expect(plan.toRelease).toEqual(['DEP']);
   });
@@ -215,9 +206,6 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
   });
 
   test('a dependent with ANOTHER still-failed predecessor is reset to blocked but NOT released', () => {
-    // D depends on both B and C. B is being fixed, but C is still failed →
-    // D resets skipped→blocked (so it can release once C also recovers) but is
-    // NOT released now — gated the same as the original.
     const children = [
       row('B', 'failed'),
       row('C', 'failed'),
@@ -226,12 +214,11 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
     const plan = computeRecoveryPlan('B', children);
     const u = recoveryUpdatesById(plan);
     expect(u.B).toBe('succeeded');
-    expect(u.D).toBe('blocked'); // reset, waiting on C
-    expect(plan.toRelease).toEqual([]); // C still failed → not releasable
+    expect(u.D).toBe('blocked');
+    expect(plan.toRelease).toEqual([]);
   });
 
   test('diamond: fixing the apex re-releases BOTH skipped legs (predecessors satisfied)', () => {
-    // A(apex) failed, B & C skipped (deps=A), D skipped (deps=B,C).
     const children = [
       row('A', 'failed'),
       row('B', 'skipped', ['A']),
@@ -241,9 +228,6 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
     const plan = computeRecoveryPlan('A', children);
     const u = recoveryUpdatesById(plan);
     expect(u.A).toBe('succeeded');
-    // Whole skipped subtree resets to blocked; B and C release now (A succeeded).
-    // D resets to blocked but does NOT release — B/C aren't succeeded yet; it
-    // releases later via the forward cascade when B & C land.
     expect(u.B).toBe('blocked');
     expect(u.C).toBe('blocked');
     expect(u.D).toBe('blocked');
@@ -251,8 +235,6 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
   });
 
   test('chain: fixing the head releases only the immediate next node; deeper nodes reset to blocked', () => {
-    // A failed → B,C skipped (B deps A, C deps B). Fixing A frees B only; C resets
-    // to blocked and releases later when B actually succeeds (forward cascade).
     const children = [
       row('A', 'failed'),
       row('B', 'skipped', ['A']),
@@ -261,14 +243,12 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
     const plan = computeRecoveryPlan('A', children);
     const u = recoveryUpdatesById(plan);
     expect(u.A).toBe('succeeded');
-    expect(u.B).toBe('blocked'); // reset + releasable
-    expect(u.C).toBe('blocked'); // reset, waits for B to succeed
-    expect(plan.toRelease).toEqual(['B']); // only B is releasable now
+    expect(u.B).toBe('blocked');
+    expect(u.C).toBe('blocked');
+    expect(plan.toRelease).toEqual(['B']);
   });
 
   test('integration node re-releases once all its (now-recovered) leaf deps succeeded', () => {
-    // Two leaves: GOOD succeeded, BAD failed; integration (deps GOOD,BAD) skipped.
-    // Fixing BAD makes both leaves succeeded → integration releases.
     const children = [
       row('GOOD', 'succeeded'),
       row('BAD', 'failed'),
@@ -277,7 +257,7 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
     const plan = computeRecoveryPlan('BAD', children);
     const u = recoveryUpdatesById(plan);
     expect(u.BAD).toBe('succeeded');
-    expect(u.INTEG).toBe('blocked'); // reset; both deps now succeeded → releasable
+    expect(u.INTEG).toBe('blocked');
     expect(plan.toRelease).toEqual(['INTEG']);
   });
 });
@@ -288,8 +268,6 @@ describe('computeEpicRetryPlan — re-triggering a terminal epic retries its fai
   }
 
   test('a failed root with skipped dependents → reset them all, release the root', () => {
-    // 660 failed (root), 661/662 skipped (dep on 660), 663 failed (independent root),
-    // integration skipped (dep on all) — the shape a real terminal epic leaves behind.
     const children = [
       row('660', 'failed'),
       row('661', 'skipped', ['660']),
@@ -302,25 +280,23 @@ describe('computeEpicRetryPlan — re-triggering a terminal epic retries its fai
     expect(plan.failedCount).toBe(2);
     expect(plan.skippedCount).toBe(3);
     expect(plan.succeededCount).toBe(0);
-    // Both failed roots reset to ready (no preds); skipped nodes → blocked.
     expect(u['660']).toBe('ready');
     expect(u['663']).toBe('ready');
     expect(u['661']).toBe('blocked');
     expect(u['662']).toBe('blocked');
     expect(u.INTEG).toBe('blocked');
-    // Only the two ready roots release now; the rest ride the forward cascade.
     expect([...plan.toRelease].sort()).toEqual(['660', '663']);
   });
 
   test('a failed node BEHIND another failed node resets to blocked (waits for the cascade), not ready', () => {
     const children = [
       row('A', 'failed'),
-      row('B', 'failed', ['A']), // B failed AND depends on the also-failed A
+      row('B', 'failed', ['A']),
     ];
     const plan = computeEpicRetryPlan(children);
     const u = retryUpdatesById(plan);
-    expect(u.A).toBe('ready'); // root, no preds
-    expect(u.B).toBe('blocked'); // A isn't succeeded yet → B waits
+    expect(u.A).toBe('ready');
+    expect(u.B).toBe('blocked');
     expect(plan.toRelease).toEqual(['A']);
   });
 
@@ -331,8 +307,8 @@ describe('computeEpicRetryPlan — re-triggering a terminal epic retries its fai
     ];
     const plan = computeEpicRetryPlan(children);
     const u = retryUpdatesById(plan);
-    expect(u.A).toBeUndefined(); // untouched
-    expect(u.B).toBe('ready'); // its only pred (A) already succeeded
+    expect(u.A).toBeUndefined();
+    expect(u.B).toBe('ready');
     expect(plan.toRelease).toEqual(['B']);
     expect(plan.succeededCount).toBe(1);
   });
@@ -350,12 +326,11 @@ describe('computeEpicRetryPlan — re-triggering a terminal epic retries its fai
   test('idempotent: re-running the plan on the reset graph is a no-op', () => {
     const children = [row('A', 'failed'), row('B', 'skipped', ['A'])];
     const first = computeEpicRetryPlan(children);
-    // Apply the first plan to a new graph.
     const applied = children.map((c) => {
       const upd = first.statusUpdates.find((u) => u.sub_issue_id === c.sub_issue_id);
       return upd ? row(c.sub_issue_id, upd.child_status, c.depends_on) : c;
     });
     const second = computeEpicRetryPlan(applied);
-    expect(second.statusUpdates).toEqual([]); // A now ready, B blocked → nothing failed/skipped
+    expect(second.statusUpdates).toEqual([]);
   });
 });

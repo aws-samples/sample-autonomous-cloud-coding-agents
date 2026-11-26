@@ -1,5 +1,3 @@
-"""Telemetry: metrics, trajectory writer, and disk usage."""
-
 from __future__ import annotations
 
 import json
@@ -34,7 +32,6 @@ _BYTES_PER_UNIT = 1024
 
 
 def format_bytes(size: float) -> str:
-    """Human-readable byte size."""
     for unit in ("B", "KB", "MB", "GB"):
         if abs(size) < _BYTES_PER_UNIT:
             return f"{size:.1f} {unit}"
@@ -43,12 +40,6 @@ def format_bytes(size: float) -> str:
 
 
 def _emit_metrics_to_cloudwatch(json_payload: dict) -> None:
-    """Write the METRICS_REPORT JSON event directly to CloudWatch Logs.
-
-    Writes the log event directly to the APPLICATION_LOGS log group using the
-    CloudWatch Logs API, ensuring metrics are reliably available for dashboard
-    Logs Insights queries regardless of container stdout routing.
-    """
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
         return
@@ -64,7 +55,6 @@ def _emit_metrics_to_cloudwatch(json_payload: dict) -> None:
         task_id = json_payload.get("task_id", "unknown")
         log_stream = f"metrics/{task_id}"
 
-        # Create the log stream (ignore if it already exists)
         with contextlib.suppress(client.exceptions.ResourceAlreadyExistsException):
             client.create_log_stream(logGroupName=log_group, logStreamName=log_stream)
 
@@ -92,32 +82,8 @@ def _emit_metrics_to_cloudwatch(json_payload: dict) -> None:
 
 
 class _TrajectoryWriter:
-    """Write per-turn trajectory events to CloudWatch Logs.
+    _CW_MAX_EVENT_BYTES = 262_144
 
-    Follows the same pattern as ``_emit_metrics_to_cloudwatch()``: lazy boto3
-    import, best-effort error handling, ``contextlib.suppress`` for idempotent
-    stream creation.  Log stream: ``trajectory/{task_id}`` (parallel to the
-    existing ``metrics/{task_id}`` stream).
-
-    Events are progressively truncated to stay under the CloudWatch Logs 262 KB
-    event-size limit: large fields (thinking, tool result content) are truncated
-    first, then a hard byte-level safety-net truncation is applied.
-
-    --trace accumulator (design §10.1)
-    ----------------------------------
-    When ``accumulate=True`` (set only for ``--trace`` tasks), each event is
-    also appended in-memory so it can be dumped as a single gzipped JSONL
-    artifact on terminal state (``dump_gzipped_jsonl``). The accumulator
-    is bounded at ``_ACCUMULATOR_MAX_BYTES`` — further events are dropped
-    silently (but ``dump_gzipped_jsonl`` reports the drop in the header)
-    so a runaway task does not OOM the container.
-    """
-
-    _CW_MAX_EVENT_BYTES = 262_144  # CloudWatch limit per event
-
-    # Bound the in-memory accumulator. Expected worst case: ~100 turns
-    # x ~10 events/turn x 4 KB trace preview ~= 4 MB. 50 MB is a 10x
-    # margin before the container starts thinking about memory.
     _ACCUMULATOR_MAX_BYTES = 50 * 1024 * 1024
 
     _MAX_FAILURES = 3
@@ -128,19 +94,10 @@ class _TrajectoryWriter:
         self._client = None
         self._disabled = False
         self._failure_count = 0
-        # --trace accumulator state. ``_accumulated_bytes`` is tracked
-        # separately so ``dump_gzipped_jsonl`` can report how much it
-        # serialized vs. how much was dropped — without re-walking
-        # ``_events`` to re-measure.
         self._accumulate = accumulate
         self._events: list[dict] = []
         self._accumulated_bytes = 0
         self._accumulator_dropped = 0
-        # K2 review Finding #3 — fire-once callback when the accumulator
-        # cap first trips, so the pipeline can emit a user-visible
-        # ``trace_truncated`` milestone in ``TaskEventsTable`` (surfaced
-        # by ``bgagent watch``) rather than users discovering the
-        # truncation only after downloading + inspecting the header.
         self._truncation_callback: Callable[[int, int], None] | None = None
         self._truncation_announced = False
 
@@ -149,13 +106,11 @@ class _TrajectoryWriter:
 
         Signature: ``cb(max_bytes: int, first_dropped_so_far: int) -> None``.
         Called at most one time per writer lifetime. Errors in the
-        callback are swallowed — a broken callback must not stop event
-        capture or derail the pipeline.
+        callback are swallowed.
         """
         self._truncation_callback = cb
 
     def _ensure_client(self):
-        """Lazily create the CloudWatch Logs client and log stream."""
         if self._client is not None:
             return
         if not self._log_group:
@@ -172,17 +127,9 @@ class _TrajectoryWriter:
         log_stream = f"trajectory/{self._task_id}"
         with contextlib.suppress(client.exceptions.ResourceAlreadyExistsException):
             client.create_log_stream(logGroupName=self._log_group, logStreamName=log_stream)
-        # Only now: a client cached before the stream exists is never asked to
-        # create it again.
         self._client = client
 
     def _put_event(self, payload: dict) -> None:
-        """Serialize *payload* to JSON, truncate if needed, and write."""
-        # --trace accumulator: capture BEFORE any CW-specific truncation
-        # or the disabled short-circuit, so the S3 artifact is independent
-        # of CloudWatch health. We serialize to measure size and then
-        # keep the original dict (the serialization happens again at
-        # dump time) so bytes stay small and JSON-encodable.
         if self._accumulate:
             try:
                 event_json = json.dumps(payload, default=str)
@@ -192,11 +139,6 @@ class _TrajectoryWriter:
                     self._accumulated_bytes += event_size
                 else:
                     self._accumulator_dropped += 1
-                    # Fire-once user-visible signal the first time we
-                    # drop. Subsequent drops increment the counter but
-                    # do not re-announce (debounce — one milestone is
-                    # enough, the downloaded artifact's header has the
-                    # exact final drop count).
                     if not self._truncation_announced and self._truncation_callback is not None:
                         self._truncation_announced = True
                         try:
@@ -212,10 +154,6 @@ class _TrajectoryWriter:
                                 flush=True,
                             )
             except (TypeError, ValueError) as e:
-                # A non-JSON-encodable payload can't be serialized at
-                # dump time either — drop it here so CloudWatch still
-                # gets whatever it can write (the CW path does its own
-                # ``default=str`` handling below).
                 print(
                     f"[trajectory/accumulator] drop non-serializable event: "
                     f"{type(e).__name__}: {e}",
@@ -232,7 +170,6 @@ class _TrajectoryWriter:
 
             message = json.dumps(payload, default=str)
 
-            # Safety-net: hard byte-level truncation
             encoded = message.encode("utf-8")
             if len(encoded) > self._CW_MAX_EVENT_BYTES:
                 print(
@@ -284,7 +221,6 @@ class _TrajectoryWriter:
 
     @staticmethod
     def _truncate_field(value: str, max_len: int = 4000) -> str:
-        """Truncate a large string field for trajectory events."""
         if not value or len(value) <= max_len:
             return value
         return value[:max_len] + f"... [truncated, {len(value)} chars total]"
@@ -298,8 +234,6 @@ class _TrajectoryWriter:
         tool_calls: list[dict],
         tool_results: list[dict],
     ) -> None:
-        """Write a TRAJECTORY_TURN event for one agent turn."""
-        # Truncate large fields to stay under CloudWatch event limit
         truncated_thinking = self._truncate_field(thinking)
         truncated_text = self._truncate_field(text)
         truncated_results = []
@@ -323,11 +257,6 @@ class _TrajectoryWriter:
         )
 
     def write_tool_result(self, turn: int, tool_name: str, is_error: bool, content: str) -> None:
-        """Write a TRAJECTORY_TOOL_RESULT event for the result of one tool call.
-
-        An event of its own: the result reaches the runner after the message of
-        the model that asked for it, which ``write_turn`` has recorded by then.
-        """
         self._put_event(
             {
                 "event": "TRAJECTORY_TOOL_RESULT",
@@ -349,7 +278,6 @@ class _TrajectoryWriter:
         session_id: str,
         usage: TokenUsage | None,
     ) -> None:
-        """Write a TRAJECTORY_RESULT summary event at session end."""
         self._put_event(
             {
                 "event": "TRAJECTORY_RESULT",
@@ -367,7 +295,6 @@ class _TrajectoryWriter:
     def write_policy_decision(
         self, tool_name: str, allowed: bool, reason: str, duration_ms: float
     ) -> None:
-        """Write a POLICY_DECISION event for a tool-use policy evaluation."""
         self._put_event(
             {
                 "event": "POLICY_DECISION",
@@ -382,7 +309,6 @@ class _TrajectoryWriter:
     def write_output_screening_decision(
         self, tool_name: str, findings: list[str], redacted: bool, duration_ms: float
     ) -> None:
-        """Write an OUTPUT_SCREENING event for a post-tool-use output scan."""
         self._put_event(
             {
                 "event": "OUTPUT_SCREENING",
@@ -395,29 +321,21 @@ class _TrajectoryWriter:
         )
 
     def dump_gzipped_jsonl(self) -> bytes | None:
-        """Serialize accumulated events as gzipped JSONL for --trace upload.
+        """Serialize accumulated events as gzipped JSONL.
 
         Returns ``None`` if the writer was not constructed with
         ``accumulate=True`` or if no events were captured. Otherwise
         returns gzip-compressed bytes — one JSON object per line, plus
-        a synthetic header event that records any accumulator drops so
-        a consumer can tell a truncated trace from a complete one.
+        a synthetic header event that records any accumulator drops.
         """
         if not self._accumulate or not self._events:
             return None
 
-        # Peak memory ~= accumulator size + gzip output buffer. With the default
-        # 50 MB cap and typical ~8x JSONL compression, the transient peak is
-        # ~55-60 MB during dump. Raising the cap needs matching container
-        # memory headroom.
         import gzip
         import io
 
         buf = io.BytesIO()
         with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-            # Header: self-describing so ``zcat | head -1`` tells you
-            # the shape. ``dropped`` > 0 means later events didn't
-            # make it into the artifact (accumulator hit its cap).
             header = {
                 "event": "TRAJECTORY_ARTIFACT_HEADER",
                 "task_id": self._task_id,
@@ -439,18 +357,9 @@ def upload_trace_to_s3(
 ) -> str | None:
     """Upload *body* (gzipped JSONL) to the --trace artifact bucket.
 
-    Fail-open: any error logs a warning and returns ``None`` so the
-    caller can continue to terminal state. Only called when the task
-    was submitted with ``--trace`` and has a non-empty ``user_id``
-    (design §10.1). Returns the ``s3://bucket/key`` URI on success.
-
-    Contract enforcement (K2 Stage 3 review Finding #1):
-      - Empty ``user_id`` is treated as a programming bug at the call
-        site — this function WARNs and returns ``None`` rather than
-        writing to ``traces//<task_id>.jsonl.gz`` (an unreachable key:
-        no Cognito caller has an empty ``sub``, so the
-        ``get-trace-url`` handler's per-caller-prefix guard would 403
-        every download attempt).
+    Returns the ``s3://bucket/key`` URI on success. Fail-open: any error
+    logs a warning and returns ``None``, as does an empty ``task_id`` or
+    ``user_id``.
     """
     if not task_id:
         print("[trace/upload] skip: empty task_id", flush=True)
@@ -478,10 +387,7 @@ def upload_trace_to_s3(
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         client = tenant_client("s3", region_name=region)
         # Intentionally omit ContentEncoding=gzip: Node's fetch (undici) auto-
-        # decompresses responses whose metadata declares gzip encoding, which
-        # violates the CLI's `-o <file>` "raw gzipped bytes" contract and
-        # breaks the default stdout gunzip path (Z_DATA_ERROR). We store the
-        # actual gzipped bytes and describe them honestly as application/gzip.
+        # decompresses a response that declares gzip encoding, and the CLI gunzips it itself.
         client.put_object(
             Bucket=bucket,
             Key=key,
@@ -509,32 +415,10 @@ def upload_trace_to_s3(
         return None
 
 
-# Values under these keys are scanned for secret patterns before emission.
-# Previously these fields were blanket-redacted to ``"[redacted]"``, which
-# swallowed legitimate structural errors (e.g. ``missing built-in hard-deny
-# policies: /app/policies/hard_deny.cedar``) whose diagnostic value is
-# high and secret-risk is zero. See E2E 2026-05-11 T2.2 for the incident.
-# The new policy runs ``scan_tool_output`` over the value and only
-# substitutes ``[REDACTED-<LABEL>]`` on a real pattern match.
 _METRICS_SCAN_KEYS = frozenset({"error"})
 
 
 def _metrics_payload_for_logging(metrics: dict) -> dict:
-    """Build metrics dict for stdout / CloudWatch JSON.
-
-    For keys listed in ``_METRICS_SCAN_KEYS`` (currently just ``error``),
-    the value is passed through ``output_scanner.scan_tool_output``:
-    - Secret-like patterns (AWS keys, Bearer tokens, connection strings,
-      etc.) are substituted with ``[REDACTED-<LABEL>]`` markers in-place.
-    - Error strings with no secret patterns pass through unchanged so
-      diagnostic text like ``missing built-in hard-deny policies: ...``
-      remains visible to the dashboard's Recent-Events widget.
-
-    Non-string values (bool/int/float/None) skip the scanner. All other
-    values are coerced via ``str()``.
-    """
-    # Lazy import: output_scanner is only needed on the logging path and
-    # we want telemetry importable even in minimal test environments.
     from output_scanner import scan_tool_output
 
     out: dict = {}
@@ -543,7 +427,6 @@ def _metrics_payload_for_logging(metrics: dict) -> dict:
             if v is None:
                 out[k] = None
             elif isinstance(v, (bool, int, float)):
-                # Primitives can't carry secret patterns; pass through.
                 out[k] = v
             else:
                 scanned = scan_tool_output(str(v))
@@ -557,28 +440,19 @@ def _metrics_payload_for_logging(metrics: dict) -> dict:
 
 
 def print_metrics(metrics: dict):
-    """Emit a METRICS_REPORT event and print a human-readable summary.
-
-    Writes the JSON event directly to CloudWatch Logs via
-    ``_emit_metrics_to_cloudwatch()`` for dashboard querying, and prints a
-    human-readable table to stdout for operator console inspection.
+    """Emit a METRICS_REPORT JSON event to CloudWatch Logs and to stdout.
 
     Native types (int, float, bool, None) are preserved in the JSON payload.
-    None values become JSON ``null``. The ``parse`` patterns of the dashboard
-    queries match a real value only, so their ``ispresent()`` filters leave an
-    event with a ``null`` out. ``error`` text is logged after a scan that
-    replaces secret patterns (see ``_metrics_payload_for_logging``).
+    None values become JSON ``null``. ``error`` text is logged after a scan that
+    replaces secret patterns.
     """
     safe = _metrics_payload_for_logging(metrics)
     json_payload: dict = {"event": "METRICS_REPORT", **safe}
 
-    # Write directly to CloudWatch Logs (reliable — doesn't depend on stdout capture)
     _emit_metrics_to_cloudwatch(json_payload)
 
-    # Also print to stdout for operator console visibility
     print(json.dumps(json_payload), flush=True)
 
-    # Human-readable banner only; do not print keys/values from ``metrics`` (taints logging sinks).
     print("\n" + "=" * 60)
     print("METRICS REPORT")
     print("=" * 60)

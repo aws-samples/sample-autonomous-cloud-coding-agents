@@ -1,23 +1,3 @@
-"""The image keeps the ``requests`` and ``urllib3`` instrumentation switched off.
-
-``Dockerfile`` starts the server under ``opentelemetry-instrument``, which loads
-every installed OpenTelemetry instrumentation. Those of ``requests`` and
-``urllib3`` copy the trace context and the task's correlation baggage (session
-id, user id, repository) into the headers of every request they send, and the
-agent calls Linear and Atlassian with ``requests``. The AWS distro switches the
-two off only in its agent observability mode, so the Dockerfile names them in
-``OTEL_PYTHON_DISABLED_INSTRUMENTATIONS`` for every backend.
-
-An explicit value replaces the list the distro applies in that mode, so the
-Dockerfile carries that list whole. The distro is pinned in ``pyproject.toml``,
-and an update of it can change the list while the Dockerfile stays as it is: the
-last test holds the two together.
-
-The Dockerfile is read as text. These tests see the instruction, not the build
-stage it stands in or what the image build makes of it. Two of them start the
-wrapper with a short program (a second or two each); it opens no connection.
-"""
-
 import json
 import os
 import re
@@ -28,13 +8,9 @@ from pathlib import Path
 
 _DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
 _VARIABLE = "OTEL_PYTHON_DISABLED_INSTRUMENTATIONS"
-# An instruction of its own, `ENV <variable>="a,b,c"`, with or without the quotes.
 _INSTRUCTION = re.compile(rf'ENV\s+{_VARIABLE}=("?)([^\s"]+)\1')
-# The loader knows an instrumentation by the name of its entry point.
 _COPY_INTO_HEADERS = {"requests", "urllib3"}
 
-# Which of four instrumentations the loader activated: the two above, and those of
-# the clients the agent calls AWS and the platform's tool gateway with.
 _ACTIVE = """\
 import json
 from importlib.metadata import entry_points
@@ -50,7 +26,6 @@ _VALUE = f"import os\nprint(os.environ.get({_VARIABLE!r}, ''))\n"
 
 def _value_in_image() -> str:
     lines = _DOCKERFILE.read_text(encoding="utf-8").splitlines()
-    # Only what follows the last FROM is in the image: a build stage keeps nothing.
     final_stage = max(i for i, line in enumerate(lines) if line.startswith("FROM "))
     mentions = [
         line.strip()
@@ -74,12 +49,7 @@ def _names(value: str) -> list[str]:
 
 
 def _under_the_wrapper(program: str, cwd: Path, **variables: str) -> str:
-    """Run ``program`` under ``opentelemetry-instrument`` and return what it prints.
-
-    The distro is the one the image is built for. The configurator is the SDK's
-    own: the AWS one asks the EC2 metadata address about its host, and neither
-    decides which instrumentations load. No exporter, so nothing is sent.
-    """
+    """The AWS configurator asks the EC2 metadata address about its host: the SDK's own is set."""
     env = {
         name: value
         for name, value in os.environ.items()

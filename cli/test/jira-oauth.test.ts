@@ -28,17 +28,13 @@ function mockResponse(status: number, body: unknown): Response {
 }
 
 describe('an Atlassian token response that is off contract', () => {
-  // The same rule as for Linear (cli/test/linear-oauth.test.ts): the dangerous answer is a
-  // 200 that carries a good token beside a field of the wrong type. It fails the shape check,
-  // and a message built from the raw body puts the token on the operator's terminal and into
-  // any log that captures the output.
   const accessToken = 'atlassian-access-SUPER_SECRET_VALUE';
   const refreshToken = 'atlassian-refresh-ALSO_SECRET';
   const offContract = {
     access_token: accessToken,
     refresh_token: refreshToken,
     token_type: 'Bearer',
-    expires_in: '3600', // string, not number
+    expires_in: '3600',
     scope: 'read:jira-work offline_access',
   };
 
@@ -72,10 +68,8 @@ describe('an Atlassian token response that is off contract', () => {
     );
 
     expect(message).toContain('Atlassian /oauth/token returned an unexpected shape');
-    // No credential material, in any form.
     expect(message).not.toContain(accessToken);
     expect(message).not.toContain(refreshToken);
-    // Still diagnostic: the field that is wrong, what was expected, and the key names.
     expect(message).toContain('expires_in expected number, got string');
     expect(message).toContain('keys present: access_token, expires_in, refresh_token, scope, token_type');
   });

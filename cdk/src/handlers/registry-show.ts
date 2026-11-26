@@ -46,12 +46,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const client = makeRegistryClient();
-    // Browse over entries (not listRecords) so a malformed record still counts:
-    // otherwise an asset whose only versions are corrupt would 404 as if absent,
-    // hiding the corruption (#791). Malformed versions surface flagged; publisher
-    // is nulled because it lives in the erased payload, and created_at is nulled
-    // by convention (the marker carries only the envelope's name/version/status,
-    // not the envelope timestamp) so a flagged row reads uniformly.
     const entries = (await client.listBrowseEntries({ kind, namespace, name })).filter(
       (e) => (e.malformed ? e.name : e.record.name) === name,
     );
@@ -72,7 +66,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const av = parseVersion(a.version);
         const bv = parseVersion(b.version);
         if (!av || !bv) return 0;
-        return compareVersions(bv, av); // highest first
+        return compareVersions(bv, av);
       });
 
     const response: RegistryShowResponse = { kind, namespace, name, versions };

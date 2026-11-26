@@ -21,26 +21,14 @@ import { type DynamoDBDocumentClient, QueryCommand, GetCommand } from '@aws-sdk/
 import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 import { logger } from './logger';
 
-/**
- * Cap on the number of task rows summed for one issue.
- *
- * A bound is needed because each row costs a GetItem, so an issue with a
- * pathological number of iterations would otherwise fan out unboundedly inside a
- * single Lambda invocation. It is deliberately far above any real iteration count
- * (dozens at most) so it is a runaway guard, not a routine limit — and when it
- * does bite, {@link sumIterationCostForIssue} says so rather than quietly
- * reporting a smaller number as if it were the total.
- */
 const MAX_COST_TASKS_PER_ISSUE = 500;
 
-/** Outcome of a running-total cost sum. */
 export interface IterationCostTotal {
   /** Summed cost, or null when nothing is known (no rows, all unreadable). */
   readonly total: number | null;
   /**
    * True when the sum is known to be INCOMPLETE — the row cap was hit, or a read
-   * failed partway. Callers that show this to a user should mark it as a partial
-   * figure; a number presented as a total when it is not is worse than no number.
+   * failed partway.
    */
   readonly partial: boolean;
 }
@@ -48,19 +36,6 @@ export interface IterationCostTotal {
 /**
  * Sum ``cost_usd`` across every task recorded against one Linear issue — the
  * running total shown on an iteration's settle reply.
- *
- * Single implementation shared by the reconciler and the fan-out dispatcher. It
- * previously existed as two near-copies that had already drifted: one parsed a
- * string ``cost_usd`` and added it without a finite check (so a stringified cost
- * poisoned the whole total to NaN), the other guarded correctly. Cost accounting
- * that disagrees with itself depending on which handler ran is worse than either
- * behaviour on its own.
- *
- * PAGINATES. A DynamoDB Query returns at most 1 MB per page, and the previous
- * versions summed a single page as though it were everything — so past the page
- * boundary the user was shown a total that was silently short. Truncation here
- * surfaces as a wrong number rather than an error, which is exactly the failure
- * mode worth spending a loop to avoid.
  *
  * ``thisCost`` is added explicitly because the terminal task's GSI projection may
  * not have propagated yet; it is deduped by ``task_id`` so it cannot be counted
@@ -102,12 +77,7 @@ export async function sumIterationCostForIssue(args: {
       }
       startKey = listed.LastEvaluatedKey as Record<string, unknown> | undefined;
       if (ids.length >= MAX_COST_TASKS_PER_ISSUE) {
-        // Trim to the cap, don't just stop paginating. The cap has to bound the
-        // GetItem fan-out below, and one Query page can hold far more than the cap
-        // (the projection is task_id alone, so ~1 MB is a great many rows) — so
-        // breaking out without trimming would still fan out over the whole page.
         ids.length = MAX_COST_TASKS_PER_ISSUE;
-        // Say so rather than trimming in silence: a capped sum is not the total.
         logger.warn('Iteration cost sum hit the per-issue row cap — reporting a PARTIAL total', {
           linear_issue_id: linearIssueId, cap: MAX_COST_TASKS_PER_ISSUE, ...(logLabel && { source: logLabel }),
         });
@@ -116,8 +86,8 @@ export async function sumIterationCostForIssue(args: {
       }
     } while (startKey);
 
-    // The GSI lists task ids but does not project cost_usd (a GSI projection
-    // cannot be changed in place — see task-table.ts), so read each cost.
+    // The GSI does not project cost_usd, and DynamoDB cannot change a GSI
+    // projection in place, so read each cost.
     for (const taskId of ids) {
       if (taskId === thisTaskId) {
         sawThis = true;

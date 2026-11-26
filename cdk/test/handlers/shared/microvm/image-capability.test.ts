@@ -49,7 +49,7 @@ const version = (): Version => ({
 
 test('verifies the exact launched version and its compatible hooks and marker', () => {
   expect(verifyMicrovmImageLifecycle(identity, version())).toBe(true);
-  // Deactivation only blocks new launches; it does not rewrite an existing snapshot.
+  // An INACTIVE image version is only blocked from launching new MicroVMs.
   const inactive = { ...version(), status: 'INACTIVE' };
   expect(verifyMicrovmImageLifecycle(identity, inactive)).toBe(true);
 });

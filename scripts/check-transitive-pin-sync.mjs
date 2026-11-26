@@ -21,40 +21,8 @@
 /**
  * Transitive-pin sync guard (issue #712).
  *
- * The repo pins transitive npm dependencies in TWO independent places that do
- * not share state:
- *   - root `package.json` -> `resolutions`   governs the yarn workspace (yarn.lock)
- *   - `integrations/jira-forge-app/package.json` -> `overrides`
- *                                             governs that standalone npm project
- *                                             (its own package-lock.json)
- * jira-forge-app is OUTSIDE the yarn `workspaces` array, so a bump applied via
- * root `resolutions` never reaches it. A maintainer remediating a shared
- * transitive advisory (e.g. fast-uri, undici) can clear yarn.lock and pass the
- * LOCAL `security:deps`, while the same advisory silently persists in the
- * jira-forge-app lockfile until the scheduled/CI scan fails days later.
- *
- * This guard fails fast, locally, when the two drift: for every package that is
- * pinned in root `resolutions` AND also present in the jira-forge-app lockfile,
- * the version resolved there must meet the root pin's minimum. If it does not,
- * the fix is to mirror the pin into jira-forge-app `overrides` and re-lock
- * (`npm install --package-lock-only`).
- *
- * A `resolutions` key is a package name or a path pattern that ends in one
- * (`parent/pkg`, `parent/@scope/pkg`, usually behind a leading glob). Yarn
- * applies a pattern only under that parent, but the floor is there because of
- * an advisory against the package itself, so here it applies to every copy in
- * the jira-forge-app tree, whatever depends on it.
- *
- * It intentionally does NOT require every root pin to appear in jira-forge-app —
- * only packages actually present in both trees must agree. A pin for a package
- * jira-forge-app doesn't depend on is a no-op there and is not flagged.
- *
- * No third-party deps by design: root scripts are knip entries (knip.json), so
- * pulling in `semver` without declaring it fails `check:deadcode`, and a
- * transitive copy could vanish on a re-lock. The
- * repo's transitive pins are all `^`/`>=`-style minimum FLOORS, so a
- * "resolved >= floor" numeric compare on the leading `major.minor.patch` is the
- * exact check we need — no range engine required.
+ * For every package that is pinned in root `resolutions` AND also present in the
+ * jira-forge-app lockfile, the version resolved there must meet the root pin's minimum.
  */
 
 import { readFileSync } from 'node:fs';
@@ -79,19 +47,16 @@ function readJson(path) {
   }
 }
 
-/** Parse the leading numeric release of a semver into [major, minor, patch]. */
 function releaseTuple(version) {
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
   if (!m) return null;
   return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
-/** Strip a range operator (^, ~, >=, v) to the bare minimum version string. */
 function floorOf(range) {
   return String(range).trim().replace(/^[\^~]|^>=\s*|^v/i, '');
 }
 
-/** True iff `version` is >= the minimum implied by `range`; null if unparseable. */
 function meetsFloor(version, range) {
   const v = releaseTuple(version);
   const f = releaseTuple(floorOf(range));
@@ -100,10 +65,11 @@ function meetsFloor(version, range) {
     if (v[i] > f[i]) return true;
     if (v[i] < f[i]) return false;
   }
-  return true; // exactly equal
+  return true;
 }
 
-/** The package a `resolutions` key pins: the name its path pattern ends in. */
+// A yarn `resolutions` key is a package name or a path pattern that ends in one
+// (`parent/pkg`, `parent/@scope/pkg`, usually behind a leading glob).
 function pinnedPackage(key) {
   const segments = key.split('/');
   const name = segments.pop();
@@ -120,10 +86,8 @@ if (typeof resolutions !== 'object' || Array.isArray(resolutions)) {
   process.exit(2);
 }
 
-// Collect every resolved version of every package present in the jira-forge-app
-// lockfile. npm v2/v3 lockfiles key `packages` by install path; the package name
-// is the final segment after the last `node_modules/`. The root entry ("") is
-// skipped.
+// npm v2/v3 lockfiles key `packages` by install path; the package name is the
+// final segment after the last `node_modules/`, and the root entry is "".
 const forgeLock = readJson(forgeLockPath);
 if (!forgeLock.packages || typeof forgeLock.packages !== 'object') {
   console.error(
@@ -131,7 +95,7 @@ if (!forgeLock.packages || typeof forgeLock.packages !== 'object') {
   );
   process.exit(2);
 }
-const forgeVersions = new Map(); // name -> Set<version>
+const forgeVersions = new Map();
 for (const [installPath, meta] of Object.entries(forgeLock.packages)) {
   if (installPath === '' || !meta?.version) continue;
   const name = installPath.split('node_modules/').pop();
@@ -139,14 +103,12 @@ for (const [installPath, meta] of Object.entries(forgeLock.packages)) {
   forgeVersions.get(name).add(meta.version);
 }
 
-// Keyed by what was compared, so several patterns that pin one package to one
-// floor (`**/jest-config/glob`, `**/jest-runtime/glob`) count and report once.
 const drifts = new Map();
 const checked = new Set();
 for (const [key, range] of Object.entries(resolutions)) {
   const name = pinnedPackage(key);
   const present = forgeVersions.get(name);
-  if (!present) continue; // not a jira-forge-app dependency — pin is a no-op there
+  if (!present) continue;
   for (const version of present) {
     const ok = meetsFloor(version, range);
     if (ok === null) {

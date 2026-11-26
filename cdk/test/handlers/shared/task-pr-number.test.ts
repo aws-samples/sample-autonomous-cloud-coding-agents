@@ -17,24 +17,15 @@
  *  SOFTWARE.
  */
 
-// `readTaskPrNumber` is the deduped replacement for two copies that swallowed a
-// failed TaskRecord read into a bare `null` (#756 Cat 2), which the restack
-// cascade then read as "dependent has no PR yet — skip". The behaviour that
-// matters is therefore the *shape* on each path: found vs genuinely-absent vs
-// read-failed, never absent-because-it-broke.
-
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { isLookupAbsent, isLookupFailure } from '../../../src/handlers/shared/lookup-result';
 import { prNumberFromTask, readTaskPrNumber } from '../../../src/handlers/shared/task-pr-number';
 
-/** Minimal doc-client stub: only `send` is exercised. */
 const ddbWith = (impl: jest.Mock): DynamoDBDocumentClient =>
   ({ send: impl } as unknown as DynamoDBDocumentClient);
 
 const resolving = (Item?: Record<string, unknown>) => jest.fn().mockResolvedValue({ Item });
 
-// One rule for every reader of a task's PR: the Linear and Jira comment paths,
-// the terminal reply of an iteration and `readTaskPrNumber` below.
 describe('prNumberFromTask', () => {
   test.each([
     ['the numeric pr_number', { pr_number: 12 }, 12],
@@ -73,8 +64,6 @@ describe('readTaskPrNumber', () => {
   });
 
   test('falls back to parsing pr_url when pr_number is absent', async () => {
-    // Orchestration child tasks commonly persist only pr_url — the case the two
-    // original copies existed to handle.
     const send = resolving({ pr_url: 'https://github.com/o/r/pull/1234' });
 
     await expect(readTaskPrNumber(ddbWith(send), 'tasks', 'task-1'))
@@ -109,7 +98,6 @@ describe('readTaskPrNumber', () => {
   });
 
   test('reports ABSENT when pr_url carries no /pull/<n> segment', async () => {
-    // A non-PR URL is a genuine "no PR number here", not a broken read.
     const send = resolving({ pr_url: 'https://github.com/o/r/commit/abc123' });
     const r = await readTaskPrNumber(ddbWith(send), 'tasks', 'task-1');
 
@@ -123,15 +111,12 @@ describe('readTaskPrNumber', () => {
   });
 
   test('reports ABSENT when pr_number is not a PR number (0) and there is no pr_url', async () => {
-    // PR #0 does not exist: handed on, the restack cascade would ask task creation for it and be refused.
     const r = await readTaskPrNumber(ddbWith(resolving({ pr_number: 0 })), 'tasks', 'task-1');
 
     expect(isLookupAbsent(r)).toBe(true);
   });
 
   test('reports FAILURE, not absence, when the DynamoDB read throws', async () => {
-    // The regression this module exists to prevent: an outage must never read as
-    // "no PR yet" to the restack cascade.
     const err = new Error('ProvisionedThroughputExceededException');
     const send = jest.fn().mockRejectedValue(err);
 

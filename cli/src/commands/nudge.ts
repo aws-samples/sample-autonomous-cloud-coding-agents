@@ -23,13 +23,6 @@ import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import { NUDGE_MAX_MESSAGE_LENGTH } from '../types';
 
-/**
- * `bgagent nudge <task-id> <message>` — send a steering message to a
- * running task (Phase 2). The message argument should be quoted in the
- * shell if it contains spaces, e.g.:
- *
- *     bgagent nudge TASK-123 "also update the README"
- */
 export function makeNudgeCommand(): Command {
   return new Command('nudge')
     .description('Send a steering message to a running task')
@@ -72,11 +65,8 @@ export function makeNudgeCommand(): Command {
     });
 }
 
-/** Map nudge-specific API error codes to friendlier CLI messages. */
 function mapNudgeError(err: ApiError): CliError {
   return mapApiError(err, {
-    // 400: guardrail-blocked or validation error. Pass the server's message
-    // through verbatim so guardrail reasons are visible to the user.
     400: (e) => `Nudge rejected: ${e.message}`,
     403: (e) => `Forbidden (${e.errorCode}): this task belongs to another user.`,
     404: (e) => `Task not found (${e.errorCode}).`,

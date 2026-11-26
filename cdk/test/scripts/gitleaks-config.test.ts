@@ -18,7 +18,7 @@
  */
 
 // gitleaks applies a global allowlist to every rule and every file unless the entry names them, and ORs the criteria of
-// an entry unless it sets `condition = "AND"`. No JavaScript workspace declares a TOML parser, so the file is read as text.
+// an entry unless it sets `condition = "AND"`.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -27,20 +27,18 @@ const CONFIG = fs.readFileSync(path.resolve(__dirname, '../../../.gitleaks.toml'
 
 const isSkipped = (line: string): boolean => /^\s*(#|$)/.test(line);
 
-// A string on one line. In double quotes its only escape is the doubled backslash, so each character of a pattern is the
-// one written. It holds no character that ends a line for JavaScript, which TOML takes for part of the string.
 const STRING = String.raw`(?:"(?:(?!["\\]).|\\\\)*"|'''(?:(?!''').)*''')`;
 
 const FORMS = [
-  String.raw`\[extend\]|\[\[rules\]\]|\[\[(?:rules\.)?allowlists\]\]`, // a table: one of the four the file has
-  String.raw`\w+ = (?:${STRING}|[\w.+-]+)`, // a setting: a string, a boolean or a number
-  String.raw`\w+ = \[(?:${STRING}(?:, ${STRING})*\])?`, // an array of strings on one line, or the start of one that
-  String.raw` {4}${STRING},`, // holds one string per line
-  String.raw`\]`, // and ends on a line of its own
+  String.raw`\[extend\]|\[\[rules\]\]|\[\[(?:rules\.)?allowlists\]\]`,
+  String.raw`\w+ = (?:${STRING}|[\w.+-]+)`,
+  String.raw`\w+ = \[(?:${STRING}(?:, ${STRING})*\])?`,
+  String.raw` {4}${STRING},`,
+  String.raw`\]`,
 ];
 const FORM = new RegExp(`^(?:${FORMS.join('|')})$`);
 
-/** The keys gitleaks reads in a global allowlist, spelled as its documentation spells them. */
+// The keys gitleaks reads in a global allowlist, spelled as its documentation spells them.
 const KEYS = ['description', 'targetRules', 'condition', 'paths', 'commits', 'regexes', 'regexTarget', 'stopwords'];
 
 interface Allowlist {
@@ -65,18 +63,16 @@ const allowlists = (config: string): Allowlist[] => {
   return entries;
 };
 
-// None for a string in the place of an array. gitleaks splits such a string at its commas, so one string can be several
-// patterns and an empty one is no rule.
+// gitleaks splits a string in the place of an array at its commas.
 const strings = (value = ''): string[] => (value.startsWith('[') ? value.match(new RegExp(STRING, 'g')) : null) ?? [];
 
-/** Whether a pattern has to match a whole path. A `|` would split it into alternatives anchored at one end each. */
 const isAnchored = (pattern: string): boolean => /^("|''')\^[^|]+\$\1$/.test(pattern);
 
 const names = (entries: Allowlist[]): string[] => entries.map((entry) => entry.name);
 
 const unread = (config: string): string[] => [
   ...config.split('\n').filter((line) => !isSkipped(line) && !FORM.test(line)),
-  // To gitleaks a key in another letter case is the same key; to the two functions below it would be another one.
+  // To gitleaks a key in another letter case is the same key.
   ...allowlists(config).flatMap(({ settings }) => [...settings.keys()]).filter((key) => !KEYS.includes(key)),
 ];
 
@@ -106,7 +102,6 @@ describe('the global allowlists of .gitleaks.toml', () => {
   });
 });
 
-// The file as it is would pass a looser reading as well, so these hold the reading itself.
 describe('this suite', () => {
   const entry = (...lines: string[]): string => ['[[allowlists]]', ...lines].join('\n');
   const FILE = 'paths = ["^test/a$"]';
@@ -124,7 +119,7 @@ describe('this suite', () => {
     expect(() => withoutFiles(['[allowlist]', VALUE].join('\n'))).toThrow('no [[allowlists]] table');
   });
 
-  // gitleaks reads each of these lines: under a form that matched one, an entry could go unread.
+  // gitleaks reads each of these lines.
   test.each([
     '[[Allowlists]]',
     '[[ allowlists ]]',

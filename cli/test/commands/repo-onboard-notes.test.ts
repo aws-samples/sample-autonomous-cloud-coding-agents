@@ -81,12 +81,8 @@ describe('buildRepoOnboardNotes', () => {
     });
 
     expect(notes.some((n) => n.includes('microvmConfig'))).toBe(true);
-    // The substrate gate in `repo onboard` can prove the substrate exists but NOT
-    // that an image is configured — a deployed-but-imageless stack still rejects
-    // every task, so the note has to carry the packaging remedy.
     expect(notes.some((n) => n.includes('package-microvm-artifact.sh'))).toBe(true);
     expect(notes.some((n) => n.includes('microvm_base_image_arn'))).toBe(true);
-    // ...and the P1 honesty warning, matching the synth-time annotation id.
     expect(notes.some((n) => n.includes('abca:microvm-image-p1-smoke-unverified'))).toBe(true);
   });
 

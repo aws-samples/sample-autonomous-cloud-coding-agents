@@ -17,41 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Authenticated Linear attachment enrichment at task-admission time (ADR-016).
- *
- * ABCA runs Linear 100% deterministically — there is NO Linear MCP (see
- * ADR-016 "Linear is fully deterministic"). The agent therefore cannot fetch
- * `uploads.linear.app`-hosted files at runtime (that used to be
- * `mcp__linear-server__extract_images`). Instead, the webhook processor fetches
- * them here at admission time, AUTHENTICATED with the workspace `@bgagent`
- * OAuth token, screens each through the same Bedrock Guardrail pipeline as
- * every other attachment, uploads the cleaned bytes to S3, and returns `passed`
- * AttachmentRecords for `createTaskCore` to persist verbatim.
- *
- * All platform-supported attachment types come through here, not just images:
- * images (PNG/JPEG) are screened visually, files (PDF/text/csv/markdown/json/
- * log) as text — same set the inline/URL paths and `jira-attachments.ts` allow.
- * An unsupported type (docx, zip, …) FAILS the task closed with a message naming
- * the supported types (user deletes it + re-triggers) — not silently skipped, so
- * a user who attached a spec isn't left wondering why it was ignored.
- *
- * This is the Linear analog of `jira-attachments.ts` — same
- * select → fetch → magic-bytes → screen → upload → record shape, same
- * fail-closed contract ({@link LinearAttachmentError}), same batch cleanup. The
- * one Linear-specific difference is the FETCH primitive: Linear embeds uploaded
- * images inline as `![alt](https://uploads.linear.app/…)` and attaches uploaded
- * files as plain `[label](https://uploads.linear.app/…)` links in the issue
- * description, and those signed URLs require the workspace OAuth bearer (the
- * unauthenticated URL-resolver in `resolve-url-attachments.ts` deliberately
- * SKIPS `uploads.linear.app` for exactly this reason — see
- * `linear-webhook-processor.extractImageUrlAttachments`). Non-Linear-hosted
- * markdown images (public CDNs) stay on that unauthenticated URL path; only the
- * `uploads.linear.app` ones come through here.
- *
- * Tests: cdk/test/handlers/shared/linear-attachments.test.ts
- */
-
 import { createHash } from 'crypto';
 import * as dns from 'dns/promises';
 import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
@@ -62,84 +27,30 @@ import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
 import { EXTENSION_TO_MIME, isAllowedMimeType, isPrivateIp, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK, SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL } from './validation';
 
-/** Per-request timeout for a single attachment download. */
 const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
 
-/** Cap on `uploads.linear.app` files pulled from one issue description. */
 const MAX_LINEAR_UPLOADS_PER_ISSUE = 10;
 
-/**
- * Upper bound on how many markdown links we'll even enumerate while scanning a
- * description, so a pathological body with thousands of links can't spin. Set
- * well above any real cap — overflow past the real slot budget is handled with a
- * clear error by the caller, not by this scan limit.
- */
 const SCAN_HARD_CAP = 100;
 
-/** Max length of the derived, path-safe attachment id (S3 key segment). */
 const MAX_ATTACHMENT_ID_LENGTH = 128;
 
-/** Chars of pathname digest appended to an upload id to keep distinct paths distinct. */
 const UPLOAD_ID_DIGEST_CHARS = 10;
 
 /* eslint-disable @typescript-eslint/no-magic-numbers -- file-format magic-byte signatures */
-/** Magic-byte signatures used to sniff a body when the content-type is generic. */
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47] as const;
 const JPEG_MAGIC = [0xff, 0xd8, 0xff] as const;
-const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // %PDF-
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const;
 /* eslint-enable @typescript-eslint/no-magic-numbers */
 
-/**
- * Markdown reference to a `uploads.linear.app` file. Matches BOTH the image form
- * `![alt](url)` AND the plain link form `[label](url)` — Linear embeds uploaded
- * images inline (`!`) but attaches uploaded files (PDFs, logs, specs) as plain
- * links. The leading `!` is optional so both are captured.
- *
- * Capture groups: **1 = label** (the `[…]` text — for a file link this IS the
- * original filename, e.g. `spec.docx`, surfaced in user-facing messages), **2 =
- * URL**. The URL may be wrapped in angle brackets — `[label](<https://…>)` —
- * which is the CommonMark autolink form Linear NORMALIZES uploaded-file links
- * into (observed in practice: a plain `[f](https://…)` link round-tripped
- * through Linear comes back as `(<https://…>)`, and the un-bracketed pattern
- * silently dropped it). The `<`/`>` are optional and excluded from the captured
- * URL, and `>` is excluded from the URL body so the closing bracket can't leak in.
- */
-//
-// The label quantifier is BOUNDED (``{0,MAX}``) rather than open-ended. Making the
-// leading ``!`` optional means the engine can no longer anchor each attempt on a
-// literal ``!`` — it retries the label scan from every ``[`` — so an unbounded
-// ``[^\]]*`` is quadratic in the description length. Measured on a description of
-// unmatched ``[``: 4 KB ≈ 7 ms, 12 KB ≈ 56 ms, 50 KB ≈ 940 ms, and ~150 KB blows
-// the webhook processor's timeout. No crafting is needed — a large pasted table
-// does it. A bound caps the work per start position; a real markdown label is far
-// shorter than the limit, so nothing legitimate stops matching.
-// A GENEROUS label bound. This is not what stops the pathological case (see
-// SCAN_MAX_DESCRIPTION_CHARS below) — it only keeps a single start position from
-// scanning arbitrarily far. It must sit well above any real markdown label,
-// because a label longer than the bound makes the whole link stop matching and
-// the attachment is then silently MISSED. A tight bound traded a slow scan for
-// lost user data, which is the worse failure: 300 dropped a 350-char descriptive
-// alt text with nothing logged.
 const MARKDOWN_LABEL_MAX_CHARS = 4096;
 
-/**
- * Hard cap on the description length we scan for attachment links.
- *
- * This is the real bound on the work. Making the leading ``!`` optional stopped
- * the engine anchoring each attempt on a literal ``!``, and BOTH variable parts
- * of the pattern then backtrack per start position — the label AND the URL. So
- * bounding the label alone does not help: measured on `[](https://a` repeated,
- * a 100 KB description takes ~820 ms with or without a label bound, and larger
- * inputs exceed the webhook processor's timeout. No crafting is needed; a
- * mangled paste does it.
- *
- * A length cap fixes it for every hostile shape at once and is honest about the
- * trade: a description longer than this has its tail unscanned, which we LOG
- * rather than pass over in silence. Linear descriptions are prose written by
- * humans; 64 KB is far past any real one, and the attachment count is separately
- * capped by {@link SCAN_HARD_CAP}.
- */
+// Node's regex engine backtracks on both the label and the URL from every `[`: measured
+// ~820 ms on 100 KB of `[](https://a` repeated, with or without a label bound.
 const SCAN_MAX_DESCRIPTION_CHARS = 65_536;
+// Linear embeds uploaded images as `![alt](url)` and uploaded files as plain
+// `[label](url)` links, and normalizes a file link's URL into the CommonMark
+// angle-bracket form `[label](<https://…>)`.
 const MARKDOWN_LINK_OR_IMAGE_PATTERN = new RegExp(
   `!?\\[([^\\]]{0,${MARKDOWN_LABEL_MAX_CHARS}})\\]\\(<?(https://[^)>]+)>?\\)`,
   'g',
@@ -149,8 +60,7 @@ const MARKDOWN_LINK_OR_IMAGE_PATTERN = new RegExp(
  * Thrown when a Linear attachment that was SELECTED for inclusion cannot be
  * safely fetched, validated, or screened. The caller treats this as a
  * fail-closed signal: reject the whole task rather than let the agent run with
- * missing or unscreened context. (Attachments filtered out *before* download —
- * non-`uploads.linear.app`, over-cap — are silently skipped and never raise.)
+ * missing or unscreened context.
  */
 export class LinearAttachmentError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -159,7 +69,6 @@ export class LinearAttachmentError extends Error {
   }
 }
 
-/** S3 + screening dependencies for the attachment download path. */
 export interface LinearAttachmentStorage {
   readonly s3Client: S3Client;
   readonly bucketName: string;
@@ -174,23 +83,13 @@ export interface LinearAttachmentStorage {
   readonly linearWorkspaceId: string;
 }
 
-/** A `uploads.linear.app` file selected from the description for download. */
 interface SelectedUpload {
   readonly url: string;
-  /** Path-traversal-safe, unique filename for the S3 key + on-disk name. */
   readonly filename: string;
-  /** Stable id derived from the upload path (S3 key segment + on-disk dir). */
   readonly id: string;
-  /**
-   * Human-friendly name for USER-FACING messages/logs only (the markdown
-   * `[label]` — the original filename the user attached, e.g. `spec.docx`).
-   * Never used in an S3 key or on disk (that's {@link filename}, which is
-   * path-safe). Falls back to `filename` when the label is empty.
-   */
   readonly displayName: string;
 }
 
-/** Is this a Linear-hosted upload URL (needs the OAuth bearer to fetch)? */
 export function isLinearUploadsUrl(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase();
@@ -201,11 +100,8 @@ export function isLinearUploadsUrl(url: string): boolean {
 }
 
 /**
- * Derive a stable, path-traversal-safe id + filename from a `uploads.linear.app`
- * URL. The id becomes an S3 key segment AND the agent-side on-disk directory
- * name, so it must never traverse. Linear upload URLs look like
- * `https://uploads.linear.app/<uuid>/<uuid>/<name>?signature=…`; we key on the
- * path (minus query) and sanitize the trailing name.
+ * Linear upload URLs look like
+ * `https://uploads.linear.app/<uuid>/<uuid>/<name>?signature=…`.
  */
 function deriveUploadIdentity(url: string, index: number): { id: string; filename: string } {
   let pathname = '';
@@ -217,48 +113,22 @@ function deriveUploadIdentity(url: string, index: number): { id: string; filenam
   } catch {
     pathname = url;
   }
-  // Stable id: the path with unsafe chars collapsed to '-' (query dropped so a
-  // re-signed URL for the same object maps to the same id), plus a short digest
-  // of the FULL pathname.
-  //
-  // The digest is load-bearing, not decoration. Collapsing every unsafe char to
-  // '-' and then squashing runs maps '.', '-' and '/' onto the same character, so
-  // ``design.v1.png`` and ``design-v1.png`` produced an identical id — and both
-  // de-dupe sites resolve a collision by DISCARDING the second file. A user who
-  // attached both got one, silently, with nothing logged and no warning. The
-  // digest restores injectivity for practical purposes while keeping the readable
-  // stem for logs.
   const slug = pathname.replace(/[^A-Za-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
   const digest = createHash('sha256').update(pathname).digest('hex').slice(0, UPLOAD_ID_DIGEST_CHARS);
   const stem = (slug || `upload-${index}`).slice(0, MAX_ATTACHMENT_ID_LENGTH - UPLOAD_ID_DIGEST_CHARS - 1);
   const id = `${stem}-${digest}`;
   const sanitized = lastSegment.replace(/[^a-zA-Z0-9._-]/g, '_');
-  // No .png default: a link-form upload may be a PDF/log. A generic fallback name
-  // keeps the extension out of the type decision (content-type/magic-bytes win).
   const filename = isValidFilename(sanitized) ? sanitized : `linear-upload-${index}`;
   return { id, filename };
 }
 
-/** Lowercased file extension (no dot) of a filename, or '' if none. */
 function extensionOf(filename: string): string {
   const dot = filename.lastIndexOf('.');
   return dot > 0 ? filename.slice(dot + 1).toLowerCase() : '';
 }
 
-/**
- * Collect the UNIQUE `uploads.linear.app` markdown files from a description (both
- * image `![](url)` and link `[](url)` forms). Non-Linear-hosted URLs are ignored
- * here (the unauthenticated URL path in `resolve-url-attachments.ts` handles
- * public images). De-dupes by id. Does NOT apply the slot cap — the caller
- * decides whether the count fits (so overflow is a loud error, not a silent
- * truncation; review finding #2). Scanning is bounded by {@link SCAN_HARD_CAP}
- * so a pathological description with thousands of links can't run unbounded.
- */
 function collectLinearUploads(description: string | undefined): SelectedUpload[] {
   if (!description) return [];
-  // Bound the scan input, not just the pattern. Truncation is announced: an
-  // unscanned tail could hide an attachment, and a silent miss is worse than a
-  // slow scan.
   let scanned = description;
   if (scanned.length > SCAN_MAX_DESCRIPTION_CHARS) {
     logger.warn('Issue description longer than the attachment-scan cap — tail not scanned', {
@@ -275,24 +145,16 @@ function collectLinearUploads(description: string | undefined): SelectedUpload[]
     if (selected.length >= SCAN_HARD_CAP) break;
     const label = (match[1] ?? '').trim();
     const url = match[2];
-    if (!isLinearUploadsUrl(url)) continue; // public CDN URLs go via the URL path
+    if (!isLinearUploadsUrl(url)) continue;
     const { id, filename } = deriveUploadIdentity(url, index++);
     if (seenIds.has(id)) continue;
     seenIds.add(id);
-    // The markdown label is the original filename for a file link (Linear sets
-    // it to the upload's name). Use it for user-facing messages only; fall back
-    // to the path-safe filename when the link had no/empty label.
+    // Linear sets a file link's label to the upload's original filename.
     selected.push({ url, filename, id, displayName: label || filename });
   }
   return selected;
 }
 
-/**
- * GET the raw bytes of one `uploads.linear.app` URL with the OAuth bearer,
- * enforcing the size cap while reading. SSRF-guarded: HTTPS-only, host must be a
- * Linear uploads host, and the resolved IP must be public. Returns an outcome
- * kind so the caller can force a token refresh on a 401/403.
- */
 async function fetchUploadBytes(
   accessToken: string,
   url: string,
@@ -313,14 +175,12 @@ async function fetchUploadBytes(
   if (!isLinearUploadsUrl(url)) {
     return { kind: 'error', message: 'not a Linear uploads host' };
   }
-  // SSRF: resolve the host and reject private/internal targets before connecting.
   try {
     const addrs = await dns.lookup(parsed.hostname, { all: true });
     if (addrs.length === 0 || addrs.some((a) => isPrivateIp(a.address) !== undefined)) {
       return { kind: 'error', message: 'host resolves to a private/reserved address' };
     }
   } catch (err) {
-    // The outcome's message is posted on the Linear issue: the cause goes to the log.
     logger.warn('Linear attachment download: DNS resolution failed', {
       host: parsed.hostname,
       error: err instanceof Error ? err.message : String(err),
@@ -338,12 +198,7 @@ async function fetchUploadBytes(
         Accept: '*/*',
       },
       signal: controller.signal,
-      // SSRF hardening (review): the pre-fetch DNS check validates the ALLOWLISTED
-      // uploads.linear.app host, but a redirect could bounce the connection to an
-      // internal address the check never saw. A legitimate signed Linear upload
-      // URL serves the bytes directly (no redirect), so reject any redirect rather
-      // than blindly follow it to an unvalidated host. (Narrows the residual
-      // DNS-rebinding TOCTOU window too — the fetch can't be steered off-host.)
+      // A signed Linear upload URL serves the bytes directly, with no redirect.
       redirect: 'error',
     });
     if (resp.status === 401 || resp.status === 403) {
@@ -371,7 +226,6 @@ async function fetchUploadBytes(
     }
     return { kind: 'ok', content: Buffer.concat(chunks), contentType };
   } catch (err) {
-    // As above: the cause goes to the log, not onto the issue.
     logger.warn('Linear attachment download: request failed', {
       host: parsed.hostname,
       error: err instanceof Error ? err.message : String(err),
@@ -395,11 +249,10 @@ export interface LinearPaperclipAttachment {
  * Fetch, screen, and store the `uploads.linear.app` files an issue carries,
  * returning `passed` AttachmentRecords for `createTaskCore` to persist verbatim.
  *
- * Sources BOTH kinds of Linear attachment (review finding #1):
+ * Sources BOTH kinds of Linear attachment:
  *   - files embedded in the description as markdown `[label](uploads.linear.app/…)`;
  *   - native paperclip attachments (the `attachments` connection) passed in via
- *     `paperclipAttachments` — the webhook processor reads those from the context
- *     probe. Only `uploads.linear.app`-hosted paperclips are hydrated; a paperclip
+ *     `paperclipAttachments`. Only `uploads.linear.app`-hosted paperclips are hydrated; a paperclip
  *     that's an external link (GitHub, Figma, …) is left alone.
  * De-duped across both sources by upload id.
  *
@@ -421,14 +274,11 @@ export async function downloadScreenAndStoreLinearAttachments(
 ): Promise<PassedAttachmentRecord[]> {
   const all = collectLinearUploads(description);
 
-  // Merge native paperclip attachments (uploads.linear.app only), de-duped by id
-  // against the description-scanned set so a file that's both attached AND linked
-  // isn't fetched twice.
   const seenIds = new Set(all.map((u) => u.id));
   let pcIndex = 0;
   for (const pc of paperclipAttachments) {
     if (all.length >= SCAN_HARD_CAP) break;
-    if (!isLinearUploadsUrl(pc.url)) continue; // external-link paperclip — not ours to fetch
+    if (!isLinearUploadsUrl(pc.url)) continue;
     const { id, filename } = deriveUploadIdentity(pc.url, pcIndex++);
     if (seenIds.has(id)) continue;
     seenIds.add(id);
@@ -437,11 +287,6 @@ export async function downloadScreenAndStoreLinearAttachments(
 
   if (all.length === 0) return [];
 
-  // Overflow is a LOUD error, not a silent truncation (review #2 + #6). This is
-  // reached AFTER collecting uploads (not short-circuited on remainingSlots<=0),
-  // so a Linear-hosted spec behind 10 public images is REJECTED, never silently
-  // dropped. Budget = the smaller of free per-task slots (public-URL images
-  // already consumed some) and the per-issue Linear cap.
   const budget = Math.min(remainingSlots, MAX_LINEAR_UPLOADS_PER_ISSUE, MAX_ATTACHMENTS_PER_TASK);
   const slotsConsumedElsewhere = remainingSlots < MAX_LINEAR_UPLOADS_PER_ISSUE;
   if (all.length > budget) {
@@ -457,21 +302,13 @@ export async function downloadScreenAndStoreLinearAttachments(
   const selected = all;
 
   const records: PassedAttachmentRecord[] = [];
-  // Keys uploaded so far this batch — deleted on any failure so a
-  // partially-successful batch doesn't orphan S3 objects.
   const uploadedKeys: string[] = [];
-  // Running total of REAL downloaded bytes (declared sizes don't exist for a
-  // signed URL, so this is the only ceiling).
   let totalBytes = 0;
 
   try {
     for (const upload of selected) {
       const outcome = await fetchUploadBytes(ctx.accessToken, upload.url);
 
-      // uploads.linear.app auth failures are terminal here: the caller already
-      // resolved a fresh workspace token (resolveLinearOauthToken refreshes
-      // proactively within 60s of expiry), so a 401/403 means the signed URL
-      // itself is stale/invalid, not a refreshable token — fail closed.
       if (outcome.kind === 'auth') {
         throw new LinearAttachmentError(
           `Attachment '${upload.displayName}' could not be downloaded: Linear rejected the credential ` +
@@ -496,50 +333,27 @@ export async function downloadScreenAndStoreLinearAttachments(
         throw new LinearAttachmentError(`Attachment '${upload.displayName}' is empty (0 bytes).`);
       }
 
-      // Infer the MIME from the response content-type, the filename extension,
-      // then the magic bytes (in that order of trust). The extension comes from
-      // the markdown LABEL (displayName — the original filename like `design.pdf`),
-      // not the S3 filename (derived from the URL path, a UUID with no extension).
-      // Linear embeds uploaded images inline and attaches uploaded files (PDFs,
-      // logs, CSVs, JSON, text) as links — both come through here. The platform
-      // allowlist gates the supported set: images (PNG/JPEG) and files
-      // (PDF/text/csv/markdown/json/log). Anything else (docx, zip, …) fails closed.
       const mimeType = inferMime(outcome.contentType, upload.displayName, content);
       const isImage = mimeType.startsWith('image/');
       const attachmentType = isImage ? 'image' : 'file';
       if (!mimeType || !isAllowedMimeType(mimeType, attachmentType)) {
-        // Unsupported type (docx, zip, …) — there's no safe screening path, so
-        // fail closed and tell the user to remove it and re-trigger. (We reject
-        // rather than silently skip: a user who attached a spec would otherwise
-        // get no signal it was ignored.) The supported-extension list is derived
-        // from the allowlist so it never drifts.
         logger.warn('Rejecting Linear task: unsupported attachment type', {
           linear_workspace_id: ctx.linearWorkspaceId,
           attachment_filename: upload.displayName,
           content_type: outcome.contentType || 'unknown',
           inferred_mime: mimeType || 'unknown',
         });
-        // Message states the fact + the supported set; the processor's reject
-        // wrapper appends the "remove and re-apply the trigger label" instruction,
-        // so we don't repeat it here.
         throw new LinearAttachmentError(
           `Attachment '${upload.displayName}' is not a supported file type ` +
           `(supported: ${SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL}).`,
         );
       }
-      // Confirm the bytes match the resolved type (blocks a masquerading/polyglot
-      // payload). Text types have no signature — validateMagicBytes checks for
-      // valid, null-free UTF-8 instead.
       if (!validateMagicBytes(content, mimeType)) {
         throw new LinearAttachmentError(
           `Attachment '${upload.displayName}' content does not match its declared type '${mimeType}'.`,
         );
       }
 
-      // Screen through the same Bedrock Guardrail pipeline as every other
-      // attachment — images visually, files as text. Any block or screening
-      // failure is fail-closed. (Pass displayName — screening uses it only in
-      // its own error text, never as a path.)
       let screenResult;
       try {
         screenResult = isImage
@@ -552,9 +366,6 @@ export async function downloadScreenAndStoreLinearAttachments(
             { cause: err },
           );
         }
-        // Not a verdict on the file: the screening call itself failed (throttled,
-        // denied). The SDK's text can name the role and the account, and this
-        // error's message is posted on the Linear issue, so it stays in the log.
         logger.error('Screening call failed for Linear attachment', {
           linear_workspace_id: ctx.linearWorkspaceId,
           attachment_filename: upload.displayName,
@@ -571,9 +382,6 @@ export async function downloadScreenAndStoreLinearAttachments(
         );
       }
 
-      // S3 key + record filename stay path-safe (upload.filename) — the agent
-      // writes the attachment to disk at `<dir>/<filename>` (agent/src/attachments.py),
-      // so it must never carry the raw user label.
       const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${ctx.userId}/${ctx.taskId}/${upload.id}/${upload.filename}`;
       let putResult;
       try {
@@ -598,8 +406,6 @@ export async function downloadScreenAndStoreLinearAttachments(
       }
       uploadedKeys.push(s3Key);
 
-      // Only images carry a token estimate (files aren't fed to the model as
-      // vision tokens). Mirrors jira-attachments.
       const tokenEstimate = isImage
         ? estimateImageTokensFromBuffer(screenResult.content, mimeType)
         : undefined;
@@ -624,7 +430,6 @@ export async function downloadScreenAndStoreLinearAttachments(
       });
     }
   } catch (err) {
-    // Fail-closed: a mid-batch failure must not orphan objects already uploaded.
     await deleteS3Objects(ctx.s3Client, ctx.bucketName, uploadedKeys);
     throw err;
   }
@@ -632,55 +437,25 @@ export async function downloadScreenAndStoreLinearAttachments(
   return records;
 }
 
-/** Does `content` start with the given magic-byte signature? */
 function startsWith(content: Buffer, magic: readonly number[]): boolean {
   if (content.length < magic.length) return false;
   return magic.every((byte, i) => content[i] === byte);
 }
 
-/**
- * Resolve the MIME type of a downloaded upload. Trust order — and crucially, the
- * filename `label` is ATTACKER-CONTROLLED (it's the markdown `[label]`), so it
- * must never by itself promote bytes to a BINARY type (review finding #3):
- *   1. response content-type, if it is itself a platform-allowed type;
- *   2. magic-byte signature for the BINARY types (PNG/JPEG/PDF) — proven by the
- *      bytes, not the label;
- *   3. the label extension, but ONLY when it maps to a TEXT type. Binary
- *      extensions are ignored here — a `[x.pdf]` label can't make a non-PDF a
- *      PDF; only step 2's magic bytes can. Text is safe to key on the label
- *      because the caller then runs validateMagicBytes, whose UTF-8 check
- *      rejects a binary payload wearing a `.txt`/`.csv` label.
- * Returns '' if none applies (caller rejects the upload as unsupported).
- */
-/** Is this an allowed TEXT-family MIME (screened as UTF-8 text, never a binary)? */
 function isAllowedTextMime(mime: string): boolean {
   return (mime.startsWith('text/') || mime === 'application/json') && isAllowedMimeType(mime, 'file');
 }
 
 function inferMime(contentType: string, label: string, content: Buffer): string {
-  // BYTES ARE AUTHORITATIVE (review #2): a recognised binary magic signature wins
-  // over ANY content-type or label. This blocks a PDF served as `text/plain` (or
-  // labeled `.txt`) from skipping PDF extraction and being screened as raw text.
   if (startsWith(content, PNG_MAGIC)) return 'image/png';
   if (startsWith(content, JPEG_MAGIC)) return 'image/jpeg';
   if (startsWith(content, PDF_MAGIC)) return 'application/pdf';
-  // No binary signature. A content-type claiming a BINARY allowed type (pdf/png/
-  // jpeg) but lacking the matching magic bytes is a mismatch → reject (don't store
-  // bytes lying about being a PDF/image). Only a TEXT content-type is trusted here,
-  // and validateMagicBytes' UTF-8 gate still confirms the bytes are really text.
   if (contentType && isAllowedTextMime(contentType)) return contentType;
-  // Fall back to the label extension — TEXT types only. The label is
-  // attacker-controlled, so it can never promote bytes to a binary type (#3).
   const byExt = EXTENSION_TO_MIME[extensionOf(label)];
   if (byExt && isAllowedTextMime(byExt)) return byExt;
   return '';
 }
 
-/**
- * Best-effort deletion of S3 objects by key. Never throws — cleanup failure is
- * logged and left to the bucket's 90-day lifecycle. Mirrors
- * `jira-attachments.deleteS3Objects`.
- */
 async function deleteS3Objects(s3Client: S3Client, bucketName: string, keys: readonly string[]): Promise<void> {
   if (keys.length === 0) return;
   try {
@@ -701,8 +476,6 @@ async function deleteS3Objects(s3Client: S3Client, bucketName: string, keys: rea
   }
 }
 
-/** Delete previously-stored pre-screened Linear attachment objects (for the
- *  processor to call when createTaskCore rejects the task after upload). */
 export async function cleanupPreScreenedAttachments(
   s3Client: S3Client,
   bucketName: string,

@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for SlackUserMappingTable construct.
- */
 export interface SlackUserMappingTableProps {
   /**
    * Optional table name override.
@@ -49,9 +46,6 @@ export interface SlackUserMappingTableProps {
  *
  * Schema: slack_identity (PK) — composite key `{team_id}#{user_id}`.
  * Also used for pending link records (with status='pending' and TTL).
- *
- * GSIs:
- * - PlatformUserIndex (PK: platform_user_id, SK: linked_at) — list linked Slack accounts for a user
  */
 export class SlackUserMappingTable extends Construct {
   /**
@@ -60,9 +54,6 @@ export class SlackUserMappingTable extends Construct {
    */
   public static readonly PLATFORM_USER_INDEX = 'PlatformUserIndex';
 
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: SlackUserMappingTableProps = {}) {

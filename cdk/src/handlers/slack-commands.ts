@@ -28,7 +28,6 @@ const lambdaClient = makeClient(LambdaClient);
 const SIGNING_SECRET_ARN = process.env.SLACK_SIGNING_SECRET_ARN!;
 const PROCESSOR_FUNCTION_NAME = process.env.SLACK_COMMAND_PROCESSOR_FUNCTION_NAME!;
 
-/** Parsed Slack slash command payload (URL-encoded form data). */
 export interface SlackCommandPayload {
   readonly command: string;
   readonly text: string;
@@ -54,7 +53,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return slackResponse('Request body is required.');
     }
 
-    // Verify Slack signing secret (re-fetches if the cached value was rotated out).
     const signingSecret = await getSlackSecret(SIGNING_SECRET_ARN);
     if (!signingSecret) {
       logger.error('Slack signing secret not found');
@@ -69,16 +67,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return { statusCode: 401, headers: { 'Content-Type': 'text/plain' }, body: 'Invalid signature' };
     }
 
-    // Parse URL-encoded form body.
     const payload = parseFormBody(event.body);
     const subcommand = (payload.text ?? '').trim().split(/\s+/)[0]?.toLowerCase() ?? '';
 
-    // For 'help' we can respond inline (no async processing needed).
     if (subcommand === 'help' || subcommand === '') {
       return slackResponse(HELP_TEXT);
     }
 
-    // Async-invoke the processor Lambda for all other subcommands.
     try {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
@@ -93,7 +88,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return slackResponse('Failed to process command. Please try again.');
     }
 
-    // Acknowledge immediately — the processor will follow up via response_url.
     const ackMessage = ACK_MESSAGES[subcommand] ?? `Processing \`${subcommand}\`...`;
     return slackResponse(ackMessage);
   } catch (err) {

@@ -22,9 +22,6 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct, IValidation } from 'constructs';
-// Cross-language constants (S9 — see ``contracts/constants.md``). Import
-// the JSON directly rather than re-using ``handlers/shared/types.ts`` so
-// the construct layer stays decoupled from runtime-side types.
 import sharedConstants from '../../../contracts/constants.json';
 import { parseRef } from '../handlers/shared/registry/ref';
 import {
@@ -38,49 +35,24 @@ import {
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
-/**
- * Cedar HITL — bounds on the per-task approval-gate cap (design decision #13).
- * Single source of truth: ``contracts/constants.json``. Same JSON is read
- * by ``agent/src/policy.py`` at import and re-exported from
- * ``handlers/shared/types.ts``.
- */
 const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 
-/**
- * Bounds on a per-repo cost budget (#748). Same JSON the task-submit path
- * validates ``max_budget_usd`` against (``handlers/shared/types.ts`` →
- * ``MAX_BUDGET_USD_MIN``/``MAX_BUDGET_USD_MAX``, used by
- * ``cli/src/commands/submit.ts``). Reading the shared constants rather than
- * re-declaring literals is what keeps the per-repo default and the per-task
- * override from disagreeing about what is in range.
- */
 const MAX_BUDGET_USD_MIN = sharedConstants.max_budget_usd.min;
 const MAX_BUDGET_USD_MAX = sharedConstants.max_budget_usd.max;
 
-/** Timeout for the RepoConfig custom resource (minutes). */
 const REPO_CONFIG_CR_TIMEOUT_MINUTES = 5;
 
-/** TTL (days) applied to a RepoConfig row on blueprint delete before cleanup. */
 const REMOVED_REPO_TTL_DAYS = 30;
 
-/**
- * Properties for the Blueprint construct.
- */
 export interface BlueprintProps {
   /**
    * Repository identifier in "owner/repo" format.
    */
   readonly repo: string;
 
-  /**
-   * The shared RepoTable DynamoDB table.
-   */
   readonly repoTable: dynamodb.ITable;
 
-  /**
-   * Compute strategy configuration.
-   */
   readonly compute?: {
     /**
      * Compute strategy type.
@@ -94,9 +66,6 @@ export interface BlueprintProps {
     readonly runtimeArn?: string;
   };
 
-  /**
-   * Agent configuration overrides.
-   */
   readonly agent?: {
     /**
      * Model override, as a Bedrock inference-profile ID: ``<geo>.<model>``, for
@@ -121,9 +90,7 @@ export interface BlueprintProps {
      * this value; when neither is set NO budget applies (there is no platform
      * default — unset means unlimited, deliberately).
      *
-     * Must be in ``[0.01, 100]`` — the same range the task-submit path
-     * enforces, so a per-repo default cannot be a value a per-task override
-     * would have rejected. Out-of-range values fail at synth.
+     * Must be in ``[0.01, 100]``; out-of-range values fail at synth.
      */
     readonly maxBudgetUsd?: number;
 
@@ -148,9 +115,6 @@ export interface BlueprintProps {
     readonly systemPromptOverrides?: string;
   };
 
-  /**
-   * Credential configuration.
-   */
   readonly credentials?: {
     /**
      * ARN of the Secrets Manager secret containing a per-repo GitHub token.
@@ -158,9 +122,6 @@ export interface BlueprintProps {
     readonly githubTokenSecretArn?: string;
   };
 
-  /**
-   * Pipeline customization.
-   */
   readonly pipeline?: {
     /**
      * Override the default poll interval (ms) for awaiting agent completion.
@@ -189,9 +150,6 @@ export interface BlueprintProps {
     readonly lintCommand?: string;
   };
 
-  /**
-   * Security configuration.
-   */
   readonly security?: {
     /**
      * Additional Cedar policy strings evaluated by the agent's PolicyEngine.
@@ -211,9 +169,6 @@ export interface BlueprintProps {
     readonly approvalGateCap?: number;
   };
 
-  /**
-   * Network configuration for the agent.
-   */
   readonly networking?: {
     /**
      * Additional domains the agent is allowed to resolve.
@@ -231,11 +186,11 @@ export interface BlueprintProps {
    * into the agent payload; an unresolvable ref fails the task (fail-closed).
    */
   readonly assets?: {
-    /** MCP servers merged into the agent's ``.mcp.json`` (PR 2). */
+    /** MCP servers merged into the agent's ``.mcp.json``. */
     readonly mcpServers?: string[];
-    /** Cedar policy modules concatenated into the agent's cedar_policies (PR 3). */
+    /** Cedar policy modules concatenated into the agent's cedar_policies. */
     readonly cedarPolicyModules?: string[];
-    /** Skills whose prompt fragments are appended to the system prompt (PR 3). */
+    /** Skills whose prompt fragments are appended to the system prompt. */
     readonly skills?: string[];
   };
 }
@@ -247,15 +202,11 @@ export interface BlueprintProps {
  * Create: PutItem with status='active' and all config fields. Update: UpdateItem,
  * which SETs the fields a Blueprint declares and REMOVEs only per-repo **asset
  * refs** it no longer declares. Other dropped overrides are carried forward, not
- * cleared: `onUpdate` runs on every deploy and `bgagent repo onboard --model` is a
- * sanctioned second writer of the same row (ADR-017), so a blanket clear deleted an
- * operator's CLI pin on unrelated redeploys.
+ * cleared: `bgagent repo onboard --model` is a second writer of the same row (ADR-017).
  * Delete: UpdateItem to set status='removed' and TTL for eventual cleanup.
  *
- * NOTE: Timestamps (onboarded_at, updated_at) are captured at CDK synth time,
- * not CloudFormation deploy time. This is an inherent limitation of AwsCustomResource
- * where parameters are baked into the template. For precise deploy-time timestamps,
- * a full custom resource Lambda would be needed.
+ * Timestamps (onboarded_at, updated_at) are captured at CDK synth time, not
+ * CloudFormation deploy time: AwsCustomResource bakes its parameters into the template.
  */
 export class Blueprint extends Construct {
   /**
@@ -264,9 +215,6 @@ export class Blueprint extends Construct {
    */
   public readonly egressAllowlist: readonly string[];
 
-  /**
-   * Cedar policies from the security.cedarPolicies prop, exposed for inspection.
-   */
   public readonly cedarPolicies: readonly string[];
 
   /**
@@ -314,11 +262,6 @@ export class Blueprint extends Construct {
     this.cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
     this.skillRefs = [...(props.assets?.skills ?? [])];
 
-    // Chunk 7c: emit a synth-time info annotation when the blueprint did
-    // not configure an override so operators see a signal that this repo
-    // will rely on the platform-default cap (50). Without this, the only
-    // way to notice the default was in effect was to inspect the TaskRecord
-    // at runtime — the default is a silent fallback at the handler layer.
     if (this.approvalGateCap === undefined) {
       Annotations.of(this).addInfo(
         `security.approvalGateCap not configured for '${props.repo}'; `
@@ -327,7 +270,6 @@ export class Blueprint extends Construct {
       );
     }
 
-    // Validate repo format at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));
     this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
     this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
@@ -339,7 +281,6 @@ export class Blueprint extends Construct {
 
     const now = new Date().toISOString();
 
-    // Build the DynamoDB item for PutItem
     const item: Record<string, unknown> = {
       repo: { S: props.repo },
       status: { S: 'active' },
@@ -355,8 +296,6 @@ export class Blueprint extends Construct {
     }
     if (props.agent?.modelId) {
       item.model_id = { S: props.agent.modelId };
-      // Registered next to the write, so that a model is checked exactly when it is
-      // written and a Blueprint that pins none does not read the model context.
       this.node.addValidation(new ModelIdValidation(
         props.agent.modelId,
         resolveBedrockGeoRegion(this.node),
@@ -482,8 +421,6 @@ export class Blueprint extends Construct {
     if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
     if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
     if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
-    // Registry asset refs (#246) — must mirror onCreate's item, else a redeploy
-    // of an already-onboarded repo silently drops asset-ref changes.
     if (this.mcpServerRefs.length > 0) fields.push(', #mcp_servers = :mcp_servers');
     if (this.cedarPolicyModuleRefs.length > 0) fields.push(', #cedar_policy_modules = :cedar_policy_modules');
     if (this.skillRefs.length > 0) fields.push(', #skills = :skills');
@@ -534,10 +471,6 @@ export class Blueprint extends Construct {
     return values;
   }
 
-  /** Registry asset fields that are now empty must be REMOVEd on update, not
-   *  just omitted from SET — otherwise a redeploy that cleared the last
-   *  mcp_server/cedar_policy_module/skill leaves the stale DDB refs active and
-   *  operators can't detach a pinned asset through the Blueprint API (#246). */
   private emptyAssetFields(): string[] {
     const empty: string[] = [];
     if (this.mcpServerRefs.length === 0) empty.push('mcp_servers');
@@ -559,9 +492,6 @@ export class Blueprint extends Construct {
   }
 }
 
-/**
- * Validates that the repo string matches the "owner/repo" format.
- */
 class RepoFormatValidation implements IValidation {
   constructor(private readonly repo: string) {}
 
@@ -573,9 +503,6 @@ class RepoFormatValidation implements IValidation {
   }
 }
 
-/**
- * Validates that all egress allowlist domains match the expected format.
- */
 class DomainFormatValidation implements IValidation {
   constructor(private readonly domains: readonly string[]) {}
 
@@ -590,13 +517,6 @@ class DomainFormatValidation implements IValidation {
   }
 }
 
-/**
- * Cedar HITL — validates the per-blueprint approval-gate cap is an integer
- * inside ``[1, 500]`` (design decision #13). Out-of-bounds values fail at
- * synth so an invalid blueprint cannot deploy and silently drift agent
- * behavior. ``undefined`` is allowed — the submit path falls back to the
- * platform default.
- */
 class ApprovalGateCapValidation implements IValidation {
   constructor(private readonly cap: number | undefined) {}
 
@@ -617,19 +537,6 @@ class ApprovalGateCapValidation implements IValidation {
   }
 }
 
-/**
- * #748 — validates the per-repo cost budget is a finite number inside
- * ``[MAX_BUDGET_USD_MIN, MAX_BUDGET_USD_MAX]``. Bounds come from
- * ``contracts/constants.json``, the SAME source the task-submit path validates
- * a per-task ``max_budget_usd`` against — so a blueprint cannot persist a
- * per-repo default that a per-task override of the same value would reject.
- * Out-of-range fails at synth rather than deploying a budget the agent would
- * then act on. ``undefined`` is allowed: there is no platform default, and
- * unset deliberately means unlimited.
- *
- * Fractional values ARE valid (unlike ``approvalGateCap``) — a budget is
- * dollars-and-cents, and the minimum is one cent.
- */
 class MaxBudgetUsdValidation implements IValidation {
   constructor(private readonly budget: number | undefined) {}
 
@@ -668,10 +575,6 @@ class MemoryTokenBudgetValidation implements IValidation {
   }
 }
 
-/**
- * ``assertModelIdUsable`` in ``cli/src/model-id.ts`` guards the same ``model_id``
- * column (ADR-017). A value that only one of the two rejects still reaches a task.
- */
 class ModelIdValidation implements IValidation {
   constructor(
     private readonly modelId: string,
@@ -686,8 +589,6 @@ class ModelIdValidation implements IValidation {
     if (modelId !== modelId.trim()) {
       return invalid('Remove the surrounding whitespace: the value is written to the RepoTable as given.');
     }
-    // A token and an ARN have no geography prefix either. Left to the rule after
-    // these two, they would be reported as a bare ID, with a suggestion built from them.
     if (Token.isUnresolved(modelId)) {
       return invalid('It contains an unresolved token: agent.modelId must be a literal, so that it can be checked at synth.');
     }
@@ -699,8 +600,6 @@ class ModelIdValidation implements IValidation {
     }
     const geo = geoPrefixOf(modelId);
     if (geo === undefined) {
-      // With the prefix added, a value that is not a granted model (an alias, an ungranted
-      // ID) still fails the next synth, so no value to use is built from it.
       if (!grantedModelIds.includes(modelId)) {
         return invalid(
           `It has no geography prefix. Use '${geoRegion}.<model-id>' with a model this deployment grants `
@@ -740,18 +639,6 @@ class ModelIdValidation implements IValidation {
   }
 }
 
-/**
- * Registry (#246) — validates each ``registry://`` asset ref against the strict
- * grammar at synth, so a floating or malformed pin cannot deploy and then fail
- * every task at resolve time. Uses the same ``parseRef`` the resolver enforces.
- *
- * Also enforces that the ref's kind matches the field it was pinned under
- * (``expectedKind``). Each typed Blueprint field stores into a distinct DDB
- * column, and the orchestrator dispatches by the ref's embedded kind — so a
- * ``skill`` ref placed under ``assets.mcpServers`` would otherwise deploy and
- * then silently activate skill behavior from an "MCP" column. Reject the
- * mismatch at synth instead.
- */
 class RegistryRefValidation implements IValidation {
   constructor(
     private readonly field: string,

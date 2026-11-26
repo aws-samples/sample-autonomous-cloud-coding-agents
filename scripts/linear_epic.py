@@ -6,14 +6,11 @@
 #
 # Creates a parent "epic" issue plus a DAG of child sub-issues wired with
 # "blocked by" relations, then (optionally) applies the trigger label to
-# fire the orchestration. Also inspects + tears down test epics. Kept as a
-# real .py file so the GraphQL payloads don't fight shell quoting.
+# fire the orchestration. Also inspects + tears down test epics.
 #
 # Auth: reads the Linear PAT from $LINEAR_PAT (never echoed).
 #
-# Workspace targeting has no defaults — a team id is required, because the ids
-# are specific to your own Linear workspace. Supply each either by flag or by
-# environment variable:
+# Workspace targeting, by flag or by environment variable:
 #   --team    / $LINEAR_TEAM_ID        (required)
 #   --project / $LINEAR_PROJECT_ID     (optional; omit to create outside a project)
 #   --label   / $LINEAR_TRIGGER_LABEL  (optional; defaults to the platform's `bgagent`)
@@ -37,13 +34,11 @@ import urllib.request
 
 LINEAR_URL = "https://api.linear.app/graphql"
 
-# The platform's default trigger label. A project can rename it via the
-# project-mapping row's ``label_filter``, so pass --label if yours differs.
 DEFAULT_TRIGGER_LABEL = "bgagent"
 
 
 def require_team(args):
-    """Team id from --team or $LINEAR_TEAM_ID. Required: it is workspace-specific."""
+    """Team id from --team or $LINEAR_TEAM_ID; exits when neither is set."""
     team = getattr(args, "team", None) or os.environ.get("LINEAR_TEAM_ID")
     if not team:
         sys.exit(
@@ -68,11 +63,7 @@ def trigger_label(args):
 
 
 def pat():
-    """Linear personal access token from $LINEAR_PAT (never echoed).
-
-    Read only from the environment: an earlier version also fell back to a
-    world-readable path under /tmp, which is not somewhere a credential should
-    live. Export it for the command instead, e.g. from your own secret store."""
+    """Linear personal access token from $LINEAR_PAT; exits when it is unset."""
     p = os.environ.get("LINEAR_PAT")
     if not p:
         sys.exit("No Linear PAT: export $LINEAR_PAT (a Linear personal API key).")
@@ -83,13 +74,9 @@ def https_opener():
     """An opener that can speak ONLY https.
 
     ``urllib.request.urlopen`` (and ``build_opener``) install the default
-    handler set, which includes ``file://``, ``ftp://`` and ``data://``. That
-    turns any future mistake which lets a URL be configured — an env var, a CLI
-    flag, an API-returned redirect target — into an arbitrary-file read, since
-    this function carries the Linear PAT. Building the director by hand keeps
-    HTTPS as the only reachable scheme, so no such mistake can escalate.
+    handler set, which includes ``file://``, ``ftp://`` and ``data://``.
     ``HTTPErrorProcessor``/``HTTPDefaultErrorHandler`` preserve the usual
-    raise-on-4xx/5xx behaviour the caller below relies on.
+    raise-on-4xx/5xx behaviour.
     """
     opener = urllib.request.OpenerDirector()
     opener.add_handler(urllib.request.HTTPSHandler())
@@ -183,7 +170,6 @@ def cmd_create_epic(args):
         )
         key_to_id[node["key"]] = cid
         print(f"  CHILD {cident} {cid}  key={node['key']}  {node['title']}")
-    # Wire edges: for child C depends_on P, P BLOCKS C.
     for node in spec["nodes"]:
         for dep in node.get("depends_on", []):
             create_blocks(key_to_id[dep], key_to_id[node["key"]])

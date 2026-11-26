@@ -17,22 +17,12 @@
  *  SOFTWARE.
  */
 
-/**
- * Stranded-orchestration backstop. Uses a stateful in-memory
- * DynamoDB fake so the sweep's read-advance-release cycle is exercised
- * for real (status writes are visible to the subsequent reload).
- */
-
 interface Row { [k: string]: unknown }
-const orch = new Map<string, Row>(); // OrchestrationTable, key = `${oid} ${sk}`
-const tasksTbl = new Map<string, Row>(); // TaskTable, key = task_id
+const orch = new Map<string, Row>();
+const tasksTbl = new Map<string, Row>();
 
-/** Runs once, after the next Query has read its rows: lets a test change a row
- *  between the sweep's read and the write that follows it. */
 let afterNextQuery: (() => void) | undefined;
 
-/** The condition syntax the sweep and the release path use: clauses joined by
- *  AND, each ``attr = :v``, ``attr <> :v`` or ``attr IN (:a, :b)``. */
 function conditionHolds(row: Row, expression: unknown, vals: Row): boolean {
   if (expression === undefined) return true;
   return String(expression).split(' AND ').every((clause) => {
@@ -46,7 +36,6 @@ const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unkn
   const { _type, input } = cmd;
   const tn = input.TableName as string;
   if (_type === 'Scan') {
-    // meta-row scan on OrchestrationTable: only the projected attributes come back
     const attrs = String(input.ProjectionExpression).split(', ');
     return {
       Items: [...orch.values()]
@@ -67,8 +56,6 @@ const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unkn
     return { Items: items };
   }
   if (_type === 'Update') {
-    // Applies the ``SET attr = :value`` and the ``REMOVE attr`` clause when the
-    // condition holds, as DynamoDB does.
     const k = input.Key as Row;
     const key = `${k.orchestration_id} ${k.sub_issue_id}`;
     const vals = input.ExpressionAttributeValues as Row;
@@ -105,9 +92,6 @@ jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
-// The sweep imports refreshPanelAndSettle from the reconciler to settle an epic
-// whose last terminal event was lost. Mock it so we can assert the sweep CALLS
-// it (its real body is exercised by the reconciler's own suite).
 const refreshPanelAndSettleMock = jest.fn();
 jest.mock('../../src/handlers/orchestration-reconciler', () => ({
   refreshPanelAndSettle: (...args: unknown[]) => refreshPanelAndSettleMock(...args),
@@ -160,7 +144,6 @@ beforeEach(() => {
 
 describe('stranded-orchestration backstop', () => {
   test('lost RELEASE event: A already succeeded, B blocked → sweep releases B', async () => {
-    // The reconciler missed releasing B even though A is succeeded.
     seed('o1', [
       { sk: 'A', status: 'succeeded' },
       { sk: 'B', deps: ['A'], status: 'blocked' },
@@ -171,7 +154,6 @@ describe('stranded-orchestration backstop', () => {
   });
 
   test('a child the sweep starts is stamped, and loses the reason of an earlier start that was refused', async () => {
-    // A retry put the child back to ready and the sweep is the one to start it.
     seed('o-reason', [{ sk: 'A', status: 'ready', updatedAt: minutesAgo(30) }]);
     orch.get('o-reason A')!.failure_reason = 'Blocked by content policy — reword this sub-issue, then reply `@bgagent retry` on the epic to re-run.';
     await handler();
@@ -193,9 +175,6 @@ describe('stranded-orchestration backstop', () => {
     expect(statusOf('o2', 'B')).toBe('released');
   });
 
-  // The sweep must SETTLE the parent (post rollup + transition Linear), not
-  // just flip DDB rows — else a lost last-terminal event leaves the epic 'done'
-  // in DDB but stuck 🔄 In Progress in Linear forever.
   test('lost LAST terminal event: the only remaining child completes → sweep settles the parent', async () => {
     seed('o-settle', [
       { sk: 'A', status: 'succeeded' },
@@ -203,11 +182,9 @@ describe('stranded-orchestration backstop', () => {
     ]);
     tasksTbl.set('task-B', { task_id: 'task-B', status: 'COMPLETED', build_passed: true });
     await handler();
-    // B advanced to terminal in DDB…
     expect(statusOf('o-settle', 'B')).toBe('succeeded');
-    // …and, crucially, the parent was settled — the whole point of the backstop.
     expect(refreshPanelAndSettleMock).toHaveBeenCalled();
-    expect(createTaskCoreMock).not.toHaveBeenCalled(); // nothing left to release
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
   test('already fully-terminal but unsettled epic → sweep still settles (idempotent)', async () => {
@@ -249,7 +226,7 @@ describe('stranded-orchestration backstop', () => {
     ]);
     tasksTbl.set('task-A', { task_id: 'task-A', status: 'RUNNING' });
     await handler();
-    expect(statusOf('o5', 'A')).toBe('released'); // unchanged
+    expect(statusOf('o5', 'A')).toBe('released');
     expect(statusOf('o5', 'B')).toBe('blocked');
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
@@ -291,13 +268,10 @@ describe('stranded-orchestration backstop', () => {
     ]);
     await handler();
     createTaskCoreMock.mockClear();
-    await handler(); // B is now 'released' → no further release
+    await handler();
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  // The sweep settles the parent in the run that ends the epic, not one or two
-  // runs (10 or 20 minutes) later. What it hands to the settle are the rows as
-  // they are after its own writes.
   describe('an epic that this run brings to its end', () => {
     const settledWith = () => {
       expect(refreshPanelAndSettleMock).toHaveBeenCalledTimes(1);
@@ -320,7 +294,6 @@ describe('stranded-orchestration backstop', () => {
     });
 
     test('a release that is refused for good → dependents skipped and the parent settled', async () => {
-      // R was left ``ready`` by the concurrency throttle; the guardrail rejects its text.
       seed('o-refused', [
         { sk: 'R', status: 'ready' },
         { sk: 'D', deps: ['R'], status: 'blocked' },
@@ -328,7 +301,6 @@ describe('stranded-orchestration backstop', () => {
       createTaskCoreMock.mockResolvedValue(refusedForGood);
       await handler();
       expect(settledWith()).toEqual([['R', 'failed'], ['D', 'skipped']]);
-      // The reason the panel shows for R comes with the rows.
       expect(orch.get('o-refused R')?.failure_reason).toMatch(/content policy/);
     });
 
@@ -347,9 +319,6 @@ describe('stranded-orchestration backstop', () => {
     });
   });
 
-  // ``rollup_posted_at`` on the meta row is the stamp of the settle. Finished
-  // epics stay in the table, so settling each of them again on every run would
-  // edit every panel ever posted, every 10 minutes.
   describe('an epic whose rollup is already posted', () => {
     const done = [
       { sk: 'A', status: 'succeeded' },
@@ -369,8 +338,6 @@ describe('stranded-orchestration backstop', () => {
     });
 
     test('an old stamp on an epic that is running again does not stop the recovery', async () => {
-      // Re-opened (a sub-issue added, a retry) by a writer whose removal of the
-      // stamp failed; the last child then lost its terminal event.
       seed('o-reopened', [
         { sk: 'A', status: 'succeeded' },
         { sk: 'B', deps: ['A'], status: 'released', taskId: 'task-B' },
@@ -382,8 +349,6 @@ describe('stranded-orchestration backstop', () => {
     });
   });
 
-  // ``releasing`` is the claim a releaser holds while it creates the task. Taking
-  // it from a releaser that is still running starts a second task for the child.
   describe('a child found in releasing', () => {
     test('claimed moments ago → left to its releaser: not reset, not released a second time', async () => {
       seed('o-live', [
@@ -410,8 +375,6 @@ describe('stranded-orchestration backstop', () => {
         { sk: 'A', status: 'succeeded' },
         { sk: 'B', deps: ['A'], status: 'releasing', updatedAt: minutesAgo(20) },
       ]);
-      // Between the sweep's read and its reset another sweep run resets the dead
-      // claim and takes it itself: the row reads ``releasing`` again, claimed now.
       afterNextQuery = () => { orch.get('o-retaken B')!.updated_at = minutesAgo(0); };
       await handler();
       expect(statusOf('o-retaken', 'B')).toBe('releasing');

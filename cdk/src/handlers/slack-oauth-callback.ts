@@ -48,16 +48,6 @@ interface SlackOAuthResponse {
  * After a workspace admin authorizes the Slack App, Slack redirects here
  * with a `code` query parameter. This handler exchanges the code for a
  * bot token, stores it in Secrets Manager, and records the installation.
- *
- * **CSRF note:** this handler does not validate a `state` parameter
- * (RFC 6749 §10.12). In OAuth V2, the `code` exchange at Slack also
- * requires the app's `client_secret`, which is not available to an attacker —
- * so a forged callback cannot complete the token exchange. The residual
- * risk is a confused-deputy scenario where a workspace admin who clicked a
- * legitimate install link on another tab is instead logged against an
- * attacker-initiated install. Mitigating that requires per-session signed
- * state storage and is tracked as a follow-up. For now, the `client_secret`
- * requirement on Slack's side provides the primary defense.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
@@ -66,9 +56,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return htmlResponse(400, 'Missing authorization code. Please try the install flow again.');
     }
 
-    // Fetch the Slack App client ID and client secret from Secrets Manager.
-    // Always a fresh read: an install runs once, and an operator who has just
-    // corrected a wrong credential must not get the cached one for five minutes.
     const clientId = await getSlackSecret(CLIENT_ID_SECRET_ARN, true);
     if (!clientId) {
       logger.error('Slack client ID not found', { secret_arn: CLIENT_ID_SECRET_ARN });
@@ -81,7 +68,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return htmlResponse(500, 'Slack client secret not configured. Populate the secret in Secrets Manager.');
     }
 
-    // Exchange the code for an access token.
     const redirectUri = buildRedirectUri(event);
     const tokenResponse = await exchangeCode(code, clientId, clientSecret, redirectUri);
     if (!tokenResponse.ok || !tokenResponse.access_token || !tokenResponse.team) {
@@ -96,11 +82,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const botToken = tokenResponse.access_token;
     const now = new Date().toISOString();
 
-    // Store the bot token in Secrets Manager.
     const secretName = `${SLACK_SECRET_PREFIX}${teamId}`;
     await upsertSecret(secretName, botToken, teamId);
 
-    // Write installation record to DynamoDB.
     await ddb.send(new PutCommand({
       TableName: TABLE_NAME,
       Item: {
@@ -172,7 +156,6 @@ async function upsertSecret(secretName: string, secretValue: string, teamId: str
         ],
       }));
     } else if (err instanceof InvalidRequestException && String(err.message).includes('marked for deletion')) {
-      // Secret was scheduled for deletion during app uninstall — restore it and update.
       await sm.send(new RestoreSecretCommand({ SecretId: secretName }));
       await sm.send(new UpdateSecretCommand({
         SecretId: secretName,

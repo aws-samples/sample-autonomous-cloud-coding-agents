@@ -32,7 +32,6 @@ function oneLine(text: string): string {
   return flat.length > SUMMARY_LENGTH ? `${flat.slice(0, SUMMARY_LENGTH - 1)}…` : flat;
 }
 
-/** "Ran a command", or "Read src/a.ts and 2 more" when the turn used several tools. */
 function summary(turn: Turn, repo: string | null): string {
   const first = turn.tools[0];
   if (!first) return turn.said ? `Said: ${oneLine(turn.said)}` : 'Thought it over';

@@ -43,19 +43,16 @@ process.env.POLICIES_RATE_LIMIT_PER_MINUTE = '30';
 import { _resetCacheForTests, handler } from '../../src/handlers/get-policies';
 import type { RepoLookupResult } from '../../src/handlers/shared/repo-config';
 
-/** A Blueprint entry in the annotated form: listed under its own rule id. */
 const CUSTOM_SOFT_RULE =
   '@tier("soft") @rule_id("custom_rule") @severity("low") @approval_timeout_s("60") ' +
   'forbid (principal, action == Agent::Action::"execute_bash", resource) ' +
   'when { context.command like "*npm publish*" };';
 
-/** Blueprint entries without annotations, the form `cdk/test/constructs/blueprint.test.ts` uses. */
 const UNANNOTATED_RULE =
   'forbid (principal, action == Agent::Action::"execute_bash", resource) when { context.command like "*npm publish*" };';
 const OTHER_UNANNOTATED_RULE =
   'forbid (principal, action == Agent::Action::"execute_bash", resource) when { context.command like "*terraform apply*" };';
 
-/** What `lookupRepo` answers for an onboarded repository whose Blueprint holds these Cedar policies. */
 function onboardedWith(cedarPolicies?: string[]): RepoLookupResult {
   return {
     onboarded: true,
@@ -103,10 +100,6 @@ function makeEvent(repoId = 'owner%2Frepo'): APIGatewayProxyEvent {
 beforeEach(() => {
   mockSend.mockReset();
   mockLookupRepo.mockReset();
-  // Default: assume repos are onboarded so existing tests that
-  // predate the Chunk 10 onboarding gate continue to exercise the
-  // happy path. The new T1.4-regression test explicitly overrides
-  // this to simulate a non-onboarded repo.
   mockLookupRepo.mockResolvedValue({ onboarded: true, config: null });
   ulidCounter = 0;
   _resetCacheForTests();
@@ -127,14 +120,8 @@ describe('get-policies', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  // Chunk 10 E2E T1.4: ``GET /repos/{repo}/policies`` must gate on
-  // onboarding the same way ``POST /tasks`` does. Previously the
-  // handler was lenient — a typo'd repo name returned 200 with the
-  // built-in policies, leading users to mistake the response for proof
-  // the repo was onboarded.
-
   test('422 REPO_NOT_ONBOARDED when repo is not in RepoTable', async () => {
-    mockSend.mockResolvedValue({}); // rate-limit update succeeds
+    mockSend.mockResolvedValue({});
     mockLookupRepo.mockResolvedValue({ onboarded: false, config: null });
 
     const res = await handler(makeEvent('typo%2Frepo'));
@@ -142,15 +129,10 @@ describe('get-policies', () => {
     const body = JSON.parse(res.body);
     expect(body.error.code).toBe('REPO_NOT_ONBOARDED');
     expect(body.error.message).toContain('typo/repo');
-    // The gate short-circuits: the one read of the repository row is all it costs.
     expect(mockLookupRepo.mock.calls).toEqual([['typo/repo']]);
   });
 
   test('422 gate runs after rate-limit (rate-limited caller gets 429, not 422)', async () => {
-    // Rate-limit writes fail with ConditionalCheckFailed BEFORE the
-    // onboarding check. A user hammering the endpoint must see the
-    // 429 (their own fault) rather than leaking which repos are
-    // onboarded via a 422-vs-200 timing oracle.
     mockSend.mockRejectedValue(
       Object.assign(new Error('rate limit exceeded'), {
         name: 'ConditionalCheckFailedException',
@@ -164,7 +146,7 @@ describe('get-policies', () => {
   });
 
   test('200 with built-in hard + soft rule summaries when repo has no custom policies', async () => {
-    mockSend.mockResolvedValue({}); // rate-limit
+    mockSend.mockResolvedValue({});
     mockLookupRepo.mockResolvedValue(onboardedWith());
 
     const res = await handler(makeEvent());
@@ -206,9 +188,6 @@ describe('get-policies', () => {
   });
 
   test('lists Blueprint rules written without annotations under the ids the agent gives them', async () => {
-    // The agent runs such an entry as a soft rule named legacy_extra_<n>
-    // (agent/src/policy.py). That id is what an approval request shows and what
-    // `--pre-approve rule:<id>` takes, so the listing has to show it.
     mockSend.mockResolvedValue({});
     mockLookupRepo.mockResolvedValue(onboardedWith([UNANNOTATED_RULE, OTHER_UNANNOTATED_RULE]));
 
@@ -220,7 +199,6 @@ describe('get-policies', () => {
   });
 
   test('numbers the unannotated entries among themselves, whatever stands between them', async () => {
-    // An annotated entry brings its own id and takes no number.
     mockSend.mockResolvedValue({});
     mockLookupRepo.mockResolvedValue(onboardedWith([UNANNOTATED_RULE, CUSTOM_SOFT_RULE, OTHER_UNANNOTATED_RULE]));
 
@@ -278,8 +256,6 @@ describe('get-policies', () => {
 
     const first = await handler(makeEvent());
 
-    // Second call within cache TTL: the onboarding gate reads the row again,
-    // but the listing is not rebuilt, so a rule added meanwhile is not in it.
     mockLookupRepo.mockResolvedValue(onboardedWith([CUSTOM_SOFT_RULE]));
     const second = await handler(makeEvent());
     expect(JSON.parse(second.body).data).toEqual(JSON.parse(first.body).data);
@@ -301,8 +277,6 @@ describe('get-policies', () => {
   });
 
   test('logs an invalid policy set under its own message, with the text of the parser in `error`', async () => {
-    // A data key named `message` would replace the message of the line, and a
-    // search of the log group for 'Cedar parse failure' would find nothing.
     mockSend.mockResolvedValue({});
     mockLookupRepo.mockResolvedValue(onboardedWith(['this is not valid cedar at all ;']));
     const stderr = jest.spyOn(process.stderr, 'write').mockReturnValue(true);
@@ -319,9 +293,6 @@ describe('get-policies', () => {
   });
 
   test('a failed read of the repository row fails that request and is not cached', async () => {
-    // A listing built without the Blueprint's rules must not be answered as a
-    // 200, and above all not be kept in the per-repository cache: every caller
-    // of the next five minutes would be told the repository has no rules of its own.
     mockSend.mockResolvedValue({});
     mockLookupRepo
       .mockRejectedValueOnce(new Error('DDB throttle'))

@@ -1,5 +1,3 @@
-"""Tests for the deliver_artifact deliverer registry (ADR-014 addendum)."""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -23,24 +21,15 @@ def test_first_party_deliverers_present():
 
 
 def test_produced_outcomes_match_first_party_contract():
-    # These sets must equal the pre-addendum enum behavior so no existing
-    # workflow / fixture changes verdict.
     assert produced_outcomes("s3") == frozenset({"artifact"})
     assert produced_outcomes("comment") == frozenset({"comment"})
     assert produced_outcomes("s3_and_comment") == frozenset({"artifact", "comment"})
 
 
 def test_unset_target_models_the_runtime_default():
-    # PR review #296 finding #7: an unset target must resolve to the SAME default
-    # the runtime applies (DEFAULT_DELIVER_TARGET), not a lenient full set — so
-    # the validator models exactly what runs. With the default 's3', that is
-    # {'artifact'} only; a primary:comment workflow with no target is correctly
-    # flagged by rule 11 rather than silently never posting the comment.
     assert DEFAULT_DELIVER_TARGET == "s3"
     assert produced_outcomes(None) == produced_outcomes(DEFAULT_DELIVER_TARGET)
     assert produced_outcomes(None) == frozenset({"artifact"})
-    # The full union still exists for rule 11's "is this a deliver-backed
-    # outcome at all" membership check.
     assert frozenset({"artifact", "comment"}) == DELIVER_OUTCOMES
 
 
@@ -49,7 +38,6 @@ def test_unknown_target_produces_nothing():
 
 
 def _ctx(result_text="some output", task_id="task-1", progress=None):
-    """A minimal StepContext stand-in for the deliver() dispatcher."""
     return SimpleNamespace(
         agent_result=AgentResult(status="success", result_text=result_text),
         config=TaskConfig(aws_region="us-east-1", requires_repo=False, task_id=task_id),
@@ -70,7 +58,6 @@ class TestDeliver:
 
         assert result.artifact_uri == "s3://artifacts-bkt/artifacts/task-9/result.md"
         assert result.comment_posted is False
-        # Uploaded to the task_id-scoped key the SessionRole grant allows.
         _, kwargs = mock_client.put_object.call_args
         assert kwargs["Key"] == "artifacts/task-9/result.md"
         assert kwargs["Body"] == b"hello"
@@ -92,10 +79,6 @@ class TestDeliver:
             deliver("s3", _ctx(result_text=big))
 
     def test_oversize_artifact_rejected_before_encoding(self, monkeypatch):
-        # PR review #296 finding #9: the cap must bound memory by rejecting on the
-        # character count BEFORE encoding to UTF-8 bytes (which would materialize a
-        # second full copy). Patch str.encode to prove it is never called on the
-        # oversize path — the up-front character check fires first.
         monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
         from workflow.deliverers import _artifact_body
 
@@ -119,9 +102,6 @@ class TestDeliver:
             deliver("s3", _ctx(result_text=big))
 
     def test_deferral_message_rejected_not_uploaded(self, monkeypatch):
-        # #515 exit-path guard: a final message that defers the work ("running…
-        # watch /workflows") must fail the deliver step, not upload as the
-        # artifact. This is the exact placeholder observed on task 01KWDEFQH6.
         monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
         deferral = (
             "The deep-research workflow is running in the background. I'll deliver "
@@ -132,10 +112,6 @@ class TestDeliver:
             deliver("s3", _ctx(result_text=deferral))
 
     def test_deferral_guard_applies_to_comment_target_too(self):
-        # Both deliverers route through _artifact_body, so the comment path is
-        # guarded as well — a deferral is never presented as a delivered comment.
-        # (progress must be present, else _post_comment short-circuits before
-        # building the body.)
         ctx = _ctx(
             result_text="The workflow is now running in the background.", progress=MagicMock()
         )
@@ -143,8 +119,6 @@ class TestDeliver:
             deliver("comment", ctx)
 
     def test_genuine_answer_mentioning_background_is_not_rejected(self, monkeypatch):
-        # Guard against false positives: an answer that legitimately discusses
-        # "background" as a topic (not a deferral) must still deliver.
         monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
         answer = (
             "# DynamoDB capacity modes\n\nOn-demand suits bursty traffic; provisioned "
@@ -158,30 +132,23 @@ class TestDeliver:
     @pytest.mark.parametrize(
         "answer",
         [
-            # PR #523 review: a cited CI URL matched the old "/workflows" marker.
             (
                 "Our CI is defined in `.github/workflows/ci.yml`. See "
                 "https://github.com/o/r/actions/workflows/ci.yml for the runs."
             ),
-            # "running in the background" as genuine topic prose.
             "Log compaction runs in the background, so writes are never blocked.",
-            # "watch progress" / "check back" as legitimate instructions in an answer.
             (
                 "To watch progress of a deployment, run `bgagent watch <id>`; check back "
                 "in the console once it reports COMPLETED."
             ),
-            # A fenced code block quoting a marker must not trip it.
             (
                 "Here is the guard's marker list:\n```\nwatch live progress\n```\nThat is "
                 "the full answer."
             ),
-            # A finished answer announces what comes next in the same message.
             (
                 "I compared the three libraries. I'll share the results by criterion.\n\n"
                 "## Speed\nA is twice as fast as B.\n\n## Licence\nAll three are MIT."
             ),
-            # The answer is itself a message or a notice: a promise in it is the
-            # deliverable, not the agent putting the work off.
             "Dear Ms Lee, the analysis is still running. I will share the results on Friday.",
             "We are down for maintenance tonight. Please check back later.",
             "Service is restored. A full incident report will follow within five days.",
@@ -190,9 +157,6 @@ class TestDeliver:
         ],
     )
     def test_genuine_answer_with_colliding_tokens_not_rejected(self, monkeypatch, answer):
-        # #523: the guard matches full phrases and strips code/URLs first, so
-        # answers that merely quote a token in a link, code, or topic prose still
-        # deliver. Only the S3 client is a stub: the text meets the real guard.
         monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
         with patch("aws_session.tenant_client", return_value=MagicMock()):
             result = deliver("s3", _ctx(result_text=answer))

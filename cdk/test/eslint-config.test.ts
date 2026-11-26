@@ -21,24 +21,15 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-/**
- * The rules below are selectors, path lists and one import zone written by hand in
- * eslint.config.mjs. One that matches nothing is still valid and lint passes, so each row
- * lints a snippet as the named file with the real config and lists the rules that must
- * report it: none where the snippet has to stay legal.
- */
 const CASES: Array<[file: string, code: string, rules: string[]]> = [
-  // An AWS SDK client built outside the ua factory (#319).
   ['src/handlers/a.ts', 'export const client = new DynamoDBClient({});', ['no-restricted-syntax']],
   ['src/constructs/a.ts', 'export const client = new sdk.S3Client();', ['no-restricted-syntax']],
   ['src/handlers/a.ts', 'export const client = makeClient(DynamoDBClient, {});', []],
   ['src/handlers/a.ts', 'export const registry = new AgentRegistryClient(config);', []],
   ['src/constructs/a.ts', "export const client = new cognito.UserPoolClient(scope, 'Client', props);", []],
   ['test/a.test.ts', 'export const client = new DynamoDBClient({});', []],
-  // md5 from node:crypto.
   ['src/a.ts', "export const digest = createHash('md5');", ['no-restricted-syntax']],
   ['scripts/a.ts', "export const digest = crypto.createHash('md5');", ['no-restricted-syntax']],
-  // Handler code stays clear of the CDK and of the modules that import it.
   ['src/handlers/a.ts', "import 'aws-cdk-lib';", ['no-restricted-imports']],
   ['src/handlers/a.ts', "import 'aws-cdk-lib/aws-lambda';", ['no-restricted-imports']],
   ['src/handlers/a.ts', "import 'constructs';", ['no-restricted-imports']],
@@ -47,28 +38,22 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/handlers/a.ts', "import '../constructs/task-status';", []],
   ['src/handlers/a.ts', "import './shared/types';", []],
   ['src/constructs/a.ts', "import 'aws-cdk-lib';", []],
-  // A comment that takes code out of the coverage report, in each spelling the rule lists.
   ['src/a.ts', '/* istanbul ignore next */', ['no-warning-comments']],
   ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
   ['src/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
   ['src/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
-  // An error thrown from a catch block without the caught one as its cause, in a file
-  // beside the one file the config exempts.
   ['src/handlers/shared/a.ts', "try { run(); } catch (err) { throw new Error('failed'); }", ['preserve-caught-error']],
-  // The two core formatting rules that stay on beside their @stylistic forks: what the
-  // forks leave out.
+  // Checks that the @stylistic forks of these two core rules leave out.
   ['src/a.ts', 'try { run(); } catch(err) { report(err); }', ['keyword-spacing']],
   ['src/a.ts', 'export const [,second] = pair;', ['comma-spacing']],
-  // A control character in a regular expression.
   ['src/a.ts', 'export const pattern = /\\x01/;', ['no-control-regex']],
-  // Two spaces inside an import attribute, which @stylistic/no-multi-spaces lets pass by default.
+  // @stylistic/no-multi-spaces lets two spaces inside an import attribute pass by default.
   ['src/a.ts', "import cfg from './cfg.json' with { type: /* c */  'json' };", ['@stylistic/no-multi-spaces']],
 ];
 
 /**
  * Runs in a child process, because Jest cannot import() the ES module config that ESLint
- * loads. Only the rules under test run and the parser gets no project: the snippets are
- * not files of the project.
+ * loads.
  */
 const LINT_CASES = `
   import { ESLint } from 'eslint';
@@ -98,9 +83,8 @@ test('eslint.config.mjs reports each snippet with exactly the rules listed', () 
 }, 60_000);
 
 /**
- * ESLint looks for an eslint.config.* file from the directory of each file it lints. One in
- * a subdirectory would replace the package's configuration for the files below it while
- * lint stays green, so the eslint tasks name the file: --config applies it to every file.
+ * ESLint looks for an eslint.config.* file from the directory of each file it lints.
+ * --config applies one file to every file.
  */
 test.each(['cdk', 'cli', 'web'])('the eslint tasks of %s name eslint.config.mjs', (pkg) => {
   const commands = fs.readFileSync(path.resolve(__dirname, '..', '..', pkg, 'mise.toml'), 'utf-8')
@@ -112,15 +96,6 @@ test.each(['cdk', 'cli', 'web'])('the eslint tasks of %s name eslint.config.mjs'
   }
 });
 
-/**
- * A function that was above the complexity ceiling when the ceiling landed carries a
- * directive, and the first number in its parenthesis is the record: the value the function
- * had then, lowered whenever a change made the function smaller (four were raised once, to
- * what #904 had made of their functions before this test existed). The directive switches
- * the rule off for that function, so nothing else compares the two numbers: this lints
- * src with the directives ignored and holds each function above the ceiling to the record
- * on the line above it.
- */
 const LINT_COMPLEXITY = `
   import { readFileSync } from 'node:fs';
   import { relative } from 'node:path';

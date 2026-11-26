@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// Cross-language constants — see ``contracts/constants.md``. Imported at
-// TypeScript compile time (resolveJsonModule); esbuild inlines the values
-// into the bundled Lambda artifact, so no runtime FS read is needed.
 import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
 import { classifyError, type ErrorClassification } from './error-classifier';
@@ -27,20 +24,13 @@ import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
 
-/**
- * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
- * check sees a single declaration site for the API status union. The
- * canonical source remains ``cdk/src/constructs/task-status.ts``.
- */
 export type { TaskStatusType };
 
 /**
  * A resolved workflow pin: the ``{id, version}`` produced at the create-task
- * boundary from a ``workflow_ref`` (or the resolution fallback). Replaces the
- * former ``task_type`` enum end-to-end (#248). Persisted on the TaskRecord and
- * threaded to the agent so it loads the exact pinned workflow file.
- *
- * Keep in sync with ``cli/src/types.ts::ResolvedWorkflow``.
+ * boundary from a ``workflow_ref`` (or the resolution fallback). Persisted on
+ * the TaskRecord and threaded to the agent so it loads the exact pinned
+ * workflow file.
  */
 export type ResolvedWorkflow = {
   readonly id: string;
@@ -58,12 +48,6 @@ export type ResolvedAssetTriple = {
   readonly id: string;
   readonly version: string;
 };
-
-// --- Agent asset registry (#246) API wire types ------------------------------
-// snake_case wire shapes shared with the CLI. The substrate-neutral *domain*
-// types (RegistryRecord, ResolvedAsset, the RegistryClient port) live in
-// ``handlers/shared/registry/`` and are intentionally NOT part of the CLI
-// types-sync contract — only these request/response envelopes are.
 
 /** `POST /registry/records` request body. */
 export type RegistryPublishRequest = {
@@ -91,14 +75,12 @@ export type RegistryVersionSummary = {
   /** True when the record's descriptor payload failed to parse. `publisher` lives
    *  in the erased payload so it is unrecoverable (reads `null`); `created_at` is
    *  envelope data and is nulled only by the `show` marker's convention, not
-   *  because it is lost. Surfaced rather than hidden so a corrupt version is
-   *  visible to operators (#791). */
+   *  because it is lost. */
   readonly malformed?: boolean;
 };
 
 /** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
- *  versions. Named (rather than inlined on the handler + client) so it rides the
- *  CDK↔CLI types-sync guard like the other registry envelopes. */
+ *  versions. */
 export type RegistryShowResponse = {
   readonly kind: string;
   readonly namespace: string;
@@ -135,7 +117,6 @@ export type RegistryListEntry = {
   readonly status: string;
 };
 
-/** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
 /**
@@ -145,11 +126,6 @@ export type AttachmentType = 'image' | 'file' | 'url';
  * - ``slack``: Slack @mention / slash-command submissions (see SlackIntegration)
  * - ``linear``: Linear label-triggered submissions (see LinearIntegration)
  * - ``jira``: Jira Cloud label-triggered submissions (see JiraIntegration)
- *
- * Narrowed from ``string`` so switches and predicates that read
- * ``channel_source`` get exhaustiveness checking at compile time; matches the
- * internal ``CreateTaskContext.channelSource`` literal in ``create-task-core.ts``.
- * Keep in sync with ``cli/src/types.ts::ChannelSource``.
  */
 export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
@@ -162,8 +138,8 @@ export interface TaskRecord {
   /** Cognito group names captured at admission for team-budget rollups. */
   readonly team_ids?: readonly string[];
   readonly status: TaskStatusType;
-  /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
-   *  repo-less workflow (``requires_repo: false``) runs with no repo. */
+  /** Target repository (``owner/repo``). Optional: a repo-less workflow
+   *  (``requires_repo: false``) runs with no repo. */
   readonly repo?: string;
   readonly issue_number?: number;
   /** GitHub issue title, stored when the issue is read at hydration so lists can
@@ -190,20 +166,13 @@ export interface TaskRecord {
   readonly pr_url?: string;
   /**
    * Public CloudFront URL of the deploy-preview screenshot captured for this
-   * task's PR (#247). Persisted best-effort by the screenshot pipeline
-   * (github-webhook-processor) keyed off the taskId in the deploy branch, so
-   * the orchestration reconciler can embed the INTEGRATION node's combined
-   * preview in the parent epic panel. Absent until a preview deploys (and for
-   * tasks with no UI to screenshot).
+   * task's PR (#247). Absent until a preview deploys (and for tasks with no UI
+   * to screenshot).
    */
   readonly screenshot_url?: string;
   /**
    * Live deploy-preview URL the {@link screenshot_url} image was captured from
-   * (e.g. the Vercel/Netlify preview deploy). Persisted alongside
-   * ``screenshot_url`` so the orchestration reconciler can make the INTEGRATION
-   * node's combined preview in the parent epic panel a clickable deep-link to
-   * the running combined site, not just a static image (#247 UX.17). Absent
-   * when no preview deployed.
+   * (e.g. the Vercel/Netlify preview deploy). Absent when no preview deployed.
    */
   readonly screenshot_preview_url?: string;
   readonly error_message?: string;
@@ -214,10 +183,7 @@ export interface TaskRecord {
    * Linear issue UUID, hoisted to the top level from
    * ``channel_metadata.linear_issue_id`` at task-create time (#247 UX.3).
    * Top-level because a DynamoDB GSI (``LinearIssueIndex``) cannot key off a
-   * nested map field — the standalone ``@bgagent`` comment trigger queries
-   * this index to resolve a plain issue back to its newest ABCA task + PR.
-   * Present only for Linear-origin tasks; absent for GitHub/Slack/API tasks
-   * (which keeps the GSI sparse).
+   * nested map field. Present only for Linear-origin tasks.
    */
   readonly linear_issue_id?: string;
   /** Sparse JiraIssueIndex key (`{cloudId}#{issueKey}`); internal only. */
@@ -233,18 +199,15 @@ export interface TaskRecord {
   readonly duration_s?: number | string;
   readonly build_passed?: boolean;
   /**
-   * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
-   * ran with no change (a question-only ``@bgagent`` comment). Absent for
-   * pre-fix tasks / non-iterations → the settle reply defaults to "✅ Updated".
+   * Whether a PR-iteration advanced the branch HEAD (a real commit) vs. ran
+   * with no change (a question-only ``@bgagent`` comment) (#299). Absent for
+   * pre-fix tasks / non-iterations.
    */
   readonly code_changed?: boolean;
-  /** A6/#299: the agent's answer, surfaced on a no-change iteration reply. */
+  /** The agent's answer, surfaced on a no-change iteration reply (#299). */
   readonly answer_text?: string;
   /**
-   * The branch HEAD sha this iteration pushed. The screenshot webhook matches a
-   * deploy's commit sha → the iteration task that pushed it, so the preview
-   * thumbnail lands on the right reply when iterations overlap on one PR. Absent
-   * on pre-fix / non-PR tasks → the webhook falls back to the newest reply.
+   * The branch HEAD sha this iteration pushed. Absent on pre-fix / non-PR tasks.
    */
   readonly head_sha?: string;
   /** Whether the post-run lint gate passed (#515). Written with `build_passed`
@@ -262,8 +225,7 @@ export interface TaskRecord {
    * Whether the task was submitted with ``--trace`` (design §10.1).
    * When true the orchestrator threads a ``trace: true`` flag into the
    * agent payload; the agent's ``_ProgressWriter`` raises its preview
-   * cap from 200 chars to 4 KB so debug captures aren't silently
-   * clipped. Opt-in per task — not routine observability.
+   * cap from 200 chars to 4 KB.
    */
   readonly trace?: boolean;
   /**
@@ -271,20 +233,18 @@ export interface TaskRecord {
    * terminal state when ``trace`` is true (design §10.1). Shape:
    * ``s3://<trace-bucket>/traces/<user_id>/<task_id>.jsonl.gz``. Absent
    * until the agent finishes the upload; also absent for tasks that ran
-   * without ``--trace`` or whose upload failed. The
-   * ``get-trace-url`` handler reads this to issue presigned download URLs.
+   * without ``--trace`` or whose upload failed.
    */
   readonly trace_s3_uri?: string;
   /** S3 URI of a repo-less workflow's delivered artifact (deliver_artifact,
    *  #248 Phase 3); absent for coding tasks / comment-only delivery. */
   readonly artifact_uri?: string;
-  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept raw for
-   *  debugging. Equals the legacy `turns` value. Not the count `max_turns`
-   *  limits, and it can exceed the limit on a task that never reached it:
-   *  see `TaskResult` in `agent/src/models.py`. */
+  /** The Claude Code CLI's own turn count, kept raw for debugging. Not the
+   *  count `max_turns` limits, and it can exceed the limit on a task that
+   *  never reached it: see `TaskResult` in `agent/src/models.py`. */
   readonly turns_attempted?: number | string;
-  /** Rev-5 DATA-1: turns that actually completed: the model's answers, which
-   *  is what `max_turns` limits (clamped to it). */
+  /** Turns that actually completed: the model's answers, which is what
+   *  `max_turns` limits (clamped to it). */
   readonly turns_completed?: number | string;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
@@ -296,10 +256,7 @@ export interface TaskRecord {
   /**
    * Optional per-task override for the FanOutConsumer's channel filters
    * (design §6.5). When present, the router uses these settings instead
-   * of the per-channel defaults. Chunk I introduced the type and the
-   * resolution path; Chunk K adds a submit-time API parameter and the
-   * DDB read that populates this field — until then it is always
-   * ``undefined`` at runtime and every task inherits the defaults.
+   * of the per-channel defaults.
    */
   readonly notifications?: TaskNotificationsConfig;
   /**
@@ -312,19 +269,16 @@ export interface TaskRecord {
   readonly github_comment_id?: number;
   /**
    * Event ID of the terminal event whose Linear final-status comment
-   * was successfully posted (fan-out plane). Linear has no comment
-   * edit API, so the dispatcher is post-once: this marker makes the
-   * post idempotent across partial-batch Lambda retries (a sibling
-   * channel's infra rejection re-runs every dispatcher for the
-   * record). Absent until the first successful post.
+   * was successfully posted (fan-out plane). This marker makes the
+   * post idempotent across partial-batch Lambda retries. Absent until
+   * the first successful post.
    */
   readonly linear_final_comment_event_id?: string;
   /**
    * Event ID of the ``pr_created`` milestone whose Linear "PR opened"
    * courtesy comment was successfully posted (fan-out plane, ADR-016 P4.5).
    * Makes the first-run PR-opened comment post-once across partial-batch
-   * Lambda retries — the analogue of ``linear_final_comment_event_id`` for
-   * the mid-run PR notification. Absent until the first successful post.
+   * Lambda retries. Absent until the first successful post.
    */
   readonly linear_pr_comment_event_id?: string;
   /**
@@ -416,17 +370,14 @@ export interface TaskRecord {
    * Linear parent/sub-issue orchestration (issue #247, Mode A).
    * ``orchestration_id`` PK of the row in ``OrchestrationTable`` whose
    * DAG this task is a child of. Absent on ordinary (non-orchestrated)
-   * tasks. PR A1 introduces the field; graph discovery (A2) and the
-   * reconciler (A3) populate and read it. Until then it is always
-   * ``undefined`` at runtime.
+   * tasks.
    */
   readonly orchestration_id?: string;
   /**
    * Linear orchestration (#247): the ``task_id`` of the parent task
    * for attribution and rollup, when a parent task exists. Absent on
    * non-orchestrated tasks and on root children whose parent is the
-   * Linear issue rather than an ABCA task. Introduced in PR A1;
-   * unused at runtime until A2/A3.
+   * Linear issue rather than an ABCA task.
    */
   readonly parent_task_id?: string;
   /**
@@ -436,7 +387,6 @@ export interface TaskRecord {
    * reconciler releases this child. Empty/absent for root children.
    * Authoritative gating state lives on the ``OrchestrationTable`` row;
    * this is the denormalized copy threaded onto the task record.
-   * Introduced in PR A1; unused at runtime until A3.
    */
   readonly depends_on?: readonly string[];
   /**
@@ -476,10 +426,7 @@ export interface ChannelConfig {
   readonly events?: readonly string[];
 }
 
-/** Per-task notification overrides (design §6.5). Single source of truth;
- *  imported by both ``TaskRecord`` (producer side) and
- *  ``fanout-task-events.ts`` (consumer side) so a Chunk K schema change
- *  lands in one place and both sides pick it up at compile time. */
+/** Per-task notification overrides (design §6.5). */
 export interface TaskNotificationsConfig {
   readonly slack?: ChannelConfig;
   readonly email?: ChannelConfig;
@@ -511,11 +458,7 @@ export interface TaskDetail {
   readonly pr_url: string | null;
   readonly error_message: string | null;
   readonly error_classification: ErrorClassification | null;
-  /** Provenance of the task's submission — ``api`` for CLI/Cognito
-   *  submissions, ``webhook`` for HMAC-signed inbound webhooks. Present
-   *  on every task record at creation time (``create-task-core.ts``)
-   *  and surfaced here so CLI / dashboard / audit consumers do not have
-   *  to spelunk CloudWatch to learn which channel created a task. */
+  /** Provenance of the task's submission. */
   readonly channel_source: ChannelSource;
   readonly created_at: string;
   readonly updated_at: string;
@@ -527,20 +470,10 @@ export interface TaskDetail {
    * ``_heartbeat_worker``) and once at start on ecs, which runs the pipeline
    * without that server. ``null`` before the first beat, on tasks that never
    * ran, and on records predating the field.
-   *
-   * Surfaced (ADR-021 P2r2-F11) because it was the platform's only in-guest
-   * liveness signal and the API hid it: the orchestrator reads it for
-   * hang detection (``orchestrator.ts`` ``heartbeatLivenessApplies``) but
-   * ``toTaskDetail`` never mapped it, so ``bgagent status`` reported ``None``
-   * while DynamoDB held a 6-second-old value. That gap produced a WRONG
-   * live-verification conclusion ("heartbeats not observed", attributed to a
-   * different defect entirely), which is the cost of an internal signal no
-   * operator can see. Keep in sync with ``cli/src/types.ts::TaskDetail``.
    */
   readonly agent_heartbeat_at: string | null;
   /** The compute backend the task's session was started on; ``null`` before a
-   *  session starts and on records that predate the field. What a heartbeat
-   *  says differs by backend, so a reader of ``agent_heartbeat_at`` needs it. */
+   *  session starts and on records that predate the field. */
   readonly compute_type: ComputeType | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
@@ -552,32 +485,26 @@ export interface TaskDetail {
   readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
-  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept for debugging.
+  /** The Claude Code CLI's own turn count, kept for debugging.
    *  Not the count `max_turns` limits, and it can exceed the limit on a task
    *  that never reached it: see `TaskResult` in `agent/src/models.py`. */
   readonly turns_attempted: number | null;
-  /** Rev-5 DATA-1: actually-completed turns: the model's answers, which is
+  /** Actually-completed turns: the model's answers, which is
    *  what `max_turns` limits (clamped to it). */
   readonly turns_completed: number | null;
   readonly prompt_version: string | null;
-  /** True when the task was submitted with ``--trace`` — surfaces the
-   *  opt-in state to scripts / CLI consumers without making them
-   *  guess from secondary signals. */
+  /** True when the task was submitted with ``--trace``. */
   readonly trace: boolean;
   /** S3 URI of the uploaded ``--trace`` trajectory dump, or ``null``
    *  until the agent finishes the terminal upload (or for tasks that
-   *  ran without ``--trace``). Non-optional so scripts can rely on
-   *  the field being present; CLI download resolves this via the
-   *  ``get-trace-url`` handler rather than hitting S3 directly. */
+   *  ran without ``--trace``). */
   readonly trace_s3_uri: string | null;
   /** S3 URI of a repo-less delivered artifact (#248 Phase 3); ``null`` for
    *  coding tasks or comment-only delivery. */
   readonly artifact_uri: string | null;
   readonly attachments: AttachmentSummary[] | null;
   /** Cedar HITL: running counter of approval gates fired on this
-   *  task (TaskRecord §10.2, §13.6). Surfaced so CLI / dashboard
-   *  consumers can report how many gates a task used without re-
-   *  reading the internal TaskRecord. Null when the task predates
+   *  task (TaskRecord §10.2, §13.6). Null when the task predates
    *  the counter or the agent never wrote one. */
   readonly approval_gate_count: number | null;
   /** Cedar HITL: per-task cap on total approval gates (TaskRecord
@@ -625,25 +552,12 @@ export interface TaskSummary {
    * Last in-guest liveness beat (ISO-8601), or ``null`` when the agent has not
    * beaten yet, on a substrate whose agent never beats, or on records predating
    * the field.
-   *
-   * On the SUMMARY as well as the detail (ADR-021 P2r2-F11 follow-up) because
-   * liveness is a list-level question: "is anything still alive?" is asked across
-   * tasks, and answering it one `bgagent status` at a time is how a hung task
-   * goes unnoticed. The field's history is the argument — while `toTaskDetail`
-   * omitted it, `bgagent status` reported `None` against a 6-second-old DynamoDB
-   * value, and that produced a WRONG live-verification conclusion attributed to a
-   * different defect entirely. Keep in sync with the sibling declaration in the
-   * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
   /** The compute backend the task's session was started on; ``null`` before a
-   *  session starts and on records that predate the field. On the summary beside
-   *  ``agent_heartbeat_at``, because what a heartbeat says differs by backend. */
+   *  session starts and on records that predate the field. */
   readonly compute_type: ComputeType | null;
-  /**
-   * Estimated spend in USD (null until the agent reports one). On the summary so a
-   * cost view can total a page of tasks without one detail call per task.
-   */
+  /** Estimated spend in USD (null until the agent reports one). */
   readonly cost_usd: number | null;
   /** When the task reached a terminal state (null while it runs). */
   readonly completed_at: string | null;
@@ -784,16 +698,13 @@ export interface EventRecord {
 /**
  * A single event as embedded in a {@link ReplayBundle} (#515). Normalized to
  * match the ``GET /tasks/{id}/events`` feed exactly — ``task_id``/``ttl`` are
- * stripped (redundant in a task-scoped bundle) and ``metadata`` defaults to
- * ``{}`` — so a consumer can move between the events feed and the bundle
- * without ``event.metadata.x`` throwing on an event that stored no metadata.
+ * stripped and ``metadata`` defaults to ``{}``.
  */
 export interface ReplayEvent {
   readonly event_id: string;
   readonly event_type: string;
   readonly timestamp: string;
   readonly metadata: Record<string, unknown>;
-  // Correlation envelope (#245): present per-event when the source stamped it.
   readonly user_id?: string;
   readonly repo?: string;
   readonly trace_id?: string;
@@ -824,9 +735,7 @@ export interface VerificationReport {
 
 /**
  * Operator-facing replay bundle returned by ``GET /v1/tasks/{task_id}/replay``
- * (#515). Aggregates existing telemetry — it introduces no new persistence —
- * so a task can be post-mortem'd / fed to the eval harness without manually
- * correlating CloudWatch, DynamoDB, and S3.
+ * (#515).
  *
  * Fields sourced from stores that may not have run for a given task are
  * ``null``/empty rather than omitted, so consumers get a stable schema:
@@ -864,15 +773,10 @@ export interface ReplayBundle {
   readonly collected_at: string;
 }
 
-/**
- * Create task request body.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
 export interface CreateTaskRequest {
   /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the contract default). Does not extend approval deadlines. */
   readonly microvm_sleep_after_s?: number;
-  /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
+  /** Target repository (``owner/repo``). Optional: a
    *  repo-less workflow (``requires_repo: false``) is submitted without it.
    *  Required-ness is enforced conditionally in ``createTaskCore`` based on
    *  the resolved workflow's ``requiresRepo``. */
@@ -881,7 +785,7 @@ export interface CreateTaskRequest {
   readonly task_description?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
-  /** Workflow selector ``<id>[@<constraint>]``. Replaces ``task_type`` (#248).
+  /** Workflow selector ``<id>[@<constraint>]``.
    *  Omitted ⇒ the create-task boundary resolves via the fallback ladder. */
   readonly workflow_ref?: string;
   readonly pr_number?: number;
@@ -909,10 +813,6 @@ export interface Attachment {
   readonly filename?: string;
   readonly expected_size_bytes?: number;
 }
-
-// ---------------------------------------------------------------------------
-// Validated attachment types (post-validation discriminated union)
-// ---------------------------------------------------------------------------
 
 interface BaseValidatedAttachment {
   readonly filename: string;
@@ -948,20 +848,11 @@ export interface UrlAttachment extends BaseValidatedAttachment {
 /** Output of validateAttachments() — illegal combinations are unrepresentable. */
 export type ValidatedAttachment = InlineAttachment | PresignedAttachment | UrlAttachment;
 
-// ---------------------------------------------------------------------------
-// Screening result (persisted in DynamoDB as part of AttachmentRecord)
-// ---------------------------------------------------------------------------
-
 /** Screening outcome — discriminated union prevents invalid combinations. */
 export type ScreeningResult =
   | { readonly status: 'pending' }
   | { readonly status: 'passed'; readonly screened_at: string }
   | { readonly status: 'blocked'; readonly screened_at: string; readonly categories: [string, ...string[]] };
-
-// ---------------------------------------------------------------------------
-// Attachment record (persisted metadata in TaskRecord) — discriminated union
-// keyed on screening.status ensures that passed records always have storage fields.
-// ---------------------------------------------------------------------------
 
 interface BaseAttachmentRecord {
   readonly attachment_id: string;
@@ -1030,10 +921,6 @@ export function createAttachmentRecord(params: CreateAttachmentRecordParams): At
   return params as PendingAttachmentRecord;
 }
 
-// ---------------------------------------------------------------------------
-// Attachment summary (API response — metadata only, no binary content)
-// ---------------------------------------------------------------------------
-
 export interface AttachmentSummary {
   readonly attachment_id: string;
   readonly type: AttachmentType;
@@ -1042,10 +929,6 @@ export interface AttachmentSummary {
   readonly size_bytes: number;
   readonly screening_status: 'passed' | 'blocked' | 'pending';
 }
-
-// ---------------------------------------------------------------------------
-// Presigned upload response (returned on PENDING_UPLOADS creation)
-// ---------------------------------------------------------------------------
 
 export interface AttachmentUploadInstruction {
   readonly attachment_id: string;
@@ -1061,11 +944,7 @@ export interface CreateTaskResponse extends TaskDetail {
   readonly task_expires_at?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Agent attachment payload (orchestrator → agent runtime)
-// ---------------------------------------------------------------------------
-
-/** Attachment descriptor sent to the agent runtime. Exported for test assertions. */
+/** Attachment descriptor sent to the agent runtime. */
 export interface AgentAttachmentPayload {
   readonly attachment_id: string;
   readonly type: AttachmentType;
@@ -1080,22 +959,13 @@ export interface AgentAttachmentPayload {
 }
 
 /**
- * Map a DynamoDB task record to the API detail response shape.
+ * Map a DynamoDB task record to the API detail response shape. The numeric
+ * fields that may be stored as strings are routed through
+ * ``coerceNumericOrNull``.
  *
- * The numeric fields that may be stored as strings are routed through
- * ``coerceNumericOrNull`` — the agent stores some of them as DynamoDB
- * String attributes, which arrive as JavaScript ``string``s
- * (see ``shared/numeric.ts`` for rationale), and a downstream caller
- * that calls ``.toFixed`` on a string-typed "number" crashes at
- * runtime, while ``+`` concatenates. Coercing uniformly here means no caller
- * has to guess which TaskDetail numeric fields are safe — do not bypass
- * the helper when adding new numeric fields.
- *
- * @param record - the DynamoDB task record.
  * @param queueInfo - read-time queue position/ETA for QUEUED tasks (#441).
- *   Computed by the caller (get-task) because position changes as the
- *   queue drains and must never be persisted; omitted everywhere else.
- * @returns the API-facing task detail.
+ *   Computed by the caller (get-task) and never persisted; omitted everywhere
+ *   else.
  */
 export function toTaskDetail(
   record: TaskRecord,
@@ -1125,8 +995,6 @@ export function toTaskDetail(
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
     completed_at: record.completed_at ?? null,
-    // ADR-021 P2r2-F11: written by every backend, consumed by the orchestrator for
-    // hang detection, and — until this line — invisible to every API consumer.
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
     compute_type: record.compute_type ?? null,
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
@@ -1148,7 +1016,7 @@ export function toTaskDetail(
         type: a.type,
         filename: a.filename,
         content_type: a.content_type,
-        size_bytes: a.size_bytes ?? 0, // 0 for pending attachments (size unknown until resolved)
+        size_bytes: a.size_bytes ?? 0,
         screening_status: a.screening.status,
       }))
       : null,
@@ -1171,10 +1039,6 @@ export function toTaskDetail(
 
 /**
  * Maximum length (in characters, after trim) of a nudge ``message``.
- *
- * Mirrored in ``cli/src/types.ts`` as ``NUDGE_MAX_MESSAGE_LENGTH`` and
- * consumed both client-side (for fail-fast rejection without a round-trip)
- * and server-side (in ``cdk/src/handlers/nudge-task.ts``).
  */
 export const NUDGE_MAX_MESSAGE_LENGTH = 2000;
 
@@ -1186,8 +1050,6 @@ export const NUDGE_MAX_MESSAGE_LENGTH = 2000;
  * screening + rate limiting, then picked up by the agent's nudge_reader
  * at the next between-turns seam and injected as an authoritative
  * `<user_nudge>` XML block.
- *
- * Keep in sync with `cli/src/types.ts`.
  */
 export interface NudgeRequest {
   /** Free-text steering message. Max 2000 chars after trim; guardrail-screened. */
@@ -1211,12 +1073,6 @@ export interface NudgeResponse {
  *
  * - PK = `task_id` (groups all nudges for a task together)
  * - SK = `nudge_id` (ULID — lexicographic sort == chronological sort)
- *
- * The agent-side reader queries by `task_id` with `consumed = false`
- * filter, orders by `nudge_id` (implicit sort-key order), and marks
- * each consumed nudge with an atomic conditional UpdateItem
- * (ConditionExpression: `consumed = :false`) for idempotency across
- * restarts mid-consume.
  */
 export interface NudgeRecord {
   readonly task_id: string;
@@ -1243,9 +1099,6 @@ export interface WebhookRecord {
   readonly ttl?: number;
 }
 
-/**
- * Webhook detail for API responses.
- */
 export interface WebhookDetail {
   readonly webhook_id: string;
   readonly name: string;
@@ -1255,9 +1108,6 @@ export interface WebhookDetail {
   readonly revoked_at: string | null;
 }
 
-/**
- * Create webhook request body.
- */
 export interface CreateWebhookRequest {
   readonly name: string;
 }
@@ -1277,11 +1127,6 @@ export interface CreateWebhookResponse {
   readonly created_at: string;
 }
 
-/**
- * Map a DynamoDB webhook record to the API detail response shape.
- * @param record - the DynamoDB webhook record.
- * @returns the API-facing webhook detail.
- */
 export function toWebhookDetail(record: WebhookRecord): WebhookDetail {
   return {
     webhook_id: record.webhook_id,
@@ -1294,9 +1139,7 @@ export function toWebhookDetail(record: WebhookRecord): WebhookDetail {
 }
 
 /**
- * Scopes a platform API key may hold. Phase 1 ships `webhooks:manage`;
- * the remaining values are reserved for Phase 2 (read-only task APIs) so keys
- * minted now can be validated against a stable vocabulary.
+ * Scopes a platform API key may hold.
  */
 export type ApiKeyScope = 'webhooks:manage' | 'webhooks:invoke' | 'tasks:read' | 'tasks:cancel';
 
@@ -1342,9 +1185,6 @@ export interface ApiKeyDetail {
   readonly revoked_at: string | null;
 }
 
-/**
- * Create API key request body.
- */
 export interface CreateApiKeyRequest {
   readonly name: string;
   readonly scopes?: readonly ApiKeyScope[];
@@ -1366,7 +1206,6 @@ export interface CreateApiKeyResponse {
 
 /**
  * Map a DynamoDB API key record to the API detail response shape.
- * @param record - the DynamoDB API key record.
  * @returns the API-facing API key detail (never includes the hash or owner).
  */
 export function toApiKeyDetail(record: ApiKeyRecord): ApiKeyDetail {
@@ -1382,11 +1221,6 @@ export function toApiKeyDetail(record: ApiKeyRecord): ApiKeyDetail {
   };
 }
 
-/**
- * Map a DynamoDB task record to the API summary response shape.
- * @param record - the DynamoDB task record.
- * @returns the API-facing task summary.
- */
 export function toTaskSummary(record: TaskRecord): TaskSummary {
   return {
     task_id: record.task_id,
@@ -1410,13 +1244,8 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Cedar HITL approval types (design §7, §10.1)
-// ---------------------------------------------------------------------------
-
 /**
- * Scope of an approval grant. Narrowed from `string` so the approve
- * handler + CLI can exhaustiveness-check the union on parse.
+ * Scope of an approval grant.
  *
  * - `this_call`          — one-shot. Does NOT grow the allowlist.
  * - `tool_type_session`  — allow any further invocation of the same tool name
@@ -1428,8 +1257,6 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
  * - `rule:<rule_id>`     — allow soft-deny hits whose rule_id matches.
  * - `all_session`        — allow anything for the rest of the session. Gated
  *                          by blueprint `maxPreApprovalScope` (§7.5).
- *
- * Keep in sync with ``cli/src/types.ts``.
  */
 export type ApprovalScope =
   | 'this_call'
@@ -1457,17 +1284,13 @@ export type ApprovalStatus =
 /**
  * Cedar HITL severity, surfaced in the CLI approval prompt and used
  * for severity-gated channel routing (§11.2: high-severity rules
- * skip Slack-button auto-approval). Shared alias so the same literal
- * union is not redefined inline in `PendingApprovalSummary`,
- * `PolicyRuleSummary`, etc.
+ * skip Slack-button auto-approval).
  */
 export type Severity = 'low' | 'medium' | 'high';
 
 /**
  * Pending approval summary returned by `GET /v1/pending` (§7.7).
- * Derived from the GSI projection attributes only — keeps the list
- * response cheap and avoids leaking `deny_reason` / `tool_input_sha256`
- * on PENDING rows.
+ * Derived from the GSI projection attributes only.
  */
 export interface PendingApprovalSummary {
   readonly task_id: string;
@@ -1480,9 +1303,8 @@ export interface PendingApprovalSummary {
   readonly timeout_s: number;
   /** Derived: `created_at + timeout_s` in ISO 8601 UTC. */
   readonly expires_at: string;
-  /** Cedar rule ids that matched this request (design §10.1). Surfaced
-   *  so `bgagent pending` can show _why_ a gate fired without the user
-   *  spelunking TaskEventsTable. Empty array on pre-Cedar-HITL rows. */
+  /** Cedar rule ids that matched this request (design §10.1). Empty array
+   *  on pre-Cedar-HITL rows. */
   readonly matching_rule_ids: readonly string[];
 }
 
@@ -1490,8 +1312,6 @@ export interface PendingApprovalSummary {
  * `POST /v1/tasks/{task_id}/approve` request body (§7.1).
  *
  * `scope` is optional — defaults to `this_call` when omitted.
- *
- * Keep in sync with ``cli/src/types.ts``.
  */
 export interface ApprovalRequest {
   readonly request_id: string;
@@ -1517,8 +1337,6 @@ export interface ApprovalResponse {
  * persistence — user-facing secrets (AWS keys, GitHub PATs, API tokens)
  * are redacted with `[REDACTED-...]` markers. Truncated to
  * `DENY_REASON_MAX_LENGTH` chars AFTER scanning.
- *
- * Keep in sync with ``cli/src/types.ts``.
  */
 export interface DenyRequest {
   readonly request_id: string;
@@ -1538,8 +1356,7 @@ export interface DenyResponse {
 
 /**
  * Maximum length of a sanitized deny reason after `output_scanner`
- * redaction (§7.2 step 3). Matches the Phase 2 nudge limit for
- * consistency.
+ * redaction (§7.2 step 3).
  */
 export const DENY_REASON_MAX_LENGTH = 2000;
 
@@ -1555,9 +1372,6 @@ export interface PolicyRuleSummary {
   readonly summary: string;
 }
 
-/**
- * `GET /v1/repos/{repo_id}/policies` response body.
- */
 /** One open issue in GET /v1/repos/{repo_id}/issues. Titles and metadata only, no body. */
 export interface RepoIssueSummary {
   readonly number: number;
@@ -1573,6 +1387,7 @@ export interface ListRepoIssuesResponse {
   readonly issues: readonly RepoIssueSummary[];
 }
 
+/** `GET /v1/repos/{repo_id}/policies` response body. */
 export interface GetPoliciesResponse {
   readonly repo_id: string;
   readonly policies: {
@@ -1590,8 +1405,7 @@ export interface GetPendingResponse {
 
 /**
  * Lambda-written audit event type for an approve/deny decision
- * (IMPL-6). Emitted to TaskEventsTable so the 90-day audit trail does
- * not depend on the agent's best-effort milestone.
+ * (IMPL-6). Emitted to TaskEventsTable.
  */
 export interface ApprovalDecisionRecordedEvent {
   readonly request_id: string;
@@ -1608,13 +1422,11 @@ export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
 /** Maximum per-entry length for an `initial_approvals` scope string. */
 export const INITIAL_APPROVALS_MAX_ENTRY_LENGTH = 128;
 
-/** Floor for `approval_timeout_s` (§6 decision #6).
- *  Sourced from ``contracts/constants.json`` (S9). */
+/** Floor for `approval_timeout_s` (§6 decision #6). */
 export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
 
 /** Absolute ceiling for `approval_timeout_s` before the
- *  `maxLifetime - 300` clip is applied (§7.3).
- *  Sourced from ``contracts/constants.json`` (S9). */
+ *  `maxLifetime - 300` clip is applied (§7.3). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
 
 /** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
@@ -1626,24 +1438,14 @@ export const MICROVM_SLEEP_AFTER_S_DEFAULT = sharedConstants.microvm_sleep_after
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap
  * (design decision #13, §4 step 5). Blueprints may override via
  * ``security.approvalGateCap``; the submit path bounds-checks the
- * resolved value against these constants so an out-of-bounds blueprint
- * never persists a bad cap onto a TaskRecord.
- *
- * Sourced from ``contracts/constants.json`` (S9 — see
- * ``contracts/constants.md``). The same JSON is read by
- * ``agent/src/policy.py`` at import; the drift check
- * (``scripts/check-types-sync.ts``) verifies no other site declares
- * these constants as literals.
+ * resolved value against these constants.
  */
 export const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 export const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;
 export const APPROVAL_GATE_CAP_DEFAULT = sharedConstants.approval_gate_cap.default;
 
-/** Minimum allowed `max_budget_usd` (1 cent). The CLI pre-validates with the
- *  same bound (`bgagent submit --max-budget`), so it lives in
- *  ``contracts/constants.json`` rather than as a local literal (#258). */
+/** Minimum allowed `max_budget_usd` (1 cent). */
 export const MAX_BUDGET_USD_MIN = sharedConstants.max_budget_usd.min;
 
-/** Maximum allowed `max_budget_usd` ($100).
- *  Sourced from ``contracts/constants.json`` (#258). */
+/** Maximum allowed `max_budget_usd` ($100). */
 export const MAX_BUDGET_USD_MAX = sharedConstants.max_budget_usd.max;

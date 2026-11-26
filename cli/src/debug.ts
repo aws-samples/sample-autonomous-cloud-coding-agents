@@ -19,12 +19,10 @@
 
 let verbose = false;
 
-/** Enable verbose debug output. */
 export function setVerbose(enabled: boolean): void {
   verbose = enabled;
 }
 
-/** Returns whether verbose mode is on. */
 export function isVerbose(): boolean {
   return verbose;
 }
@@ -36,13 +34,6 @@ export function debug(message: string): void {
   }
 }
 
-/**
- * Field names whose values must never appear in `--verbose` output.
- * Webhook creation returns a one-time `secret`; API key creation returns a
- * one-time `key` (and requests carry it in `x-api-key`); OAuth flows carry
- * `access_token` / `refresh_token`. Verbose logs land in scrollback and
- * CI logs, which outlive the "shown once" guarantee of those values.
- */
 const SENSITIVE_FIELDS = new Set([
   'secret',
   'key',

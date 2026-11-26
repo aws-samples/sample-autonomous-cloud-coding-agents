@@ -17,19 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for `scripts/check-transitive-pin-sync.mjs` — the guard that keeps the
- * root `resolutions` floors and the standalone Jira Forge app's lockfile in step.
- *
- * WHY THESE EXIST: the guard used to look up each `resolutions` key as a package
- * name, so a key that is a path pattern (the root pins glob and minimatch that
- * way) matched nothing and was skipped while the guard printed "OK".
- *
- * HOW: same as `check-constants-sync.test.ts` — the script is spawned against a
- * throwaway repo root. The two files it reads are written per case, so the cases
- * do not depend on what the repository pins today.
- */
-
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -46,7 +33,6 @@ interface RunResult {
   readonly stderr: string;
 }
 
-/** Run the script in a temp root holding `files` (path → contents; `null` copies the real file). */
 function run(files: Record<string, string | null>): RunResult {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-pin-sync-'));
   try {
@@ -70,7 +56,6 @@ function run(files: Record<string, string | null>): RunResult {
   }
 }
 
-/** A root manifest with these `resolutions`, and a Forge lockfile resolving these install paths. */
 function fixture(resolutions: Record<string, string>, resolved: Record<string, string>): Record<string, string> {
   const packages: Record<string, { version?: string }> = { '': {} };
   for (const [installPath, version] of Object.entries(resolved)) packages[installPath] = { version };
@@ -87,7 +72,6 @@ describe('check-transitive-pin-sync', () => {
     const result = run({ [ROOT_PACKAGE]: null, [FORGE_LOCK]: null });
 
     expect(result.status).toBe(0);
-    // The count is the anti-vacuity assertion: a guard that compared nothing also exits 0.
     expect(result.stdout).toMatch(/OK — [1-9]\d* shared pin\(s\) in sync/);
   });
 
@@ -107,7 +91,6 @@ describe('check-transitive-pin-sync', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('✖ minimatch: root pins "^11.0.1" (resolutions key "**/eslint/minimatch") but jira-forge-app resolves 3.0.0');
-    // Two patterns pinning one package to one floor are one drift, not two.
     expect(result.stderr).toContain('Drifted: 1.');
   });
 
@@ -133,7 +116,6 @@ describe('check-transitive-pin-sync', () => {
   });
 
   test('does NOT read a scoped package name as a pattern', () => {
-    // The false-positive side: `@scope/pkg` is one name, not "pkg under @scope".
     const result = run(fixture(
       { '@scope/pkg': '^2.0.0' },
       { 'node_modules/@scope/pkg': '2.0.1', 'node_modules/pkg': '0.0.1' },

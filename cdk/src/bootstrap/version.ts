@@ -24,60 +24,6 @@ import { allPolicies } from './policies';
 
 /**
  * Semantic version of the bootstrap policy bundle.
- *
- * Bump history: 1.0.0 → 1.1.0 added the `compute-ecs` policy (#162), 1.1.0 →
- * 1.2.0 refreshed policies for a full deploy (#350), 1.2.0 → 1.3.0 added the
- * `compute-lambda-microvm` policy (#645 / ADR-021), 1.3.0 → 1.4.0 granted SNS
- * topic + customer-managed-KMS-key create/lifecycle for the OperationalAlerts
- * notification channel (#629), 1.4.0 → 1.5.0 added the agent asset registry
- * policies (#246: Step Functions, Cognito group, and CloudFormation
- * nested-stack actions — the registry's own control-plane calls run under the
- * custom resource's Lambda execution role), 1.5.0 → 1.6.0 adds the
- * `compute-lambda-microvm` policy's `MicrovmPassRoles` statement (#645, ADR-021
- * P2r2-F9), 1.6.0 → 1.7.0 adds the `infrastructure` policy's
- * `NestedStackPassRole` statement (CloudFormation passes the execution role to
- * nested stacks; without it a fresh-account deploy fails at change-set creation),
- * Adding policies to the bundle is a minor bump — that is the precedent
- * `compute-ecs` set.
- *
- * On the 1.6.0 bump specifically: it is a *statement* addition, not a new policy,
- * and it is still a MINOR bump for the reason 1.2.0 was — **an operator must
- * re-bootstrap to pick it up**, and the version is the only signal that says so.
- * Without it the CDK-managed MicroVM image path fails at deploy with a caller-side
- * `iam:PassRole` AccessDenied on the build role (live-verified; see
- * `policies/compute-lambda-microvm.ts`), which is exactly the class of breakage a
- * patch-level bump would under-advertise.
- *
- * The 1.6.0 release was not 1.4.0 because #629 and #246 landed on `main` first and took
- * 1.4.0 and 1.5.0 in the interim. The number is an operator-visible contract (the
- * `CDKToolkit` stack's `BootstrapPolicyVersion` output), so re-using a published
- * version would make two different bundles indistinguishable to the `>=` check
- * operators are told to run.
- *
- * 1.6.0 → 1.7.0 adds an exact-self, CloudFormation-only PassRole inline policy
- * for nested stacks (#645 clean deployment). The policy hash now includes that
- * inline policy and every nested JSON field; the old root-key replacer omitted
- * Action/Resource/Condition changes from its input.
- *
- * 1.7.0 → 1.8.0 adds scoped SSM parameter lifecycle/tag permissions for the P3
- * MicroVM suspension switch. Re-bootstrap before deploying the live parameter.
- *
- * 1.8.0 → 1.9.0 admits the exact nested MicroVM build/operator role names to
- * the backend-specific PassRole statement. Re-bootstrap before the nested split.
- *
- * 1.9.0 → 1.10.0 merges `main`'s 1.7.0 (#976), whose number collided with this
- * branch's 1.7.0: the `infrastructure` policy gains its `NestedStackPassRole`
- * statement for least-privilege fresh-account deploys. It overlaps the exact-self
- * `PassSelfToCloudFormation` inline policy above; both remain until one is
- * retired. Re-bootstrap: an account on 1.9.0 lacks the new statement.
- *
- * 1.10.0 → 1.11.0 merges `main`'s 1.8.0 (#987), whose number collided again: it
- * grants the operator console stack's Cognito managed-login domain
- * (`cognito-idp:*UserPoolDomain`). Re-bootstrap: an account on 1.10.0 lacks it.
- * 1.11.0 → 1.12.0 lets a suffixed stack (`backgroundagent-dev-<name>`) pass its
- * nested MicroVM build and connector-operator roles; 1.11.0 admitted only the
- * default stack's two names. Re-bootstrap: an account on 1.11.0 cannot deploy a
- * nested MicroVM layout under any other stack name.
  */
 export const BOOTSTRAP_VERSION = '1.12.0';
 

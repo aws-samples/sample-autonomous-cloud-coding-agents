@@ -28,28 +28,16 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** Pickup Lambda timeout (minutes). */
 const PICKUP_TIMEOUT_MINUTES = 5;
 
-/** Pickup Lambda memory (MB). */
 const PICKUP_MEMORY_MB = 256;
 
-/**
- * Default pickup schedule interval (minutes). Short — queue latency is
- * user-visible wait time; 1 minute keeps the worst-case pickup delay
- * bounded while a QUEUED-empty cycle is a single cheap GSI query.
- */
 const DEFAULT_SCHEDULE_MINUTES = 1;
 
-/** Default max queue age before the backstop fails the task (seconds; 24h). */
 const DEFAULT_QUEUE_MAX_AGE_SECONDS = 86400;
 
-/** Default task-record retention used for event TTL (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/**
- * Properties for AdmissionQueuePickup construct.
- */
 export interface AdmissionQueuePickupProps {
   /** TaskTable (StatusIndex GSI powers the QUEUED FIFO query). */
   readonly taskTable: dynamodb.ITable;
@@ -112,8 +100,6 @@ export class AdmissionQueuePickup extends Construct {
       timeout: Duration.minutes(PICKUP_TIMEOUT_MINUTES),
       memorySize: PICKUP_MEMORY_MB,
       environment: {
-        // md/ solution-attribution label (#319), matching the peer
-        // orchestration reconcilers (stranded-task, concurrency).
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
@@ -128,16 +114,10 @@ export class AdmissionQueuePickup extends Construct {
       },
     });
 
-    // TaskTable: StatusIndex query + conditional QUEUED->SUBMITTED /
-    // QUEUED->FAILED transitions.
     props.taskTable.grantReadWriteData(this.fn);
-    // TaskEvents: queue_pickup / task_failed events.
     props.taskEventsTable.grantWriteData(this.fn);
-    // Concurrency: READ-ONLY capacity pre-check — the orchestrator's
-    // admissionControl is the only writer of the counter.
     props.userConcurrencyTable.grantReadData(this.fn);
 
-    // Re-invoke the orchestrator alias on pickup.
     this.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction'],
       resources: [props.orchestratorFunctionArn],

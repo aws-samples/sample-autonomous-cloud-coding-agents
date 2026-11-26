@@ -7,9 +7,9 @@ title: "ADR-009: Security posture and blast radius for development-time agents"
 
 ## Context
 
-The existing `SECURITY.md` covers runtime agent execution (inside MicroVMs). It does not cover **development-time agents** — those writing code, creating PRs, and modifying infrastructure in this repository. A development-time agent operates with the credentials of whoever invoked it, creating a risk of self-approval, policy modification, and unbounded blast radius.
+The existing `SECURITY.md` covers runtime agent execution (inside MicroVMs). It does not cover **development-time agents**, the agents that write code, create PRs, and modify infrastructure in this repository. A development-time agent operates with the credentials of whoever invoked it. Those credentials create a risk of self-approval, policy modification, and unbounded blast radius.
 
-The core principle: **planners and implementors must be separated by context and ideally by identity. No self-approval.**
+The core principle is the following. **Planners and implementors must be separated by context and ideally by identity. No self-approval.**
 
 ## Decision
 
@@ -32,7 +32,7 @@ The core principle: **planners and implementors must be separated by context and
 | Modify CI/CD workflow | High | 2P review + admin approval |
 | Modify branch protection / approval rules | Critical | Admin-only + audit trail |
 | Modify governance ADRs | Critical | Admin-only + 2P review |
-| Delete or force-push protected branches | Critical | Never automated; human-only |
+| Delete or force-push protected branches | Critical | Never automated, human-only |
 
 ### 2P (two-person) review
 
@@ -61,15 +61,15 @@ For High and Critical actions:
 
 - (+) Prevents self-approval of dangerous changes
 - (+) Blast radius is explicit and enforceable
-- (+) Role separation enables audit trail
+- (+) Role separation enables an audit trail
 - (+) 2P review catches compromised or confused agents
 - (-) Credential management complexity increases
 - (-) Small tasks require multi-identity orchestration
-- (!) Personal PATs grant all permissions — structural enforcement requires GitHub Apps or fine-grained tokens
+- (!) Personal PATs grant all permissions, so structural enforcement requires GitHub Apps or fine-grained tokens
 
 ## References
 
-- Issue #140 — full RFC with open questions
-- `docs/design/SECURITY.md` — runtime agent security (complementary)
-- Cedar HITL gates (PR #88) — runtime tool-call governance
-- ADR-003 — governance (approval gates enforced here technically)
+- Issue #140, the full RFC with open questions
+- `docs/design/SECURITY.md`, runtime agent security (complementary)
+- Cedar HITL gates (PR #88), runtime tool-call governance
+- ADR-003, governance (approval gates enforced here technically)

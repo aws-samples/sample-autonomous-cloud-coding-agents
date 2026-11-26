@@ -32,7 +32,6 @@ const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
 
 interface LinkRequest {
   readonly code: string;
-  /** Preview-only: return what would be linked without writing. */
   readonly dry_run?: boolean;
 }
 
@@ -41,10 +40,8 @@ interface LinkRequest {
  *
  * Called from the CLI (`bgagent jira link <code>`) with a Cognito JWT.
  * Looks up the pending link record. With `dry_run: true`, returns the
- * Jira identity attached to the code without writing — the CLI uses
- * this to render a "you're about to link X" preview before the user
- * confirms. Without `dry_run`, writes the mapping and deletes the
- * pending record.
+ * Jira identity attached to the code without writing. Without `dry_run`,
+ * writes the mapping and deletes the pending record.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
@@ -60,8 +57,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must include a "code" field.', requestId);
     }
 
-    // Codes from `bgagent jira invite-user` are case-sensitive (kebab-case
-    // with a lowercase hex suffix); don't uppercase the incoming value.
     const code = body.code.trim();
 
     const pending = await ddb.send(new GetCommand({
@@ -82,7 +77,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const jiraUserName = (pending.Item.jira_user_name as string | undefined) ?? '';
     const jiraUserEmail = (pending.Item.jira_user_email as string | undefined) ?? '';
 
-    // Dry-run preview: return identity without writing.
     if (body.dry_run === true) {
       return successResponse(200, {
         dry_run: true,

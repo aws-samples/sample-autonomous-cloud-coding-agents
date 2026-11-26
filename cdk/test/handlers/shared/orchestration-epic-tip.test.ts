@@ -37,14 +37,11 @@ describe('resolveEpicTip — where a new node with no declared dependency stacks
   });
 
   test('fan-out (two independent leaves) → diamond: both leaves, sorted', () => {
-    // root R; B and C both depend on R, nothing depends on B or C.
     const epic = [node('R'), node('B', ['R']), node('C', ['R'])];
     expect(resolveEpicTip(epic)).toEqual(['B', 'C']);
   });
 
   test('integration node present → it IS the combined tip (stack on it alone, no redundant diamond)', () => {
-    // A and B are leaves; the integration node depends on both, so it is the
-    // single most-downstream node. A new node stacks on integration only.
     const epic = [
       node('A'),
       node('B'),
@@ -54,14 +51,11 @@ describe('resolveEpicTip — where a new node with no declared dependency stacks
   });
 
   test('a leaf beside the integration node → both, so the new node builds on all of the work', () => {
-    // C was added with its own blocker after the integration node was made, so
-    // the integration node does not contain it.
     const epic = [node('A'), node('B'), node('orch_x__integration', ['A', 'B']), node('C', ['B'])];
     expect(resolveEpicTip(epic)).toEqual(['C', 'orch_x__integration']);
   });
 
   test('multiple roots, one chain → only the genuine leaf is the tip', () => {
-    // A→B (B is a leaf); D is a standalone leaf. Two leaves → diamond.
     const epic = [node('A'), node('B', ['A']), node('D')];
     expect(resolveEpicTip(epic)).toEqual(['B', 'D']);
   });
@@ -71,8 +65,6 @@ describe('resolveEpicTip — where a new node with no declared dependency stacks
     expect(resolveEpicTip(epic)).toEqual(['B', 'C']);
   });
 
-  // A node that depends on a failed or skipped one never runs: it is skipped in
-  // turn. So new work stacks on what is left.
   describe('a failed or skipped node is no tip', () => {
     test('one of two leaves failed, the integration node was skipped → tip is the leaf that succeeded', () => {
       const epic = [
@@ -102,8 +94,6 @@ describe('resolveEpicTip — where a new node with no declared dependency stacks
       expect(resolveEpicTip(epic)).toEqual(['B']);
     });
 
-    // The sweep skips a node that waits behind a failed or skipped one. Until it
-    // has, the row still says blocked or ready: such a node is no tip either.
     test('a node that waits behind a failed one is no tip: A failed, B blocked on A, no tip', () => {
       expect(resolveEpicTip([node('A', [], 'failed'), node('B', ['A'], 'blocked')])).toEqual([]);
     });

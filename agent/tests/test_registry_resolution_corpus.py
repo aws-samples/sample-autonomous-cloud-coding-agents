@@ -1,11 +1,3 @@
-"""Grammar parity corpus runner (Python side) for registry:// refs (#246).
-
-Loads ``contracts/registry-resolution/cases.json`` and asserts the Python parser
-(``registry.ref.parse_ref``) agrees with each golden verdict. The TypeScript
-runner (``cdk/test/handlers/shared/registry-resolution-parity.test.ts``) runs the
-same file against ``parseRef``; both must agree, so the two grammars cannot drift.
-"""
-
 from __future__ import annotations
 
 import json

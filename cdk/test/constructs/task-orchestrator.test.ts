@@ -33,7 +33,6 @@ interface StackOverrides {
   memoryId?: string;
   guardrailId?: string;
   guardrailVersion?: string;
-  /** ADR-021 P2: the identifiers the orchestrator forwards as `platform_config`. */
   agentPlatformConfig?: TaskOrchestratorProps['agentPlatformConfig'];
   ecsConfig?: {
     clusterArn: string;
@@ -475,10 +474,7 @@ describe('TaskOrchestrator construct', () => {
     const { template } = createStack({ agentRegistryId: 'AbCdEfGh1234' });
     const policies = template.findResources('AWS::IAM::Policy');
     const serialized = JSON.stringify(policies);
-    // The wired registry id must appear in the resource ARNs...
     expect(serialized).toContain('AbCdEfGh1234');
-    // ...and no Agent Registry statement may grant a bare "*" or a
-    // registry/* wildcard (the finding: it should scope to registry/{id}).
     for (const policy of Object.values(policies)) {
       const statements = (policy as {
         Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } };
@@ -516,8 +512,6 @@ describe('TaskOrchestrator construct', () => {
           Variables: Match.objectLike({
             ECS_CLUSTER_ARN: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
             ECS_TASK_DEFINITION_ARN: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent:1',
-            // Read-only workflows run on the smaller planning task definition.
-            // See docs/design/ECS_RIGHTSIZED_PLANNING.md.
             ECS_PLANNING_TASK_DEFINITION_ARN: 'arn:aws:ecs:us-east-1:123456789012:task-definition/agent-planning:1',
             ECS_SUBNETS: 'subnet-aaa,subnet-bbb',
             ECS_SECURITY_GROUP: 'sg-12345',
@@ -597,20 +591,12 @@ describe('TaskOrchestrator construct', () => {
 
 describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   const IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
-  /** What the construct derives from the bare image name `abca-agent`. */
   const NAME_DERIVED_IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
   const EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/MicrovmExecutionRole';
   const CONNECTOR_ARN = 'arn:aws:lambda:us-east-1:123456789012:network-connector:nc-123';
-  // What LambdaMicrovmCompute always supplies: the Lambda-managed NO_INGRESS
-  // connector. Service-owned, hence the literal `aws` account segment.
+  // The Lambda-managed NO_INGRESS connector is service-owned: its account segment is the literal `aws`.
   const NO_INGRESS_ARN = 'arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:NO_INGRESS';
 
-  /**
-   * Build a stack with `microvmConfig` wired. Separate from `createStack` above
-   * because the payload bucket has to be a real construct (the prop takes an
-   * `s3.IBucket` so the grant can be rendered), which the shared helper's
-   * override shape does not model.
-   */
   function createMicrovmStack(config?: {
     imageIdentifier?: string;
     imageArn?: string;
@@ -642,8 +628,6 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
         imageVersion: config?.imageVersion,
         executionRoleArn: EXECUTION_ROLE_ARN,
         egressConnectorArns: [CONNECTOR_ARN],
-        // REQUIRED prop — mirrors what LambdaMicrovmCompute passes on every
-        // deploy. There is no "unset" case to fixture, by design.
         ingressConnectorArns: config?.ingressConnectorArns ?? [NO_INGRESS_ARN],
         payloadBucket: new s3.Bucket(stack, 'MicrovmPayloadBucket'),
       },
@@ -669,10 +653,6 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
       .filter((s: { Sid?: string }) => (s.Sid ?? '').startsWith('Microvm'));
   }
 
-  // Three distinct configurations, synthesized once each in beforeAll per
-  // cdk/AGENTS.md: the default wiring, the same wiring with an image version +
-  // ingress connectors pinned, and a name-derived (not operator-supplied) image
-  // ARN. `noMicrovmTemplate` is the negative control.
   let template: Template;
   let pinnedTemplate: Template;
   let nameDerivedTemplate: Template;
@@ -685,8 +665,6 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
       approvalSuspendEnabled: true,
       ingressConnectorArns: ['arn:aws:lambda:us-east-1:aws:network-connector:x', 'arn:y'],
     }).template;
-    // What LambdaMicrovmCompute passes when the operator gave a bare image NAME:
-    // the exact ARN it derived, never a wildcard.
     nameDerivedTemplate = createMicrovmStack({
       imageIdentifier: NAME_DERIVED_IMAGE_ARN,
       imageArn: NAME_DERIVED_IMAGE_ARN,
@@ -732,26 +710,16 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   });
 
   test('ALWAYS injects the ingress var, carrying the NO_INGRESS control', () => {
-    // OUTCOME assertion, not an omission assertion. This var used to be injected
-    // only when non-empty, and the test asserted it was `undefined` — which is
-    // precisely the shape of test that passes while the service silently picks
-    // something wider: `RunMicrovm` attaches a PUBLIC HTTP_INGRESS connector (and
-    // a public *.lambda-microvm.<region>.on.aws endpoint) when the request omits
-    // the field. So "no inbound" has to be a value we can SEE in the template.
+    // RunMicrovm attaches a public HTTP_INGRESS connector when the request omits ingress connectors.
     const env = orchestratorEnv(template);
     expect(Object.keys(env)).toContain('MICROVM_INGRESS_CONNECTOR_ARNS');
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBe(NO_INGRESS_ARN);
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toContain('NO_INGRESS');
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).not.toContain('HTTP_INGRESS');
-    // Not an empty string either — the strategy would then fall back rather than
-    // pass what the deployment configured.
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).not.toBe('');
   });
 
   test('the ingress var belongs to the all-or-nothing block, not the optional one', () => {
-    // Exactly one MICROVM_* var is genuinely optional (`imageVersion`, whose
-    // absent state means "resolve the latest ACTIVE version"). Everything else,
-    // ingress included, is present whenever microvmConfig is.
     const env = orchestratorEnv(template);
     expect(Object.keys(env).filter((k) => k.startsWith('MICROVM_')).sort()).toEqual([
       'MICROVM_APPROVAL_SUSPEND_ENABLED',
@@ -766,8 +734,6 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   });
 
   test('pins the image version, and real ingress connectors WIN over NO_INGRESS', () => {
-    // How #391 (operator shell access) lands without a strategy change: the
-    // construct supplies different connectors and they are joined verbatim.
     const env = orchestratorEnv(pinnedTemplate);
     expect(env.MICROVM_IMAGE_VERSION).toBe('4');
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBe('arn:aws:lambda:us-east-1:aws:network-connector:x,arn:y');
@@ -791,15 +757,10 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
 
   test('scopes the lifecycle statement to the one platform image ARN', () => {
     const lifecycle = microvmStatements(template).find(s => s.Sid === 'MicrovmLifecycle')!;
-    // Exact ARN plus the `<arn>:*` version-suffix hedge — both pinned to this
-    // image's name, so neither can match another image.
     expect(lifecycle.Resource).toEqual([IMAGE_ARN, `${IMAGE_ARN}:*`]);
   });
 
   test('a name-derived image ARN is scoped to that exact name, never a wildcard', () => {
-    // LambdaMicrovmCompute resolves a configured image name to an exact ARN
-    // for both RunMicrovm and IAM. Neither path may fall back to an account-wide
-    // image wildcard; the service does not accept a bare RunMicrovm image name.
     const lifecycle = microvmStatements(nameDerivedTemplate).find(s => s.Sid === 'MicrovmLifecycle')!;
     expect(lifecycle.Resource).toEqual([
       NAME_DERIVED_IMAGE_ARN,
@@ -815,20 +776,11 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   });
 
   test('passes ONLY the exact execution-role ARN, with NO iam:PassedToService condition', () => {
-    // ADR-021 P2r2-F10, and the sharpest IAM assertion in this file: the condition
-    // must NOT come back. A controlled two-arm experiment (same exact-ARN resource,
-    // same ~5-minute settle, one variable) showed the Lambda MicroVMs service does
-    // not present a usable `iam:PassedToService` value on the RunMicrovm PassRole
-    // path — with the condition every submission was DENIED, without it the next
-    // one reached RUNNING in 9 s. An earlier revision asserted the opposite
-    // ("exonerated live"); that was a false negative from a contaminated control
-    // (run 1's temporary unconditioned grant was still attached during its
-    // "control" arm). See the comment on the statement in task-orchestrator.ts.
+    // Lambda MicroVMs presents no usable `iam:PassedToService` value on the RunMicrovm PassRole
+    // path, and a conditioned grant is denied (ADR-021 P2r2-F10).
     const passRole = microvmStatements(template).find(s => s.Sid === 'MicrovmPassExecutionRole')!;
     expect(passRole.Action).toBe('iam:PassRole');
     expect(passRole.Condition).toBeUndefined();
-    // With the condition gone, the exact-ARN resource is the WHOLE of the scoping —
-    // so a widening here (a name prefix, or `*`) would leave the grant unbounded.
     expect(passRole.Resource).toBe(EXECUTION_ROLE_ARN);
     expect(JSON.stringify(passRole.Resource)).not.toContain('*');
   });
@@ -855,7 +807,6 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
     expect(actions.some(action => action.startsWith('s3:DeleteObject'))).toBe(true);
-    // The MicroVM execution role is the only reader of a task's payload.
     expect(actions.some(action => action.startsWith('s3:GetObject'))).toBe(false);
   });
 
@@ -870,16 +821,8 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
 describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config transport)', () => {
   const SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
   const HAIKU_PROFILE = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
-  // Deliberately a NON-`global` geography, matching HAIKU_PROFILE above. A `global.`
-  // fixture would pass even if the construct dropped the value, because the agent's
-  // own fallback literal is `global.`-prefixed — the bug this asserts against.
   const MAIN_PROFILE = 'us.anthropic.claude-opus-5';
 
-  /**
-   * Stack with real approvals/nudges tables and buckets, so the "forwards the
-   * NAME, grants nothing" property can be asserted against actual logical IDs
-   * rather than string literals.
-   */
   function createPlatformConfigStack(withConfig: boolean): { template: Template } {
     const app = new App();
     const stack = new Stack(app, 'TestStack', {
@@ -931,11 +874,6 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
   });
 
   test('injects forwarded identifiers under the names the strategy reads', () => {
-    // These names are a CONTRACT with
-    // `handlers/shared/strategies/lambda-microvm-strategy.ts`'s
-    // PLATFORM_CONFIG_ENV_VARS map, and with the AgentCore runtime env block in
-    // `stacks/agent.ts` — one stack value, one name, three backends. Renaming one
-    // side silently strips a key from every MicroVM task's platform_config.
     const env = orchestratorEnvVars(template);
     expect(env.TASK_APPROVALS_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskApprovalsTable/) });
     expect(env.NUDGES_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskNudgesTable/) });
@@ -944,18 +882,10 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     expect(env.TRACE_ARTIFACTS_BUCKET_NAME).toEqual({ Ref: expect.stringMatching(/^TraceArtifactsBucket/) });
     expect(env.AGENT_SESSION_ROLE_ARN).toBe(SESSION_ROLE_ARN);
     expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(HAIKU_PROFILE);
-    // The MAIN model. This test asserted seven identifiers while the interface
-    // declared eight, and that gap is exactly how the missing one shipped:
-    // `anthropicModel` was a required prop the stack dutifully passed, so the
-    // compiler was satisfied, but no line here or in the construct read it. The two
-    // substrates that inject the model into a runtime env directly were unaffected,
-    // leaving MicroVM on the `global.` literal in `agent/src/config.py` regardless
-    // of the deployed geography.
     expect(env.ANTHROPIC_MODEL).toBe(MAIN_PROFILE);
   });
 
   test('carries all required platform configuration', () => {
-    // One deployment must supply the complete configuration required at launch.
     const env = orchestratorEnvVars(createStack({
       githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
       agentPlatformConfig: {
@@ -992,11 +922,6 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
   });
 
   test('grants NOTHING for the forwarded resources — names only, no new reach', () => {
-    // The load-bearing property of this block. The orchestrator transports these
-    // identifiers to the agent and never calls the resources itself, so a
-    // "while I'm here" grant would hand the orchestration plane approvals/nudges
-    // tenant-data access it has never needed. The agent reaches them through its
-    // own execution role / the task-scoped SessionRole.
     const orchestratorPolicies = JSON.stringify(
       Object.entries(template.findResources('AWS::IAM::Policy'))
         .filter(([id]) => id.includes('TaskOrchestrator')),
@@ -1004,8 +929,6 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     expect(orchestratorPolicies).not.toContain('TaskApprovalsTable');
     expect(orchestratorPolicies).not.toContain('TaskNudgesTable');
     expect(orchestratorPolicies).not.toContain('TraceArtifactsBucket');
-    // ...and no sts:AssumeRole on the SessionRole either: forwarding the ARN is
-    // not assuming the role.
     expect(orchestratorPolicies).not.toContain(SESSION_ROLE_ARN);
     expect(orchestratorPolicies).not.toContain('sts:AssumeRole');
   });

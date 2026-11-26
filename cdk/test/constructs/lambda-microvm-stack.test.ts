@@ -69,11 +69,10 @@ describe.each(IMAGE_INPUTS)('LambdaMicrovmStack %s', (mode, imageInputs) => {
       deploymentName: stack.stackName,
     });
     compute = nested.compute;
-    // Exercise actual parent consumers and child outputs, not just a detached child.
     new CfnOutput(stack, 'ArtifactBucket', { value: compute.artifactBucket.bucketName });
     new CfnOutput(stack, 'PayloadBucket', { value: compute.payloadBucket.bucketArn });
     if (compute.imageArn) new CfnOutput(stack, 'ImageArn', { value: compute.imageArn });
-    parent = Template.fromStack(stack); // Also rejects parent/child dependency cycles.
+    parent = Template.fromStack(stack);
     child = Template.fromStack(nested);
   });
 
@@ -113,8 +112,8 @@ describe.each(IMAGE_INPUTS)('LambdaMicrovmStack %s', (mode, imageInputs) => {
     child.hasResourceProperties('AWS::Lambda::NetworkConnector', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });
-    // CDK's raw cleanup-provider resources inherit tags from CloudFormation;
-    // they do not expose a CDK TagManager that emits resource-level Tags.
+    // CDK's raw cleanup-provider resources expose no TagManager that emits resource-level Tags;
+    // they inherit the stack's tags from CloudFormation.
     parent.hasResourceProperties('AWS::CloudFormation::Stack', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });

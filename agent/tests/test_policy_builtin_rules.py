@@ -1,28 +1,6 @@
-"""Behaviour table for the built-in Cedar rules shipped in ``agent/policies/``.
-
-Every rule is pinned to the tool calls it must catch and to one similar,
-legitimate call it must leave alone. Removing a rule, moving it to the softer
-tier, dropping one of its patterns, limiting it to some task types or to tasks
-that are not read-only, or turning it into a catch-all fails here. Narrowing a
-pattern fails here when a call listed for the rule no longer matches it. The
-calls are chosen with that in mind (see ``BUILTIN_RULES``), but they are
-examples: a pattern that still matches every one of them passes.
-
-The calls go through ``PolicyEngine.evaluate_tool_use``, the only place the
-shipped rules are evaluated. ``cdk/src/handlers/shared/builtin-policies.ts``
-carries the same text for the API handlers, which parse it but never evaluate
-it, and ``cdk/test/handlers/shared/builtin-policies.test.ts`` keeps that copy
-byte-identical: a rule cannot be weakened there without being weakened here.
-
-``contracts/cedar-parity/`` is a different check. It compares the two Cedar
-engines on policy text written into each fixture, not on the shipped rules.
-"""
-
 import json
 from typing import NamedTuple
 
-# Hard import (not importorskip): without cedarpy the engine denies every call
-# and no row below would mean anything.
 import cedarpy
 import pytest
 
@@ -32,11 +10,9 @@ from workflow.loader import _PRINCIPAL_BY_ID
 
 
 class Call(NamedTuple):
-    """A tool call as the PreToolUse hook hands it to the engine."""
-
     tool: str
-    target: str  # Bash: the command. Write and Edit: the file path.
-    read_only: bool = False  # the task runs a read-only workflow
+    target: str
+    read_only: bool = False
 
 
 # rule id -> (tier, calls it must catch, a similar call it must leave alone)
@@ -92,10 +68,6 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             Call("Bash", "cd repo && git push --force"),
             Call("Bash", "cd repo && git push -f upstream fix/typo"),
             Call("Bash", "cd repo && git push -f"),
-            # ``-f`` directly after ``git push`` counts whatever follows it: the
-            # shell goes on without a space (a second line, ``;``, ``&``, ``|``,
-            # ``>``, the end of a subshell), or another short option is written
-            # together with it.
             Call("Bash", "git push -f\ngit status"),
             Call("Bash", "cd repo && git push -f;echo done"),
             Call("Bash", "git push -f&& echo ok"),
@@ -103,14 +75,10 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             Call("Bash", "git push -f>push.log"),
             Call("Bash", "(cd repo && git push -f)"),
             Call("Bash", "git push -fu origin feature/login"),
-            # The flag after the remote and branch.
             Call("Bash", "git push origin feature/login --force"),
             Call("Bash", "cd repo && git push upstream fix/typo --force-with-lease && git status"),
             Call("Bash", "git push origin feature/login -f"),
             Call("Bash", "cd repo && git push upstream fix/typo -f"),
-            # ``-f`` after the branch and the shell goes on: on a second line, or
-            # after ``;``, ``&``, ``|`` and ``>`` (each directly after the flag
-            # and after a space) and after `` 2>``.
             Call("Bash", "git push origin feature/login -f\ngit status"),
             Call("Bash", "cd repo && git push upstream fix/typo -f\necho done"),
             Call("Bash", "git push origin feature/login -f; git status"),
@@ -146,7 +114,6 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             Call("Bash", "cd repo && git push -f origin main && git status"),
             Call("Bash", "cd repo && git push -f origin prod && git status"),
         ],
-        # Still needs approval, but from force_push_any alone.
         Call("Bash", "git push --force origin feature/login"),
     ),
     "push_to_protected_branch": (
@@ -175,8 +142,6 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
     ),
 }
 
-# Every task type a workflow can run as: the Cedar principal. A built-in rule
-# holds for all of them, so each call it must catch is evaluated as each one.
 _TASK_TYPES = sorted(set(_PRINCIPAL_BY_ID.values()))
 
 _OUTCOME = {"hard": Outcome.DENY, "soft": Outcome.REQUIRE_APPROVAL}
@@ -193,7 +158,6 @@ def _decide(call: Call, task_type: str = "new_task") -> PolicyDecision:
 
 
 def _rules_behind(decision: PolicyDecision) -> list[str]:
-    """Rule ids the engine names for a decision. An allow names none."""
     if decision.outcome == Outcome.ALLOW:
         return []
     kind, _, rule_ids = decision.reason.partition(": ")
@@ -230,10 +194,6 @@ def test_table_covers_exactly_the_shipped_rules() -> None:
         for rule_id, (tier, caught, _) in BUILTIN_RULES.items()
         for call in caught
         for task_type in _TASK_TYPES
-        # A command rule holds in a read-only task as well: the review workflow
-        # is read-only and runs Bash. A file rule shows only in a task that may
-        # write: in a read-only one the two read_only rules deny Write and Edit
-        # before a file rule is reached.
         for read_only in ((False, True) if call.tool == "Bash" else (call.read_only,))
     ],
 )
@@ -279,11 +239,6 @@ def test_rule_leaves_a_similar_call_alone(rule_id: str, call: Call) -> None:
     ],
 )
 def test_force_push_rule_leaves_the_flag_of_a_later_command_alone(then: str) -> None:
-    # After the branch, ``-f`` counts at the end of the command or of a line and
-    # before one of the operators the rule lists. Followed by other text it is
-    # the flag of another tool: here the reply to a review comment that the
-    # PR-iteration prompt teaches, chained after its push, also when the shell
-    # goes on after the reply.
     call = Call(
         "Bash",
         "git push origin fix/typo && "
@@ -294,7 +249,6 @@ def test_force_push_rule_leaves_the_flag_of_a_later_command_alone(then: str) -> 
 
 
 def test_force_push_rule_leaves_a_push_without_the_flag_and_a_second_line_alone() -> None:
-    # A line break counts only directly after ``-f``.
     call = Call("Bash", "git push origin feat\ngit status")
     decision = _decide(call)
     assert decision.outcome == Outcome.ALLOW, f"not a force push: {call}, got {decision!r}"
@@ -310,9 +264,6 @@ def test_force_push_rule_leaves_a_push_without_the_flag_and_a_second_line_alone(
     ],
 )
 def test_force_push_rule_leaves_a_push_with_another_option_alone(command: str) -> None:
-    # Neither is a force push: a long option that begins with ``f`` takes two
-    # dashes, and ``-u`` is another short option, as the new-task prompt
-    # teaches it.
     call = Call("Bash", command)
     decision = _decide(call)
     assert decision.outcome == Outcome.ALLOW, f"not a force push: {call}, got {decision!r}"

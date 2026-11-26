@@ -34,10 +34,8 @@ export interface JiraFinalStatusInput {
 
 /**
  * The frame of an iteration's terminal comment and the reason it names. An
- * iteration that completes with a red build is not a clean success: it gets
- * the failure frame, and a fixed reason, because such a run stores no error
- * message. The words are the error classifier's title for a task that its
- * build gate failed.
+ * iteration that completes with a red build gets the failure frame, and a
+ * fixed reason, because such a run stores no error message.
  */
 export function jiraIterationFrame(
   eventType: string,
@@ -74,7 +72,6 @@ function formatDuration(seconds: number): string {
     : `${minutes}m ${remainingSeconds}s`;
 }
 
-/** Render a Jira terminal status as ADF blocks. */
 export function renderJiraFinalStatusComment(
   args: JiraFinalStatusInput,
 ): ReadonlyArray<AdfBlock> {
@@ -83,12 +80,8 @@ export function renderJiraFinalStatusComment(
 
   let headerRuns: AdfTextRun[];
   if (isCompleted) {
-    // This comment can carry the agent's own text (the answer below), which
-    // may spell out the ``@bgagent`` mention, and Jira attributes it to the
-    // setup user on a site without the Forge app. The webhook processor tells
-    // ABCA's comments by their leading marker (``isKnownAbcaComment``): the
-    // emoji stays outside the bold run so the marker survives a wiki-text
-    // body, where bold is an asterisk.
+    // Jira's wiki-text form of a comment body writes bold as an asterisk, so
+    // the marker stays outside the bold run.
     headerRuns = [{ text: '✅ ' }, { text: 'Task completed', strong: true }];
   } else if (shippedDespiteFailure) {
     const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';
@@ -110,10 +103,6 @@ export function renderJiraFinalStatusComment(
     ? formatDuration(args.durationS)
     : '—';
 
-  // A completed run without a commit answered a question (an ``@bgagent``
-  // question on an open PR): the answer goes under the header, rendered from
-  // the Markdown the agent wrote it in. The agent stores its last message
-  // for a failed run too; that is not an answer.
   const answer = isCompleted ? (args.answerText ?? '').trim() : '';
   const paragraphs: AdfBlock[] = [
     headerRuns,

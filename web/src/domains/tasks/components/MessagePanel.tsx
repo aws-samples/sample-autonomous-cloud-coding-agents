@@ -37,7 +37,6 @@ interface SentMessage {
 
 const storageKey = (taskId: string) => `abca-console-messages:${taskId}`;
 
-/** Messages you sent from this tab; the API has no "list my messages" call, so the console remembers them. */
 function loadSent(taskId: string): SentMessage[] {
   try {
     const parsed: unknown = JSON.parse(sessionStorage.getItem(storageKey(taskId)) ?? '[]');
@@ -47,7 +46,6 @@ function loadSent(taskId: string): SentMessage[] {
   }
 }
 
-/** The agent reports which messages it read in a `nudge_acknowledged` milestone (`ids=…a1b2c3d4`). */
 function seenTails(events: readonly TaskEvent[]): string {
   return events
     .filter((e) => e.event_type === 'agent_milestone' && e.metadata?.milestone === 'nudge_acknowledged')
@@ -63,8 +61,8 @@ export interface MessagePanelProps {
 }
 
 /**
- * Send the agent a message, and see whether it has read the ones you sent. Sits under
- * the activity it refers to; once the task has finished only earlier messages show.
+ * Send the agent a message, and see whether it has read the ones you sent. Once the
+ * task has finished only earlier messages show.
  */
 export const MessagePanel = forwardRef<TextareaProps.Ref, MessagePanelProps>(function MessagePanel({ taskId, events, open }, ref) {
   const send = useSendMessage(taskId);
@@ -115,7 +113,6 @@ export const MessagePanel = forwardRef<TextareaProps.Ref, MessagePanelProps>(fun
             rows={2}
             placeholder="Change of plan? Tell it here, like you would a teammate."
             onChange={({ detail }) => setDraft(detail.value)}
-            // Ctrl/Cmd+Enter sends; plain Enter is a new line.
             onKeyDown={({ detail }) => detail.key === 'Enter' && (detail.ctrlKey || detail.metaKey) && submit()}
             invalid={tooLong}
             ariaLabel="Message"

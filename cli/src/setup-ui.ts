@@ -17,12 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Terminal presentation for `bgagent setup`: plain-language summaries of
- * `cdk diff` / `cdk deploy` output and a live progress board. Raw CDK output
- * goes to a log file; the operator sees components, counts and causes.
- */
-
 // eslint-disable-next-line no-control-regex -- ANSI escape codes start with the escape character
 const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -31,23 +25,14 @@ const BAR_WIDTH = 28;
 const PERCENT = 100;
 const SECONDS_PER_MINUTE = 60;
 const MS_PER_SECOND = 1000;
-/** Lines of raw output shown when a failure has no CloudFormation reason. */
 const TAIL_LINES = 6;
-/** Recent raw lines kept to find an error when CloudFormation gives none. */
 const TAIL_BUFFER_LINES = 24;
-/** Progress granularity when output is not a terminal. */
 const PLAIN_STEPS = 10;
 
 export function stripAnsi(text: string): string {
   return text.replace(ANSI, '');
 }
 
-/**
- * Component names shown to the operator, keyed by top-level construct id in `AgentStack`.
- * A nested stack is one resource of the root stack, under its own id, whatever it holds:
- * `ConcurrencyMaintenance` is the scheduled maintenance jobs, `Microvm` the Lambda MicroVM
- * backend in its nested layout.
- */
 const COMPONENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['Networking', ['AgentVpc', 'DnsFirewall']],
   ['Task API & sign-in', ['TaskApi']],
@@ -84,7 +69,6 @@ export function componentForPath(constructPath: string, stackNames: readonly str
       break;
     }
   }
-  // The split network stack owns only networking.
   if (stackNames.length > 1 && constructPath.startsWith(`${stackNames[1]}/`)) return 'Networking';
   const top = rest.split('/')[0].split('.')[0];
   if (COMPONENT_BY_ID.has(top)) return COMPONENT_BY_ID.get(top)!;
@@ -214,7 +198,6 @@ export class LiveBlock {
       return;
     }
     for (const line of lines.map(stripAnsi)) {
-      // Spinner frames would make every repaint "new"; compare without them.
       const key = line.replace(new RegExp(`[${SPINNER_FRAMES.join('')}]`, 'g'), '·');
       if (!this.printed.has(key)) {
         this.printed.add(key);
@@ -298,7 +281,6 @@ export class DeployProgress {
     if (!event || !this.stackNames.includes(event.stack)) return;
     if (this.phase === 'preparing') this.phase = 'deploying';
     if (event.total !== undefined) this.overall = { done: event.done!, total: event.total };
-    // Stack-level events describe the whole deployment, not a component.
     if (event.type === 'AWS::CloudFormation::Stack' && this.stackNames.includes(event.logicalId)) return;
     const component = componentForPath(event.constructPath, this.stackNames);
     this.started.add(component);
@@ -326,7 +308,6 @@ export class DeployProgress {
     const lines = [`  ${prepMark} Preparing deployment ${style.dim('(building the agent image)')}`];
     if (this.phase === 'preparing') return lines;
     const exact = this.overall.total > 0 ? Math.min(1, this.overall.done / this.overall.total) : 0;
-    // Without a TTY every repaint is a new line; report in 10% steps instead.
     const ratio = this.phase === 'done' ? 1 : this.tty ? exact : Math.floor(exact * PLAIN_STEPS) / PLAIN_STEPS;
     const filled = Math.round(ratio * BAR_WIDTH);
     const bar = `${'█'.repeat(filled)}${'░'.repeat(BAR_WIDTH - filled)}`;

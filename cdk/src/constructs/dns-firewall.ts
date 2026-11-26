@@ -28,20 +28,12 @@ import { Construct, IValidation } from 'constructs';
 
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
-/**
- * Platform baseline domains that are always allowed.
- * These cover core services the agent needs: source control, package registries,
- * and AWS service endpoints (for VPC endpoint private DNS safety).
- */
 const PLATFORM_BASELINE_DOMAINS: readonly string[] = [
-  // GitHub (source control)
   'github.com',
   'api.github.com',
   '*.githubusercontent.com',
-  // npm (Node.js packages)
   'registry.npmjs.org',
   '*.npmjs.org',
-  // PyPI (Python packages)
   'pypi.org',
   '*.pypi.org',
   'files.pythonhosted.org',
@@ -50,13 +42,7 @@ const PLATFORM_BASELINE_DOMAINS: readonly string[] = [
   '*.amazonaws.com',
 ];
 
-/**
- * Properties for the DnsFirewall construct.
- */
 export interface DnsFirewallProps {
-  /**
-   * The VPC to associate the DNS Firewall with.
-   */
   readonly vpc: ec2.IVpc;
 
   /**
@@ -68,8 +54,7 @@ export interface DnsFirewallProps {
 
   /**
    * When true (default), non-allowlisted domains trigger ALERT (log only)
-   * rather than BLOCK. Deploy in observation mode first to analyze real DNS
-   * queries before enforcing.
+   * rather than BLOCK.
    * @default true
    */
   readonly observationMode?: boolean;
@@ -103,10 +88,7 @@ export class DnsFirewall extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
     const additionalDomains = [...new Set(props.additionalAllowedDomains ?? [])];
 
-    // Validate additional domain format (defense in depth — Blueprint also validates)
     this.node.addValidation(new DomainListValidation(additionalDomains));
-
-    // --- Domain lists ---
 
     const baselineDomainList = new route53resolver.CfnFirewallDomainList(this, 'BaselineDomainList', {
       name: 'platform-baseline',
@@ -114,9 +96,8 @@ export class DnsFirewall extends Construct {
     });
     baselineDomainList.applyRemovalPolicy(removalPolicy);
 
-    // Use a placeholder domain when no additional domains are provided so the
-    // domain list always has at least one entry (CloudFormation requirement).
-    // '.invalid' is an RFC 2606 reserved TLD guaranteed to never resolve.
+    // CloudFormation requires a domain list to have at least one entry.
+    // '.invalid' is an RFC 2606 reserved TLD that never resolves.
     const additionalDomainList = new route53resolver.CfnFirewallDomainList(this, 'AdditionalDomainList', {
       name: 'blueprint-additional',
       domains: additionalDomains.length > 0 ? additionalDomains : ['placeholder.invalid'],
@@ -128,8 +109,6 @@ export class DnsFirewall extends Construct {
       domains: ['*'],
     });
     blockAllDomainList.applyRemovalPolicy(removalPolicy);
-
-    // --- Rule group ---
 
     const catchAllAction = observationMode ? 'ALERT' : 'BLOCK';
     const rules: route53resolver.CfnFirewallRuleGroup.FirewallRuleProperty[] = [
@@ -157,8 +136,6 @@ export class DnsFirewall extends Construct {
     });
     ruleGroup.applyRemovalPolicy(removalPolicy);
 
-    // --- VPC association ---
-
     new route53resolver.CfnFirewallRuleGroupAssociation(this, 'RuleGroupAssociation', {
       firewallRuleGroupId: ruleGroup.attrId,
       vpcId: props.vpc.vpcId,
@@ -166,9 +143,7 @@ export class DnsFirewall extends Construct {
       name: 'agent-vpc-dns-firewall',
     });
 
-    // Fail open so a transient DNS Firewall issue does not kill running agent sessions.
-    // AWS::Route53Resolver::FirewallConfig is not recognised by CloudFormation in all
-    // regions. Use an AwsCustomResource to call the API directly instead.
+    // CloudFormation does not recognise AWS::Route53Resolver::FirewallConfig in all regions.
     const firewallConfig = new cr.AwsCustomResource(this, 'FirewallConfig', {
       onCreate: {
         service: 'Route53Resolver',
@@ -195,7 +170,6 @@ export class DnsFirewall extends Construct {
           ResourceId: props.vpc.vpcId,
           FirewallFailOpen: 'DISABLED',
         },
-        // VPC may already be deleted when this runs during stack teardown.
         ignoreErrorCodesMatching: 'ResourceNotFoundException|ValidationException',
       },
       policy: cr.AwsCustomResourcePolicy.fromStatements([
@@ -212,8 +186,6 @@ export class DnsFirewall extends Construct {
         reason: 'route53resolver:UpdateFirewallConfig requires ec2:DescribeVpcs — neither supports resource-level permissions',
       },
     ], true);
-
-    // --- DNS query logging ---
 
     const queryLogGroup = new logs.LogGroup(this, 'QueryLogGroup', {
       retention: logs.RetentionDays.ONE_MONTH,
@@ -232,9 +204,6 @@ export class DnsFirewall extends Construct {
   }
 }
 
-/**
- * Validates that all domains in the additional allowed list match the expected format.
- */
 class DomainListValidation implements IValidation {
   constructor(private readonly domains: string[]) {}
 

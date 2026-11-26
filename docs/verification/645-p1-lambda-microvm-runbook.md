@@ -1,7 +1,7 @@
 # ADR-021 P1 Lambda MicroVM verification runbook
 
-Working verification document for issue #645 / PR #689 on branch
-`feat/645-lambda-microvm-p1`. This is for a **new, CDK-bootstrapped sandbox
+Working verification document for issue #645 and PR #689 on branch
+`feat/645-lambda-microvm-p1`. This runbook is for a **new, CDK-bootstrapped sandbox
 account in which ABCA has never been deployed**. It is not a production deploy
 guide.
 
@@ -11,15 +11,15 @@ guide.
 
 ## ⚠️ This runbook predates the Stage D fixes
 
-The pass recorded under “Live execution results” below ran against the code as of
+The pass recorded under "Live execution results" below ran against the code as of
 `0505f914`, and its findings (F1–F14) were then fixed. The **instructions** above
-each step have been updated only where a fix renamed something an instruction
-asserts on. The following instructions are known to still describe the pre-fix
-world and must be adjusted by whoever runs this again:
+each step have been updated only where a fix renamed something that an instruction
+asserts on. The following instructions are known to still describe the code as it
+was before the fixes. Whoever runs this runbook again must adjust them:
 
 | Step | Stale instruction | Post-fix reality |
 |---|---|---|
-| 1.2 | ~~unescaped `ParameterValue=agentcore,lambda-microvm`; bootstrap without `--force`~~ | **CORRECTED IN PLACE** — the comma is now escaped (`agentcore\,lambda-microvm`) and both bootstrap invocations carry `--force`. F14/F10 are the evidence; nothing is left to adjust here |
+| 1.2 | ~~unescaped `ParameterValue=agentcore,lambda-microvm`; bootstrap without `--force`~~ | **CORRECTED IN PLACE.** The comma is now escaped (`agentcore\,lambda-microvm`) and both bootstrap invocations carry `--force`. F14 and F10 are the evidence. Nothing is left to adjust here |
 | 2.2 | "a 443-only security group" and one `AWS::Lambda::NetworkConnector` | **two** security groups (443-only runtime, 443 + 80 build) and **two** connectors, plus a connector operator role; a seventh output `MicrovmBuildEgressConnectorArns` |
 | 2.3 | `list-stack-resources --query "…\|[0]"` | needs `--no-paginate` (F14) |
 | 4.3 | `export IMAGE_VERSION=1` | the service returns `1.0`; there are two builds per version (one per chipset) |
@@ -29,45 +29,47 @@ world and must be adjusted by whoever runs this again:
 
 ## Important P1 and tooling limits
 
-- P1 provisions and can start the substrate, and — **as of the Stage D fixes** —
+- P1 provisions and can start the substrate. **As of the Stage D fixes**,
   its image declares AND the agent serves `/ready` + `/run`, so the image is
-  creatable, launchable and payload-deliverable. What P1 has no guarantee of is
+  creatable, launchable and payload-deliverable. P1 does not guarantee
   smoke parity (Memory grants, snapshot env parity, egress specifics from a
-  running MicroVM, heartbeats). *Pre-fix, this bullet read "not runnable end to
-  end" because the plan was to declare `/run` in P1 and serve it in P2; the live
-  run proved that is not a reachable service state (F1).*
+  running MicroVM, heartbeats). *Before the fixes, this bullet read "not runnable end to
+  end" because the plan was to declare `/run` in P1 and serve it in P2. The live
+  run proved that this plan is not a reachable service state (F1).*
 - P1's orchestrator role intentionally has only `RunMicrovm`, `GetMicrovm`,
   `TerminateMicrovm`, `PassNetworkConnector`, and the required `iam:PassRole`.
   It does **not** have `SuspendMicrovm`, `ResumeMicrovm`, or
-  `CreateMicrovmAuthToken`. Therefore use the orchestrator role for the P1 IAM
-  checks when it can be assumed, but use the sandbox administrator identity for
-  the manual suspend/resume experiment. This is a deliberate P1/brief mismatch.
+  `CreateMicrovmAuthToken`. Therefore, when the orchestrator role can be assumed,
+  use it for the P1 IAM checks. Use the sandbox administrator identity for
+  the manual suspend and resume experiment. This is a deliberate mismatch between
+  P1 and the brief.
 - The repository's AWS SDK model is
   `@aws-sdk/client-lambda-microvms@3.1098.0`. It verifies operation names,
   request keys, state enums, and `delete-microvm-image-version`. The local
-  `aws-cli/2.35.8` does **not** recognize `aws lambda-microvms`; consequently all
+  `aws-cli/2.35.8` does **not** recognize `aws lambda-microvms`. Consequently all
   `aws lambda-microvms ...` commands below are **best-effort CLI spellings
-  derived from that SDK model and the repository packaging script**, not locally
-  CLI-validated. No minimum AWS CLI release containing this service could be
-  established. The executor must install a CLI build for which
-  `aws lambda-microvms help` succeeds. Do not proceed with image/lifecycle work
+  derived from that SDK model and the repository packaging script**. They were not
+  validated against a local CLI. No minimum AWS CLI release that contains this
+  service could be established. The executor must install a CLI build for which
+  `aws lambda-microvms help` succeeds. Do not proceed with image or lifecycle work
   merely because `aws --version` is newer than 2.35.8.
-- The packaging-script model drift is resolved: its direct service request now
+- The model drift of the packaging script is resolved. Its direct service request now
   uses SDK 3.1098.0's `ARM_64` architecture and `ENABLED|DISABLED` hook-state
-  shape (with port and timeout), rather than CloudFormation's `arm64` and hook
+  shape (with port and timeout), not CloudFormation's `arm64` and hook
   path strings. The CDK L1 remains intentionally unchanged because its generated
-  CloudFormation types accept string values and document no architecture/hook
-  allowed-value constraint. Step 4.2 still captures CLI help/input skeleton as
-  a live check because the local CLI cannot validate this service offline.
-- Commands are run from the repository root. `mise` is primary. Commands marked
+  CloudFormation types accept string values and document no allowed-value
+  constraint for the architecture or the hooks. Step 4.2 still captures the CLI
+  help and the input skeleton as a live check because the local CLI cannot
+  validate this service offline.
+- Run commands from the repository root. `mise` is primary. Commands marked
   **raw fallback** are only for a machine without `mise`.
-- **Run the whole thing under `set -o pipefail`.** Several steps pipe a command
-  through `tee`; without `pipefail` the pipeline reports `tee`'s exit status and a
+- **Run the whole runbook under `set -o pipefail`.** Several steps pipe a command
+  through `tee`. Without `pipefail` the pipeline reports `tee`'s exit status and a
   failed command looks like a success. The 2026-07-31 pass recorded `EXIT=0` for a
-  `package-microvm-artifact.sh` run that had actually failed service validation
+  `package-microvm-artifact.sh` run that had failed service validation
   (F14). The script now also prints an explicit
   `!! package-microvm-artifact.sh FAILED (exit N) !!` marker on any failure, so
-  the teed log carries the truth either way — but set the option anyway:
+  the teed log shows the failure either way. Set the option anyway:
 
   ```bash
   set -o pipefail
@@ -87,9 +89,9 @@ export EVIDENCE_DIR="/tmp/abca-645-p1-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$EVIDENCE_DIR"
 ```
 
-If using a profile, also `export AWS_PROFILE=<sandbox-profile>`. Supported
+If you use a profile, also run `export AWS_PROFILE=<sandbox-profile>`. The supported
 Regions are `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1`, and
-`ap-northeast-1`; this runbook defaults to `us-east-1`.
+`ap-northeast-1`. This runbook defaults to `us-east-1`.
 
 **Expected:** the directory exists and all variables print non-empty.
 
@@ -103,7 +105,7 @@ Regions are `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1`, and
 
 ### 0.1 Verify identity, branch, and virgin account
 
-**Purpose:** prevent deploying to the wrong account/branch and fail fast if this
+**Purpose:** prevent a deploy to the wrong account or branch, and fail fast if this
 is not the assumed first ABCA deployment.
 
 ```bash
@@ -120,8 +122,8 @@ fi
 ```
 
 The expected CloudFormation error is `ValidationError: Stack ... does not
-exist`. Any other error (especially `AccessDenied`) is not proof of absence;
-stop and fix credentials.
+exist`. Any other error (especially `AccessDenied`) is not proof of absence.
+Stop and fix the credentials.
 
 **Expected:** account is the intended sandbox, branch test passes, only known
 local files are shown, and `backgroundagent-dev` is absent. `CDKToolkit` may and
@@ -134,7 +136,7 @@ and the exact stack-absence response.
 
 ### 0.2 Record tools and install dependencies
 
-**Purpose:** capture the exact client/service models and prepare CDK and CLI.
+**Purpose:** capture the exact client and service models and prepare CDK and CLI.
 
 ```bash
 aws --version 2>&1 | tee "$EVIDENCE_DIR/aws-version.txt"
@@ -162,11 +164,11 @@ node -p "require('./node_modules/@aws-sdk/client-lambda-microvms/package.json').
   | tee "$EVIDENCE_DIR/lambda-microvms-sdk-version.txt"
 ```
 
-**Expected:** install succeeds; SDK version is `3.1098.0`; the help command
+**Expected:** install succeeds. The SDK version is `3.1098.0`. The help command
 lists at least `run-microvm`, `get-microvm`, `suspend-microvm`,
 `resume-microvm`, `terminate-microvm`, `create-microvm-auth-token`, and
-`delete-microvm-image-version`. If help fails, stop and update/install the AWS
-CLI distribution that exposes the preview/new service.
+`delete-microvm-image-version`. If help fails, stop and update or install the AWS
+CLI distribution that exposes the preview or new service.
 
 **Record:** every version and whether service help was available.
 
@@ -206,7 +208,7 @@ template.
 
 **Purpose:** replace the standard administrator bootstrap with the repository's
 generated least-privilege template, then enable both AgentCore and Lambda
-MicroVM deployment permissions. `cdk bootstrap` has no `--parameters`; CDK
+MicroVM deployment permissions. `cdk bootstrap` has no `--parameters`, and CDK
 context is not a substitute for this CloudFormation parameter.
 
 ```bash
@@ -244,7 +246,7 @@ npx tsx scripts/generate-bootstrap-template.ts
 npx cdk bootstrap --template bootstrap/bootstrap-template.yaml --force
 ```
 
-Then run the same `aws cloudformation update-stack` parameter dance above,
+Then run the same `aws cloudformation update-stack` parameter commands as above,
 including the escaped comma.
 
 **Expected:** `ComputeTypes` is exactly `agentcore,lambda-microvm`. The custom
@@ -252,8 +254,8 @@ template replaces default `AdministratorAccess` with generated ABCA policies.
 
 **Record:** update stack ID/events and final parameters.
 
-**ADR-021 item:** “where `ComputeTypes` includes `lambda-microvm`, attach
-`IaCRole-ABCA-Compute-LambdaMicrovms`.”
+**ADR-021 item:** "where `ComputeTypes` includes `lambda-microvm`, attach
+`IaCRole-ABCA-Compute-LambdaMicrovms`."
 
 ### 1.3 Verify policy creation and attachment
 
@@ -283,9 +285,10 @@ aws iam list-attached-role-policies --role-name "$CFN_EXEC_ROLE" \
 
 **Optional negative deliberately skipped:** a scratch-qualifier bootstrap with
 only `agentcore` would create another bootstrap stack, buckets, ECR repository,
-roles, and policies merely to prove a template condition already covered by CDK
-tests. It is not cheap enough for the core pass and complicates teardown. Run it
-only if specifically requested, and destroy every scratch bootstrap resource.
+roles, and policies merely to prove a template condition that CDK tests already
+cover. It is not cheap enough for the core pass and complicates teardown. Run it
+only if someone specifically requests it, and then destroy every scratch bootstrap
+resource.
 
 ---
 
@@ -315,10 +318,10 @@ npx cdk deploy "$STACK_NAME" --require-approval never --context compute_type=lam
 ```
 
 **Expected:** synth includes warning ID
-`abca:microvm-image-not-provisioned`; deploy completes. This is intentionally
+`abca:microvm-image-not-provisioned`, and deploy completes. The warning is intentionally
 not `abca:microvm-image-p1-smoke-unverified` yet because no image is configured.
-(The 2026-07-31 pass observed the pre-fix id `abca:microvm-image-p1-not-runnable`;
-the warning was renamed when F1 was fixed.)
+(The 2026-07-31 pass observed the pre-fix id `abca:microvm-image-p1-not-runnable`.
+The warning was renamed when F1 was fixed.)
 
 **Record:** warning, deployment duration, stack ID/status, and failures/retries.
 
@@ -343,11 +346,11 @@ for key in ComputeSubstrate MicrovmArtifactBucketName MicrovmArtifactObjectKey \
 done | tee "$EVIDENCE_DIR/microvm-output-values.txt"
 ```
 
-**Expected:** `ComputeSubstrate=lambda-microvm`; all six `Microvm...` outputs
-are populated; artifact key is `microvm-images/agent-artifact.zip`. Stack
-resources include two S3 buckets, build/execution roles, a 443-only security
-group, `/aws/lambda-microvms/...` log group, and
-`AWS::Lambda::NetworkConnector`; no `AWS::Lambda::MicrovmImage` exists.
+**Expected:** `ComputeSubstrate=lambda-microvm`. All six `Microvm...` outputs
+are populated. The artifact key is `microvm-images/agent-artifact.zip`. The stack
+resources include two S3 buckets, the build and execution roles, a 443-only security
+group, a `/aws/lambda-microvms/...` log group, and
+`AWS::Lambda::NetworkConnector`. No `AWS::Lambda::MicrovmImage` exists.
 
 **Record:** outputs and physical IDs.
 
@@ -372,10 +375,10 @@ aws lambda get-function-configuration --function-name "$ORCHESTRATOR_FN" \
 
 **Expected:** the final line is `[]`.
 
-**Record:** function name and environment-key list (do not publish environment
-values if later deployments add sensitive configuration).
+**Record:** function name and environment-key list. Do not publish environment
+values if later deployments add sensitive configuration.
 
-**ADR-021 item:** reject tasks when deployed without an image; all-or-nothing
+**ADR-021 item:** reject tasks when deployed without an image, and all-or-nothing
 strategy configuration.
 
 ### 2.4 Verify backend cost tags
@@ -404,8 +407,8 @@ PY
 
 **Expected:** every taggable construct resource (buckets, roles, security group,
 log group, and connector where supported) shows the backend tag. Generated
-policies/bucket policies are not independently taggable resources. Save any
-service that omits tags as a defect rather than silently accepting it.
+policies and bucket policies are not independently taggable resources. Save any
+service that omits tags as a defect. Do not accept the omission silently.
 
 **Record:** tagged ARNs and the per-logical-resource template report.
 
@@ -446,7 +449,7 @@ env AWS_REGION=eu-central-1 AWS_DEFAULT_REGION=eu-central-1 \
 
 ### 3.2 Exercise the escape hatch
 
-**Purpose:** prove newly launched Regions can bypass only the static list.
+**Purpose:** prove that newly launched Regions can bypass only the static list.
 
 ```bash
 env AWS_REGION=eu-central-1 AWS_DEFAULT_REGION=eu-central-1 \
@@ -463,10 +466,10 @@ env AWS_REGION=eu-central-1 AWS_DEFAULT_REGION=eu-central-1 \
 
 **ADR-021 item:** Region-list escape hatch.
 
-**Gotcha:** `src/main.ts` reads `CDK_DEFAULT_REGION`, not merely `AWS_REGION`.
-An unresolved/region-agnostic CDK token skips the static check by design. The
+**Pitfall:** `src/main.ts` reads `CDK_DEFAULT_REGION`, not merely `AWS_REGION`.
+An unresolved, region-agnostic CDK token skips the static check by design. The
 commands set both account and Region to force the real test. Synth makes no
-MicroVM control-plane calls, but CDK context/asset bundling may still require
+MicroVM control-plane calls, but CDK context and asset bundling may still require
 valid AWS credentials and the bootstrap version parameter.
 
 ---
@@ -475,7 +478,7 @@ valid AWS credentials and the bootstrap version parameter.
 
 ### 4.1 Select a managed base image
 
-**Purpose:** pin a real regional base-image ARN/version rather than guessing.
+**Purpose:** pin a real regional base-image ARN and version instead of a guess.
 
 ```bash
 aws lambda-microvms list-managed-microvm-images \
@@ -494,8 +497,8 @@ test -n "$BASE_IMAGE_ARN" && test "$BASE_IMAGE_ARN" != None
 test -n "$BASE_IMAGE_VERSION" && test "$BASE_IMAGE_VERSION" != None
 ```
 
-**Expected:** the regional probe succeeds and returns at least one ARN/version.
-Ordering is newest-to-oldest, so `items[0]` is correct; inspect the timestamps
+**Expected:** the regional probe succeeds and returns at least one ARN and version.
+Ordering is newest-to-oldest, so `items[0]` is correct. Inspect the timestamps
 and explicitly export the desired version if the installed CLI ever differs.
 
 **Record:** complete catalogs and selected pair.
@@ -505,9 +508,9 @@ and explicitly export the desired version if the installed CLI ever differs.
 ### 4.2 Package, upload, and start the out-of-band build
 
 **Purpose:** exercise the actual script interface and avoid slow CloudFormation
-iteration while still using CDK-created bucket, role, connector, and logs.
+iteration while still using the CDK-created bucket, role, connector, and logs.
 
-Before running it, capture the installed CLI's authoritative request shape:
+Before you run the script, capture the installed CLI's authoritative request shape:
 
 ```bash
 aws lambda-microvms create-microvm-image help \
@@ -517,11 +520,11 @@ aws lambda-microvms create-microvm-image --generate-cli-skeleton input \
 ```
 
 Confirm that `hooks.microvmHooks.run` is `ENABLED` and
-`cpuConfigurations[].architecture` is `ARM_64`, matching SDK 3.1098.0. The CDK
-L1 request is a separate CloudFormation surface and legitimately retains its
-generated path/string shape. If the installed CLI skeleton differs from the SDK
-model or rejects the script request, stop this phase, save the parser/service
-error as a model-drift defect, and mark later image/runtime steps blocked.
+`cpuConfigurations[].architecture` is `ARM_64`. Both values match SDK 3.1098.0. The CDK
+L1 request goes through CloudFormation, a separate interface, and legitimately retains its
+generated path and string shape. If the installed CLI skeleton differs from the SDK
+model or rejects the script request, stop this phase. Save the parser or service
+error as a model-drift defect, and mark the later image and runtime steps blocked.
 
 ```bash
 export IMAGE_NAME="${STACK_NAME}-abca-agent"
@@ -538,18 +541,18 @@ cdk/scripts/package-microvm-artifact.sh \
 test "${PIPESTATUS[0]}" -eq 0
 ```
 
-The script requires `aws`, `zip`, `python3`, and `rsync`; reads outputs
+The script requires `aws`, `zip`, `python3`, and `rsync`. It reads the outputs
 `MicrovmArtifactBucketName`, `MicrovmArtifactObjectKey`,
 `MicrovmBuildRoleArn`, `MicrovmBuildEgressConnectorArns`,
-`MicrovmEgressConnectorArns`, and `MicrovmLogGroupName`; stages root
-`Dockerfile`, `agent/`, and `contracts/`; uploads the zip; and calls
+`MicrovmEgressConnectorArns`, and `MicrovmLogGroupName`. It stages the root
+`Dockerfile`, `agent/`, and `contracts/`, and uploads the zip. It then calls
 `create-microvm-image` with ARM64, 8,192 MiB, `/ready` **and** `/run` enabled on
 port 8080, the **build-time** egress connector (443 + 80), and the backend tag.
 
-**Expected:** upload succeeds, create returns/starts image version `1.0` in this
-virgin image name, and the output contains the conspicuous “P1 image is runnable
-but NOT smoke-verified” reminder — printed BOTH before and after the create call,
-so a failing create cannot swallow it.
+**Expected:** upload succeeds, and create returns and starts image version `1.0` in this
+virgin image name. The output contains the conspicuous "P1 image is runnable
+but NOT smoke-verified" reminder. The script prints the reminder BOTH before and
+after the create call, so a failing create cannot hide it.
 
 **Record:** artifact size printed by the script, S3 object size from the command
 below, create response, and exact banner.
@@ -565,9 +568,9 @@ aws s3api head-object --bucket "$ARTIFACT_BUCKET" --key "$ARTIFACT_KEY" \
 
 **ADR-021 item:** zip+Dockerfile packaging plane, no secret build inputs, build
 role/connector/log wiring, and the `abca:microvm-image-p1-smoke-unverified`
-warning (renamed from `…-p1-not-runnable` when F1 was fixed: the image IS
+warning. The warning was renamed from `…-p1-not-runnable` when F1 was fixed. The image IS
 creatable, launchable and payload-deliverable now that `/ready` + `/run` are
-declared AND served — what is unverified is smoke parity).
+declared AND served. Smoke parity is what remains unverified.
 
 ### 4.3 Poll build and image status to ACTIVE
 
@@ -608,7 +611,7 @@ export BUILD_FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 **Expected:** build states may include `PENDING` and `IN_PROGRESS`, then
-`SUCCESSFUL`; image-version `state` becomes `SUCCESSFUL` and `status` becomes
+`SUCCESSFUL`. The image-version `state` becomes `SUCCESSFUL` and `status` becomes
 `ACTIVE`. On failure, save `stateReason` and tail the exact output log group:
 
 ```bash
@@ -620,11 +623,11 @@ aws logs tail "$MICROVM_LOG_GROUP" --since 2h
 **Record:** start/finish timestamps, duration, all states/reasons, build ID, and
 `snapshotBuild.memorySnapshotSizeInBytes`, `codeInstallSizeInBytes`, and
 `diskSnapshotSizeInBytes`. Compare **code-install size** to AgentCore's 2 GB
-container-image limit, while clearly noting that memory/disk snapshots are not
+container-image limit. Note that memory and disk snapshots are not
 equivalent to an OCI image and must not be summed into a misleading comparison.
-Also record the reported image resources/disk facts; the SDK exposes minimum
+Also record the reported image resources and disk facts. The SDK exposes minimum
 memory but no explicit disk-capacity field, so verify the 32 GB disk claim in
-the service quota/console and report “not exposed” if that remains true.
+the service quota or the console, and report "not exposed" if that remains true.
 
 **ADR-021 item:** buildability, final image size, 2 GB-limit narrative, and disk
 quota external fact.
@@ -643,14 +646,15 @@ mise //cdk:deploy -- \
   2>&1 | tee "$EVIDENCE_DIR/image-configured-deploy.txt"
 ```
 
-**Expected:** synth/deploy emits `abca:microvm-image-p1-smoke-unverified` (the
-2026-07-31 pass saw the pre-fix id `abca:microvm-image-p1-not-runnable`; the
-warning was renamed when F1 was fixed). The orchestrator now has
-`MICROVM_IMAGE_IDENTIFIER` — **a full image ARN**, not a bare name (F3) —
-`MICROVM_IMAGE_VERSION`, `MICROVM_EXECUTION_ROLE_ARN`,
+**Expected:** synth and deploy emit `abca:microvm-image-p1-smoke-unverified`. (The
+2026-07-31 pass saw the pre-fix id `abca:microvm-image-p1-not-runnable`. The
+warning was renamed when F1 was fixed.) The orchestrator now has
+`MICROVM_IMAGE_IDENTIFIER`, `MICROVM_IMAGE_VERSION`, `MICROVM_EXECUTION_ROLE_ARN`,
 `MICROVM_EGRESS_CONNECTOR_ARNS`, `MICROVM_PAYLOAD_BUCKET`, and
-`MICROVM_INGRESS_CONNECTOR_ARNS` carrying the Lambda-managed `NO_INGRESS`
-connector (F7 — the pre-fix build had no ingress variable at all).
+`MICROVM_INGRESS_CONNECTOR_ARNS`. `MICROVM_IMAGE_IDENTIFIER` is **a full image
+ARN**, not a bare name (F3). `MICROVM_INGRESS_CONNECTOR_ARNS` carries the
+Lambda-managed `NO_INGRESS` connector (F7). The pre-fix build had no ingress
+variable at all.
 
 ```bash
 aws lambda get-function-configuration --function-name "$ORCHESTRATOR_FN" \
@@ -671,14 +675,14 @@ aws iam get-role-policy --role-name "$ORCHESTRATOR_ROLE" \
 ```
 
 The inline policy's physical name is CDK-generated and therefore cannot be
-hard-coded; the actual name to fetch is `$ORCH_POLICY_NAME` returned by
-`list-role-policies` (normally the role's `DefaultPolicy`). If more than one is
-listed, fetch each and select the document containing `Sid=MicrovmLifecycle`.
+hard-coded. The name to fetch is `$ORCH_POLICY_NAME`, which
+`list-role-policies` returns (normally the role's `DefaultPolicy`). If more than one
+policy is listed, fetch each and select the document that contains `Sid=MicrovmLifecycle`.
 
 **Expected:** `MicrovmLifecycle` grants exactly `lambda:RunMicrovm`,
 `lambda:GetMicrovm`, and `lambda:TerminateMicrovm` against exactly
-`arn:...:microvm-image:$IMAGE_NAME` and its `:<version>` suffix sibling;
-`MicrovmPassNetworkConnector` has `lambda:PassNetworkConnector` on `*`; no
+`arn:...:microvm-image:$IMAGE_NAME` and its `:<version>` suffix sibling.
+`MicrovmPassNetworkConnector` has `lambda:PassNetworkConnector` on `*`. No
 `SuspendMicrovm`, `ResumeMicrovm`, or `CreateMicrovmAuthToken` exists.
 
 **Record:** warning, environment-key/value map, role/policy names, statements,
@@ -686,8 +690,8 @@ and exact image ARN format observed.
 
 **ADR-021 item:** the `abca:microvm-image-p1-smoke-unverified` warning (formerly
 `…-p1-not-runnable`), exact-ARN lifecycle IAM, no-JWE grant, and all-or-nothing
-environment wiring — which now includes `MICROVM_INGRESS_CONNECTOR_ARNS`, always
-injected, carrying the `NO_INGRESS` control.
+environment wiring. The wiring now includes `MICROVM_INGRESS_CONNECTOR_ARNS`, which
+is always injected and carries the `NO_INGRESS` control.
 
 ---
 
@@ -715,7 +719,7 @@ operator assumption is expected to fail unless the sandbox has an explicit
 test trust path. **Do not modify production-like trust just for this run.** If
 assumption succeeds, open a subshell with those temporary credentials for steps
 5.1, 5.2, 5.7, and 5.8(a/b), and mark evidence `ORCHESTRATOR_ROLE`. Otherwise
-run as sandbox admin and mark scoping observations `ADMIN — advisory`; the
+run as sandbox admin and mark scoping observations `ADMIN — advisory`. The
 static inline-policy inspection in 4.4 remains authoritative.
 
 Example temporary-credential subshell setup:
@@ -730,7 +734,7 @@ export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 aws sts get-caller-identity
 ```
 
-**Expected:** either a clearly recorded assume-role identity or a clearly
+**Expected:** either a recorded assume-role identity or a
 recorded trust denial and admin fallback.
 
 **Record:** identity mode. Never paste temporary secret values into evidence.
@@ -739,19 +743,19 @@ recorded trust denial and admin fallback.
 
 ### 5.1 Launch the P1 image
 
-**Purpose (SUPERSEDED — see below):** answer what a P1 image that declares but
-does not serve `/run` actually does.
+**Purpose (SUPERSEDED, see below):** answer what a P1 image that declares but
+does not serve `/run` does.
 
-> **Stale premise.** This step was written against the pre-fix world, where the
-> plan was to declare `/run` in P1 and serve it in P2. F1 proved that is not a
-> reachable service state, and the agent now serves `/ready` + `/run`. Two
-> consequences for a re-run: (i) the image is no longer hook-less, so
-> `--run-hook-payload` is ACCEPTED rather than rejected — the interesting
-> observation becomes whether the payload reaches the pipeline, not what a
-> hook-less VM does; and (ii) `--image-identifier` needs the image **ARN**, not
-> `$IMAGE_NAME` (F3). What still holds unchanged, and is worth re-confirming, is
-> everything below about the state enum, the 28,800-second bound, the
-> omit-`idlePolicy` invariant, and the default public ingress.
+> **Stale premise.** This step was written against the pre-fix code, where the
+> plan was to declare `/run` in P1 and serve it in P2. F1 proved that this plan is
+> not a reachable service state, and the agent now serves `/ready` + `/run`. A
+> re-run has two consequences. First, the image is no longer hook-less, so
+> `--run-hook-payload` is ACCEPTED, not rejected. The observation of interest
+> becomes whether the payload reaches the pipeline, not what a
+> hook-less VM does. Second, `--image-identifier` needs the image **ARN**, not
+> `$IMAGE_NAME` (F3). Everything below about the state enum, the 28,800-second
+> bound, the omit-`idlePolicy` invariant, and the default public ingress still
+> holds unchanged and is worth re-confirming.
 
 ```bash
 export RUN_STARTED_EPOCH="$(date +%s)"
@@ -779,18 +783,18 @@ done | tee "$EVIDENCE_DIR/hookless-state-timeline.txt"
 
 **Expected:** `run-microvm` should return a `microvmId`, endpoint, image ARN,
 version, and initial state if `/run` is asynchronous at control-plane return.
-The eventual state is deliberately **not prescribed**: record whether it reaches
+The eventual state is deliberately **not prescribed**. Record whether the VM reaches
 `RUNNING`, remains `PENDING`, becomes `TERMINATING/TERMINATED`, or disappears,
-plus `stateReason` and elapsed time. If `run-microvm` itself rejects because the
-hook returns 404/times out, record that exact exception and timing. This result
-feeds the P2 hook/startup design.
+plus `stateReason` and elapsed time. If `run-microvm` itself rejects the request
+because the hook returns 404 or times out, record that exact exception and timing.
+This result feeds the P2 hook and startup design.
 
 **Record:** full response, endpoint (not an auth token), all states/reasons,
 time-to-first-state/time-to-terminal, and relevant log lines.
 
 **ADR-021 item:** real state enum, 28,800-second bound, and omit-`idlePolicy`
-invariant. (The original "P1-not-runnable premise" this step was written to probe
-no longer exists — see the Phase 5 row of the stale-instruction table.)
+invariant. (The original "P1-not-runnable premise" that this step was written to probe
+no longer exists. See the Phase 5 row of the stale-instruction table.)
 
 ### 5.2 Explicit `get-microvm` state mapping
 
@@ -802,10 +806,10 @@ aws lambda-microvms get-microvm --microvm-identifier "$MICROVM_ID" \
 ```
 
 **Expected:** observed values come from `PENDING`, `RUNNING`, `SUSPENDING`,
-`SUSPENDED`, `TERMINATING`, `TERMINATED`; a reaped ID returns
+`SUSPENDED`, `TERMINATING`, `TERMINATED`. A reaped ID returns
 `ResourceNotFoundException`.
 
-**Record:** every distinct state actually observed and any unknown state.
+**Record:** every distinct state observed and any unknown state.
 
 **ADR-021 item:** mechanical state mapping and future-enum safety premise.
 
@@ -828,9 +832,9 @@ done | tee "$EVIDENCE_DIR/suspend-state-timeline.txt"
 ```
 
 **Expected:** if the VM reached a suspendible state, observe
-`SUSPENDING → SUSPENDED`. A conflict/not-found caused by the failed `/run` hook
-is a valid P1 result but means 5.4–5.6 cannot discharge TTL/resume empirically;
-mark those **BLOCKED-BY-P1-HOOKLESS-IMAGE**, do not invent an answer.
+`SUSPENDING → SUSPENDED`. A conflict or not-found error caused by the failed `/run` hook
+is a valid P1 result, but it means that 5.4–5.6 cannot discharge TTL and resume
+empirically. Mark those **BLOCKED-BY-P1-HOOKLESS-IMAGE**. Do not invent an answer.
 
 **Record:** identity, response/exception, states, and suspend latency.
 
@@ -841,7 +845,7 @@ mark those **BLOCKED-BY-P1-HOOKLESS-IMAGE**, do not invent an answer.
 **Purpose:** determine the default lifetime of a manually suspended VM when
 `idlePolicy` (and therefore `suspendedDurationSeconds`) is omitted.
 
-Only run after observing `SUSPENDED`:
+Run only after you observe `SUSPENDED`:
 
 ```bash
 for seconds in 0 900 3600 14400; do
@@ -853,15 +857,15 @@ done | tee "$EVIDENCE_DIR/suspended-ttl-checkpoints.txt"
 
 The sleeps are incremental (0, then 15 min, then +1 h, then +4 h). A time-boxed
 executor may truncate after 15 min or 1 h, but must say so. Never leave the VM
-past the 28,800-second maximum; Phase 8 terminates it.
+past the 28,800-second maximum. Phase 8 terminates it.
 
-**Expected:** unknown by design. Record whether it stays `SUSPENDED`, terminates,
-or becomes NotFound and at what wall-clock age. `maximumDurationInSeconds=28800`
+**Expected:** unknown by design. Record whether the VM stays `SUSPENDED`, terminates,
+or becomes NotFound, and at what wall-clock age. `maximumDurationInSeconds=28800`
 bounds the worst case even if no separate suspended TTL exists.
 
 **Record:** complete checkpoints, truncation, start age, and terminal time.
 
-**ADR-021 item:** P1 external fact — manual-suspend default TTL without
+**ADR-021 item:** P1 external fact, manual-suspend default TTL without
 `idlePolicy`.
 
 ### 5.5 Quota treatment while suspended
@@ -881,19 +885,19 @@ aws lambda-microvms list-microvms --image-identifier "$IMAGE_NAME" \
 ```
 
 Also open the Lambda MicroVM **account quota / memory utilization view** in the
-AWS console before launch, while RUNNING, while SUSPENDED, and after termination;
-capture values/timestamps. The SDK 3.1098 model has no “get account memory
-usage” operation, and `service-quotas` normally reports limits rather than live
-consumption. If the console has no utilization view and quota is too high to
-safely saturate with a second 32 GiB VM, record **NOT OBSERVABLE SAFELY** rather
-than launching VMs until failure.
+AWS console before launch, while RUNNING, while SUSPENDED, and after termination.
+Capture the values and timestamps. The SDK 3.1098 model has no "get account memory
+usage" operation, and `service-quotas` normally reports limits, not live
+consumption. If the console has no utilization view and the quota is too high to
+saturate safely with a second 32 GiB VM, record **NOT OBSERVABLE SAFELY** instead of
+launching VMs until failure.
 
-**Expected:** the suspended VM remains in `list-microvms`; the load-bearing
-claim is discharged only if the account quota view continues counting its
-32,768 MiB after `SUSPENDED`.
+**Expected:** the suspended VM remains in `list-microvms`. The claim that the
+rationale depends on is discharged only if the account quota view continues to
+count the VM's 32,768 MiB after `SUSPENDED`.
 
 **Record:** quota names/codes/limits, list response, and four utilization
-snapshots. Distinguish “listed” from “proven to consume quota.”
+snapshots. Distinguish "listed" from "proven to consume quota."
 
 **ADR-021 item:** account-memory quota treatment of suspended VMs / concurrency
 slot-held rationale.
@@ -913,8 +917,8 @@ done | tee "$EVIDENCE_DIR/resume-state-timeline.txt"
 
 **Expected:** unknown for P1 because no `/resume` hook is declared and `/run`
 may already have failed. Record whether resume succeeds and transitions to
-`RUNNING`, conflicts, terminates, or disappears, and whether ID/endpoint remain
-stable.
+`RUNNING`, conflicts, terminates, or disappears, and whether the ID and endpoint
+remain stable.
 
 **Record:** response, transitions, latency, ID/endpoint stability.
 
@@ -970,10 +974,10 @@ aws lambda-microvms create-microvm-auth-token \
 ```
 
 **Expected:** both return `AccessDeniedException`. If the different-name test
-returns `ResourceNotFoundException`, it does not prove exact-ARN denial; create
-or use a real second sandbox image only if already available, otherwise mark
+returns `ResourceNotFoundException`, it does not prove exact-ARN denial. Create
+or use a real second sandbox image only if it is already available. Otherwise mark
 that sub-check inconclusive. The `allowed-ports` CLI union syntax is
-best-effort; the verified SDK request is
+best-effort. The verified SDK request is
 `{microvmIdentifier, expirationInMinutes, allowedPorts:[{port:8080}]}`. A local
 argument-parser error is not an IAM result.
 
@@ -985,7 +989,7 @@ argument-parser error is not an IAM result.
 ### 5.9 Direct service boundary: 16,384 vs 16,385 bytes
 
 **Purpose:** independently verify the documented `runHookPayload` service cap.
-This is direct-service validation; the ABCA strategy already routes envelopes
+This is direct-service validation. The ABCA strategy already routes envelopes
 larger than 16,384 bytes to S3.
 
 ```bash
@@ -1013,12 +1017,12 @@ aws lambda-microvms run-microvm \
   2>&1 | tee "$EVIDENCE_DIR/run-payload-16385.txt"
 ```
 
-Immediately terminate the MicroVM returned by the accepted request (if any).
+Immediately terminate the MicroVM that the accepted request returns, if any.
 
-**Expected:** 16,384 bytes is accepted; 16,385 bytes is rejected, likely with
-`ValidationException`. Record the actual exception rather than treating the
-predicted name as normative. Confirm the installed CLI expands `file://` to file
-contents; if it passes the literal URI, repeat with command substitution and
+**Expected:** 16,384 bytes is accepted. 16,385 bytes is rejected, likely with
+`ValidationException`. Record the actual exception. Do not treat the
+predicted name as normative. Confirm that the installed CLI expands `file://` to
+the file contents. If it passes the literal URI, repeat with command substitution and
 record the client behavior.
 
 **Record:** byte counts, both complete responses, exception name/message/status,
@@ -1032,9 +1036,9 @@ and cleanup ID.
 
 ### 6.1 Build and point the CLI at the stack
 
-**Purpose:** use the repository CLI's real resolution rules: operator commands
-take `--region`/`--stack-name`; configured Region is a fallback; API commands
-also need Cognito configuration/login.
+**Purpose:** use the repository CLI's real resolution rules. Operator commands
+take `--region` and `--stack-name`. The configured Region is a fallback. API commands
+also need Cognito configuration and login.
 
 ```bash
 mise //cli:build
@@ -1043,8 +1047,8 @@ bgagent configure --stack-name "$STACK_NAME" --region "$AWS_REGION"
 bgagent platform outputs --stack-name "$STACK_NAME" --region "$AWS_REGION"
 ```
 
-**Expected:** config is written under `${BGAGENT_CONFIG_DIR:-$HOME/.bgagent}`;
-stack outputs resolve. No Cognito login is needed for operator AWS commands.
+**Expected:** the CLI writes config under `${BGAGENT_CONFIG_DIR:-$HOME/.bgagent}`,
+and stack outputs resolve. Operator AWS commands need no Cognito login.
 
 **Record:** CLI build result and redacted outputs.
 
@@ -1073,12 +1077,12 @@ bgagent repo offboard "$DUMMY_REPO" \
 ```
 
 **Expected:** onboarding's `ListManagedMicrovmImages` probe passes and the row
-has `compute_type=lambda-microvm`; doctor contains
-`lambda_microvm_availability`; runtime status groups it under
-`lambda_microvm_substrates`; offboard marks it removed. Doctor may still exit
+has `compute_type=lambda-microvm`. Doctor contains
+`lambda_microvm_availability`. Runtime status groups the row under
+`lambda_microvm_substrates`. Offboard marks the row removed. Doctor may still exit
 non-zero in a virgin sandbox because its GitHub secret is an unpopulated
-placeholder or no real repo/token/model access exists—record those independent
-failures.
+placeholder or because no real repo, token, or model access exists. Record those
+independent failures.
 
 **SKIP-IF-UNCONFIGURED:** if the sandbox principal lacks DDB or MicroVM catalog
 read permission, record the IAM gap and skip the write. Onboarding itself does
@@ -1097,9 +1101,9 @@ not require a valid GitHub token, but a meaningful doctor pass and any task do.
 **Purpose:** observe orchestrator classification and terminate-on-finalize, not
 to claim P2 smoke parity.
 
-This is **OPTIONAL / usually DEFERRED-TO-P2-ENV**. A virgin account is missing a
-Cognito user/login, populated GitHub token secret, and a genuinely accessible
-onboarded repository unless the executor configures all three. Do not create
+This is **OPTIONAL / usually DEFERRED-TO-P2-ENV**. A virgin account lacks a
+Cognito user and login, a populated GitHub token secret, and a genuinely accessible
+onboarded repository, unless the executor configures all three. Do not create
 those merely for this P1 substrate pass.
 
 If they already exist:
@@ -1114,8 +1118,8 @@ bgagent watch <task-id>
 ```
 
 **Expected:** the backend does not complete agent work. Capture the task's
-failure classification/remedy, persisted `compute_metadata` (`microvmId` and
-endpoint), orchestrator logs, and whether finalization calls
+failure classification and remedy, the persisted `compute_metadata` (`microvmId` and
+endpoint), the orchestrator logs, and whether finalization calls
 `TerminateMicrovm`. If no complete setup exists, write
 `DEFERRED-TO-P2-ENV — missing Cognito user/login, GitHub token, and/or real repo
 onboarding`.
@@ -1123,7 +1127,7 @@ onboarding`.
 **Record:** task ID/evidence or exact deferral reason.
 
 **ADR-021 item:** defense-in-depth failure classification, handle persistence,
-and terminate fire; this is not P2 clone→change→PR smoke parity.
+and terminate fire. This is not the P2 smoke parity of clone, then change, then PR.
 
 ---
 
@@ -1131,7 +1135,7 @@ and terminate fire; this is not P2 clone→change→PR smoke parity.
 
 ### 8.1 Terminate every MicroVM
 
-**Purpose:** stop compute billing before image/stack deletion.
+**Purpose:** stop compute billing before image and stack deletion.
 
 ```bash
 aws lambda-microvms list-microvms --image-identifier "$IMAGE_NAME" \
@@ -1145,15 +1149,15 @@ aws lambda-microvms list-microvms --image-identifier "$IMAGE_NAME" \
   | tee "$EVIDENCE_DIR/microvms-after-terminate.json"
 ```
 
-**Expected:** no nonterminal VM remains; wait/retry if necessary.
+**Expected:** no nonterminal VM remains. Wait and retry if necessary.
 
 **Record:** IDs and final states.
 
-**ADR-021 item:** explicit cleanup rather than relying on the eight-hour bound.
+**ADR-021 item:** explicit cleanup, not reliance on the eight-hour bound.
 
 ### 8.2 Delete out-of-band image versions and image
 
-**Purpose:** stop snapshot storage charges. The verified operation/CLI command
+**Purpose:** stop snapshot storage charges. The verified operation and CLI command
 name is `delete-microvm-image-version` with `imageIdentifier` and
 `imageVersion`.
 
@@ -1169,8 +1173,8 @@ aws lambda-microvms delete-microvm-image --image-identifier "$IMAGE_NAME"
 ```
 
 **Expected:** all versions enter deletion and the image is deleted. If the
-service requires deleting the parent first/last or waiting between operations,
-follow the returned conflict remedy and record actual order.
+service requires you to delete the parent first or last, or to wait between operations,
+follow the returned conflict remedy and record the actual order.
 
 **Record:** versions, responses, final NotFound/list absence.
 
@@ -1202,7 +1206,7 @@ npx cdk destroy "$STACK_NAME" --force \
   --context microvm_image_version="$IMAGE_VERSION"
 ```
 
-**Expected:** `backgroundagent-dev` is absent; `CDKToolkit` remains
+**Expected:** `backgroundagent-dev` is absent. `CDKToolkit` remains
 `CREATE_COMPLETE`/`UPDATE_COMPLETE` with the custom policies. VPC teardown can
 lag while service-managed ENIs are reclaimed; wait and retry rather than
 force-deleting resources past CloudFormation.
@@ -1215,37 +1219,37 @@ force-deleting resources past CloudFormation.
 storage, S3 artifact storage, NAT gateway hourly/data charges, VPC endpoint
 hourly charges, CloudWatch logs, and brief Lambda/DynamoDB/API usage. Suspended
 VMs should stop compute charges but may retain billed snapshot storage and
-account memory quota; the experiment determines the latter. NAT gateways and
-endpoints continue charging until stack deletion.
+account memory quota. The experiment determines the latter. NAT gateways and
+endpoints continue to charge until stack deletion.
 
 ---
 
 ## Live execution results — 2026-07-31, account <account>, us-east-1
 
 Executed against real AWS. Evidence directory:
-`/tmp/abca-645-p1-20260731T184822Z`. Wall clock 18:48Z → 23:07Z (4 h 19 min).
+`/tmp/abca-645-p1-20260731T184822Z`. Wall clock 18:48Z to 23:07Z (4 h 19 min).
 
 **Execution deviations from the runbook as written** (each is itself a result):
 
-1. `mise` is **not installed** on the executor; every **raw fallback** was used.
-2. The account is **not virgin overall** — `serverless-api-powertools`,
+1. `mise` is **not installed** on the executor. Every **raw fallback** was used.
+2. The account is **not virgin overall**. `serverless-api-powertools`,
    `BuildingServerlessAPIs`, `aws-sam-cli-managed-default`, and `CDKToolkit`
    pre-existed. `backgroundagent-dev` was absent, so the ABCA-specific
    first-deploy premise held.
-3. `docker` is absent; `finch` 1.x (`CDK_DOCKER=finch`) built the AgentCore
+3. `docker` is absent. `finch` 1.x (`CDK_DOCKER=finch`) built the AgentCore
    container asset.
 4. Phase 2 could not deploy from unmodified sources. The stack was deployed from
-   a **hand-patched cloud assembly** (`/tmp/cdkout-p1*`, a build artifact — no
-   repository source file was modified). Two patches, both forced by live-service
-   rejections recorded below: a MicroVM connector **operator role**, and moving
-   subnets off `us-east-1a`.
+   a **hand-patched cloud assembly** (`/tmp/cdkout-p1*`), which is a build artifact.
+   No repository source file was modified. There were two patches, both forced by
+   live-service rejections recorded below: a MicroVM connector **operator role**,
+   and a move of the subnets off `us-east-1a`.
 5. A temporary **port-80 egress rule** (`sgr-07ed1fa48ef38467a`) was added to the
    construct's security group to get any image to build at all (see 4.3).
-6. Suspend-TTL observation was **truncated at ~1 h** (runbook allows this).
+6. Suspend-TTL observation was **truncated at ~1 h** (the runbook allows this).
 
 ### Phase 0
 
-**0.1** — Account `<account>`, caller
+**0.1.** Account `<account>`, caller
 `arn:aws:sts::<account>:assumed-role/AdminConsoleAccess/aamorosi-Isengard`
 (administrator). Branch `feat/645-lambda-microvm-p1`, SHA
 `0505f914fd7093cccd067b6346a24e1c40e50643`. Untracked: `docs/verification/`,
@@ -1255,9 +1259,9 @@ Executed against real AWS. Evidence directory:
 An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id backgroundagent-dev does not exist
 ```
 
-**0.2** — `aws-cli/2.36.13 Python/3.14.6 Darwin/25.5.0 source/arm64`;
+**0.2.** `aws-cli/2.36.13 Python/3.14.6 Darwin/25.5.0 source/arm64`;
 `node v24.16.0`; `cdk 2.1129.0`; `mise NOT INSTALLED`; `Python 3.9.6`;
-`Zip 3.0`; **`openrsync` (protocol 29, "rsync 2.6.9 compatible")** — the
+`Zip 3.0`; **`openrsync` (protocol 29, "rsync 2.6.9 compatible")**. The
 packaging script's `rsync -a --exclude` usage worked unmodified on macOS.
 `@aws-sdk/client-lambda-microvms` = **3.1098.0**.
 
@@ -1269,30 +1273,31 @@ match** to the SDK 3.1098.0 command list (24 vs 24), including
 `create-microvm-image --generate-cli-skeleton input` **confirms the packaging
 script's shape and refutes the CDK L1 shape**:
 
-- `cpuConfigurations[].architecture` — help documents exactly one allowed value:
+- `cpuConfigurations[].architecture`. Help documents exactly one allowed value,
   `ARM_64`. The L1's `'arm64'` is not a documented value.
-- `hooks` — `{"port": integer, "microvmHooks": {"run": "DISABLED"|"ENABLED",
-  "runTimeoutInSeconds": integer, ...}}`. There is **no hook-path field at all**;
-  the L1's `run: '/run'` path string has no counterpart in the service model.
-- `run-microvm` skeleton confirms `idlePolicy`
+- `hooks` has the shape `{"port": integer, "microvmHooks": {"run": "DISABLED"|"ENABLED",
+  "runTimeoutInSeconds": integer, ...}}`. There is **no hook-path field at all**.
+  The L1's `run: '/run'` path string has no counterpart in the service model.
+- The `run-microvm` skeleton confirms `idlePolicy`
   `{maxIdleDurationSeconds, suspendedDurationSeconds, autoResumeEnabled}` and
   `runHookPayload` as a plain string.
 
-The CFN-vs-API question is therefore **half-adjudicated**: the API side is
+The CFN-vs-API question is therefore **half settled**. The API side is
 settled, but the `AWS::Lambda::MicrovmImage` CFN path was never exercised,
-because the construct only synthesizes it when `microvm_base_image_arn` +
+because the construct synthesizes that resource only when `microvm_base_image_arn` +
 `microvm_base_image_version` context is supplied, and the runbook's Phase 4 uses
-the out-of-band script path. **The CFN value shapes remain untested** — and 4.2
-below shows the request would be rejected on hook semantics regardless of shape.
+the out-of-band script path. **The CFN value shapes remain untested**, and 4.2
+below shows that the request would be rejected on hook semantics regardless of shape.
 
 ### Phase 1
 
-**1.1** — `CDKToolkit` `CREATE_COMPLETE`, created 2025-11-24, `BootstrapVariant`
+**1.1.** `CDKToolkit` `CREATE_COMPLETE`, created 2025-11-24, `BootstrapVariant`
 = `AWS CDK: Default Resources`. Markers: `ComputeTypes` **ABSENT**,
 `IaCRoleABCAComputeLambdaMicrovms` **ABSENT**, `AdministratorAccess`
-**present** — exactly the standard-bootstrap starting state the step predicts.
+**present**. This is exactly the standard-bootstrap starting state that the step
+predicts.
 
-**1.2 — DEFECT (runbook + `mise //cdk:bootstrap`): the re-bootstrap is a silent
+**1.2. DEFECT (runbook + `mise //cdk:bootstrap`): the re-bootstrap is a silent
 no-op on an already-bootstrapped account.** Verbatim:
 
 ```
@@ -1300,14 +1305,14 @@ Bootstrap stack already exists, containing 'AWS CDK: Default Resources'. Not ove
 ✅  Environment aws://<account>/us-east-1 bootstrapped (no changes).
 ```
 
-Exit status **0**. A pass that trusts this would proceed to 1.3 with
-`AdministratorAccess` still attached. `--force` was required. A **durable**
-consequence: after the forced bootstrap, `BootstrapVariant` **remains**
-`AWS CDK: Default Resources` (the CDK CLI re-sends the previous value rather than
-the template default `ABCA: Least-Privilege Bootstrap`), so **every future
+Exit status **0**. A pass that trusts this output would proceed to 1.3 with
+`AdministratorAccess` still attached. `--force` was required. One consequence is
+**durable**. After the forced bootstrap, `BootstrapVariant` **remains**
+`AWS CDK: Default Resources`, because the CDK CLI re-sends the previous value instead of
+the template default `ABCA: Least-Privilege Bootstrap`. So **every future
 non-forced `mise //cdk:bootstrap` will refuse again**.
 
-**1.2 — DEFECT (runbook): the `ComputeTypes` parameter command as written is
+**1.2. DEFECT (runbook): the `ComputeTypes` parameter command as written is
 rejected.** Verbatim:
 
 ```
@@ -1316,17 +1321,17 @@ Invalid type for parameter Parameters[0].ParameterValue, value: ['agentcore', 'l
 ```
 
 The CLI shorthand parser splits on the comma. The escaped form
-`ParameterValue=agentcore\,lambda-microvm` works — which is exactly what the
-comment above `[tasks.bootstrap]` in `cdk/mise.toml` already shows; the runbook
+`ParameterValue=agentcore\,lambda-microvm` works. The
+comment above `[tasks.bootstrap]` in `cdk/mise.toml` already shows exactly that form. The runbook
 dropped the escapes. Final state: `UPDATE_COMPLETE`, `ComputeTypes` =
 `agentcore,lambda-microvm`.
 
-**1.3 — PASS.** `CFN_EXEC_ROLE` =
+**1.3. PASS.** `CFN_EXEC_ROLE` =
 `cdk-hnb659fds-cfn-exec-role-<account>-us-east-1`. Exactly one local policy
 matched: `cdk-hnb659fds-IaCRole-ABCA-Compute-LambdaMicrovms-<account>-us-east-1`,
 and it is attached. Attachments are the five ABCA policies (Application,
 Infrastructure, Observability, Compute-Agentcore, Compute-LambdaMicrovms) and
-**no `AdministratorAccess`** — the template's replacement works. The
+**no `AdministratorAccess`**, so the template's replacement works. The
 `LambdaMicrovms` statement grants 19 actions, all image/version/build/
 managed-catalog/network-connector, including `lambda:PassNetworkConnector`.
 The optional scratch-qualifier negative was deliberately skipped as the runbook
@@ -1334,10 +1339,10 @@ directs.
 
 ### Phase 2
 
-**2.1 — synth PASS, deploy BLOCKED THREE TIMES.** Synth emitted
+**2.1. Synth PASS, deploy BLOCKED THREE TIMES.** Synth emitted
 `abca:microvm-image-not-provisioned` and **not**
 `abca:microvm-image-p1-not-runnable`, exactly as specified. Incidental synth
-warnings worth noting: `Template size is approaching limit: 893273/1000000` and
+warnings: `Template size is approaching limit: 893273/1000000` and
 `Number of resources: 463 is approaching allowed maximum of 500`.
 
 *Blocker A (environmental, not an ABCA defect).* The stack carries one Docker
@@ -1352,14 +1357,14 @@ pkg/mod/github.com/cli/go-gh/v2@v2.13.0/internal/yamlmap/yaml_map.go:8:2: unreco
 succeeded. **Data point for 4.3's size narrative:** the AgentCore container
 image is **1.799 GB uncompressed / 629.7 MB compressed**.
 
-*Blocker B — **the P1 substrate cannot deploy from unmodified sources**.*
+*Blocker B. **The P1 substrate cannot deploy from unmodified sources**.*
 `AWS::Lambda::NetworkConnector` `CREATE_FAILED`, verbatim:
 
 ```
 Resource handler returned message: "NetworkConnectorOperatorRole is required for VPC_EGRESS connector type (Service: Lambda, Status Code: 400, Request ID: 04726267-6c61-4ff5-bb1d-302122e9f955) (SDK Attempt Count: 1)" (RequestToken: 1a1652c3-2166-e865-c49d-6cdb5927bbfe, HandlerErrorCode: InvalidRequest)
 ```
 
-This **directly refutes an explicit design assumption** stated in
+This error **refutes an explicit design assumption** stated in
 `cdk/src/constructs/lambda-microvm-compute.ts` (~line 467):
 
 > `operatorRole` is left unset so Lambda manages the ENIs with its own
@@ -1368,12 +1373,13 @@ This **directly refutes an explicit design assumption** stated in
 The generated L1 also marks `operatorRole` optional
 (`readonly operatorRole?: string`) with no note that `VPC_EGRESS` requires it.
 An independent probe stack (`abca645-connector-probe`) confirmed the minimal
-working recipe: a role trusting `lambda.amazonaws.com` with
+working configuration: a role that trusts `lambda.amazonaws.com` with
 `AWSLambdaVPCAccessExecutionRole` plus `ec2:CreateNetworkInterface` /
 `DeleteNetworkInterface` / `DescribeNetworkInterfaces` / `DescribeSubnets` /
 `DescribeVpcs` / `DescribeSecurityGroups` / `CreateTags` /
 `AssignPrivateIpAddresses` / `UnassignPrivateIpAddresses` /
-`Describe|ModifyNetworkInterfaceAttribute` → connector `CREATE_COMPLETE`.
+`Describe|ModifyNetworkInterfaceAttribute`. With that role the connector reached
+`CREATE_COMPLETE`.
 
 *Blocker C (AgentCore, account-AZ-specific, blocks any ABCA deploy here).*
 
@@ -1381,96 +1387,97 @@ working recipe: a role trusting `lambda.amazonaws.com` with
 Resource handler returned message: "Agent runtime creation failed with status: CREATE_FAILED for runtime: backgroundagentdevRuntimeCC6E3A5A-yiKm9OEVPo. Reason: The following subnets are in unsupported availability zones in region us-east-1: subnet-02b0221802f3fee10 in us-east-1a (ID: use1-az6). Supported availability zones are: use1-az4, use1-az1, use1-az2"
 ```
 
-This account maps `us-east-1a` → `use1-az6`. `AgentVpc` does not constrain AZ
-selection, so CDK's default two-AZ pick lands on an AZ AgentCore rejects.
-Patched `us-east-1a` → `us-east-1c` (`use1-az2`).
+This account maps `us-east-1a` to `use1-az6`. `AgentVpc` does not constrain AZ
+selection, so CDK's default two-AZ pick includes an AZ that AgentCore rejects.
+The patch changed `us-east-1a` to `us-east-1c` (`use1-az2`).
 
-*Two further teardown/iteration gotchas.* (i) Rollback itself failed once:
+*Two further teardown and iteration pitfalls.* (i) Rollback itself failed once:
 `Validation failed during DeleteMemory: Memory is in transitional state
-CREATING. Cannot delete memory.` — `AWS::BedrockAgentCore::Memory` cannot be
-deleted while creating, leaving `ROLLBACK_FAILED`; a plain `delete-stack`
-cleared it. (ii) Post-synth template edits are **silently ignored** if the
-template's S3 asset object already exists: the object key is the pre-edit content
+CREATING. Cannot delete memory.` `AWS::BedrockAgentCore::Memory` cannot be
+deleted while it is creating, which left the stack in `ROLLBACK_FAILED`. A plain
+`delete-stack` cleared it. (ii) Post-synth template edits are **silently ignored** if the
+template's S3 asset object already exists. The object key is the pre-edit content
 hash recorded in `*.assets.json`, so `cdk-assets` skips the upload and CFN
 re-uses the stale template. The stale object must be deleted.
 
-Successful deploy: `CREATE_COMPLETE`, 19:41:53Z → 19:55:35Z = **13 min 42 s**,
+Successful deploy: `CREATE_COMPLETE`, 19:41:53Z to 19:55:35Z = **13 min 42 s**,
 464 resources.
 
-**2.2 — PASS.** `ComputeSubstrate=lambda-microvm`; all six `Microvm…` outputs
+**2.2. PASS.** `ComputeSubstrate=lambda-microvm`; all six `Microvm…` outputs
 populated; artifact key exactly `microvm-images/agent-artifact.zip`. The 13
 `LambdaMicrovmCompute` resources are: artifact + payload buckets (each with a
 bucket policy and an auto-delete custom resource), build role + policy, execution
 role + policy, `AWS::EC2::SecurityGroup sg-0e662dc0d6f6e9ade`,
 `AWS::Logs::LogGroup /aws/lambda-microvms/backgroundagent-dev-abca-agent`, and
 `AWS::Lambda::NetworkConnector nc-132ede11-cb63-4dfa-b75b-6a4713023c1a`.
-**No `AWS::Lambda::MicrovmImage`** — correct for this state. The security group
+**No `AWS::Lambda::MicrovmImage`**, which is correct for this state. The security group
 has exactly one rule: egress `tcp/443 → 0.0.0.0/0`, *"Allow HTTPS egress (GitHub
-API, AWS services)"*. (That single rule is what breaks the image build — 4.3.)
+API, AWS services)"*. (That single rule is what breaks the image build. See 4.3.)
 
-**2.3 — PASS.** `MICROVM_*` keys = `[]` (14 env keys total).
+**2.3. PASS.** `MICROVM_*` keys = `[]` (14 env keys total).
 **DEFECT (runbook): the `ORCHESTRATOR_FN` command is broken by pagination.**
 With 464 resources, `list-stack-resources --query "…|[0]"` applies the query
-**per page** and printed five lines (`None None None None <name>`), which then
-failed `get-function-configuration` on the multi-line value. Needs
-`--no-paginate` (or local parsing). Resolved value:
+**per page** and printed five lines (`None None None None <name>`).
+`get-function-configuration` then failed on the multi-line value. The
+`ORCHESTRATOR_FN` command needs `--no-paginate` (or local parsing). Resolved value:
 `backgroundagent-dev-TaskOrchestratorOrchestratorFn-gM2sydgNVf1V`.
 
-**2.4 — PASS.** All **six** taggable construct resources carry
+**2.4. PASS.** All **six** taggable construct resources carry
 `abca:compute-backend=lambda-microvm`: security group, network connector, log
-group, both buckets, and — verified via `iam list-role-tags` — both roles.
-`resourcegroupstaggingapi` returned only **5** ARNs; **IAM roles are simply not
-returned by that API**, which is an API coverage gap, not a missing tag.
+group, both buckets, and both roles. The roles were verified via `iam list-role-tags`.
+`resourcegroupstaggingapi` returned only **5** ARNs. **IAM roles are not
+returned by that API**. The difference is an API coverage gap, not a missing tag.
 Bucket policies and auto-delete custom resources are not independently taggable,
 as the step anticipates.
 
 ### Phase 3
 
-**3.1 — PASS** (exit 1). Verbatim:
+**3.1. PASS** (exit 1). Verbatim:
 
 ```
 Error: AWS Lambda MicroVMs are not available in eu-central-1. The lambda-microvm compute backend is enabled (--context compute_type=lambda-microvm) but the stack Region is not one of: us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1. Either deploy the stack into a supported Region, drop the backend (--context compute_type=agentcore or ecs), or — if AWS has since launched Lambda MicroVMs in eu-central-1 — bypass this static check with --context microvm_region_override=true and add eu-central-1 to LAMBDA_MICROVM_SUPPORTED_REGIONS in cdk/src/handlers/shared/microvm-regions.ts.
 ```
 
-Names the Region, all five supported Regions, and the override flag.
+The error names the Region, all five supported Regions, and the override flag.
 
-**3.2 — PASS** (exit 0) with `abca:microvm-region-override` (and, correctly, the
+**3.2. PASS** (exit 0) with `abca:microvm-region-override` (and, correctly, the
 `abca:microvm-image-not-provisioned` warning still present).
 
 ### Phase 4
 
-**4.1 — PASS, with a runbook selector bug.** Exactly **one** managed base image
+**4.1. PASS, with a runbook selector bug.** Exactly **one** managed base image
 exists in us-east-1: `arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1`, with
 versions `1` (created 2026-07-21) and `0` (2026-06-17). **Ordering is
 newest-first**, so the runbook's `items[-1].imageVersion` returns **`0`** (the
-older version); `items[0]` returns `1`. The runbook's own warning about ordering
-is therefore *load-bearing here*. Selected `1`; the service echoes it back as
+older version). `items[0]` returns `1`. The runbook's own warning about ordering
+therefore *matters here*. Version `1` was selected, and the service echoes it back as
 `baseImageVersion: "1.0"`.
 
-**4.2 — Artifact plane PASS; image creation FAILED TWICE on service
+**4.2. Artifact plane PASS. Image creation FAILED TWICE on service
 validation.** The script read all five outputs, staged `Dockerfile` + `agent/` +
 `contracts/`, printed **`584K artifact`**, and uploaded successfully (S3
 `ContentLength` **597305**, SSE `AES256`).
 
-Then, on the exact request the script builds, verbatim:
+Then the service rejected the exact request that the script builds. Verbatim:
 
 ```
 An error occurred (ValidationException) when calling the CreateMicrovmImage operation: The ready (/ready) MicroVM image hook must be enabled when any MicroVM lifecycle hook (run, resume, suspend, or terminate) is enabled. The ready hook signals when the application has finished initializing so the snapshot is taken in a ready state.
 ```
 
-This **refutes the P1 hook-phasing plan directly**. The construct comments state
-`/ready` and `/validate` are *"omitted in P1 because the agent does not implement
+This rejection **refutes the P1 hook-phasing plan directly**. The construct comments state
+that `/ready` and `/validate` are *"omitted in P1 because the agent does not implement
 them yet: configuring a `/validate` endpoint that 404s would fail every image
-build"* — but the service **will not accept `run: ENABLED` without
+build"*. But the service **will not accept `run: ENABLED` without
 `ready: ENABLED`**. "Declare `/run` in P1, serve it in P2" is not a reachable
 state.
 
 Consequences of that failure: **the conspicuous "P1 image is NOT runnable end to
 end" banner was never printed**, because the script's banner heredoc comes after
 the `create-microvm-image` call. Also, the runbook's `2>&1 | tee` pipeline
-reported `EXIT=0` while the script had failed — the tee status masks it.
+reported `EXIT=0` while the script had failed, because the tee status masks the
+failure.
 
-Retrying with `/ready` enabled surfaced the **second** rejection:
+A retry with `/ready` enabled produced the **second** rejection:
 
 ```
 An error occurred (ValidationException) when calling the CreateMicrovmImage operation: The requested memory size of 32768 MiB is not supported by base MicroVM image arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1. Supported memory sizes in MiB are: [512, 1024, 2048, 4096, 8192].
@@ -1480,11 +1487,11 @@ The script's and construct's `32768` MiB (`DEFAULT_MINIMUM_MEMORY_MIB`,
 documented as *"the service ceiling"*) is **not accepted**. The ceiling for this
 base image is **8192 MiB (8 GiB)**, a quarter of what ADR-021 claims.
 
-**4.3 — Image ACTIVE only after two more corrections; the P1 hook shape is
+**4.3. Image ACTIVE only after two more corrections. The P1 hook shape is
 UNBUILDABLE.**
 
-*Attempt 1* (hooks omitted, 8192 MiB): create succeeded, returning
-`imageVersion: "1.0"` — **not `1`**, contradicting the runbook's
+*Attempt 1* (hooks omitted, 8192 MiB): create succeeded and returned
+`imageVersion: "1.0"`, **not `1`**. That value contradicts the runbook's
 `IMAGE_VERSION=1` and the script's `--image-version 1` guidance. Both builds then
 **FAILED** with `stateReason: "The container image build failed."` The exact
 root cause, from `/aws/lambda-microvms/backgroundagent-dev-abca-agent`:
@@ -1499,19 +1506,19 @@ ERROR: process "/bin/sh -c apt-get update && ... apt-get install -y --no-install
 ```
 
 **The construct's 443-only security group makes the agent image unbuildable.**
-`agent/Dockerfile` runs `apt-get`, which uses HTTP on **port 80**; DNS resolution
-worked, so only the port is the problem. Adding a temporary port-80 egress rule
-(`sgr-07ed1fa48ef38467a`) fixed it immediately.
+`agent/Dockerfile` runs `apt-get`, which uses HTTP on **port 80**. DNS resolution
+worked, so only the port is the problem. A temporary port-80 egress rule
+(`sgr-07ed1fa48ef38467a`) fixed the build immediately.
 
 *Attempt 2* (`update-microvm-image`, port 80 open) produced version **`2.0`**,
-both builds `SUCCESSFUL`, `state=SUCCESSFUL`, `status=ACTIVE` in
-20:11:18Z → 20:17:09Z = **5 min 51 s**.
+both builds `SUCCESSFUL`, `state=SUCCESSFUL`, `status=ACTIVE`, from
+20:11:18Z to 20:17:09Z = **5 min 51 s**.
 
 Further API-shape observations:
 
 - **Two builds per image version**, one per `chipsetGeneration` (`3` and `4`,
   `chipset: GRAVITON`). The runbook's `items[0].buildState` inspects only one.
-- `list-microvm-image-builds --image-identifier <bare name>` →
+- `list-microvm-image-builds --image-identifier <bare name>` returns
   `ValidationException: Invalid ARN format: backgroundagent-dev-abca-agent`.
   **An ARN is required.** `--image-version` accepts either `1` or `1.0`.
 - `snapshotBuild` is returned by **`get-microvm-image-build`**, not by
@@ -1528,13 +1535,13 @@ Sizes (`buildId 2033b7d8-1aa2-44a4-b174-3fc4bffebcea`, GRAVITON gen 4):
 **Code-install size (2.17 GiB) exceeds AgentCore's 2 GB container-image limit**,
 while the equivalent OCI image built locally was 1.799 GB (629.7 MB compressed).
 So the same agent tree is *over* the AgentCore ceiling when measured as MicroVM
-code-install and *under* it as an OCI image — the two are not interchangeable
+code-install and *under* it as an OCI image. The two are not interchangeable
 measures, and the ADR narrative should say which one it means. Memory and disk
 snapshots are deliberately **not** summed into that comparison.
 
 **Disk capacity: NOT EXPOSED.** No disk quota appears in `service-quotas`
 (full list under 5.5) and no image/version field reports disk capacity. The
-32 GB disk claim remains unverified; the 32 GB *memory* claim is refuted (8 GiB).
+32 GB disk claim remains unverified. The 32 GB *memory* claim is refuted (8 GiB).
 
 *The decisive experiment.* A second image (`…-abca-agent-hooks`) was created with
 the **exact P1 hook shape plus the service-mandated `/ready`**, and rebuilt after
@@ -1547,10 +1554,10 @@ Ready hook check failed: the application returned a client error (HTTP 4xx) resp
 The agent **does** answer on port 8080 (an HTTP 4xx, not a connection failure),
 but does not implement `/ready`. Combined with 4.2: **a P1 image that declares
 `/run` cannot be built at all**, and an image that omits hooks cannot receive a
-`runHookPayload` (5.1). P1 as specified is not merely "not runnable end to end" —
-its image is **not creatable**.
+`runHookPayload` (5.1). P1 as specified is not merely "not runnable end to end".
+Its image is **not creatable**.
 
-**4.4 — PASS, exactly as designed.** `UPDATE_COMPLETE`. Synth emitted
+**4.4. PASS, exactly as designed.** `UPDATE_COMPLETE`. Synth emitted
 `abca:microvm-image-p1-not-runnable` with the full expected text. Orchestrator
 env is exactly the five variables and **no ingress variable**:
 
@@ -1564,44 +1571,44 @@ MICROVM_PAYLOAD_BUCKET        = backgroundagent-dev-lambdamicrovmcomputepayloadb
 
 Inline policy `TaskOrchestratorOrchestratorFnServiceRoleDefaultPolicyDECF0D43`:
 
-- `Sid: MicrovmLifecycle` — exactly `lambda:RunMicrovm`, `lambda:GetMicrovm`,
+- `Sid: MicrovmLifecycle` grants exactly `lambda:RunMicrovm`, `lambda:GetMicrovm`,
   `lambda:TerminateMicrovm` on exactly
   `arn:aws:lambda:us-east-1:<account>:microvm-image:backgroundagent-dev-abca-agent`
   and `…:backgroundagent-dev-abca-agent:*`. **Observed image ARN format matches**
   the Service Authorization Reference pattern the construct derives.
-- `Sid: MicrovmPassNetworkConnector` — `lambda:PassNetworkConnector` on `*`.
-- `Sid: MicrovmPassExecutionRole` — `iam:PassRole` scoped to the execution role
+- `Sid: MicrovmPassNetworkConnector` grants `lambda:PassNetworkConnector` on `*`.
+- `Sid: MicrovmPassExecutionRole` grants `iam:PassRole` scoped to the execution role
   with `iam:PassedToService = lambda.amazonaws.com`.
 - **Zero** `SuspendMicrovm` / `ResumeMicrovm` / `CreateMicrovmAuthToken` actions
-  anywhere in the role (only attached managed policy is
+  anywhere in the role (the only attached managed policy is
   `AWSLambdaBasicDurableExecutionRolePolicy`).
 
 **Critical mismatch:** `MICROVM_IMAGE_IDENTIFIER` is a **bare name**, and
 `RunMicrovm` rejects bare names (5.1). The construct's comment asserts the
-opposite — *"`imageIdentifier` may legitimately be a bare image NAME (that is
+opposite: *"`imageIdentifier` may legitimately be a bare image NAME (that is
 what `create-microvm-image --name` returns and what `run-microvm
 --image-identifier` accepts)"*. `lambda-microvm-strategy.ts:236` passes that env
 var straight through, so the P1 orchestrator would fail at `RunMicrovm`.
 
 ### Phase 5
 
-**5.0 — ADMIN — advisory.** AssumeRole denied, verbatim:
+**5.0. ADMIN — advisory.** AssumeRole denied, verbatim:
 
 ```
 An error occurred (AccessDenied) when calling the AssumeRole operation: User: arn:aws:sts::<account>:assumed-role/AdminConsoleAccess/aamorosi-Isengard is not authorized to perform: sts:AssumeRole on resource: arn:aws:iam::<account>:role/backgroundagent-dev-TaskOrchestratorOrchestratorFnS-Bd7rBa2V6Jwf
 ```
 
-Trust policy allows only `Service: lambda.amazonaws.com`. Trust was **not**
-modified. All Phase 5 lifecycle evidence is therefore **admin-identity**;
+The trust policy allows only `Service: lambda.amazonaws.com`. Trust was **not**
+modified. All Phase 5 lifecycle evidence is therefore **admin-identity**.
 4.4's static policy inspection remains the authoritative scoping evidence.
 
-**5.1 — Hook-less behaviour MEASURED: the VM runs and stays running.**
+**5.1. Hook-less behaviour MEASURED: the VM runs and stays running.**
 Three requests, in order:
 
-1. Bare name → `ValidationException: Malformed ARN - doesn't start with 'arn:'`
-2. ARN + `--run-hook-payload` on the hook-less image →
-   `ValidationException: The run hook must be enabled in the MicroVM image to pass the run hook payload`
-3. ARN, no payload → **success**:
+1. A bare name returned `ValidationException: Malformed ARN - doesn't start with 'arn:'`.
+2. The ARN with `--run-hook-payload` on the hook-less image returned
+   `ValidationException: The run hook must be enabled in the MicroVM image to pass the run hook payload`.
+3. The ARN with no payload **succeeded**:
 
 ```json
 { "microvmId": "microvm-b44b69d9-f23b-30d1-97d1-a4ac558cfb5c",
@@ -1614,29 +1621,29 @@ Three requests, in order:
   "egressNetworkConnectors": ["arn:aws:lambda:us-east-1:<account>:network-connector:nc-132ede11-cb63-4dfa-b75b-6a4713023c1a"] }
 ```
 
-`maximumDurationInSeconds=28800` accepted; `idlePolicy` omitted as required.
+`maximumDurationInSeconds=28800` was accepted, and `idlePolicy` was omitted as required.
 Timeline: `RUNNING` at **+12 s**, and still `RUNNING` at +15/+21/+32/+53/+84/
-**+145 s**, `stateReason` always `None`. It did **not** terminate, stall in
+**+145 s**, `stateReason` always `None`. The VM did **not** terminate, stall in
 `PENDING`, or disappear. A hook-less MicroVM is a healthy idle VM that bills.
 
-**Security finding — unrequested public ingress.** The service **auto-attached**
+**Security finding: unrequested public ingress.** The service **auto-attached**
 `arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS`
 even though `--ingress-network-connectors` was never passed, and returned a
 public `*.lambda-microvm.us-east-1.on.aws` endpoint. ADR-021's "no ingress"
-posture is not what the service defaults to; it is a *default-on* public HTTP
-ingress that P1 neither requests nor suppresses.
+posture is not what the service defaults to. The service default is a *default-on*
+public HTTP ingress that P1 neither requests nor suppresses.
 
-**5.2 — five of six states observed.** `PENDING`, `RUNNING`, `SUSPENDED`,
-`TERMINATING`, `TERMINATED`. **`SUSPENDING` was never observable** — suspend
-reached `SUSPENDED` in under 1 s. No unknown/unmapped state appeared.
+**5.2. Five of six states observed.** `PENDING`, `RUNNING`, `SUSPENDED`,
+`TERMINATING`, `TERMINATED`. **`SUSPENDING` was never observable**, because suspend
+reached `SUSPENDED` in under 1 s. No unknown or unmapped state appeared.
 `ResourceNotFoundException` for a reaped ID was **not** reached (5.7).
 
-**5.3 — PASS.** Admin `suspend-microvm` on a hook-less image with no
+**5.3. PASS.** Admin `suspend-microvm` on a hook-less image with no
 `idlePolicy`: **empty response body**, `SUSPENDED` at **+1 s**, stable across
 +12/+23/+34/+44/+55 s. Explicit suspend works independently of any idle policy,
-and a hook-less image is perfectly suspendible.
+and a hook-less image is suspendible.
 
-**5.4 — Suspended TTL: survived the full observation window; TRUNCATED at ~1 h.**
+**5.4. Suspended TTL: survived the full observation window, TRUNCATED at ~1 h.**
 Suspended at 20:21:12Z. `maximumDurationInSeconds` was 28800 and `startedAt`
 stayed 20:18:05Z throughout.
 
@@ -1650,13 +1657,13 @@ stayed 20:18:05Z throughout.
 **No suspended TTL was observed within 1 h.** The runbook's 4-hour checkpoint was
 **not** run (time-boxed, as the runbook permits). So the answer is bounded, not
 final: *a manually suspended MicroVM with no `idlePolicy` survives at least
-1 h 0 min 17 s (3617 s)*; whether a TTL exists between 1 h and the 8 h
+1 h 0 min 17 s (3617 s)*. Whether a TTL exists between 1 h and the 8 h
 `maximumDurationInSeconds` bound is **still open**. The VM was terminated in
-Phase 8 rather than left to expire.
+Phase 8, not left to expire.
 
-**5.5 — Suspended VM stays listed; quota consumption NOT PROVABLE.**
+**5.5. Suspended VM stays listed. Quota consumption NOT PROVABLE.**
 `service-quotas list-service-quotas --service-code lambda` returned 24 MicroVM
-quotas. The load-bearing ones:
+quotas. The relevant ones:
 
 | Code | Name | Value |
 |---|---|---|
@@ -1673,56 +1680,56 @@ quotas. The load-bearing ones:
 | `L-772D8D8F` … `L-19741F6D` | Concurrent connections per 1/2/4/8/16 vCPU MicroVM | 8 / 16 / 32 / 64 / 128 |
 
 `L-B430C318 = 8 hours` independently confirms the 28,800-second bound. There is
-**no disk quota at all**, corroborating "disk capacity not exposed".
+**no disk quota at all**. That absence corroborates "disk capacity not exposed".
 `L-CD1C0CC4` is `QuotaAppliedAtLevel: ACCOUNT`, described as *"The maximum amount
 of memory that can be allocated across all MicroVMs per account per region.
 Customers can burst up to 4x this limit."*
 
 **Utilization is not observable.** `get-service-quota` returns **no
-`UsageMetric`** for `L-CD1C0CC4`; `AWS/Usage` exposes only `CallCount` per API
+`UsageMetric`** for `L-CD1C0CC4`. `AWS/Usage` exposes only `CallCount` per API
 name (`RunMicrovm`, `GetMicrovm`, `CreateMicrovmImage`, …) and **no memory
-metric**; there is no MicroVM metric in `AWS/Lambda` and no MicroVM CloudWatch
+metric**. There is no MicroVM metric in `AWS/Lambda` and no MicroVM CloudWatch
 namespace. Saturating the quota would require ~128 × 8 GiB VMs.
 
 **Verdict: LISTED, NOT PROVEN.** The suspended VM remained in `list-microvms` at
 every checkpoint, but the claim *"a suspended VM still holds account memory
 quota"* is **NOT OBSERVABLE SAFELY** in this account and remains undischarged.
-Note also that the rationale was written for 32,768 MiB per VM against this
-1024 GB quota; at the real 8192 MiB ceiling the arithmetic changes by 4×.
+Also, the rationale was written for 32,768 MiB per VM against this
+1024 GB quota. At the real 8192 MiB ceiling the arithmetic changes by 4×.
 
-**5.6 — Resume PASSES with no `/resume` hook declared.** Run on a second VM
-(`microvm-d4992cba-92a5-328b-b534-d40ef8715ab3`) so the TTL observation was not
-disturbed. `resume-microvm` returned an empty body; state `RUNNING` at **+1 s**
+**5.6. Resume PASSES with no `/resume` hook declared.** The test ran on a second VM
+(`microvm-d4992cba-92a5-328b-b534-d40ef8715ab3`) so that the TTL observation was not
+disturbed. `resume-microvm` returned an empty body. The state was `RUNNING` at **+1 s**
 and stable through +55 s. **`microvmId` and `endpoint` were byte-identical before
-and after** suspend/resume — lifecycle identity is preserved, so a stored
+and after** suspend/resume. Lifecycle identity is preserved, so a stored
 `SessionHandle` survives a suspend/resume cycle.
 
-**5.7 — Terminate is fast; `NotFound` did NOT arrive.** Terminate requested
+**5.7. Terminate is fast. `NotFound` did NOT arrive.** Terminate requested
 20:26:09Z: `TERMINATING` at **+1 s**, `TERMINATED` at **+3 s**, then still
 `TERMINATED` at +9/+20/+41/+72/+133/**+254 s**, and still `TERMINATED` at the
 +15-min checkpoint (~10 min after termination) and in `list-microvms` at every
 later checkpoint. **`ResourceNotFoundException` was never observed.** The
 strategy's `NotFound → completed` mapping is not wrong, but it is **not the
-near-term signal**: for at least ~10 minutes the observable terminal state is
+near-term signal**. For at least ~10 minutes the observable terminal state is
 `TERMINATED`, so `TERMINATED` must map to completed on its own.
 
-**5.8 — SKIPPED as a role-scoped test** (Lambda role trust does not allow
-operator assumption — 5.0). Advisory admin-identity results:
+**5.8. SKIPPED as a role-scoped test** (Lambda role trust does not allow
+operator assumption, see 5.0). Advisory admin-identity results:
 
-- Different image ARN → `ResourceNotFoundException: No active version found for
+- A different image ARN returned `ResourceNotFoundException: No active version found for
   MicroVM image arn:aws:lambda:us-east-1:<account>:microvm-image:backgroundagent-dev-abca-agent-different`.
-  **Inconclusive** for exact-ARN denial, exactly as the runbook predicts. Note
-  the message is about *no active version*, not a missing image.
+  **Inconclusive** for exact-ARN denial, exactly as the runbook predicts. The
+  message is about *no active version*, not a missing image.
 - `create-microvm-auth-token --expiration-in-minutes 5 --allowed-ports
-  '[{"port":8080}]'` → **SUCCEEDED**. The CLI union syntax is valid, and the
-  request shape matches the SDK. It returned a genuine JWE under key
+  '[{"port":8080}]'` **SUCCEEDED**. The CLI union syntax is valid, and the
+  request shape matches the SDK. The call returned a genuine JWE under key
   `X-aws-proxy-auth` (header `{"kid":"9e81880a-…","alg":"dir","enc":"A256GCM"}`),
-  **minted against a `SUSPENDED` MicroVM**. So tokens are mintable at will by any
-  principal holding the action, including for suspended VMs; the no-JWE posture
-  rests entirely on the orchestrator role omitting the action, which 4.4 verified
-  statically.
+  **minted against a `SUSPENDED` MicroVM**. So any principal that holds the action
+  can mint tokens at will, including for suspended VMs. The no-JWE posture
+  depends entirely on the orchestrator role omitting the action, and 4.4 verified
+  that omission statically.
 
-**5.9 — The 16 KB boundary is WRONG: the real cap is 4096.** Both runbook
+**5.9. The 16 KB boundary is WRONG: the real cap is 4096.** Both runbook
 payloads were rejected identically:
 
 ```
@@ -1736,65 +1743,65 @@ message above. The CLI **does** expand `file://` (a literal URI would have been
 which is why the boundary was measurable on a hook-less image at all.
 
 `lambda-microvm-strategy.ts:84` sets `RUN_HOOK_PAYLOAD_LIMIT_BYTES = 16_384` and
-inlines anything `<= 16384`; ADR-021 states `≤ 16 KB` in four places. Any
-envelope between 4,097 and 16,384 bytes would be inlined by the strategy and
-**rejected by the service**. No MicroVM was created by these calls, so no
+inlines anything `<= 16384`. ADR-021 states `≤ 16 KB` in four places. The strategy
+would inline any envelope between 4,097 and 16,384 bytes, and the service would
+**reject it**. These calls created no MicroVM, so no
 cleanup was needed.
 
 ### Phase 6
 
-**6.1 — PASS.** `npx tsc -p cli/tsconfig.json` built cleanly (mise fallback).
-`bgagent configure` wrote config (`BGAGENT_CONFIG_DIR=/tmp/abca-645-bgagent`);
+**6.1. PASS.** `npx tsc -p cli/tsconfig.json` built cleanly (mise fallback).
+`bgagent configure` wrote config (`BGAGENT_CONFIG_DIR=/tmp/abca-645-bgagent`).
 `platform outputs` resolved all seven MicroVM outputs. No Cognito login was
 needed for operator AWS commands, as documented.
 
-**6.2 — PASS.** `repo onboard verification-only/issue-645 --compute-type
+**6.2. PASS.** `repo onboard verification-only/issue-645 --compute-type
 lambda-microvm` succeeded (the live `ListManagedMicrovmImages` probe passed) with
 `status: active`, `compute_type: lambda-microvm`.
 `platform doctor` returned `passed: true` with **all six** checks passing,
-including `lambda_microvm_availability` — *"Managed MicroVM images are available
-in us-east-1"*. (`github_token` also passed: the CFN-generated secret holds a
-32-character generated placeholder, which the check cannot distinguish from a
-real PAT — worth noting, since the runbook expected doctor to fail here.)
+including `lambda_microvm_availability`: *"Managed MicroVM images are available
+in us-east-1"*. (`github_token` also passed. The CFN-generated secret holds a
+32-character generated placeholder, and the check cannot distinguish it from a
+real PAT. The runbook expected doctor to fail here.)
 `runtime status` grouped the row under `lambda_microvm_substrates` with
 `used_by_repos: ["verification-only/issue-645"]`.
 `repo offboard` set `status: removed` with a TTL. Nothing was skipped.
 
 ### Phase 7
 
-**7.1 — DEFERRED-TO-P2-ENV — missing Cognito user/login and real repo
+**7.1. DEFERRED-TO-P2-ENV — missing Cognito user/login and real repo
 onboarding.** The user pool `us-east-1_sYU3Rftw6` has **zero users**, so
 `bgagent login` is impossible, and no genuinely accessible repository is
-onboarded; the platform GitHub secret is a 32-character generated placeholder.
+onboarded. The platform GitHub secret is a 32-character generated placeholder.
 None of these were created, per the step's instruction. Independently, the task
-path could not have produced meaningful classification evidence: `RunMicrovm`
-rejects the bare-name identifier the orchestrator injects (4.4 / 5.1), so every
-task would fail with a `ValidationException` at launch rather than at
+path could not have produced meaningful classification evidence. `RunMicrovm`
+rejects the bare-name identifier that the orchestrator injects (4.4 / 5.1), so every
+task would fail with a `ValidationException` at launch, not at
 "session start" as the P1 narrative predicts.
 
 ### Phase 8 — teardown (executed)
 
-**8.1** — `list-microvms` before teardown showed
+**8.1.** `list-microvms` before teardown showed
 `microvm-b44b69d9-…` `SUSPENDED` and `microvm-d4992cba-…` `TERMINATED`.
-`terminate-microvm` on the suspended VM (a `SUSPENDED` VM terminates directly,
-no resume required) → both `TERMINATED`; no non-terminal VM remained.
+After `terminate-microvm` on the suspended VM (a `SUSPENDED` VM terminates directly,
+no resume required), both were `TERMINATED`. No non-terminal VM remained.
 
-**8.2** — Both out-of-band images deleted (`list-microvm-images` now returns
+**8.2.** Both out-of-band images were deleted (`list-microvm-images` now returns
 **empty**). **Correction to the runbook's loop:** the *last remaining* version
-cannot be deleted individually —
-`ValidationException: This is the last version. Please delete the entire image` —
-so the correct order is *delete every version except the last, then delete the
-image*, which reaps the final version. A version delete in flight also puts the
+cannot be deleted individually. The service returns
+`ValidationException: This is the last version. Please delete the entire image`.
+The correct order is therefore *delete every version except the last, then delete the
+image*. Deleting the image reaps the final version. A version delete in flight also puts the
 image in `UPDATING` and makes concurrent calls fail with
 `ConflictException: MicroVM Image is already in state: UPDATING` and
-`ValidationException: Cannot delete MicroVM image in its current state: <arn>`;
-both cleared on retry after ~40 s. Versions reaped: `1.0` + `2.0` on
-`…-abca-agent` and `1.0` + `2.0` on `…-abca-agent-hooks` — note that **failed
+`ValidationException: Cannot delete MicroVM image in its current state: <arn>`.
+Both cleared on retry after ~40 s. Versions reaped: `1.0` + `2.0` on
+`…-abca-agent` and `1.0` + `2.0` on `…-abca-agent-hooks`. **Failed
 builds still create versions that must be reaped**. `get-microvm-image` on the
 first image now returns
 `ResourceNotFoundException: MicroVMImage not found for MicroVMImageID: <arn>`.
 
-**8.3 — Stack deletion is INCOMPLETE: `DELETE_FAILED`, blocked by leaked
+**8.3. Stack deletion is INCOMPLETE: `DELETE_FAILED`, blocked by leaked
 AgentCore ENIs. All billable resources are confirmed gone.**
 
 `cdk destroy` ran 21:24:34Z and deleted 460 of 464 resources. It then failed:
@@ -1806,19 +1813,19 @@ Resource handler returned message: "The subnet 'subnet-0befbffccbb83b718' has de
 ```
 
 Cause: two ENIs of `InterfaceType: agentic_ai` (AgentCore-managed, requester
-`AROA…[redacted]:[redacted]`) — `eni-080353b2356328ed7` and
-`eni-04500acbfed377f4a` — remained `in-use` in the private subnets. The runbook's
-own gotcha ("VPC teardown can lag while service-managed ENIs are reclaimed; wait
+`AROA…[redacted]:[redacted]`), `eni-080353b2356328ed7` and
+`eni-04500acbfed377f4a`, remained `in-use` in the private subnets. The runbook's
+own warning ("VPC teardown can lag while service-managed ENIs are reclaimed; wait
 and retry rather than force-deleting resources past CloudFormation") was
-followed: **three** `delete-stack` retries spread over ~1 h 40 min (21:48Z,
+followed. **Three** `delete-stack` retries spread over ~1 h 40 min (21:48Z,
 22:37Z, 23:05Z) all returned `DELETE_FAILED`, and the ENIs were still `in-use`
 each time. A direct `delete-network-interface` was attempted once for diagnosis
 and correctly refused (`InvalidParameterValue: Network interface … is currently
-in use.`); nothing was force-deleted past CloudFormation.
+in use.`). Nothing was force-deleted past CloudFormation.
 
-Final residual state of `backgroundagent-dev` — **4 resources, all zero-cost**:
+The final residual state of `backgroundagent-dev` is **4 resources, all zero-cost**:
 `AWS::EC2::VPC AgentVpcA6796801` (`vpc-0a12c1a64cc960c6a`), two private subnets,
-and one security group, plus the two AgentCore ENIs holding them.
+and one security group, plus the two AgentCore ENIs that hold them.
 
 **Billing is stopped.** Verified after teardown:
 
@@ -1841,7 +1848,7 @@ aws cloudformation wait stack-delete-complete --stack-name backgroundagent-dev
 ```
 
 **Verification-only resources created and removed:** the
-`abca645-connector-probe` stack (deleted — `Stack with id
+`abca645-connector-probe` stack (deleted: `Stack with id
 abca645-connector-probe does not exist`) and the temporary port-80 egress rule
 `sgr-07ed1fa48ef38467a` (removed with its security group when the stack deleted
 it). The local `finch` VM was stopped.
@@ -1855,50 +1862,50 @@ to `cdk-hnb659fds-cfn-exec-role-<account>-us-east-1` and **no
 
 ## Results table (fill this in)
 
-Use one row per material observation; add rows as needed.
+Use one row per material observation. Add rows as needed.
 
 | Step | Expected | Observed | ADR item discharged | Feeds back to design? |
 |---|---|---|---|---|
 | Setup | Vars + evidence dir | `us-east-1`, `backgroundagent-dev`, evidence `/tmp/abca-645-p1-20260731T184822Z`. `mise` absent → all **raw fallbacks** used | Reproducibility | No |
-| 0.1 | Virgin account, correct branch | Account `<account>`, admin `AdminConsoleAccess/aamorosi-Isengard`, branch OK, SHA `0505f914`. `backgroundagent-dev` absent (`ValidationError … does not exist`). **Account not virgin overall** — 3 unrelated stacks + `CDKToolkit` pre-existed; ABCA itself never deployed, so the premise holds | Clean first-deploy path | No |
-| 0.2 | CLI exposes Lambda MicroVMs; SDK 3.1098.0 | `aws lambda-microvms help` **exit 0**, 24 commands, all 7 required present. CLI command list is an **exact match** to SDK 3.1098.0 (24 vs 24). CLI 2.36.13, cdk 2.1129.0, node 24.16.0, python 3.9.6, **openrsync** (worked). Skeleton confirms `ARM_64`-only and `ENABLED\|DISABLED` hooks with a single `hooks.port` and **no hook-path field** | API/action-name verification | **Yes — CFN L1 shapes (`arm64`, `run:'/run'`) have no counterpart in the service model** |
-| 1.2 | Custom template replaces admin bootstrap | **DEFECT: `cdk bootstrap --template …` is a silent no-op** on an already-bootstrapped account (`Not overwriting it with a template containing 'ABCA: Least-Privilege Bootstrap' (use --force …)`, **exit 0**). `--force` required. `BootstrapVariant` then *stays* `AWS CDK: Default Resources`, so every future non-forced bootstrap refuses again. **DEFECT: the runbook's `--parameters` shorthand is rejected** (`Invalid type for parameter Parameters[0].ParameterValue, value: ['agentcore', 'lambda-microvm'] … valid types: <class 'str'>`); the escaped `agentcore\,lambda-microvm` works | Conditional bootstrap IAM | **Yes — `mise //cdk:bootstrap` + runbook/docs** |
+| 0.1 | Virgin account, correct branch | Account `<account>`, admin `AdminConsoleAccess/aamorosi-Isengard`, branch OK, SHA `0505f914`. `backgroundagent-dev` absent (`ValidationError … does not exist`). **Account not virgin overall.** 3 unrelated stacks + `CDKToolkit` pre-existed; ABCA itself never deployed, so the premise holds | Clean first-deploy path | No |
+| 0.2 | CLI exposes Lambda MicroVMs; SDK 3.1098.0 | `aws lambda-microvms help` **exit 0**, 24 commands, all 7 required present. CLI command list is an **exact match** to SDK 3.1098.0 (24 vs 24). CLI 2.36.13, cdk 2.1129.0, node 24.16.0, python 3.9.6, **openrsync** (worked). Skeleton confirms `ARM_64`-only and `ENABLED\|DISABLED` hooks with a single `hooks.port` and **no hook-path field** | API/action-name verification | **Yes. CFN L1 shapes (`arm64`, `run:'/run'`) have no counterpart in the service model** |
+| 1.2 | Custom template replaces admin bootstrap | **DEFECT: `cdk bootstrap --template …` is a silent no-op** on an already-bootstrapped account (`Not overwriting it with a template containing 'ABCA: Least-Privilege Bootstrap' (use --force …)`, **exit 0**). `--force` required. `BootstrapVariant` then *stays* `AWS CDK: Default Resources`, so every future non-forced bootstrap refuses again. **DEFECT: the runbook's `--parameters` shorthand is rejected** (`Invalid type for parameter Parameters[0].ParameterValue, value: ['agentcore', 'lambda-microvm'] … valid types: <class 'str'>`); the escaped `agentcore\,lambda-microvm` works | Conditional bootstrap IAM | **Yes. `mise //cdk:bootstrap` + runbook/docs** |
 | 1.3 | Custom policy attached for `agentcore,lambda-microvm` | `ComputeTypes=agentcore,lambda-microvm`; exactly one `IaCRole-ABCA-Compute-LambdaMicrovms` policy, attached to `cdk-hnb659fds-cfn-exec-role-…`; 5 ABCA policies, **no `AdministratorAccess`**; 19 MicroVM/connector actions incl. `PassNetworkConnector` | Conditional bootstrap IAM | No |
 | 2.1 (synth) | No-image warning | `abca:microvm-image-not-provisioned` present, `…p1-not-runnable` correctly absent. Incidental: template 893273/1000000, 463/500 resources | First-deploy bootstrap state | No |
-| 2.1 (deploy) | Substrate deploys | **BLOCKED — cannot deploy from unmodified sources.** `AWS::Lambda::NetworkConnector` CREATE_FAILED: `"NetworkConnectorOperatorRole is required for VPC_EGRESS connector type (… Status Code: 400 …)" HandlerErrorCode: InvalidRequest`. Refutes the construct's stated *"`operatorRole` is left unset so Lambda manages the ENIs with its own service-linked role"*. Deployed only after patching in an operator role (+ moving off `us-east-1a`): `CREATE_COMPLETE` in **13 min 42 s** | Conditional substrate — **only with a code fix** | **YES — construct must create + pass an operator role; L1 marks it optional** |
-| 2.1 (deploy, 2nd) | — | **AgentCore blocker:** `The following subnets are in unsupported availability zones in region us-east-1: subnet-… in us-east-1a (ID: use1-az6). Supported availability zones are: use1-az4, use1-az1, use1-az2`. This account maps `us-east-1a`→`use1-az6`; `AgentVpc` does not constrain AZs | — | **YES — `AgentVpc` should pin AgentCore-supported AZs** |
-| 2.1 (rollback) | — | Rollback itself failed: `Validation failed during DeleteMemory: Memory is in transitional state CREATING. Cannot delete memory.` → `ROLLBACK_FAILED`; plain `delete-stack` cleared it | — | Minor — yes (`AgentMemory` delete retry) |
+| 2.1 (deploy) | Substrate deploys | **BLOCKED. Cannot deploy from unmodified sources.** `AWS::Lambda::NetworkConnector` CREATE_FAILED: `"NetworkConnectorOperatorRole is required for VPC_EGRESS connector type (… Status Code: 400 …)" HandlerErrorCode: InvalidRequest`. Refutes the construct's stated *"`operatorRole` is left unset so Lambda manages the ENIs with its own service-linked role"*. Deployed only after patching in an operator role (+ moving off `us-east-1a`): `CREATE_COMPLETE` in **13 min 42 s** | Conditional substrate, **only with a code fix** | **YES. Construct must create + pass an operator role; L1 marks it optional** |
+| 2.1 (deploy, 2nd) | — | **AgentCore blocker:** `The following subnets are in unsupported availability zones in region us-east-1: subnet-… in us-east-1a (ID: use1-az6). Supported availability zones are: use1-az4, use1-az1, use1-az2`. This account maps `us-east-1a`→`use1-az6`; `AgentVpc` does not constrain AZs | — | **YES. `AgentVpc` should pin AgentCore-supported AZs** |
+| 2.1 (rollback) | — | Rollback itself failed: `Validation failed during DeleteMemory: Memory is in transitional state CREATING. Cannot delete memory.` → `ROLLBACK_FAILED`; plain `delete-stack` cleared it | — | Minor, yes (`AgentMemory` delete retry) |
 | 2.2 | Outputs/resources present | `ComputeSubstrate=lambda-microvm`; all six `Microvm…` outputs populated; key `microvm-images/agent-artifact.zip`; 2 buckets, build+execution roles, **443-only SG** (`sg-0e662dc0d6f6e9ade`, one rule tcp/443), `/aws/lambda-microvms/…` log group, `AWS::Lambda::NetworkConnector`; **no `AWS::Lambda::MicrovmImage`** | Conditional substrate/config | No |
-| 2.3 | No `MICROVM_*` env | `[]` ✓ (14 env keys). **DEFECT: the runbook's `ORCHESTRATOR_FN` query is broken by pagination** — 464 resources → the query ran per page and returned 5 values (`None None None None <name>`), breaking the next call. Needs `--no-paginate` | Reject-without-image config | Yes — runbook |
-| 2.4 | Construct resources have backend tag | All **6** taggable resources tagged `abca:compute-backend=lambda-microvm` (SG, connector, log group, 2 buckets, 2 roles). `resourcegroupstaggingapi` returned only 5 — **IAM roles are not returned by that API** (coverage gap, not a missing tag); confirmed via `iam list-role-tags` | Cost attribution | No |
+| 2.3 | No `MICROVM_*` env | `[]` ✓ (14 env keys). **DEFECT: the runbook's `ORCHESTRATOR_FN` query is broken by pagination.** 464 resources → the query ran per page and returned 5 values (`None None None None <name>`), breaking the next call. Needs `--no-paginate` | Reject-without-image config | Yes, runbook |
+| 2.4 | Construct resources have backend tag | All **6** taggable resources tagged `abca:compute-backend=lambda-microvm` (SG, connector, log group, 2 buckets, 2 roles). `resourcegroupstaggingapi` returned only 5. **IAM roles are not returned by that API** (coverage gap, not a missing tag); confirmed via `iam list-role-tags` | Cost attribution | No |
 | 3.1–3.2 | Unsupported failure; override warning | 3.1 exit 1 naming `eu-central-1`, all five Regions, and `--context microvm_region_override=true`. 3.2 exit 0 with `abca:microvm-region-override` (plus the not-provisioned warning) | Region gate/escape hatch | No |
-| 4.1 | Live regional probe | Exactly **one** base image: `…:aws:microvm-image:al2023-1`, versions `1` and `0`. **Ordering is newest-first, so the runbook's `items[-1]` selects the OLDER version `0`**; `items[0]`=`1` is correct. Service echoes `baseImageVersion: "1.0"` | Regional availability probe | Yes — runbook selector |
+| 4.1 | Live regional probe | Exactly **one** base image: `…:aws:microvm-image:al2023-1`, versions `1` and `0`. **Ordering is newest-first, so the runbook's `items[-1]` selects the OLDER version `0`**; `items[0]`=`1` is correct. Service echoes `baseImageVersion: "1.0"` | Regional availability probe | Yes, runbook selector |
 | 4.2 (artifact) | Script uploads | Staged + zipped + uploaded fine on macOS/openrsync: script printed `584K artifact`, S3 `ContentLength 597305`, SSE `AES256` | Packaging plane | No |
-| 4.2 (create) | Image created; P1 banner shown | **FAILED:** `The ready (/ready) MicroVM image hook must be enabled when any MicroVM lifecycle hook (run, resume, suspend, or terminate) is enabled.` → **the P1 banner was never printed** (it comes after the failing call), and the runbook's `2>&1 \| tee` reported `EXIT=0`, masking the failure | **NOT discharged** — packaging + operator warning | **YES — "declare `/run` in P1, serve it in P2" is not a reachable state** |
-| 4.2 (memory) | 32,768 MiB accepted | **FAILED:** `The requested memory size of 32768 MiB is not supported by base MicroVM image …al2023-1. Supported memory sizes in MiB are: [512, 1024, 2048, 4096, 8192].` Real ceiling **8192 MiB (8 GiB)**, ¼ of the documented figure | Refutes sizing premise | **YES — `DEFAULT_MINIMUM_MEMORY_MIB` and ADR-021's "32 GB RAM"** |
-| 4.3 (build 1) | Build successful | **FAILED** (`The container image build failed.`). Root cause in the log group: `Could not connect to deb.debian.org:80 (146.75.38.132), connection timed out` → `E: Unable to locate package curl/git/build-essential` → `exit code: 100`. **The construct's 443-only SG makes the agent image unbuildable** (`apt-get` needs port 80; DNS was fine) | **NOT discharged** without a fix | **YES — SG must allow 80, or the Dockerfile must not use HTTP apt** |
+| 4.2 (create) | Image created; P1 banner shown | **FAILED:** `The ready (/ready) MicroVM image hook must be enabled when any MicroVM lifecycle hook (run, resume, suspend, or terminate) is enabled.` → **the P1 banner was never printed** (it comes after the failing call), and the runbook's `2>&1 \| tee` reported `EXIT=0`, masking the failure | **NOT discharged.** Packaging + operator warning | **YES. "declare `/run` in P1, serve it in P2" is not a reachable state** |
+| 4.2 (memory) | 32,768 MiB accepted | **FAILED:** `The requested memory size of 32768 MiB is not supported by base MicroVM image …al2023-1. Supported memory sizes in MiB are: [512, 1024, 2048, 4096, 8192].` Real ceiling **8192 MiB (8 GiB)**, ¼ of the documented figure | Refutes sizing premise | **YES. `DEFAULT_MINIMUM_MEMORY_MIB` and ADR-021's "32 GB RAM"** |
+| 4.3 (build 1) | Build successful | **FAILED** (`The container image build failed.`). Root cause in the log group: `Could not connect to deb.debian.org:80 (146.75.38.132), connection timed out` → `E: Unable to locate package curl/git/build-essential` → `exit code: 100`. **The construct's 443-only SG makes the agent image unbuildable** (`apt-get` needs port 80; DNS was fine) | **NOT discharged** without a fix | **YES. SG must allow 80, or the Dockerfile must not use HTTP apt** |
 | 4.3 (build 2) | Image ACTIVE | After adding a temporary port-80 egress rule: version **`2.0`** `state=SUCCESSFUL`, `status=ACTIVE` in **5 min 51 s**, both builds `SUCCESSFUL` | Buildability (with fixes) | No |
-| 4.3 (shapes) | `IMAGE_VERSION=1` | **Version is `1.0`, not `1`.** **Two builds per version** (`chipsetGeneration` 3 and 4, GRAVITON) — the runbook's `items[0]` checks only one. `list-microvm-image-builds --image-identifier <bare name>` → `ValidationException: Invalid ARN format: …` (**ARN required**). `snapshotBuild` lives on `get-microvm-image-build`, **not** on the version (which returns `null`) | State/shape mapping | Yes — runbook + script |
-| 4.3 (sizes) | Size vs 2 GB narrative | `codeInstallSizeInBytes` **2,334,748,672 (2.17 GiB) — exceeds AgentCore's 2 GB container-image limit**; `memorySnapshotSizeInBytes` 1,216,577,536 (1.13 GiB); `diskSnapshotSizeInBytes` 37,089,280 (35.4 MiB). Same tree as an OCI image = 1.799 GB (629.7 MB compressed). Snapshots deliberately not summed | Sizing narrative | **Yes — state which measure the 2 GB comparison uses** |
-| 4.3 (disk) | Verify 32 GB disk | **NOT EXPOSED** — no disk quota in `service-quotas`, no disk field on image/version. 32 GB disk unverified; 32 GB *memory* refuted | Disk external fact | Yes |
-| 4.3 (P1 shape) | — | **Decisive:** the exact P1 hook shape + service-mandated `/ready` **FAILED both builds**: `Ready hook check failed: the application returned a client error (HTTP 4xx) response`. The agent *does* answer on 8080 but not `/ready`. **A P1 image declaring `/run` is not creatable at all** | Refutes P1 premise | **YES — P1/P2 hook phasing** |
+| 4.3 (shapes) | `IMAGE_VERSION=1` | **Version is `1.0`, not `1`.** **Two builds per version** (`chipsetGeneration` 3 and 4, GRAVITON). The runbook's `items[0]` checks only one. `list-microvm-image-builds --image-identifier <bare name>` → `ValidationException: Invalid ARN format: …` (**ARN required**). `snapshotBuild` lives on `get-microvm-image-build`, **not** on the version (which returns `null`) | State/shape mapping | Yes, runbook + script |
+| 4.3 (sizes) | Size vs 2 GB narrative | `codeInstallSizeInBytes` **2,334,748,672 (2.17 GiB), exceeds AgentCore's 2 GB container-image limit**; `memorySnapshotSizeInBytes` 1,216,577,536 (1.13 GiB); `diskSnapshotSizeInBytes` 37,089,280 (35.4 MiB). Same tree as an OCI image = 1.799 GB (629.7 MB compressed). Snapshots deliberately not summed | Sizing narrative | **Yes. State which measure the 2 GB comparison uses** |
+| 4.3 (disk) | Verify 32 GB disk | **NOT EXPOSED.** No disk quota in `service-quotas`, no disk field on image/version. 32 GB disk unverified; 32 GB *memory* refuted | Disk external fact | Yes |
+| 4.3 (P1 shape) | — | **Decisive:** the exact P1 hook shape + service-mandated `/ready` **FAILED both builds**: `Ready hook check failed: the application returned a client error (HTTP 4xx) response`. The agent *does* answer on 8080 but not `/ready`. **A P1 image declaring `/run` is not creatable at all** | Refutes P1 premise | **YES. P1/P2 hook phasing** |
 | 4.4 | Env present; exact image IAM; no JWE grant | **PASS exactly as designed.** `abca:microvm-image-p1-not-runnable` emitted. Exactly 5 `MICROVM_*` vars, no ingress var. `MicrovmLifecycle` = exactly `RunMicrovm`/`GetMicrovm`/`TerminateMicrovm` on `…:microvm-image:backgroundagent-dev-abca-agent` + `:*`; `MicrovmPassNetworkConnector` on `*`; `MicrovmPassExecutionRole` with `iam:PassedToService=lambda.amazonaws.com`; **zero** Suspend/Resume/AuthToken actions | Least privilege | No |
-| 4.4 (identifier) | Bare name accepted by RunMicrovm | **REFUTED.** `MICROVM_IMAGE_IDENTIFIER` is the bare name `backgroundagent-dev-abca-agent`; `run-microvm` with a bare name → `ValidationException: Malformed ARN - doesn't start with 'arn:'`. `lambda-microvm-strategy.ts:236` passes it straight through, so P1 would fail at launch | Refutes construct comment | **YES — inject the image ARN, not the name** |
+| 4.4 (identifier) | Bare name accepted by RunMicrovm | **REFUTED.** `MICROVM_IMAGE_IDENTIFIER` is the bare name `backgroundagent-dev-abca-agent`; `run-microvm` with a bare name → `ValidationException: Malformed ARN - doesn't start with 'arn:'`. `lambda-microvm-strategy.ts:236` passes it straight through, so P1 would fail at launch | Refutes construct comment | **YES. Inject the image ARN, not the name** |
 | 5.0 | Assume-role identity or trust denial | **ADMIN — advisory.** `AccessDenied … not authorized to perform: sts:AssumeRole on resource: …TaskOrchestratorOrchestratorFnS-Bd7rBa2V6Jwf`; trust = `lambda.amazonaws.com` only. Trust not modified | Verification confidence | No |
-| 5.1 | Hook-less behavior measured, not assumed | **Measured: it runs and keeps running.** `RUNNING` at **+12 s**, still `RUNNING` at +145 s, `stateReason` always `None` — no terminate, no stall, no disappearance. `maximumDurationInSeconds=28800` accepted, `idlePolicy` omitted. A payload on a hook-less image is rejected: `The run hook must be enabled in the MicroVM image to pass the run hook payload` | P1/P2 phase boundary | **Yes — P2 startup/hooks** |
-| 5.1 (ingress) | No ingress | **Service auto-attached `…:aws:network-connector:aws-network-connector:HTTP_INGRESS`** with a public `*.lambda-microvm.us-east-1.on.aws` endpoint, though none was requested. "No ingress" is not the service default | Security posture | **YES — P1 must suppress or accept default public ingress** |
+| 5.1 | Hook-less behavior measured, not assumed | **Measured: it runs and keeps running.** `RUNNING` at **+12 s**, still `RUNNING` at +145 s, `stateReason` always `None`. No terminate, no stall, no disappearance. `maximumDurationInSeconds=28800` accepted, `idlePolicy` omitted. A payload on a hook-less image is rejected: `The run hook must be enabled in the MicroVM image to pass the run hook payload` | P1/P2 phase boundary | **Yes. P2 startup/hooks** |
+| 5.1 (ingress) | No ingress | **Service auto-attached `…:aws:network-connector:aws-network-connector:HTTP_INGRESS`** with a public `*.lambda-microvm.us-east-1.on.aws` endpoint, though none was requested. "No ingress" is not the service default | Security posture | **YES. P1 must suppress or accept default public ingress** |
 | 5.2 | Actual state enum values recorded | Observed 5 of 6: `PENDING`, `RUNNING`, `SUSPENDED`, `TERMINATING`, `TERMINATED`. **`SUSPENDING` never observable** (<1 s). No unknown state. `ResourceNotFoundException` not reached | State mapping | Yes (see 5.7) |
-| 5.3 | Manual suspend without idle policy | **PASS.** Admin suspend on a hook-less image, no `idlePolicy`: **empty response body**, `SUSPENDED` at **+1 s**, stable | Explicit suspend external fact | **Yes — P3 lifecycle** |
-| 5.4 | Suspended TTL/checkpoint result | **No TTL within 1 h.** `SUSPENDED` at start / +15 min / +45 min / +1 h (3617 s); `startedAt` and `maximumDurationInSeconds=28800` unchanged. **TRUNCATED at ~1 h**; the 4 h checkpoint was NOT run, so a TTL between 1 h and the 8 h bound is **still open** | Partially — bounded below only | **Yes — timeout policy** |
-| 5.5 | Suspended quota consumption proven/inconclusive | **LISTED, NOT PROVEN — NOT OBSERVABLE SAFELY.** Suspended VM present in `list-microvms` at every checkpoint. `L-CD1C0CC4 Max allocated memory = 1024 GB` (ACCOUNT, "burst up to 4x"), **no `UsageMetric`**; `AWS/Usage` has only `CallCount`; no MicroVM memory metric anywhere. Proving it needs ~128 × 8 GiB VMs. `L-B430C318 = 8 hours` independently confirms the 28,800 s bound; **no disk quota exists** | **NOT discharged** | **Yes — concurrency policy; rationale was sized on 32 GiB/VM, real is 8 GiB** |
-| 5.6 | Resume transitions/result | **PASS with no `/resume` hook declared.** `RUNNING` at **+1 s**, empty response body; **`microvmId` and `endpoint` byte-identical** across suspend→resume, so a stored `SessionHandle` survives | Resume external fact | **Yes — P3 hooks/reconciliation** |
-| 5.7 | Terminate→NotFound timing | `TERMINATING` **+1 s** → `TERMINATED` **+3 s**, then `TERMINATED` at +254 s and still `TERMINATED` ~10 min later and at every later checkpoint. **`ResourceNotFoundException` never observed** | Partially — terminate path yes, `NotFound` mapping no | **YES — `TERMINATED` must map to completed; `NotFound` is not the near-term signal** |
-| 5.8 | Different image/JWE denied under role | **SKIPPED — LAMBDA ROLE TRUST DOES NOT ALLOW OPERATOR ASSUMPTION.** Advisory (admin): different image ARN → `ResourceNotFoundException: No active version found for MicroVM image …-different` (**inconclusive**, as predicted). `create-microvm-auth-token … --allowed-ports '[{"port":8080}]'` **SUCCEEDED** as admin, returning a real JWE under `X-aws-proxy-auth` (`{"alg":"dir","enc":"A256GCM"}`) **against a SUSPENDED VM**; CLI union syntax valid. No-JWE posture rests solely on 4.4's role omission | Static only (4.4) | Yes — tokens are mintable for suspended VMs |
-| 5.9 | 16,384 accepted; 16,385 rejected | **REFUTED — the cap is 4096, not 16,384.** Both 16,384 and 16,385 → `Value at 'runHookPayload' failed to satisfy constraint: Member must have length less than or equal to 4096`. Re-measured: **4096 passes, 4097 rejected**. CLI does expand `file://`. Length validation precedes the hook check. `RUN_HOOK_PAYLOAD_LIMIT_BYTES = 16_384` would inline 4,097–16,384-byte envelopes that the service rejects | **Refutes the documented boundary** | **YES — strategy threshold + ADR-021 (4 places)** |
-| 6.1–6.2 | Onboard probe, doctor, grouping, cleanup | **PASS, nothing skipped.** `npx tsc` build clean; `platform outputs` resolved all 7 MicroVM outputs; onboard probe passed with `compute_type=lambda-microvm`, `status=active`; doctor `passed: true` with all 6 checks including `lambda_microvm_availability` ("Managed MicroVM images are available in us-east-1"); `runtime status` grouped under `lambda_microvm_substrates`; offboard `status=removed` + TTL. Note `github_token` **passed** on a 32-char generated placeholder | CLI regional enforcement | Minor — yes (`github_token` can't detect a placeholder) |
-| 7.1 | Negative task evidence or explicit deferral | **DEFERRED-TO-P2-ENV — missing Cognito user/login, real GitHub token, and real repo onboarding.** User pool `us-east-1_sYU3Rftw6` has **zero users**; secret is a 32-char placeholder. Not created, per the step. Independently moot: `RunMicrovm` rejects the bare-name identifier, so tasks would fail at launch, not at session start | Not discharged (by design) | **Yes — P2 env** |
-| 8.1–8.2 | VMs/images gone | **PASS.** Both MicroVMs `TERMINATED` (a `SUSPENDED` VM terminates directly, no resume needed). `list-microvm-images` **empty**. **Correction:** the last remaining version cannot be deleted alone (`This is the last version. Please delete the entire image`) — delete all but the last, then the image. Concurrent calls during a version delete give `ConflictException: MicroVM Image is already in state: UPDATING`. **Failed builds still create versions that must be reaped** (`1.0`+`2.0` on both images) | Versioned image lifecycle | Yes — runbook loop order |
-| 8.3 | Stack gone; bootstrap retained | **PARTIAL — `DELETE_FAILED`.** 460/464 resources deleted; VPC + 2 private subnets + 1 SG remain, blocked by two leaked AgentCore ENIs (`InterfaceType: agentic_ai`) still `in-use` after 3 retries over ~1 h 40 min. **All billable resources confirmed gone** (no ABCA NAT gateway, no VPC endpoints, no buckets, no images/VMs, no unattached EIPs); residual 4 resources are zero-cost. Nothing force-deleted past CFN. `CDKToolkit` retained `UPDATE_COMPLETE`, `ComputeTypes=agentcore,lambda-microvm`, 5 ABCA policies, no `AdministratorAccess`. Verification-only extras (`abca645-connector-probe`, temp rule `sgr-07ed1fa48ef38467a`) removed | Partially — cleanup blocked by AgentCore | **YES — AgentCore ENI reclaim blocks clean `cdk destroy`** |
+| 5.3 | Manual suspend without idle policy | **PASS.** Admin suspend on a hook-less image, no `idlePolicy`: **empty response body**, `SUSPENDED` at **+1 s**, stable | Explicit suspend external fact | **Yes. P3 lifecycle** |
+| 5.4 | Suspended TTL/checkpoint result | **No TTL within 1 h.** `SUSPENDED` at start / +15 min / +45 min / +1 h (3617 s); `startedAt` and `maximumDurationInSeconds=28800` unchanged. **TRUNCATED at ~1 h**; the 4 h checkpoint was NOT run, so a TTL between 1 h and the 8 h bound is **still open** | Partially, bounded below only | **Yes. Timeout policy** |
+| 5.5 | Suspended quota consumption proven/inconclusive | **LISTED, NOT PROVEN. NOT OBSERVABLE SAFELY.** Suspended VM present in `list-microvms` at every checkpoint. `L-CD1C0CC4 Max allocated memory = 1024 GB` (ACCOUNT, "burst up to 4x"), **no `UsageMetric`**; `AWS/Usage` has only `CallCount`; no MicroVM memory metric anywhere. Proving it needs ~128 × 8 GiB VMs. `L-B430C318 = 8 hours` independently confirms the 28,800 s bound; **no disk quota exists** | **NOT discharged** | **Yes. Concurrency policy; rationale was sized on 32 GiB/VM, real is 8 GiB** |
+| 5.6 | Resume transitions/result | **PASS with no `/resume` hook declared.** `RUNNING` at **+1 s**, empty response body; **`microvmId` and `endpoint` byte-identical** across suspend→resume, so a stored `SessionHandle` survives | Resume external fact | **Yes. P3 hooks/reconciliation** |
+| 5.7 | Terminate→NotFound timing | `TERMINATING` **+1 s** → `TERMINATED` **+3 s**, then `TERMINATED` at +254 s and still `TERMINATED` ~10 min later and at every later checkpoint. **`ResourceNotFoundException` never observed** | Partially: terminate path yes, `NotFound` mapping no | **YES. `TERMINATED` must map to completed; `NotFound` is not the near-term signal** |
+| 5.8 | Different image/JWE denied under role | **SKIPPED — LAMBDA ROLE TRUST DOES NOT ALLOW OPERATOR ASSUMPTION.** Advisory (admin): different image ARN → `ResourceNotFoundException: No active version found for MicroVM image …-different` (**inconclusive**, as predicted). `create-microvm-auth-token … --allowed-ports '[{"port":8080}]'` **SUCCEEDED** as admin, returning a real JWE under `X-aws-proxy-auth` (`{"alg":"dir","enc":"A256GCM"}`) **against a SUSPENDED VM**; CLI union syntax valid. No-JWE posture rests solely on 4.4's role omission | Static only (4.4) | Yes, tokens are mintable for suspended VMs |
+| 5.9 | 16,384 accepted; 16,385 rejected | **REFUTED. The cap is 4096, not 16,384.** Both 16,384 and 16,385 → `Value at 'runHookPayload' failed to satisfy constraint: Member must have length less than or equal to 4096`. Re-measured: **4096 passes, 4097 rejected**. CLI does expand `file://`. Length validation precedes the hook check. `RUN_HOOK_PAYLOAD_LIMIT_BYTES = 16_384` would inline 4,097–16,384-byte envelopes that the service rejects | **Refutes the documented boundary** | **YES. Strategy threshold + ADR-021 (4 places)** |
+| 6.1–6.2 | Onboard probe, doctor, grouping, cleanup | **PASS, nothing skipped.** `npx tsc` build clean; `platform outputs` resolved all 7 MicroVM outputs; onboard probe passed with `compute_type=lambda-microvm`, `status=active`; doctor `passed: true` with all 6 checks including `lambda_microvm_availability` ("Managed MicroVM images are available in us-east-1"); `runtime status` grouped under `lambda_microvm_substrates`; offboard `status=removed` + TTL. Note `github_token` **passed** on a 32-char generated placeholder | CLI regional enforcement | Minor, yes (`github_token` can't detect a placeholder) |
+| 7.1 | Negative task evidence or explicit deferral | **DEFERRED-TO-P2-ENV — missing Cognito user/login, real GitHub token, and real repo onboarding.** User pool `us-east-1_sYU3Rftw6` has **zero users**; secret is a 32-char placeholder. Not created, per the step. Independently moot: `RunMicrovm` rejects the bare-name identifier, so tasks would fail at launch, not at session start | Not discharged (by design) | **Yes. P2 env** |
+| 8.1–8.2 | VMs/images gone | **PASS.** Both MicroVMs `TERMINATED` (a `SUSPENDED` VM terminates directly, no resume needed). `list-microvm-images` **empty**. **Correction:** the last remaining version cannot be deleted alone (`This is the last version. Please delete the entire image`). Delete all but the last, then the image. Concurrent calls during a version delete give `ConflictException: MicroVM Image is already in state: UPDATING`. **Failed builds still create versions that must be reaped** (`1.0`+`2.0` on both images) | Versioned image lifecycle | Yes, runbook loop order |
+| 8.3 | Stack gone; bootstrap retained | **PARTIAL, `DELETE_FAILED`.** 460/464 resources deleted; VPC + 2 private subnets + 1 SG remain, blocked by two leaked AgentCore ENIs (`InterfaceType: agentic_ai`) still `in-use` after 3 retries over ~1 h 40 min. **All billable resources confirmed gone** (no ABCA NAT gateway, no VPC endpoints, no buckets, no images/VMs, no unattached EIPs); residual 4 resources are zero-cost. Nothing force-deleted past CFN. `CDKToolkit` retained `UPDATE_COMPLETE`, `ComputeTypes=agentcore,lambda-microvm`, 5 ABCA policies, no `AdministratorAccess`. Verification-only extras (`abca645-connector-probe`, temp rule `sgr-07ed1fa48ef38467a`) removed | Partially, cleanup blocked by AgentCore | **YES. AgentCore ENI reclaim blocks clean `cdk destroy`** |
 
 ## Findings summary
 
@@ -1906,45 +1913,45 @@ Live run, 2026-07-31, account `<account>`, `us-east-1`, branch
 `feat/645-lambda-microvm-p1` @ `0505f914`. Evidence:
 `/tmp/abca-645-p1-20260731T184822Z`.
 
-**Headline:** the *P1 substrate* is broadly correct — conditional bootstrap IAM,
+**Headline:** the *P1 substrate* is broadly correct. Conditional bootstrap IAM,
 outputs, tags, region gate, warnings, exact-ARN least privilege, and the CLI
-surface all behave as designed. But **P1 cannot deploy, cannot build its image,
-and cannot launch a MicroVM from unmodified sources**: five independent
+all behave as designed. But **P1 cannot deploy, cannot build its image,
+and cannot launch a MicroVM from unmodified sources**. Five independent
 live-service rejections had to be worked around to get any empirical result, and
 three documented ADR-021 constants (32 GB memory, 16 KB payload, bare-name image
 identifier) are **wrong**.
 
 ### Items discharged (behaved exactly as designed)
 
-1. **0.2** — CLI/SDK operation names: `aws lambda-microvms` exposes 24 commands,
-   an exact match to SDK 3.1098.0. No action-name drift; the packaging script's
+1. **0.2.** CLI/SDK operation names: `aws lambda-microvms` exposes 24 commands,
+   an exact match to SDK 3.1098.0. No action-name drift. The packaging script's
    `ARM_64` / `ENABLED` shapes are confirmed correct against the live model.
-2. **1.3** — Conditional bootstrap IAM: `IaCRole-ABCA-Compute-LambdaMicrovms` is
+2. **1.3.** Conditional bootstrap IAM: `IaCRole-ABCA-Compute-LambdaMicrovms` is
    created and attached only with `ComputeTypes` including `lambda-microvm`, and
    `AdministratorAccess` really is replaced.
-3. **2.2** — Substrate contract: `ComputeSubstrate=lambda-microvm`, all six
+3. **2.2.** Substrate contract: `ComputeSubstrate=lambda-microvm`, all six
    `Microvm…` outputs, both buckets, both roles, 443-only SG, `/aws/lambda-microvms/`
    log group, network connector, and **no** `AWS::Lambda::MicrovmImage`.
-4. **2.3** — All-or-nothing config: zero `MICROVM_*` env vars without an image.
-5. **2.4** — Cost tags: all six taggable construct resources carry
+4. **2.3.** All-or-nothing config: zero `MICROVM_*` env vars without an image.
+5. **2.4.** Cost tags: all six taggable construct resources carry
    `abca:compute-backend=lambda-microvm`.
-6. **3.1 / 3.2** — Region gate and escape hatch, verbatim as specified.
-7. **4.1** — Live regional availability probe works.
-8. **4.2 (artifact half)** — Packaging plane: zip+Dockerfile staging, no secret
+6. **3.1 / 3.2.** Region gate and escape hatch, verbatim as specified.
+7. **4.1.** Live regional availability probe works.
+8. **4.2 (artifact half).** Packaging plane: zip+Dockerfile staging, no secret
    build inputs, correct bucket/key, works on macOS with `openrsync`.
-9. **4.4** — Least privilege: exactly `RunMicrovm`/`GetMicrovm`/`TerminateMicrovm`
+9. **4.4.** Least privilege: exactly `RunMicrovm`/`GetMicrovm`/`TerminateMicrovm`
    on exactly the image ARN + `:*`; `PassNetworkConnector`; scoped `iam:PassRole`;
    **zero** `SuspendMicrovm`/`ResumeMicrovm`/`CreateMicrovmAuthToken`. Both
    no-image and image-configured warnings fire correctly.
-10. **5.3** — Manual suspend works without any `idlePolicy` (`SUSPENDED` in ~1 s).
-11. **5.6** — Manual resume works with no `/resume` hook declared; `microvmId`
+10. **5.3.** Manual suspend works without any `idlePolicy` (`SUSPENDED` in ~1 s).
+11. **5.6.** Manual resume works with no `/resume` hook declared. `microvmId`
     **and** `endpoint` are preserved, so `SessionHandle` survives a cycle.
-12. **5.7 (terminate half)** — Explicit terminate is near-instant
-    (`TERMINATING` +1 s → `TERMINATED` +3 s).
-13. **6.1 / 6.2** — CLI: outputs discovery, live `ListManagedMicrovmImages`
+12. **5.7 (terminate half).** Explicit terminate is near-instant
+    (`TERMINATING` at +1 s, then `TERMINATED` at +3 s).
+13. **6.1 / 6.2.** CLI: outputs discovery, live `ListManagedMicrovmImages`
     onboarding probe, `lambda_microvm_availability` doctor check,
     `lambda_microvm_substrates` grouping, and offboard all pass.
-14. **8.1 / 8.2** — MicroVM and image cleanup paths work (with the version-order
+14. **8.1 / 8.2.** MicroVM and image cleanup paths work (with the version-order
     correction below).
 
 ### Items contradicting design assumptions — `feeds-back-to-design: YES`
@@ -1952,7 +1959,7 @@ identifier) are **wrong**.
 Ordered by severity.
 
 **F1. The P1 image is not creatable at all** (blocks the entire P1 premise).
-`create-microvm-image` with the script's/construct's hook shape:
+`create-microvm-image` with the hook shape of the script and the construct:
 
 ```
 ValidationException: The ready (/ready) MicroVM image hook must be enabled when any MicroVM lifecycle hook (run, resume, suspend, or terminate) is enabled. The ready hook signals when the application has finished initializing so the snapshot is taken in a ready state.
@@ -1969,7 +1976,7 @@ and `/validate` because the agent does not implement them") is **not a reachable
 service state**. The only creatable P1 image is one with **no hooks at all**, and
 such an image **cannot accept a `runHookPayload`**
 (`The run hook must be enabled in the MicroVM image to pass the run hook
-payload`) — so P1's payload-delivery path cannot function either. The agent does
+payload`), so P1's payload-delivery path cannot function either. The agent does
 answer on port 8080 (HTTP 4xx, not a connection refusal), so serving `/ready`
 is the unblocking change.
 
@@ -1980,11 +1987,11 @@ role.**
 "NetworkConnectorOperatorRole is required for VPC_EGRESS connector type (Service: Lambda, Status Code: 400, Request ID: 04726267-6c61-4ff5-bb1d-302122e9f955)" HandlerErrorCode: InvalidRequest
 ```
 
-This refutes the explicit comment in `lambda-microvm-compute.ts` (~L467):
+This error refutes the explicit comment in `lambda-microvm-compute.ts` (~L467):
 *"`operatorRole` is left unset so Lambda manages the ENIs with its own
 service-linked role rather than a role we would have to trust."* The generated L1
-also mis-signals it as optional (`readonly operatorRole?: string`). Proven fix
-(validated standalone): a role trusting `lambda.amazonaws.com` with
+also wrongly marks it as optional (`readonly operatorRole?: string`). Proven fix
+(validated standalone): a role that trusts `lambda.amazonaws.com` with
 `AWSLambdaVPCAccessExecutionRole` + `ec2:CreateNetworkInterface` /
 `DeleteNetworkInterface` / `DescribeNetworkInterfaces` / `DescribeSubnets` /
 `DescribeVpcs` / `DescribeSecurityGroups` / `CreateTags` /
@@ -2000,9 +2007,9 @@ ValidationException: Malformed ARN - doesn't start with 'arn:'
 `MICROVM_IMAGE_IDENTIFIER` is set to `backgroundagent-dev-abca-agent` and
 `lambda-microvm-strategy.ts:236` passes it straight to `RunMicrovm`. The
 construct's comment claims *"`run-microvm --image-identifier` accepts"* bare
-names — it does not. Every P1 task would fail at launch. The same applies to
-`list-microvm-image-builds` (`ValidationException: Invalid ARN format: …`), which
-the packaging script's operator instructions also get wrong. Note the construct
+names. It does not. Every P1 task would fail at launch. The same applies to
+`list-microvm-image-builds` (`ValidationException: Invalid ARN format: …`), and
+the packaging script's operator instructions also get that command wrong. The construct
 already derives the correct ARN for IAM, so the fix is to inject that ARN.
 
 **F4. The 443-only security group makes the agent image unbuildable.**
@@ -2013,7 +2020,7 @@ E: Unable to locate package curl / git / build-essential
 … did not complete successfully: exit code: 100
 ```
 
-`agent/Dockerfile` runs `apt-get`, which uses **HTTP/80**; the construct's SG
+`agent/Dockerfile` runs `apt-get`, which uses **HTTP/80**. The construct's SG
 allows only 443 (DNS resolution succeeded, so the port is the sole cause). Either
 the SG must allow 80 for build-time egress, or the Dockerfile must use an
 HTTPS apt transport/mirror. Opening port 80 made the build succeed immediately.
@@ -2027,8 +2034,8 @@ ValidationException: The requested memory size of 32768 MiB is not supported by 
 `DEFAULT_MINIMUM_MEMORY_MIB = 32768` is documented in the construct as *"the
 service ceiling"*, and ADR-021 states **32 GB RAM** in at least three places
 (comparison table, constraint paragraph, consequences). The real ceiling for the
-only available base image (`al2023-1`) is **8 GiB — one quarter**. This
-materially changes the "MicroVMs target the default-sized workload" positioning
+only available base image (`al2023-1`) is **8 GiB, one quarter**. That ceiling
+changes the "MicroVMs target the default-sized workload" positioning
 *and* the 5.5 concurrency arithmetic (which was sized on 32 GiB/VM).
 
 **F6. `runHookPayload` cap is 4096 bytes, not 16,384.**
@@ -2040,7 +2047,7 @@ ValidationException: 1 validation error detected: Value at 'runHookPayload' fail
 Boundary measured exactly: **4096 passes, 4097 fails**. Both of the runbook's
 16 KB probes failed. `RUN_HOOK_PAYLOAD_LIMIT_BYTES = 16_384`
 (`lambda-microvm-strategy.ts:84`) would inline every envelope from 4,097 to
-16,384 bytes and the service would reject all of them; ADR-021 repeats `≤ 16 KB`
+16,384 bytes and the service would reject all of them. ADR-021 repeats `≤ 16 KB`
 in four places, including the P1 requirement statement.
 
 **F7. `RunMicrovm` attaches a default public HTTP ingress connector.**
@@ -2052,12 +2059,12 @@ Without `--ingress-network-connectors`, the response contained:
 
 plus a public `*.lambda-microvm.us-east-1.on.aws` endpoint. ADR-021's "no
 orchestrator→agent HTTP path / no ingress in P1–P3" posture is **not the service
-default**; P1 either has to suppress it explicitly or document that a public
+default**. P1 either has to suppress that ingress explicitly or document that a public
 ingress endpoint exists on every agent MicroVM.
 
 **F8. `NotFound` is not the near-term terminal signal.** After terminate, the VM
 was `TERMINATED` at +3 s and **still `TERMINATED` ~10 min later** and at every
-subsequent checkpoint; `ResourceNotFoundException` was **never observed**. The
+subsequent checkpoint. `ResourceNotFoundException` was **never observed**. The
 strategy's `NotFound → completed` mapping is fine as a fallback, but `TERMINATED`
 must map to completed in its own right or the orchestrator will poll a terminal
 VM indefinitely. Relatedly, **`SUSPENDING` is not observable** (suspend reaches
@@ -2068,14 +2075,14 @@ reaches `RUNNING` in **12 s** and stays `RUNNING` (no `stateReason`, no
 self-termination) up to its 8 h `maximumDurationInSeconds`. The P1 narrative
 ("a launch may return an ID and endpoint and then fail its hook or terminate")
 is wrong in the safe direction for correctness and wrong in the *expensive*
-direction for cost: nothing fails, so nothing cleans up. Active
-`TerminateMicrovm` is mandatory, not belt-and-braces.
+direction for cost. Nothing fails, so nothing cleans up. Active
+`TerminateMicrovm` is mandatory, not an extra precaution.
 
 **F10. `mise //cdk:bootstrap` silently no-ops on an already-bootstrapped
-account** — `Not overwriting it with a template containing 'ABCA: Least-Privilege
+account.** It prints `Not overwriting it with a template containing 'ABCA: Least-Privilege
 Bootstrap' (use --force if you intend to overwrite)` with **exit 0**. Worse, after
 a forced bootstrap `BootstrapVariant` remains `AWS CDK: Default Resources`, so
-the refusal recurs forever. Any operator following ADR-002's documented flow on an
+the refusal recurs forever. Any operator who follows ADR-002's documented flow on an
 existing account keeps `AdministratorAccess`.
 
 **F11. `AgentVpc` picks AZs AgentCore rejects.**
@@ -2094,20 +2101,20 @@ CREATING`), which turned one rollback into `ROLLBACK_FAILED`.
 **F13. `codeInstallSizeInBytes` = 2.17 GiB exceeds AgentCore's 2 GB image
 limit**, while the same tree as an OCI image is 1.799 GB (629.7 MB compressed).
 The ADR's "compare to AgentCore's 2 GB limit" narrative must say *which* measure
-it means, because the two straddle the limit.
+it means, because one is above the limit and the other is below it.
 
 **F14. Runbook/tooling defects found in execution** (lower severity, but they
 would silently corrupt a future pass):
 
 - The `--parameters 'ParameterKey=ComputeTypes,ParameterValue=agentcore,lambda-microvm'`
-  form is rejected (`Invalid type for parameter … valid types: <class 'str'>`);
-  needs `agentcore\,lambda-microvm`, as `cdk/mise.toml` already shows.
+  form is rejected (`Invalid type for parameter … valid types: <class 'str'>`).
+  It needs `agentcore\,lambda-microvm`, as `cdk/mise.toml` already shows.
 - `list-stack-resources --query "…|[0]"` is **paginated** at 464 resources and
-  returned five values, breaking `ORCHESTRATOR_FN`. Needs `--no-paginate`.
+  returned five values, breaking `ORCHESTRATOR_FN`. It needs `--no-paginate`.
 - `list-managed-microvm-image-versions` is **newest-first**, so `items[-1]`
   selects the *older* version.
-- Image version is **`1.0`**, not `1`, so `IMAGE_VERSION=1` is wrong.
-- There are **two builds per version** (GRAVITON gen 3 and 4); `items[0]` checks
+- The image version is **`1.0`**, not `1`, so `IMAGE_VERSION=1` is wrong.
+- There are **two builds per version** (GRAVITON gen 3 and 4). `items[0]` checks
   only one.
 - `snapshotBuild` comes from `get-microvm-image-build`, not
   `get-microvm-image-version` (which returns `null`).
@@ -2129,18 +2136,18 @@ would silently corrupt a future pass):
 | 5.5 suspended VM consumes account memory quota | **NOT OBSERVABLE SAFELY / UNDISCHARGED** | The VM stays in `list-microvms`, but that only proves *listed*. `L-CD1C0CC4` (1024 GB, ACCOUNT) exposes **no `UsageMetric`**; `AWS/Usage` has only `CallCount`; no MicroVM memory metric exists in any namespace; no console utilization view is reachable from a CLI-only session. Proving it would need ~128 × 8 GiB VMs. |
 | 5.8 IAM negatives under the orchestrator role | **SKIPPED — LAMBDA ROLE TRUST DOES NOT ALLOW OPERATOR ASSUMPTION** | `AccessDenied … sts:AssumeRole`; trust is `lambda.amazonaws.com` only and was deliberately not modified. 4.4's static policy inspection is authoritative. |
 | 5.8 exact-ARN denial sub-check | **INCONCLUSIVE** | As the runbook predicts, a different image name returns `ResourceNotFoundException: No active version found for MicroVM image …-different`, not `AccessDenied`. Advisory only (admin identity). |
-| 5.8 no-JWE posture | **STATIC ONLY** | As admin, `create-microvm-auth-token` **succeeded**, returning a real JWE (`{"alg":"dir","enc":"A256GCM"}`, key `X-aws-proxy-auth`) — **against a `SUSPENDED` VM**. The posture depends entirely on the role omitting the action. |
+| 5.8 no-JWE posture | **STATIC ONLY** | As admin, `create-microvm-auth-token` **succeeded**, returning a real JWE (`{"alg":"dir","enc":"A256GCM"}`, key `X-aws-proxy-auth`), **against a `SUSPENDED` VM**. The posture depends entirely on the role omitting the action. |
 | 7.1 negative task path | **DEFERRED-TO-P2-ENV** | Cognito pool `us-east-1_sYU3Rftw6` has **zero users**, no real repo onboarded, GitHub secret is a 32-char generated placeholder. Not created, per the step. Independently moot given F3. |
 | 8.3 stack deletion | **DELETE_FAILED (billing stopped)** | Leaked AgentCore ENIs (F12). 4 zero-cost resources remain; all billable resources verified gone. Retry command recorded in 8.3. |
 | Disk capacity / 32 GB disk claim | **NOT EXPOSED** | No disk quota in `service-quotas`, no disk field on image or version. Unverified. |
 
 ### Elapsed and approximate cost
 
-**Elapsed:** 18:48Z → 23:07Z = **4 h 19 min** wall clock. Of that, ~1 h was the
-suspend-TTL observation (run concurrently with the CLI phase, IAM checks, the
-16 KB probes, and the second image build, per instructions — no idle waiting);
-~1 h 15 min was consumed by the three blocked deploys plus rollbacks/redeploys;
-~1 h 40 min was teardown retries.
+**Elapsed:** 18:48Z to 23:07Z = **4 h 19 min** wall clock. Of that, ~1 h was the
+suspend-TTL observation. It ran concurrently with the CLI phase, IAM checks, the
+16 KB probes, and the second image build, per instructions, so there was no idle
+waiting. The three blocked deploys plus rollbacks and redeploys consumed
+~1 h 15 min. Teardown retries took ~1 h 40 min.
 
 **Approximate cost: well under US$10, dominated by NAT gateways and VPC
 endpoints, not by MicroVMs.**
@@ -2156,25 +2163,25 @@ endpoints, not by MicroVMs.**
 | S3 / DynamoDB / Lambda / API GW / Cognito / Secrets / logs | brief, mostly idle | < $1 |
 | ECR container asset (retained in bootstrap) | 630 MB stored | ~$0.06/month ongoing |
 
-The 8 h `maximumDurationInSeconds` worst case was never approached; both VMs were
+The 8 h `maximumDurationInSeconds` worst case was never approached. Both VMs were
 explicitly terminated.
 
 ### Deliberately left in place
 
-1. **`CDKToolkit`** — retained as the runbook instructs, now carrying
+1. **`CDKToolkit`.** Retained as the runbook instructs. It now carries
    `ComputeTypes=agentcore,lambda-microvm` and the five ABCA least-privilege
-   policies **instead of `AdministratorAccess`**. ⚠️ This is a change to a
-   *shared* account: other CDK apps in `<account>` now deploy through the
+   policies **instead of `AdministratorAccess`**. **Warning.** This is a change to a
+   *shared* account. Other CDK apps in `<account>` now deploy through the
    ABCA-scoped execution role. The original standard-bootstrap template is
    captured at `$EVIDENCE_DIR/cdktoolkit-template-before.txt` if it needs
    restoring.
-2. **`backgroundagent-dev` in `DELETE_FAILED`** — VPC `vpc-0a12c1a64cc960c6a`,
+2. **`backgroundagent-dev` in `DELETE_FAILED`.** VPC `vpc-0a12c1a64cc960c6a`,
    two private subnets, one security group, and two leaked AgentCore ENIs. Zero
-   cost; retry `delete-stack` once AgentCore releases the ENIs.
-3. **Bootstrap S3/ECR assets** — including the 630 MB agent container image,
-   normal bootstrap content.
-4. **Service-vended log groups** — `/aws/bedrock-agentcore/runtimes/…` and
-   `/aws/lambda/backgroundagent-dev-…` created outside CloudFormation.
+   cost. Retry `delete-stack` once AgentCore releases the ENIs.
+3. **Bootstrap S3/ECR assets.** They include the 630 MB agent container image,
+   which is normal bootstrap content.
+4. **Service-vended log groups.** `/aws/bedrock-agentcore/runtimes/…` and
+   `/aws/lambda/backgroundagent-dev-…` were created outside CloudFormation.
 
 Untouched and **not** created by this run: the pre-existing stacks
 (`serverless-api-powertools`, `BuildingServerlessAPIs`,
@@ -2185,14 +2192,14 @@ Untouched and **not** created by this run: the pre-existing stacks
 
 F1, F2, F3, F4, F5, and F6 are each independently sufficient to make the
 `lambda-microvm` backend non-functional. F1 (the `/ready` requirement) is the one
-that changes the *shape* of the phase plan rather than a constant, so it should be
-adjudicated first: either P1 grows a minimal `/ready` (and `/run`) responder, or
+that changes the *shape* of the phase plan, not a constant, so it should be
+decided first. Either P1 gains a minimal `/ready` (and `/run`) responder, or
 P1 ships a hook-less image and explicitly defers all payload delivery to P2.
 
 ## Report back
 
 Attach or summarize the evidence paths, then provide the filled results table to
-the orchestrator. Draft it as a comment for issue #645; **do not post it until
+the orchestrator. Draft it as a comment for issue #645. **Do not post it until
 the orchestrator reviews it**. Highlight every `BLOCKED`, `INCONCLUSIVE`,
-`SKIPPED`, and `DEFERRED-TO-P2-ENV` result and explicitly separate observed AWS
+`SKIPPED`, and `DEFERRED-TO-P2-ENV` result, and explicitly separate observed AWS
 behavior from expectations inferred from the SDK model.

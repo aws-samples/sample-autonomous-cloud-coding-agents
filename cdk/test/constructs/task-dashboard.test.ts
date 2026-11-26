@@ -50,12 +50,10 @@ function createStack(): { stack: Stack; template: Template } {
   return { stack, template };
 }
 
-/** A metric of a widget as the dashboard body holds it: `[namespace, name, dimension, value, ..., options]`, or `[expression]`. */
 type MetricRow = readonly (string | Readonly<Record<string, unknown>>)[];
 
 interface Widget {
   readonly type: string;
-  /** The line of the grid the widget starts on, and how many of its 24 columns it takes. */
   readonly y: number;
   readonly width: number;
   readonly properties: {
@@ -67,14 +65,12 @@ interface Widget {
   };
 }
 
-/** The widgets of the dashboard, in the order it shows them. The body is a join around the region token. */
 function widgetsOf(template: Template): Widget[] {
   const [dashboard] = Object.values(template.findResources('AWS::CloudWatch::Dashboard'));
   const parts = dashboard.Properties.DashboardBody['Fn::Join'][1] as unknown[];
   return JSON.parse(parts.map((p) => (typeof p === 'string' ? p : 'TOKEN')).join('')).widgets;
 }
 
-/** The widget with exactly this title. */
 function widgetTitled(template: Template, title: string): Widget {
   const widget = widgetsOf(template).find((candidate) => candidate.properties.title === title);
   if (!widget) throw new Error(`The dashboard has no widget titled "${title}"`);
@@ -94,11 +90,6 @@ describe('TaskDashboard construct', () => {
     });
   });
 
-  // --- Chunk 8b: Cedar HITL approval widgets (§11.3, IMPL-28) ------------
-
-  // The dashboard body is serialized as CloudFormation ``Fn::Join`` parts
-  // with CDK tokens for the stack region/account. Use ``Match.serializedJson``
-  // / substring checks via template rendering.
   function dashboardBodyContains(template: Template, needle: string): boolean {
     const dashboards = template.findResources('AWS::CloudWatch::Dashboard');
     for (const res of Object.values(dashboards)) {
@@ -106,8 +97,6 @@ describe('TaskDashboard construct', () => {
       if (typeof body === 'string') {
         if (body.includes(needle)) return true;
       } else if (body && body['Fn::Join']) {
-        // Join parts: array of string / token. Flatten and search the
-        // concatenated literal portion.
         const joined = (body['Fn::Join'][1] as unknown[]).map((p) => (typeof p === 'string' ? p : '')).join('');
         if (joined.includes(needle)) return true;
       }
@@ -123,10 +112,7 @@ describe('TaskDashboard construct', () => {
   test('dashboard includes ApprovalTimeoutClipRate widget (MathExpression with IF guard)', () => {
     const { template } = createStack();
     expect(dashboardBodyContains(template, 'Approval Timeout Clip Rate')).toBe(true);
-    // The IF(requested > 0, ...) guard is critical to avoid divide-by-zero
-    // NaN renders (silent gap). Assert the expression ships in the widget.
     expect(dashboardBodyContains(template, 'IF(requested > 0')).toBe(true);
-    // The 3 reason dimensions each get their own MathExpression line.
     expect(dashboardBodyContains(template, 'rule_annotation')).toBe(true);
     expect(dashboardBodyContains(template, 'maxLifetime_ceiling')).toBe(true);
     expect(dashboardBodyContains(template, 'runtime_jwt_ceiling')).toBe(true);
@@ -142,8 +128,6 @@ describe('TaskDashboard construct', () => {
     const { template } = createStack();
     expect(dashboardBodyContains(template, 'Approval Timeout Breakdown')).toBe(true);
     expect(dashboardBodyContains(template, 'TimedOutEffectiveTimeout')).toBe(true);
-    // All three percentiles required by §11.3, read as the statistics of this widget:
-    // other widgets of the dashboard have a p50 and a p90 of their own.
     const breakdown = widgetTitled(template, 'Approval Timeout Breakdown — effective timeout on timed-out approvals (s)');
     expect(breakdown.properties.metrics?.map((row) => [row[1], (row.at(-1) as { stat?: string }).stat])).toEqual([
       ['TimedOutEffectiveTimeout', 'p50'],
@@ -156,9 +140,6 @@ describe('TaskDashboard construct', () => {
     const { template } = createStack();
     expect(dashboardBodyContains(template, 'Approval Decision Latency')).toBe(true);
     expect(dashboardBodyContains(template, 'ApprovalDecisionLatencyMs')).toBe(true);
-    // Three outcome dim values — one series set per outcome per percentile. Read as
-    // the dimension values of this widget: the factory scoreboard row has a
-    // `timed_out` of its own.
     const latency = widgetTitled(template, 'Approval Decision Latency by outcome (ms, p50 / p90 / p99)');
     const outcomes = latency.properties.metrics?.map(([, , dimension, value]) => `${String(dimension)}=${String(value)}`);
     expect([...new Set(outcomes)]).toEqual(['outcome=approved', 'outcome=denied', 'outcome=timed_out']);
@@ -170,14 +151,10 @@ describe('TaskDashboard construct', () => {
       template = createStack().template;
     });
 
-    /** The Logs Insights commands of one log widget, in order. */
     function widgetQuery(title: string): string[] {
       return (widgetTitled(template, title).properties.query as string).split('\n| ');
     }
 
-    // A METRICS_REPORT line as the agent writes it (Python json.dumps). Both
-    // verdicts are null when nothing ran: a task without a repository, a
-    // crashed task, a build command that could not run.
     const metricsLine = (verdict: boolean | null): string =>
       `{"event": "METRICS_REPORT", "status": "${verdict === null ? 'error' : 'success'}", "agent_status": "success", `
       + `"pr_url": null, "build_passed": ${verdict}, "lint_passed": ${verdict}, "cost_usd": 6.2, "turns": 60, "duration_s": 2400.0}`;
@@ -187,8 +164,6 @@ describe('TaskDashboard construct', () => {
       ['Lint Pass Rate (24h)', 'lp_raw'],
     ])('%s counts a task without a verdict neither as passed nor as failed', (title, field) => {
       const [, parse, filter, stats] = widgetQuery(title);
-      // What the query does with the parsed field: keep the events that have
-      // it, then divide those that read "true" by all that are left.
       expect(filter).toBe(`filter ispresent(${field})`);
       expect(stats).toContain(`stats sum(${field} = "true") / count(*) * 100 as`);
       const pattern = new RegExp(parse.slice(parse.indexOf('/') + 1, parse.lastIndexOf('/')));
@@ -210,7 +185,6 @@ describe('TaskDashboard construct', () => {
       template = createStack().template;
     });
 
-    // The titles follow the labels of the console's Scoreboard page, in the order of the row.
     const NUMBER_TITLES = [
       'Time to verified pull request',
       'Time to merged pull request',
@@ -223,17 +197,14 @@ describe('TaskDashboard construct', () => {
     const PR_GRAPH_TITLE = 'Pull requests merged and closed per day';
     const TITLES = [...NUMBER_TITLES, GRAPH_TITLE, PR_GRAPH_TITLE];
 
-    /** A statistic of one series, as `valuesShown` writes it: `Sum(ABCA/Factory TasksFinished{Outcome=verified_pr})`. */
     function reading(stat: string, metricName: string, dimensions: Record<string, string> = {}, namespace = FACTORY_METRIC_NAMESPACE): string {
       const pairs = Object.entries(dimensions).map(([dimension, value]) => `${dimension}=${value}`);
       return `${stat}(${namespace} ${metricName}${pairs.length > 0 ? `{${pairs.join(', ')}}` : ''})`;
     }
 
-    /** The options of a metric row: its last cell. */
     const optionsOf = (row: MetricRow): Readonly<Record<string, unknown>> =>
       Object.assign({}, ...row.filter((cell) => typeof cell !== 'string'));
 
-    /** The statistic a metric row takes of its series. A row that names none takes the average. */
     function seriesOf(row: MetricRow): string {
       const [namespace, metricName, ...cells] = row.filter((cell) => typeof cell === 'string');
       const dimensions: Record<string, string> = {};
@@ -241,13 +212,6 @@ describe('TaskDashboard construct', () => {
       return reading(String(optionsOf(row).stat ?? 'Average'), metricName, dimensions, namespace);
     }
 
-    /**
-     * What a widget shows, by label and in the order it shows them: each value as a formula
-     * over the statistics of the series it reads. The body lists such a series as a hidden
-     * row under an id, and the value as an expression over the ids. Where the library puts
-     * those rows, and that it names no statistic for an average, is how it renders the
-     * widget, not what the widget shows.
-     */
     function valuesShown(widget: Widget): Record<string, string> {
       const rows = widget.properties.metrics ?? [];
       const inputs = new Map(rows.filter((row) => 'id' in optionsOf(row)).map((row) => [optionsOf(row).id, seriesOf(row)]));
@@ -265,12 +229,10 @@ describe('TaskDashboard construct', () => {
 
       expect(heading.type).toBe('text');
       expect(heading.properties.markdown).toMatch(/^## Factory scoreboard\n/);
-      // For its first 30 days the row holds less than its window says.
       expect(heading.properties.markdown).toContain(
         "Every user's tasks that finished in the last 30 days, or since the scoreboard was deployed if that is less.",
       );
       expect(heading.properties.markdown).toContain('whatever time range the dashboard shows');
-      // A merge is counted when it happened, which can be weeks after the task finished, or days before the deployment.
       expect(heading.properties.markdown).toContain(
         'The two pull-request widgets count a pull request on the day it was merged or closed, not on the day its task finished, '
         + 'and reach up to 13 days back before the deployment.',
@@ -282,7 +244,6 @@ describe('TaskDashboard construct', () => {
       const widthOfLine = new Map<number, number>();
       for (const { y, width } of widgetsOf(template).slice(0, 1 + TITLES.length)) widthOfLine.set(y, (widthOfLine.get(y) ?? 0) + width);
 
-      // The heading, the six numbers three to a line, the two graphs.
       expect([...widthOfLine.values()]).toEqual([24, 24, 24, 24]);
     });
 
@@ -296,7 +257,6 @@ describe('TaskDashboard construct', () => {
       ],
       [
         NUMBER_TITLES[1],
-        // A merge takes days where an agent takes minutes: this widget is in hours, and each label names its unit.
         {
           'Median (hours)': `${reading('p50', FACTORY_METRICS.timeToMerge)} / 3600`,
           '9 in 10 within (hours)': `${reading('p90', FACTORY_METRICS.timeToMerge)} / 3600`,
@@ -304,7 +264,6 @@ describe('TaskDashboard construct', () => {
       ],
       [
         NUMBER_TITLES[2],
-        // The metric is 0 or 1 on each task that asked for a new pull request: its average is the share.
         { '% of the tasks that asked for a new pull request': `100 * ${reading('Average', FACTORY_METRICS.untouchedVerifiedPrs)}` },
       ],
       [
@@ -325,7 +284,6 @@ describe('TaskDashboard construct', () => {
     ])('%s: each value over the last 30 days as a whole', (title, values) => {
       const widget = widgetTitled(template, title);
 
-      // The whole window is the period: neither the widget nor a metric names another one.
       expect(widget.properties).toMatchObject({ view: 'singleValue', setPeriodToTimeRange: true, start: '-P30D' });
       expect(widget.properties.period).toBeUndefined();
       expect((widget.properties.metrics ?? []).filter((row) => 'period' in optionsOf(row))).toEqual([]);
@@ -346,7 +304,6 @@ describe('TaskDashboard construct', () => {
         [label, reading('Sum', FACTORY_METRICS.tasksFinished, { [FACTORY_DIMENSIONS.outcome]: outcome })]);
 
       expect(widget.properties).toMatchObject({ view: 'timeSeries', stacked: true, period: 86400, start: '-P30D' });
-      // The stack is built in this order, the verified pull requests at its foot.
       expect(Object.entries(valuesShown(widget))).toEqual(series);
     });
 
@@ -359,11 +316,9 @@ describe('TaskDashboard construct', () => {
     });
 
     describe('and the metric line', () => {
-      /** `name {dimension: value}` of a metric, the way CloudWatch tells two series apart. */
       const series = (name: string, dimensions: Record<string, unknown>): string =>
         `${name} ${JSON.stringify(Object.entries(dimensions).sort())}`;
 
-      /** Every series a widget of the row reads. */
       function seriesRead(): string[] {
         const rows = TITLES.flatMap((title) => widgetTitled(template, title).properties.metrics ?? []);
         return rows
@@ -376,7 +331,6 @@ describe('TaskDashboard construct', () => {
           });
       }
 
-      /** Every series these tasks write: on the line of the task, and on the line of its pull request once that is merged or closed. */
       function seriesWritten(tasks: readonly ScoreboardTask[]): Set<string> {
         const written = new Set<string>();
         for (const task of tasks) {
@@ -393,7 +347,6 @@ describe('TaskDashboard construct', () => {
         return written;
       }
 
-      /** New work that ended in a verified pull request, with a recorded cost. */
       const finished = (overrides: Partial<ScoreboardTask> = {}): ScoreboardTask => ({
         task_id: 'task-1',
         status: TaskStatus.COMPLETED,

@@ -1,5 +1,3 @@
-"""Workflow section for pr_iteration (iterate on an existing PR)."""
-
 PR_ITERATION_WORKFLOW = """\
 ## Workflow
 

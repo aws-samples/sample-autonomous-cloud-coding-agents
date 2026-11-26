@@ -209,7 +209,6 @@ describe('repo onboard/offboard', () => {
     const put = ddbSend.mock.calls[0][0] as PutCommand;
     expect(put.input.Item?.onboarded_at).toBe('2025-01-01T00:00:00Z');
     expect(put.input.Item?.cedar_policies).toEqual(['policy']);
-    // Blueprint-only settings have no flag here: a re-onboard must not drop them.
     expect(put.input.Item).toMatchObject({ approval_gate_cap: 10, max_budget_usd: 5, memory_token_budget: 4000 });
   });
 
@@ -248,7 +247,6 @@ describe('repo onboard/offboard', () => {
     );
 
     await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a')).rejects.toThrow('throttled');
-    // Must NOT have written a defaults-only row over the existing config.
     expect(ddbSend).not.toHaveBeenCalled();
   });
 

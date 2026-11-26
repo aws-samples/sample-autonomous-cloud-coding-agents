@@ -101,11 +101,8 @@ describe('parseAgentSessionEvent', () => {
     expect(at('https://linear.app/acme/profiles/bgagent please add tests')).toBe('please add tests');
     expect(at('[@bgagent](https://linear.app/acme/profiles/bgagent), add tests')).toBe('add tests');
     expect(at('<https://linear.app/acme/profiles/bgagent> add tests')).toBe('add tests');
-    // A bare mention is no instruction at all.
     expect(at('https://linear.app/acme/profiles/bgagent')).toBe('');
-    // Only a LEADING mention is stripped; a link the user pasted stays.
     expect(at('ask https://linear.app/acme/profiles/dana about this')).toBe('ask https://linear.app/acme/profiles/dana about this');
-    // Other links at the start are the user's text.
     expect(at('https://linear.app/acme/issue/ENG-1 is related')).toBe('https://linear.app/acme/issue/ENG-1 is related');
   });
 
@@ -171,7 +168,6 @@ describe('buildAgentSessionTaskDescription', () => {
   const issue = { id: 'i', identifier: 'ENG-1', title: 'Title', description: 'Body', projectId: null };
 
   test('directive, then heading, then session context — which already carries the issue', () => {
-    // promptContext includes the issue's description; the fetched one is not repeated.
     expect(buildAgentSessionTaskDescription(issue, 'Do X', '<ctx/>'))
       .toBe('Do X\n\nENG-1: Title\n\n## Linear session context\n\n<ctx/>');
   });

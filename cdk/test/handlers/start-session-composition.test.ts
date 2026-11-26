@@ -17,13 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Integration-style tests for the start-session step composition:
- *   resolveComputeStrategy → strategy.startSession → transitionTask → emitTaskEvent
- * These compose the real helpers. The actual durable handler, including
- * MicroVM recovery/finalization, is exercised in orchestrate-task-microvm.test.ts.
- */
-
 const mockDdbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -93,7 +86,6 @@ process.env.MICROVM_EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMic
 process.env.MICROVM_EGRESS_CONNECTOR_ARNS = 'arn:aws:lambda:us-east-1:123456789012:network-connector/egress-1';
 process.env.MICROVM_PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 
-// Required platform configuration is supplied at launch, never baked into the image.
 process.env.GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
@@ -119,7 +111,7 @@ describe('start-session step composition', () => {
 
   test('happy path: strategy.startSession → transitionTask → emitTaskEvent', async () => {
     mockAgentCoreSend.mockResolvedValueOnce({});
-    mockDdbSend.mockResolvedValue({}); // transitionTask + emitTaskEvent
+    mockDdbSend.mockResolvedValue({});
 
     const strategy = resolveComputeStrategy(blueprintConfig);
     const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
@@ -133,18 +125,15 @@ describe('start-session step composition', () => {
       strategy_type: handle.strategyType,
     });
 
-    // Verify AgentCore was invoked
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
-    // Verify DDB was called for transition + event
     expect(mockDdbSend).toHaveBeenCalledTimes(2);
-    // Verify handle shape
     expect(handle.strategyType).toBe('agentcore');
     expect(handle.sessionId).toBeDefined();
   });
 
   test('error path: strategy.startSession fails → failTask is called', async () => {
     mockAgentCoreSend.mockRejectedValueOnce(new Error('InvokeAgent failed'));
-    mockDdbSend.mockResolvedValue({}); // failTask transitions
+    mockDdbSend.mockResolvedValue({});
 
     const strategy = resolveComputeStrategy(blueprintConfig);
 
@@ -153,8 +142,6 @@ describe('start-session step composition', () => {
     ).rejects.toThrow('InvokeAgent failed');
     await failTask(taskId, TaskStatus.HYDRATING, 'Session start failed: Error: InvokeAgent failed', userId, true);
 
-    // failTask should have been called — transitions to FAILED + emits event + decrements concurrency
-    // transitionTask (1) + emitTaskEvent (1) + decrementConcurrency (1) = 3 DDB calls
     expect(mockDdbSend).toHaveBeenCalledTimes(3);
   });
 
@@ -163,8 +150,8 @@ describe('start-session step composition', () => {
     const condErr = new Error('Conditional check failed');
     condErr.name = 'ConditionalCheckFailedException';
     mockDdbSend
-      .mockRejectedValueOnce(condErr) // transitionTask fails
-      .mockResolvedValue({}); // failTask calls
+      .mockRejectedValueOnce(condErr)
+      .mockResolvedValue({});
 
     const strategy = resolveComputeStrategy(blueprintConfig);
     const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
@@ -175,9 +162,7 @@ describe('start-session step composition', () => {
     })).rejects.toThrow('Conditional check failed');
     await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(condErr)}`, userId, true);
 
-    // AgentCore was invoked
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
-    // transitionTask failed (1) + failTask: transitionTask (1) + emitTaskEvent (1) + decrement (1) = 4
     expect(mockDdbSend).toHaveBeenCalledTimes(4);
   });
 });
@@ -219,12 +204,9 @@ describe('start-session step composition — lambda-microvm (ADR-021)', () => {
       compute_metadata: buildComputeMetadata(handle),
     });
 
-    // RunMicrovm actually went out.
     expect(mockMicrovmSend).toHaveBeenCalledTimes(1);
     expect(mockMicrovmSend.mock.calls[0][0]._type).toBe('RunMicrovm');
 
-    // The persisted attributes are what cancel-task (and P3's approve/deny
-    // resume) read back, so assert them on the real UpdateCommand input.
     const update = mockDdbSend.mock.calls.find(c =>
       c[0]._type === 'Update' && c[0].input.ExpressionAttributeValues[':toStatus'] === TaskStatus.RUNNING)![0];
     const values = update.input.ExpressionAttributeValues as Record<string, unknown>;

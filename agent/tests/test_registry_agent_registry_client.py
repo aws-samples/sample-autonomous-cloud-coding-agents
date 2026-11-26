@@ -1,11 +1,3 @@
-"""Unit tests for registry.agent_registry_client read-side extraction.
-
-Focus: ``_extract_runtime`` must recover the runtime payload from all three
-descriptor storage shapes — CUSTOM (verbatim JSON), MCP (JSON + ``_meta``), and
-SKILL (Markdown frontmatter, runtime in ``x-abca-runtime``). The SKILL parse
-must byte-match what the TS adapter writes (parity).
-"""
-
 from __future__ import annotations
 
 import base64
@@ -24,7 +16,6 @@ def _client() -> AgentRegistryClient:
     return AgentRegistryClient("r", None)
 
 
-# The TS adapter reads each of these as an empty runtime: `?.` and `??` in extractPayload (#781).
 _ABSENT_DESCRIPTORS = [
     pytest.param("CUSTOM", None, id="custom-descriptors-null"),
     pytest.param("CUSTOM", {"custom": None}, id="custom-custom-null"),
@@ -61,9 +52,6 @@ _ABSENT_DESCRIPTORS = [
 
 
 class _FakeBoto:
-    """Minimal agent-registry-control stand-in: one page of records, and
-    get_registry_record echoing the seeded record by id."""
-
     def __init__(self, records: list[dict]) -> None:
         self._records = records
 
@@ -115,19 +103,16 @@ class TestExtractRuntime:
         }
 
     def test_agent_skills_parses_base64_frontmatter(self):
-        # The shape the TS adapter's buildSkillMd emits: base64-encoded JSON.
         runtime = {"prompt_fragment": "Add a note.", "tool_hints": ["Edit"]}
         b64 = base64.b64encode(json.dumps(runtime).encode()).decode()
         assert _client()._extract_runtime(self._skill_md(f"x-abca-runtime: {b64}")) == runtime
 
     def test_agent_skills_base64_survives_apostrophe(self):
-        # The exact payload that broke single-quoted YAML frontmatter (#246).
         runtime = {"prompt_fragment": "Don't skip tests; it's required.", "tool_hints": ["Don't"]}
         b64 = base64.b64encode(json.dumps(runtime).encode()).decode()
         assert _client()._extract_runtime(self._skill_md(f"x-abca-runtime: {b64}")) == runtime
 
     def test_agent_skills_parses_legacy_single_quoted_json(self):
-        # Records published before the base64 switch must still resolve.
         runtime = {"prompt_fragment": "Add a note.", "tool_hints": ["Edit"]}
         line = f"x-abca-runtime: '{json.dumps(runtime)}'"
         assert _client()._extract_runtime(self._skill_md(line)) == runtime
@@ -143,9 +128,6 @@ class TestExtractRuntime:
         assert _client()._extract_runtime(raw) == {}
 
     def test_agent_skills_malformed_frontmatter_raises_not_empty(self):
-        # A frontmatter block that is present but not valid YAML (unterminated flow
-        # sequence) must be rejected, not collapsed to `{}` — collapsing erases the
-        # publisher/runtime and hides the corruption (#791).
         skill_md = "---\nname: x\nx-abca-runtime: [1, 2\n---\nbody"
         raw = {
             "recordType": "SKILL",
@@ -157,9 +139,6 @@ class TestExtractRuntime:
             _client()._extract_runtime(raw)
 
     def test_agent_skills_undecodable_runtime_raises_malformed(self):
-        # Frontmatter parses as valid YAML, but x-abca-runtime base64-decodes to a
-        # non-JSON string — must classify as MALFORMED (mirrors the TS adapter),
-        # not collapse to {} or leak a bare ValueError (PR #837 review).
         bad = base64.b64encode(b"not json").decode()
         with pytest.raises(RegistryRecordMalformedError):
             _client()._extract_runtime(self._skill_md(f"x-abca-runtime: {bad}"))
@@ -176,9 +155,6 @@ class TestExtractRuntime:
 
     @pytest.mark.parametrize("data", ["null", "123", "[1, 2]", '"just a string"'])
     def test_custom_non_object_body_raises_malformed(self, data):
-        # json.loads succeeds on these, then body.get would raise a bare
-        # AttributeError — box it as MALFORMED, mirroring parseDescriptorJson's
-        # object check in the TS adapter (#837 review).
         raw = {"recordType": "CUSTOM", "descriptors": {"custom": {"data": data}}}
         with pytest.raises(RegistryRecordMalformedError):
             _client()._extract_runtime(raw)
@@ -190,16 +166,11 @@ class TestExtractRuntime:
             _client()._extract_runtime(raw)
 
     def test_mcp_non_dict_meta_returns_empty_not_crash(self):
-        # `{"_meta": "x"}`: `.get` on a str would raise AttributeError before the
-        # #837 guard. Now it yields an empty runtime (resolve then fails REMOVED).
         server = {"name": "acme/x", "version": "1.0.0", "_meta": "not-a-dict"}
         raw = {"recordType": "MCP", "descriptors": {"mcpServer": {"data": json.dumps(server)}}}
         assert _client()._extract_runtime(raw) == {}
 
     def test_agent_skills_non_mapping_frontmatter_raises_malformed(self):
-        # Frontmatter that is valid YAML but a sequence/scalar (not a mapping) must
-        # reject as MALFORMED rather than collapse to `{}`, which would hide the
-        # corruption the way an unparseable block would (#791 / #837 review).
         skill_md = "---\n- a\n- b\n---\nbody"
         raw = {
             "recordType": "SKILL",
@@ -211,9 +182,6 @@ class TestExtractRuntime:
             _client()._extract_runtime(raw)
 
     def test_agent_skills_newline_description_cannot_inject_runtime_key(self):
-        # B1 (#246): a description carrying a newline + a second x-abca-runtime
-        # line must not shadow the validated runtime. Frontmatter emitted by the
-        # safe builder quotes the description, so the injection stays a value.
         import yaml
 
         legit = {"prompt_fragment": "THE VALIDATED FRAGMENT"}
@@ -251,8 +219,6 @@ class TestExtractRuntime:
         ],
     )
     def test_body_that_is_not_json_text_raises_malformed(self, record_type, descriptor, data):
-        # Present, unlike a null, so not an absent payload: the TS adapter's `??` stands
-        # in for null and undefined only. An empty string, 0 and false reach its parser.
         raw = {"recordType": record_type, "descriptors": {descriptor: {"data": data}}}
         with pytest.raises(RegistryRecordMalformedError):
             _client()._extract_runtime(raw)
@@ -270,8 +236,8 @@ class TestExtractRuntime:
         ],
     )
     def test_non_json_number_in_body_raises_malformed(self, record_type, descriptor, body):
-        # NaN, Infinity and -Infinity are not JSON: JSON.parse in the TS adapter rejects
-        # a body that holds one. json.loads reads them unless told otherwise.
+        # json.loads reads NaN, Infinity and -Infinity unless told otherwise; JSON.parse
+        # rejects them.
         raw = {"recordType": record_type, "descriptors": {descriptor: {"data": body}}}
         with pytest.raises(RegistryRecordMalformedError):
             _client()._extract_runtime(raw)
@@ -284,13 +250,11 @@ class TestExtractRuntime:
         ],
     )
     def test_agent_skills_non_json_number_in_runtime_raises_malformed(self, value):
-        # Each form goes through its own json.loads call.
         with pytest.raises(RegistryRecordMalformedError):
             _client()._extract_runtime(self._skill_md(f"x-abca-runtime: {value}"))
 
     def test_agent_skills_duplicate_frontmatter_key_last_value_wins(self):
-        # PyYAML keeps the last value of a repeated key, and so does js-yaml under `json: true`
-        # (parseSkillFrontmatter in agent-registry-client.ts): the two readers must agree.
+        # PyYAML keeps the last value of a repeated key, and so does js-yaml under `json: true`.
         def b64(runtime: dict) -> str:
             return base64.b64encode(json.dumps(runtime).encode()).decode()
 
@@ -301,9 +265,6 @@ class TestExtractRuntime:
 
 
 class TestResolveFailClosed:
-    """resolve() must never hand back a record with an empty/unreadable runtime —
-    that would let a task run with a missing/substituted asset (REGISTRY.md §8)."""
-
     @staticmethod
     def _mcp_record(version: str, status: str, *, with_runtime: bool) -> dict:
         server: dict = {"name": "acme/pdf-tools", "version": version}
@@ -342,8 +303,6 @@ class TestResolveFailClosed:
         assert exc.value.reason == "REMOVED"
 
     def test_fails_malformed_when_winner_frontmatter_is_unparseable(self):
-        # A malformed frontmatter block must reject the ref as MALFORMED — distinct
-        # from REMOVED (empty) — rather than resolving with erased attribution (#791).
         skill_md = "---\nname: acme-readme-helper\nx-abca-runtime: [1, 2\n---\nbody"
         record = {
             "recordId": "rec-1.0.0",
@@ -363,8 +322,6 @@ class TestResolveFailClosed:
         assert exc.value.reason == "MALFORMED"
 
     def test_fails_malformed_when_runtime_value_undecodable(self):
-        # Valid YAML frontmatter but an undecodable x-abca-runtime value must be
-        # MALFORMED, not REMOVED — matching the TS adapter (PR #837 review).
         bad = base64.b64encode(b"not json").decode()
         skill_md = f"---\nname: acme-readme-helper\nx-abca-runtime: {bad}\n---\nbody"
         record = {
@@ -408,8 +365,6 @@ class TestResolveFailClosed:
         assert exc.value.reason == "MALFORMED"
 
     def test_get_record_fails_closed_on_malformed_target(self):
-        # Parity with TS getRecord, which throws for a malformed target rather than
-        # handing back a record whose attribution was silently erased (#791).
         skill_md = "---\nname: acme-readme-helper\nx-abca-runtime: [1, 2\n---\nbody"
         record = {
             "recordId": "rec-1.0.0",
@@ -426,10 +381,6 @@ class TestResolveFailClosed:
             client.get_record("skill", "acme", "readme-helper", "1.0.0")
 
     def test_rejects_malformed_winner_rather_than_downgrading(self):
-        # The TS adapter's highest-value test, mirrored: a valid lower version
-        # exists but the highest matching version is malformed. Silently resolving
-        # the lower one would mask that the pinned (winning) version is corrupt —
-        # reject as MALFORMED instead (#791 / #837 review).
         def _skill(version: str, runtime_line: str) -> dict:
             skill_md = f"---\nname: acme-readme-helper\n{runtime_line}\n---\nbody"
             return {
@@ -446,16 +397,13 @@ class TestResolveFailClosed:
         good = base64.b64encode(json.dumps({"prompt_fragment": "ok"}).encode()).decode()
         records = [
             _skill("1.0.0", f"x-abca-runtime: {good}"),
-            _skill("1.1.0", "x-abca-runtime: [1, 2"),  # highest, but unparseable
+            _skill("1.1.0", "x-abca-runtime: [1, 2"),
         ]
         with pytest.raises(RegistryResolutionError) as exc:
             self._resolve(records, "registry://skill/acme/readme-helper@^1.0.0")
         assert exc.value.reason == "MALFORMED"
 
     def test_malformed_message_does_not_leak_descriptor_bytes(self):
-        # resolve() returns this reason on an open 422 (via the TS twin); the raw
-        # parser text — which can echo descriptor bytes — must stay off the message
-        # and only on __cause__ (#837 review).
         record = {
             "recordId": "rec-1.0.0",
             "name": "mcp_server/acme/pdf-tools",
@@ -469,7 +417,6 @@ class TestResolveFailClosed:
         assert "SUPERSECRETTOKEN" not in str(exc.value)
 
     def _resolve_payload(self, record_type: str, descriptors: object):
-        # The reader goes by the record type, so one name serves every payload.
         record = {
             "recordId": "rec-1.0.0",
             "name": "mcp_server/acme/pdf-tools",
@@ -504,7 +451,6 @@ class TestResolveFailClosed:
         assert exc.value.reason == "REMOVED"
 
     def test_get_record_returns_a_record_whose_descriptor_level_is_null(self):
-        # Parity with TS getRecord: a null payload makes an empty record, not a malformed one.
         record = {
             "recordId": "rec-1.0.0",
             "name": "cedar_policy_module/acme/permit",
@@ -539,7 +485,6 @@ class TestResolveFailClosed:
         assert asset.version == "1.1.0"
 
     def test_unknown_status_is_not_a_resolution_candidate(self):
-        # The service can add a status that this code has never seen.
         records = [
             self._mcp_record("1.0.0", "APPROVED", with_runtime=True),
             self._mcp_record("1.1.0", "SOME_FUTURE_STATUS", with_runtime=True),

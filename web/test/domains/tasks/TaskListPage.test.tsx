@@ -54,7 +54,6 @@ describe('TaskListPage', () => {
     renderRoute('/tasks?view=queued');
     expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.queued) })).toBeInTheDocument();
     expect(screen.getByText('(1)')).toBeInTheDocument();
-    // The list carries the name of the Overview counter that opens it.
     expect(screen.getByRole('heading', { name: /^Waiting to start/ })).toBeInTheDocument();
   });
 
@@ -114,7 +113,6 @@ describe('TaskListPage', () => {
   it('does not show a quiet task on ECS as "No updates lately": its agent reports once, at its start', async () => {
     renderRoute('/tasks?view=active');
     expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.ecs) })).toBeInTheDocument();
-    // Of the tasks under way, only the one on AgentCore that went quiet is flagged.
     expect(screen.getAllByText('No updates lately')).toHaveLength(1);
   });
 
@@ -142,13 +140,11 @@ describe('TaskListPage', () => {
   });
 
   it('flags a task that goes quiet while the list stays open and no record changes', async () => {
-    // The interval clock and the date are in the test's hands, and still run on their own for the waits of the test.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], shouldAdvanceTime: true });
     try {
       renderRoute('/tasks?view=active');
       expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.running) })).toBeInTheDocument();
       expect(screen.getAllByText('No updates lately')).toHaveLength(1);
-      // Five minutes on. The agent of the mock's running task reported 20 seconds before the list opened and not since.
       act(() => {
         vi.advanceTimersByTime(5 * 60_000);
       });

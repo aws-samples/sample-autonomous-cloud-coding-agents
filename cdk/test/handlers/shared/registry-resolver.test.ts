@@ -39,8 +39,7 @@ describe('registry resolver — parseVersion', () => {
     expect(parseVersion('latest')).toBeNull();
   });
   test('rejects a digit outside ASCII and a component too long to be a safe integer', () => {
-    // The reference for the Python mirror, where \d and int() accept U+0662 (ARABIC-INDIC
-    // DIGIT TWO) and int() refuses more than 4300 digits (agent/tests/test_registry_resolver.py).
+    // Python's `\d` and `int()` accept U+0662 (ARABIC-INDIC DIGIT TWO), and `int()` refuses more than 4300 digits.
     expect(parseVersion('1.1\u0662.0')).toBeNull();
     expect(parseVersion(`1.${'9'.repeat(4301)}.0`)).toBeNull();
   });
@@ -58,8 +57,6 @@ describe('registry resolver — compareVersions', () => {
     expect(compareVersions(V('1.4.1-rc.2'), V('1.4.1-rc.10'))).toBeLessThan(0);
   });
   test('numeric prerelease identifiers above 2^53 are compared exactly', () => {
-    // As JavaScript numbers 9007199254740993 and ...992 are the same value, so the two
-    // tied and the first one seen won. The Python resolver compares exact integers.
     expect(compareVersions(V('1.0.0-9007199254740993'), V('1.0.0-9007199254740992'))).toBeGreaterThan(0);
     expect(compareVersions(V('1.0.0-9007199254740992'), V('1.0.0-9007199254740993'))).toBeLessThan(0);
   });
@@ -73,8 +70,6 @@ describe('registry resolver — satisfies', () => {
     expect(satisfies(V('1.4.1-rc.1'), C('1.4.1-rc.1'))).toBe(true);
   });
   test('exact matches the version as written, not one that only compares equal', () => {
-    // The grammar admits a leading zero in a prerelease identifier, so rc.01 can be
-    // published beside rc.1, and the two rank the same (1 and 01 are the same number).
     expect(satisfies(V('1.0.0-rc.01'), C('1.0.0-rc.1'))).toBe(false);
     expect(satisfies(V('1.0.0-rc.1'), C('1.0.0-rc.1'))).toBe(true);
   });
@@ -108,7 +103,6 @@ describe('registry resolver — selectHighest', () => {
   test('skips unparseable candidate strings', () => {
     expect(selectHighest(['garbage', '1.0.0', 'also-bad'], C('^1.0.0'))).toBe('1.0.0');
   });
-  // The Python resolver has to pick the same winners: agent/tests/test_registry_resolver.py.
   test('an exact pin returns the pinned version, whatever the order of the candidates', () => {
     expect(selectHighest(['1.0.0-rc.01', '1.0.0-rc.1'], C('1.0.0-rc.1'))).toBe('1.0.0-rc.1');
     expect(selectHighest(['1.0.0-rc.1', '1.0.0-rc.01'], C('1.0.0-rc.01'))).toBe('1.0.0-rc.01');

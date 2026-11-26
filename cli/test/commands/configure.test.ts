@@ -80,7 +80,6 @@ describe('configure command', () => {
       '--client-id', 'client-123',
     ]);
 
-    // Update only --region; other fields should persist.
     const cmd2 = makeConfigureCommand();
     await cmd2.parseAsync(['node', 'test', '--region', 'us-west-1']);
 
@@ -99,14 +98,11 @@ describe('configure command', () => {
       cmd.parseAsync([
         'node', 'test',
         '--api-url', 'https://api.example.com',
-        // missing --region, --user-pool-id, --client-id
       ]),
     ).rejects.toThrow(/Missing required configuration/);
   });
 
   test('--from-bundle decodes a base64 bundle and writes config in one shot', async () => {
-    // Mirrors what `bgagent admin invite-user` would print: the four config
-    // fields encoded as base64 JSON.
     const payload = {
       api_url: 'https://api.example.com',
       region: 'us-east-1',
@@ -157,7 +153,6 @@ describe('configure command', () => {
     );
     const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'));
     expect(config.client_id).toBe('client-from-stack');
-    // Feature guards fall back to this for subcommands without --stack-name.
     expect(config.stack_name).toBe('backgroundagent-dev');
     expect(consoleSpy).toHaveBeenCalledWith('Configuration saved.');
   });
@@ -181,7 +176,6 @@ describe('configure command', () => {
     fs.writeFileSync(credentials, '{}');
     await makeConfigureCommand().parseAsync(['node', 'test', '--region', 'us-west-2']);
     expect(fs.existsSync(credentials)).toBe(true);
-    // The next command would send the first pool's token to the API of the other one.
     await makeConfigureCommand().parseAsync(['node', 'test', '--user-pool-id', 'other-pool']);
     expect(fs.existsSync(credentials)).toBe(false);
   });
@@ -228,7 +222,6 @@ describe('configure command', () => {
   });
 
   test('no flags with complete existing config → reports "No configuration changes" without re-saving', async () => {
-    // Seed a complete config.
     const cmd1 = makeConfigureCommand();
     await cmd1.parseAsync([
       'node', 'test',
@@ -239,13 +232,10 @@ describe('configure command', () => {
     ]);
     const initialMtime = fs.statSync(path.join(tmpDir, 'config.json')).mtimeMs;
 
-    // Run configure again with no flags.
     const cmd2 = makeConfigureCommand();
     await cmd2.parseAsync(['node', 'test']);
 
-    // File was not rewritten.
     expect(fs.statSync(path.join(tmpDir, 'config.json')).mtimeMs).toBe(initialMtime);
-    // User-facing message is honest about the no-op.
     expect(consoleSpy).toHaveBeenCalledWith('No configuration changes — all flags were omitted.');
     expect(consoleSpy).not.toHaveBeenLastCalledWith('Configuration saved.');
   });

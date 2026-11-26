@@ -17,55 +17,20 @@
  *  SOFTWARE.
  */
 
-/**
- * Shared Lambda-side Cedar policy parsing library (design §15.6, §15.2
- * task 11). Wraps `@cedar-policy/cedar-wasm` so handlers that need to
- * inspect blueprint rules (`create-task`, `get-policies`) and handlers
- * that need to evaluate a tool use (future `evaluate` path) share one
- * parser.
- *
- * The matching ``cedarpy`` surface on the agent side is
- * ``agent/src/policy.py``; the cross-engine parity contract
- * (``contracts/cedar-parity/*.json`` + IMPL-29) guarantees the two
- * sides agree on decisions. This module re-derives the key
- * normalization here so a bump in ``cedar-wasm`` that renames
- * ``diagnostics.reason`` is caught by the parity tests before it
- * ships.
- */
-
 import type { Severity } from './types';
-// cedar-wasm is a CommonJS package; the nodejs build ships a default
-// export that behaves like a module namespace. eslint's
-// ``@typescript-eslint/no-require-imports`` is disabled here because
-// the wasm package's published types do not expose a working ESM entry
-// under Node Lambda.
+// cedar-wasm's `nodejs` build is CommonJS, and its published types expose no working ESM entry under Node Lambda.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const cedar = require('@cedar-policy/cedar-wasm/nodejs');
 
 /**
- * Parsed rule metadata recovered from a Cedar policy set. Mirrors the
- * five HITL annotations locked in by the Chunk 1 spike (§15.6):
+ * Rule metadata recovered from a Cedar policy set.
  *
- * - `tier`                 — "hard" | "soft" (required; validated
- *                            separately so a missing tier fails loud).
- * - `rule_id`              — author-chosen ID, unique within the tier.
- * - `severity`             — low/medium/high (soft only; hard rules
- *                            omit).
- * - `approval_timeout_s`   — per-rule override, clamped to the floor
- *                            elsewhere.
- * - `category`             — free-form taxonomy (destructive,
- *                            filesystem, ...).
- *
- * `summary` is a human-readable blurb derived from the optional
- * `@summary` annotation; when absent it falls back to a best-effort
- * render of the policy's `when` clause.
- *
- * `policy_id` is the positional ID cedar-wasm assigned on parse
- * (`policy0`, `policy1`, ...). Used to correlate
- * `diagnostics.reason[]` back to `rule_id` on an evaluation path; not
- * useful outside this module.
+ * - `policy_id`: the positional ID cedar-wasm assigned on parse (`policy0`, `policy1`, ...).
+ * - `rule_id`: author-chosen ID, unique within the tier.
+ * - `severity`: soft rules only.
+ * - `approval_timeout_s`: per-rule override, in seconds.
+ * - `summary`: the `@summary` annotation, or a rendering of the policy's `when` clause.
  */
-
 export interface ParsedRule {
   readonly policy_id: string;
   readonly rule_id: string;
@@ -76,7 +41,6 @@ export interface ParsedRule {
   readonly summary: string;
 }
 
-/** Error raised when the Cedar parser rejects the policy text. */
 export class CedarPolicyParseError extends Error {
   constructor(
     message: string,
@@ -104,11 +68,7 @@ interface CedarPolicyJson {
 }
 
 /**
- * Parse a Cedar policy set into `ParsedRule[]`, preserving the five
- * annotations §15.2 task 4 guarantees are on every soft-deny rule.
- *
- * Order is preserved so `policy_id === "policyN"` maps back to
- * `rules[N]` (cedar-wasm assigns positional IDs in parse order).
+ * Parse a Cedar policy set into `ParsedRule[]`, in parse order.
  *
  * @param policiesText - raw Cedar policy text. An empty built-in set returns `[]`.
  * @param nextLegacyRuleId - pass when parsing one Blueprint entry. A single
@@ -151,11 +111,6 @@ export function parseRules(policiesText: string, nextLegacyRuleId?: () => string
     const tier = annotations.tier;
     const rule_id = annotations.rule_id;
 
-    // `base_permit` is an intentional unannotated catch-all on both
-    // tiers (see agent/policies/*.cedar comments). cedar engines need
-    // it to return ALLOW for non-matching requests rather than
-    // default-deny. We skip it from ParsedRule[] so callers only see
-    // user-facing rule entries.
     if (!nextLegacyRuleId && rule_id === 'base_permit' && tier === undefined) {
       return;
     }
@@ -192,9 +147,6 @@ export function parseRules(policiesText: string, nextLegacyRuleId?: () => string
 
 /**
  * True when `ruleId` resolves to a hard-deny rule in `policiesText`.
- *
- * Used by `create-task` to reject `rule:<id>` pre-approval scopes that
- * point at hard-deny rules (§7.3 step 4).
  */
 export function isHardDenyRule(policiesText: string, ruleId: string): boolean {
   return parseRules(policiesText).some(
@@ -204,9 +156,6 @@ export function isHardDenyRule(policiesText: string, ruleId: string): boolean {
 
 /**
  * True when `ruleId` exists in the parsed `rules` regardless of tier.
- *
- * Callers do their own `tier === 'soft'` check as needed; surfaced as
- * a helper so the common "rule exists?" check does not re-parse.
  */
 export function isValidRuleId(rules: readonly ParsedRule[], ruleId: string): boolean {
   return rules.some((r) => r.rule_id === ruleId);
@@ -215,8 +164,7 @@ export function isValidRuleId(rules: readonly ParsedRule[], ruleId: string): boo
 /**
  * Convert a list of cedar-wasm matching policy IDs (from
  * `diagnostics.reason`) to the corresponding `rule_id[]`. IDs that do
- * not resolve are skipped silently — the parity tests catch any
- * structural disagreement between the two engines.
+ * not resolve are skipped.
  */
 export function matchingRuleIds(
   rules: readonly ParsedRule[],
@@ -237,14 +185,8 @@ export function matchingRuleIds(
 }
 
 /**
- * Bundle the built-in hard + soft policies with a blueprint override.
- *
- * Mirrors the order `PolicyEngine.__init__` uses on the agent side so
- * both engines see the same concatenation. The raw strings feed
- * directly into `parseRules` / `cedar.isAuthorized`; returning the
- * concatenated text (not the parsed rules) gives the caller the option
- * to pass the text to `cedar.isAuthorized` without a second parse
- * round-trip.
+ * Concatenate the built-in policies with a blueprint override, built-in first:
+ * the order `PolicyEngine.__init__` uses on the agent side.
  *
  * Built-in text is trusted and does not count against the 64 KB
  * blueprint cap; callers enforce the cap on the blueprint text
@@ -279,13 +221,6 @@ function coerceTimeout(value: string | undefined): number | undefined {
   return parsed;
 }
 
-/**
- * Best-effort summary from a Cedar `when` clause when `@summary` is
- * absent. cedar-wasm returns the conditions as a tagged union JSON
- * tree; we stringify the first expression and cap at ~160 chars so
- * the `GET /v1/repos/{repo}/policies` response stays terse.
- */
-/** Cedar summary truncation length when stringifying `when` conditions. */
 const CEDAR_SUMMARY_MAX_LENGTH = 160;
 const CEDAR_SUMMARY_ELLIPSIS_LENGTH = 3;
 const CEDAR_SUMMARY_TRUNCATE_LENGTH = CEDAR_SUMMARY_MAX_LENGTH - CEDAR_SUMMARY_ELLIPSIS_LENGTH;

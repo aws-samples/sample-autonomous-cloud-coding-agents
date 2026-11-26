@@ -17,20 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * What the CLI concludes about the platform GitHub token secret of a stack
- * where nobody has stored a token, against an AWS Emulator (ADR-013 Tier 2a).
- *
- * A mocked test decides for itself what such a secret holds. Here the value is
- * the one CloudFormation generates: the secret is declared the way `aws-cdk-lib`
- * synthesizes `new secretsmanager.Secret(this, 'GitHubTokenSecret', { description })`
- * in `cdk/src/stacks/agent.ts`, with `GenerateSecretString: {}`, which yields a
- * random password and not a placeholder the CLI could recognize.
- *
- * Named `*.emulator.ts`; runs only through `jest.emulator.config.js`
- * (`mise run test:integration`).
- */
-
 import {
   CloudFormationClient,
   CreateStackCommand,
@@ -43,7 +29,6 @@ import { makeClient } from '../../src/ua';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const SETUP_TIMEOUT_MS = 30_000;
-/** Shorter than the hook, so a stack that never settles reports itself instead of a bare hook timeout. */
 const STACK_WAIT_MS = 20_000;
 const POLL_INTERVAL_MS = 50;
 
@@ -54,6 +39,8 @@ const STACK_TEMPLATE = {
       Type: 'AWS::SecretsManager::Secret',
       Properties: {
         Description: 'GitHub personal access token for the background agent',
+        // What aws-cdk-lib synthesizes for a Secret without a value. CloudFormation generates a
+        // random password for it, not a placeholder the CLI could recognize.
         GenerateSecretString: {},
       },
     },
@@ -83,7 +70,6 @@ describe('the platform GitHub token secret of a new stack', () => {
     if (stack.StackStatus !== 'CREATE_COMPLETE') {
       throw new Error(`Fixture stack ${stackName} ended in ${stack.StackStatus}: ${stack.StackStatusReason ?? 'no reason given'}`);
     }
-    // The secret `bgagent github set-token` writes to when no flag is given.
     ({ secretArn } = await resolveGithubTokenSecretArn({ region: REGION, stackName }));
   }, SETUP_TIMEOUT_MS);
 
@@ -96,7 +82,6 @@ describe('the platform GitHub token secret of a new stack', () => {
   });
 
   test('it is configured once a token is stored', async () => {
-    // Built with repeat() so that no token-shaped literal sits in the source.
     await putGithubToken(REGION, secretArn, `ghp_${'a1B2'.repeat(9)}`);
 
     await expect(isGithubTokenConfigured(REGION, secretArn)).resolves.toBe(true);

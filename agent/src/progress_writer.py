@@ -1,32 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Write structured progress events to DynamoDB TaskEventsTable.
-
-Follows the same patterns as ``_TrajectoryWriter`` in ``entrypoint.py``:
-  - Lazy boto3 client initialization
-  - Best-effort, fail-open (never crash the agent)
-  - Circuit breaker: disable after 3 consecutive *transient* DDB write
-    failures (permanent errors like
-    ``ValidationException`` no longer trip the breaker).
-  - Reads ``TASK_EVENTS_TABLE_NAME`` from environment (already set on AgentCore Runtime)
-
-Each event is a DDB item with:
-  - ``task_id`` (PK)
-  - ``event_id`` (SK, ULID-compatible — time-sortable unique ID)
-  - ``event_type``
-  - ``metadata`` (Map)
-  - ``timestamp`` (ISO 8601)
-  - ``ttl`` (90-day, matching task retention)
-
-Circuit-breaker state is **shared across all writer instances for the same
-task** (shared circuit-breaker state).  Runner-level (turn/tool events)
-and pipeline-level (milestones) writers are two ``_ProgressWriter``
-instances with the same ``task_id``; without shared state a throttling burst
-on one would let the other keep writing, producing visible gaps in the
-event stream.  See :class:`_SharedCircuitBreaker` for the mechanism.
-"""
-
 from __future__ import annotations
 
 import json
@@ -40,30 +14,17 @@ from typing import Literal
 
 from observability import current_otel_trace_id
 
-# Preview field cap defaults (design §10.1):
-#   - 200 chars for normal tasks — small DDB rows, cheap watch-stream bytes.
-#   - 4096 chars (4 KB) for ``--trace`` opt-in tasks — full enough to
-#     capture the critical lines of a tool invocation / model response
-#     without blowing through DDB's per-item byte budget.
 _PREVIEW_MAX_LEN = 200
 _PREVIEW_MAX_LEN_TRACE = 4096
 
-# 90 days in seconds — matches task retention TTL
 _TTL_SECONDS = 90 * 24 * 60 * 60
 
-# Crockford's Base32 alphabet for ULID encoding
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 
 def _generate_ulid() -> str:
-    """Generate a ULID-compatible string using only the standard library.
-
-    Format: 10-char timestamp (ms since epoch) + 16-char random, both in
-    Crockford's Base32.  Lexicographically sortable by time.
-    """
     timestamp_ms = int(time.time() * 1000)
 
-    # Encode 48-bit timestamp into 10 Base32 chars (big-endian)
     t_chars = []
     t = timestamp_ms
     for _ in range(10):
@@ -71,7 +32,6 @@ def _generate_ulid() -> str:
         t >>= 5
     t_part = "".join(reversed(t_chars))
 
-    # 80 bits of randomness → 16 Base32 chars
     r = random.getrandbits(80)
     r_chars = []
     for _ in range(16):
@@ -83,33 +43,12 @@ def _generate_ulid() -> str:
 
 
 def _truncate_preview(value: str | None, max_len: int = _PREVIEW_MAX_LEN) -> str:
-    """Truncate a string to *max_len* chars for DDB preview fields."""
     if not value:
         return ""
     if len(value) <= max_len:
         return value
     return value[:max_len] + "..."
 
-
-# ---------------------------------------------------------------------------
-# Blocker taxonomy + canonical reason contract (#251, design §13)
-# ---------------------------------------------------------------------------
-#
-# THE single source of truth for the closed blocker-kind set and the canonical
-# terminal-reason string (decision D). Three layers reference this contract:
-#   1. the ``agent_blocked`` progress event metadata (``write_agent_blocked``);
-#   2. the agent's ``TaskResult.error`` carry-path — a terminal blocker sets
-#      ``error`` to ``format_blocker_reason(...)`` so ``failTask`` persists it
-#      verbatim;
-#   3. the CDK error classifier (``cdk/.../error-classifier.ts``), whose regex
-#      keys on the ``BLOCKED[<kind>]`` prefix produced here.
-#
-# Keep this set and ``error-classifier.ts`` + ``docs/design/CEDAR_HITL_GATES.md``
-# §13 in lockstep — a new kind means a new classifier pattern and a doc row.
-#
-# ``auth_failure`` and ``unknown_environmental`` are reserved: they are valid
-# kinds so callers/classifier can handle them without a follow-up enum change,
-# but have no v1 detection site.
 
 BlockerKind = Literal[
     "missing_secret",
@@ -133,15 +72,14 @@ BLOCKER_KINDS: frozenset[str] = frozenset(
 
 
 def format_blocker_reason(kind: str, detail: str, resource: str | None = None) -> str:
-    """Build the canonical terminal-reason string for a blocker (decision D).
+    """Build the canonical terminal-reason string for a blocker.
 
     Format: ``BLOCKED[<kind>]: <detail>`` with `` (resource: <resource>)``
     appended when *resource* is set. This exact shape is what the CDK
     classifier regex matches, so it must not drift.
 
     Unknown *kind* values fall back to ``unknown_environmental`` rather than
-    raising — a blocker reason must always be constructible on the failure
-    path, never itself the source of a new failure.
+    raising.
     """
     safe_kind = kind if kind in BLOCKER_KINDS else "unknown_environmental"
     reason = f"BLOCKED[{safe_kind}]: {detail}"
@@ -150,25 +88,7 @@ def format_blocker_reason(kind: str, detail: str, resource: str | None = None) -
     return reason
 
 
-# ---------------------------------------------------------------------------
-# Error classification
-# ---------------------------------------------------------------------------
-
-# DDB error codes that are NOT recoverable by retry — retrying will keep
-# failing the same way forever, so letting them increment ``_failure_count``
-# would eventually trip the breaker and silence the entire progress stream
-# for this task.  Examples seen in practice:
-#   - ``ValidationException`` — e.g. a trace-heavy event pushes the item
-#     past the 400 KB DDB limit.  Subsequent lighter events would succeed,
-#     but today's bare ``except Exception`` counter already tripped.
-#   - ``ItemCollectionSizeLimitExceededException`` — local-index partition
-#     collection exceeded 10 GB; same story.
-#   - ``AccessDeniedException`` / ``UnauthorizedOperation`` — IAM misconfig
-#     at deploy time; retry is futile and the breaker should flip
-#     *immediately* so we don't waste three events worth of noise finding
-#     this out.
-#   - ``ResourceNotFoundException`` — table genuinely does not exist in
-#     this deploy.  Log loudly and disable.
+# DynamoDB rejects an item above 400 KB with ValidationException.
 _PERMANENT_DDB_ERROR_CODES: frozenset[str] = frozenset(
     {
         "ValidationException",
@@ -179,10 +99,6 @@ _PERMANENT_DDB_ERROR_CODES: frozenset[str] = frozenset(
     }
 )
 
-# DDB error codes that ARE expected to self-heal (throughput throttling,
-# control-plane blips, network-level timeouts).  These feed the normal
-# circuit-breaker counter — three in a row and we disable, matching the
-# original design.
 _TRANSIENT_DDB_ERROR_CODES: frozenset[str] = frozenset(
     {
         "ProvisionedThroughputExceededException",
@@ -193,10 +109,6 @@ _TRANSIENT_DDB_ERROR_CODES: frozenset[str] = frozenset(
     }
 )
 
-# Non-``ClientError`` transient types — matched on class name because
-# ``botocore.exceptions`` may not be importable in every environment (the
-# writer must not crash the agent if boto3 is missing, see ``ImportError``
-# handling in ``_put_event``).
 _TRANSIENT_NETWORK_EXC_NAMES: frozenset[str] = frozenset(
     {
         "ConnectionError",
@@ -204,37 +116,12 @@ _TRANSIENT_NETWORK_EXC_NAMES: frozenset[str] = frozenset(
         "ReadTimeoutError",
         "ConnectTimeoutError",
         "ConnectionClosedError",
-        # boto3's retry wrapper surface
         "ClientConnectionError",
     }
 )
 
 
 def _classify_ddb_error(exc: BaseException) -> Literal["permanent", "transient", "unknown"]:
-    """Classify a DDB-layer exception for circuit-breaker accounting.
-
-    Rules:
-
-    - ``ClientError`` with an AWS error code we recognise as permanent
-      (schema/size/IAM/missing-table) → ``"permanent"``.  Drop the
-      individual event, do NOT trip the breaker — the next event may be a
-      smaller payload that succeeds just fine.
-    - ``ClientError`` with a recognised transient code, OR a network-layer
-      exception class we know (``EndpointConnectionError`` et al.) →
-      ``"transient"``.  Feed the normal counter.
-    - Anything else → ``"unknown"``.  Default to transient-style accounting
-      (increment the counter) but log at a louder ERROR level so operators
-      can add the new code to the permanent/transient table next release.
-      This is intentionally conservative: instant-disable on unknown errors
-      would over-correct from today's bare-except behaviour and risk a new
-      botocore release silencing the stream on benign retryable codes.
-
-    We identify ``ClientError`` structurally (duck-typed via
-    ``exc.response["Error"]["Code"]``) rather than ``isinstance`` so the
-    classifier remains importable in environments where ``botocore`` is
-    missing (e.g. pure-python unit tests).
-    """
-    # ClientError: response is a dict with a nested Error.Code string.
     response = getattr(exc, "response", None)
     if isinstance(response, dict):
         error_block = response.get("Error") or {}
@@ -244,10 +131,7 @@ def _classify_ddb_error(exc: BaseException) -> Literal["permanent", "transient",
                 return "permanent"
             if code in _TRANSIENT_DDB_ERROR_CODES:
                 return "transient"
-            # Unknown AWS error code — fall through to class-name match,
-            # then to "unknown" default.
 
-    # Non-ClientError: match by class name for network-layer exceptions.
     exc_name = type(exc).__name__
     if exc_name in _TRANSIENT_NETWORK_EXC_NAMES:
         return "transient"
@@ -255,44 +139,9 @@ def _classify_ddb_error(exc: BaseException) -> Literal["permanent", "transient",
     return "unknown"
 
 
-# ---------------------------------------------------------------------------
-# Shared circuit-breaker state
-# ---------------------------------------------------------------------------
-
-
 class _SharedCircuitBreaker:
-    """Process-wide circuit-breaker state keyed by ``task_id``.
-
-    Both the runner (turn/tool events) and pipeline (milestones) create
-    their own ``_ProgressWriter`` instance.  Before this class each writer
-    kept its own ``_failure_count`` / ``_disabled`` flag, so a throttling
-    burst would trip one writer while the other kept firing — producing a
-    visibly half-alive event stream (e.g. milestones arriving after all
-    turn events went silent).
-
-    The contract is now: **one task's stream is either healthy or
-    disabled, never half-alive.**  Every writer for the same ``task_id``
-    reads/writes the same counter, and the first one to hit
-    ``_MAX_FAILURES`` disables the stream for the whole task.
-
-    State resets on fresh ``task_id`` (new task, new state).  A test-only
-    reset helper (:func:`_reset_circuit_breakers`) clears every entry so
-    one test's tripped breaker does not leak into the next.
-
-    The empty-string sentinel ``"unknown"`` that ``runner.py`` falls back
-    to (``config.task_id or "unknown"``) is treated as a plain key here —
-    writers with a real ``task_id`` never collide with it, and two
-    ``"unknown"`` writers running in the same process would legitimately
-    share state (they can't be distinguished anyway).
-    """
-
     def __init__(self) -> None:
-        # task_id -> (failure_count, disabled)
         self._state: dict[str, dict[str, int | bool]] = {}
-        # A single lock for the whole map is plenty — write contention on
-        # this path is bounded by the DDB write rate (handful per second),
-        # so coarse-grained locking has no measurable cost and keeps the
-        # invariants (read-modify-write of failure_count) simple.
         self._lock = threading.Lock()
 
     def is_disabled(self, task_id: str) -> bool:
@@ -300,19 +149,11 @@ class _SharedCircuitBreaker:
             return bool(self._state.get(task_id, {}).get("disabled", False))
 
     def disable(self, task_id: str) -> None:
-        """Flip the breaker open for this ``task_id`` immediately.
-
-        Used by the permanent-error fast path (``AccessDeniedException``,
-        ``ResourceNotFoundException``) where retry has zero chance of
-        helping and we would rather silence the stream than spam
-        CloudWatch with three copies of the same IAM error.
-        """
         with self._lock:
             entry = self._state.setdefault(task_id, {"failure_count": 0, "disabled": False})
             entry["disabled"] = True
 
     def record_failure(self, task_id: str, max_failures: int) -> tuple[int, bool]:
-        """Increment the counter; return (new_count, now_disabled)."""
         with self._lock:
             entry = self._state.setdefault(task_id, {"failure_count": 0, "disabled": False})
             entry["failure_count"] = int(entry["failure_count"]) + 1
@@ -321,58 +162,21 @@ class _SharedCircuitBreaker:
             return int(entry["failure_count"]), bool(entry["disabled"])
 
     def record_success(self, task_id: str) -> None:
-        """Reset the failure counter on a successful write.
-
-        Does NOT clear ``disabled`` — once the breaker is open we stay
-        open for the rest of the task.  Re-enabling mid-task would let a
-        single flaky minute burn through the budget repeatedly; better to
-        accept a degraded stream than oscillate.
-        """
         with self._lock:
             entry = self._state.get(task_id)
             if entry is not None:
                 entry["failure_count"] = 0
 
 
-# Module-level singleton — shared across every ``_ProgressWriter`` in the
-# process.  Tests reset it via :func:`_reset_circuit_breakers`.
 _CIRCUIT_BREAKERS = _SharedCircuitBreaker()
 
 
 def _reset_circuit_breakers() -> None:
-    """Test-only helper: clear all shared circuit-breaker state.
-
-    Pinned here (not hidden behind ``_`` alone) so future contributors who
-    add tests involving multiple writers remember to reset between tests.
-    Forgetting to reset means a prior test's tripped breaker silently
-    disables the writer under test — the symptom is "put_item never
-    called" with no other signal.
-    """
     global _CIRCUIT_BREAKERS
     _CIRCUIT_BREAKERS = _SharedCircuitBreaker()
 
 
-# ---------------------------------------------------------------------------
-# Progress writer
-# ---------------------------------------------------------------------------
-
-
 class _ProgressWriter:
-    """Write AG-UI-style progress events to the existing DynamoDB TaskEventsTable.
-
-    Ordinary event methods fail open: a DDB write failure is logged but never raises. After
-    ``_MAX_FAILURES`` consecutive *transient* failures the task's stream
-    is permanently disabled (circuit breaker).  Permanent errors
-    (``ValidationException`` et al.) drop the individual event without
-    tripping the breaker — see :func:`_classify_ddb_error`.
-
-    Circuit-breaker state lives in :data:`_CIRCUIT_BREAKERS` and is
-    shared across every writer instance for the same ``task_id``.  Two
-    writers (runner + pipeline) observing the same task therefore agree
-    on whether the stream is healthy; there is no "half-alive" state
-    where one writer is still emitting and the other is silent.
-    """
-
     _MAX_FAILURES = 3
 
     def __init__(
@@ -383,25 +187,11 @@ class _ProgressWriter:
         repo: str | None = None,
     ) -> None:
         self._task_id = task_id
-        # Correlation envelope (#245): stamped on every event so the agent-side
-        # event stream joins to orchestrator logs and the X-Ray trace. ``repo``
-        # is None for repo-less workflows (#248 Phase 3).
         self._user_id = user_id
         self._repo = repo
         self._table_name = os.environ.get("TASK_EVENTS_TABLE_NAME")
         self._table = None
-        # Per-instance preview cap — design §10.1. ``trace=True`` raises
-        # the cap from 200 chars to 4 KB for debug captures.
         self._preview_max_len = _PREVIEW_MAX_LEN_TRACE if trace else _PREVIEW_MAX_LEN
-
-    # ------------------------------------------------------------------
-    # Circuit-breaker proxies (finding #8): keep the historical
-    # ``writer._disabled`` / ``writer._failure_count`` surface working as
-    # read-only attributes.  Callers in ``hooks.py`` and tests inspect
-    # these directly — see ``hooks._try_progress`` which reads
-    # ``getattr(progress, "_disabled", False)``.  We back them with the
-    # shared state so external readers see the consolidated view.
-    # ------------------------------------------------------------------
 
     @property
     def _disabled(self) -> bool:
@@ -409,10 +199,6 @@ class _ProgressWriter:
 
     @_disabled.setter
     def _disabled(self, value: bool) -> None:
-        # The only legitimate transition is False -> True (flip the
-        # breaker open).  We honour that for back-compat with existing
-        # callers, and ignore attempts to re-enable mid-task to match
-        # ``record_success`` semantics.
         if value:
             _CIRCUIT_BREAKERS.disable(self._task_id)
 
@@ -423,9 +209,6 @@ class _ProgressWriter:
 
     @_failure_count.setter
     def _failure_count(self, value: int) -> None:
-        # Test seam: allow direct writes so legacy tests that assign
-        # ``writer._failure_count = 0`` keep working.  Production code
-        # should use ``record_success`` / ``record_failure`` instead.
         with _CIRCUIT_BREAKERS._lock:
             entry = _CIRCUIT_BREAKERS._state.setdefault(
                 self._task_id, {"failure_count": 0, "disabled": False}
@@ -433,13 +216,9 @@ class _ProgressWriter:
             entry["failure_count"] = int(value)
 
     def _preview(self, value: str | None) -> str:
-        """Truncate *value* to the instance's preview cap."""
         return _truncate_preview(value, self._preview_max_len)
 
-    # -- lazy init -------------------------------------------------------------
-
     def _ensure_table(self):
-        """Lazily create the DynamoDB Table resource."""
         if self._table is not None:
             return
         if not self._table_name:
@@ -452,17 +231,13 @@ class _ProgressWriter:
         dynamodb = tenant_resource("dynamodb", region_name=region)
         self._table = dynamodb.Table(self._table_name)
 
-    # -- core write ------------------------------------------------------------
-
     def write_microvm_checkpoint(
         self, *, metadata: dict, condition_checks: list[dict], client
     ) -> None:
         """Atomically acknowledge a pause marker and its task/gate preconditions.
 
-        Called only by the lifecycle checkpoint callback after activity drains.
         This deliberately bypasses the best-effort event path: absent tables,
         disabled progress, failed conditions and uncertain writes must raise.
-        A saved marker records a safe point, not proof that AWS froze the VM.
         """
         if not self._table_name or self._disabled:
             raise RuntimeError("Checkpoint progress table is unavailable")
@@ -519,22 +294,6 @@ class _ProgressWriter:
             )
 
     def _put_event_best_effort(self, event_type: str, metadata: dict) -> bool:  # noqa: C901 -- 16 when the ceiling of 15 was set; must not grow
-        """Write a single progress event item to DynamoDB.
-
-        Error handling splits three ways:
-
-        - **ImportError** (no boto3 on the path) — disable the writer
-          immediately, this is unrecoverable.
-        - **Permanent DDB errors** (``ValidationException``, missing
-          table, IAM denial) — drop this event, do NOT increment the
-          shared failure counter.  ``AccessDeniedException`` /
-          ``ResourceNotFoundException`` additionally flip the breaker
-          open immediately because retrying is pointless.
-        - **Transient DDB errors** (throttling, network blips) — feed the
-          shared circuit-breaker counter; trip at ``_MAX_FAILURES``.
-        - **Unknown exceptions** — increment like transient but log at a
-          louder ERROR level so unexpected codes surface in reviews.
-        """
         if not self._table_name or self._disabled:
             return False
         try:
@@ -544,10 +303,6 @@ class _ProgressWriter:
                 return False
 
             now = datetime.now(UTC)
-            # Correlation envelope (#245): trace_id is read per-event from the
-            # active span (it may be None early, before the root span opens);
-            # user_id/repo are stamped when known. All are omitted when
-            # empty/None so the item shape stays stable for consumers.
             trace_id = current_otel_trace_id()
             item = {
                 "task_id": self._task_id,
@@ -568,10 +323,6 @@ class _ProgressWriter:
                 item["trace_id"] = trace_id
             self._table.put_item(Item=item)
 
-            # Success: reset the shared failure counter.  We do NOT flip
-            # ``disabled`` back to False — a tripped breaker stays open
-            # for the rest of the task (see ``_SharedCircuitBreaker``
-            # docstring).
             _CIRCUIT_BREAKERS.record_success(self._task_id)
             return True
 
@@ -583,12 +334,6 @@ class _ProgressWriter:
             exc_type = type(e).__name__
 
             if classification == "permanent":
-                # Permanent errors: drop the event, do NOT increment the
-                # shared counter.  The next (possibly smaller / different)
-                # event may well succeed.  However a handful of permanent
-                # codes (IAM denial, missing table) genuinely mean the
-                # whole stream is dead — flip the breaker for those so we
-                # don't spam CloudWatch with repeats.
                 response = getattr(e, "response", None)
                 code: str | None = None
                 if isinstance(response, dict):
@@ -603,9 +348,6 @@ class _ProgressWriter:
                     "ResourceNotFoundException",
                 }
                 if code in permanent_codes:
-                    # Immediate disable: retrying an IAM / missing-table
-                    # error will only produce more copies of the same
-                    # error.  Loud log so operators notice.
                     self._disabled = True
                     print(
                         f"[progress] DDB write failed with permanent error "
@@ -614,8 +356,6 @@ class _ProgressWriter:
                         flush=True,
                     )
                 else:
-                    # Event-level drop (size/schema violation).  Keep the
-                    # stream alive.
                     print(
                         f"[progress] dropped event due to permanent DDB error "
                         f"({exc_type}: {code}); breaker NOT incremented: {e}",
@@ -642,8 +382,6 @@ class _ProgressWriter:
                     )
                 return False
 
-            # Unknown: count like transient but flag loudly so operators
-            # can add the new code to the classifier next release.
             new_count, now_disabled = _CIRCUIT_BREAKERS.record_failure(
                 self._task_id, self._MAX_FAILURES
             )
@@ -663,8 +401,6 @@ class _ProgressWriter:
                 )
         return False
 
-    # -- public event methods --------------------------------------------------
-
     def write_agent_turn(
         self,
         turn: int,
@@ -673,7 +409,6 @@ class _ProgressWriter:
         text: str,
         tool_calls_count: int,
     ) -> None:
-        """Emit an ``agent_turn`` event after each AssistantMessage."""
         self._put_event(
             "agent_turn",
             {
@@ -691,7 +426,6 @@ class _ProgressWriter:
         tool_input: str,
         turn: int,
     ) -> None:
-        """Emit an ``agent_tool_call`` event after each ToolUseBlock."""
         self._put_event(
             "agent_tool_call",
             {
@@ -708,7 +442,6 @@ class _ProgressWriter:
         content: str,
         turn: int,
     ) -> None:
-        """Emit an ``agent_tool_result`` event after each ToolResultBlock."""
         self._put_event(
             "agent_tool_result",
             {
@@ -720,7 +453,6 @@ class _ProgressWriter:
         )
 
     def write_agent_milestone(self, milestone: str, details: str = "") -> None:
-        """Emit an ``agent_milestone`` event at key points."""
         self._put_event(
             "agent_milestone",
             {
@@ -736,7 +468,6 @@ class _ProgressWriter:
         output_tokens: int,
         turn: int,
     ) -> None:
-        """Emit an ``agent_cost_update`` event after each ResultMessage."""
         self._put_event(
             "agent_cost_update",
             {
@@ -748,7 +479,6 @@ class _ProgressWriter:
         )
 
     def write_agent_error(self, error_type: str, message: str) -> None:
-        """Emit an ``agent_error`` event on errors during execution."""
         self._put_event(
             "agent_error",
             {
@@ -766,16 +496,11 @@ class _ProgressWriter:
         retryable: bool,
         resource: str | None = None,
     ) -> None:
-        """Emit an ``agent_blocked`` event for an environmental fault (#251, §13).
+        """Emit an ``agent_blocked`` event for an environmental fault.
 
-        Distinct event type (not an ``agent_milestone`` variant) so consumers
-        get a closed taxonomy and clean ⛔ rendering. ``kind`` is one of
-        :data:`BLOCKER_KINDS`; an unrecognised value is normalised to
-        ``unknown_environmental`` (same fallback as
-        :func:`format_blocker_reason`) so a mis-typed kind can never drop the
-        event. ``detail``/``remediation_hint`` are routed through
-        :meth:`_preview` for truncation; the circuit breaker is automatic via
-        :meth:`_put_event`.
+        ``kind`` is one of :data:`BLOCKER_KINDS`; an unrecognised value is
+        normalised to ``unknown_environmental``. ``detail`` and
+        ``remediation_hint`` are truncated to the preview cap.
         """
         metadata: dict = {
             "kind": kind if kind in BLOCKER_KINDS else "unknown_environmental",
@@ -787,35 +512,12 @@ class _ProgressWriter:
             metadata["resource"] = resource
         self._put_event("agent_blocked", metadata)
 
-    # -- approval-gate milestones (§11.1, Chunk 3) -----------------------------
-    #
-    # Each helper is a thin wrapper over ``_put_event("agent_milestone", ...)``
-    # carrying the structured metadata shape documented in §11.1. Centralizing
-    # the milestone name + metadata keys here keeps the agent/Lambda/CLI
-    # contract consistent — every approval_* producer goes through a named
-    # method rather than stringly-typed ``write_agent_milestone`` calls.
-    #
-    # ``approval_decision_recorded`` is NOT emitted here: it is the
-    # Lambda-side audit event (written by ApproveTaskFn / DenyTaskFn directly
-    # to TaskEventsTable in Chunk 5). See IMPL-6.
-    #
-    # ``approval_timeout_capped_at_submit`` is emitted by CreateTaskFn and
-    # also lives on the Lambda side (Chunk 5). Agent-side helpers cover the
-    # 14 events the agent runtime emits.
-
     def _put_approval_milestone(self, milestone: str, metadata: dict) -> None:
-        """Emit an ``agent_milestone`` with ``milestone`` + extra metadata.
-
-        Mirrors the shape of ``write_agent_milestone`` but preserves the
-        structured metadata keys so consumers do not need to parse a
-        free-form ``details`` string.
-        """
         payload: dict = {"milestone": milestone}
         payload.update(metadata)
         self._put_event("agent_milestone", payload)
 
     def write_approval_pre_approvals_loaded(self, count: int, scopes: list[str]) -> None:
-        """Emit ``pre_approvals_loaded`` (agent init, §11.1)."""
         self._put_approval_milestone(
             "pre_approvals_loaded",
             {"count": count, "scopes": list(scopes)},
@@ -832,7 +534,6 @@ class _ProgressWriter:
         timeout_s: int,
         matching_rule_ids: list[str],
     ) -> None:
-        """Emit ``approval_requested`` (PENDING row written, §11.1)."""
         self._put_approval_milestone(
             "approval_requested",
             {
@@ -854,21 +555,9 @@ class _ProgressWriter:
         decided_at: str | None,
         created_at: str | None = None,
     ) -> None:
-        """Emit ``approval_granted`` (user APPROVED, §11.1).
+        """Emit ``approval_granted`` (user APPROVED).
 
-        Chunk 8a: ``created_at`` propagated from the approval row so the
-        ApprovalMetricsPublisher Lambda can compute ``decided_at -
-        created_at`` latency without a round-trip GetItem. Optional with
-        default ``None`` so any legacy caller path still constructs a
-        valid event — the publisher skips the latency emit + logs a
-        ``METRICS_SCHEMA_MISMATCH`` if the field is absent, rather than
-        emitting ``latency=0`` which would poison percentile widgets.
-
-        Field is omitted (not present as ``None``) from the emitted
-        event metadata when ``created_at`` is ``None``. This keeps the
-        event stream free of ``None`` values that consumers would have
-        to re-check, and makes "absent" vs "present but null" a
-        single well-defined case downstream.
+        ``created_at`` is omitted from the event metadata when ``None``.
         """
         payload: dict = {
             "request_id": request_id,
@@ -887,10 +576,9 @@ class _ProgressWriter:
         decided_at: str | None,
         created_at: str | None = None,
     ) -> None:
-        """Emit ``approval_denied`` (user DENIED, §11.1).
+        """Emit ``approval_denied`` (user DENIED).
 
-        Chunk 8a: see ``write_approval_granted`` for the ``created_at``
-        rationale (field omitted from metadata when ``None``).
+        ``created_at`` is omitted from the event metadata when ``None``.
         """
         payload: dict = {
             "request_id": request_id,
@@ -910,33 +598,15 @@ class _ProgressWriter:
         effective_timeout_s: int | None = None,
         matching_rule_ids: list[str] | None = None,
     ) -> None:
-        """Emit ``approval_timed_out`` (timer expired, §11.1).
+        """Emit ``approval_timed_out`` (timer expired).
 
-        Chunk 8a additions to support the ApprovalMetricsPublisher
-        dashboard widgets (IMPL-28):
-
-        - ``created_at`` — propagated from the approval row so the
-          publisher Lambda can compute decision latency at
-          ``outcome=timed_out`` the same way it does for granted/denied.
+        - ``created_at`` — propagated from the approval row.
         - ``effective_timeout_s`` — the clipped timeout actually applied
           (from the approval row's ``timeout_s`` field, which is the
-          post-clip value). Required by the ``ApprovalTimeoutBreakdown``
-          histogram. When absent (legacy caller), the metric emit is
-          skipped + a ``METRICS_SCHEMA_MISMATCH`` counter fires, rather
-          than polluting percentile widgets with zero-valued samples.
-        - ``matching_rule_ids`` — rule ids that matched at gate-fire
-          time, propagated from the approval row's
-          ``matching_rule_ids``. Used by the publisher Lambda to emit
-          ``TimedOutEffectiveTimeout`` with a ``rule_id`` dimension
-          (normalized against an allowlist so unknown rules collapse
-          to ``other`` — cardinality cap, H4 adversarial finding). The
-          publisher emits the value a second time without dimensions:
-          that is the metric the dashboard's percentiles read.
+          post-clip value).
+        - ``matching_rule_ids`` — rule ids that matched at gate-fire time.
 
-        ``timeout_s`` is retained for backward-compat — pre-Chunk-8a
-        events and consumers that only want the raw timer value see
-        the original field. ``effective_timeout_s`` is a separate field
-        (not a rename) to keep the event schema a pure superset.
+        Each of the three is omitted from the event metadata when ``None``.
         """
         payload: dict = {"request_id": request_id, "timeout_s": timeout_s}
         if created_at is not None:
@@ -954,28 +624,24 @@ class _ProgressWriter:
         age_s: int,
         reason: str,
     ) -> None:
-        """Emit ``approval_stranded`` (reconciler surface, §11.1)."""
         self._put_approval_milestone(
             "approval_stranded",
             {"request_id": request_id, "age_s": age_s, "reason": self._preview(reason)},
         )
 
     def write_approval_write_failed(self, *, request_id: str | None, error: str) -> None:
-        """Emit ``approval_write_failed`` (TransactWriteItems failure, §11.1)."""
         self._put_approval_milestone(
             "approval_write_failed",
             {"request_id": request_id, "error": self._preview(error)},
         )
 
     def write_approval_resume_failed(self, *, request_id: str, error: str) -> None:
-        """Emit ``approval_resume_failed`` (resume transaction failure, §11.1)."""
         self._put_approval_milestone(
             "approval_resume_failed",
             {"request_id": request_id, "error": self._preview(error)},
         )
 
     def write_approval_poll_degraded(self, *, request_id: str, consecutive_failures: int) -> None:
-        """Emit ``approval_poll_degraded`` (3+ consecutive GetItem failures)."""
         self._put_approval_milestone(
             "approval_poll_degraded",
             {
@@ -996,8 +662,7 @@ class _ProgressWriter:
         """Emit ``approval_timeout_capped`` when min-wins clips the timeout.
 
         ``reason`` ∈ {rule_annotation, maxLifetime_ceiling, runtime_jwt_ceiling}.
-        ``matching_rule_ids`` populated when ``reason == "rule_annotation"``
-        (IMPL-26).
+        ``matching_rule_ids`` populated when ``reason == "rule_annotation"``.
         """
         payload: dict = {
             "request_id": request_id,
@@ -1017,7 +682,6 @@ class _ProgressWriter:
         cleanup_margin_s: int,
         task_default_timeout_s: int,
     ) -> None:
-        """Emit once-per-task ``approval_ceiling_shrinking`` (IMPL-26, §11.1)."""
         self._put_approval_milestone(
             "approval_ceiling_shrinking",
             {
@@ -1029,21 +693,18 @@ class _ProgressWriter:
         )
 
     def write_approval_cap_exceeded(self, *, request_id: str, count: int, cap: int) -> None:
-        """Emit ``approval_cap_exceeded`` (per-task gate-cap fired)."""
         self._put_approval_milestone(
             "approval_cap_exceeded",
             {"request_id": request_id, "count": count, "cap": cap},
         )
 
     def write_approval_rate_limit_exceeded(self, *, request_id: str, rate: int, limit: int) -> None:
-        """Emit ``approval_rate_limit_exceeded`` (per-minute rate limit hit)."""
         self._put_approval_milestone(
             "approval_rate_limit_exceeded",
             {"request_id": request_id, "rate": rate, "limit": limit},
         )
 
     def write_approval_late_win(self, *, request_id: str, outcome: str, reason: str) -> None:
-        """Emit ``approval_late_win`` (VM-throttle race mitigation, IMPL-24)."""
         self._put_approval_milestone(
             "approval_late_win",
             {
@@ -1063,23 +724,11 @@ class _ProgressWriter:
         original_decision_ts: str,
         matched_rule_id: str | None = None,
     ) -> None:
-        """Emit ``policy_decision`` for a recent-decision-cache hit (IMPL-23).
-
-        Event name is ``policy_decision`` (not ``approval_*``) because a
-        cache hit intentionally avoids creating a new approval row — the
-        original decision already produced the audit trail. The
-        ``decision_source`` field distinguishes cache-driven denies from
-        fresh policy evaluations so operators can correlate retry patterns
-        with container restarts (§12.8, §13.6).
+        """Emit ``policy_decision`` for a recent-decision-cache hit.
 
         ``matched_rule_id`` is the rule a rule-level hit was denied for (a
         retry that matches a rule the user has just denied). A hit on the
         exact input has none, and the field is omitted from the metadata.
-
-        Reuses ``_put_approval_milestone`` for the ``agent_milestone``
-        event shape; the ``milestone`` key is ``policy_decision`` here
-        instead of an ``approval_*`` name. No new approval row, no
-        counter increment — purely observability (§12.8 caveat).
         """
         self._put_approval_milestone(
             "policy_decision",

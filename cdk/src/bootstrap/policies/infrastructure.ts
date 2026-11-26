@@ -17,16 +17,10 @@
  *  SOFTWARE.
  */
 
-// ARN partitions are intentionally literal — this policy is a bootstrap
-// template matching the exact resource patterns in DEPLOYMENT_ROLES.md.
-
 import { aws_iam as iam } from 'aws-cdk-lib';
 
 /**
  * Returns the IAM PolicyDocument for the IaCRole-ABCA-Infrastructure role.
- *
- * Covers: CloudFormation, IAM roles/policies, VPC networking, and
- * Route 53 Resolver DNS Firewall permissions.
  */
 export function infrastructurePolicy(): iam.PolicyDocument {
   return new iam.PolicyDocument({
@@ -54,8 +48,7 @@ export function infrastructurePolicy(): iam.PolicyDocument {
         ],
         resources: [
           'arn:aws:cloudformation:*:*:stack/backgroundagent-dev/*',
-          // Nested stacks (e.g. Agent Registry, #246) synth as child
-          // stacks named ``backgroundagent-dev-<Child><hash>``.
+          // Nested stacks synth as child stacks named ``backgroundagent-dev-<Child><hash>``.
           'arn:aws:cloudformation:*:*:stack/backgroundagent-dev-*',
           'arn:aws:cloudformation:*:*:stack/CDKToolkit/*',
         ],
@@ -121,12 +114,8 @@ export function infrastructurePolicy(): iam.PolicyDocument {
         },
       }),
 
-      // Nested stacks (registry, registry API, ...) are created by CloudFormation
-      // acting AS this execution role, and CloudFormation hands the same role on to
-      // each child stack. Without this, change-set creation fails with
-      // "cfn-exec-role ... is not authorized to perform: iam:PassRole on resource:
-      // ...cfn-exec-role...". Scoped to the CDK execution role itself and to
-      // CloudFormation only, so it grants nothing the role does not already hold.
+      // Nested stacks are created by CloudFormation acting AS this execution role,
+      // and CloudFormation hands the same role on to each child stack.
       new iam.PolicyStatement({
         sid: 'NestedStackPassRole',
         effect: iam.Effect.ALLOW,

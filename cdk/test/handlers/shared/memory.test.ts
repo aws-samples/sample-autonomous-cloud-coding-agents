@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-// --- Mocks ---
 const mockAgentCoreSend = jest.fn();
 jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   BedrockAgentCoreClient: jest.fn(() => ({ send: mockAgentCoreSend })),
@@ -41,22 +40,16 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-// ---------------------------------------------------------------------------
-// loadMemoryContext
-// ---------------------------------------------------------------------------
-
 describe('loadMemoryContext', () => {
   test('returns memory context with semantic and episodic results', async () => {
     mockAgentCoreSend
       .mockResolvedValueOnce({
-        // Semantic search result
         memoryRecordSummaries: [
           { content: { text: 'This repo uses Jest for testing' } },
           { content: { text: 'Build system is mise + CDK' } },
         ],
       })
       .mockResolvedValueOnce({
-        // Episodic search result
         memoryRecordSummaries: [
           { content: { text: 'Previous task fixed auth bug successfully' } },
         ],
@@ -77,7 +70,6 @@ describe('loadMemoryContext', () => {
 
     await loadMemoryContext('mem-123', 'owner/repo', 'Fix the build');
 
-    // Semantic search uses /{repo}/knowledge/ as a namespace prefix.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
         namespacePath: '/owner/repo/knowledge/',
@@ -86,8 +78,6 @@ describe('loadMemoryContext', () => {
         }),
       }),
     );
-    // Episodic search uses /{repo}/episodes/ prefix to scoop up records
-    // under all task sessions plus the cross-task reflection records.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
         namespacePath: '/owner/repo/episodes/',
@@ -96,8 +86,7 @@ describe('loadMemoryContext', () => {
         }),
       }),
     );
-    // `namespace` is an exact match in the AgentCore Memory API: it leaves out
-    // the per-task records at /{repo}/episodes/{sessionId}/ and logs nothing.
+    // `namespace` is an exact match in the AgentCore Memory API.
     expect(RetrieveMemoryRecordsCommand).not.toHaveBeenCalledWith(
       expect.objectContaining({ namespace: expect.anything() }),
     );
@@ -137,14 +126,13 @@ describe('loadMemoryContext', () => {
   });
 
   test('enforces token budget — truncates entries that exceed budget', async () => {
-    // Create entries that together exceed 2000 tokens (at ~4 chars/token = ~8000 chars)
-    const longText = 'x'.repeat(4000); // ~1000 tokens each
+    const longText = 'x'.repeat(4000);
     mockAgentCoreSend
       .mockResolvedValueOnce({
         memoryRecordSummaries: [
           { content: { text: longText } },
           { content: { text: longText } },
-          { content: { text: longText } }, // This one should be cut
+          { content: { text: longText } },
         ],
       })
       .mockResolvedValueOnce({
@@ -155,9 +143,7 @@ describe('loadMemoryContext', () => {
 
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Task');
     expect(result).toBeDefined();
-    // Only 2 long entries fit in 2000 token budget
     expect(result!.repo_knowledge).toHaveLength(2);
-    // No room for episodes
     expect(result!.past_episodes).toHaveLength(0);
   });
 
@@ -166,7 +152,7 @@ describe('loadMemoryContext', () => {
     { budget: 'a budget of 1000 tokens', tokenBudget: 1000, knowledge: 1, episodes: 0 },
     { budget: 'the default budget when the caller passes undefined', tokenBudget: undefined, knowledge: 2, episodes: 0 },
   ])('trims to $budget', async ({ tokenBudget, knowledge, episodes }) => {
-    const longText = 'x'.repeat(4000); // ~1000 tokens each
+    const longText = 'x'.repeat(4000);
     mockAgentCoreSend
       .mockResolvedValueOnce({
         memoryRecordSummaries: [
@@ -198,7 +184,6 @@ describe('loadMemoryContext', () => {
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
     expect(result).toBeDefined();
     expect(result!.repo_knowledge[0]).toContain('Old v2 record');
-    // v2 records (no schema_version) should not trigger any integrity warnings
     expect(mockLoggerWarn).not.toHaveBeenCalledWith(
       expect.stringContaining('hash mismatch'),
       expect.anything(),
@@ -210,7 +195,7 @@ describe('loadMemoryContext', () => {
   });
 
   test('keeps semantic records with hash mismatch (audit-only) and logs WARN', async () => {
-    const wrongHash = 'a'.repeat(64); // Hash won't match — expected for extracted records
+    const wrongHash = 'a'.repeat(64);
     mockAgentCoreSend
       .mockResolvedValueOnce({
         memoryRecordSummaries: [
@@ -226,10 +211,8 @@ describe('loadMemoryContext', () => {
       .mockResolvedValueOnce({ memoryRecordSummaries: [] });
 
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
-    // Audit-only: record is kept despite hash mismatch
     expect(result).toBeDefined();
     expect(result!.repo_knowledge[0]).toContain('Extracted summary');
-    // Verify WARN audit log with context for investigation
     expect(mockLoggerWarn).toHaveBeenCalledWith(
       expect.stringContaining('hash mismatch'),
       expect.objectContaining({
@@ -291,10 +274,8 @@ describe('loadMemoryContext', () => {
       .mockResolvedValueOnce({ memoryRecordSummaries: [] });
 
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
-    // Record is still kept (backward compat)
     expect(result).toBeDefined();
     expect(result!.repo_knowledge[0]).toContain('v3 record but hash was lost');
-    // But a warning about the missing hash should be logged
     expect(mockLoggerWarn).toHaveBeenCalledWith(
       expect.stringContaining('missing content_sha256'),
       expect.objectContaining({
@@ -306,7 +287,6 @@ describe('loadMemoryContext', () => {
 
   test('returns record when hash matches sanitized content (no audit log)', async () => {
     const { createHash } = jest.requireActual('crypto') as typeof import('crypto');
-    // Compute hash of the sanitized version (clean text is unchanged by sanitization)
     const cleanText = 'This repo uses Jest for testing';
     const correctHash = createHash('sha256').update(cleanText).digest('hex');
     const mockLoggerError = jest.requireMock('../../../src/handlers/shared/logger').logger.error;
@@ -328,7 +308,6 @@ describe('loadMemoryContext', () => {
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
     expect(result).toBeDefined();
     expect(result!.repo_knowledge[0]).toBe(cleanText);
-    // No mismatch or integrity log should fire for matching records
     expect(mockLoggerWarn).not.toHaveBeenCalledWith(
       expect.stringContaining('hash mismatch'),
       expect.anything(),
@@ -358,10 +337,8 @@ describe('loadMemoryContext', () => {
 
     const result = await loadMemoryContext('mem-123', 'owner/repo', 'Some task');
     expect(result).toBeDefined();
-    // Script tag stripped
     expect(result!.repo_knowledge[0]).not.toContain('<script>');
     expect(result!.repo_knowledge[0]).toContain('Use Jest for testing');
-    // Instruction prefix neutralized
     expect(result!.past_episodes[0]).toContain('[SANITIZED_PREFIX]');
     expect(result!.past_episodes[0]).toContain('[SANITIZED_INSTRUCTION]');
   });
@@ -369,7 +346,6 @@ describe('loadMemoryContext', () => {
   test('skips semantic search when no task description provided', async () => {
     mockAgentCoreSend
       .mockResolvedValueOnce({
-        // Episodic only
         memoryRecordSummaries: [
           { content: { text: 'Past episode data' } },
         ],
@@ -379,14 +355,9 @@ describe('loadMemoryContext', () => {
     expect(result).toBeDefined();
     expect(result!.repo_knowledge).toHaveLength(0);
     expect(result!.past_episodes).toHaveLength(1);
-    // Only one call should be made (episodic only, semantic was skipped)
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
   });
 });
-
-// ---------------------------------------------------------------------------
-// writeMinimalEpisode
-// ---------------------------------------------------------------------------
 
 describe('writeMinimalEpisode', () => {
   test('writes episode successfully', async () => {
@@ -440,7 +411,6 @@ describe('writeMinimalEpisode', () => {
     expect(metadata.content_sha256).toBeDefined();
     expect(metadata.content_sha256.stringValue).toMatch(/^[a-f0-9]{64}$/);
 
-    // Verify the hash matches the actual sanitized episode text
     const payload = CreateEventCommand.mock.calls[0][0].payload[0].conversational.content.text;
     const expectedHash = createHash('sha256').update(payload).digest('hex');
     expect(metadata.content_sha256.stringValue).toBe(expectedHash);
@@ -457,10 +427,6 @@ describe('writeMinimalEpisode', () => {
     expect(call.input).toBeDefined();
   });
 });
-
-// ---------------------------------------------------------------------------
-// Cross-language hash parity (shared fixture)
-// ---------------------------------------------------------------------------
 
 describe('cross-language hash parity', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports

@@ -18,27 +18,8 @@
  */
 
 /**
- * Built-in Cedar HITL policy text mirrored from `agent/policies/`.
- *
- * Kept in sync with `agent/policies/hard_deny.cedar` and
- * `agent/policies/soft_deny.cedar` so Lambda-side handlers (get-policies,
- * create-task rule-id validation) see the same rule set the agent's
- * cedarpy engine sees. The parity contract
- * (`contracts/cedar-parity/*.json`) catches decision-level drift; a
- * dedicated drift test (`cdk/test/handlers/shared/builtin-policies.test.ts`)
- * asserts byte-equality so text drift cannot silently diverge.
- *
- * Why embed instead of read from disk:
- *   - Lambda bundling with `esbuild` does not copy non-TS assets by
- *     default; adding a bundling asset hook just for two small files
- *     is more code than the embed.
- *   - Embed keeps cold-start zero-cost — no `fs.readFileSync` on the
- *     hot path.
- *   - Drift is caught by the test at build time, before deploy.
- *
- * If these policies ever become blueprint-overridable per-repo, the
- * caller should pass the resolved text directly to `parseRules`;
- * these constants remain the platform default.
+ * Built-in Cedar HITL policy text, byte for byte the text of
+ * `agent/policies/hard_deny.cedar` and `agent/policies/soft_deny.cedar`.
  */
 
 export const BUILTIN_HARD_DENY_POLICIES = `// Built-in hard-deny policy set for Cedar HITL engine.

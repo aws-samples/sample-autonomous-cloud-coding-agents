@@ -262,13 +262,10 @@ describe('repo command JSON output', () => {
     await makeRepoCommand().parseAsync(['node', 'test', action, 'acme/a', '--region', 'us-east-1']);
 
     expect(getStackOutputsMock).toHaveBeenCalledTimes(1);
-    // Every per-key answer came from that one batch: no output was read on its own.
     expect(getStackOutputMock).toHaveBeenCalledTimes(getStackOutputsMock.mock.calls[0][2].length);
   });
 
   test('onboard reads ComputeTypes before writing and refuses an omitted AgentCore backend', async () => {
-    // No ComputeSubstrate in this table: the backends are taken from it when ComputeTypes is
-    // missing, so with both set the same refusal comes out whether or not ComputeTypes is read.
     getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
       RepoTableName: 'RepoTable-dev',
       ComputeTypes: 'ecs,lambda-microvm',
@@ -281,8 +278,6 @@ describe('repo command JSON output', () => {
   });
 
   test('onboard --compute-type ecs is REFUSED when the stack has no ECS substrate', async () => {
-    // Per-key outputs: RepoTableName present, ComputeSubstrate=agentcore (deployed
-    // without --context compute_type=ecs).
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
       Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
 
@@ -290,7 +285,6 @@ describe('repo command JSON output', () => {
     await expect(cmd.parseAsync([
       'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'ecs',
     ])).rejects.toThrow(/without the ECS substrate|compute_type=ecs/i);
-    // Must NOT write the repo row when it would be dead-on-arrival.
     expect(onboardRepoMock).not.toHaveBeenCalled();
   });
 
@@ -308,8 +302,6 @@ describe('repo command JSON output', () => {
   });
 
   test('onboard --compute-type ecs proceeds against an OLDER stack lacking ComputeSubstrate (null → unknown)', async () => {
-    // Back-compat: pre-output stacks return null for ComputeSubstrate; don't hard-block
-    // (the runtime error is the backstop there).
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
       Promise.resolve(key === 'ComputeSubstrate' ? null : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active', compute_type: 'ecs' });
@@ -333,12 +325,6 @@ describe('repo command JSON output', () => {
     expect(onboardRepoMock).toHaveBeenCalled();
   });
 
-  // --- lambda-microvm substrate gate (parity with the ECS gate above) ---------
-  //
-  // Before this gate existed, `--compute-type lambda-microvm` only ran the live
-  // regional availability probe, so a row could be written against an
-  // agentcore-only stack and every task on it would die at session start.
-
   test('onboard --compute-type lambda-microvm is REFUSED when the stack has no MicroVM substrate', async () => {
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
       Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
@@ -347,15 +333,10 @@ describe('repo command JSON output', () => {
     await expect(cmd.parseAsync([
       'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'lambda-microvm',
     ])).rejects.toThrow(/without the Lambda MicroVMs substrate/i);
-    // Must NOT write the repo row when it would be dead-on-arrival...
     expect(onboardRepoMock).not.toHaveBeenCalled();
   });
 
   test('the substrate gate refuses BEFORE the live availability probe runs', async () => {
-    // ORDERING assertion (documented in repo.ts): the substrate gate is cheaper
-    // (reuses an already-fetched stack output) and more specific, so it must fire
-    // first. `onboardRepo` owns the ListManagedMicrovmImages probe, so "the probe
-    // did not run" is exactly "onboardRepo was never called".
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
       Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockReset();
@@ -378,16 +359,12 @@ describe('repo command JSON output', () => {
     await cmd.parseAsync([
       'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'lambda-microvm',
     ]);
-    // ...and the gate must then hand off to onboardRepo, which runs the live
-    // regional availability probe as the SECOND layer.
     expect(onboardRepoMock).toHaveBeenCalledWith(
       'us-east-1', 'RepoTable-dev', 'acme/a',
       expect.objectContaining({ computeType: 'lambda-microvm' }));
   });
 
   test('onboard --compute-type lambda-microvm is REFUSED on an ECS-only stack', async () => {
-    // The two optional backends are mutually exclusive today, so an ecs stack is
-    // a real (not hypothetical) way to get this wrong.
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
       Promise.resolve(key === 'ComputeSubstrate' ? 'ecs' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
 
@@ -399,7 +376,6 @@ describe('repo command JSON output', () => {
   });
 
   test('onboard --compute-type lambda-microvm proceeds against an OLDER stack lacking ComputeSubstrate', async () => {
-    // Same back-compat posture as the ECS gate: null → "unknown", not "none".
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
       Promise.resolve(key === 'ComputeSubstrate' ? null : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({
@@ -414,8 +390,6 @@ describe('repo command JSON output', () => {
   });
 
   test('onboard with NO --compute-type is never gated (inherits/defaults elsewhere)', async () => {
-    // The effective compute type may come from the existing row, which the gate
-    // cannot see — `onboardRepo` resolves that and runs its own probe.
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
       Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active' });

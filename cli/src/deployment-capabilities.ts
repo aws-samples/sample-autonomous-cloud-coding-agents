@@ -45,10 +45,7 @@ export interface CapabilityCatalog {
 }
 
 /**
- * Package-safe copy of ``contracts/deployment-capabilities.json`` (ADR-024).
- * The contract lives outside the published ``lib`` files, so the CLI carries
- * literals and ``test/deployment-capabilities-parity.test.ts`` fails on drift.
- * Update the JSON first, then mirror it here.
+ * Copy of ``contracts/deployment-capabilities.json`` (ADR-024).
  */
 export const CAPABILITY_CATALOG: CapabilityCatalog = {
   schemaVersion: 1,

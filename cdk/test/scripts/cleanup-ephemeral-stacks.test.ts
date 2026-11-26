@@ -31,7 +31,6 @@ const ABCA = 'ABCA Development Stack (uksb-wt64nei4u6)';
 
 interface FakeStack {
   readonly name: string;
-  /** Its age in hours, or the text `list-stacks` gives as its creation time. @default 49, an hour over the default max age */
   readonly created?: number | string;
   readonly description?: string | null;
   readonly status?: string;
@@ -81,7 +80,6 @@ interface Sweep {
   readonly stdout: string;
   readonly stderr: string;
   readonly calls: string[];
-  /** The stacks it asked CloudFormation to delete, in order. */
   readonly deleted: string[];
 }
 
@@ -102,14 +100,12 @@ function sweep(stacks: FakeStack[], args: string[] = [], failing?: string): Swee
     }));
     const env = {
       ...process.env,
-      // The fake `aws` first, then the `node` that runs this suite: the fake names it.
       PATH: [root, path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
-      // The script reads both; empty selects its defaults, 48 hours and us-east-1.
       MAX_AGE_HOURS: '',
       AWS_DEFAULT_REGION: '',
     };
-    // The script deletes stacks, so it starts only when bash resolves `aws` to the fake. First place on PATH does not
-    // settle that under a noexec mount or a BASH_ENV file, and `bash -c` can read other start-up files than `bash <file>`.
+    // First place on PATH does not settle what bash takes for `aws` under a noexec mount or a BASH_ENV file, and
+    // `bash -c` can read other start-up files than `bash <file>`.
     const bash = (script: string, ...scriptArgs: string[]) =>
       spawnSync('bash', [script, ...scriptArgs], { encoding: 'utf-8', timeout: 20_000, env });
     fs.writeFileSync(path.join(root, 'which-aws.sh'), 'command -v aws\n');
@@ -136,8 +132,7 @@ describe('cleanup-ephemeral-stacks.sh', () => {
   test('is not started when bash resolves `aws` to anything but the fake', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-cleanup-stacks-test-'));
     try {
-      // The BASH_ENV file makes `aws` a function, which bash prefers to any file on PATH. Without SHLVL, a `bash -c`
-      // started by node passes over that file, which the bash of the cleanup script reads.
+      // Without SHLVL, a `bash -c` started by node passes over the BASH_ENV file, which `bash <file>` reads.
       const called = path.join(dir, 'called');
       fs.writeFileSync(path.join(dir, 'env.sh'), `aws() { : > '${called}'; }\n`);
       jest.replaceProperty(process, 'env', { ...process.env, BASH_ENV: path.join(dir, 'env.sh'), SHLVL: undefined });
@@ -166,7 +161,6 @@ describe('cleanup-ephemeral-stacks.sh', () => {
       / --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE UPDATE_ROLLBACK_COMPLETE DELETE_FAILED( --|$)/);
   });
 
-  // In each case the stack stands in front of one the sweep does delete: leaving it alone must not end the run.
   test.each<[string, FakeStack, string]>([
     ['with termination protection', { name: 'kept', protected: true }, 'SKIP (protected): kept'],
     ['an hour younger than the default max age', { name: 'kept', created: 47 }, 'SKIP (too young: 47h): kept'],
@@ -182,7 +176,6 @@ describe('cleanup-ephemeral-stacks.sh', () => {
     expect(result.deleted).toEqual(['old']);
     expect(result.stdout).toContain(reason);
     expect(result.stdout).toMatch(/Skipped:\s+1\b/);
-    // Left alone: its description is read and nothing else is done with it.
     expect(result.calls.filter((call) => call.split(' ').includes('kept'))).toHaveLength(1);
   });
 
@@ -212,7 +205,6 @@ describe('cleanup-ephemeral-stacks.sh', () => {
   });
 
   test('--prefix limits the sweep to the stack names that start with it', () => {
-    // The name that does not match stands first: passing over it must not end the run either.
     expect(sweep([{ name: 'not-pr-1' }, { name: 'pr-1' }], ['--prefix', 'pr-']).deleted).toEqual(['pr-1']);
   });
 

@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-// --- Mocks ---
 const mockDdbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({})),
@@ -40,8 +39,6 @@ process.env.TASK_RETENTION_DAYS = '90';
 
 import { TaskStatus } from '../../../src/constructs/task-status';
 import type { SessionHandle, SessionStatus } from '../../../src/handlers/shared/compute-strategy';
-// The real classifier: the reason-append must not break the anchor the substrate
-// -failure classification keys on.
 import { classifyError, formatMicrovmTerminalFailure } from '../../../src/handlers/shared/error-classifier';
 import { renderFailureReply, renderPanelFailureReason } from '../../../src/handlers/shared/failure-reply';
 import { buildComputeMetadata, finalizeTask } from '../../../src/handlers/shared/orchestrator';
@@ -50,7 +47,6 @@ import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/type
 const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
 
-/** Commands the mocked document client received, in order. */
 function sentCommands(): Array<{ _type: string; input: Record<string, unknown> }> {
   return mockDdbSend.mock.calls.map(c => c[0]);
 }
@@ -59,7 +55,6 @@ function commandsOfType(type: string): Array<{ _type: string; input: Record<stri
   return sentCommands().filter(c => c._type === type);
 }
 
-/** Strong finalization observes this committed task before choosing an outcome. */
 function primeReread(status: string): void {
   mockDdbSend.mockImplementation((cmd: { _type: string }) => Promise.resolve(cmd._type === 'Get' ? {
     Item: {
@@ -74,7 +69,6 @@ function primeReread(status: string): void {
     },
   } : {}));
 }
-/** Finalization returns the user's concurrency slot through the counter table. */
 function concurrencyDecrements() {
   return commandsOfType('Update').filter(command =>
     String(command.input.UpdateExpression).includes('active_count = active_count - :one'));
@@ -116,7 +110,6 @@ describe('buildComputeMetadata', () => {
       clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/c',
       taskArn: 'arn:aws:ecs:us-east-1:123456789012:task/c/abc',
     };
-    // cancel-task.ts reads exactly these two keys — do not rename them.
     expect(buildComputeMetadata(handle)).toEqual({
       clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/c',
       taskArn: 'arn:aws:ecs:us-east-1:123456789012:task/c/abc',
@@ -141,7 +134,6 @@ describe('buildComputeMetadata', () => {
       microvmId: MICROVM_ID,
       endpoint: ENDPOINT,
     };
-    // ADR-021: the P3 approve/deny Lambdas load the resume handle from these keys.
     expect(buildComputeMetadata(handle)).toEqual({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
   });
 
@@ -218,7 +210,6 @@ describe('MicroVM terminal finalization', () => {
       primeReread(status);
       await finish({ status: 'completed' });
       expect(commandsOfType('Get')[0].input.ConsistentRead).toBe(true);
-      // Terminal TTL stamp plus the concurrency decrement; no status transition.
       expect(commandsOfType('Update')).toHaveLength(2);
       expect(commandsOfType('Update').some(command =>
         String(command.input.ConditionExpression ?? '').includes(':fromStatus'))).toBe(false);

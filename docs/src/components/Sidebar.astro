@@ -1,7 +1,7 @@
 ---
 /**
- * Starlight Sidebar, but uses our SidebarSublist (absolute home URLs). The default Sidebar imports
- * `./SidebarSublist.astro` directly, so overriding only `SidebarSublist` in Starlight config has no effect.
+ * Starlight's default Sidebar imports `./SidebarSublist.astro` directly, so overriding only
+ * `SidebarSublist` in the Starlight config has no effect.
  */
 import MobileMenuFooter from 'virtual:starlight/components/MobileMenuFooter';
 import SidebarPersister from '@astrojs/starlight/components/SidebarPersister.astro';
@@ -11,7 +11,6 @@ const { sidebar } = Astro.locals.starlightRoute;
 ---
 
 <SidebarPersister>
-	<!-- Starlight’s `sidebar` type is internal; our sublist markup matches its shape. -->
 	<SidebarSublist sublist={sidebar as any} />
 </SidebarPersister>
 

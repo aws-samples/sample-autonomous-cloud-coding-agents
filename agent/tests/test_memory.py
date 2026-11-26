@@ -1,5 +1,3 @@
-"""Unit tests for pure functions in memory.py."""
-
 import hashlib
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +16,7 @@ from sanitization import sanitize_external_content
 
 class TestValidateRepo:
     def test_valid_simple(self):
-        _validate_repo("owner/repo")  # should not raise
+        _validate_repo("owner/repo")
 
     def test_valid_with_dots_and_dashes(self):
         _validate_repo("my-org/my.repo-name")
@@ -48,14 +46,11 @@ class TestValidateRepo:
 
 
 class TestValidateActor:
-    """``_validate_actor`` accepts an ``owner/repo`` OR a ``user:{id}`` namespace
-    (repo-less knowledge tasks, #248 Phase 3) and rejects anything else."""
-
     def test_valid_repo(self):
-        _validate_actor("owner/repo")  # delegates to _validate_repo, no raise
+        _validate_actor("owner/repo")
 
     def test_valid_user_namespace(self):
-        _validate_actor("user:cog-sub-123")  # should not raise
+        _validate_actor("user:cog-sub-123")
 
     def test_invalid_empty_user_id(self):
         with pytest.raises(ValueError, match="non-empty user id"):
@@ -106,7 +101,6 @@ class TestWriteTaskEpisode:
         hash_value = metadata["content_sha256"]["stringValue"]
         assert len(hash_value) == 64
 
-        # Verify hash matches the sanitized content that was actually stored
         content = call_kwargs["payload"][0]["conversational"]["content"]["text"]
         sanitized = sanitize_external_content(content)
         expected = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
@@ -114,10 +108,6 @@ class TestWriteTaskEpisode:
 
     @patch("memory._get_client")
     def test_user_namespace_actor_writes_event(self, mock_get_client):
-        """A repo-less knowledge task keys the episode on ``user:{id}`` (#248
-        Phase 3) and the write reaches create_event with that actorId — guards
-        against a regression that re-tightens the write path to repo-only (which
-        would silently stop repo-less memory writes, since the caller fails open)."""
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
 

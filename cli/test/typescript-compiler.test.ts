@@ -21,23 +21,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 /**
- * Every workspace is compiled by the TypeScript it depends on, however ``tsc``
- * is started.
- *
  * ``yarn tsc`` inside a workspace does not run that workspace's compiler: Yarn 1
  * also looks in the repository-root ``node_modules/.bin`` and lets that entry
  * win, and it links that entry to the first installed ``typescript`` in path
- * order. A package that nests another version therefore takes the compiler over
- * without any manifest saying so. That is how cli and web were compiled by the
- * 5.9.3 nested under ``@cdklabs/eslint-plugin`` while declaring ^6.0.3.
- *
- * When this fails, run ``mise run install`` and try again. If it still fails,
- * the test title names the package that brought the other version: point its
- * ``typescript`` at the workspaces' range in the root package.json
- * ``resolutions`` (see the ``@cdklabs/eslint-plugin/typescript`` entry) and run
- * ``yarn install``. If that package cannot run on the workspaces' version,
- * declare ``typescript`` in the root ``devDependencies`` instead: Yarn links a
- * direct dependency last, so it wins the root ``.bin`` entry.
+ * order, so a package that nests another version takes the compiler over.
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -47,7 +34,6 @@ function versionOf(packageDir: string): string {
 }
 
 const { workspaces } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as { workspaces: string[] };
-// What ``yarn tsc`` executes in every workspace: <package>/bin/tsc.
 const rootTsc = fs.realpathSync(path.join(REPO_ROOT, 'node_modules', '.bin', 'tsc'));
 
 test.each(workspaces)(`%s: \`yarn tsc\` (${path.relative(REPO_ROOT, rootTsc)}) is the TypeScript the workspace depends on`, (workspace) => {
@@ -55,6 +41,5 @@ test.each(workspaces)(`%s: \`yarn tsc\` (${path.relative(REPO_ROOT, rootTsc)}) i
     .map(dir => path.join(dir, 'node_modules', 'typescript'))
     .find(dir => fs.existsSync(dir));
   expect(own).toBeDefined();
-  // A mismatch means another package's TypeScript owns node_modules/.bin/tsc: see the comment above.
   expect(versionOf(path.resolve(rootTsc, '..', '..'))).toBe(versionOf(own as string));
 });

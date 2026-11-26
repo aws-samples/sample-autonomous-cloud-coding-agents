@@ -18,19 +18,8 @@
  */
 
 /**
- * Shared guard for HMAC signing secrets — the single chokepoint for the
- * "never HMAC with an empty key" invariant.
- *
- * HMAC('', input) is computable by anyone, so an empty or whitespace-only
- * signing secret makes every signature forgeable. All webhook verifiers
- * (GitHub, Linear, Slack, generic webhook-create-task) MUST route their
- * secret through this check both when fetching from Secrets Manager and
- * again inside the verify function (defense-in-depth for secrets sourced
- * elsewhere, e.g. per-workspace OAuth bundles).
- *
- * When wiring a NEW webhook source, call this in both places — the
- * per-verifier unit tests cannot structurally force a verifier they
- * don't know about to honor the invariant.
+ * Guard for HMAC signing secrets: HMAC('', input) is computable by anyone, so
+ * an empty or whitespace-only signing secret makes every signature forgeable.
  */
 export function isUsableHmacSecret(secret: string | undefined | null): secret is string {
   return typeof secret === 'string' && secret.trim() !== '';

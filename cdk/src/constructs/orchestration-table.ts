@@ -22,9 +22,6 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 import { ORCHESTRATION_CHILD_TASK_INDEX_NAME } from '../handlers/shared/storage-names';
 
-/**
- * Properties for OrchestrationTable construct.
- */
 export interface OrchestrationTableProps {
   /**
    * Optional table name override.
@@ -47,51 +44,13 @@ export interface OrchestrationTableProps {
 
 /**
  * DynamoDB table holding the parent/sub-issue dependency graph (DAG)
- * for sub-issue orchestration.
- *
- * One orchestration = one labeled Linear parent issue with sub-issues.
- * Each child sub-issue is a row; the reconciler walks the rows to find
- * children whose predecessors are all terminal-success and releases them
- * via ``createTaskCore``.
- *
- * Schema: orchestration_id (PK), sub_issue_id (SK).
- *
- * Per-child row fields (written when the graph is discovered):
- * - linear_sub_issue_id — the Linear sub-issue UUID this row tracks
- * - child_task_id — the platform task_id created for this child (absent
- *   until the child is released by the reconciler)
- * - depends_on — list of ``sub_issue_id``s that must reach
- *   terminal-success before this child may start
- * - child_status — orchestration-local lifecycle marker (e.g.
- *   ``blocked`` | ``released`` | ``succeeded`` | ``failed`` | ``skipped``)
- * - base_branch — the predecessor branch this child stacks on (ADR-001
- *   stacked PRs); ``main`` for root children
- * - parent_linear_issue_id, linear_workspace_id, repo — provenance
- *
- * GSI:
- * - ChildTaskIndex (PK: child_task_id) — the reconciler receives a
- *   child terminal-state event keyed by ``task_id`` and must resolve
- *   which orchestration + child row it belongs to. Sparse: only rows
- *   whose child has been released carry ``child_task_id``.
- * - ChildBranchIndex (PK: child_branch_name) — the re-stack path receives
- *   a GitHub ``pull_request`` event keyed by head branch and must resolve
- *   which orchestration child opened that branch, so it can re-stack the
- *   child's dependents when its branch changes. Sparse: only released
- *   children carry ``child_branch_name``.
- *
- * NOTE: this construct is introduced but not yet instantiated in any
- * stack — graph discovery and the reconciler wire it in. Synth-only for
- * now keeps this foundational change deploy-safe.
+ * for sub-issue orchestration: one row per child sub-issue.
  */
 export class OrchestrationTable extends Construct {
   /**
    * GSI name for resolving a child ``task_id`` back to its
    * orchestration + sub-issue row.
    * PK: child_task_id. Sparse — only released children are projected.
-   *
-   * The reconciler Lambda queries this index, so the literal lives in
-   * ``handlers/shared/storage-names.ts``: a handler importing this class would
-   * bundle all of ``aws-cdk-lib`` into the function.
    */
   public static readonly CHILD_TASK_INDEX = ORCHESTRATION_CHILD_TASK_INDEX_NAME;
 
@@ -102,9 +61,6 @@ export class OrchestrationTable extends Construct {
    */
   public static readonly CHILD_BRANCH_INDEX = 'ChildBranchIndex';
 
-  /**
-   * The underlying DynamoDB table. Use this to grant access or read the table name.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: OrchestrationTableProps = {}) {
@@ -128,17 +84,12 @@ export class OrchestrationTable extends Construct {
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
 
-    // GSI: resolve a released child's task_id back to its orchestration row.
-    // Sparse — rows without child_task_id (not yet released) are not projected.
     this.table.addGlobalSecondaryIndex({
       indexName: OrchestrationTable.CHILD_TASK_INDEX,
       partitionKey: { name: 'child_task_id', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    // GSI: resolve a released child's head branch back to its orchestration
-    // row, so the re-stack path can find it. Sparse — rows without
-    // child_branch_name (not yet released) are not projected.
     this.table.addGlobalSecondaryIndex({
       indexName: OrchestrationTable.CHILD_BRANCH_INDEX,
       partitionKey: { name: 'child_branch_name', type: dynamodb.AttributeType.STRING },

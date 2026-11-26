@@ -27,27 +27,18 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** Reconciler Lambda timeout (minutes). */
 const RECONCILER_TIMEOUT_MINUTES = 5;
 
-/** Default reconciliation schedule interval (minutes). */
 const DEFAULT_SCHEDULE_MINUTES = 15;
 
-/** Reconciler Lambda memory (MB). */
 const RECONCILER_MEMORY_MB = 256;
 
-/**
- * Properties for ConcurrencyReconciler construct.
- */
 export interface ConcurrencyReconcilerProps {
   /**
    * The DynamoDB task table (has UserStatusIndex GSI).
    */
   readonly taskTable: dynamodb.ITable;
 
-  /**
-   * The DynamoDB user concurrency table.
-   */
   readonly userConcurrencyTable: dynamodb.ITable;
 
   /**
@@ -78,7 +69,6 @@ export class ConcurrencyReconciler extends Construct {
       timeout: Duration.minutes(RECONCILER_TIMEOUT_MINUTES),
       memorySize: RECONCILER_MEMORY_MB,
       environment: {
-        // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,

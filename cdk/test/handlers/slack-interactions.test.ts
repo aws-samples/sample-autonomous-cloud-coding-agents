@@ -124,11 +124,8 @@ describe('slack-interactions handler', () => {
   });
 
   test('cancel_task transitions owned task to CANCELLED', async () => {
-    // 1. user mapping lookup → platform user id
     ddbSend.mockResolvedValueOnce({ Item: { platform_user_id: 'user-42' } });
-    // 2. task lookup → same owner
     ddbSend.mockResolvedValueOnce({ Item: { task_id: 'task-42', user_id: 'user-42', channel_metadata: {} } });
-    // 3. update → success
     ddbSend.mockResolvedValueOnce({});
 
     const event = makeInteractionEvent(interactionPayload('cancel_task:task-42', 'U1', 'T1'));
@@ -137,7 +134,6 @@ describe('slack-interactions handler', () => {
     const updateCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Update');
     expect(updateCall).toBeTruthy();
     expect(updateCall![0].input.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
-    // The row is terminal: it carries completed_at and a status_created_at that matches its status.
     const { UpdateExpression, ExpressionAttributeValues: values } = updateCall![0].input;
     expect(UpdateExpression).toContain('completed_at = :now');
     expect(UpdateExpression).toContain('status_created_at = :sca');
@@ -151,10 +147,8 @@ describe('slack-interactions handler', () => {
     const event = makeInteractionEvent(interactionPayload('cancel_task:task-42'));
     const result = await handler(event);
     expect(result.statusCode).toBe(200);
-    // No update attempted
     const updateCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Update');
     expect(updateCall).toBeFalsy();
-    // Posted to response_url with "own your own tasks"
     const posted = fetchMock.mock.calls.find(
       ([url, opts]) =>
         isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('your own tasks'),
@@ -165,7 +159,6 @@ describe('slack-interactions handler', () => {
   test('cancel_task on already-terminal task warns the user', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { platform_user_id: 'user-42' } });
     ddbSend.mockResolvedValueOnce({ Item: { task_id: 'task-42', user_id: 'user-42' } });
-    // ConditionalCheckFailedException => already in terminal state
     const err = new Error('conditional failed');
     err.name = 'ConditionalCheckFailedException';
     ddbSend.mockRejectedValueOnce(err);

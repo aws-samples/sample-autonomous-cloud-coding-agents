@@ -28,8 +28,6 @@ function makeTask(status: string): TaskDetail {
   return { task_id: 'task-1', status } as unknown as TaskDetail;
 }
 
-/** Drive a fake-timer poll loop: flush microtasks, advance all timers, repeat,
- *  so each ``abortableSleep`` resolves and the next ``getTask`` runs. */
 async function flushPolls(iterations: number): Promise<void> {
   for (let i = 0; i < iterations; i += 1) {
     await Promise.resolve();
@@ -110,8 +108,6 @@ describe('waitForTask', () => {
   });
 
   test('a successful poll resets the transient-failure budget', async () => {
-    // Six failures in total, but never more than three in a row: the budget
-    // of five counts consecutive failures, so the wait must not give up.
     const networkErr = new TypeError('fetch failed');
     mockGetTask
       .mockRejectedValueOnce(networkErr)
@@ -138,14 +134,10 @@ describe('waitForTask', () => {
     const client = new ApiClient();
 
     const promise = waitForTask(client, 'task-1');
-    // The message reports the ACTUAL failure count (6 = 5 retried + the
-    // trip), not the retry budget — "after 5" while aborting on the 6th
-    // read as an off-by-one against server logs.
     // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
     const assertion = expect(promise).rejects.toThrow(/after 6 consecutive transient failures/);
     await flushPolls(12);
     await assertion;
-    // 5 retries tolerated, the 6th consecutive failure trips the budget.
     expect(mockGetTask).toHaveBeenCalledTimes(6);
   });
 
@@ -162,7 +154,6 @@ describe('waitForTask', () => {
     mockGetTask.mockResolvedValue(makeTask('RUNNING'));
     const client = new ApiClient();
 
-    // Tiny ceiling so the second poll observes elapsed >= maxWaitMs.
     const promise = waitForTask(client, 'task-1', { maxWaitMs: 1 });
     // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
     const assertion = expect(promise).rejects.toThrow(/Timed out waiting/);
@@ -171,8 +162,6 @@ describe('waitForTask', () => {
   });
 
   test('wait-abort errors carry exit code 2, distinct from task-failure exit 1', async () => {
-    // Scripts wrapping `submit --wait` must be able to tell "the CLI gave
-    // up waiting (task may still run)" from "the task terminally failed".
     mockGetTask.mockResolvedValue(makeTask('RUNNING'));
     const client = new ApiClient();
 
@@ -182,7 +171,6 @@ describe('waitForTask', () => {
     const err = (await settled) as CliError;
     expect(err).toBeInstanceOf(CliError);
     expect(err.exitCode).toBe(2);
-    // ...while a FAILED terminal status maps to plain exit 1.
     expect(exitCodeForStatus('FAILED')).toBe(1);
   });
 });

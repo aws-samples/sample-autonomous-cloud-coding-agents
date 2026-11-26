@@ -21,19 +21,6 @@ import { isLinearUploadsUrl } from './linear-attachments';
 import { logger } from './logger';
 
 /**
- * Best-effort probe for additional Linear context attached to an issue —
- * paperclip attachments (linked resources) and project documents — surfaced
- * as a PRESENCE SIGNAL in the task description.
- *
- * ADR-016: the agent runs Linear deterministically and has no Linear MCP, so
- * it can't fetch these at runtime. This probe therefore just FLAGS that they
- * exist (titles + counts) so the agent knows the issue may reference material
- * it wasn't given, and can proceed with best judgment / note the gap rather
- * than assume the description is complete. It does NOT pre-fetch bodies, screen
- * content, or upload to S3 — description-embedded `uploads.linear.app` files are
- * pre-hydrated separately by `linear-attachments.ts`, and recent human comments
- * by `linear-feedback.fetchRecentComments`.
- *
  * The webhook payload itself does NOT carry attachments or project.documents,
  * so we ask Linear's GraphQL API once at task-creation time.
  */
@@ -41,24 +28,10 @@ import { logger } from './logger';
 const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 const REQUEST_TIMEOUT_MS = 5000;
 
-/**
- * Cap on attachment titles listed inline in the task-description hint; any
- * beyond this are summarized as "(+N more)" so the prepended hint stays short.
- */
 const MAX_HINTED_ATTACHMENT_TITLES = 5;
 
-/** Cap on project documents whose CONTENT is pulled into the task context. */
 const MAX_HYDRATED_PROJECT_DOCS = 5;
 
-/**
- * Upper bound for COUNTING project docs (review #3). The content page is capped
- * at {@link MAX_HYDRATED_PROJECT_DOCS}, but the presence-hint needs the TRUE
- * total so it can flag docs beyond that cap (previously the count came from the
- * capped content page, so docs 6+ were invisible to the hint). A second aliased
- * id-only connection counts up to this bound cheaply (no bodies fetched); a
- * project with more docs than this is vanishingly rare and the hint's "+N more"
- * is approximate past it anyway.
- */
 const MAX_COUNTED_PROJECT_DOCS = 50;
 
 const ISSUE_CONTEXT_QUERY = `
@@ -92,7 +65,7 @@ export interface LinearProbeAttachment {
   readonly url: string;
 }
 
-/** A project wiki document's title + markdown body (ADR-016 doc pre-hydration). */
+/** A project wiki document's title + markdown body. */
 export interface LinearProbeDocument {
   readonly title: string;
   readonly content: string;
@@ -102,40 +75,25 @@ export interface LinearIssueContextProbe {
   /**
    * Titles of the paperclip attachments the task does NOT carry (external links
    * such as Figma or GitHub), for the hint. The `uploads.linear.app` ones are
-   * not listed: the path that renders the hint attaches them or rejects the task.
+   * not listed.
    */
   readonly attachmentTitles: readonly string[];
-  /**
-   * Native paperclip attachments with their URLs — the webhook processor
-   * hydrates the `uploads.linear.app` ones through the attachment pipeline
-   * (review finding #1). Distinct from description-embedded markdown links.
-   */
+  /** Native paperclip attachments with their URLs. Distinct from description-embedded markdown links. */
   readonly attachments: readonly LinearProbeAttachment[];
   /** Project name (only present when the issue belongs to a project). */
   readonly projectName: string | null;
-  /** True when the issue's project has at least one document attached. */
   readonly projectHasDocuments: boolean;
-  /**
-   * Project wiki documents WITH their content (ADR-016: pre-hydrated at
-   * task-creation because the agent has no Linear MCP to fetch them). The
-   * webhook processor screens these through the Bedrock Guardrail and folds them
-   * into the task description. Capped at {@link MAX_HYDRATED_PROJECT_DOCS}.
-   */
+  /** Project wiki documents WITH their content. Capped at {@link MAX_HYDRATED_PROJECT_DOCS}. */
   readonly projectDocuments: readonly LinearProbeDocument[];
   /**
    * Whether the probe actually reached Linear and parsed a result. `false` on a
    * non-2xx / GraphQL error / network failure / timeout — in which case the
-   * empty arrays mean "we don't KNOW", not "there is nothing". Attachment
-   * hydration keys on this to fail-CLOSED (reject the task) rather than run blind
-   * when a paperclip-only spec could be silently missing (review finding #5). The
-   * doc/hint consumers stay advisory (fail-open) as before.
+   * empty arrays mean "we don't KNOW", not "there is nothing".
    */
   readonly ok: boolean;
   /**
    * Total project documents Linear reported (incl. empty-body / over-cap ones NOT
-   * in `projectDocuments`). Lets the hint flag "there are docs we didn't hand you"
-   * precisely — hydratedCount < totalCount — instead of suppressing the hint the
-   * moment ANY doc is hydrated (review finding #6).
+   * in `projectDocuments`).
    */
   readonly projectDocumentCount: number;
 }
@@ -150,18 +108,12 @@ const EMPTY: LinearIssueContextProbe = {
   projectDocumentCount: 0,
 };
 
-/** Probe result for the FAILURE case — same empty shape but `ok:false` so a
- *  caller can distinguish "unknown" from "genuinely empty". */
 const PROBE_FAILED: LinearIssueContextProbe = { ...EMPTY, ok: false };
 
 /**
  * Issue the GraphQL query. Never throws. On failure (network, auth, GraphQL
  * errors, timeout) returns a probe with `ok:false` + empty arrays; on a genuine
- * empty result (2xx, issue has no attachments/docs) returns `ok:true`. The
- * distinction matters: a failed probe means "we don't KNOW" (a paperclip-only
- * spec could be present-but-unread), so the attachment-hydration caller
- * fails-CLOSED on `ok:false` rather than treating it as "nothing here" (review
- * finding #5). The doc/hint consumers stay advisory (fail-open) either way.
+ * empty result (2xx, issue has no attachments/docs) returns `ok:true`.
  */
 export async function probeLinearIssueContext(
   accessToken: string,
@@ -205,14 +157,8 @@ export async function probeLinearIssueContext(
       return PROBE_FAILED;
     }
     const issue = body.data?.issue;
-    // A well-formed 2xx GraphQL response whose `issue` is null/absent (deleted /
-    // not visible) is a genuine "nothing here", not a transport failure → ok:true.
     if (!issue) return EMPTY;
     const attachmentNodes = issue.attachments?.nodes ?? [];
-    // The titles are for the hint, which names what the task does NOT carry. On
-    // the label path, the only one that renders the hint, an uploads.linear.app
-    // paperclip is fetched, screened and attached (or the task is rejected), so
-    // it is left out.
     const attachmentTitles = attachmentNodes
       .filter((a) => !isLinearUploadsUrl(a?.url ?? ''))
       .map((a) => (typeof a?.title === 'string' ? a.title.trim() : ''))
@@ -224,15 +170,9 @@ export async function probeLinearIssueContext(
     const projectName = typeof project?.name === 'string' && project.name.trim() ? project.name.trim() : null;
     const documentNodes = project?.documents?.nodes ?? [];
     const projectHasDocuments = documentNodes.length > 0;
-    // Keep docs that actually have body text (an empty wiki page adds nothing but
-    // noise + a guardrail round-trip). Title defaults to "Untitled document".
     const projectDocuments = documentNodes
       .filter((d): d is { title?: string; content: string } => typeof d?.content === 'string' && d.content.trim().length > 0)
       .map((d) => ({ title: typeof d.title === 'string' && d.title.trim() ? d.title.trim() : 'Untitled document', content: d.content }));
-    // Review #3: the TRUE doc total from the id-only count connection (up to
-    // MAX_COUNTED_PROJECT_DOCS), NOT the capped content page — so the presence
-    // hint can flag docs beyond the hydration cap. Fall back to the content page
-    // length if the count connection is absent (older API shape / test mock).
     const countNodes = project?.documentsForCount?.nodes;
     const projectDocumentCount = Array.isArray(countNodes) ? countNodes.length : documentNodes.length;
     return {
@@ -258,16 +198,8 @@ export async function probeLinearIssueContext(
 /**
  * Render a one-paragraph hint the webhook processor prepends to the task
  * description when the probe surfaced anything worth flagging. Returns
- * an empty string when there's nothing to hint about — the processor
- * skips the prepend in that case.
- *
- * ADR-016: the agent has no Linear MCP, so this is a PRESENCE SIGNAL for the
- * material we could NOT hand it (a non-uploads paperclip like a Figma/GitHub
- * link; a project doc whose body was empty or beyond the hydration cap). Project
- * documents WITH content are pre-hydrated into the description separately
- * (see the processor's project-docs section), so they are NOT flagged here —
- * flagging included content would wrongly tell the agent to go find it. Names
- * what's missing WITHOUT pointing at any (now non-existent) fetch tool.
+ * an empty string when there's nothing to hint about. Names only the material
+ * the task does NOT carry; project documents hydrated with content are not flagged.
  */
 export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
   const bits: string[] = [];
@@ -278,16 +210,7 @@ export function renderIssueContextHint(probe: LinearIssueContextProbe): string {
       ? ` (+${probe.attachmentTitles.length - MAX_HINTED_ATTACHMENT_TITLES} more)` : '';
     bits.push(`paperclip attachments — ${titles}${more}`);
   }
-  // Flag docs we did NOT hydrate content for — empty body, or beyond the
-  // hydration cap. Hydrated docs are in the description already, so don't tell
-  // the agent to hunt for them; but if SOME docs were left out (hydrated < total)
-  // still flag the remainder (review finding #6 — a single hydrated doc used to
-  // suppress the hint for all the others). Default arrays defensively — a
-  // hand-built probe object in a test may omit the newer fields.
   const hydratedDocCount = (probe.projectDocuments ?? []).length;
-  // Prefer the exact count; when a probe object omits it (older shape / test
-  // mock), infer: hydrated>0 → assume those are all (no extra); else if docs are
-  // known to exist → treat as ≥1 unhydrated so the presence hint still fires.
   const totalDocCount = typeof probe.projectDocumentCount === 'number'
     ? probe.projectDocumentCount
     : (hydratedDocCount > 0 ? hydratedDocCount : (probe.projectHasDocuments ? 1 : 0));

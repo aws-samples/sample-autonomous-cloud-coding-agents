@@ -21,24 +21,12 @@
  * Stable, machine-greppable log-event names for sub-issue orchestration.
  * Emitted as the ``event`` field on structured logs.
  *
- * WHY A CENTRAL MODULE: these strings are a TEST CONTRACT. End-to-end and
- * automated dev tests assert on orchestration behavior by grepping
- * CloudWatch for these exact event names (the orchestration plane is
- * event-driven and has no synchronous API to assert against). Defining
- * them in one place means:
- *   - a test references ``ORCH_LOG.childReleased``, not a copy-pasted
- *     string that silently drifts when a log line is reworded;
- *   - renaming an event is a single edit that the type system propagates;
- *   - this file IS the catalogue of "what to look for in the logs",
- *     which is exactly the long-term automated-testing question.
- *
  * Convention: ``orch.<phase>.<outcome>`` so a test can match a whole
  * phase with a prefix (``orch.reconcile.*``) or an exact transition.
  * Every emit site should also include the structured fields listed in the
  * doc comment so log-based assertions can bind to ids, not just names.
  */
 export const ORCH_LOG = {
-  // ── Discovery (webhook → seed) ──────────────────────────────────
   /** A labeled parent had a valid sub-issue graph; rows seeded.
    *  Fields: orchestration_id, parent_linear_issue_id, child_count, root_count. */
   discoverySeeded: 'orch.discovery.seeded',
@@ -52,7 +40,6 @@ export const ORCH_LOG = {
    *  Fields: parent_linear_issue_id, message. */
   discoveryError: 'orch.discovery.error',
 
-  // ── Release (root + reconciler) ─────────────────────────────────
   /** A child task was created (released). Fields: orchestration_id,
    *  sub_issue_id, child_task_id, base_branch, merge_branch_count, source
    *  ('root' | 'reconciler' | 'sweep'). */
@@ -61,7 +48,6 @@ export const ORCH_LOG = {
    *  orchestration_id, sub_issue_id, status, response_body. */
   childReleaseFailed: 'orch.child.release_failed',
 
-  // ── Reconcile (TaskTable stream → gating) ───────────────────────
   /** A child reached terminal-success; gating re-evaluated. Fields:
    *  orchestration_id, sub_issue_id, released_count. */
   reconcileSuccess: 'orch.reconcile.success',
@@ -69,7 +55,6 @@ export const ORCH_LOG = {
    *  skipped. Fields: orchestration_id, sub_issue_id, skipped_ids. */
   reconcileFailurePropagated: 'orch.reconcile.failure_propagated',
 
-  // ── Completion / cancel ─────────────────────────────────────────
   /** Every child reached a terminal orchestration state. Fields:
    *  orchestration_id, parent_linear_issue_id, succeeded, failed, skipped. */
   orchestrationComplete: 'orch.complete',
@@ -77,7 +62,6 @@ export const ORCH_LOG = {
    *  orchestration_id, parent_linear_issue_id, cancelled_count. */
   cancelCascaded: 'orch.cancel.cascaded',
 
-  // ── Backstop (scheduled sweep) ──────────────────────────────────
   /** The sweep recovered a child the live reconciler missed. Fields:
    *  orchestration_id, sub_issue_id, recovery ('lost_release' |
    *  'lost_terminal'). */

@@ -75,7 +75,6 @@ function slashCommand(overrides: Partial<SlashCommandEvent> = {}): SlashCommandE
   };
 }
 
-/** JSON bodies of the calls made to one Slack Web API method, in call order. */
 function slackCalls(method: string): Array<Record<string, unknown>> {
   return fetchMock.mock.calls
     .filter(([url]) => String(url) === `https://slack.com/api/${method}`)
@@ -105,7 +104,6 @@ describe('slack-command-processor handler', () => {
   });
 
   test('slash command without source flag defaults to slash and falls through to default branch', async () => {
-    // Legacy shape: no source field — slash ack lambda forwards raw SlackCommandPayload
     const legacy = {
       command: '/bgagent',
       text: 'unknown_sub',
@@ -119,7 +117,6 @@ describe('slack-command-processor handler', () => {
       response_url: 'https://hooks.slack.com/cmd/X',
     };
     await handler(legacy);
-    // Posted the default "Use @Shoof" hint back to the response_url
     const posted = fetchMock.mock.calls.find(
       ([url, opts]) =>
         isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('Use `@Shoof`'),
@@ -137,9 +134,7 @@ describe('slack-command-processor handler', () => {
   });
 
   test('mention submit requires linked account (prompts /bgagent link)', async () => {
-    // 1. User mapping lookup: not found
     ddbSend.mockResolvedValueOnce({ Item: undefined });
-    // 2. swapReaction → getBotToken → installation lookup (for :x: swap)
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
     await handler(mention({ text: 'submit org/repo fix' }));
     const reply = fetchMock.mock.calls.find(
@@ -151,8 +146,6 @@ describe('slack-command-processor handler', () => {
 
   test('mention submit with no repo and no channel default replies with guidance', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
-    // channel-default lookup returns a row without a repo → no default; then
-    // swapReaction → getBotToken installation lookup.
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
     await handler(mention({ text: 'submit not-a-repo fix' }));
     const reply = fetchMock.mock.calls.find(
@@ -163,11 +156,8 @@ describe('slack-command-processor handler', () => {
   });
 
   test('mention submit with no repo falls back to channel default and uses full text as description', async () => {
-    // 1. user mapping → linked
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
-    // 2. channel-default lookup → active mapping to org/defaultrepo
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', repo: 'org/defaultrepo' } });
-    // 3. checkChannelAccess installation lookup (+ bot token secret)
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -182,13 +172,11 @@ describe('slack-command-processor handler', () => {
     const [reqBody] = createTaskCoreMock.mock.calls[0];
     expect(reqBody.repo).toBe('org/defaultrepo');
     expect(reqBody.issue_number).toBeUndefined();
-    // The whole message is the description — the first token is NOT dropped.
     expect(reqBody.task_description).toBe('fix the spacing on the header');
   });
 
   test('mention submit with no repo fails open when the channel lookup throws', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
-    // channel-default lookup throws → fail open → no default → guidance reply
     ddbSend.mockRejectedValueOnce(new Error('ddb blip'));
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
     await handler(mention({ text: 'submit fix the bug' }));
@@ -201,9 +189,7 @@ describe('slack-command-processor handler', () => {
 
   test('mention submit creates task via createTaskCore', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
-    // Installation lookup for bot token (checkChannelAccess) + bot token secret
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active' } });
-    // fetch: conversations.info response (public channel with bot as member)
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
@@ -218,13 +204,9 @@ describe('slack-command-processor handler', () => {
     expect(reqBody.repo).toBe('org/repo');
     expect(reqBody.issue_number).toBe(42);
     expect(reqBody.task_description).toBe('add validation');
-    // Must pin the coding workflow — an absent workflow_ref falls through the
-    // resolution ladder to default/agent-v1, which never opens a PR. Mirrors
-    // the Jira processor.
     expect(reqBody.workflow_ref).toBe('coding/new-task-v1');
     expect(ctx.channelSource).toBe('slack');
     expect(ctx.userId).toBe('cognito-1');
-    // mention_thread_ts flows to channel_metadata
     expect(ctx.channelMetadata.slack_thread_ts).toBe('1000.0001');
   });
 
@@ -244,9 +226,6 @@ describe('slack-command-processor handler', () => {
   });
 
   test('a refusal because the bot cannot post in the channel swaps :eyes: for :x: too', async () => {
-    // conversations.info answers that the bot lacks the scope to read this
-    // conversation (a group direct message, for example). The events handler
-    // has put :eyes: on the mention, and no task will be created.
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
     fetchMock.mockResolvedValueOnce({
@@ -267,7 +246,6 @@ describe('slack-command-processor handler', () => {
   test('mention submit fails open on transient Slack errors (ratelimited, internal_error)', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
-    // conversations.info returns a non-hard failure — task creation should proceed.
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ ok: false, error: 'ratelimited' }),
@@ -281,8 +259,6 @@ describe('slack-command-processor handler', () => {
   });
 
   describe('a mention written as a reply inside a thread', () => {
-    // mention_message_ts is the mention itself, mention_thread_ts the first
-    // message of the thread, which somebody else may have written.
     const threadReply = { text: 'submit org/repo fix', mention_thread_ts: '100.0001', mention_message_ts: '200.0002' };
 
     test('stores its own ts next to the thread ts, for the reactions of the task', async () => {
@@ -310,7 +286,7 @@ describe('slack-command-processor handler', () => {
     });
 
     test('gets the :x: itself when the request fails, with the answer in its thread', async () => {
-      ddbSend.mockResolvedValueOnce({ Item: undefined }); // user mapping: not linked
+      ddbSend.mockResolvedValueOnce({ Item: undefined });
       ddbSend.mockResolvedValue({ Item: { status: 'active' } });
 
       await handler(mention(threadReply));
@@ -324,9 +300,6 @@ describe('slack-command-processor handler', () => {
   });
 
   test('an unexpected error swaps :eyes: for :x: on the mention', async () => {
-    // Linked user, public channel, and then the task write fails (DynamoDB
-    // throttling escapes createTaskCore). No task exists: the mention must not
-    // keep the reaction that means "received".
     ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
     ddbSend.mockResolvedValue({ Item: { status: 'active' } });
     fetchMock.mockResolvedValueOnce({
@@ -345,13 +318,12 @@ describe('slack-command-processor handler', () => {
   });
 
   test('a reaction swap that fails after an unexpected error does not fail the invocation', async () => {
-    // An error that escapes the handler makes Lambda retry the asynchronous
-    // invocation, which would run the whole submission a second time.
+    // Lambda retries an asynchronous invocation whose handler throws.
     ddbSend
-      .mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } }) // user mapping
-      .mockResolvedValueOnce({ Item: { status: 'active' } }) // installation, for the channel check
-      .mockResolvedValueOnce({ Item: { status: 'active' } }) // installation, for the error reply
-      .mockRejectedValueOnce(new Error('ddb throttle')); // installation, for the reaction swap
+      .mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } })
+      .mockResolvedValueOnce({ Item: { status: 'active' } })
+      .mockResolvedValueOnce({ Item: { status: 'active' } })
+      .mockRejectedValueOnce(new Error('ddb throttle'));
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
@@ -365,13 +337,12 @@ describe('slack-command-processor handler', () => {
   });
 
   test('link subcommand persists pending mapping with a link code', async () => {
-    ddbSend.mockResolvedValueOnce({}); // Put pending mapping
+    ddbSend.mockResolvedValueOnce({});
     await handler(slashCommand({ text: 'link' }));
     const putCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Put');
     expect(putCall).toBeTruthy();
     expect(putCall![0].input.Item.slack_identity).toMatch(/^pending#/);
     expect(putCall![0].input.Item.status).toBe('pending');
-    // slack-link refuses a pending row whose ttl is not a number of seconds in the future.
     const nowSeconds = Math.floor(Date.now() / 1000);
     expect(putCall![0].input.Item.ttl).toBeGreaterThan(nowSeconds);
     expect(putCall![0].input.Item.ttl).toBeLessThanOrEqual(nowSeconds + 600);
@@ -389,21 +360,17 @@ describe('slack-command-processor handler', () => {
     expect(posted).toBeTruthy();
   });
 
-  // ─── Which word of the message is the repository ─────────────────────────────
-
   describe('repo and description of a mention', () => {
-    /** Every Get is answered from its table: a linked user, an installed workspace, these onboarded repos and this channel default. */
     function givenTables(onboarded: string[], channelDefault?: string): void {
       ddbSend.mockImplementation((cmd: { input: { TableName: string; Key: Record<string, string> } }) => {
         const { TableName, Key } = cmd.input;
         if (TableName === 'SlackMap') return Promise.resolve({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
         if (TableName === 'SlackChannelMap') return Promise.resolve({ Item: channelDefault ? { status: 'active', repo: channelDefault } : undefined });
         if (TableName === 'Repos') return Promise.resolve({ Item: onboarded.includes(Key.repo) ? { repo: Key.repo, status: 'active' } : undefined });
-        return Promise.resolve({ Item: { status: 'active' } }); // SlackInstall
+        return Promise.resolve({ Item: { status: 'active' } });
       });
     }
 
-    /** createTaskCore's answer to a repo that is not onboarded. */
     function givenNotOnboardedAnswer(): void {
       createTaskCoreMock.mockResolvedValue({
         statusCode: 422,
@@ -415,7 +382,6 @@ describe('slack-command-processor handler', () => {
       return ddbSend.mock.calls.filter(([cmd]) => cmd.input.TableName === 'Repos').map(([cmd]) => cmd.input.Key.repo);
     }
 
-    /** What createTaskCore was asked to create. */
     function submitted(): unknown[] {
       return createTaskCoreMock.mock.calls.map(([body]) => ({
         repo: body.repo,
@@ -426,7 +392,6 @@ describe('slack-command-processor handler', () => {
 
     beforeEach(() => {
       process.env.REPO_TABLE_NAME = 'Repos';
-      // conversations.info of a public channel the bot is in; any other Slack call just succeeds.
       fetchMock.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ ok: true, channel: { is_private: false, is_member: true } }),
@@ -451,7 +416,6 @@ describe('slack-command-processor handler', () => {
         issue_number: undefined,
         task_description: 'make the client/server handshake and the client/server docs agree in',
       }]);
-      // One read per distinct name.
       expect(repoLookups()).toEqual(['client/server', 'acme/api']);
     });
 
@@ -476,11 +440,8 @@ describe('slack-command-processor handler', () => {
     });
 
     test.each([
-      // A word tried from each of its dots reads on to its end every time.
       ['dot-joined letters', `${'a.'.repeat(30_000)}/`],
-      // A look back over the dots in front of every dot reads them all again.
       ['dots', '.'.repeat(60_000)],
-      // A run of blanks tried from each of its blanks reads on to its end every time.
       ['blanks between two words in front of the repo', `a${' \t'.repeat(30_000)}b acme/api`],
     ])('reads 60,000 characters of %s in under half a second', async (_what, message) => {
       givenTables(['acme/api'], 'acme/api');
@@ -498,9 +459,6 @@ describe('slack-command-processor handler', () => {
       'bump node to 22 and/or 24',
       'support 24/7 mode',
       'src/handlers/foo.ts throws on empty input',
-      // The price of the rule: a repo that is not onboarded reads like any
-      // other slash word when nothing marks it as a repo (the tests below
-      // say what does).
       'update the README in other/web',
     ])('a slash word that is no onboarded repo leaves the channel default in charge of the whole message: %s', async (message) => {
       givenTables(['acme/api'], 'acme/api');
@@ -511,9 +469,7 @@ describe('slack-command-processor handler', () => {
     });
 
     test.each([
-      // Written with an issue number: it is a repo, whoever owns it.
       ['with an issue number', 'fix other/web#7 the way acme/api does it', { repo: 'other/web', issue_number: 7, task_description: 'fix the way acme/api does it' }],
-      // Under the owner of the onboarded repo: its sibling, or a typo of it.
       ['of the same owner', 'update acme/web like acme/api', { repo: 'acme/web', issue_number: undefined, task_description: 'update like acme/api' }],
       ['given as a link', 'fix <https://github.com/other/web> the way acme/api does it', { repo: 'other/web', issue_number: undefined, task_description: 'fix the way acme/api does it' }],
     ])('a repo %s that is not onboarded is not passed over for an onboarded repo behind it', async (_what, message, expected) => {
@@ -526,9 +482,7 @@ describe('slack-command-processor handler', () => {
     });
 
     test.each([
-      // Written with an issue number: nobody means the channel default by that.
       ['a repo with an issue number', 'fix the bug in other/web#42', { repo: 'other/web', issue_number: 42, task_description: 'fix the bug in' }],
-      // Under the owner of the channel default (owners compare without case): a sibling repo, or a typo.
       ["a repo of the default's owner", 'update the README in Acme/web', { repo: 'Acme/web', issue_number: undefined, task_description: 'update the README in' }],
       ['a repo with an issue number under the name of a page of GitHub', 'fix the build in apps/web#42', { repo: 'apps/web', issue_number: 42, task_description: 'fix the build in' }],
       ['a repo with an issue number behind a slash word that ends in a full stop', 'compare lib/utils./other/web#5', { repo: 'other/web', issue_number: 5, task_description: 'compare lib/utils./' }],
@@ -538,7 +492,6 @@ describe('slack-command-processor handler', () => {
 
       await handler(mention({ text: `submit ${message}` }));
 
-      // createTaskCore answers that this repo is not onboarded, and the user reads it.
       expect(submitted()).toEqual([expected]);
       expect(slackCalls('chat.postMessage')).toEqual([
         expect.objectContaining({ text: ':x: Failed to create task: Repository is not onboarded.' }),
@@ -553,8 +506,6 @@ describe('slack-command-processor handler', () => {
 
       expect(submitted()).toEqual([{ repo: 'CI/CD', issue_number: undefined, task_description: 'fix the pipeline' }]);
     });
-
-    // ─── A pasted link ───────────────────────────────────────────────────────
 
     const LINKED_ISSUE = { repo: 'aws-samples/sample-interview-assistant-serverless', issue_number: 24, task_description: 'fix' };
 
@@ -583,7 +534,6 @@ describe('slack-command-processor handler', () => {
       await handler(mention({ text: `submit ${message}` }));
 
       expect(submitted()).toEqual([expected]);
-      // No part of a link is looked up as a word.
       expect(repoLookups()).toEqual([]);
     });
 
@@ -609,7 +559,6 @@ describe('slack-command-processor handler', () => {
     });
 
     test.each([
-      // Another site. One part of the address stands under the owner of the channel default.
       'fix what <https://example.com/teams/acme/board> describes',
       'fix what https://example.com/teams/acme/board describes',
       'fix the typo in <https://github.com/acme/acme/blob/main/README.md>',
@@ -639,8 +588,6 @@ describe('slack-command-processor handler', () => {
       ]);
     });
 
-    // ─── The description keeps the user's lines ──────────────────────────────
-
     const DIFF = '```\n- timeout: 30\n+   timeout: 60\n```';
 
     test.each([
@@ -666,11 +613,8 @@ describe('slack-command-processor handler', () => {
     });
   });
 
-  // ─── Slack file attachment extraction ────────────────────────────────────────
-
   describe('file attachments', () => {
     beforeEach(() => {
-      // Standard setup: linked user, public channel
       ddbSend.mockResolvedValueOnce({ Item: { status: 'active', platform_user_id: 'cognito-1' } });
       ddbSend.mockResolvedValue({ Item: { status: 'active' } });
       fetchMock.mockResolvedValueOnce({
@@ -680,7 +624,6 @@ describe('slack-command-processor handler', () => {
     });
 
     test('downloads Slack files and passes as inline attachments', async () => {
-      // fetch for file download
       fetchMock.mockResolvedValueOnce({
         ok: true,
         arrayBuffer: () => Promise.resolve(Buffer.from('file content')),
@@ -729,21 +672,10 @@ describe('slack-command-processor handler', () => {
       expect(reply).toBeTruthy();
     });
 
-    // ─── Size limits: those of an inline attachment ────────────────────────────
-    //
-    // The files are handed to createTaskCore inline, and validateAttachments
-    // takes 500 KB per file and 3 MB per task that way. The user has to be told
-    // these numbers, before anything is downloaded.
-
-    /** A PNG of exactly `size` bytes: the signature validateAttachments checks, then padding. */
     function png(size: number): Buffer {
       return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(size - 8)]);
     }
 
-    /**
-     * Submit a mention with one PNG per entry of `sizes`. Slack's CDN serves
-     * file i with sizes[i] bytes; the event declares it with declared[i].
-     */
     async function submitPngs(sizes: number[], declared: number[] = sizes): Promise<void> {
       fetchMock.mockImplementation((url: string) => {
         const file = /^https:\/\/files\.slack\.com\/files\/F(\d+)\//.exec(url);
@@ -782,7 +714,6 @@ describe('slack-command-processor handler', () => {
     });
 
     test('refuses a file that turns out larger than Slack declared', async () => {
-      // The events handler forwards size 0 when Slack sends none.
       await submitPngs([600 * 1024], [0]);
 
       expect(downloads()).toHaveLength(1);
@@ -793,7 +724,6 @@ describe('slack-command-processor handler', () => {
     });
 
     test('refuses files over the 3 MB inline total, without downloading the one that exceeds it', async () => {
-      // Seven screenshots of 480 KB pass the per-file limit and make 3,360 KB.
       await submitPngs(Array<number>(7).fill(480 * 1024));
 
       expect(downloads()).toHaveLength(6);
@@ -803,9 +733,6 @@ describe('slack-command-processor handler', () => {
       ]);
     });
 
-    // The processor reads the two limits from validation.ts. These cases sit on
-    // both sides of each limit and fail when the processor and
-    // validateAttachments stop agreeing.
     test.each([
       ['a file of exactly 500 KB', [500 * 1024], true],
       ['a file of 500 KB and one byte', [500 * 1024 + 1], false],
@@ -814,7 +741,6 @@ describe('slack-command-processor handler', () => {
     ])('%s: handed over exactly when validateAttachments takes it', async (_what, sizes, accepted) => {
       await submitPngs(sizes);
 
-      // The same files as the processor would hand them over.
       const inline = sizes.map((size, i) => ({
         type: 'image',
         content_type: 'image/png',
@@ -822,7 +748,6 @@ describe('slack-command-processor handler', () => {
         data: png(size).toString('base64'),
       }));
       expect(validateAttachments(inline).valid).toBe(accepted);
-      // Byte counts, not the attachments: a megabyte of base64 in a failure message helps nobody.
       const handedOver = createTaskCoreMock.mock.calls.map(
         ([reqBody]) => (reqBody.attachments as Array<{ data: string }>).map(att => Buffer.from(att.data, 'base64').length),
       );

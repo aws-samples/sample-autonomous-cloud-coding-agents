@@ -17,33 +17,11 @@
  *  SOFTWARE.
  */
 
-// Short-lived state for a consent that spans TWO CLI invocations.
-//
-// The localhost flow keeps everything in one process: the CLI generates a PKCE
-// verifier, starts a listener, and exchanges the code it catches. On a cloud
-// desktop, SSH box, or container that does not work — the browser cannot reach the
-// CLI's localhost — so consent has to be completed by pasting the code back into a
-// SECOND `bgagent linear setup` invocation.
-//
-// The authorization code is useless without the PKCE `code_verifier` from the FIRST
-// invocation, and `state` must still be checked to prevent CSRF. Both are held here
-// between the two runs.
-//
-// SECURITY. The verifier is a one-time secret: with it plus a stolen code an
-// attacker could complete the exchange. So the file is `0600` in the CLI's own
-// config dir, is deleted as soon as it is consumed, and is rejected once expired
-// (Linear's codes are short-lived; a stale verifier lingering on disk is a liability
-// with no upside).
 import * as fs from 'fs';
 import * as path from 'path';
 import { ensureConfigDir, getConfigDir, writeSecretFile } from './config';
 import { CliError } from './errors';
 
-/**
- * Consent must be completed within this window. Linear's authorization codes are
- * short-lived, so a verifier older than this is dead weight on disk — and a
- * one-time secret with no remaining use is a liability, not a convenience.
- */
 const PENDING_CONSENT_TTL_MINUTES = 15;
 const SECONDS_PER_MINUTE = 60;
 const MS_PER_SECOND = 1000;
@@ -59,13 +37,6 @@ export interface PendingConsent {
   readonly createdAt: string;
 }
 
-/**
- * Linear `urlKey` shape. Enforced HERE rather than trusted from the caller: this
- * value is interpolated into a filename, so a slug containing path separators or
- * `..` would let it escape the config directory — and what it would clobber or
- * expose is a file holding a live PKCE verifier. Callers do validate, but a
- * security-relevant store should not depend on being called correctly.
- */
 const SAFE_SLUG = /^[a-zA-Z0-9_-]{1,64}$/;
 
 function pendingPath(slug: string): string {
@@ -88,10 +59,7 @@ export function savePendingConsent(pending: PendingConsent): void {
 /**
  * Load and CONSUME the pending consent for a slug. The file is deleted whether or
  * not it turns out to be usable, so the verifier in it gets one attempt and cannot
- * be replayed from it. Only this file is deleted: a process killed in
- * `savePendingConsent` between the write and the rename leaves the verifier it was
- * saving in a temporary file beside this one, owner-only, and nothing removes that
- * copy (see `writeSecretFile`).
+ * be replayed from it.
  */
 export function takePendingConsent(slug: string): PendingConsent {
   const p = pendingPath(slug);
@@ -112,7 +80,6 @@ export function takePendingConsent(slug: string): PendingConsent {
       + `It has been discarded — re-run \`bgagent linear setup ${slug}\`.`,
     );
   } finally {
-    // Consume on read: one verifier, one attempt.
     fs.rmSync(p, { force: true });
   }
 

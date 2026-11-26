@@ -62,7 +62,6 @@ describe('parseRules', () => {
     expect(rule.approval_timeout_s).toBe(300);
     expect(rule.category).toBe('destructive');
     expect(rule.policy_id).toBe('policy0');
-    // `summary` falls back to a conditions render when @summary is absent.
     expect(rule.summary.length).toBeGreaterThan(0);
   });
 

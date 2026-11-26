@@ -1,14 +1,3 @@
-"""Value parity between ``contracts/constants.json`` and the agent constants it owns.
-
-``scripts/check-constants-sync.ts`` checks how each owned constant is WRITTEN: every
-assignment under ``agent/src`` must be a plain read of its contract key. That is a
-check of the source text. This test is the other half: the value each constant
-actually holds once the module is imported equals the contract, whatever expression
-produced it. Modelled on ``cli/test/constants-parity.test.ts``.
-
-Keep ``_OWNED`` in step with ``OWNED_PYTHON_NAMES`` in the script.
-"""
-
 import json
 from pathlib import Path
 
@@ -24,7 +13,6 @@ _CONTRACT = json.loads(
     (Path(__file__).resolve().parents[2] / "contracts" / "constants.json").read_text()
 )
 
-# (module, constant, path into contracts/constants.json)
 _OWNED = [
     (policy, "DEFAULT_APPROVAL_GATE_CAP", ("approval_gate_cap", "default")),
     (policy, "APPROVAL_GATE_CAP_MIN", ("approval_gate_cap", "min")),
@@ -74,7 +62,6 @@ def test_constant_holds_the_contract_value(module, name, path):
     actual = getattr(module, name)
 
     if isinstance(actual, (set, frozenset)):
-        # JSON has no set: the contract lists the members.
         assert sorted(actual) == sorted(expected)
     else:
         assert actual == expected

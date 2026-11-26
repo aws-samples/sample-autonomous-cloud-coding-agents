@@ -21,19 +21,13 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { DeleteCommand, type DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 
 /**
- * Linear helpers for the operator console: list a mapped project's open issues, and
- * hand one to the agent by adding its trigger label (so the normal webhook flow runs
- * and the agent keeps commenting on the issue).
- *
  * The label is added through ABCA's Linear app, so Linear reports the APP as the actor
  * on the resulting webhook, and the app is not linked to any ABCA user. A short-lived,
- * single-use "start claim" records which ABCA user asked; the webhook processor uses
- * it only when the actor itself has no linked user.
+ * single-use "start claim" records which ABCA user asked.
  */
 
 const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 const REQUEST_TIMEOUT_MS = 8_000;
-/** Long enough for Linear's webhook to arrive, short enough not to outlive the click. */
 export const START_CLAIM_TTL_SECONDS = 600;
 const MAX_ISSUES_PER_PROJECT = 50;
 
@@ -152,7 +146,7 @@ export async function getIssueForStart(accessToken: string, issueId: string, fet
 
 /**
  * The trigger label usable on an issue of `teamId`: a team label of that team, else a
- * workspace-wide label. Matched case-insensitively, like the webhook processor.
+ * workspace-wide label. Matched case-insensitively.
  */
 export async function findTriggerLabelId(accessToken: string, teamId: string | null, name: string, fetchImpl?: typeof fetch): Promise<string | null> {
   const data = await linearQuery<{ issueLabels: { nodes: Array<{ id: string; name: string; team?: { id: string } | null }> } }>(accessToken, `
@@ -175,8 +169,7 @@ const claimKey = (issueId: string) => `console-start#${issueId}`;
 
 /**
  * Records that `platformUserId` asked for `issueId` to be started from the console.
- * Conditional: an unexpired claim from someone else wins, so two people pressing Start
- * at once cannot overwrite each other's attribution. Returns false when it is taken.
+ * Conditional: an unexpired claim from someone else wins. Returns false when it is taken.
  */
 export async function writeStartClaim(
   ddb: DynamoDBDocumentClient,
@@ -207,9 +200,7 @@ export async function writeStartClaim(
 
 /**
  * The ABCA user who asked for `issueId` to be started, or null when there is no
- * unexpired claim from this workspace. Reads without consuming: the claim is released
- * only once the task exists ({@link releaseStartClaim}), so a retried webhook delivery
- * still finds who asked.
+ * unexpired claim from this workspace. Reads without consuming.
  */
 export async function readStartClaim(
   ddb: DynamoDBDocumentClient,

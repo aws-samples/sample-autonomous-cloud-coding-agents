@@ -1,15 +1,3 @@
-"""The read-side ``RegistryClient`` port for the agent (#246).
-
-The agent is a read-only consumer: it resolves refs and fetches records, but never
-publishes or governs. It talks to the substrate through this Protocol, never a raw
-AWS SDK client — the one implementation is ``AgentRegistryClient``
-(``registry.agent_registry_client``), so a substrate swap is confined there.
-
-The write-side verbs (publish / submit / approve) live only on the TypeScript port
-(``cdk/src/handlers/shared/registry/client.ts``); the agent has no business
-mutating the registry.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -21,8 +9,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ResolvedAsset:
-    """One resolved asset: enough to load it without knowing where bytes live."""
-
     kind: str
     namespace: str
     name: str
@@ -34,8 +20,7 @@ class ResolvedAsset:
 class RegistryResolutionError(Exception):
     """Raised when a ref cannot be resolved. ``reason`` matches the TS token set
     (``NO_MATCHING_VERSION`` / ``REMOVED`` / ``MALFORMED`` /
-    ``INVALID_CONSTRAINT`` / ``INVALID_REGISTRY_REF``) so both languages agree on
-    *why*."""
+    ``INVALID_CONSTRAINT`` / ``INVALID_REGISTRY_REF``)."""
 
     def __init__(self, reason: str, ref: str, message: str) -> None:
         super().__init__(message)
@@ -47,20 +32,11 @@ class RegistryRecordMalformedError(Exception):
     """Raised when a record's descriptor payload is present but unparseable — a
     SKILL.md frontmatter block that fails to YAML-parse, an ``x-abca-runtime``
     value that is not decodable base64/JSON, or a CUSTOM/MCP body that is not valid
-    JSON. Distinct from an *absent* record and from an *empty* runtime: a malformed
-    payload must be rejected, not silently collapsed to ``{}``. Collapsing erases
-    the runtime the agent is here to load (and, on the TS write/read side, the
-    publisher attribution), making a malformed record indistinguishable from a
-    legitimately empty one (#791). Mirrors ``RegistryRecordMalformedError`` in
-    ``cdk/src/handlers/shared/registry/types.ts`` — the TS twin additionally
-    carries an explicit ``reason`` discriminator field the agent has no consumer
-    for, so that field is omitted here; the underlying cause still travels on
-    ``__cause__`` via ``raise ... from exc`` at every raise site."""
+    JSON. Distinct from an *absent* record and from an *empty* runtime. The
+    underlying cause travels on ``__cause__``."""
 
 
 class RegistryClient(Protocol):
-    """Read-only registry access. See the TS port for the full (write) surface."""
-
     def get_record(
         self, kind: str, namespace: str, name: str, version: str
     ) -> dict[str, Any] | None:

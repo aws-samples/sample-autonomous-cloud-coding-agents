@@ -55,9 +55,7 @@ process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 
 import { handler } from '../../src/handlers/deny-task';
 
-// Secret fixtures assembled at runtime so the source file itself
-// never holds a contiguous secret literal (Code Defender pre-commit
-// hook trips on AWS / GitHub / Slack tokens even inside tests).
+// Assembled at runtime: secret scanners fail on a contiguous token literal, in tests too.
 const FIX_AWS_KEY = 'AK' + 'IAIOSFODNN7EXAMPLE';
 const FIX_GITHUB_PAT = 'gh' + 'p_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij';
 const FIX_PEM_BEGIN = '-----' + 'BEGIN' + ' PRIVATE KEY' + '-----';
@@ -121,7 +119,6 @@ describe('deny-task — auth + validation', () => {
       makeEvent({ body: JSON.stringify({ request_id: '01K', decision: 'deny' }) }),
     );
     expect(res.statusCode).toBe(202);
-    // The deny_reason ends up as "" in the Update expression values.
     const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
     expect(tx.TransactItems[0].Update.ExpressionAttributeValues[':reason']).toBe('');
   });
@@ -131,7 +128,6 @@ describe('deny-task — auth + validation', () => {
     ['an object', { text: 'too risky' }],
     ['a list', ['too risky']],
   ])('400 when reason is %s', async (_what, reason) => {
-    // The body is parsed JSON, so the field can hold any JSON type.
     const res = await handler(
       makeEvent({ body: JSON.stringify({ request_id: '01K', decision: 'deny', reason }) }),
     );
@@ -201,15 +197,12 @@ describe('deny-task — secret redaction', () => {
     expect(reason.length).toBeLessThanOrEqual(2000);
   });
 
-  // The scanner module that the handler calls; nothing in this file mocks it.
   const scanner = jest.requireActual<typeof import('../../src/handlers/shared/deny-reason-scanner')>(
     '../../src/handlers/shared/deny-reason-scanner',
   );
 
   test('scans only the first 20,000 characters of an oversized reason', async () => {
     mockSend.mockResolvedValue({});
-    // 540 KB of key headers and no END marker: the private-key pattern
-    // walks from every header to the end of the text it is given.
     const longReason = FIX_PEM_BEGIN.repeat(20_000);
     const scan = jest.spyOn(scanner, 'scanDenyReason');
     const res = await handler(
@@ -226,7 +219,6 @@ describe('deny-task — secret redaction', () => {
 
   test('stores an ordinary reason longer than 20,000 characters as if all of it were scanned', async () => {
     mockSend.mockResolvedValue({});
-    // A key id across the 2,000-character cut, then ordinary words: 27,219 characters.
     const longReason = `${'x'.repeat(1989)} ${FIX_AWS_KEY} leaked. ${'do not push to main. '.repeat(1200)}`;
     await handler(
       makeEvent({
@@ -243,7 +235,7 @@ describe('deny-task — secret redaction', () => {
 describe('deny-task — error classification', () => {
   test('404 REQUEST_NOT_FOUND when approvals condition fails', async () => {
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(
         new MockTransactionCanceledException([
           { Code: 'ConditionalCheckFailed' },

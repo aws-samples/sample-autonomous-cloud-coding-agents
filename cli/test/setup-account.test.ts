@@ -87,13 +87,11 @@ describe('versionAtLeast', () => {
     ['1.12.0', '1.12.0', true],
     ['1.12.1', '1.12.0', true],
     ['2.0.0', '1.12.0', true],
-    // Segments compare as numbers: as text, 1.9.0 would sort after 1.12.0.
     ['1.9.0', '1.12.0', false],
     ['0.99.99', '1.0.0', false],
     ['1.12', '1.12.0', true],
     ['1.12', '1.12.1', false],
     ['1.12.1', '1.12', true],
-    // A part that is not a number counts as 0.
     ['1.12.x', '1.12.0', true],
   ])('%s against a required %s: %s', (actual, required, expected) => {
     expect(versionAtLeast(actual, required)).toBe(expected);

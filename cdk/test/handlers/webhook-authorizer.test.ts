@@ -109,7 +109,6 @@ describe('webhook-authorizer handler', () => {
   });
 
   test('does a strongly-consistent GetItem by webhook_id', async () => {
-    // A revocation that has returned must be seen by the very next request.
     await handler(makeEvent());
     const sent = mockDdbSend.mock.calls[0][0];
     expect(sent.input.Key).toEqual({ webhook_id: 'wh-123' });

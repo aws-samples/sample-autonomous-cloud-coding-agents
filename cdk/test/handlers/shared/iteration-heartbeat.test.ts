@@ -25,7 +25,7 @@ function task(overrides: Partial<HeartbeatTaskView> = {}): HeartbeatTaskView {
   return {
     taskId: 't-1',
     status: 'RUNNING',
-    createdAt: '2026-06-29T13:20:00Z', // 10 min before NOW
+    createdAt: '2026-06-29T13:20:00Z',
     channelSource: 'linear',
     linearWorkspaceId: 'ws-1',
     iterationReplyCommentId: 'reply-1',
@@ -58,14 +58,6 @@ describe('planHeartbeat — eligibility', () => {
   });
 
   test('a STANDALONE iteration (no orchestration marker) is STILL eligible — keys on the reply, not isIteration', () => {
-    // The black-box case observed in practice was a standalone @bgagent
-    // iteration, which omits orchestration_iteration but still has a maturing
-    // reply. It must get a heartbeat: eligibility is the reply-routing fields,
-    // not isIteration.
-    // (The first deploy returned eligible:0 for exactly this case
-    // because the standalone path stamps linear_issue_id, not
-    // trigger_comment_issue_id — the sweep's toView now falls back to it, so by
-    // the time we reach planHeartbeat the issue id is populated either way.)
     const plan = planHeartbeat(task({ isIteration: false }), NOW);
     expect(plan).not.toBeNull();
     expect(plan!.replyId).toBe('reply-1');
@@ -98,7 +90,6 @@ describe('planHeartbeat — eligibility', () => {
   });
 
   test('below the elapsed floor → no plan (fresh task, no nudge)', () => {
-    // 30s elapsed < 90s floor
     expect(planHeartbeat(task({ createdAt: '2026-06-29T13:29:30Z' }), NOW)).toBeNull();
   });
 

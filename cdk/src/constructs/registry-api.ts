@@ -17,20 +17,6 @@
  *  SOFTWARE.
  */
 
-// The agent asset registry API (#246), isolated in its own NestedStack.
-//
-// WHY A SEPARATE API (not routes on the main TaskApi): the four handler Lambdas
-// + their roles/policies + the API Gateway methods/resources/permissions are
-// ~35 resources. Once the orchestration arc (#695) landed on the root
-// AgentStack, the root was near CloudFormation's hard 500-resource-per-stack
-// limit; adding the registry surface pushed it over (and further over on the
-// ECS compute path). API Gateway routes must live on the same stack as their
-// RestApi, so the only way to move the routes off the root is to give the
-// registry its OWN RestApi. This nested stack owns the RestApi, a Cognito
-// authorizer (bound to the SHARED user pool so credentials are identical), the
-// four Lambdas, and their routes — reclaiming the whole surface from the root
-// budget. The trade-off is a second invoke URL (`registryApiUrl`) the CLI must
-// be configured with; see docs/design/REGISTRY.md.
 import * as path from 'path';
 import { ArnFormat, Duration, NestedStack, type NestedStackProps, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
@@ -42,20 +28,15 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** Standard API-handler Lambda timeout (seconds); mirrors TaskApi's handlers. */
 const REGISTRY_HANDLER_TIMEOUT_SECONDS = 15;
 
-/** Publish Lambda timeout (seconds). Publish waits up to 20 s for the new record to
- *  leave CREATING (the poll budget in agent-registry-client.ts), between its other
- *  calls, so it gets what API Gateway's 29 s integration limit allows. */
+// API Gateway cuts an integration off at 29 s.
 const REGISTRY_PUBLISH_TIMEOUT_SECONDS = 28;
 
 export interface RegistryApiProps extends NestedStackProps {
-  /** Agent Registry id the handlers target (via `AGENT_REGISTRY_ID`). */
   readonly agentRegistryId: string;
-  /** The SHARED Cognito user pool — the registry API authorizes against the same
-   *  pool as the main API, so a caller's existing JWT works unchanged. The two
-   *  RegistryPublisher/RegistryApprover groups are created on this pool. */
+  /** The Cognito user pool the main API authorizes against. The
+   *  RegistryPublisher and RegistryApprover groups are created on it. */
   readonly userPool: cognito.IUserPool;
   /** API Gateway stage name; matches the main API (default `v1`). */
   readonly stageName?: string;
@@ -64,6 +45,8 @@ export interface RegistryApiProps extends NestedStackProps {
 /**
  * NestedStack exposing the registry REST API. {@link apiUrl} is the invoke URL
  * the CLI targets for `registry` commands (distinct from the main API URL).
+ * It owns its RestApi: API Gateway methods live in the stack of their RestApi,
+ * and CloudFormation allows 500 resources per stack.
  */
 export class RegistryApi extends NestedStack {
   public readonly api: apigw.RestApi;
@@ -72,9 +55,6 @@ export class RegistryApi extends NestedStack {
   constructor(scope: Construct, id: string, props: RegistryApiProps) {
     super(scope, id, props);
 
-    // Two Cognito groups gate writes (REGISTRY.md §10): publishers submit,
-    // approvers drive records to APPROVED. Resolve/list/show are open to any
-    // authenticated caller. Created on the shared pool.
     new cognito.CfnUserPoolGroup(this, 'RegistryPublisherGroup', {
       userPoolId: props.userPool.userPoolId,
       groupName: 'RegistryPublisher',
@@ -86,11 +66,9 @@ export class RegistryApi extends NestedStack {
       description: 'May approve/reject/deprecate registry records and auto-approve on publish (#246).',
     });
 
-    // --- Handler Lambdas ---
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const environment = { AGENT_REGISTRY_ID: props.agentRegistryId, ABCA_COMPONENT: 'registry-api' };
-    // The Agent Registry control-plane SDK is not in the Lambda runtime, so
-    // bundle it (do not externalize) — mirrors the provisioning handler.
+    // The Agent Registry control-plane SDK is not in the Lambda runtime.
     const bundling: lambda.BundlingOptions = { externalModules: [] };
 
     const registryFn = (
@@ -114,9 +92,6 @@ export class RegistryApi extends NestedStack {
     const listFn = registryFn('RegistryListFn', 'registry-list.ts');
     const showFn = registryFn('RegistryShowFn', 'registry-show.ts');
 
-    // Control-plane + data-plane actions, scoped to THIS registry (the id is
-    // known at synth time). Record ids are server-assigned, so the record ARN
-    // keeps a `/record/*` wildcard under this registry.
     const registryArn = Stack.of(this).formatArn({
       service: 'agent-registry',
       resource: 'registry',
@@ -145,8 +120,6 @@ export class RegistryApi extends NestedStack {
       fn.addToRolePolicy(new iam.PolicyStatement({ actions: readActions, resources: [registryArn, recordArn] }));
     }
 
-    // --- REST API (own RestApi + Cognito authorizer on the shared pool) ---
-    // Access + method logging mirror the main TaskApi so cdk-nag APIG1/APIG6 pass.
     const accessLogGroup = new logs.LogGroup(this, 'ApiAccessLogs', {
       retention: logs.RetentionDays.ONE_MONTH,
     });
@@ -169,7 +142,6 @@ export class RegistryApi extends NestedStack {
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
 
-    // --- Routes: /registry ---
     const registry = this.api.root.addResource('registry');
     const records = registry.addResource('records');
     records.addMethod('POST', new apigw.LambdaIntegration(publishFn, { allowTestInvoke: false }), authOptions);
@@ -178,7 +150,6 @@ export class RegistryApi extends NestedStack {
     const resolve = registry.addResource('resolve');
     resolve.addMethod('GET', new apigw.LambdaIntegration(resolveFn, { allowTestInvoke: false }), authOptions);
 
-    // show: /registry/records/{kind}/{namespace}/{name}
     const byKind = records.addResource('{kind}');
     const byNamespace = byKind.addResource('{namespace}');
     const byName = byNamespace.addResource('{name}');
@@ -186,7 +157,6 @@ export class RegistryApi extends NestedStack {
 
     this.apiUrl = this.api.url;
 
-    // --- cdk-nag suppressions ---
     for (const fn of [publishFn, resolveFn, listFn, showFn]) {
       NagSuppressions.addResourceSuppressions(fn, [
         {

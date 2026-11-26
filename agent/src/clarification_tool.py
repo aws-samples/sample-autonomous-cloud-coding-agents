@@ -1,31 +1,17 @@
 """In-process ``request_clarification`` SDK tool (clarify-before-spend, UX #4).
 
-The customer-caught problem: a vague request like "make it faster" was answered
-by GUESSING (shipping a plausible PR and charging for it) instead of asking what
-was meant. The fix asks the agent to STOP and pose a question when a request is
-too underspecified to implement without guessing.
-
-An earlier cut used a text sentinel the agent had to reproduce verbatim on its
-final line. That proved unreliable live — the model either shipped a guess or
-finished silently without emitting the exact string. A **tool call** is a
-discrete, deterministic event: the model either invokes ``request_clarification``
-or it doesn't, and the runner sees the ``ToolUseBlock`` in the message stream (no
-string-matching, no reproduction). This module defines that tool as an in-process
-SDK MCP server; the runner registers it and captures the question, and the
-pipeline treats a captured question as a hold-and-ask (no build, no PR).
-
-Kept tiny and side-effect-free: the tool just acknowledges the call. The
-authoritative signal is the runner observing the call + its ``question`` arg.
+Defines the tool as an in-process SDK MCP server. The tool just acknowledges the
+call: the runner registers the server and captures the question from the
+``ToolUseBlock``, and the pipeline treats a captured question as a hold-and-ask
+(no build, no PR).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-#: The in-process MCP server name. The SDK exposes each tool as
-#: ``mcp__<server>__<tool>``, so the fully-qualified tool name the runner matches
-#: on is :data:`CLARIFICATION_TOOL_NAME`.
 CLARIFICATION_SERVER_NAME = "abca"
+# The SDK exposes each tool of an MCP server as ``mcp__<server>__<tool>``.
 CLARIFICATION_TOOL_NAME = f"mcp__{CLARIFICATION_SERVER_NAME}__request_clarification"
 
 
@@ -51,8 +37,6 @@ def build_clarification_server() -> Any:
     )
     async def request_clarification(args: dict[str, Any]) -> dict[str, Any]:
         question = str(args.get("question", "")).strip()
-        # The tool's own return is only feedback to the agent; the runner captures
-        # the question from the ToolUseBlock. Tell the agent to stop here.
         return {
             "content": [
                 {

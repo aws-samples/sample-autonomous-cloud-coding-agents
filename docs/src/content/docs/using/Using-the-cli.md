@@ -2,9 +2,9 @@
 title: "Using the CLI"
 ---
 
-The `bgagent` CLI is the recommended way to interact with the platform. It authenticates via Cognito, manages token caching, and provides formatted output.
+The `bgagent` CLI is the recommended way to interact with the platform. It authenticates through Cognito, manages token caching, and provides formatted output.
 
-**This repository** builds the CLI under `cli/`; after compile, run the entrypoint as `node lib/bin/bgagent.js` from the `cli` directory (the path `package.json` exposes as `bin`). If you install a published package or link `bgagent` onto your `PATH`, you can call `bgagent` directly  - the subcommands are the same.
+This repository builds the CLI under `cli/`. After the compile, run the entrypoint as `node lib/bin/bgagent.js` from the `cli` directory. That entrypoint is the path `package.json` exposes as `bin`. If you install a published package or link `bgagent` onto your `PATH`, you can call `bgagent` directly. The subcommands are the same.
 
 ### Setup
 
@@ -25,7 +25,7 @@ node lib/bin/bgagent.js login --username user@example.com
 
 ### Operator commands (stack admin)
 
-Stack admins can introspect deployment state and run smoke checks **without Cognito login** — these commands use operator AWS credentials (IAM profile / `AWS_REGION`):
+Stack admins can inspect deployment state and run smoke checks **without Cognito login**. These commands use operator AWS credentials (IAM profile / `AWS_REGION`):
 
 ```bash
 # Print stack outputs (ApiUrl, UserPoolId, AppClientId, GitHubTokenSecretArn, …)
@@ -45,7 +45,7 @@ bgagent github set-token
 bgagent github set-token --repo owner/repo
 ```
 
-The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
+The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, and `admin list-users`) accept `--output json`. The credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. The region defaults to `bgagent configure --region` or `AWS_REGION`.
 
 ### Submitting a task
 
@@ -84,7 +84,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" 
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --wait
 ```
 
-**Example** (default `text` output immediately after a successful submit  - task is `SUBMITTED`, branch name reserved):
+**Example** of the default `text` output immediately after a successful submit. The task is `SUBMITTED` and the branch name is reserved:
 
 ```bash
 node lib/bin/bgagent.js submit --repo awslabs/agent-plugins --task "add codeowners field to RFC issue template"
@@ -108,14 +108,14 @@ Created:     2026-04-01T00:39:51.271Z
 | `--task` | Task description text. |
 | `--pr` | PR number to iterate on. Selects the `coding/pr-iteration-v1` workflow. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--review-pr` | PR number to review. Selects the `coding/pr-review-v1` workflow. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
-| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; without any of the three flags the CLI sends `coding/new-task-v1`. |
-| `--attachment` | Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline, up to 3 MB in total; the other files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
-| `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
-| `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
+| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (for example `coding/new-task-v1`). Overrides the workflow implied by `--pr` or `--review-pr`. Without any of the three flags, the CLI sends `coding/new-task-v1`. |
+| `--attachment` | Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline, up to 3 MB in total. The other files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
+| `--max-turns` | Maximum agent turns (1 to 500). Overrides per-repo Blueprint default. Platform default: 100. |
+| `--max-budget` | Maximum cost budget in USD (0.01 to 100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
-| `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
+| `--trace` | Enable detailed tracing. Raises the progress preview cap to 4 KB and uploads the full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
 | `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl). |
-| `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
+| `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60, 0 to 3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled. Does not change approval deadlines or affect other compute backends. |
 | `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Scope forms: `all_session`, `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>`, `rule:<rule_id>`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
@@ -124,7 +124,7 @@ At least one of `--issue`, `--task`, `--pr`, or `--review-pr` is required. The `
 
 ### Attachments
 
-Attachments let you provide non-text context to the agent — screenshots of bugs, design mockups, CSV data, log files, or URLs to external resources. Every attachment passes through security screening before reaching the agent.
+Attachments let you give the agent non-text context, such as screenshots of bugs, design mockups, CSV data, log files, or URLs to external resources. Every attachment goes through security screening before it reaches the agent.
 
 **Supported file types:**
 
@@ -159,25 +159,25 @@ node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" 
   --attachment https://example.com/mockup.png
 ```
 
-The CLI automatically routes attachments through the optimal upload path:
+The CLI chooses the upload path for each attachment:
 
 - **Files ≤ 500 KB** are sent inline (base64-encoded in the request body), up to 3 MB in total.
-- **Files > 500 KB**, and smaller files once 3 MB are sent inline, use presigned upload (uploaded directly to S3, then confirmed).
+- **Files > 500 KB**, and smaller files once 3 MB are sent inline, use presigned upload. The CLI uploads them directly to S3 and then confirms the upload.
 - **URLs** are validated at submission and fetched during context hydration with SSRF protection.
 
 **Security screening:**
 
-All attachments are screened before reaching the agent:
+All attachments are screened before they reach the agent:
 
-- **Images**: Magic bytes validation, dimension checks (max 8000px per side), Bedrock Guardrail content screening (prompt attack detection). Only PNG and JPEG are accepted.
-- **Text files**: Magic bytes validation, Bedrock Guardrail text content screening. PDFs have text extracted (max 50 pages) before screening.
-- **URLs**: HTTPS-only enforcement, DNS resolution pinning (prevents DNS rebinding/SSRF), private IP blocking, redirect validation, size and timeout limits.
+- **Images.** Magic bytes validation, dimension checks (at most 8000px per side), and Bedrock Guardrail content screening for prompt attacks. Only PNG and JPEG are accepted.
+- **Text files.** Magic bytes validation and Bedrock Guardrail text content screening. The text of a PDF is extracted (at most 50 pages) before screening.
+- **URLs.** HTTPS-only enforcement, DNS resolution pinning (which prevents DNS rebinding and SSRF), private IP blocking, redirect validation, and size and timeout limits.
 
-If any attachment fails screening, the entire task is rejected with a clear error identifying the problematic file. Re-submit without the flagged attachment.
+If any attachment fails screening, the platform rejects the entire task with an error that identifies the file. Submit the task again without the flagged attachment.
 
 ### Checking task status
 
-Run these from the `cli/` directory (same as in **Setup**).
+Run these commands from the `cli/` directory, as in **Setup**.
 
 #### Single task
 
@@ -188,7 +188,7 @@ node lib/bin/bgagent.js status <TASK_ID>
 node lib/bin/bgagent.js status <TASK_ID> --wait
 ```
 
-**Example** (default `text` output once the task has finished  - `COMPLETED`, with session id, PR link, duration, and cost):
+**Example** of the default `text` output once the task has finished. The status is `COMPLETED`, and the output has the session id, PR link, duration, and cost:
 
 ```bash
 node lib/bin/bgagent.js status 01KN37PZ77P1W19D71DTZ15X6X
@@ -217,19 +217,19 @@ node lib/bin/bgagent.js list --status RUNNING,SUBMITTED
 node lib/bin/bgagent.js list --repo owner/repo --limit 10
 ```
 
-The table is `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, `DESCRIPTION`.
+The columns of the table are `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, and `DESCRIPTION`.
 
 #### Is a running task actually alive? (`HEARTBEAT`)
 
-While a task is `RUNNING` the agent writes a liveness beat every 45 seconds. `bgagent status` shows it as a `Heartbeat:` line and `bgagent list` as a `HEARTBEAT` column, both as an **age** rather than a timestamp, because the age is the signal:
+While a task is `RUNNING`, the agent writes a liveness beat every 45 seconds. `bgagent status` shows the beat as a `Heartbeat:` line, and `bgagent list` shows it as a `HEARTBEAT` column. Both show an **age**, not a timestamp, because the age tells you whether the agent is alive:
 
 ```text
   Heartbeat:     12s ago
 ```
 
-- **Under ~1 minute** - healthy; the agent is working.
-- **Several minutes and climbing** - the agent is hung, deadlocked, or was OOM-killed inside an otherwise-healthy compute environment. The platform detects this itself and fails the task rather than letting it burn its full timeout, so you do not need to act; the failure message will name the compute substrate.
-- **`—`** - nothing to report. Shown for terminal tasks (the last beat means nothing next to a final status), before the first beat arrives, and on the `ecs` backend, where the agent runs the pipeline directly rather than serving HTTP and so beats only once at start.
+- **Under about 1 minute.** Healthy. The agent is working.
+- **Several minutes and rising.** The agent is hung, is deadlocked, or was OOM-killed inside an otherwise healthy compute environment. The platform detects this state itself and fails the task instead of letting it run to its full timeout, so you do not need to act. The failure message names the compute substrate.
+- **`—`.** Nothing to report. The CLI shows it for terminal tasks, because the last beat means nothing next to a final status. The CLI also shows it before the first beat arrives, and on the `ecs` backend, where the agent runs the pipeline directly instead of serving HTTP and so beats only once, at the start.
 
 ### Viewing task events
 
@@ -239,11 +239,11 @@ node lib/bin/bgagent.js events <TASK_ID> --limit 20
 node lib/bin/bgagent.js events <TASK_ID> --output json
 ```
 
-Use **`--output json`** to see the full payload for **`preflight_failed`** (`reason`, `detail`, and per-check metadata). See **Task events** under **Task lifecycle** for how to interpret common `reason` values.
+Use `--output json` to see the full payload of `preflight_failed` (`reason`, `detail`, and per-check metadata). See **Task events** under **Task lifecycle** for how to interpret common `reason` values.
 
 ### Watching a task in real time
 
-Stream progress events (turns, tool calls, tool results, milestones, cost updates) from a running task and exit automatically when it reaches a terminal state.
+`bgagent watch` streams progress events (turns, tool calls, tool results, milestones, and cost updates) from a running task and exits automatically when the task reaches a terminal state.
 
 ```bash
 node lib/bin/bgagent.js watch <TASK_ID>
@@ -252,11 +252,11 @@ node lib/bin/bgagent.js watch <TASK_ID>
 node lib/bin/bgagent.js watch <TASK_ID> --output json
 ```
 
-Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`, `2` when the CLI gives up because the API kept failing (the task may still be running: run the command again to resume). Press Ctrl+C to exit early without affecting the task.
+The exit code is `0` on `COMPLETED`, `1` on `FAILED`, `CANCELLED`, or `TIMED_OUT`, and `2` when the CLI gives up because the API kept failing. After exit code `2`, the task may still be running. Run the command again to resume. Press Ctrl+C to exit early without affecting the task.
 
 ### Steering a running task (nudge)
 
-Send a mid-run message to the agent while it is working. The agent emits a `nudge_acknowledged` milestone before incorporating your guidance into its next turn.
+Send a message to the agent while it is working. The agent emits a `nudge_acknowledged` milestone before it uses your guidance in its next turn.
 
 ```bash
 node lib/bin/bgagent.js nudge <TASK_ID> "Focus on the auth module first"
@@ -265,11 +265,11 @@ node lib/bin/bgagent.js nudge <TASK_ID> "Focus on the auth module first"
 node lib/bin/bgagent.js nudge <TASK_ID> "Skip the docs update, just fix the handler"
 ```
 
-Nudges are delivered between turns — the agent finishes its current tool call before reading the message. You can send multiple nudges; each one is acknowledged in order.
+Nudges are delivered between turns. The agent finishes its current tool call before it reads the message. You can send multiple nudges. The agent acknowledges them in order.
 
 ### Tracing a task
 
-Submit a task with `--trace` to enable detailed tracing. This raises the progress-writer preview cap from 200 chars to 4 KB and uploads a full gzipped NDJSON trajectory to S3 when the task finishes.
+Submit a task with `--trace` to enable detailed tracing. Tracing raises the progress-writer preview cap from 200 characters to 4 KB and uploads a full gzipped NDJSON trajectory to S3 when the task finishes.
 
 ```bash
 # Submit with tracing enabled
@@ -290,7 +290,7 @@ node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz --force
 
 ### Debug output
 
-Add `--verbose` to any `bgagent` command to emit the full HTTP request/response cycle on stderr. This is useful for diagnosing auth, network, or API contract issues.
+Add `--verbose` to any `bgagent` command to print the full HTTP request and response cycle on stderr. Use it to diagnose auth, network, or API contract issues.
 
 ```bash
 node lib/bin/bgagent.js --verbose status <TASK_ID>
@@ -328,10 +328,10 @@ node lib/bin/bgagent.js stats --output json
 
 The numbers stand under four headings, Speed, Quality, Leverage and Trust, and the finished tasks per outcome follow them. Under a number stand the counts it rests on and, for some, the same number for the period of that length before. A number with nothing to compute it from shows `-`, and the line under it says why. The **Scoreboard** page of the operator console shows the same numbers under the same labels.
 
-What a number counts is defined in one document, the observability design: [The numbers](/sample-autonomous-cloud-coding-agents/architecture/observability#the-numbers) has a row for every number, under the label the command prints, [Words](/sample-autonomous-cloud-coding-agents/architecture/observability#words) defines the terms those rows use and the six outcomes, and [Not counted and not measured](/sample-autonomous-cloud-coding-agents/architecture/observability#not-counted-and-not-measured) lists what the scoreboard does not see.
+One document, the observability design, defines what a number counts. [The numbers](/sample-autonomous-cloud-coding-agents/architecture/observability#the-numbers) has a row for every number, under the label the command prints. [Words](/sample-autonomous-cloud-coding-agents/architecture/observability#words) defines the terms those rows use and the six outcomes. [Not counted and not measured](/sample-autonomous-cloud-coding-agents/architecture/observability#not-counted-and-not-measured) lists what the scoreboard does not see.
 
 **Limits:**
 
-- **Your own tasks only.** No option shows another user's numbers or a team's; every user's are on the CloudWatch dashboard, in the "Factory scoreboard" row.
+- **Your own tasks only.** No option shows another user's numbers or a team's. Every user's numbers are on the CloudWatch dashboard, in the "Factory scoreboard" row.
 - **7 or 30 days.** The numbers cover the last 7 or 30 days, beside the period of the same length before, and no option reaches further back.
 - **`--repo` filters after the read.** A request reads a bounded number of your task records and then counts those of the repository, so the notice that the numbers cover part of the range can appear for a repository with few tasks.

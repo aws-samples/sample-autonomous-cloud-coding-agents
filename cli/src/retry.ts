@@ -19,28 +19,10 @@
 
 import { ApiError } from './errors';
 
-/**
- * Shared transient-retry primitives used by both the ``bgagent watch``
- * poll loop and ``waitForTask`` (``submit --wait`` / ``status --wait``).
- *
- * Both consumers face the same hazard: a single network blip or 5xx hiccup
- * should not crash a long-lived poll, while deterministic 4xx errors must
- * fail fast. Centralizing the classification + backoff here keeps the two
- * call sites in lockstep.
- */
-
-/** Lower bound on the backoff base — the first retry waits at least this. */
 const RETRY_BASE_DELAY_MS = 500;
 
-/** Upper bound on a single backoff sleep. Keeps a retry storm from walking
- *  longer than a few seconds between attempts. */
 const RETRY_CEILING_MS = 5_000;
 
-/** ``error.cause.code`` values that mark a socket-level transient. Node's
- *  undici wraps most of these in a ``TypeError: fetch failed`` (caught by
- *  the message check below), but mid-stream failures (``UND_ERR_SOCKET``,
- *  ``ECONNRESET`` after headers) can surface as other error shapes whose
- *  cause still carries the syscall code. */
 const TRANSIENT_CAUSE_CODES = new Set([
   'ECONNRESET',
   'ECONNREFUSED',
@@ -64,9 +46,7 @@ const TRANSIENT_CAUSE_CODES = new Set([
  *     (see ``TRANSIENT_CAUSE_CODES``) — covers mid-stream terminations
  *     that undici does NOT wrap as ``TypeError: fetch failed``.
  *
- * Non-transient: everything else propagates with its original message —
- * ``ApiError`` 4xx (deterministic; retry is futile), ``CliError``, and any
- * unrecognized error all fall through to the final ``return false``.
+ * Non-transient: everything else (``ApiError`` 4xx, ``CliError``, any unrecognized error).
  */
 export function isTransientError(err: unknown): boolean {
   if (err instanceof ApiError) {
@@ -76,8 +56,6 @@ export function isTransientError(err: unknown): boolean {
     return true;
   }
   if (err instanceof Error) {
-    // ``Error.cause`` is runtime-present on Node 18+; the compile target's
-    // lib predates its typing, so read it structurally.
     const cause = (err as Error & { cause?: unknown }).cause;
     const code = cause instanceof Error
       ? (cause as Error & { code?: unknown }).code
@@ -90,15 +68,9 @@ export function isTransientError(err: unknown): boolean {
 }
 
 /** Exponential backoff with equal-jitter (AWS Architecture Blog variant):
- *  half the base delay is fixed, the other half randomized. Prevents a
- *  near-zero ``Math.random()`` roll from retry-spamming a degraded service.
- *  Bounded at ``RETRY_CEILING_MS``. ``attempt`` is 1-based.
- *
- *  The exponent is ``2 ** attempt`` (NOT ``attempt - 1``): with the 1-based
- *  counter both callers use, the first retry's base is 1000ms, then
- *  2000/4000/5000(cap). This preserves the original watch.ts tuning —
- *  an earlier extraction accidentally halved the curve, doubling retry
- *  pressure on a degraded backend. The curve is pinned by tests. */
+ *  half the base delay is fixed, the other half randomized.
+ *  Bounded at ``RETRY_CEILING_MS``. ``attempt`` is 1-based: the base is 1000ms
+ *  for the first retry, then 2000/4000/5000 (cap). */
 export function transientRetryDelayMs(attempt: number): number {
   const base = Math.min(RETRY_CEILING_MS, RETRY_BASE_DELAY_MS * 2 ** attempt);
   const half = Math.floor(base / 2);

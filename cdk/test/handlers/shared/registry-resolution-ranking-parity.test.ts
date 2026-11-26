@@ -17,18 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Semver RESOLUTION-ranking parity corpus runner (TypeScript side) (#246).
- *
- * Loads ``contracts/registry-resolution/resolution-cases.json`` and asserts
- * ``selectHighest`` picks the golden winner for each (candidates, constraint).
- * The companion runner ``agent/tests/test_registry_resolution_ranking_corpus.py``
- * runs the same file against the Python ``select_highest``. Ranking happens in
- * BOTH languages (TS handler for the API, Python for the orchestrator's direct
- * port), so a drift in caret/tilde/prerelease semantics would silently resolve
- * different versions on the two paths — this corpus fails CI before that ships.
- */
-
 import * as fs from 'fs';
 import * as path from 'path';
 import { parseConstraint } from '../../../src/handlers/shared/registry/ref';

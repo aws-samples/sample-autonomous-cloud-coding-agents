@@ -104,14 +104,14 @@ describe('create-webhook handler', () => {
     expect(body.data.webhook_id).toBeDefined();
     expect(body.data.name).toBe('My CI Webhook');
     expect(body.data.secret).toBeDefined();
-    expect(body.data.secret.length).toBe(64); // 32 bytes hex
+    expect(body.data.secret.length).toBe(64);
     expect(body.data.webhook_url).toBe('https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks');
-    expect(mockSmSend).toHaveBeenCalledTimes(1); // CreateSecret (with inline tags)
+    expect(mockSmSend).toHaveBeenCalledTimes(1);
     expect(mockDdbSend).toHaveBeenCalledTimes(1);
   });
 
   test('builds webhook_url from the host and stage the request came in on', async () => {
-    // A Regional API passes header names on as sent, and another deployment has another stage.
+    // A Regional API Gateway REST API passes header names on as sent.
     const event = makeEvent({ headers: { host: 'api.example.com' } });
     event.requestContext.stage = 'prod';
     const result = await handler(event);
@@ -137,7 +137,6 @@ describe('create-webhook handler', () => {
     }
 
     test('names the API key when the request was authorized by one', async () => {
-      // The unified authorizer puts the key id into the request context.
       const event = makeEvent();
       event.requestContext.authorizer = { userId: 'user-123', keyId: 'K1', scopes: 'webhooks:manage' };
       expect(await createdLine(event)).toEqual({
@@ -208,7 +207,6 @@ describe('create-webhook handler', () => {
     const event = makeEvent();
     const result = await handler(event);
     expect(result.statusCode).toBe(500);
-    // SM should have 2 calls: CreateSecret + DeleteSecret (rollback)
     expect(mockSmSend).toHaveBeenCalledTimes(2);
   });
 });

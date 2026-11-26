@@ -25,9 +25,6 @@ import { decodeBundle, encodeBundle, generateTempPassword, makeAdminCommand } fr
 import { CliError } from '../../src/errors';
 import { CliConfig } from '../../src/types';
 
-// Mock the Cognito admin layer so `invite-user` resolves a fixed context and
-// performs no AWS calls — the assertion is on the local credentials file the
-// command writes, not on Cognito.
 jest.mock('../../src/cognito-admin', () => ({
   ...jest.requireActual('../../src/cognito-admin'),
   resolveCognitoAdminContext: jest.fn().mockResolvedValue({
@@ -88,11 +85,6 @@ describe('admin bundle helpers', () => {
 });
 
 describe('generateTempPassword', () => {
-  // Cognito's default policy: min 12 chars, with at least one upper, lower,
-  // digit, and symbol. The CLI relies on satisfying this by construction —
-  // these tests guard against a regression that would silently produce
-  // passwords Cognito rejects with "InvalidPasswordException" only at
-  // `admin-create-user` time.
   const upper = /[A-Z]/;
   const lower = /[a-z]/;
   const digit = /[0-9]/;
@@ -104,7 +96,6 @@ describe('generateTempPassword', () => {
   });
 
   test('contains at least one upper, lower, digit, and symbol', () => {
-    // Sample many passwords — the random shuffle should never strip a class.
     for (let i = 0; i < 50; i += 1) {
       const pwd = generateTempPassword();
       expect(pwd).toMatch(upper);
@@ -119,7 +110,6 @@ describe('generateTempPassword', () => {
     for (let i = 0; i < 20; i += 1) {
       seen.add(generateTempPassword());
     }
-    // Allow at most one collision in 20 draws (effectively 0 with crypto rand).
     expect(seen.size).toBeGreaterThanOrEqual(19);
   });
 });
@@ -152,29 +142,21 @@ describe('admin invite-user credentials file', () => {
     const body = fs.readFileSync(invitePath, 'utf-8');
     const lines = body.split('\n');
 
-    // The file holds a password: owner-only.
     expect(fs.statSync(invitePath).mode % 0o1000).toBe(0o600);
 
-    // The label is "temp password:" (not "password:") for invites.
     const emailLine = lines.find((l) => l.startsWith('email:'))!;
     const pwdLine = lines.find((l) => l.startsWith('temp password:'))!;
     expect(pwdLine).toContain('K9$mPq2nL!vXf3Hb');
     expect(lines.some((l) => l.startsWith('password:'))).toBe(false);
 
-    // All labels pad to the widest ("temp password:" = 14), so the value column
-    // lines up: every value begins at offset 15 (label width + one space).
     const VALUE_COLUMN = 'temp password:'.length + 1;
     expect(emailLine.indexOf('teammate@example.com')).toBe(VALUE_COLUMN);
     expect(pwdLine.indexOf('K9$mPq2nL!vXf3Hb')).toBe(VALUE_COLUMN);
 
-    // The trailing first-login guidance the docs promise.
     expect(body).toContain('On first login you will be prompted to set a permanent password.');
   });
 
   test('the bundle label pads to the same value column as the others', async () => {
-    // The bundle line is the one rendered in USER_GUIDE.md's sample, and it is
-    // padded independently of email/temp-password — so un-padding ONLY that
-    // label would otherwise keep the suite green.
     const bundleConfig: CliConfig = {
       api_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1',
       region: 'us-east-1',

@@ -1,68 +1,31 @@
 #!/usr/bin/env node
 // Guards the semgrep suppression comments of the repository (#790, #257).
 //
-// A suppression comment is the documented escape hatch of the semgrep gates, and
-// an unchecked one is an unreviewed off switch. This check holds every one of
-// them, in every tracked file that is not Markdown and in any file semgrep
-// reads for the masking rules, to two rules:
-//
-//  1. FORM. The suppression word is followed by `: <rule-id> -- <reason>` (the
-//     failure message prints an example). Without a rule id the comment silences
-//     every rule on its line; without a reason nobody can review it. The word is
-//     found the way semgrep finds it, which is far looser than this form spells
-//     it and makes no difference between code and comment. So a line that holds
-//     the word at all must be one well-formed suppression and nothing else: a
-//     comment that only talks about suppressions has to use other words.
-//
-//  2. BINDING, for the two silent-success-masking rules. `focus-metavariable: $RET`
-//     in .semgrep/silent-success-masking.yaml anchors each finding on the returned
-//     value, so a suppression only acts when it sits ON that line or on the line
-//     IMMEDIATELY above it. One that sits anywhere else suppresses nothing: either
-//     it drifted away from its return (the finding is then live, or the comment
-//     only looks like it is doing something), or the code changed and no longer
-//     needs it. Both are reported. This is asked of semgrep itself rather than
-//     guessed from the text: the rules are run once with suppressions ignored and
-//     every suppression must sit on, or directly above, a finding of its rule.
-//     A suppression counts as one for a masking rule when that rule's id stands
-//     anywhere on its line: semgrep reads an id in more places and spellings
-//     than the documented one, and all of them contain the id.
-//
-// The binding rule covers only the two local rules because only they can be run
-// offline and reproducibly; the registry rules behind `security:sast` cannot.
-//
 // Run: node scripts/check-masking-suppression-placement.mjs  (wired into
 // `security:sast:masking` and `:masking:range`, which put semgrep on PATH).
 // Exit 0 when every suppression passes, 1 on a violation, 2 when the check could
-// not run (it never passes on what it could not read).
+// not run.
 
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 
 const RULES = '.semgrep/silent-success-masking.yaml';
 const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs|py)$/;
-// Not read, unless semgrep read it: the guides have to be able to spell the word.
 const MARKDOWN = /\.(md|mdx)$/;
 
-// This file is scanned like any other, so no line of it may hold the word: it is
-// assembled from two halves, and the patterns spell it with a character class.
 const WORD = 'nose' + 'mgrep';
 const IGNORE_SUPPRESSIONS = '--disable-nose' + 'm';
-// The word as semgrep finds it. Both of its patterns (one for the flagged line,
-// one for the line above) match only where this one does, so nothing it honours
-// is missed; `u` makes `i` fold letters the way semgrep's matcher does.
+// The word as semgrep finds it; `u` makes `i` fold letters the way semgrep's matcher does.
 const MENTION = /(?<![a-z0-9])nose[m]\w*/giu;
-// The documented form, read from where a mention starts.
 const WELL_FORMED = /^nose[m]grep: [\w.-]+ -- \S/;
-// A masking rule id, wherever it stands on a suppression line.
+// semgrep reads a rule id in more places and spellings than the documented one, and all of them contain the id.
 const MASKING_RULE = /(?:ts|py)-silent-success-masking/g;
 
-/** The check could not run: say why and stop, never report success. */
 function cannotRun(message) {
   console.error(`check-masking-suppression-placement: ${message}`);
   process.exit(2);
 }
 
-/** What semgrep makes of the masking rules with suppression comments ignored: every finding, and the files it read. */
 function scan() {
   let stdout;
   try {
@@ -94,7 +57,6 @@ function scan() {
   };
 }
 
-// Tracked files only; the .semgrep/ fixtures trigger by design.
 let tracked;
 try {
   tracked = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -105,13 +67,8 @@ const candidates = tracked.split('\0').filter((f) => f && !f.startsWith('.semgre
 if (!candidates.some((f) => SOURCE_EXT.test(f))) cannotRun('git lists no tracked source file here. Run from the repository root.');
 
 const { found, scanned } = scan();
-// Every tracked file but Markdown: the registry scan (`security:sast`) also reads
-// workflows, Dockerfiles, shell scripts and configuration, and semgrep honours a
-// suppression in each of them. And whatever semgrep read for the masking rules,
-// Markdown by name or not: it picks its files by more than the name. No file is
-// left out for its content: semgrep reads a source file that holds a NUL byte.
-// A symbolic link and a submodule are left out: neither is a file, and semgrep
-// does not read through a link.
+// semgrep honours a suppression in workflows, Dockerfiles, shell scripts and configuration too, and picks its files
+// by more than the name. It reads a source file that holds a NUL byte and does not read through a symbolic link.
 const files = candidates.filter((f) => (!MARKDOWN.test(f) || scanned.has(f)) && lstatSync(f).isFile());
 const malformed = [];
 const unbound = [];
@@ -130,7 +87,6 @@ for (const file of files) {
     if (rules.size === 0) return;
     masking++;
     for (const rule of rules) {
-      // On the finding's line (inline) or directly above it.
       if (!found.has(`${file}:${i + 1}:${rule}`) && !found.has(`${file}:${i + 2}:${rule}`)) {
         unbound.push({ file, line: i + 1, text: line.trim(), rule });
       }

@@ -28,7 +28,6 @@ import { makeClient, makeDocClient } from './ua';
 const sm = makeClient(SecretsManagerClient);
 const ddb = makeDocClient();
 
-// In-memory secret cache with 5-minute TTL (same pattern as slack-verify.ts).
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
@@ -36,32 +35,12 @@ const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 /** Maximum age of a Linear webhookTimestamp (ms) before it is rejected (replay protection). */
 export const MAX_WEBHOOK_TIMESTAMP_AGE_MS = 60 * 1000;
 
-/**
- * Cached count of active workspaces, capped at 2.
- *
- * Capped because nothing needs the true total — every decision that reads it only asks
- * "is there more than one tenant on this stack", so the Scan can stop at the second hit.
- *
- * Cached separately from `secretCache` because it is not keyed by anything: it is one
- * table-wide fact, re-derived by a Scan that would otherwise run on every delivery.
- * A short TTL is the tradeoff — onboarding a second workspace takes up to this long to
- * start being enforced, which is acceptable because the CLI refuses to create the
- * shared-secret state in the first place.
- */
 let activeWorkspaceCountCache: { count: number; expiresAt: number } | undefined;
 
 /**
  * How many active Linear workspaces this stack has, saturating at 2.
  *
- * The distinction that matters is one tenant versus more than one. With a single
- * workspace a secret that is not bound to a tenant still identifies the only tenant
- * there is, so neither the stack-wide fallback nor a shared secret can cross a
- * boundary. With two or more, both can.
- *
- * Returns 1 when the registry cannot be read, and says so in the log. That is the
- * permissive answer, chosen deliberately: a DynamoDB throttle must not start rejecting
- * every delivery on a healthy single-workspace install. The callers that act on this
- * are hardening an already-verified signature, not standing in for one.
+ * Returns 1 when the registry cannot be read, and says so in the log.
  */
 export async function countActiveLinearWorkspaces(registryTableName: string | undefined): Promise<number> {
   if (!registryTableName) return 1;
@@ -97,7 +76,6 @@ export async function countActiveLinearWorkspaces(registryTableName: string | un
   }
 }
 
-/** Drop the cached workspace count. Exported for tests. */
 export function _resetActiveWorkspaceCountCache(): void {
   activeWorkspaceCountCache = undefined;
 }
@@ -119,8 +97,6 @@ export async function getLinearSecret(secretId: string, forceRefresh = false): P
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    // Treat empty / whitespace-only SecretString as null — an empty secret
-    // must never be used for HMAC, or HMAC('', body) becomes forgeable.
     if (!isUsableHmacSecret(result.SecretString)) {
       logger.error('Linear webhook secret is empty — refusing to use for HMAC', {
         secret_id: secretId,
@@ -135,7 +111,7 @@ export async function getLinearSecret(secretId: string, forceRefresh = false): P
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Linear secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null; // missing Linear signing secret means "cannot verify"; ResourceNotFound is expected before setup
+      return null;
     }
     logger.error('Failed to fetch Linear secret from Secrets Manager', {
       secret_id: secretId,
@@ -145,11 +121,6 @@ export async function getLinearSecret(secretId: string, forceRefresh = false): P
   }
 }
 
-/**
- * Explicitly drop a cached secret. Called when rotation is suspected —
- * e.g. signature verification fails with an otherwise valid-looking request.
- * @param secretId - the Secrets Manager secret ID or ARN to evict.
- */
 export function invalidateLinearSecretCache(secretId: string): void {
   secretCache.delete(secretId);
 }
@@ -171,11 +142,6 @@ export function verifyLinearSignature(
   signature: string,
   body: string,
 ): boolean {
-  // Defense-in-depth: getLinearSecret already filters empty secrets, but
-  // callers like verifyLinearRequestForWorkspace pass secrets from other
-  // sources (per-workspace OAuth bundles) — HMAC('') must always be
-  // rejected or an attacker can forge signatures against a misconfigured
-  // empty secret.
   if (!isUsableHmacSecret(webhookSecret)) {
     return false;
   }
@@ -208,8 +174,7 @@ export function isWebhookTimestampFresh(webhookTimestamp: number | undefined): b
 
 /**
  * Verify a Linear webhook request, transparently re-fetching the signing secret once
- * if the cached copy is rejected. After rotation, warm Lambdas keep the old
- * cached secret until their 5-minute TTL elapses — this forces an early refresh.
+ * if the cached copy is rejected.
  *
  * @param secretId - Secrets Manager ARN/ID for the webhook secret.
  * @param signature - the `Linear-Signature` header value.
@@ -237,45 +202,23 @@ export async function verifyLinearRequest(
  * Verify a Linear webhook request against the **per-workspace** signing
  * secret stored alongside the workspace's OAuth token bundle.
  *
- * Linear generates a fresh signing secret per webhook subscription, and
- * webhook subscriptions are workspace-scoped — so a stack-wide signing
- * secret cannot verify events from multiple workspaces. This path:
- *
- *   1. Looks up the registry row keyed on `linear_workspace_id` (the
- *      orgId from the webhook payload — claimed, not yet trusted).
- *   2. Reads the per-workspace OAuth secret to extract
- *      `webhook_signing_secret`.
- *   3. Verifies the HMAC signature against that secret.
- *
- * The orgId is untrusted input from the webhook body; an attacker can
- * claim any orgId. But it only **selects which secret to verify
- * against** — they still need the correct signing secret to forge a
- * valid signature, which they don't have. The trust model is
- * preserved.
+ * Linear generates a signing secret per webhook subscription, and subscriptions are
+ * workspace-scoped, so a stack-wide secret cannot verify events from multiple workspaces.
  *
  * Returns:
  * - `'verified'` — signature matches the per-workspace secret. Caller
  *   trusts the body.
  * - `'mismatch'` — registry row + secret were found, but the signature
- *   doesn't match. Caller MUST reject (do not fall back to stack-wide;
- *   that would let an attacker bypass the per-workspace secret by
- *   tricking us into re-checking against the stack-wide one).
+ *   doesn't match. Caller MUST reject (do not fall back to stack-wide).
  * - `'revoked'` — registry row exists but its status is not `active`.
- *   Treated like `mismatch` by the receiver: 401, no fallback. Without
- *   this distinct outcome a revoked workspace would collapse to
- *   `no-per-workspace-secret` and the stack-wide fallback would
- *   re-grant access (since `setup` mirrors the first workspace's
- *   secret into the stack-wide one and revocation never clears it).
+ *   Treated like `mismatch` by the receiver: 401, no fallback.
  * - `'no-per-workspace-secret'` — no registry row at all, secret JSON
  *   has no `webhook_signing_secret` field. Caller should fall back to
  *   the stack-wide secret for back-compat with single-workspace
  *   installs predating per-workspace secrets.
  *
  * Uses strict lookups (`getRegistryRowStrict`, `getOauthSecretStrict`)
- * that throw on infra error rather than returning null. A DDB throttle
- * during a webhook burst must NOT silently downgrade a per-workspace-
- * secured workspace to stack-wide verification — let the error bubble,
- * the receiver's outer try/catch returns 500, and Linear retries.
+ * that throw on infra error rather than returning null.
  *
  * @param registryTableName - DynamoDB table for `LinearWorkspaceRegistryTable`.
  * @param linearWorkspaceId - the claimed `organizationId` from the body.
@@ -303,13 +246,6 @@ export async function verifyLinearRequestForWorkspace(
     return 'mismatch';
   }
 
-  // The signature matched — but matching a secret this workspace does not exclusively
-  // hold proves only that the sender knows a secret SOME workspace on this stack holds.
-  // A workspace onboarded by an older release can be carrying a copy of the first
-  // workspace's secret, and the routing values in the body are read from whichever
-  // workspace the sender names. Checked only when another tenant exists to impersonate,
-  // so a single-workspace install — where the same secret cannot cross a boundary and
-  // where an unrecorded provenance is the normal state — is untouched.
   if (row.webhook_secret_owned !== true && await countActiveLinearWorkspaces(registryTableName) > 1) {
     return 'shared-secret';
   }

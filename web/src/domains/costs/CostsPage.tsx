@@ -167,7 +167,6 @@ export function CostsPage() {
               <Header
                 variant="h2"
                 description={grouping === 'total' ? undefined : `Stacked by ${COST_GROUPINGS[grouping].toLowerCase()}. Hover a bar for the numbers.`}
-                // The bars show their numbers on hover, so the chart's explanation opens from the "i" alone.
                 info={<Explain as="span" title="Spend per day" explanation={COST_EXPLANATIONS.perDay}>{(icon) => icon}</Explain>}
                 actions={
                   <SegmentedControl
@@ -191,7 +190,6 @@ export function CostsPage() {
               hideLegend={view.series.length < 2}
               height={240}
               yTitle="USD"
-              // Whole dollars on the axis ("$4"), cents in the hover tooltip.
               yTickFormatter={(v) => `$${Number.isInteger(v) ? formatCount(v) : v.toFixed(1)}`}
               statusType={query.isPending ? 'loading' : 'finished'}
               loadingText="Loading costs"

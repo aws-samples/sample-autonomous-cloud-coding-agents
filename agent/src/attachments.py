@@ -60,13 +60,8 @@ def download_attachments(
 
     attachments_dir = Path(workspace) / ATTACHMENTS_DIR
     attachments_dir.mkdir(parents=True, exist_ok=True)
-    # For a task with a repository the workspace is the clone. Its exclude file is
-    # local and never committed: listed there, the uploads stay out of `git status`
-    # and of a broad `git add`, so they cannot end up in the pull request. Without
-    # a repository the workspace is no clone, and the entry is skipped.
     git_info = Path(workspace) / ".git" / "info"
     if git_info.is_dir():
-        # The leading newline is for an exclude file whose last line has none.
         with (git_info / "exclude").open("a") as exclude:
             exclude.write(f"\n/{ATTACHMENTS_DIR}/\n")
 
@@ -98,13 +93,10 @@ def download_attachments(
 
 
 def _download_single(att, attachments_dir: Path, s3_client) -> Path:
-    """Download a single attachment and verify its SHA-256 checksum."""
-    # Parse s3_uri (s3://bucket/key)
     parsed = urlparse(att.s3_uri)
     bucket = parsed.netloc
     key = parsed.path.lstrip("/")
 
-    # Unique subdirectory per attachment to avoid filename collisions
     dest_dir = attachments_dir / att.attachment_id
     dest_dir.mkdir(parents=True, exist_ok=True)
     local_path = dest_dir / att.filename
@@ -115,7 +107,6 @@ def _download_single(att, attachments_dir: Path, s3_client) -> Path:
         f"(s3://{bucket}/{key}, version={att.s3_version_id})",
     )
 
-    # Download with pinned VersionId to prevent TOCTOU
     response = s3_client.get_object(
         Bucket=bucket,
         Key=key,
@@ -123,7 +114,6 @@ def _download_single(att, attachments_dir: Path, s3_client) -> Path:
     )
     content = response["Body"].read()
 
-    # Verify SHA-256 integrity
     actual_checksum = hashlib.sha256(content).hexdigest()
     if actual_checksum != att.checksum_sha256:
         raise RuntimeError(
@@ -132,16 +122,14 @@ def _download_single(att, attachments_dir: Path, s3_client) -> Path:
             f"The file may have been tampered with."
         )
 
-    # Verify size matches
     if len(content) != att.size_bytes:
         raise RuntimeError(
             f"Attachment '{att.filename}' size mismatch: "
             f"expected {att.size_bytes} bytes, got {len(content)} bytes."
         )
 
-    # Write to local filesystem
     local_path.write_bytes(content)
-    os.chmod(str(local_path), 0o444)  # Read-only
+    os.chmod(str(local_path), 0o444)
 
     log("TASK", f"  Verified: {att.filename} ({len(content)} bytes, SHA-256 OK)")
     return local_path

@@ -23,7 +23,6 @@ jest.mock('@aws-sdk/client-s3', () => ({
   PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
 }));
 
-// DynamoDB doc client — drives persistScreenshotUrl.
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({})),
@@ -147,7 +146,6 @@ test.each(['check_run', 'deployment_status'])('receiver %s payload drives the pr
   } as unknown as APIGatewayProxyEvent);
   expect(response.statusCode).toBe(200);
   expect(lambdaSend).toHaveBeenCalledTimes(1);
-  // Pass the actual bytes emitted by the receiver without rebuilding any fields.
   const forwarded = JSON.parse(new TextDecoder().decode(lambdaSend.mock.calls[0][0].input.Payload));
   if (eventType === 'deployment_status') {
     expect(forwarded).toEqual({ raw_body: JSON.stringify(body) });

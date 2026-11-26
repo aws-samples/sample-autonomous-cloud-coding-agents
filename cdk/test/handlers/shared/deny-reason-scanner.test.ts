@@ -21,17 +21,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DENY_REASON_SECRET_NAMES, scanDenyReason } from '../../../src/handlers/shared/deny-reason-scanner';
 
-// Shared with agent/tests/test_output_scanner.py: the agent's scanner has to
-// give the same text for a URL with a user and a password.
 const scanVectors = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'contracts', 'secret-scan-vectors.json'), 'utf-8'),
 ) as { vectors: { input: string; expected: string; note: string }[] };
 
-// Test fixtures are assembled at runtime so the source file itself
-// never contains a contiguous secret literal — Code Defender's
-// pre-commit scanner flags AWS / GitHub / Slack tokens even in tests.
-// Building these from fragments keeps scanning noise-free without
-// sacrificing pattern coverage.
+// Built from fragments: Code Defender and gitleaks flag a contiguous token literal, even in a test.
 const FIX_AWS_KEY = 'AK' + 'IAIOSFODNN7EXAMPLE';
 const FIX_AWS_ASIA = 'AS' + 'IAY2T4IJABCDEFGHIJ';
 const FIX_GITHUB_PAT = 'gh' + 'p_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij';
@@ -41,30 +35,21 @@ const FIX_PEM_BEGIN = '-----' + 'BEGIN' + ' RSA PRIVATE KEY' + '-----';
 const FIX_PEM_END = '-----' + 'END' + ' RSA PRIVATE KEY' + '-----';
 const FIX_PRIVATE_KEY = `${FIX_PEM_BEGIN}\nAAAA\n${FIX_PEM_END}`;
 const FIX_GITHUB_APP_TOKEN = 'gh' + 's_' + 'A'.repeat(48);
-// An installation token of the stateless format, ghs_<app id>_<JWT>: three
-// base64url parts, which may hold "-" and "_", joined by dots.
+// A GitHub installation token of the stateless format, ghs_<app id>_<JWT>: three base64url parts,
+// which may hold "-" and "_", joined by dots.
 const FIX_GITHUB_APP_TOKEN_STATELESS = 'gh' + 's_123456_' + ['eyJ' + 'hbGciOi'.repeat(5), 'eyJ' + 'pYXQi-_'.repeat(40), 's1G-n_'.repeat(30)].join('.');
-// The JWT of that token alone: what stands behind "Bearer" need not be a
-// GitHub token.
 const FIX_JWT_SIGNED = FIX_GITHUB_APP_TOKEN_STATELESS.slice(('gh' + 's_123456_').length);
-// What the pattern for the older GitHub tokens takes for one of them: a prefix
-// and 36 letters and digits. A signature can hold such a run by chance.
 const FIX_LIKE_AN_OLDER_TOKEN = 'gh' + 'p_' + 'Zz9'.repeat(12);
 const FIX_GITHUB_FINE_GRAINED_SHORT = 'github' + '_pat_' + 'ABCDEFGHIJKLMNOPQRSTUV_' + '1'.repeat(20);
-// 40 characters of the alphabet of an AWS secret access key.
 const FIX_AWS_SECRET = 'aB3/'.repeat(9) + 'aB3x';
 const FIX_AWS_SECRET_ENDING_IN_SLASH = 'aB3/'.repeat(10);
 const FIX_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9';
 const FIX_PASSWORD = 's3cret' + 'P4ss';
-// A password with letters and digits, as somebody may leave it inside the
-// brackets of a placeholder.
 const FIX_LETTERS_AND_DIGITS = 'Passw0rd' + '123';
 const FIX_CONNECTION_STRING = 'postgres://app' + ':s3cretP4ss' + '@db.internal:5432/app';
-// Base64 text holds "/", and so does many a generated password.
 const FIX_CONNECTION_STRING_WITH_SLASH = 'postgres://admin' + ':abc/def+ghiJKL' + '@db.internal:5432/app';
 const FIX_SMTP_URL = 'smtp://alerts@example.com' + ':s3cretP4ss' + '@smtp.example.com:587';
 const FIX_AWS_KEY_PAIR_URL = `s3a://${FIX_AWS_KEY}:${FIX_AWS_SECRET_ENDING_IN_SLASH}@bucket/path`;
-// A key id, a colon and a secret access key that holds no slash.
 const FIX_AWS_KEY_PAIR = `${FIX_AWS_KEY}:${'A1b2'.repeat(10)}`;
 const FIX_GIT_URL = 'https://x-access-token' + ':s3cret123' + '@github.com/o/r.git';
 
@@ -118,7 +103,6 @@ describe('scanDenyReason', () => {
     expect(scanDenyReason('hash: abc123')).toBe('hash: abc123');
   });
 
-  // Shapes the agent's output_scanner.py redacts: this port has to redact them too.
   test.each([
     ['a GitHub token longer than 36 characters', `token ${FIX_GITHUB_APP_TOKEN}`, 'token [REDACTED-GITHUB_TOKEN]'],
     ['a fine-grained GitHub token shorter than 80 characters', FIX_GITHUB_FINE_GRAINED_SHORT, '[REDACTED-GITHUB_TOKEN]'],
@@ -135,9 +119,6 @@ describe('scanDenyReason', () => {
     expect(scanDenyReason(input)).toBe(expected);
   });
 
-  // AWS_KEY runs first and leaves scheme://[REDACTED-AWS_KEY]...@host, which is
-  // no user:password@host any more. The rest of the URL (the rest of a
-  // password, a secret in the query) must not stay readable for that.
   test.each([
     ['a session token in the query', `mongodb+srv://${FIX_AWS_KEY_PAIR}@cluster0.example.net/app?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:${'T0ken'.repeat(8)}`],
     ['a password in the query', `https://${FIX_AWS_KEY_PAIR}@files.example.com/get?pass` + 'word=Pa55w0rdQuery'],
@@ -150,20 +131,16 @@ describe('scanDenyReason', () => {
 
   test('does not take a longer run after an AWS key id for its secret', () => {
     // A secret access key has exactly 40 characters.
-    const input = `${FIX_AWS_KEY}:${'a'.repeat(41)}`;
+    const input =`${FIX_AWS_KEY}:${'a'.repeat(41)}`;
     expect(scanDenyReason(input)).toBe(`[REDACTED-AWS_KEY]:${'a'.repeat(41)}`);
   });
 
   test('redacts a long GitHub App token in a git remote URL', () => {
-    // Installation tokens (ghs_<app id>_<JWT>) are about 520 characters since
-    // 2026 and vary in length: a token has no length limit.
+    // GitHub installation tokens are about 520 characters since 2026 and vary in length.
     const token = 'ghs_123456_' + Array(3).fill('eyJ' + 'a'.repeat(200)).join('.');
     expect(scanDenyReason(`x-access-token:${token}@github.com/o/r.git`)).toBe('[REDACTED-GITHUB_URL_TOKEN]github.com/o/r.git');
   });
 
-  // Every new installation token has this format since 2026. The pattern
-  // for the older ones wants 36 letters or digits after "ghs_" and stops at
-  // the underscore after the app id.
   test.each([
     ['an assignment', `GITHUB_TOKEN=${FIX_GITHUB_APP_TOKEN_STATELESS}`, 'GITHUB_TOKEN=[REDACTED-GITHUB_APP_TOKEN]'],
     ['the bare token', FIX_GITHUB_APP_TOKEN_STATELESS, '[REDACTED-GITHUB_APP_TOKEN]'],
@@ -177,10 +154,6 @@ describe('scanDenyReason', () => {
     expect(scanDenyReason(input)).toBe(expected);
   });
 
-  // The signature of such a token is random text and can hold a run that an
-  // earlier pattern takes for a secret of its own and replaces by its marker,
-  // inside the token. The rest behind that marker belongs to the token as
-  // well.
   test.each([
     ['a run in the signature that looks like an older token', `${FIX_GITHUB_APP_TOKEN_STATELESS}${FIX_LIKE_AN_OLDER_TOKEN}-${'s1G-n_'.repeat(10)}`, ''],
     [
@@ -193,8 +166,6 @@ describe('scanDenyReason', () => {
     expect(scanDenyReason(`GITHUB_TOKEN=${token}${behind}`)).toBe(`GITHUB_TOKEN=[REDACTED-GITHUB_APP_TOKEN]${behind}`);
   });
 
-  // The pattern runs behind the older ones: what one of them replaced
-  // together with such a token before it existed is replaced as before.
   test.each([
     ['after Bearer', `Authorization: Bearer ${FIX_GITHUB_APP_TOKEN_STATELESS}`, 'Authorization: [REDACTED-GENERIC_BEARER]'],
     [
@@ -213,9 +184,6 @@ describe('scanDenyReason', () => {
     expect(scanDenyReason(input)).toBe(input);
   });
 
-  // A bearer token ends in random text as well (the signature of a JWT).
-  // Where that holds a run an earlier pattern replaces, the Bearer pattern
-  // stops at the marker; the rest behind it belongs to the token.
   test.each([
     ['a GitHub App token', `${FIX_GITHUB_APP_TOKEN_STATELESS}${FIX_LIKE_AN_OLDER_TOKEN}-${'s1G-n_'.repeat(10)}`],
     ['a JWT that is no GitHub token', `${FIX_JWT_SIGNED}${FIX_LIKE_AN_OLDER_TOKEN}-${'s1G-n_'.repeat(10)}`],
@@ -238,18 +206,11 @@ describe('scanDenyReason', () => {
   });
 
   test('leaves the other patterns their match of the rest of a bearer token', () => {
-    // The entry for the rest of a bearer token runs last. Directly behind the
-    // Bearer pattern it would take the marker of the key id, and the pattern
-    // for connection strings needs that marker to replace this URL as a
-    // whole: the password would stay.
     const input = `s3://Bearer ${'x'.repeat(24)}-${FIX_AWS_KEY}:pa/ss@host`;
     expect(scanDenyReason(input)).toBe('[REDACTED-CONNECTION_STRING]');
   });
 
   test('takes text with a colon for a git remote URL token up to 512 characters', () => {
-    // A token holds no ":". Other text before the "@" is still replaced, but
-    // only up to 512 characters: unlimited, a text that repeats
-    // "x-access-token:" is scanned from each one to the end (quadratic).
     expect(scanDenyReason(`x-access-token:a:${'a'.repeat(510)}@`)).toBe('[REDACTED-GITHUB_URL_TOKEN]');
     const overTheLimit = `x-access-token:a:${'a'.repeat(511)}@`;
     expect(scanDenyReason(overTheLimit)).toBe(overTheLimit);
@@ -272,18 +233,11 @@ describe('scanDenyReason', () => {
   });
 
   test.each(['x://', 'x://y:1/'])('scans a text that repeats %s in a time that grows with its length only', (unit) => {
-    // Every "x://" is a start of the pattern, and behind "y:1/" the port rule
-    // looks ahead as well. The bound on a password with "/" and ":" and the
-    // stop of that look-ahead at a ":" keep the scan linear: about 30 ms for
-    // these 200,000 characters, against several seconds without either.
     const started = Date.now();
     scanDenyReason(unit.repeat(200_000 / unit.length));
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  // URL templates: a placeholder where the password would stand. Source code
-  // and documentation, not a credential. The agent's scanner leaves them as
-  // they are (the agent reads files through it), and so does this port.
   test.each([
     'DATABASE_URL = "postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"',
     'url = f"redis://default:{settings.redis_password}@{host}:6379/0"',
@@ -293,12 +247,10 @@ describe('scanDenyReason', () => {
     'sqlalchemy.url = postgresql://%(DB_USER)s:%(DB_PASS)s@%(DB_HOST)s/app',
     'run: git clone https://x-access-token:${{secrets.GITHUB_TOKEN}}@github.com/o/r.git',
     'push = f"git push https://x-access-token:{token}@github.com/o/r"',
-    // empty and positional braces, capitals, a dotted name in two cases
     'let url = format!("postgres://{}:{}@{}:5432/app", user, pw, host);',
     'url = "postgres://{0}:{1}@{2}/app".format(user, pw, host)',
     'MONGO_URI=mongodb+srv://<USERNAME>:<YOUR_PASSWORD>@cluster0.example.net/app',
     'url = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}/app"',
-    // doubled braces without "$", a dash inside <...>, %v
     'url: redis://default:{{redis_password}}@{{redis_host}}:6379',
     'mongodb+srv://<db-user>:<your-password>@cluster0.example.net',
     'dsn := fmt.Sprintf("postgres://%v:%v@%v/app", user, pass, host)',
@@ -319,7 +271,6 @@ describe('scanDenyReason', () => {
   });
 
   test.each([
-    // only begins or ends with a placeholder
     '{x}real',
     '${A}b3',
     '%sabc',
@@ -328,7 +279,6 @@ describe('scanDenyReason', () => {
     '%(x)sy',
     'real{x}',
     '{a}{b}',
-    // forms that are not taken: a real password can look like them
     '$DB_PASSWORD',
     '${DB_PASSWORD:-postgres}',
     '${DB_PASSWORD-postgres}',
@@ -336,9 +286,7 @@ describe('scanDenyReason', () => {
     'password',
     '%d',
     '<pass.word>',
-    // a password that somebody left the brackets of a placeholder around
-    // (MongoDB Atlas hands out "<password>"): it holds a digit, or it mixes
-    // small letters and capitals inside <...>
+    // MongoDB Atlas hands out "<password>": somebody may leave the brackets around a real password.
     `<${FIX_LETTERS_AND_DIGITS}>`,
     `{${FIX_LETTERS_AND_DIGITS}}`,
     '$' + `{${FIX_LETTERS_AND_DIGITS}}`,
@@ -350,7 +298,6 @@ describe('scanDenyReason', () => {
   });
 
   test('takes a placeholder password after an AWS key id for no template', () => {
-    // The key id is real and is replaced: the URL goes as a whole, as before.
     expect(scanDenyReason(`https://${FIX_AWS_KEY}:{secret}@files.example.com/x`)).toBe('[REDACTED-CONNECTION_STRING]');
   });
 

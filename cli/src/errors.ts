@@ -20,9 +20,7 @@
 /** Generic CLI error with a user-facing message.
  *
  * ``exitCode`` defaults to 1. Pass a different code when the failure class
- * must be script-distinguishable — e.g. ``waitForTask`` uses 2 for
- * "the CLI gave up waiting" so wrappers can tell a timeout apart from a
- * genuinely FAILED task (which exits 1 via ``exitCodeForStatus``). */
+ * must be script-distinguishable. */
 export class CliError extends Error {
   readonly exitCode: number;
 
@@ -33,7 +31,6 @@ export class CliError extends Error {
   }
 }
 
-/** Error from the REST API, including status code and error code. */
 export class ApiError extends Error {
   readonly statusCode: number;
   readonly errorCode: string;
@@ -50,9 +47,8 @@ export class ApiError extends Error {
 
 /**
  * Map an {@link ApiError} to a user-facing {@link CliError}. ``cases`` supplies
- * the command-specific messages (keyed by HTTP status); the shared 401 and
- * fallthrough handling is the same across commands, so it lives here. A status
- * with no case (and not 401) surfaces the server message verbatim.
+ * the command-specific messages (keyed by HTTP status). A status with no case
+ * (and not 401) surfaces the server message verbatim.
  */
 export function mapApiError(
   err: ApiError,

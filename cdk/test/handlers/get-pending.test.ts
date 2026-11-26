@@ -70,10 +70,6 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   } as APIGatewayProxyEvent;
 }
 
-/**
- * The clock of every test. A row created at 00:00:00 that day is half a minute
- * into its approval window, so the handler lists it.
- */
 const NOW = Date.parse('2026-05-07T00:00:30Z');
 
 beforeEach(() => {
@@ -82,27 +78,16 @@ beforeEach(() => {
   jest.spyOn(Date, 'now').mockReturnValue(NOW);
 });
 
-/**
- * Two-mock chain used by every test that returns a non-empty pending
- * list: (1) rate-limit Update passes, (2) GSI Query returns ``items``.
- *
- * ``matching_rule_ids`` is projected onto the ``user_id-status-index``
- * GSI directly (see the construct), so the handler maps each field
- * from the Query result without a second read — keeping the mock
- * chain short.
- */
 function setupPendingMocks(items: ReadonlyArray<Record<string, unknown>>): void {
   mockSend
-    .mockResolvedValueOnce({}) // rate-limit
+    .mockResolvedValueOnce({})
     .mockResolvedValueOnce({ Items: items });
 }
 
-/** A PENDING row as the index returns it, for the tests about its approval window. */
 function pendingRow(requestId: string, approvalWindow: { created_at?: string; timeout_s?: number }): Record<string, unknown> {
   return { task_id: 'task-1', request_id: requestId, tool_name: 'Bash', tool_input_preview: '', severity: 'medium', reason: '', ...approvalWindow };
 }
 
-/** Call the handler and return the request_id of each request it lists, in order. */
 async function listedRequestIds(): Promise<string[]> {
   const res = await handler(makeEvent());
   return JSON.parse(res.body).data.pending.map((p: { request_id: string }) => p.request_id);
@@ -125,16 +110,12 @@ describe('get-pending', () => {
   });
 
   test('the default limit is one call a second, enough for the console in several windows', async () => {
-    // No deployment sets PENDING_RATE_LIMIT_PER_MINUTE, so the default is the
-    // limit users meet. The console polls this route every 10 s in each visible
-    // window (6 calls a minute) and once more per page change, window focus and
-    // decision: two windows alone are 12 a minute.
     jest.resetModules();
     delete process.env.PENDING_RATE_LIMIT_PER_MINUTE;
     const { handler: handlerWithDefaultLimit } = await import('../../src/handlers/get-pending');
     process.env.PENDING_RATE_LIMIT_PER_MINUTE = '10';
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Items: [] });
 
     const res = await handlerWithDefaultLimit(makeEvent());
@@ -146,7 +127,7 @@ describe('get-pending', () => {
 
   test('returns empty pending[] when query returns no items', async () => {
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Items: [] });
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(200);
@@ -156,7 +137,7 @@ describe('get-pending', () => {
 
   test('queries user_id-status-index GSI with user_id + status=PENDING', async () => {
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Items: [] });
     await handler(makeEvent());
     const queryCall = mockSend.mock.calls.find((c) => c[0]._type === 'Query');
@@ -231,9 +212,7 @@ describe('get-pending', () => {
   });
 
   test('leaves out a request whose approval window has passed', async () => {
-    // The agent writes TIMED_OUT when a window ends. When it cannot (its container or
-    // MicroVM is gone by then) the row stays PENDING until DynamoDB's TTL deletes it,
-    // which can take days.
+    // DynamoDB's TTL can take days to delete an expired row, so a row can stay PENDING past its window.
     setupPendingMocks([
       pendingRow('stale', { created_at: '2026-05-06T23:00:00Z', timeout_s: 300 }),
       pendingRow('live', { created_at: '2026-05-07T00:00:00Z', timeout_s: 300 }),
@@ -252,8 +231,6 @@ describe('get-pending', () => {
   });
 
   test('keeps a request that has no window to pass, however old it is', async () => {
-    // Only a window that is known to have passed takes a request off the list: a row
-    // with no positive timeout_s, or with a created_at that is not a date, has none.
     setupPendingMocks([
       pendingRow('no-timeout', { created_at: '2026-05-01T00:00:00Z', timeout_s: 0 }),
       pendingRow('timeout-absent', { created_at: '2026-05-01T00:00:00Z' }),
@@ -265,13 +242,11 @@ describe('get-pending', () => {
   });
 
   test('reads past a page of requests whose window has passed to a live one behind it', async () => {
-    // Limit counts the rows DynamoDB reads, so the first page can hold nothing but
-    // requests whose window has passed while a live one waits on the next page.
     const stale = Array.from({ length: 100 }, (_, i) =>
       pendingRow(`stale-${i}`, { created_at: '2026-05-06T23:00:00Z', timeout_s: 300 }));
     const lastKey = { user_id: 'user-alice', status: 'PENDING', task_id: 'task-1', request_id: 'stale-99' };
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ Items: stale, LastEvaluatedKey: lastKey })
       .mockResolvedValueOnce({ Items: [pendingRow('live', { created_at: '2026-05-07T00:00:00Z', timeout_s: 300 })] });
 
@@ -284,12 +259,11 @@ describe('get-pending', () => {
     const rows = (prefix: string, count: number, createdAt: string) => Array.from({ length: count }, (_, i) =>
       pendingRow(`${prefix}-${i}`, { created_at: createdAt, timeout_s: 300 }));
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({
         Items: [...rows('first', 60, '2026-05-07T00:00:00Z'), ...rows('stale', 40, '2026-05-06T23:00:00Z')],
         LastEvaluatedKey: { request_id: 'stale-39' },
       })
-      // More rows follow this page too, and the list is already full.
       .mockResolvedValueOnce({ Items: rows('second', 100, '2026-05-07T00:00:00Z'), LastEvaluatedKey: { request_id: 'second-99' } });
 
     const listed = await listedRequestIds();
@@ -300,11 +274,9 @@ describe('get-pending', () => {
   });
 
   test('stops after 20 pages of requests whose window has passed', async () => {
-    // A user can pile up such rows faster than DynamoDB deletes them (a cancelled task on
-    // MicroVM compute leaves one). The list must not read them all on every call.
     const stale = Array.from({ length: 100 }, (_, i) =>
       pendingRow(`stale-${i}`, { created_at: '2026-05-06T23:00:00Z', timeout_s: 300 }));
-    mockSend.mockResolvedValueOnce({}); // rate-limit
+    mockSend.mockResolvedValueOnce({});
     for (let page = 0; page < 30; page += 1) {
       mockSend.mockResolvedValueOnce({ Items: stale, LastEvaluatedKey: { request_id: `page-${page}` } });
     }
@@ -317,24 +289,18 @@ describe('get-pending', () => {
 
     expect(listed).toEqual([]);
     expect(mockSend.mock.calls.filter((c) => c[0]._type === 'Query')).toHaveLength(20);
-    // The warning is the only sign an operator gets that requests are not listed.
     expect(logged).toContain('stopped at its page cap');
   });
 
   test('500 on DDB error after rate-limit passes', async () => {
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error('Throughput'));
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(500);
   });
 
   test('maps matching_rule_ids from the GSI row (Cedar HITL diagnostics)', async () => {
-    // ``matching_rule_ids`` is projected directly onto the
-    // ``user_id-status-index`` GSI (see task-approvals-table.ts),
-    // so the handler reads it from the Query result without a
-    // second round trip. Lets ``bgagent pending`` show WHICH rule
-    // fired without spelunking TaskEventsTable.
     setupPendingMocks([
       {
         task_id: 'task-rule',
@@ -358,7 +324,6 @@ describe('get-pending', () => {
 
   test('defaults matching_rule_ids to [] when the field is absent or malformed', async () => {
     setupPendingMocks([
-      // row 1: field absent (pre-Chunk-3 approval row — defensive)
       {
         task_id: 't1',
         request_id: 'r1',
@@ -369,7 +334,6 @@ describe('get-pending', () => {
         created_at: '2026-05-07T00:00:00Z',
         timeout_s: 60,
       },
-      // row 2: field present but wrong shape
       {
         task_id: 't2',
         request_id: 'r2',

@@ -25,22 +25,14 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, IConstruct } from 'constructs';
 
-/** S3 key prefixes the agent writes/reads, scoped per tenant. */
 const TRACE_KEY_PREFIX = 'traces';
 const ATTACHMENT_KEY_PREFIX = 'attachments';
-/** Repo-less deliverable artifacts (#248 Phase 3), scoped per task_id. */
 const ARTIFACT_KEY_PREFIX = 'artifacts';
 
-/**
- * Properties for {@link AgentSessionRole}.
- */
 export interface AgentSessionRoleProps {
   /**
    * Compute roles (AgentCore Runtime ExecutionRole and/or ECS Fargate task
-   * role) permitted to assume this SessionRole and pass session tags. These
-   * are the only principals trusted to mint scoped credentials, so they bound
-   * the trust surface. Both run the same trusted agent code, which sources the
-   * `{user_id, repo, task_id}` tag values from the resolved TaskConfig.
+   * role) permitted to assume this SessionRole and pass session tags.
    */
   readonly assumingRoles?: iam.IRole[];
   /** Admit deployed backends with admitComputeRole after constructing this role. */
@@ -71,16 +63,7 @@ export interface AgentSessionRoleProps {
   /**
    * Bedrock models / cross-region inference profiles the agent may invoke
    * (#215, cost attribution). When provided, each is `grantInvoke`-ed to the
-   * SessionRole — the **same** grant the compute role receives, so the
-   * permission set (including the all-regions foundation-model ARNs a
-   * cross-region profile fans out to) stays in lockstep and a cross-region
-   * route can never AccessDenied. Model inference run by the Claude Code
-   * subprocess is then attributed per `{user_id, repo}` in CUR 2.0 / Cost
-   * Explorer via the session tags this role already carries.
-   *
-   * The compute role keeps its own Bedrock grant: attribution is a billing
-   * control that fails open (the credential helper falls back to compute-role
-   * creds if the assume-role fails), so model invocation never depends on this.
+   * SessionRole — the **same** grant the compute role receives.
    * Omit (e.g. isolated construct tests) to skip the Bedrock grant.
    */
   readonly invokableModels?: bedrock.IBedrockInvokable[];
@@ -99,21 +82,8 @@ export interface AgentSessionRoleProps {
  *   deliberately not granted — it ignores leading-keys).
  * - S3 trace writes and attachment reads are scoped to the
  *   `<prefix>/${aws:PrincipalTag/user_id}/` object prefix.
- *
- * The result: a compromised agent session can reach only its own task's data,
- * not other tenants' — enforced at the IAM layer rather than in application
- * code. Backend-agnostic: the same role serves agents booted under either the
- * AgentCore Runtime execution role or the ECS Fargate task role.
- *
- * CloudWatch Logs remains on the compute role (shared, non-tenant access). The
- * compute role *also* keeps `InvokeModel`; this role adds a parallel, session-
- * tagged Bedrock grant (#215) used by the Claude Code subprocess for cost
- * attribution. Long-task safety on the 1-hour-capped chained session is handled
- * by Claude Code's `awsCredentialExport` refresh, and the helper falls back to
- * the compute role if assume fails — so model invocation never breaks.
  */
 export class AgentSessionRole extends Construct {
-  /** Actions sufficient for the agent's DynamoDB access. Excludes Scan. */
   private static readonly DDB_ITEM_ACTIONS = [
     'dynamodb:GetItem',
     'dynamodb:BatchGetItem',
@@ -125,7 +95,6 @@ export class AgentSessionRole extends Construct {
     'dynamodb:ConditionCheckItem',
   ];
 
-  /** The SessionRole. Assumed by the agent at task startup. */
   public readonly role: iam.Role;
   private readonly admittedRoles = new Set<iam.IRole>();
 
@@ -133,8 +102,6 @@ export class AgentSessionRole extends Construct {
     super(scope, id);
 
     if (!props.assumingRoles?.length && !props.deferComputeRoleBinding) {
-      // A SessionRole no principal can assume is dead weight and would
-      // synthesize an empty/invalid trust policy. Fail at synth instead.
       throw new Error(
         'AgentSessionRole requires at least one assuming role (the compute role[s] that mint scoped credentials)',
       );
@@ -152,24 +119,17 @@ export class AgentSessionRole extends Construct {
       },
     });
 
-    // CDK requires assumedBy; additional principals are admitted via
-    // admitComputeRole so trust + grant always wire together.
     this.role = new iam.Role(this, 'Role', {
       assumedBy: new iam.ArnPrincipal(firstAssumingRoleArn),
       description:
         'Per-task scoped credentials for ABCA agent tenant-data access '
         + '(DynamoDB task rows + S3 trace/attachment objects), constrained by '
         + 'session tags {user_id, repo, task_id}.',
-      // Role chaining (agent assumes this from the compute role) hard-caps the
-      // session at 1 hour regardless of this value; set it explicitly so the
-      // intent is documented and synth-visible.
+      // Role chaining hard-caps the session at 1 hour regardless of this value.
       maxSessionDuration: Duration.hours(1),
     });
 
-    // --- DynamoDB: item access gated by task_id leading-key ---
-    // One statement per table keeps the resource ARNs explicit. The condition
-    // requires the request's partition key (task_id) to equal the session's
-    // task_id tag. ForAllValues is required by DynamoDB for LeadingKeys.
+    // DynamoDB requires ForAllValues for dynamodb:LeadingKeys.
     for (const table of props.taskScopedTables) {
       this.role.addToPolicy(
         new iam.PolicyStatement({
@@ -184,7 +144,6 @@ export class AgentSessionRole extends Construct {
       );
     }
 
-    // --- S3 trace writes: scoped to traces/<user_id>/ ---
     this.role.addToPolicy(
       new iam.PolicyStatement({
         actions: ['s3:PutObject'],
@@ -196,9 +155,6 @@ export class AgentSessionRole extends Construct {
       }),
     );
 
-    // --- S3 attachment reads: scoped to attachments/<user_id>/ ---
-    // grantRead-equivalent action set, including version reads (the agent uses
-    // GetObjectVersion); scoped by the per-user prefix.
     this.role.addToPolicy(
       new iam.PolicyStatement({
         actions: ['s3:GetObject', 's3:GetObjectVersion'],
@@ -210,10 +166,6 @@ export class AgentSessionRole extends Construct {
       }),
     );
 
-    // --- S3 artifact writes: scoped to artifacts/<task_id>/ (#248 Phase 3) ---
-    // A repo-less workflow's deliver_artifact step uploads its product here. The
-    // key is task_id-scoped (per ADR-014 addendum) — same PrincipalTag the
-    // DynamoDB LeadingKeys condition uses — sharing the trace-artifacts bucket.
     this.role.addToPolicy(
       new iam.PolicyStatement({
         actions: ['s3:PutObject'],
@@ -225,23 +177,11 @@ export class AgentSessionRole extends Construct {
       }),
     );
 
-    // --- Bedrock model invocation: tagged for cost attribution (#215) ---
-    // Reuse grantInvoke so this role's Bedrock permissions exactly mirror the
-    // compute role's (cross-region profiles fan out to the foundation model in
-    // every routed region — replicating that by hand would risk an AccessDenied
-    // on a cross-region route). Claude Code assumes this role (via its
-    // awsCredentialExport helper) so InvokeModel rides the session's
-    // {user_id, repo, task_id} tags, surfacing per-user/repo Bedrock spend in
-    // CUR 2.0 / Cost Explorer. No PrincipalTag condition: the tags are for
-    // billing attribution, not access scoping, so a condition would add no
-    // isolation and only risk breakage.
     for (const invokable of props.invokableModels ?? []) {
       invokable.grantInvoke(this.role);
     }
 
-    // Model-list overrides can spill these grants into managed policies created
-    // during synthesis. Visit every policy before cdk-nag, including that late
-    // overflow, and allow only the wildcard shapes this construct requires.
+    // CDK splits an oversized role policy into managed policies during synthesis; the Aspect visits those too.
     Aspects.of(this.role).add({
       visit(node: IConstruct): void {
         if (!(node instanceof iam.CfnRole || node instanceof iam.CfnPolicy || node instanceof iam.CfnManagedPolicy)) return;
@@ -283,7 +223,6 @@ export class AgentSessionRole extends Construct {
     this.grantAssumeToComputeRole(computeRole);
   }
 
-  /** Add bundled AssumeRole + TagSession trust for one compute principal. */
   private addTrustForComputeRole(computeRole: iam.IRole): void {
     this.role.assumeRolePolicy?.addStatements(
       new iam.PolicyStatement({
@@ -293,12 +232,6 @@ export class AgentSessionRole extends Construct {
     );
   }
 
-  /**
-   * Grant a compute role permission to assume this SessionRole and pass
-   * session tags. Adds `sts:AssumeRole` + `sts:TagSession` to the grantee's
-   * policy (a separate IAM::Policy resource, so no dependency cycle with this
-   * role's trust policy).
-   */
   private grantAssumeToComputeRole(computeRole: iam.IRole): void {
     computeRole.addToPrincipalPolicy(
       new iam.PolicyStatement({

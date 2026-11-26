@@ -30,18 +30,6 @@ import type {
 import type { Explanation } from '../components/Explain';
 import { formatCost, formatCount, formatDurationShort, formatTimestamp } from './format';
 
-/**
- * The Scoreboard page as data: its sections, tiles, explanations and sentences over the
- * numbers of `GET /v1/tasks?view=scoreboard`.
- *
- * The server defines every number (`cdk/src/handlers/shared/scoreboard.ts`). The only
- * arithmetic here is presentation: a percentage from a fraction, the merged share of the
- * pull requests read, a sum per verified and per merged pull request, the pull requests
- * ABCA does not follow as a period's new pull requests less the four states, the six
- * outcomes folded into the three parts of the bar. A number is added to the page with one
- * entry in {@link SECTIONS}, which holds its explanation too.
- */
-
 export const SCOREBOARD_RANGES: Readonly<Record<ScoreboardRange, string>> = {
   '7d': 'Last 7 days',
   '30d': 'Last 30 days',
@@ -49,7 +37,6 @@ export const SCOREBOARD_RANGES: Readonly<Record<ScoreboardRange, string>> = {
 
 const RANGE_DAYS: Readonly<Record<ScoreboardRange, number>> = { '7d': 7, '30d': 30 };
 
-/** Below this many pull requests the 90th percentile is the slowest of them, not a tendency. */
 const P90_MIN_COUNT = 10;
 
 const NO_VERIFIED_PR = 'No verified pull request in this period.';
@@ -58,18 +45,12 @@ const NO_NEW_PR = 'No new pull request in this period.';
 const NONE_MERGED = 'No pull request of this period is merged yet.';
 const ORCHESTRATION_NOT_FOLLOWED = 'ABCA does not follow the pull requests of an orchestration on GitHub.';
 
-/**
- * What the page calls the coding tasks that started (`gated.total`), in the singular and
- * the plural: the ones that can ask for approval, and the ones that can hold a cost.
- */
 const STARTED_TO_WRITE_CODE = ['task that writes code and started', 'tasks that write code and started'] as const;
 
-/** "1 task", "2,140 tasks"; `many` for a word that takes no "s". */
 function counted(count: number, one: string, many = `${one}s`): string {
   return `${formatCount(count)} ${count === 1 ? one : many}`;
 }
 
-/** The counts above zero, each with its words: "2 closed without merging, 5 still open". Empty when all are zero. */
 function countsAboveZero(counts: readonly (readonly [count: number, words: string])[]): string {
   return counts.filter(([count]) => count > 0).map(([count, words]) => `${formatCount(count)} ${words}`).join(', ');
 }
@@ -86,49 +67,35 @@ export function percent({ count, total }: Fraction): string | null {
   return `${share}%`;
 }
 
-/** A share as the previous-period line quotes it, with the two counts it rests on: "62% (18 of 29)". */
 function shareWithCounts(fraction: Fraction): string | null {
   const share = percent(fraction);
   return share === null ? null : `${share} (${formatCount(fraction.count)} of ${formatCount(fraction.total)})`;
 }
 
-/** A sum over the period for each verified pull request; null when the period has none. */
 function perVerifiedPr(sum: number, period: ScoreboardPeriod, format: (ratio: number) => string): string | null {
   const pullRequests = period.outcomes.verified_pr;
   return pullRequests === 0 ? null : format(sum / pullRequests);
 }
 
-/**
- * The same sum for each pull request merged so far, as the second figure of a tile that
- * divides by the verified ones; null while none is merged.
- */
 function perMergedPr(sum: number, period: ScoreboardPeriod, format: (ratio: number) => string): string | null {
   const { merged } = period.pull_requests;
   return merged === 0 ? null : `${format(sum / merged)} per merged pull request so far`;
 }
 
-/** The merged pull requests, of the period's new pull requests that ABCA has read on GitHub. */
 function mergedOfRead({ pull_requests: { merged, closed, open } }: ScoreboardPeriod): Fraction {
   return { count: merged, total: merged + closed + open };
 }
 
-/**
- * The period's new pull requests that ABCA does not follow: those of an orchestration. They
- * are in the tiles that count every new pull request and in none of the four states, so a
- * line that counts the states names them where the two totals would otherwise differ.
- */
 function notFollowed({ outcomes, pull_requests: { merged, closed, open, unread } }: ScoreboardPeriod): number {
   return outcomes.verified_pr + outcomes.unverified_pr - merged - closed - open - unread;
 }
 
-/** What a count over the pull requests ABCA follows says of the others, beside it. */
 function orchestrationNotFollowed(count: number): string {
   return count === 1 ? 'The one of an orchestration is not followed.' : `The ${formatCount(count)} of an orchestration are not followed.`;
 }
 
 export interface TileSpec {
   readonly label: string;
-  /** What it is, why it matters and how it is computed: the bubble of the tile. */
   readonly explanation: Explanation;
   /**
    * The headline number; null when there is nothing to compute it from. A number of a period
@@ -151,16 +118,13 @@ export interface SectionSpec {
   readonly notMeasured: string;
 }
 
-/** A tile whose number is a share: "70%" over "26 of 37 tasks that asked for a new pull request". */
 function shareTile({ label, explanation, of, noun, plural, rest = '', none, compare: compares = false }: {
   label: string;
   explanation: Explanation;
   of: (period: ScoreboardPeriod) => Fraction;
-  /** What the total counts, in the singular; its plural where that takes no "s"; and the words that follow it. */
   noun: string;
   plural?: string;
   rest?: string;
-  /** The line shown when the total is zero: one sentence, or the one that fits the period. */
   none: string | ((period: ScoreboardPeriod) => string);
   compare?: boolean;
 }): TileSpec {
@@ -177,7 +141,6 @@ function shareTile({ label, explanation, of, noun, plural, rest = '', none, comp
   };
 }
 
-/** The median of the durations, as the number of a tile and of its previous-period line; null when there is none. */
 function median(time: DurationSummary | null): string | null {
   return time === null ? null : formatDurationShort(time.p50);
 }
@@ -185,7 +148,6 @@ function median(time: DurationSummary | null): string | null {
 const timeToVerifiedPr = (period: ScoreboardPeriod): string | null => median(period.time_to_verified_pr_s);
 const timeToMergedPr = (period: ScoreboardPeriod): string | null => median(period.time_to_merge_s);
 
-/** What a median rests on, then the spread once there are enough durations to show one. */
 function medianOf(time: DurationSummary, noun: string): string[] {
   const sentences = [`Median of ${counted(time.count, noun)}.`];
   if (time.count >= P90_MIN_COUNT) sentences.push(`9 in 10 within ${formatDurationShort(time.p90)}.`);
@@ -200,16 +162,10 @@ function timeDetail(period: ScoreboardPeriod): string {
   return sentences.join(' ');
 }
 
-/**
- * Why a number over the merged pull requests is missing: none of those ABCA has read is
- * merged; it has read none of them; or it follows none, because the period has no new
- * pull request, or only those of an orchestration.
- */
 function noneMerged(period: ScoreboardPeriod): string {
   if (mergedOfRead(period).total > 0) return NONE_MERGED;
   const { unread } = period.pull_requests;
   if (unread > 0) {
-    // No "yet": for a pull request ABCA's token cannot read, or one GitHub does not have, no read is coming.
     const unreadOnes = unread === 1 ? 'the new pull request' : `the ${formatCount(unread)} new pull requests`;
     return `ABCA has not read ${unreadOnes} of this period on GitHub.`;
   }
@@ -222,9 +178,7 @@ function mergeTimeDetail(period: ScoreboardPeriod): string {
   const sentences = medianOf(time, 'merged pull request');
   const review = period.first_review_s;
   if (review !== null) {
-    // One pull request is "it", and one review has a time, not a typical time.
     const reviewed = time.count === 1 ? 'It' : `${formatCount(review.count)} of them`;
-    // The clock starts when the task finishes: a review that came before then counts as 0.
     const timing = review.p50 === 0 ? 'before the task had finished' : `${formatDurationShort(review.p50)} after the task finished`;
     sentences.push(`${reviewed} had a review by someone else, ${review.count === 1 ? '' : 'typically '}${timing}.`);
   }
@@ -243,23 +197,17 @@ function mergedDetail(period: ScoreboardPeriod): string {
     if (notMerged) sentences.push(`${notMerged}.`);
     if (unread > 0) sentences.push(`${formatCount(unread)} not read.`);
   }
-  // Beside pull requests that ABCA follows. A period with none of those has the orchestration as its reason already.
   const orchestration = notFollowed(period);
   if (orchestration > 0 && read + unread > 0) sentences.push(orchestrationNotFollowed(orchestration));
   return sentences.join(' ');
 }
 
-/**
- * Why the count of pull requests that wait for a person is not known. The API decides that
- * it is not, for one of two reasons, and the response shows which.
- */
 function waitingNotCounted(board: Scoreboard): string {
   return board.previous === null
     ? 'The scoreboard did not read far enough back to count these.'
     : 'ABCA has not read these pull requests on GitHub.';
 }
 
-/** The kinds of touchpoint in the order the line names them, each in the singular and the plural. */
 const TOUCHPOINT_WORDS: Readonly<Record<TouchpointKind, readonly [one: string, many: string]>> = {
   approve: ['approval request', 'approval requests'],
   clarify: ['question from the agent', 'questions from the agent'],
@@ -271,7 +219,6 @@ function touchpointTotal(period: ScoreboardPeriod): number {
   return Object.values(period.touchpoints).reduce((sum, count) => sum + count, 0);
 }
 
-/** To one decimal; a ratio above zero never reads as "0". */
 function oneDecimal(ratio: number): string {
   const rounded = Math.round(ratio * 10) / 10;
   return rounded === 0 && ratio > 0 ? '<0.1' : String(rounded);
@@ -292,11 +239,6 @@ function touchpointDetail(period: ScoreboardPeriod): string {
   return period.outcomes.verified_pr === 0 ? `${NO_VERIFIED_PR} ${inAll}` : inAll;
 }
 
-/**
- * Tasks that write code started and none of them recorded a cost: the spend is unknown,
- * not zero. Those tasks (`gated.total`) are the ones that can hold a cost, and the ones
- * `uncosted` is counted among.
- */
 function noneCosted(period: ScoreboardPeriod): boolean {
   return period.gated.total > 0 && period.uncosted === period.gated.total;
 }
@@ -319,8 +261,6 @@ function spendDetail(period: ScoreboardPeriod): string {
     if (period.uncosted > 0) spent += ` ${counted(period.uncosted, 'has', 'have')} no recorded cost.`;
     const perMerged = perMergedPr(period.spend_usd, period, formatCost);
     if (perMerged !== null) {
-      // What the divisor leaves out. The open ones can still be merged and the ones not read may be: the figure falls
-      // as they are. The ones of an orchestration never count, though their tasks are in the spend.
       const { merged, open, unread } = period.pull_requests;
       const counts = countsAboveZero([[merged, 'merged'], [open, 'still open'], [unread, 'not read'], [notFollowed(period), 'of an orchestration not followed']]);
       spent += ` ${perMerged}: ${counts}.`;
@@ -390,12 +330,9 @@ export const SECTIONS: readonly SectionSpec[] = [
             + ' that finished longest ago, ten at most. Not in it: pull requests ABCA could not read, one opened by a task that'
             + ' failed, and those of an orchestration.',
         },
-        // The one number of the whole response: the API counts it over both periods, and says when it cannot.
         value: (_period, board) => board.open_over_7d && formatCount(board.open_over_7d.count),
         detail: (_period, board) => {
           if (board.open_over_7d === null) return waitingNotCounted(board);
-          // The count rests on the tasks of both periods, and so does what it leaves out. The API gives no
-          // count without the period before: the test for it is there for the type, and no response reaches its other side.
           const orchestration = notFollowed(board.current) + (board.previous ? notFollowed(board.previous) : 0);
           return orchestration > 0 ? orchestrationNotFollowed(orchestration) : null;
         },
@@ -585,7 +522,6 @@ export const SECTIONS: readonly SectionSpec[] = [
   },
 ];
 
-/** "in the last 30 days", or since the time a read that hit its cap reaches back to. */
 function when(board: Scoreboard): string {
   return board.truncated ? `since ${formatTimestamp(board.current.from)}` : `in the last ${RANGE_DAYS[board.range]} days`;
 }
@@ -615,21 +551,14 @@ export function truncationNotice(board: Scoreboard): string {
 
 /**
  * The line that sets a tile against the period before: the earlier number in the tile's
- * own form, with no arrow, sign or verdict, because one person's numbers rest on a
- * handful of tasks. Null for a tile that does not compare, when the earlier period was
- * not read, and when that period has nothing to compute the number from.
+ * own form, with no arrow, sign or verdict. Null for a tile that does not compare, when
+ * the earlier period was not read, and when that period has nothing to compute the number from.
  */
 export function previousLine(tile: TileSpec, board: Scoreboard): string | null {
   const before = board.previous && tile.compare?.(board.previous);
   return before ? `${before} in the ${RANGE_DAYS[board.range]} days before` : null;
 }
 
-/**
- * The outcome bar's parts in the order they are drawn, each with its slot in the chart
- * palette and its explanation. Any two parts touch when the third is empty, and slots
- * 0 to 2 stay apart pair by pair under protan and deutan simulation (closest: 1 and 2,
- * OKLab Delta E 9.2 light, 9.4 dark).
- */
 const OUTCOME_PARTS: readonly { label: string; slot: 0 | 1 | 2; explanation: Explanation }[] = [
   {
     label: 'Verified pull request',
@@ -667,7 +596,6 @@ const OUTCOME_PARTS: readonly { label: string; slot: 0 | 1 | 2; explanation: Exp
   },
 ];
 
-/** The six outcomes in table order, each with the slot of the bar part it belongs to. */
 const OUTCOMES: Readonly<Record<TaskOutcome, { label: string; slot: (typeof OUTCOME_PARTS)[number]['slot'] }>> = {
   verified_pr: { label: 'Verified pull request', slot: 0 },
   unverified_pr: { label: 'Pull request without a passed build', slot: 2 },

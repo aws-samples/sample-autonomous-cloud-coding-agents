@@ -34,7 +34,6 @@ process.env.JIRA_USER_MAPPING_TABLE_NAME = 'JiraMap';
 
 import { handler } from '../../src/handlers/jira-link';
 
-// The handler refuses a pending row whose ttl has passed, so live fixtures carry a future one.
 const FUTURE_TTL = Math.floor(Date.now() / 1000) + 600;
 
 function makeEvent(body: unknown, userId?: string): APIGatewayProxyEvent {
@@ -101,7 +100,7 @@ describe('jira-link handler', () => {
     });
     const result = await handler(makeEvent({ code: 'link-3f8b4a2c', dry_run: dryRun }, 'cognito-user-1'));
     expect(result.statusCode).toBe(404);
-    expect(ddbSend).toHaveBeenCalledTimes(1); // the Get only: nothing written or deleted
+    expect(ddbSend).toHaveBeenCalledTimes(1);
   });
 
   test.each([['absent', undefined], ['a string', String(FUTURE_TTL)]])('404s when the pending row has no numeric ttl (%s)', async (_shape, ttl) => {
@@ -130,8 +129,8 @@ describe('jira-link handler', () => {
           jira_account_id: 'acc-1',
         },
       })
-      .mockResolvedValueOnce({}) // Put (confirmed mapping)
-      .mockResolvedValueOnce({}); // Delete (pending)
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
 
     const result = await handler(makeEvent({ code: 'link-3f8b4a2c' }, 'cognito-user-1'));
     expect(result.statusCode).toBe(200);
@@ -178,7 +177,6 @@ describe('jira-link handler', () => {
     expect(parsed.data.jira_user_name).toBe('Ada Lovelace');
     expect(parsed.data.jira_site_url).toBe('https://acme.atlassian.net');
 
-    // Critical: the dry-run path must not write or delete.
     expect(ddbSend.mock.calls.filter(([cmd]) => cmd._type === 'Put')).toHaveLength(0);
     expect(ddbSend.mock.calls.filter(([cmd]) => cmd._type === 'Delete')).toHaveLength(0);
   });

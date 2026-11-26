@@ -43,10 +43,7 @@ export const CFN_TYPES_WITHOUT_EXEC_ROLE_IAM = new Set([
 
 /**
  * Minimum IAM actions the CloudFormation execution role needs to create each
- * resource type. This is a deploy-time subset — update when constructs add new
- * AWS services or when CloudTrail shows additional actions during deploy.
- *
- * Parent issue: #350. Full synth-time aspect tracked in #125.
+ * resource type.
  */
 export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::SSM::Parameter': ['ssm:PutParameter', 'ssm:GetParameters', 'ssm:DeleteParameter'],
@@ -57,30 +54,19 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::ApiGateway::RestApi': ['apigateway:POST'],
   'AWS::Bedrock::Guardrail': ['bedrock:CreateGuardrail'],
   'AWS::Bedrock::GuardrailVersion': ['bedrock:CreateGuardrailVersion'],
-  // ADR-019 tool-gateway feature. Only synthesized under
-  // `--context enableToolGateway=true`, so the default-context synth-coverage
-  // test never sees these — they are mapped anyway so the map stays a complete
-  // statement of what the bootstrap bundle must cover (same pattern as the
-  // lambda-microvm entries below). All create actions fall under the
-  // `bedrock-agentcore:*` grant in `policies/compute-agentcore.ts`.
   'AWS::BedrockAgentCore::Gateway': ['bedrock-agentcore:CreateGateway'],
   'AWS::BedrockAgentCore::GatewayTarget': ['bedrock-agentcore:CreateGatewayTarget'],
   'AWS::BedrockAgentCore::Memory': ['bedrock-agentcore:CreateMemory'],
   'AWS::BedrockAgentCore::Runtime': ['bedrock-agentcore:CreateRuntime'],
   'AWS::CloudFront::Distribution': ['cloudfront:CreateDistribution'],
   'AWS::CloudFront::OriginAccessControl': ['cloudfront:CreateOriginAccessControl'],
-  // NestedStack for Agent Registry (#246) — CFN creates a child stack, passing the
-  // execution role on to it (#865). The PassRole's resource and condition are pinned
-  // separately in synth-coverage.test.ts: an action-level check cannot tell this
-  // grant from the unrelated `IAMPassRole` statement.
+  // CFN creates a child stack, passing the execution role on to it (#865).
   'AWS::CloudFormation::Stack': ['cloudformation:CreateStack', 'iam:PassRole'],
   'AWS::CloudWatch::Alarm': ['cloudwatch:PutMetricAlarm'],
   'AWS::CloudWatch::Dashboard': ['cloudwatch:PutDashboard'],
   'AWS::Cognito::UserPool': ['cognito-idp:CreateUserPool'],
   'AWS::Cognito::UserPoolClient': ['cognito-idp:CreateUserPoolClient'],
-  // RegistryPublisher / RegistryApprover groups (#246).
   'AWS::Cognito::UserPoolGroup': ['cognito-idp:CreateGroup'],
-  // Operator console managed-login domain.
   'AWS::Cognito::UserPoolDomain': ['cognito-idp:CreateUserPoolDomain', 'cognito-idp:DescribeUserPoolDomain'],
   'AWS::DynamoDB::Table': ['dynamodb:CreateTable'],
   'AWS::EC2::EIP': ['ec2:AllocateAddress'],
@@ -96,11 +82,7 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Events::Rule': ['events:PutRule'],
   'AWS::IAM::Policy': ['iam:CreatePolicy', 'iam:PutRolePolicy'],
   // CDK spills a role's inline policy into an ATTACHED managed policy once it
-  // exceeds IAM's inline-policy size limit ("…ServiceRoleOverflowPolicy"). The
-  // Linear webhook processor crossed that line when the revocation-alert grants
-  // were added (#812), so a fresh deploy now creates this type and the bootstrap
-  // policy has to allow it — otherwise the first deploy into a clean account fails
-  // on an action nobody added deliberately.
+  // exceeds IAM's inline-policy size limit ("…ServiceRoleOverflowPolicy").
   'AWS::IAM::ManagedPolicy': ['iam:CreatePolicy', 'iam:AttachRolePolicy'],
   'AWS::IAM::Role': ['iam:CreateRole'],
   'AWS::KMS::Key': ['kms:CreateKey'],
@@ -108,39 +90,6 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Lambda::EventSourceMapping': ['lambda:CreateEventSourceMapping'],
   'AWS::Lambda::Function': ['lambda:CreateFunction'],
   'AWS::Lambda::LayerVersion': ['lambda:PublishLayerVersion'],
-  // ADR-021 lambda-microvm backend. Only synthesized under
-  // `--context compute_type=lambda-microvm`, so the default-context
-  // synth-coverage test never sees these — they are mapped anyway so the map
-  // stays a complete statement of what the bootstrap bundle must cover.
-  //
-  // `iam:PassRole` is listed on BOTH because CloudFormation hands a role to the
-  // Lambda MicroVMs service for each: `buildRoleArn` on the image and
-  // `operatorRole` on the (VPC_EGRESS) connector. Its absence here is what let
-  // ADR-021 P2r2-F9 through — the bundle's shared `IAMPassRole` statement carries
-  // an `iam:PassedToService` allowlist that this service presents no usable value
-  // for, so the deploy failed with `iam:PassRole … not authorized` on the build
-  // role while every mapped action was covered. The unconditioned pass now lives in
-  // the conditional `compute-lambda-microvm` policy. Evidence inlined in
-  // ADR-021 §4.
-  //
-  // NOTE: listing the action here does NOT guard that statement.
-  // `collectBootstrapAllowActions` (this file) compares action STRINGS only —
-  // `Resource` and `Condition` are discarded — and `policies/infrastructure.ts`'s
-  // conditioned `IAMPassRole` already contributes a bare `iam:PassRole` to every
-  // bundle, so the requirement is satisfied by the very statement P2r2-F9 proved
-  // is denied on this path. Deleting `MicrovmPassRoles` leaves this check green.
-  // Compounding it, `synth-coverage.test.ts` synthesizes only the default context,
-  // where `AWS::Lambda::MicrovmImage` is never emitted, so these two entries are
-  // never even consulted there.
-  //
-  // The REAL guard against dropping the unconditioned pass is
-  // `test/bootstrap/policies.test.ts` ("MicrovmPassRoles"), which asserts the sid
-  // list, the two name-prefix resources, the ABSENT condition, and the
-  // execution-role exclusion — plus `test/bootstrap/bootstrap-template.test.ts`,
-  // which asserts it survives into the rendered template. These entries DOCUMENT
-  // the create-time need; they do not enforce it. Making the map enforce it would
-  // need `findMissingBootstrapActions` to require an *unconditioned* match for a
-  // declared subset of actions — deliberately not done here.
   'AWS::Lambda::MicrovmImage': ['lambda:CreateMicrovmImage', 'iam:PassRole'],
   'AWS::Lambda::NetworkConnector': ['lambda:CreateNetworkConnector', 'iam:PassRole'],
   'AWS::Logs::Delivery': ['logs:CreateDelivery'],
@@ -157,8 +106,6 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::SNS::Subscription': ['sns:Subscribe'],
   'AWS::SNS::Topic': ['sns:CreateTopic'],
   'AWS::SQS::Queue': ['sqs:CreateQueue'],
-  // The Agent Registry provisioning custom resource uses the CDK Provider
-  // framework, whose async waiter is a Step Functions state machine (#246).
   'AWS::StepFunctions::StateMachine': ['states:CreateStateMachine'],
   'AWS::WAFv2::WebACL': ['wafv2:CreateWebACL'],
   'AWS::WAFv2::WebACLAssociation': ['wafv2:AssociateWebACL'],
@@ -166,22 +113,12 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   // The provider calls AWS under its own role, so its actions are not listed (#878).
   'Custom::AWS': ['lambda:InvokeFunction'],
   'Custom::AgentRegistry': ['lambda:InvokeFunction'],
-  // CDK BucketDeployment's custom resource — ships the static Linear vault consent
-  // page into its bucket (context-gated `enableLinearIdentityVault`, not in the
-  // default synth).
   'Custom::CDKBucketDeployment': ['lambda:InvokeFunction'],
-  // The Linear identity vault's workload-identity provisioning custom resource
-  // (RFC #249 Phase 1; context-gated `enableLinearIdentityVault`, not in the
-  // default synth). Same CDK Provider-framework shape as Custom::AgentRegistry.
   'Custom::LinearWorkloadIdentity': ['lambda:InvokeFunction'],
   'Custom::S3AutoDeleteObjects': ['lambda:InvokeFunction'],
   'Custom::VpcRestrictDefaultSG': ['lambda:InvokeFunction'],
 };
 
-/**
- * Returns true when {@link allowedAction} covers {@link requiredAction}.
- * Supports service-level wildcards (e.g. `bedrock-agentcore:*`).
- */
 function actionIsAllowed(requiredAction: string, allowedAction: string): boolean {
   if (allowedAction === requiredAction) {
     return true;
@@ -193,9 +130,6 @@ function actionIsAllowed(requiredAction: string, allowedAction: string): boolean
   return false;
 }
 
-/**
- * Collects all Allow actions declared across bootstrap managed policies.
- */
 export function collectBootstrapAllowActions(): Set<string> {
   const actions = new Set<string>();
   for (const policy of allPolicies()) {
@@ -215,10 +149,6 @@ export function collectBootstrapAllowActions(): Set<string> {
   return actions;
 }
 
-/**
- * Returns IAM actions required by a CloudFormation type that are not covered
- * by the bootstrap policy bundle.
- */
 export function findMissingBootstrapActions(
   cfnType: string,
   allowedActions: Set<string>,
@@ -232,9 +162,6 @@ export function findMissingBootstrapActions(
   );
 }
 
-/**
- * Resolves bootstrap policies for use in tests (ensures CDK token resolution).
- */
 export function resolveBootstrapPolicies(stack: { resolve: (doc: iam.PolicyDocument) => unknown }): void {
   for (const policy of allPolicies()) {
     stack.resolve(policy);

@@ -29,9 +29,8 @@ import type { RegistryListEntry } from './shared/types';
 
 /**
  * GET /v1/registry/records?kind=&namespace= — list assets (grouped by
- * kind/namespace/name, one row per asset with its latest version).
- * Excludes tombstoned/never-approved noise by reporting the latest version
- * present regardless of status (status column tells the caller the rest).
+ * kind/namespace/name, one row per asset with its latest version,
+ * whatever that version's status).
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
@@ -55,7 +54,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 }
 
-/** Collapse per-version records into one entry per asset at its highest version. */
 function groupLatest(records: readonly RegistryRecord[]): RegistryListEntry[] {
   const byAsset = new Map<string, RegistryRecord>();
   for (const r of records) {

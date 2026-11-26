@@ -22,9 +22,6 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 import { handler } from '../../src/handlers/registry-show';
 import { AgentRegistryClient } from '../../src/handlers/shared/registry/agent-registry-client';
 
-// registry-handlers.test.ts, which holds the other cases of this handler, fakes the
-// registry client. Here the handler runs over the real adapter and a fake of the AWS
-// client under it, because the two together decide what `registry show` fetches.
 const mockRecords = [
   ['pdf-tools', '1.0.0'], ['pdf-tools', '1.2.0'], ['other-a', '1.0.0'], ['other-b', '1.0.0'], ['other-c', '1.0.0'],
 ].map(([name, version], index) => ({
@@ -53,8 +50,8 @@ jest.mock('../../src/handlers/shared/registry/factory', () => {
 });
 
 describe('registry-show handler over the registry adapter', () => {
-  // The list of the registry carries each record's name, so only the versions of the
-  // asset that is shown need a GetRegistryRecord: not every record of its kind and namespace.
+  // ListRegistryRecords carries each record's name, so only the versions of the asset
+  // that is shown need a GetRegistryRecord.
   test('fetches the versions of the asset it shows, not the records of its neighbours', async () => {
     const res = await handler({
       pathParameters: { kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools' },

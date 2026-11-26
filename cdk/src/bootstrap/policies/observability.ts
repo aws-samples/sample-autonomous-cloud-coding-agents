@@ -17,17 +17,10 @@
  *  SOFTWARE.
  */
 
-// ARN partitions are intentionally literal — this policy is a bootstrap
-// template matching the exact resource patterns in DEPLOYMENT_ROLES.md.
-
 import { aws_iam as iam } from 'aws-cdk-lib';
 
 /**
  * Returns the IAM PolicyDocument for the IaCRole-ABCA-Observability role.
- *
- * Covers: Bedrock guardrails/logging, CloudWatch Logs and Dashboards,
- * CDK asset buckets (S3), KMS for CDK assets, ECR for Docker assets,
- * X-Ray, SSM Parameter Store, and STS for CDK.
  */
 export function observabilityPolicy(): iam.PolicyDocument {
   return new iam.PolicyDocument({
@@ -155,15 +148,8 @@ export function observabilityPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
-        // Create/read/tag for customer-managed keys the stack provisions
-        // (e.g. the OperationalAlerts SNS topic key, issue #629), distinct
-        // from the CDK bootstrap asset key above. kms:CreateKey cannot be
-        // resource-scoped (the key ARN does not exist yet) and CMK ARNs
-        // are UUIDs, so `*` is unavoidable here. This statement holds only
-        // create + read + tag actions — none can escalate privilege on an
-        // existing key. kms:TagResource must stay unconditioned because it
-        // applies the very `ABCA` tag that scopes the mutation statement
-        // below (a tag condition would deny the call that sets the tag).
+        // kms:CreateKey cannot be resource-scoped (the key ARN does not exist
+        // yet) and CMK ARNs are UUIDs, so `*` is unavoidable here.
         sid: 'KMSCustomerManagedKeys',
         effect: iam.Effect.ALLOW,
         actions: [
@@ -177,14 +163,8 @@ export function observabilityPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
-        // Policy-mutation and deletion actions that COULD take over or
-        // destroy an unrelated account CMK if granted on `*`. CMK ARNs are
-        // UUIDs (still unscopable), so instead we gate them on the `ABCA`
-        // resource tag that the OperationalAlerts construct stamps on its
-        // key at creation (CloudFormation tags atomically in the CreateKey
-        // call, so an existing key always carries the tag by the time any
-        // of these run). This bounds the blast radius to keys this
-        // solution owns. Issue #629 review — MEDIUM 2.
+        // CloudFormation tags the key in the CreateKey call, so an existing key
+        // always carries the `ABCA` tag by the time any of these run.
         sid: 'KMSCustomerManagedKeysLifecycle',
         effect: iam.Effect.ALLOW,
         actions: [

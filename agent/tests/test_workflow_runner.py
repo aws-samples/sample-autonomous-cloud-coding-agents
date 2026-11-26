@@ -1,11 +1,3 @@
-"""Unit tests for the agent-side workflow step runner (#248).
-
-These exercise the orchestration core — step ordering, the ``on_failure``
-policies, exception attribution, step-boundary milestones, terminal-outcome
-resolution, and checkpoint/resume skipping — with fake handlers, so the loop is
-tested independently of the real (SDK/git/boto3-backed) handlers.
-"""
-
 from __future__ import annotations
 
 import json
@@ -45,8 +37,6 @@ def _workflow(steps: list[dict], *, primary: str = "pr_url", **over) -> Workflow
 
 
 class _RecordingProgress:
-    """Captures milestone strings so step-boundary emission can be asserted."""
-
     def __init__(self) -> None:
         self.milestones: list[str] = []
 
@@ -55,7 +45,6 @@ class _RecordingProgress:
 
 
 def _ctx(workflow: Workflow, progress=None) -> StepContext:
-    # config is unused by fake handlers; a bare object is enough for the core.
     return StepContext(workflow=workflow, config=object(), progress=progress)  # ty: ignore[invalid-argument-type]
 
 
@@ -134,7 +123,7 @@ def test_on_failure_fail_is_terminal_and_attributed():
     assert result.failed_step is not None
     assert result.failed_step.kind == "run_agent"
     assert result.failed_step.error == "agent exploded"
-    assert after_ran["hit"] is False  # downstream step never ran
+    assert after_ran["hit"] is False
 
 
 def test_on_failure_continue_proceeds():
@@ -146,7 +135,7 @@ def test_on_failure_continue_proceeds():
     )
     handlers = {"verify_lint": _bad("lint failed"), "run_agent": _ok()}
     result = run_workflow(wf, _ctx(wf), handlers=handlers)
-    assert result.succeeded  # the advisory failure did not stop the run
+    assert result.succeeded
     assert [o.status for o in result.outcomes] == ["failed", "succeeded"]
 
 
@@ -165,7 +154,7 @@ def test_on_failure_skip_remaining_stops_cleanly():
 
     handlers = {"run_agent": _bad(), "ensure_pr": ensure}
     result = run_workflow(wf, _ctx(wf), handlers=handlers)
-    assert result.succeeded  # skip_remaining ends cleanly, not FAILED
+    assert result.succeeded
     assert ran_ensure["hit"] is False
 
 
@@ -180,7 +169,7 @@ def test_handler_exception_becomes_attributed_failure():
 
 def test_missing_handler_is_attributed_failure():
     wf = _workflow([{"kind": "run_agent"}])
-    result = run_workflow(wf, _ctx(wf), handlers={})  # no handler for run_agent
+    result = run_workflow(wf, _ctx(wf), handlers={})
     assert not result.succeeded
     assert result.failed_step is not None
     assert "no handler" in (result.failed_step.error or "")
@@ -203,9 +192,7 @@ def test_milestone_uses_kind_when_name_absent():
 
 
 def test_running_step_is_named_in_the_environment_of_the_commit_hook(monkeypatch):
-    # prepare-commit-msg.sh writes WORKFLOW_ID and WORKFLOW_STEP on a commit as its
-    # Workflow-Id and Workflow-Step trailers (#560).
-    monkeypatch.setenv("WORKFLOW_ID", "default/agent-v1")  # left by an earlier run
+    monkeypatch.setenv("WORKFLOW_ID", "default/agent-v1")
     monkeypatch.setenv("WORKFLOW_STEP", "deliver")
     named: list[tuple[str, str]] = []
 
@@ -217,7 +204,7 @@ def test_running_step_is_named_in_the_environment_of_the_commit_hook(monkeypatch
         [
             {"kind": "clone_repo", "name": "setup"},
             {"kind": "run_agent", "name": "implement"},
-            {"kind": "ensure_pr", "strategy": "create"},  # no name: named by its kind
+            {"kind": "ensure_pr", "strategy": "create"},
         ]
     )
     handlers: dict[str, StepHandler] = dict.fromkeys(
@@ -234,8 +221,6 @@ def test_running_step_is_named_in_the_environment_of_the_commit_hook(monkeypatch
 
 class TestCheckpointResume:
     def test_completed_verify_step_skipped_on_resume(self, tmp_path: Path):
-        # Only steps whose ENTIRE product is in the checkpoint data (and re-applied
-        # via ctx.artifacts) are skippable — verify_build/verify_lint qualify.
         wf = _workflow(
             [
                 {"kind": "verify_build", "name": "build"},
@@ -262,20 +247,13 @@ class TestCheckpointResume:
         run_workflow(wf, _ctx(wf), handlers=handlers, checkpoint=cp)
         assert calls == ["build", "agent"]
 
-        # Resume: a fresh checkpoint object over the same dir sees the prior run.
         calls.clear()
         cp2 = WorkflowCheckpoint("task-1", state_dir=tmp_path)
         result = run_workflow(wf, _ctx(wf), handlers=handlers, checkpoint=cp2)
-        # verify_build is skipped; run_agent re-runs. The skipped step's product
-        # (build_passed) is still re-applied to artifacts via ctx.record(prior).
         assert calls == ["agent"]
         assert result.artifacts["build_passed"] is True
 
     def test_clone_repo_not_skipped_on_resume(self, tmp_path: Path):
-        # clone_repo populates an in-memory product (ctx.setup) that can't be
-        # rebuilt from the JSON checkpoint, so it must re-run (handler-level
-        # idempotency), never be skipped — else ctx.setup would stay None and
-        # break downstream steps.
         wf = _workflow(
             [
                 {"kind": "clone_repo", "name": "setup"},
@@ -306,10 +284,9 @@ class TestCheckpointResume:
             handlers=handlers,
             checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
         )
-        assert calls == ["clone", "agent"]  # clone re-runs, not skipped
+        assert calls == ["clone", "agent"]
 
     def test_run_agent_not_skipped_on_resume(self, tmp_path: Path):
-        # Agentic/side-effecting steps re-run (idempotently) — never skipped by key.
         wf = _workflow([{"kind": "run_agent", "name": "implement"}])
         cp = WorkflowCheckpoint("task-1", state_dir=tmp_path)
         calls: list[str] = []
@@ -338,7 +315,6 @@ class TestCheckpointResume:
             calls.append("clone")
             return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
 
-        # Different task id over the same mount must NOT inherit task-A's checkpoint.
         run_workflow(
             wf,
             _ctx(wf),
@@ -363,11 +339,9 @@ class TestCheckpointResume:
             handlers={"verify_build": build},
             checkpoint=WorkflowCheckpoint("task-1", state_dir=tmp_path),
         )
-        assert calls == ["build"]  # prior outcome was failed → re-run
+        assert calls == ["build"]
 
     def test_skipped_step_emits_boundary_milestones(self, tmp_path: Path):
-        # A resumed run must still account for the skipped step in milestones, so
-        # a watcher sees it rather than a gap.
         wf = _workflow(
             [
                 {"kind": "verify_build", "name": "build"},
@@ -406,7 +380,6 @@ class TestCheckpointResume:
 
 
 def test_default_handlers_cover_every_step_kind():
-    """Parity with the validator's handler set — every StepKind has a handler."""
     from workflow import STEP_HANDLERS
     from workflow.validator import _HANDLER_KINDS
 
@@ -415,11 +388,6 @@ def test_default_handlers_cover_every_step_kind():
 
 @pytest.mark.parametrize("unimpl", ["post_review"])
 def test_phase_gated_handlers_fail_loud(unimpl):
-    """Still-stubbed handlers are registered but must raise, not silently no-op.
-
-    deliver_artifact graduated from this list in #248 Phase 3 (now implemented);
-    post_review remains a stub until its phase.
-    """
     from workflow import STEP_HANDLERS
 
     wf = _workflow([{"kind": unimpl}], primary="review_posted")
@@ -428,8 +396,6 @@ def test_phase_gated_handlers_fail_loud(unimpl):
 
 
 class TestGateStatus:
-    """The shared verify-gate semantics (verify_build / verify_lint)."""
-
     def test_passing_always_succeeds(self):
         from workflow.runner import gate_status
 
@@ -459,8 +425,6 @@ class TestGateStatus:
     def test_read_only_never_gates(self):
         from workflow.runner import gate_status
 
-        # read_only workflows treat verify results as informational (matches
-        # pipeline.py: pr_review build status is informational only).
         assert (
             gate_status(passed=False, gate="strict", read_only=True, was_passing_before=True)
             == "succeeded"
@@ -469,7 +433,6 @@ class TestGateStatus:
     def test_regression_only_gates_a_regression(self):
         from workflow.runner import gate_status
 
-        # was passing before, fails now → regression → gates.
         assert (
             gate_status(
                 passed=False, gate="regression_only", read_only=False, was_passing_before=True
@@ -480,8 +443,6 @@ class TestGateStatus:
     def test_regression_only_ignores_preexisting_failure(self):
         from workflow.runner import gate_status
 
-        # already broken before the agent ran → not a regression → does NOT gate
-        # (mirrors pipeline.py build_ok = passed or not build_before).
         assert (
             gate_status(
                 passed=False, gate="regression_only", read_only=False, was_passing_before=False
@@ -492,8 +453,6 @@ class TestGateStatus:
     def test_unset_gate_defaults_to_regression_only(self):
         from workflow.runner import gate_status
 
-        # An unset gate must mirror pipeline.py (which is always regression-only),
-        # NOT default to strict: a regression gates, a pre-existing failure does not.
         assert (
             gate_status(passed=False, gate=None, read_only=False, was_passing_before=True)
             == "failed"
@@ -505,7 +464,6 @@ class TestGateStatus:
 
 
 def _real_ctx(workflow: Workflow, **kw):
-    """A StepContext with a real (minimal) TaskConfig for handler tests."""
     from models import TaskConfig
 
     config = TaskConfig(
@@ -523,7 +481,6 @@ class TestVerifyHandlers:
         from models import RepoSetup
         from workflow.runner import _handle_verify_build
 
-        # build red after, but it was already red before → not a regression.
         red = VerifyOutcome(passed=False)
         monkeypatch.setattr("post_hooks.verify_build", lambda _d, _c="": red)
         wf = _workflow(
@@ -558,7 +515,6 @@ class TestVerifyHandlers:
         from models import RepoSetup
         from workflow.runner import _handle_verify_lint
 
-        # read_only workflow: a lint failure must not gate (symmetry with build).
         red = VerifyOutcome(passed=False)
         monkeypatch.setattr("post_hooks.verify_lint", lambda _d, _c="": red)
         wf = _workflow(
@@ -597,7 +553,7 @@ class TestCloneAndHydrateHandlers:
         pre = RepoSetup(repo_dir="/pre", branch="pre")
         ctx = _real_ctx(wf, setup=pre)
         outcome = _handle_clone_repo(wf.steps[0], ctx)
-        assert called["n"] == 0  # setup_repo NOT called — reused
+        assert called["n"] == 0
         assert ctx.setup is pre
         assert outcome.data["reused"] is True
 
@@ -605,9 +561,6 @@ class TestCloneAndHydrateHandlers:
         from models import RepoSetup
         from workflow.runner import _handle_clone_repo
 
-        # #251 review: capture the progress kwarg to assert the runner threads
-        # ctx.progress through — bounded-retry blocker events depend on it, and a
-        # regression to setup_repo(ctx.config) would otherwise pass silently.
         captured = {}
 
         def fake_setup_repo(_config, progress=None):
@@ -627,7 +580,7 @@ class TestCloneAndHydrateHandlers:
         outcome = _handle_clone_repo(wf.steps[0], ctx)
         assert ctx.setup is not None and ctx.setup.repo_dir == "/fresh"
         assert outcome.data["reused"] is False
-        assert captured["progress"] is sentinel_progress  # threaded through, not dropped
+        assert captured["progress"] is sentinel_progress
 
     def test_hydrate_context_builds_system_prompt(self, monkeypatch):
         from models import RepoSetup
@@ -653,7 +606,6 @@ class TestCloneAndHydrateHandlers:
     def test_hydrate_context_skips_build_without_setup(self):
         from workflow.runner import _handle_hydrate_context
 
-        # repo-less: no setup → system prompt left to the caller, not built here.
         wf = _workflow(
             [
                 {"kind": "hydrate_context"},
@@ -668,8 +620,6 @@ class TestCloneAndHydrateHandlers:
 
     @staticmethod
     def _hydrate_user_prompt(**ctx_fields) -> str:
-        """The user prompt after the hydrate_context step, whose context was
-        hydrated by the orchestrator with the prompt ``HYDRATED``."""
         from models import HydratedContext
         from workflow.runner import _handle_hydrate_context
 
@@ -688,8 +638,6 @@ class TestCloneAndHydrateHandlers:
         assert self._hydrate_user_prompt() == "HYDRATED"
 
     def test_hydrate_context_keeps_a_prompt_the_caller_built(self):
-        # The pipeline hands the step the hydrated prompt with the attachment
-        # references appended. The step must not put the bare one back.
         built = "HYDRATED\n\nAttachments: `Read /workspace/.attachments/att-1/report.txt`"
 
         assert self._hydrate_user_prompt(user_prompt=built) == built
@@ -697,18 +645,14 @@ class TestCloneAndHydrateHandlers:
 
 class TestRunAgentHandler:
     def test_empty_system_prompt_fails_loud(self):
-        # run_agent must not run an unguided (empty system prompt) agent loop —
-        # it raises so the step is an attributable failure, not a silent no-op.
         from workflow.runner import _handle_run_agent
 
         wf = _workflow([{"kind": "run_agent"}])
-        ctx = _real_ctx(wf)  # system_prompt defaults to ""
+        ctx = _real_ctx(wf)
         with pytest.raises(ValueError, match="empty system prompt"):
             _handle_run_agent(wf.steps[0], ctx)
 
     def test_empty_system_prompt_surfaces_as_failed_step(self):
-        # Through run_workflow, the raise becomes a failed StepOutcome (the runner
-        # never crashes mid-workflow) attributed to the run_agent step.
         wf = _workflow([{"kind": "run_agent", "name": "implement"}])
         result = run_workflow(wf, _real_ctx(wf))
         assert not result.succeeded

@@ -17,22 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * A parent issue that carries uploads.linear.app attachments (description links
- * AND/OR native paperclips) and has PRE-EXISTING sub-issues seeds its
- * orchestration graph HERE in the webhook processor. So the parent's attachments
- * must be hydrated at THIS seam and stamped on the meta row
- * (releaseContext.pre_screened_attachments) so every child inherits them. The
- * single-task path is covered elsewhere; this file isolates the
- * pre-existing-sub-issue seed seam, which was previously blind to the parent's
- * attachments.
- *
- * Separate file (not the sibling orchestration-routing test) because the
- * attachment screening clients are constructed at MODULE-EVAL time from
- * ATTACHMENTS_BUCKET_NAME / GUARDRAIL_ID / GUARDRAIL_VERSION — this file sets
- * them before import so the fail-closed "not configured" branch is not taken.
- */
-
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -43,8 +27,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DeleteCommand: jest.fn((input: unknown) => ({ _type: 'Delete', input })),
   BatchWriteCommand: jest.fn((input: unknown) => ({ _type: 'BatchWrite', input })),
 }));
-// The screening clients are never actually exercised (download is mocked), but
-// their ctors must not blow up at module eval.
 jest.mock('@aws-sdk/client-s3', () => ({ S3Client: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
   BedrockRuntimeClient: jest.fn(() => ({})),
@@ -89,10 +71,6 @@ jest.mock('../../src/handlers/shared/orchestration-discovery', () => ({
   discoverOrchestration: (...args: unknown[]) => discoverOrchestrationMock(...args),
 }));
 
-// The handler fetches the sub-issue graph ONCE up front (to gate epic-
-// attachment hydration on children actually existing, and to avoid
-// double-screening) and reuses it for discoverOrchestration. Mock it to report a real graph so
-// the epic-hydration path runs; discoverOrchestration itself is separately mocked.
 const fetchSubIssueGraphMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-subissue-fetch', () => ({
   fetchSubIssueGraph: (...args: unknown[]) => fetchSubIssueGraphMock(...args),
@@ -105,8 +83,6 @@ jest.mock('../../src/handlers/shared/linear-issue-context-probe', () => ({
   renderIssueContextHint: jest.fn(() => ''),
 }));
 
-// Keep isLinearUploadsUrl / LinearAttachmentError real; stub only the network+S3
-// side (download+screen+store) so we can assert the RECORDS get threaded.
 const downloadMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-attachments', () => {
   const actual = jest.requireActual('../../src/handlers/shared/linear-attachments');
@@ -121,8 +97,6 @@ process.env.LINEAR_USER_MAPPING_TABLE_NAME = 'LinearUsers';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
-// Enable attachment screening (module-eval-time gate) so the epic hydrate
-// takes the real path, not the fail-closed "not configured" branch.
 process.env.ATTACHMENTS_BUCKET_NAME = 'attachments-bucket';
 process.env.GUARDRAIL_ID = 'gr-1';
 process.env.GUARDRAIL_VERSION = '1';
@@ -153,7 +127,6 @@ function epicIssue(description = 'Parent epic.'): Record<string, unknown> {
   };
 }
 
-/** A screened record as downloadScreenAndStoreLinearAttachments would return. */
 const SCREENED_RECORD = {
   attachment_id: 'abc-spec-pdf',
   filename: 'spec.pdf',
@@ -169,7 +142,6 @@ const SCREENED_RECORD = {
 describe('linear-webhook-processor — parent epic attachment hydration', () => {
   beforeEach(() => {
     ddbSend.mockReset().mockResolvedValue({ Items: [] });
-    // preamble: project mapping + user mapping
     ddbSend
       .mockResolvedValueOnce({ Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } })
       .mockResolvedValueOnce({ Item: { platform_user_id: 'platform-user-1' } });
@@ -184,9 +156,6 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
       accessToken: 'access-tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme',
     });
     discoverOrchestrationMock.mockReset();
-    // Default: the issue HAS sub-issues (graph fetch returns children) so the
-    // epic-attachment hydration path runs. A single_task-fall-through test would
-    // override this with { kind: 'no_children' }.
     fetchSubIssueGraphMock.mockReset().mockResolvedValue({
       kind: 'ok', parentIssueId: 'issue-1', children: [{ id: 'A', depends_on: [] }],
     });
@@ -197,8 +166,6 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
   });
 
   test('parent with a native paperclip → hydrated + stamped on releaseContext for children', async () => {
-    // The probe surfaces a uploads.linear.app paperclip; the screener returns a
-    // passed record; the parent has sub-issues (seeded).
     probeLinearIssueContextMock.mockResolvedValue({
       attachmentTitles: ['spec.pdf'],
       attachments: [{ title: 'spec.pdf', url: PAPERCLIP_URL }],
@@ -212,14 +179,11 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
 
     await handler(eventWith(epicIssue()));
 
-    // The parent's paperclip was fetched/screened/stored under the epic key.
     expect(downloadMock).toHaveBeenCalledTimes(1);
     const [, , ctxArg, paperclipsArg] = downloadMock.mock.calls[0];
     expect((ctxArg as { taskId: string }).taskId).toBe('epic-issue-1');
     expect(paperclipsArg).toEqual([{ title: 'spec.pdf', url: PAPERCLIP_URL }]);
 
-    // …and the passed record was stamped on the orchestration's release context
-    // so releaseChild → createTaskCore hands it to every child.
     expect(discoverOrchestrationMock).toHaveBeenCalledTimes(1);
     const releaseContext = (discoverOrchestrationMock.mock.calls[0][0] as {
       releaseContext: { pre_screened_attachments?: unknown[] };
@@ -254,7 +218,6 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
 
     await handler(eventWith(epicIssue()));
 
-    // Fail-closed: we never seed children that would be blind to the spec.
     expect(discoverOrchestrationMock).not.toHaveBeenCalled();
     expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     const [, issueId, message] = reportIssueFailureMock.mock.calls[0];
@@ -278,36 +241,25 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
   });
 
   test('child-own attachment reaches the released child EVEN IF the post-stamp reload is stale (race regression)', async () => {
-    // The child ROW got its own attachment stamped, but
-    // the released TASK had zero — because the post-stamp loadOrchestration Query
-    // is eventually-consistent and read the pre-stamp replica. Fix: patch the
-    // in-memory snapshot with the stamped records instead of reloading. Here the
-    // ddbSend Query DELIBERATELY returns a child row WITHOUT pre_screened_attachments
-    // (the stale replica); the released child's createTaskCore must STILL carry it.
     const CHILD_REC = { ...SCREENED_RECORD, attachment_id: 'own-abc', s3_key: 'attachments/u/child-A/own-abc/mock.png', filename: 'mock.png' };
-    // Parent has NO uploads (so epic hydrate no-ops); the CHILD's probe surfaces one.
     probeLinearIssueContextMock
-      .mockResolvedValueOnce({ attachmentTitles: [], attachments: [], projectName: null, projectHasDocuments: false }) // parent probe (entry)
-      .mockResolvedValue({ attachmentTitles: ['mock.png'], attachments: [{ title: 'mock.png', url: PAPERCLIP_URL }], projectName: null, projectHasDocuments: false }); // per-child probe
+      .mockResolvedValueOnce({ attachmentTitles: [], attachments: [], projectName: null, projectHasDocuments: false })
+      .mockResolvedValue({ attachmentTitles: ['mock.png'], attachments: [{ title: 'mock.png', url: PAPERCLIP_URL }], projectName: null, projectHasDocuments: false });
     downloadMock.mockResolvedValue([CHILD_REC]);
     discoverOrchestrationMock.mockResolvedValueOnce({
       kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['sub-A'], alreadyExisted: false,
     });
-    // Every loadOrchestration Query returns a ready child row with NO own
-    // attachments (the stale replica the fix must NOT depend on).
+    // A DynamoDB Query is eventually consistent by default: a reload right after the write can miss the stamped attachments.
     const staleSnapshot = {
       Items: [
         { sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', child_count: 1, platform_user_id: 'platform-user-1' },
         { sub_issue_id: 'sub-A', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', depends_on: [], child_status: 'ready' },
       ],
     };
-    // preamble already queued 2 Get responses in beforeEach; subsequent Query/Update calls hit this.
     ddbSend.mockResolvedValue(staleSnapshot);
 
     await handler(eventWith(epicIssue()));
 
-    // The child was released and createTaskCore got the own attachment despite the
-    // stale reload — sourced from the in-memory patch, not the DB read.
     const childCreate = createTaskCoreMock.mock.calls.find(
       (c) => (c[1] as { preScreenedAttachments?: Array<{ attachment_id: string }> }).preScreenedAttachments
         ?.some((r) => r.attachment_id === 'own-abc'),
@@ -315,11 +267,9 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
     expect(childCreate).toBeDefined();
   });
 
+  // In a versioned S3 bucket a second PUT of a key makes the earlier version noncurrent,
+  // and a noncurrent-version lifecycle rule then deletes it.
   test('a RETRIGGER of an already-seeded epic does NOT re-upload the parent attachment', async () => {
-    // seedOrchestration is frozen-at-first-seed; re-uploading on retrigger would
-    // PUT a new S3 version and demote the meta-pinned one to noncurrent (reaped by
-    // the 7-day rule → a delayed child references an expired version). So when the
-    // orchestration meta row already exists, the parent hydrate must be SKIPPED.
     probeLinearIssueContextMock.mockResolvedValue({
       attachmentTitles: ['spec.pdf'],
       attachments: [{ title: 'spec.pdf', url: PAPERCLIP_URL }],
@@ -329,7 +279,6 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
       ok: true,
       projectDocumentCount: 0,
     });
-    // loadOrchestration (the alreadySeeded probe) returns an existing meta row.
     ddbSend.mockResolvedValue({
       Items: [{ sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', child_count: 1, platform_user_id: 'platform-user-1' }],
     });
@@ -339,17 +288,14 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
 
     await handler(eventWith(epicIssue()));
 
-    // Even though the parent HAS a paperclip, the re-upload was skipped (already seeded).
     expect(downloadMock).not.toHaveBeenCalled();
   });
 
   test('over-budget child paperclips are trimmed BEFORE upload + drop note uses friendly titles', async () => {
-    // 12 own paperclips on the child, 0 inherited → budget 10 → only 10 uploaded,
-    // 2 dropped. The old code uploaded all 12 then sliced (orphaning 2 in S3).
     const many = Array.from({ length: 12 }, (_, i) => ({ title: `mock-${i}.png`, url: `${PAPERCLIP_URL}/${i}` }));
     probeLinearIssueContextMock
-      .mockResolvedValueOnce({ attachmentTitles: [], attachments: [], projectName: null, projectHasDocuments: false, projectDocuments: [], ok: true, projectDocumentCount: 0 }) // parent (entry): no uploads
-      .mockResolvedValue({ attachmentTitles: [], attachments: many, projectName: null, projectHasDocuments: false, projectDocuments: [], ok: true, projectDocumentCount: 0 }); // child: 12 paperclips
+      .mockResolvedValueOnce({ attachmentTitles: [], attachments: [], projectName: null, projectHasDocuments: false, projectDocuments: [], ok: true, projectDocumentCount: 0 })
+      .mockResolvedValue({ attachmentTitles: [], attachments: many, projectName: null, projectHasDocuments: false, projectDocuments: [], ok: true, projectDocumentCount: 0 });
     downloadMock.mockResolvedValue([{ ...SCREENED_RECORD, attachment_id: 'k' }]);
     discoverOrchestrationMock.mockResolvedValueOnce({
       kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['sub-A'], alreadyExisted: false,
@@ -363,14 +309,12 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
 
     await handler(eventWith(epicIssue()));
 
-    // The child-own hydrate received only the first 10 paperclips (trimmed BEFORE upload).
     const childHydrateCall = downloadMock.mock.calls.find(
       (c) => (c[2] as { taskId?: string })?.taskId?.startsWith('child-'),
     );
     expect(childHydrateCall).toBeDefined();
     const passedPaperclips = childHydrateCall![3] as Array<{ url: string }>;
     expect(passedPaperclips).toHaveLength(10);
-    // The drop note named the 2 dropped files by their friendly title (not a UUID).
     const dropNote = reportIssueFailureMock.mock.calls.find(
       (c) => typeof c[2] === 'string' && c[2].includes('mock-10.png') && c[2].includes('mock-11.png'),
     );

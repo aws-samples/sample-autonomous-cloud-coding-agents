@@ -99,8 +99,8 @@ const activeRecord = {
 beforeEach(() => {
   jest.clearAllMocks();
   mockDdbSend
-    .mockResolvedValueOnce({ Item: activeRecord }) // GetCommand
-    .mockResolvedValueOnce({ Attributes: { ...activeRecord, status: 'revoked', revoked_at: '2025-06-01' } }); // UpdateCommand
+    .mockResolvedValueOnce({ Item: activeRecord })
+    .mockResolvedValueOnce({ Attributes: { ...activeRecord, status: 'revoked', revoked_at: '2025-06-01' } });
   mockSmSend.mockResolvedValue({});
 });
 
@@ -110,7 +110,7 @@ describe('delete-webhook handler', () => {
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body);
     expect(body.data.status).toBe('revoked');
-    expect(mockSmSend).toHaveBeenCalledTimes(1); // DeleteSecret
+    expect(mockSmSend).toHaveBeenCalledTimes(1);
   });
 
   test('returns 404 when webhook not found', async () => {
@@ -150,8 +150,8 @@ describe('delete-webhook handler', () => {
   test('stamps TTL on webhook revocation', async () => {
     mockDdbSend.mockReset();
     mockDdbSend
-      .mockResolvedValueOnce({ Item: activeRecord }) // GetCommand
-      .mockResolvedValueOnce({ Attributes: { ...activeRecord, status: 'revoked', revoked_at: '2025-06-01' } }); // UpdateCommand
+      .mockResolvedValueOnce({ Item: activeRecord })
+      .mockResolvedValueOnce({ Attributes: { ...activeRecord, status: 'revoked', revoked_at: '2025-06-01' } });
     mockSmSend.mockResolvedValue({});
 
     await handler(makeEvent());

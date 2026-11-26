@@ -1,6 +1,3 @@
-# Git hooks via https://github.com/j178/prek (installed by `mise run install` in a Git checkout; re-run `mise run hooks:install` after edits).
-# Config format matches pre-commit; run hooks with `prek` from mise (`mise.toml` [tools]).
-
 default_install_hook_types: [pre-commit, pre-push]
 fail_fast: false
 exclude: ^\.threat-composer/
@@ -10,13 +7,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        # Skip generated trees and paths often checked in read-only (0444); mutating hooks must not touch them.
         exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$|\.(snap|lock)$)
       - id: end-of-file-fixer
         exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$)
       - id: check-merge-conflict
-        # Without this the hook only looks while a merge is in progress: it would
-        # check nothing in `mise run check:hygiene`, which runs it over all files.
+        # Without this the hook only looks while a merge is in progress.
         args: [--assume-in-merge]
       - id: check-yaml
         exclude: ^(cdk/cdk\.out/|cdk\.out/|node_modules/|agent/\.venv/)
@@ -25,12 +20,8 @@ repos:
 
   - repo: local
     hooks:
-      # Every entry below that runs a mise task exports MISE_ACTIVATE_AGGRESSIVE=1 first.
-      # On macOS the login shell of an entry puts /usr/local/bin and /opt/homebrew/bin back
-      # in front of the directories mise had added to PATH, and mise leaves them there: the
-      # hook then ran the machine's own node, gitleaks and semgrep, not the versions that
-      # mise.toml pins. With the variable mise puts its tools first again. A hook added
-      # here needs it too (cdk/test/scripts/git-hooks.test.ts).
+      # On macOS the login shell of an entry puts /usr/local/bin and /opt/homebrew/bin back in front of
+      # the directories mise added to PATH. With MISE_ACTIVATE_AGGRESSIVE=1 mise puts its tools first again.
       - id: gitleaks
         name: gitleaks (staged)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run security:secrets:staged'
@@ -63,8 +54,6 @@ repos:
         files: ^web/.*\.(ts|tsx|mts|cts|cjs|mjs|js)$
         stages: [pre-commit]
 
-      # ESLint, jest and vitest do not report type errors. Without these hooks only the build does.
-      # tsc cannot check one file under its project's settings, so each hook checks its whole package.
       - id: cdk-typecheck
         name: type check (cdk)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cdk:typecheck'
@@ -116,10 +105,8 @@ repos:
 
       - id: docs-astro-check
         name: astro check (docs)
-        # astro refuses to start on a Node older than the one it declares. A login
-        # shell can put another node (a system install) ahead of the one that
-        # docs/mise.toml names, also inside `mise exec` and mise tasks, so the hook
-        # asks mise where that node is and puts it first.
+        # astro refuses to start on a Node older than the one it declares. A login shell can put another
+        # node ahead of the one docs/mise.toml names, also inside `mise exec` and mise tasks.
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/docs" && node_bin="$(mise which node)" && PATH="$(dirname "$node_bin"):$PATH" ./node_modules/.bin/astro check'
         language: system
         pass_filenames: false
@@ -148,9 +135,6 @@ repos:
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:types-sync'
         language: system
         pass_filenames: false
-        # The script compiles the CDK types file with every module it imports (ten
-        # today, in handlers/shared and constructs), so any CDK source file may be
-        # one of its inputs; plus the two mirrors and the constants they share.
         files: ^(cdk/src/.*\.ts$|cli/src/types\.ts$|web/src/core/api/types\.ts$|contracts/constants\.json$|scripts/check-types-sync\.ts$)
         stages: [pre-commit]
 
@@ -159,8 +143,6 @@ repos:
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:constants-sync'
         language: system
         pass_filenames: false
-        # The script scans every Python file under agent/src, one CDK consumer and
-        # the agent's value-parity test.
         files: ^(contracts/constants\.json$|agent/src/.*\.py$|agent/tests/test_constants_parity\.py$|cdk/src/handlers/shared/types\.ts$|cdk/src/constructs/(blueprint|lambda-microvm-compute)\.ts$|scripts/check-constants-sync\.ts$)
         stages: [pre-commit]
 
@@ -169,11 +151,6 @@ repos:
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:coverage-thresholds-sync'
         language: system
         pass_filenames: false
-        # Every commit, not a `files` pattern: the script reads the contract, five
-        # mise.toml files, four package.json files, the vitest config, the agent
-        # settings and the Forge sources, and refuses rc files by name next to those
-        # manifests. A pattern over that list went stale each time the script grew;
-        # the check takes about a second.
         always_run: true
         stages: [pre-commit]
 

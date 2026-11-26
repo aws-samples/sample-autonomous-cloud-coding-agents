@@ -110,9 +110,6 @@ describe('TraceArtifactsBucket', () => {
   });
 
   test('enables autoDeleteObjects by default (matches TaskTable pattern)', () => {
-    // autoDeleteObjects is implemented via a CDK custom resource that
-    // empties the bucket before deletion. Its presence is the signal
-    // that autoDeleteObjects is on.
     template.hasResourceProperties('Custom::S3AutoDeleteObjects', {
       BucketName: Match.anyValue(),
     });
@@ -123,8 +120,6 @@ describe('TraceArtifactsBucket', () => {
     const stack = new Stack(app, 'TestStack');
     const trace = new TraceArtifactsBucket(stack, 'TraceArtifactsBucket');
     expect(trace.bucket).toBeDefined();
-    // Sanity: the construct's public handle and the synthesized resource
-    // are the same bucket.
     expect(trace.bucket.bucketName).toBeDefined();
   });
 });
@@ -144,7 +139,6 @@ describe('TraceArtifactsBucket with custom props', () => {
       UpdateReplacePolicy: 'Retain',
     });
 
-    // With autoDeleteObjects disabled, the custom resource is not synthesized.
     const customResources = template.findResources('Custom::S3AutoDeleteObjects');
     expect(Object.keys(customResources)).toHaveLength(0);
   });

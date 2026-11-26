@@ -17,23 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Scheduled handler: auto-cancel stale PENDING_UPLOADS tasks.
- *
- * Tasks in PENDING_UPLOADS that have not received a confirm-uploads call
- * within the configured timeout (default 30 minutes) are transitioned to
- * CANCELLED. This prevents abandoned upload sessions from accumulating
- * orphaned S3 objects and cluttering the user's task list.
- *
- * Race safety: Uses conditional DynamoDB writes so this Lambda and a
- * concurrent confirm-uploads call cannot both succeed. If confirm-uploads
- * wins (transitions to SUBMITTED), the conditional write here fails
- * harmlessly. If this Lambda wins, confirm-uploads' conditional write
- * fails and returns the CANCELLED status idempotently.
- *
- * Tests: cdk/test/handlers/cleanup-pending-uploads.test.ts
- */
-
 import {
   DynamoDBClient,
   QueryCommand,
@@ -53,7 +36,6 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME!;
 
-/** Timeout in seconds before a PENDING_UPLOADS task is auto-cancelled. */
 const PENDING_UPLOAD_TIMEOUT_SECONDS = Number(
   process.env.PENDING_UPLOAD_TIMEOUT_SECONDS ?? '1800',
 );
@@ -67,10 +49,6 @@ interface ExpiredTask {
   readonly age_seconds: number;
 }
 
-/**
- * Query TaskTable's StatusIndex GSI for PENDING_UPLOADS tasks
- * older than the timeout threshold.
- */
 async function findExpiredPendingUploads(now: Date): Promise<ExpiredTask[]> {
   const cutoff = new Date(now.getTime() - PENDING_UPLOAD_TIMEOUT_SECONDS * 1000);
   const matches: ExpiredTask[] = [];
@@ -112,11 +90,6 @@ async function findExpiredPendingUploads(now: Date): Promise<ExpiredTask[]> {
   return matches;
 }
 
-/**
- * Transition a PENDING_UPLOADS task to CANCELLED with a conditional write.
- * Returns true if the transition succeeded, false if another caller
- * already transitioned (confirm-uploads won the race).
- */
 async function cancelExpiredTask(task: ExpiredTask): Promise<boolean> {
   const now = new Date().toISOString();
   const errorMessage =
@@ -151,7 +124,6 @@ async function cancelExpiredTask(task: ExpiredTask): Promise<boolean> {
     throw err;
   }
 
-  // Write pending_upload_expired event (best-effort)
   const ttl = Math.floor(Date.now() / 1000) + TASK_RETENTION_DAYS * 86400;
   try {
     await ddb.send(new PutItemCommand({
@@ -180,11 +152,6 @@ async function cancelExpiredTask(task: ExpiredTask): Promise<boolean> {
   return true;
 }
 
-/**
- * Delete all S3 objects under a task's attachment prefix.
- * Uses prefix listing to catch any objects (including oversized abuse
- * uploads that were never confirmed).
- */
 async function cleanupTaskAttachments(task: ExpiredTask): Promise<void> {
   const prefix = `${ATTACHMENT_OBJECT_KEY_PREFIX}${task.user_id}/${task.task_id}/`;
 
@@ -205,7 +172,6 @@ async function cleanupTaskAttachments(task: ExpiredTask): Promise<void> {
     keyMarker = listResp.NextKeyMarker;
     versionIdMarker = listResp.NextVersionIdMarker;
 
-    // Collect all versions and delete markers for deletion
     const objects = [
       ...(listResp.Versions ?? []).map(v => ({ Key: v.Key!, VersionId: v.VersionId })),
       ...(listResp.DeleteMarkers ?? []).map(d => ({ Key: d.Key!, VersionId: d.VersionId })),
@@ -236,9 +202,6 @@ async function cleanupTaskAttachments(task: ExpiredTask): Promise<void> {
   }
 }
 
-/**
- * EventBridge scheduled handler entry point.
- */
 export async function handler(): Promise<void> {
   const now = new Date();
 
@@ -281,9 +244,6 @@ export async function handler(): Promise<void> {
     metric_type: errored > 0 ? 'pending_upload_cleanup_errors' : undefined,
   });
 
-  // If ALL tasks errored and none were cancelled, throw so EventBridge sees
-  // a Lambda failure and CloudWatch alarms fire. Partial success (some cancelled,
-  // some errored) is acceptable — the next scheduled run will retry the failed ones.
   if (errored > 0 && cancelled === 0 && raced === 0) {
     throw new Error(
       `All ${errored} expired PENDING_UPLOADS task(s) failed to process. ` +

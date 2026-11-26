@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for RepoTable construct.
- */
 export interface RepoTableProps {
   /**
    * Optional table name override.
@@ -48,13 +45,8 @@ export interface RepoTableProps {
  * DynamoDB table for storing per-repository onboarding configuration.
  *
  * Schema: repo (PK, "owner/repo" format) with TTL for cleanup of soft-deleted records.
- * Written by the Blueprint CDK construct at deploy time, read by the task API gate
- * and the orchestrator at runtime.
  */
 export class RepoTable extends Construct {
-  /**
-   * The underlying DynamoDB table. Use this to grant access or read the table name.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: RepoTableProps = {}) {

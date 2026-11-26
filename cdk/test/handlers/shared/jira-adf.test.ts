@@ -57,7 +57,6 @@ describe('extractDescriptionMarkdown: lists', () => {
       listItem(bulletList(listItem(paragraph(text('the only requirement'))))),
     ));
 
-    // (The converter trims the document, so the indent of a first line goes.)
     expect(extractDescriptionMarkdown(description)).toBe('- the only requirement');
   });
 

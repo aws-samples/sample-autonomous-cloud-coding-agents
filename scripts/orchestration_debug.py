@@ -4,8 +4,7 @@
 #
 # Pretty-printer for Linear parent/sub-issue orchestration state.
 # Reads DynamoDB JSON from stdin. Modes: "list" (meta rows) or "rows"
-# (one orchestration's full DAG). Kept as a real .py file (not an inline
-# heredoc) so the f-strings don't fight shell quoting.
+# (one orchestration's full DAG).
 
 import sys
 import json
@@ -25,12 +24,7 @@ def s(item, key, default=""):
 
 
 def renamed(item, current, legacy, default=""):
-    """Read an attribute that has both a neutral and an older name.
-
-    Rows written before and after the rename coexist indefinitely (there is no
-    backfill), so a debug view that reads only one name shows blanks for half the
-    rows — which reads as missing data rather than a naming difference.
-    """
+    """Read an attribute that has both a neutral and an older name."""
     return s(item, current) or s(item, legacy, default)
 
 
@@ -50,7 +44,6 @@ def main():
         print("\nInspect one with: scripts/orchestration-debug.sh <orchestration_id>")
         return
 
-    # rows mode: meta first, then children sorted by identifier
     if not items:
         print("  (no rows for this orchestration_id)")
         return
@@ -59,12 +52,8 @@ def main():
 
     for m in meta:
         n = m.get("child_count", {}).get("N", "?")
-        # Print ONLY whether an OAuth secret is present, never its value — and
-        # test key PRESENCE (``in``) so the secret ARN string is never even read.
-        # NOTE: CodeQL's py/clear-text-logging-sensitive-data still flags the
-        # prints below because it taints the whole stdin-derived meta dict as
-        # sensitive and follows any ``s(m, …)`` read into a print — a false
-        # positive (this dev-only debug helper logs only ids + a yes/no flag).
+        # CodeQL's py/clear-text-logging-sensitive-data flags the prints below: it taints the
+        # whole stdin-derived meta dict. False positive: they print ids and a yes/no flag.
         has_oauth = "yes" if "linear_oauth_secret_arn" in m else "no"
         issue = renamed(m, "parent_issue_ref", "parent_linear_issue_id")
         print(f"  PARENT  issue={issue}  repo={s(m, 'repo')}  children={n}")

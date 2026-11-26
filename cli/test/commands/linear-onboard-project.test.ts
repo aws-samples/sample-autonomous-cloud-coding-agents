@@ -17,30 +17,23 @@
  *  SOFTWARE.
  */
 
-// `bgagent linear onboard-project`, run as a command. It writes the project mapping, and the
-// value that matters in that row is the owning workspace: the webhook path checks the project
-// of a delivery against it, and lets a mapping without one through with a warning only.
 import { GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { makeLinearCommand } from '../../src/commands/linear';
 import * as config from '../../src/config';
 
-// CloudFormation — the mapping table and the workspace registry are read from stack outputs.
 const cfnSend = jest.fn();
 jest.mock('@aws-sdk/client-cloudformation', () => ({
   ...jest.requireActual('@aws-sdk/client-cloudformation'),
   CloudFormationClient: jest.fn(() => ({ send: cfnSend })),
 }));
 
-// Secrets Manager — holds the token of the workspace that is asked about the project.
 const smSend = jest.fn();
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
   ...jest.requireActual('@aws-sdk/client-secrets-manager'),
   SecretsManagerClient: jest.fn(() => ({ send: smSend })),
 }));
 
-// DynamoDB — the registry is scanned for workspaces, the mapping is read with a Get and
-// written with a Put.
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   ...jest.requireActual('@aws-sdk/lib-dynamodb'),
@@ -48,12 +41,9 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 }));
 
 const PROJECT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-// Hex letters in the last group on purpose: twelve digits there read as an AWS account id
-// to the secret scan.
 const ORG_ACME = 'c0000000-0000-4000-8000-0000000ac0e1';
 const ORG_GIVEN = 'c0000000-0000-4000-8000-0000000b10a2';
 
-/** What Linear answers to the owner query: HTTP 200 with `data`. */
 function linearAnswers(data: unknown): Response {
   return new Response(JSON.stringify({ data }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
@@ -75,7 +65,6 @@ describe('linear onboard-project command', () => {
         ],
       }],
     });
-    // One onboarded workspace, on Secrets Manager (its row names no vault provider).
     ddbSend.mockReset().mockImplementation(async (command: unknown) => (
       command instanceof ScanCommand
         ? { Items: [{ workspace_slug: 'acme', linear_workspace_id: ORG_ACME, status: 'active' }] }
@@ -85,7 +74,6 @@ describe('linear onboard-project command', () => {
       if (command instanceof GetSecretValueCommand) return { SecretString: JSON.stringify({ access_token: 'tok-acme' }) };
       throw new Error('unexpected Secrets Manager command');
     });
-    // Linear, asked with that workspace's token: the project is one of its own.
     fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(
       async () => linearAnswers({ organization: { id: ORG_ACME }, project: { id: PROJECT } }),
     );
@@ -93,7 +81,6 @@ describe('linear onboard-project command', () => {
     logSpy = jest.spyOn(console, 'log').mockImplementation();
     errorSpy = jest.spyOn(console, 'error').mockImplementation();
     writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    // Make process.exit throw, so that the command stops there as it does in the CLI.
     exitSpy = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code}`);
     }) as never);
@@ -131,7 +118,6 @@ describe('linear onboard-project command', () => {
         updated_at: expect.any(String),
       },
     }]);
-    // Asked with the token of the workspace it then names as the owner.
     expect(fetchSpy).toHaveBeenCalledWith('https://api.linear.app/graphql', expect.objectContaining({
       headers: expect.objectContaining({ Authorization: 'Bearer tok-acme' }),
     }));
@@ -139,7 +125,7 @@ describe('linear onboard-project command', () => {
   });
 
   test('writes nothing when no onboarded workspace can see the project', async () => {
-    // `project: null` with a 200 is how Linear says "not one of this workspace's projects".
+    // Linear answers HTTP 200 with `project: null` for a project that is not one of the workspace's.
     fetchSpy.mockImplementation(async () => linearAnswers({ organization: { id: ORG_ACME }, project: null }));
 
     await expect(run(PROJECT, '--repo', 'acme/widgets')).rejects.toThrow('process.exit:1');
@@ -167,8 +153,6 @@ describe('linear onboard-project command', () => {
   });
 
   test('a second run keeps the first onboarded_at and moves updated_at', async () => {
-    // The mapping table, one row of it: a put stores the item, a get returns it. A scan is
-    // of the registry, answered as in the other tests.
     let row: Record<string, unknown> | undefined;
     ddbSend.mockImplementation(async (command: unknown) => {
       if (command instanceof PutCommand) {
@@ -179,7 +163,6 @@ describe('linear onboard-project command', () => {
         ? { Items: [{ workspace_slug: 'acme', linear_workspace_id: ORG_ACME, status: 'active' }] }
         : { Item: row };
     });
-    // Only the clock is faked, so that the two runs are a month apart.
     jest.useFakeTimers({
       now: new Date('2026-01-02T03:04:05.000Z'),
       doNotFake: [
@@ -209,7 +192,6 @@ describe('linear onboard-project command', () => {
       onboarded_at: '2026-01-02T03:04:05.000Z',
       updated_at: '2026-02-03T04:05:06.000Z',
     });
-    // Each run reads the row it is about to replace: by its key, and not from a stale copy.
     const reads = ddbSend.mock.calls
       .map(([command]) => command as unknown)
       .filter((command): command is GetCommand => command instanceof GetCommand)
@@ -219,8 +201,6 @@ describe('linear onboard-project command', () => {
   });
 
   test('stops with the AWS error, before writing, when the mapping row cannot be read', async () => {
-    // Not a reason to take the row for new: the put would date the mapping from today.
-    // With --workspace-id nothing else is read from DynamoDB, so this is the first request.
     ddbSend.mockRejectedValueOnce(Object.assign(
       new Error('User is not authorized to perform: dynamodb:GetItem'),
       { name: 'AccessDeniedException' },

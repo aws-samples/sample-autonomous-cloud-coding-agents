@@ -150,7 +150,6 @@ describe('list-webhooks handler', () => {
     });
 
     test('returns 400 for a next_token that cannot be decoded', async () => {
-      // Taken for no token, it restarted the list at the first page with status 200.
       const cut = Buffer.from('{"webhook_id":"w').toString('base64');
       const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
 
@@ -160,7 +159,6 @@ describe('list-webhooks handler', () => {
     });
 
     test('a single page short of the limit reports has_more=false with no token', async () => {
-      // Fewer active webhooks than requested, index exhausted (no LastEvaluatedKey).
       mockSend.mockResolvedValueOnce({ Items: [makeRecord(2), makeRecord(1)] });
       const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
       const body = JSON.parse(result.body);
@@ -171,9 +169,7 @@ describe('list-webhooks handler', () => {
     });
 
     test('keeps querying past filtered-out pages until the page is full', async () => {
-      // Page 1: Limit applied before the filter yields no active webhook, but a cursor remains.
       mockSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { webhook_id: 'wh-0' } });
-      // Page 2: enough active webhooks to fill limit=2 plus one extra.
       mockSend.mockResolvedValue({
         Items: [makeRecord(3), makeRecord(2), makeRecord(1)],
         LastEvaluatedKey: { webhook_id: 'wh-1' },
@@ -198,20 +194,16 @@ describe('list-webhooks handler', () => {
       const body = JSON.parse(result.body);
 
       const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
-      // Boundary is the last webhook actually returned (wh-2), so wh-1 is not skipped.
       expect(decoded).toEqual({ webhook_id: 'wh-2', user_id: 'user-123', created_at: makeRecord(2).created_at });
     });
 
     test('stops after the page cap and still advances the raw cursor', async () => {
-      // Every page filters to nothing but keeps returning a cursor.
       mockSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { webhook_id: 'wh-x' } });
       const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
       const body = JSON.parse(result.body);
 
-      expect(mockSend).toHaveBeenCalledTimes(10); // MAX_QUERY_PAGES
+      expect(mockSend).toHaveBeenCalledTimes(10);
       expect(body.data).toHaveLength(0);
-      // The cap stopped the read with a cursor still pending, so hand it back
-      // rather than report the list as complete.
       expect(body.pagination.has_more).toBe(true);
       const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
       expect(decoded).toEqual({ webhook_id: 'wh-x' });

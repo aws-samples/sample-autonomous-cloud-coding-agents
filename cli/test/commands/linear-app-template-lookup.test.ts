@@ -17,17 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * `bgagent linear app-template` looks its callback URLs up instead of asking the
- * operator to paste in a CloudFormation output and an AgentCore-minted callback id.
- *
- * It is the FIRST command in onboarding, which sets the bar for these tests: it
- * must still render when the CLI is unconfigured, credentials are absent, the
- * stack is not deployed, and the credential provider does not exist. A lookup that
- * throws would make the command that explains onboarding the one thing that cannot
- * run before onboarding.
- */
-
 import { CloudFormationClient } from '@aws-sdk/client-cloudformation';
 import { resolveTemplateCallbackUrls } from '../../src/commands/linear';
 import * as config from '../../src/config';
@@ -49,14 +38,12 @@ const lookupVaultCallback = jest.mocked(linearVault.probeLinearVaultCallbackUrl)
 const HOSTED = 'https://d111111abcdef8.cloudfront.net/';
 const VAULT = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f8804c1b';
 
-/** A DescribeStacks reply exposing the consent-page output. */
 function stackServingConsentUrl(): void {
   cfnSend.mockResolvedValue({
     Stacks: [{ Outputs: [{ OutputKey: 'LinearVaultConsentUrl', OutputValue: HOSTED }] }],
   });
 }
 
-/** A deployed stack with the vault flag OFF — the output is legitimately absent. */
 function stackWithoutConsentUrl(): void {
   cfnSend.mockResolvedValue({
     Stacks: [{ Outputs: [{ OutputKey: 'ApiUrl', OutputValue: 'https://api.example.com' }] }],
@@ -95,9 +82,6 @@ describe('app-template callback discovery', () => {
   });
 
   test('the webhook URL comes from config, so it resolves with no AWS call at all', async () => {
-    // It is pure string work on the configured API URL. The template used to print
-    // a placeholder here, which left operators with an app that could never
-    // deliver an event.
     jest.spyOn(config, 'loadConfig').mockReturnValue({
       region: 'us-east-1',
       api_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1',
@@ -123,11 +107,9 @@ describe('app-template callback discovery', () => {
   });
 
   test('an UNCONFIGURED CLI yields no URLs instead of throwing', async () => {
-    // The expected state on a first run: `bgagent configure` has not been run yet.
     jest.spyOn(config, 'loadConfig').mockImplementation(() => { throw new Error('Not configured'); });
     await expect(resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' }))
       .resolves.toEqual({ webhookUrl: undefined });
-    // And it must not have tried to call AWS with an undefined region.
     expect(cfnSend).not.toHaveBeenCalled();
     expect(lookupVaultCallback).not.toHaveBeenCalled();
   });
@@ -139,9 +121,6 @@ describe('app-template callback discovery', () => {
   });
 
   test('an AUTH failure renders, but SAYS it could not read the stack', async () => {
-    // findStackOutput rethrows non-"does not exist" errors. This command must not
-    // propagate them — `app-template` has to work before `aws configure` — but it used to
-    // swallow them silently, which rendered a VAULT stack as a no-vault one (#914 review).
     cfnSend.mockRejectedValue(Object.assign(new Error('Unable to locate credentials'), {
       name: 'CredentialsProviderError',
     }));
@@ -178,7 +157,6 @@ describe('app-template callback discovery', () => {
   });
 
   test('a not-yet-created provider yields no vault URL while still returning the hosted one', async () => {
-    // The ordinary first run: the hosted page exists, the provider does not.
     stackServingConsentUrl();
     lookupVaultCallback.mockResolvedValue({ kind: 'absent' });
     await expect(resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' }))

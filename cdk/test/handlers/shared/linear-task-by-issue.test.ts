@@ -44,13 +44,10 @@ describe('lookupTaskByLinearIssue', () => {
     expect(input.IndexName).toBe('LinearIssueIndex');
     expect(input.KeyConditionExpression).toContain('linear_issue_id');
     expect(input.ExpressionAttributeValues[':iid']).toBe('issue-uuid');
-    expect(input.ScanIndexForward).toBe(false); // newest first
+    expect(input.ScanIndexForward).toBe(false);
     expect(input.Limit).toBe(1);
   });
 
-  // A miss and a failure are different answers: the comment path tells the user
-  // "no task is linked to this issue" for the first and "the lookup failed" for
-  // the second. Reporting a failed query as a miss is a guess presented as a fact.
   test('GSI miss (no rows) → none', async () => {
     send.mockResolvedValueOnce({ Items: [] });
     expect(await lookupTaskByLinearIssue(ddb, 'TaskTable', 'x')).toEqual({ kind: 'none' });

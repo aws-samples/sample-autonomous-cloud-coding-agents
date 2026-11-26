@@ -7,7 +7,6 @@ if ! git rev-parse --show-toplevel >/dev/null; then
     exit 1
 fi
 
-# The package tasks load their own mise configs as well as the root config.
 mise trust --all
 mise install --yes
 mise exec -- corepack enable yarn

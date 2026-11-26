@@ -40,21 +40,17 @@ export interface CancelTaskTables {
 }
 
 /**
- * Move a task to CANCELLED and write its ``task_cancelled`` event in ONE
- * transaction, so a cancel can never commit without the event that tells the
- * fan-out channels about it (a retry after a half-applied cancel would see a
- * terminal task and never write the event).
+ * Move a task to CANCELLED and write its ``task_cancelled`` event in one
+ * transaction.
  *
  * Returns ``'already_terminal'`` when the task reached COMPLETED / FAILED /
- * CANCELLED / TIMED_OUT first (or the row is gone) — the caller lost a race and
- * nothing was written. Any other DynamoDB error propagates.
+ * CANCELLED / TIMED_OUT first (or the row is gone): nothing was written. Any
+ * other DynamoDB error propagates.
  *
- * ``extraMetadata`` lets an entry point tag the event (e.g. a Linear session
- * stop, whose confirmation the caller already posted).
+ * ``extraMetadata`` is added to the event's metadata.
  *
- * The agent runtime polls its task record between turns and exits on CANCELLED
- * (``agent/src/hooks.py``), but that alone lets the current turn finish and
- * push: callers follow up with {@link stopTaskCompute}.
+ * The agent runtime exits on CANCELLED only between turns: callers follow up
+ * with {@link stopTaskCompute}.
  */
 export async function cancelTask(
   tables: CancelTaskTables,
@@ -64,7 +60,6 @@ export async function cancelTask(
   extraMetadata: Record<string, string> = {},
 ): Promise<'cancelled' | 'already_terminal'> {
   const ttl = computeTtlEpoch(tables.retentionDays);
-  // One event id for every attempt, so a retry can never write a second event.
   const eventId = ulid();
   for (let attempt = 1; ; attempt += 1) {
     const outcome = await attemptCancel(tables, taskId, cancelledBy, now, extraMetadata, ttl, eventId);
@@ -76,12 +71,7 @@ export async function cancelTask(
   }
 }
 
-/**
- * A task row is written constantly while it runs (heartbeats, status and cost
- * updates), and DynamoDB cancels a transaction that touches an item another
- * write is in flight on (``TransactionConflict``). That says nothing about the
- * task's state, so it is retried rather than surfaced as a failed cancel.
- */
+/** DynamoDB cancels a transaction with ``TransactionConflict`` when another write is in flight on one of its items. */
 const CANCEL_CONFLICT_ATTEMPTS = 4;
 const CANCEL_CONFLICT_BACKOFF_MS = 50;
 
@@ -136,7 +126,6 @@ async function attemptCancel(
     const cancelled = err as { name?: string; CancellationReasons?: ReadonlyArray<{ Code?: string }> };
     if (cancelled?.name === 'TransactionCanceledException') {
       const codes = cancelled.CancellationReasons?.map((reason) => reason.Code) ?? [];
-      // The condition is on the task row (first item): it reached a terminal state first.
       if (codes[0] === 'ConditionalCheckFailed') return 'already_terminal';
       if (codes.includes('TransactionConflict')) return 'conflict';
     }
@@ -152,19 +141,13 @@ export type CancelledTaskCompute = Pick<
 >;
 
 /**
- * Stop the compute behind a task that was just cancelled, so the container
- * winds down instead of finishing its turn. Best-effort and never throws: the
- * CANCELLED transition already committed and must stand.
+ * Stop the compute behind a task that was just cancelled. Best-effort and
+ * never throws.
  *
- * Shared by ``DELETE /tasks/{id}`` and the Linear agent-session ``stop`` signal
- * so both stop the same backends. Reads ``RUNTIME_ARN`` / ``ECS_CLUSTER_ARN``
- * from the environment as fallbacks for a task whose container has not written
- * its session info yet; a caller without the matching IAM grant gets a logged
- * warning, not a failure.
+ * Reads ``RUNTIME_ARN`` / ``ECS_CLUSTER_ARN`` from the environment as fallbacks
+ * for a task whose container has not written its session info yet.
  *
- * A task that never reached a compute status (SUBMITTED) has nothing to stop:
- * the orchestrator's admission step re-reads the record and does not start a
- * session for a CANCELLED task.
+ * Does nothing for a task that never reached a compute status (SUBMITTED).
  */
 export async function stopTaskCompute(
   tables: CancelTaskTables,
@@ -172,7 +155,6 @@ export async function stopTaskCompute(
   now: string = new Date().toISOString(),
   requestId?: string,
 ): Promise<void> {
-  // A task waiting for approval may own a suspended MicroVM: stop that too.
   const mayHaveCompute = record.status === TaskStatus.HYDRATING
     || record.status === TaskStatus.RUNNING
     || record.status === TaskStatus.AWAITING_APPROVAL
@@ -182,14 +164,9 @@ export async function stopTaskCompute(
 
   const taskId = record.task_id;
   const computeType = record.compute_type;
-  // Prefer the ARN recorded on the task record (agent container writes
-  // this when the session starts). Fall back to the stack's single
-  // runtime ARN for the pre-session window — the task was admitted but
-  // the container hasn't written its session info yet.
   const agentRuntimeArn = record.agent_runtime_arn ?? process.env.RUNTIME_ARN;
 
   if (computeType === 'ecs') {
-    // ECS-backed task — stop the Fargate task
     const clusterArn = record.compute_metadata?.clusterArn ?? process.env.ECS_CLUSTER_ARN;
     const taskArn = record.compute_metadata?.taskArn;
     if (clusterArn && taskArn) {
@@ -219,18 +196,6 @@ export async function stopTaskCompute(
   }
 
   if (computeType === 'lambda-microvm') {
-    // ADR-021: `terminate-microvm` is the ACTIVE cleanup path — a cancelled
-    // MicroVM must not be left to the 8-hour `maximumDurationInSeconds` cap
-    // (with `idlePolicy` omitted there is no tighter substrate bound), both
-    // for cost and because running/suspended VMs count against the account
-    // memory quota that gates admission of new tasks.
-    //
-    // This branch MUST come before the `agentRuntimeArn` branch below.
-    // `agentRuntimeArn` falls back to the stack-level RUNTIME_ARN env var,
-    // which is set whenever AgentCore stop-session is wired — so in a mixed
-    // agentcore+lambda-microvm deployment a MicroVM task would otherwise fall
-    // into the AgentCore branch and call StopRuntimeSession against an
-    // unrelated runtime ARN, silently leaving the MicroVM running.
     const microvmId = record.compute_metadata?.microvmId;
     if (microvmId) {
       try {
@@ -256,7 +221,6 @@ export async function stopTaskCompute(
   }
 
   if (agentRuntimeArn) {
-    // AgentCore-backed task (default)
     try {
       await agentCoreClient.send(new StopRuntimeSessionCommand({
         runtimeSessionId: runtimeSessionId,
@@ -273,11 +237,6 @@ export async function stopTaskCompute(
     return;
   }
 
-  // Task status was flipped to CANCELLED in DDB but we have no
-  // compute handle to actually stop the container. This is a
-  // resource-leak risk: the container may still be running and
-  // consuming tokens/concurrency. Emit a dedicated event so ops
-  // dashboards / alarms can surface the orphan.
   logger.error('Active task has no recognized compute backend to stop — possible orphan', {
     task_id: taskId,
     request_id: requestId,

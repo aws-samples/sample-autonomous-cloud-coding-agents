@@ -34,17 +34,14 @@ const ICON: Readonly<Record<ActivityKind, IconProps.Name>> = {
 const DAY = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' });
 const TIME = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
 
-/** A line's time of day and its day ("Nov 12"), on the reader's clock. Both empty when the line has no time. */
 function clock(iso: string): { time: string; day: string } {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return { time: '', day: '' };
   return { time: TIME.format(date), day: DAY.format(date) };
 }
 
-/** How close to the bottom still counts as "following" the feed. */
 const FOLLOW_SLACK_PX = 120;
 
-/** Looks like text, works like a button: opens the command and its output under the line. */
 const TOGGLE: CSSProperties = {
   background: 'none',
   border: 0,
@@ -110,7 +107,6 @@ export function ActivityFeed({ lines, loading, live, trace = false }: {
   const box = useRef<HTMLDivElement>(null);
   const end = useRef<HTMLDivElement>(null);
   const count = lines.length;
-  // Follow new lines only while the reader is at the bottom, not while they read further up.
   const following = useRef(true);
   const onScroll = () => {
     const el = box.current;
@@ -123,8 +119,6 @@ export function ActivityFeed({ lines, loading, live, trace = false }: {
   if (loading) return <Box color="text-status-inactive">Loading…</Box>;
   if (count === 0) return <Box color="text-status-inactive">Nothing yet. Updates appear here as the agent works.</Box>;
 
-  // The lines show a time of day. Most tasks begin and end within one day; a line on another day than
-  // the line before it, such as the end of a pull request days after the task, names its day above it.
   const clocks = lines.map((line) => clock(line.at));
 
   return (

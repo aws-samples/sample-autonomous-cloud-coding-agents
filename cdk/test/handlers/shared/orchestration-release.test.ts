@@ -59,21 +59,7 @@ function created(taskId: string) {
 }
 
 describe('releaseChild — idempotency key is accepted by the REAL validator', () => {
-  // Regression: the key was originally `${orchestration_id}#${sub_issue_id}`,
-  // but createTaskCore validates against /^[a-zA-Z0-9_-]{1,128}$/ — the '#'
-  // was rejected with a 400 and the child silently never started. Mocked
-  // createTaskCore tests didn't catch it; this asserts the generated key
-  // against the actual validator with production-shaped ids.
   test('PARALLEL children each receive the parent\'s shared contract, verbatim', async () => {
-    // The incident this prevents: an epic fanned out an API child and a UI child at
-    // the same time. Each saw only its own sub-issue text, so each chose its own
-    // names — `kyoto` with `checkIn`/`checkOut` on one side, `wander-kyoto` with
-    // `startDate`/`endDate` on the other. Both passed their own tests, the branches
-    // merged without conflict, and the deployed flow was broken. Neither child was
-    // wrong in isolation; the agreement only ever existed in the parent.
-    //
-    // So the assertion is not "context is attached somewhere" but "BOTH siblings got
-    // the SAME contract text" — the property whose absence caused the divergence.
     const parentContext = {
       title: 'Booking flow for Kyoto trips',
       description: 'Slug is `kyoto`. Dates are `checkIn`/`checkOut` (ISO-8601).',
@@ -94,32 +80,17 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
     }
 
     for (const d of descriptions) {
-      // Delimited and labelled, so the agent can tell the epic-wide agreement from
-      // its own task rather than reading one run-on prompt.
       expect(d).toContain('--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---');
       expect(d).toContain('--- END SHARED ORCHESTRATION CONTEXT ---');
-      // The contract itself — the exact strings that diverged in the incident.
       expect(d).toContain('Slug is `kyoto`');
       expect(d).toContain('`checkIn`/`checkOut`');
-      // Told that siblings share it, which is what makes it binding rather than FYI.
       expect(d).toMatch(/in parallel/i);
     }
-    // And each still carries its OWN task below the shared block.
     expect(descriptions[0]).toContain('Add the booking API');
     expect(descriptions[1]).toContain('Add the booking form');
   });
 
   test('the shared-context preamble stays DESCRIPTIVE, so the guardrail admits the child', async () => {
-    // The task description is screened by a Bedrock guardrail at admission. An
-    // instruction-shaped preamble ("use it exactly", "do not invent an alternative")
-    // stacks with the epic's own imperatives and trips PROMPT_ATTACK at MEDIUM
-    // confidence — the child then fails with "blocked by content policy" before it
-    // ever runs. Live-reproduced against the deployed guardrail: the imperative
-    // wording blocked, this wording passed, with identical epic text after it.
-    //
-    // So this asserts the VOICE, which is the property that keeps children
-    // admittable. The constraint is still conveyed — by stating what the siblings
-    // are already working to, rather than commanding this one.
     const createTaskCore = created('T-1');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -132,18 +103,16 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
     });
     const d = createTaskCore.mock.calls[0][0].task_description as string;
     const preamble = d.slice(0, d.indexOf('Epic:'));
-    // Second-person commands are what the filter keys on.
+    // Observed: the Bedrock guardrail flags second-person commands in this preamble as
+    // PROMPT_ATTACK at MEDIUM confidence.
     expect(preamble).not.toMatch(/\buse it exactly\b/i);
     expect(preamble).not.toMatch(/\bdo not invent\b/i);
     expect(preamble).not.toMatch(/\byou must\b/i);
-    // …and the constraint is still there, stated descriptively.
     expect(preamble).toMatch(/in parallel/i);
     expect(preamble).toMatch(/shared with/i);
   });
 
   test('an epic with no context does not pad the child prompt with an empty heading', async () => {
-    // Rows seeded before parent_context existed, and bare parents, must behave
-    // exactly as before rather than gaining a hollow "SHARED CONTEXT" section.
     const createTaskCore = created('T-1');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -157,9 +126,6 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
   });
 
   test('the integration child ALSO gets the shared contract — it verifies the boundary', async () => {
-    // The integration node is where a cross-boundary defect actually shows up, so
-    // it needs the contract most: without it the merge agent cannot tell a genuine
-    // mismatch from two equally-plausible conventions.
     const createTaskCore = created('T-int');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -177,17 +143,6 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
   });
 
   test('pins the coding workflow — a child must never fall back to the repo-less default', async () => {
-    // Every other channel pins CODING_WORKFLOW_ID at its own call site, because a
-    // repo-bound task with no workflow_ref resolves to the repo-OPTIONAL
-    // default/agent-v1, whose setup skips the stacked-base and predecessor-merge
-    // path entirely.
-    //
-    // A chain hides that: its child needs no merge, so the agent works from the
-    // base it was handed and the result looks right. A DIAMOND does not — the
-    // integration node is handed predecessor branches to merge, gets a clean
-    // default branch instead, and the agent writes a plausible approximation of
-    // one arm while silently dropping the other's work. Observed in production
-    // before this pin existed.
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = created('T-1');
     await releaseChild({
@@ -198,15 +153,11 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
       createTaskCore: createTaskCore as never,
       now: NOW,
     });
-    // The REQUEST body (calls[0][0]), not the context — the workflow is part of
-    // what is being submitted, and nothing here asserted it before.
     const body = createTaskCore.mock.calls[0][0];
     expect(body.workflow_ref).toBe('coding/new-task-v1');
   });
 
   test('an INTEGRATION node also pins the coding workflow — it is the case that breaks', async () => {
-    // The integration node is the one child that MUST merge (two predecessor
-    // branches), so it is the one that fails hardest on the wrong workflow.
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = created('T-int');
     await releaseChild({
@@ -224,9 +175,7 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = created('T-1');
     const realRow = makeRow({
-      // orch_<32 hex> — exactly what deriveOrchestrationId produces.
       orchestration_id: deriveOrchestrationId('d27fcf21-4876-4be2-96c0-78099bf152de'),
-      // sub_issue_id is a Linear UUID in production.
       sub_issue_id: 'a00650a1-4b97-46a3-9977-baede9a8f001',
     });
 
@@ -265,10 +214,6 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
 });
 
 describe('releaseChild — the shared context gives way to the description limit', () => {
-  // createTaskCore refuses a task_description above the limit with a 400, and
-  // releaseChild takes every 400 for a fault of the sub-issue: the child is
-  // failed for good and its dependents are skipped. The shared block is
-  // advisory, so it is the part that has to give way.
   const OWN_TITLE = 'ENG-1: Build the thing';
   const EPIC = { title: 'Booking flow', description: 'E'.repeat(4000) };
 
@@ -290,17 +235,15 @@ describe('releaseChild — the shared context gives way to the description limit
   }
 
   test('a long sub-issue under a long epic keeps all of its own text and stays inside the limit', async () => {
-    const own = 'c'.repeat(6000); // valid on its own: the limit is 10,000
+    const own = 'c'.repeat(6000);
     const d = await taskDescription(own);
 
     expect(d.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_LENGTH);
-    expect(isValidTaskDescriptionLength(d)).toBe(true); // what createTaskCore asks
+    expect(isValidTaskDescriptionLength(d)).toBe(true);
     expect(d.endsWith(`${OWN_TITLE}\n\n${own}`)).toBe(true);
-    // The block is still there, cut where the epic's body is, and the cut is marked.
     expect(d.startsWith('--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---\n')).toBe(true);
     expect(d).toContain('Epic: Booking flow\n\nEEEE');
     expect(d).toContain('E\n… [truncated]\n\n--- END SHARED ORCHESTRATION CONTEXT ---\n\nENG-1');
-    // It gets every character the limit leaves, and not one more.
     expect(d).toHaveLength(MAX_TASK_DESCRIPTION_LENGTH);
   });
 
@@ -321,9 +264,7 @@ describe('releaseChild — the shared context gives way to the description limit
   });
 
   test('the epic title stays when there is no room for any of the body', async () => {
-    // What the frame and the title take: a block without a body, measured.
     const frame = (await taskDescription('short', { title: EPIC.title })).length - `\n\n${OWN_TITLE}\n\nshort`.length;
-    // Room for that and five more characters: less than one character of body and the mark of a cut.
     const own = 'c'.repeat(MAX_TASK_DESCRIPTION_LENGTH - frame - 5 - `\n\n${OWN_TITLE}\n\n`.length);
     const d = await taskDescription(own);
 
@@ -335,7 +276,6 @@ describe('releaseChild — the shared context gives way to the description limit
 
   test('room for half a character of the body is room for none of it', async () => {
     const frame = (await taskDescription('short', { title: EPIC.title })).length - `\n\n${OWN_TITLE}\n\nshort`.length;
-    // 17: the two line breaks around a body, the mark of a cut, and one code unit.
     const own = 'c'.repeat(MAX_TASK_DESCRIPTION_LENGTH - frame - 17 - `\n\n${OWN_TITLE}\n\n`.length);
     const d = await taskDescription(own, { title: EPIC.title, description: '😀'.repeat(2000) });
 
@@ -347,7 +287,6 @@ describe('releaseChild — the shared context gives way to the description limit
   test('a sub-issue that leaves no room for the block is sent without it', async () => {
     const own = 'c'.repeat(9900);
     expect(await taskDescription(own)).toBe(`${OWN_TITLE}\n\n${own}`);
-    // Nor is an empty frame sent when the epic has a body and no title.
     expect(await taskDescription(own, { description: EPIC.description })).toBe(`${OWN_TITLE}\n\n${own}`);
   });
 
@@ -365,25 +304,17 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
-      row: makeRow({ child_task_id: '01KX0WFC2DAKSEQY78ZX7WY0W4' }), // the prior FAILED task
+      row: makeRow({ child_task_id: '01KX0WFC2DAKSEQY78ZX7WY0W4' }),
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
     });
     const ctx = createTaskCore.mock.calls[0][1];
-    // Salted with the prior task id → distinct from the original 'orch_abc_SUB-1'
-    // key, so createTaskCore does NOT idempotently replay the failed task.
     expect(ctx.idempotencyKey).toBe('orch_abc_SUB-1_01KX0WFC2DAKSEQY78ZX7WY0W4');
     expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
   });
 
   test('the key is salted whenever a prior child_task_id exists, whoever releases the child', async () => {
-    // A child re-released while it still carries a child_task_id inherently means
-    // that prior task is TERMINAL (a live child is 'released', not back in
-    // ready/blocked). The salt must fire on the id's PRESENCE, not on who
-    // releases — else a downstream chain child (reset to blocked, later released
-    // by the reconciler) replays its dead task under the unsalted key. This is
-    // the fix; the OLD behavior (only the epic retry salted) was the bug.
     const createTaskCore = created('T-1');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -401,7 +332,7 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
-      row: makeRow(), // no child_task_id
+      row: makeRow(),
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
@@ -471,7 +402,6 @@ describe('releaseChild — happy path', () => {
 
     expect(result).toEqual({ kind: 'released', taskId: 'T-100' });
 
-    // createTaskCore called with linear channel + orchestration metadata + idempotency key.
     const [body, ctx, requestId] = createTaskCore.mock.calls[0];
     expect(body).toMatchObject({ repo: 'owner/repo' });
     expect(body.task_description).toContain('ENG-1');
@@ -487,13 +417,10 @@ describe('releaseChild — happy path', () => {
     });
     expect(requestId).toBe('orch_abc_SUB-1');
 
-    // Flip-then-create: TWO conditional updates.
-    // Call 0 = the CLAIM (blocked|ready → releasing), BEFORE createTaskCore.
     const claim = ddb.send.mock.calls[0][0] as UpdateCommand;
     expect(claim).toBeInstanceOf(UpdateCommand);
     expect(claim.input.ConditionExpression).toContain('child_status IN');
     expect(claim.input.ExpressionAttributeValues![':releasing']).toBe('releasing');
-    // Call 1 = the FINALIZE (releasing → released), stamps task id + branch.
     const finalize = ddb.send.mock.calls[1][0] as UpdateCommand;
     expect(finalize.input.ConditionExpression).toBe('child_status = :releasing');
     expect(finalize.input.ExpressionAttributeValues![':tid']).toBe('T-100');
@@ -501,8 +428,6 @@ describe('releaseChild — happy path', () => {
   });
 
   test('starting a task removes the reason of an earlier start that was refused', async () => {
-    // The panel shows a failed row's own reason before its task's. A reason that
-    // outlived this release would hide how the task started here ends.
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     await releaseChild({
       ddb: ddb as never,
@@ -532,7 +457,6 @@ describe('releaseChild — happy path', () => {
       now: NOW,
     });
     const body = createTaskCore.mock.calls[0][0];
-    // Title headline AND the promised deliverable both reach the agent.
     expect(body.task_description).toContain('ENG-1: Add a team dashboard page');
     expect(body.task_description).toContain('dashboard.html');
   });
@@ -548,7 +472,6 @@ describe('releaseChild — happy path', () => {
       now: NOW,
     });
     const body = createTaskCore.mock.calls[0][0];
-    // "Fix the header" appears once (in the "ENG-1: ..." line), not twice.
     expect(body.task_description.match(/Fix the header/g)?.length).toBe(1);
   });
 
@@ -580,9 +503,6 @@ describe('releaseChild — happy path', () => {
   });
 
   test('a non-Linear child carries the neutral orchestration keys and NO Linear ids', async () => {
-    // The released child must not be handed ids naming rows in a workspace it has
-    // nothing to do with. The orchestration pair is what the reconciler maps
-    // back on, so that stays regardless of surface.
     const createTaskCore = created('T-neutral');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -613,7 +533,6 @@ describe('releaseChild — happy path', () => {
   });
 
   test('a Linear child still carries every Linear key it did before', async () => {
-    // The gate must not quietly drop metadata the agent + orchestrator read.
     const createTaskCore = created('T-linear');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -697,8 +616,6 @@ describe('releaseChild — idempotency + failure', () => {
   });
 
   test('createTaskCore non-success → create_failed, claim rolled back to ready', async () => {
-    // The claim (call 0) succeeds, createTaskCore fails, so the claim
-    // is rolled BACK to 'ready' (call 1) — not left stranded in 'releasing'.
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = jest.fn().mockResolvedValue({ statusCode: 503, body: '{"error":{"message":"down"}}' });
 
@@ -732,16 +649,11 @@ describe('releaseChild — idempotency + failure', () => {
       now: NOW,
     });
     expect(result.kind).toBe('error');
-    // claim (call 0) + rollback (call 1)
     expect(ddb.send).toHaveBeenCalledTimes(2);
     const rollback = ddb.send.mock.calls[1][0] as UpdateCommand;
     expect(rollback.input.ExpressionAttributeValues![':ready']).toBe('ready');
   });
 
-  // A DETERMINISTIC 4xx create failure (guardrail / validation) must NOT roll
-  // back to 'ready' (which loops forever every sweep, an infinite silent
-  // strand) — it must terminally FAIL the child so the epic settles
-  // finished-with-failures.
   test('a guardrail 400 → create_failed_terminal, claim flipped to failed (NOT ready) + reason', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = jest.fn().mockResolvedValue({
@@ -759,10 +671,8 @@ describe('releaseChild — idempotency + failure', () => {
     expect(result.kind).toBe('create_failed_terminal');
     if (result.kind === 'create_failed_terminal') {
       expect(result.statusCode).toBe(400);
-      // user-facing, actionable reason (guardrail is the one the user can fix)
       expect(result.failureReason.toLowerCase()).toContain('content policy');
     }
-    // claim (call 0) + terminal-fail (call 1): flips to 'failed', not 'ready'
     expect(ddb.send).toHaveBeenCalledTimes(2);
     const fail = ddb.send.mock.calls[1][0] as UpdateCommand;
     expect(fail.input.ConditionExpression).toBe('child_status = :releasing');
@@ -775,9 +685,6 @@ describe('releaseChild — idempotency + failure', () => {
     ['the content policy', 'Task description was blocked by content policy.', /^Blocked by content policy — reword this sub-issue, /],
     ['validation', 'task_description exceeds maximum length of 10000 characters.', /^Couldn't start \(validation error\) — edit this sub-issue, /],
   ])('a text refused by %s is to be changed and then retried', async (_name, message, start) => {
-    // A child is started with the text stored on its row. The retry comment
-    // reads the sub-issue again before it releases the child, as a re-applied
-    // trigger label does, so the retry sends the new text.
     const result = await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
@@ -805,9 +712,6 @@ describe('releaseChild — idempotency + failure', () => {
     expect(reason).toMatch(/, then reply `@bgagent retry` on the epic to re-run\.$/);
   });
 
-  // Against the codes createTaskCore ACTUALLY returns: 400 (validation/guardrail),
-  // 422 (repo-not-onboarded), and 429 (budget exhausted) are terminal;
-  // 409 (dup) + 5xx are transient.
   test('422 REPO_NOT_ONBOARDED is TERMINAL with an "onboard it" reason (sweep can\'t bound it)', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = jest.fn().mockResolvedValue({
@@ -871,9 +775,6 @@ describe('releaseChild — idempotency + failure', () => {
   });
 
   test('a racing releaser loses the claim (blocked|ready→releasing) and does NOT create a task', async () => {
-    // The core exactly-once guarantee: if the atomic claim fails
-    // (ConditionalCheckFailed — another releaser already claimed the row),
-    // releaseChild returns already_released and NEVER calls createTaskCore.
     const ddb = {
       send: jest.fn().mockRejectedValue(
         Object.assign(new Error('claimed'), { name: 'ConditionalCheckFailedException' }),
@@ -889,8 +790,8 @@ describe('releaseChild — idempotency + failure', () => {
       now: NOW,
     });
     expect(result).toEqual({ kind: 'already_released' });
-    expect(createTaskCore).not.toHaveBeenCalled(); // no double-create
-    expect(ddb.send).toHaveBeenCalledTimes(1); // only the failed claim
+    expect(createTaskCore).not.toHaveBeenCalled();
+    expect(ddb.send).toHaveBeenCalledTimes(1);
   });
 
   test('non-conditional DDB error on flip → error', async () => {
@@ -923,7 +824,6 @@ describe('releaseChild — idempotency + failure', () => {
 });
 
 describe('releaseReadyChildren — the concurrency throttle', () => {
-  // 5 ready leaves, all roots (no deps) so base selection is trivial.
   const readyRows = (n: number): OrchestrationChildRow[] =>
     Array.from({ length: n }, (_, i) =>
       makeRow({ sub_issue_id: `L${String(i).padStart(2, '0')}`, child_status: 'ready', depends_on: [] }));
@@ -951,9 +851,8 @@ describe('releaseReadyChildren — the concurrency throttle', () => {
     const rows = readyRows(5);
     const results = await releaseReadyChildren(
       ddb as never, 'OrchTable', rows, { platform_user_id: 'u1' } as never,
-      createTaskCore as never, NOW, rows, 'main', 2, // budget = 2 free slots
+      createTaskCore as never, NOW, rows, 'main', 2,
     );
-    // Only 2 tasks created — the other 3 are simply not released this pass.
     expect(createTaskCore).toHaveBeenCalledTimes(2);
     expect(results).toHaveLength(2);
     expect(results.every((r) => r.kind === 'released')).toBe(true);
@@ -985,7 +884,6 @@ describe('releaseReadyChildren — the concurrency throttle', () => {
   test('release order is deterministic by sub_issue_id when throttled', async () => {
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const createTaskCore = createOk();
-    // Shuffled input; budget 2 should pick L00, L01 (sorted), not input order.
     const rows = [makeRow({ sub_issue_id: 'L02', child_status: 'ready' }),
       makeRow({ sub_issue_id: 'L00', child_status: 'ready' }),
       makeRow({ sub_issue_id: 'L01', child_status: 'ready' })];
@@ -994,10 +892,6 @@ describe('releaseReadyChildren — the concurrency throttle', () => {
       createTaskCore as never, NOW, rows, 'main', 2,
     );
     expect(results).toHaveLength(2);
-    // Flip-then-create: each release issues TWO UpdateCommands
-    // (claim ready→releasing, then finalize releasing→released), both keyed on
-    // the same sub_issue_id. Dedup consecutive duplicates to get the release
-    // ORDER, which must be sorted L00 then L01 (not the shuffled input order).
     const subsPerCall = (ddb.send.mock.calls as { 0: { input?: { Key?: { sub_issue_id?: string } } } }[])
       .map((c) => c[0]?.input?.Key?.sub_issue_id)
       .filter(Boolean);
@@ -1088,8 +982,6 @@ describe('releaseChild — parent attachments inherited by children', () => {
     expect(createTaskCore.mock.calls[0][1].preScreenedAttachments).toBeUndefined();
   });
 
-  // A sub-issue's OWN attachments (stamped on the child row) merge
-  // with the inherited parent spec, de-duped, capped, own-first.
   const ownRec = (id: string, name: string) => ({
     attachment_id: id,
     type: 'file',
@@ -1109,13 +1001,12 @@ describe('releaseChild — parent attachments inherited by children', () => {
       tableName: 'OrchestrationTable',
       row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: [ownRec('own1', 'mock.png')] as never }),
       platformUserId: 'user-1',
-      preScreenedAttachments: ATT, // parent spec (a1)
+      preScreenedAttachments: ATT,
       createTaskCore: createTaskCore as never,
       now: NOW,
     });
     const ctx = createTaskCore.mock.calls[0][1];
     expect(ctx.preScreenedAttachments).toHaveLength(2);
-    // own first, then inherited parent
     expect(ctx.preScreenedAttachments.map((r: { attachment_id: string }) => r.attachment_id)).toEqual(['own1', 'a1']);
   });
 
@@ -1124,7 +1015,6 @@ describe('releaseChild — parent attachments inherited by children', () => {
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
-      // child's own list re-declares a1 (same id as the parent spec)
       row: makeRow({ sub_issue_id: 'uuid-A', pre_screened_attachments: [ownRec('a1', 'dup.pdf')] as never }),
       platformUserId: 'user-1',
       preScreenedAttachments: ATT,
@@ -1150,7 +1040,6 @@ describe('releaseChild — parent attachments inherited by children', () => {
       now: NOW,
     });
     const ctx = createTaskCore.mock.calls[0][1];
-    // 8 own + 5 parent = 13 → capped at 10; all 8 own survive, only 2 parent.
     expect(ctx.preScreenedAttachments).toHaveLength(10);
     const ids = ctx.preScreenedAttachments.map((r: { attachment_id: string }) => r.attachment_id);
     expect(ids.filter((i: string) => i.startsWith('own'))).toHaveLength(8);
@@ -1160,7 +1049,6 @@ describe('releaseChild — parent attachments inherited by children', () => {
 
 describe('applyTerminalCreateFailures — a child that never became a task', () => {
   const ORCH = 'orch_1';
-  /** A child row, minimal but with the fields the planner reads. */
   const row = (id: string, status: string, deps: string[] = []): OrchestrationChildRow => ({
     orchestration_id: ORCH,
     sub_issue_id: id,
@@ -1174,9 +1062,6 @@ describe('applyTerminalCreateFailures — a child that never became a task', () 
   });
 
   test('skips the failed root\'s dependents and reports them as terminal', async () => {
-    // Why this exists at all: a guardrail rejection means no task, so no task event
-    // will ever wake the reconciler for this node. Nothing else would skip B or let
-    // the epic reach all-terminal — the panel would sit at "🔄 n/m" until a sweep.
     const ddb = { send: jest.fn().mockResolvedValue({}) };
     const children = [row('A', 'releasing'), row('B', 'blocked', ['A'])];
 
@@ -1190,7 +1075,6 @@ describe('applyTerminalCreateFailures — a child that never became a task', () 
       child_status: 'failed', failure_reason: 'Blocked by content policy',
     });
     expect(out.find((c) => c.sub_issue_id === 'B')?.child_status).toBe('skipped');
-    // The skip is PERSISTED, not just patched in memory.
     const writes = ddb.send.mock.calls.map((c) => c[0] as UpdateCommand)
       .filter((cmd) => (cmd.input.ExpressionAttributeValues as Record<string, unknown>)?.[':s'] === 'skipped');
     expect(writes).toHaveLength(1);
@@ -1206,8 +1090,6 @@ describe('applyTerminalCreateFailures — a child that never became a task', () 
       NOW,
     );
     const cmd = ddb.send.mock.calls[0][0] as UpdateCommand;
-    // Guarded on a non-live source, so a skip racing a re-release cannot mark a
-    // released/running child terminal and let the epic claim its rollup early.
     expect(cmd.input.ConditionExpression).toBe('child_status IN (:blocked, :ready)');
   });
 
@@ -1220,7 +1102,7 @@ describe('applyTerminalCreateFailures — a child that never became a task', () 
       [{ kind: 'released', subIssueId: 'A' }] as never, NOW,
     );
 
-    expect(out).toBe(children); // identity: the seed path uses this to detect "nothing to settle"
+    expect(out).toBe(children);
     expect(ddb.send).not.toHaveBeenCalled();
   });
 

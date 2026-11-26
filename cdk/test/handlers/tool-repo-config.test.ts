@@ -30,13 +30,11 @@ jest.mock('../../src/handlers/shared/logger', () => ({
 
 import { handler } from '../../src/handlers/tool-repo-config';
 
-/** Build a Lambda Context whose clientContext carries the Gateway tool name. */
 function gatewayContext(toolName: string | undefined): Context {
   const custom = toolName === undefined ? {} : { bedrockAgentCoreToolName: toolName };
   return { clientContext: { custom } } as unknown as Context;
 }
 
-/** A local/direct invoke has no clientContext at all. */
 const localContext = {} as unknown as Context;
 
 const ACTIVE_CONFIG = {
@@ -47,7 +45,6 @@ const ACTIVE_CONFIG = {
   max_turns: 50,
   build_command: 'mise run build',
   lint_command: 'mise run lint',
-  // Fields the tool deliberately does NOT surface:
   github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123:secret:gh',
 };
 

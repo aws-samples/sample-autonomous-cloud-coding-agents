@@ -38,8 +38,6 @@ function build(returnUrls: string[] = ['http://localhost:8080/oauth/callback']):
   return { vault, stack };
 }
 
-/** Build the stack then synth once (Template.fromStack must be the last step —
- *  the construct tree may not be mutated after the first synth). */
 function synth(returnUrls: string[] = ['http://localhost:8080/oauth/callback']): {
   template: Template;
   vault: LinearIdentityVault;
@@ -49,7 +47,6 @@ function synth(returnUrls: string[] = ['http://localhost:8080/oauth/callback']):
   return { template: Template.fromStack(stack), vault, stack };
 }
 
-/** Collect the flattened action list across every IAM policy statement. */
 function allPolicyActions(template: Template): string[] {
   const actions: string[] = [];
   for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
@@ -66,13 +63,11 @@ function allPolicyActions(template: Template): string[] {
 describe('LinearIdentityVault construct', () => {
   test('provisions a workload identity via a custom resource + bundled onEvent handler', () => {
     const { template } = synth();
-    // onEvent handler + the provider framework's own Lambda.
     expect(Object.keys(template.findResources('AWS::Lambda::Function')).length).toBeGreaterThanOrEqual(2);
     template.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'nodejs24.x',
       Architectures: ['arm64'],
     });
-    // The custom resource carries the workload name + JSON-encoded return URLs.
     template.hasResourceProperties('Custom::LinearWorkloadIdentity', {
       WorkloadName: 'abca_linear_oauth',
       AllowedReturnUrls: JSON.stringify(['http://localhost:8080/oauth/callback']),
@@ -91,15 +86,7 @@ describe('LinearIdentityVault construct', () => {
       expect(actions).toContain(a);
     }
 
-    // Two resources, both under `default`, and never the account-wide
-    // `workload-identity-directory/*` this replaced.
-    //
-    // Not scoped to a single identity NAME, and that is a service constraint rather
-    // than an oversight: these actions authorize against the bare directory too, so
-    // three live attempts to narrow them produced three AccessDenied responses (see the
-    // construct). One consequence worth pinning here: an identity-based policy CANNOT
-    // stop this Lambda updating another identity in the same directory, so the fence
-    // against cross-stack allowlist clobbering is the stack-derived NAME, not this grant.
+    // AgentCore authorizes these actions against the bare directory as well as the identity.
     const statements = Object.values(template.findResources('AWS::IAM::Policy'))
       .flatMap((p) => (p.Properties.PolicyDocument.Statement ?? []) as Array<{
         Action?: unknown; Resource?: unknown;
@@ -128,7 +115,6 @@ describe('LinearIdentityVault construct', () => {
       expect(tails.some((t) => t.endsWith('workload-identity-directory/default'))).toBe(true);
       expect(tails.some((t) => t.endsWith('workload-identity-directory/default/workload-identity/*')))
         .toBe(true);
-      // The account-wide form must be gone.
       expect(tails.some((t) => t.endsWith('workload-identity-directory/*'))).toBe(false);
     }
   });
@@ -150,21 +136,10 @@ describe('LinearIdentityVault construct', () => {
       JSON.stringify(p.Properties.Roles ?? '').includes('Consumer'),
     );
     const rendered = JSON.stringify(consumerPolicy?.Properties.PolicyDocument.Statement ?? []);
-    // Both token actions present.
     expect(rendered).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
     expect(rendered).toContain('bedrock-agentcore:GetResourceOauth2Token');
 
-    // GetWorkloadAccessTokenForUserId authorizes against the workload-identity
-    // DIRECTORY. Granting only the named identity produced a live AccessDenied
-    // ("not authorized … on resource: …/workload-identity-directory/default"),
-    // so the bare directory ARN must be present — this is the regression guard.
-    //
-    // Asserted as a distinct resource ENTRY rather than a substring of the rendered
-    // statement, because the named-identity ARN is
-    // `…/workload-identity-directory/default/workload-identity/<name>` — it CONTAINS
-    // the directory ARN. A `toContain('workload-identity-directory/default')` therefore
-    // stayed green with the directory grant deleted, i.e. the guard for the live
-    // AccessDenied could not fail. Mutation-checked by removing the grant.
+    // GetWorkloadAccessTokenForUserId authorizes against the workload-identity directory itself.
     const statements = (consumerPolicy?.Properties.PolicyDocument.Statement ?? []) as Array<{
       Action?: unknown;
       Resource?: unknown;
@@ -173,8 +148,6 @@ describe('LinearIdentityVault construct', () => {
       .filter((s) => JSON.stringify(s.Action ?? '').includes('GetWorkloadAccessTokenForUserId'))
       .flatMap((s) => (Array.isArray(s.Resource) ? s.Resource : [s.Resource]) as unknown[]);
     expect(watResources.length).toBeGreaterThan(0);
-    // An ARN built by CDK renders as an Fn::Join; the path lives in its LAST literal,
-    // so "ends there" is what distinguishes the directory from the identity under it.
     const arnTail = (resource: unknown): string => {
       const join = (resource as { 'Fn::Join'?: [string, unknown[]] })?.['Fn::Join'];
       const parts = join ? join[1] : [resource];
@@ -183,9 +156,7 @@ describe('LinearIdentityVault construct', () => {
     };
     expect(watResources.map(arnTail).some((tail) => tail.endsWith('workload-identity-directory/default')))
       .toBe(true);
-    // GetResourceOauth2Token authorizes against FOUR resources, all required. Each was
-    // found by granting a subset and minting for real: the denial names the first
-    // missing one, so the set only appears one member at a time.
+    // GetResourceOauth2Token authorizes against four resources and requires all of them.
     const tokenResources = statements
       .filter((st) => JSON.stringify(st.Action ?? '').includes('GetResourceOauth2Token'))
       .flatMap((st) => (Array.isArray(st.Resource) ? st.Resource : [st.Resource]) as unknown[])
@@ -199,22 +170,8 @@ describe('LinearIdentityVault construct', () => {
     ]) {
       expect(tokenResources.some((t) => t.endsWith(suffix))).toBe(true);
     }
-    // The provider path must be PREFIX-scoped, never the bare wildcard. This account's
-    // vault already holds a GithubOauth2 provider next to the Linear ones, so
-    // `oauth2credentialprovider/*` let every Linear-writing Lambda mint a GitHub token —
-    // and ADR-016 P7 adds Jira and Slack to the same vault. Live-proven to restrict:
-    // scoped to this prefix, minting `github-oauth-cell-a` is denied on that provider's
-    // own ARN while a Linear mint still succeeds.
     expect(tokenResources.some((t) => t.endsWith('oauth2credentialprovider/*'))).toBe(false);
-    // The vault reads each provider's client secret through the caller — scoped to
-    // THIS surface's providers, never the account-wide `bedrock-agentcore-identity!*`.
-    //
-    // That wildcard is not a cosmetic over-grant. These are raw OAuth CLIENT secrets,
-    // grantMintToken is applied to roles that run untrusted repository code, and a live
-    // vault already holds a GitHub provider and an unrelated API key beside the Linear
-    // ones. A leaked client secret mints and refreshes offline, outliving the revocation
-    // #812 exists to surface. Live-checked: the scoped grant still mints, and is denied
-    // the GitHub provider's secret.
+    // The token vault reads each provider's client secret with the caller's credentials.
     const secretResources = statements
       .filter((st) => JSON.stringify(st.Action ?? '').includes('secretsmanager:GetSecretValue'))
       .flatMap((st) => (Array.isArray(st.Resource) ? st.Resource : [st.Resource]) as unknown[])
@@ -223,10 +180,8 @@ describe('LinearIdentityVault construct', () => {
     expect(secretResources[0]!.endsWith(
       `bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}*`,
     )).toBe(true);
-    // The wildcard form must be gone entirely.
     expect(rendered).not.toContain('bedrock-agentcore-identity!*');
 
-    // Still least-privilege: no control-plane lifecycle, no wildcard resource.
     expect(rendered).not.toContain('CreateWorkloadIdentity');
     expect(rendered).not.toContain('DeleteWorkloadIdentity');
     expect(rendered).not.toContain('CreateOauth2CredentialProvider');

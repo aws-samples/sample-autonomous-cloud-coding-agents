@@ -34,7 +34,6 @@ function StatusCell({ task }: { task: TaskSummary }) {
   return <StatusBadge status={task.status} />;
 }
 
-/** Sorting by status groups tasks the way people scan them: what needs you, what is running, then the rest. */
 const STATUS_ORDER: readonly TaskStatusType[] = [
   'AWAITING_APPROVAL', 'RUNNING', 'FINALIZING', 'HYDRATING', 'SUBMITTED', 'QUEUED', 'PENDING_UPLOADS',
   'FAILED', 'TIMED_OUT', 'CANCELLED', 'COMPLETED',
@@ -42,7 +41,6 @@ const STATUS_ORDER: readonly TaskStatusType[] = [
 
 const lastUpdate = (t: TaskSummary) => t.agent_heartbeat_at ?? t.updated_at;
 
-/** Compares numbers; tasks without one sort after those with one. */
 function byNumber(get: (t: TaskSummary) => number | null): (a: TaskSummary, b: TaskSummary) => number {
   return (a, b) => {
     const x = get(a);
@@ -105,17 +103,13 @@ export interface TaskTableProps {
   readonly onLoadMore?: () => void;
 }
 
-/**
- * The task list used on every page that lists tasks. Clicking a row opens the task;
- * clicking a column header sorts by it (newest first until then).
- */
+/** Clicking a row opens the task; clicking a column header sorts by it. */
 export function TaskTable(props: TaskTableProps) {
   const navigate = useNavigate();
   const columnDefinitions = useMemo(() => columns(props.showRepo ?? true), [props.showRepo]);
   const [sortingColumn, setSortingColumn] = useState<TableProps.SortingColumn<TaskSummary> | undefined>();
   const [sortingDescending, setSortingDescending] = useState(false);
-  // Cloudscape's onRowClick does not say what inside the row was clicked. Remember it on
-  // the way down, so links (repository, pull request) and buttons keep their own action.
+  // Cloudscape's onRowClick does not say what inside the row was clicked.
   const clickedControl = useRef(false);
 
   const items = useMemo(() => {

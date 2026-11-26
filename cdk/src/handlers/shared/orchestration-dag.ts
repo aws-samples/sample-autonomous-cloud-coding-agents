@@ -17,18 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Pure dependency-graph (DAG) logic for parent/sub-issue orchestration.
- * No I/O: takes a set of nodes with ``depends_on`` edges and either
- * rejects the graph (cycle, dangling edge) or returns a topological
- * layering the reconciler uses to release children in dependency order.
- *
- * Kept deliberately free of Linear/AWS types so it is trivially unit-
- * testable, and so any future producer of a graph can validate its own nodes
- * with the same cycle check before they are written back to the tracker.
- */
-
-/** A single node in the dependency graph (one Linear sub-issue). */
 export interface DagNode {
   /** Stable identifier — the Linear sub-issue id (the orchestration SK). */
   readonly id: string;
@@ -36,7 +24,6 @@ export interface DagNode {
   readonly depends_on: readonly string[];
 }
 
-/** Why a graph was rejected. Surfaced to the user as a terminal comment. */
 export type DagRejectionReason = 'cycle' | 'dangling_edge' | 'duplicate_id';
 
 export interface DagValidationOk {
@@ -44,9 +31,8 @@ export interface DagValidationOk {
   /**
    * Topological layers. ``layers[0]`` are roots (no predecessors);
    * every node in ``layers[n]`` depends only on nodes in
-   * ``layers[<n]``. The reconciler uses layer 0 as the initial release
-   * set; deeper layers are released as predecessors succeed. The flat
-   * order (``layers.flat()``) is a valid topological sort.
+   * ``layers[<n]``. The flat order (``layers.flat()``) is a valid
+   * topological sort.
    */
   readonly layers: readonly (readonly string[])[];
 }
@@ -74,13 +60,8 @@ export type DagValidationResult = DagValidationOk | DagValidationError;
  * - ``duplicate_id``  — two nodes share an id (ambiguous gating).
  * - ``dangling_edge`` — a ``depends_on`` points at an id not in the node set.
  * - ``cycle``         — the edges form a cycle (no valid start order exists).
- *
- * Uses Kahn's algorithm: repeatedly peel off nodes with zero remaining
- * predecessors. Each peel is one layer. If nodes remain when no node
- * has zero in-degree, those nodes form (or feed) a cycle.
  */
 export function validateDag(nodes: readonly DagNode[]): DagValidationResult {
-  // ── Duplicate ids ────────────────────────────────────────────────
   const seen = new Set<string>();
   const duplicates = new Set<string>();
   for (const n of nodes) {
@@ -99,7 +80,6 @@ export function validateDag(nodes: readonly DagNode[]): DagValidationResult {
     };
   }
 
-  // ── Dangling edges (depends_on → unknown id) ─────────────────────
   const ids = new Set(nodes.map((n) => n.id));
   const dangling = new Set<string>();
   for (const n of nodes) {
@@ -119,14 +99,11 @@ export function validateDag(nodes: readonly DagNode[]): DagValidationResult {
     };
   }
 
-  // ── Kahn's algorithm: peel zero-in-degree nodes into layers ──────
-  // in-degree = number of (deduplicated) predecessors still unresolved.
   const remainingDeps = new Map<string, Set<string>>();
   for (const n of nodes) {
     remainingDeps.set(n.id, new Set(n.depends_on));
   }
 
-  // Reverse adjacency: dep -> nodes that depend on it (to decrement fast).
   const dependents = new Map<string, string[]>();
   for (const n of nodes) {
     for (const dep of new Set(n.depends_on)) {
@@ -141,7 +118,6 @@ export function validateDag(nodes: readonly DagNode[]): DagValidationResult {
   let resolvedCount = 0;
 
   while (frontier.length > 0) {
-    // Sort each layer for deterministic, testable output.
     const layer = [...frontier].sort();
     layers.push(layer);
     resolvedCount += layer.length;
@@ -158,7 +134,6 @@ export function validateDag(nodes: readonly DagNode[]): DagValidationResult {
   }
 
   if (resolvedCount < nodes.length) {
-    // Whatever never resolved is in (or downstream of) a cycle.
     const stuck = nodes
       .filter((n) => remainingDeps.get(n.id)!.size > 0)
       .map((n) => n.id)
@@ -178,9 +153,8 @@ export function validateDag(nodes: readonly DagNode[]): DagValidationResult {
 }
 
 /**
- * Convenience: the flat topological order (roots first). Only valid to
- * call on a graph ``validateDag`` accepted; throws otherwise so a caller
- * can't accidentally order a rejected graph.
+ * The flat topological order (roots first). Only valid to call on a graph
+ * ``validateDag`` accepted; throws otherwise.
  */
 export function topologicalOrder(nodes: readonly DagNode[]): readonly string[] {
   const result = validateDag(nodes);

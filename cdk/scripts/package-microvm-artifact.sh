@@ -1,117 +1,8 @@
 #!/usr/bin/env bash
-#
-# package-microvm-artifact.sh — build and upload the AWS Lambda MicroVMs image
-# artifact for the ABCA agent (ADR-021, sub-decision 3).
-#
-# ---------------------------------------------------------------------------
-# WHY THIS SCRIPT EXISTS
-# ---------------------------------------------------------------------------
-# `AWS::Lambda::MicrovmImage` *is* wired in CDK (see
-# `cdk/src/constructs/lambda-microvm-compute.ts`), but CloudFormation cannot
-# produce its own `codeArtifact`: the resource consumes a zip that already sits
-# in S3, and that zip has to be assembled from the `agent/` tree. Unlike an ECR
-# image there is no CDK asset type for "zip + Dockerfile a MicroVM image builds
-# from", so packaging + upload is one out-of-band step, run once per agent
-# change. Everything else — buckets, roles, connector, log group, the image
-# resource itself — is CDK-managed.
-#
-# ---------------------------------------------------------------------------
-# BOOTSTRAP SEQUENCE (first time)
-# ---------------------------------------------------------------------------
-#   Choose microvm_nested_stack=true for new/already-nested installations,
-#   or false for existing flat installations, in the commands below.
-#
-#   0. Install the bootstrap policy bundle named in cdk/bootstrap/BOOTSTRAP_VERSION
-#      (the version `mise //cdk:preflight` checks) for either layout.
-#      Before upgrading an existing flat deployment, set and retain
-#      microvm_nested_stack=false on every deploy below until its resources are
-#      migrated; see docs/verification/645-p3-nested-stack.md.
-#
-#   1. Deploy the MicroVM substrate WITHOUT an image. Synth warns that no image
-#      is configured; that is expected — the artifact bucket must exist before
-#      you can upload to it.
-#
-#        mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE
-#
-#   2. Package + upload the artifact (this script). It reads the bucket name and
-#      base object key from stack outputs, uploads an immutable hash-suffixed
-#      artifact, and prints the digest required by the subsequent deployment:
-#
-#        cdk/scripts/package-microvm-artifact.sh --stack-name backgroundagent-dev
-#
-#   3. Pick a managed base image (ADR-021's Region list applies — Lambda MicroVMs
-#      exist in 5 Regions at launch). NOTE the version list comes back NEWEST
-#      FIRST, so the latest version is `items[0]`, not `items[-1]`:
-#
-#        aws lambda-microvms list-managed-microvm-images
-#        aws lambda-microvms list-managed-microvm-image-versions \
-#          --image-identifier <baseImageArn> \
-#          --query 'items[0].imageVersion' --output text
-#
-#   4. Redeploy with the base image pinned. THIS is the step that creates the
-#      image resource and injects MICROVM_IMAGE_IDENTIFIER into the orchestrator:
-#
-#        mise //cdk:deploy -- \
-#          --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \
-#          --context microvm_base_image_arn=<baseImageArn> \
-#          --context microvm_base_image_version=<version> \
-#          --context microvm_artifact_sha256=<digest printed by this script>
-#
-# On subsequent agent changes repeat step 2 and deploy with the NEW digest.
-# Changing the digest changes CodeArtifact.Uri, causing a new image version.
-# Retain the digest in the deployment's context for later unrelated deploys;
-# overwriting a fixed key alone never signals a CloudFormation image update.
-#
-# ---------------------------------------------------------------------------
-# THE OUT-OF-BAND ALTERNATIVE (--create-image)
-# ---------------------------------------------------------------------------
-# Snapshot builds fail for ordinary Dockerfile reasons and take minutes, so
-# iterating through CloudFormation is painful. With `--create-image` the script
-# calls `aws lambda-microvms create-microvm-image` itself, using the CDK-created
-# build role, BUILD-time egress connector and log group. Hand the resulting image
-# to the orchestrator without CDK owning it (pass the image ARN the script prints
-# — `run-microvm` rejects a bare name):
-#
-#   mise //cdk:deploy -- \
-#     --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \
-#     --context microvm_image_identifier=<imageArn>
-#
-# ---------------------------------------------------------------------------
-# WHAT GOES IN THE ZIP
-# ---------------------------------------------------------------------------
-# The service builds the zip's `Dockerfile` with the zip root as build context,
-# so the layout must mirror the paths `agent/Dockerfile` COPYs from — which are
-# repo-root-relative (`COPY agent/src/ …`, `COPY contracts/ …`). The staged tree
-# is therefore:
-#
-#   Dockerfile      <- verbatim copy of agent/Dockerfile (MicroVM needs it at the root)
-#   agent/          <- only local Dockerfile COPY inputs, without bytecode/caches
-#   contracts/      <- cross-language constants the agent reads at runtime
-#
-# ---------------------------------------------------------------------------
-# VERIFICATION
-# ---------------------------------------------------------------------------
-# Test the selected image/coordinator together before enabling automatic sleep.
-# See docs/verification/README.md for acceptance criteria and remaining PR checks.
-#
-# Managed images declare all six hooks:
-#   /ready, /validate   Local build-time checks and warm-up; no AWS calls.
-#   /run                Authenticated task bootstrap and asynchronous execution.
-#   /terminate          Close the coding barrier and acknowledge teardown without
-#                       finalizing the task; the worker may be retiring mid-task.
-#   /suspend, /resume   Checkpoint and credential/gate reconciliation. The
-#                       coordinator verifies the launched image's protocol marker
-#                       before allowing automatic sleep.
-#
-# Requires: awscli v2 with conditional PutObject/checksum support, python3.
 
 set -euo pipefail
 
-# Make a failure impossible to miss even when the caller pipes us through `tee`.
-# `foo.sh 2>&1 | tee log` reports tee's status, not ours (the live P1 run recorded
-# EXIT=0 for a run that had actually failed at create-microvm-image), so print an
-# explicit marker the teed log carries. Callers should ALSO set `set -o pipefail`
-# or check `${PIPESTATUS[0]}`.
+# A caller's `script 2>&1 | tee log` reports tee's exit status, not this script's.
 # shellcheck disable=SC2154 # $? inside the trap string is evaluated at trap time
 trap 'rc=$?; [[ $rc -ne 0 ]] && echo "!! package-microvm-artifact.sh FAILED (exit ${rc}) !!" >&2; exit $rc' ERR
 
@@ -122,17 +13,6 @@ BASE_IMAGE_VERSION="${MICROVM_BASE_IMAGE_VERSION:-}"
 IMAGE_NAME="${MICROVM_IMAGE_NAME:-}"
 KEEP_STAGE=0
 
-# BASELINE memory sizes the service accepts, and the default. NOT a range: the
-# service enumerates the allowed baselines per base image and rejects anything
-# else — 32768 (which this script used to send) fails with
-#   "The requested memory size of 32768 MiB is not supported by base MicroVM
-#    image ...al2023-1. Supported memory sizes in MiB are: [512, 1024, 2048,
-#    4096, 8192]."
-# This value is where the MicroVM STARTS, not a cap: the service scales a running
-# MicroVM vertically to a 32 GiB / 16 vCPU peak on its own, and there is no field
-# to request that. So a bigger build does not need a bigger number here.
-# Keep in lockstep with MICROVM_SUPPORTED_MEMORY_MIB / DEFAULT_MINIMUM_MEMORY_MIB
-# in cdk/src/constructs/lambda-microvm-compute.ts.
 SUPPORTED_MEMORY_MIB="512 1024 2048 4096 8192"
 MEMORY_MIB="${MICROVM_MEMORY_MIB:-8192}"
 
@@ -188,11 +68,6 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REQUIRED_BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/cdk/bootstrap/BOOTSTRAP_VERSION")"
 
-# --- Stack outputs ------------------------------------------------------------
-# One describe-stacks call, then pull each output by key. Failing loudly here
-# (rather than uploading to a guessed bucket) is deliberate: a typo'd bucket
-# name would silently produce an artifact the build role cannot read, and the
-# only symptom would be a failed snapshot build.
 echo "==> Reading outputs from stack '${STACK_NAME}'"
 STACK_JSON="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --output json)"
 
@@ -211,15 +86,9 @@ for output in stacks[0].get("Outputs", []):
 ARTIFACT_BUCKET="$(stack_output MicrovmArtifactBucketName)"
 ARTIFACT_KEY="$(stack_output MicrovmArtifactObjectKey)"
 ARTIFACT_BASE_KEY="$(stack_output MicrovmArtifactBaseObjectKey)"
-# Before hashed-artifact support, ObjectKey was always the unsuffixed base.
 ARTIFACT_BASE_KEY="${ARTIFACT_BASE_KEY:-${ARTIFACT_KEY}}"
 BUILD_ROLE_ARN="$(stack_output MicrovmBuildRoleArn)"
 EGRESS_CONNECTORS="$(stack_output MicrovmEgressConnectorArns)"
-# BUILD-time connectors (TCP 443 + 80). `agent/Dockerfile` runs `apt-get`, which
-# fetches over plain HTTP — with the 443-only RUNTIME connector every snapshot
-# build failed ("Could not connect to deb.debian.org:80 … E: Unable to locate
-# package curl", exit 100). Fall back to the runtime connectors only so an older
-# stack still produces a comprehensible failure rather than an empty flag value.
 BUILD_EGRESS_CONNECTORS="$(stack_output MicrovmBuildEgressConnectorArns)"
 if [[ -z "${BUILD_EGRESS_CONNECTORS}" ]]; then
   BUILD_EGRESS_CONNECTORS="${EGRESS_CONNECTORS}"
@@ -248,9 +117,6 @@ echo "    egress (runtime): ${EGRESS_CONNECTORS}"
 echo "    egress (build)  : ${BUILD_EGRESS_CONNECTORS}"
 echo "    log group       : ${LOG_GROUP}"
 
-# The reminder is a FUNCTION, and it is called BEFORE the create call as well as
-# after. It used to be a heredoc at the very end, so the one run that most needed
-# it — a create-microvm-image that failed validation — printed no banner at all.
 print_p1_reminder() {
   cat <<EOF
 
@@ -265,7 +131,6 @@ REMINDER (ADR-021): verify the deployed image and coordinator together before
 EOF
 }
 
-# --- Stage + zip --------------------------------------------------------------
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abca-microvm-artifact.XXXXXX")"
 cleanup() {
   if [[ "${KEEP_STAGE}" -eq 0 ]]; then
@@ -284,17 +149,15 @@ ARTIFACT_SHA256="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sha2
 ARTIFACT_CHECKSUM="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["checksum_sha256"])' <<<"${ARTIFACT_INFO}")"
 echo "    ${ARTIFACT_INFO}"
 
-# --- Upload -------------------------------------------------------------------
 if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
+  # CloudFormation builds a new image version only when CodeArtifact.Uri changes:
+  # overwriting a fixed key signals no update.
   ARTIFACT_KEY="${ARTIFACT_BASE_KEY%.zip}-${ARTIFACT_SHA256}.zip"
 else
-  # The manual create API starts a build explicitly; retain its fixed-key path.
   ARTIFACT_KEY="${ARTIFACT_BASE_KEY}"
 fi
 echo "==> Uploading to s3://${ARTIFACT_BUCKET}/${ARTIFACT_KEY}"
 if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
-  # S3 verifies the bytes against the checksum. Never overwrite a managed build's
-  # inputs, including a repeated invocation or concurrent publisher.
   if aws s3api put-object --bucket "${ARTIFACT_BUCKET}" --key "${ARTIFACT_KEY}" \
     --body "${ARTIFACT_ZIP}" --if-none-match '*' \
     --checksum-algorithm SHA256 --checksum-sha256 "${ARTIFACT_CHECKSUM}" \
@@ -365,7 +228,6 @@ EOF
   exit 0
 fi
 
-# --- Optional: create the image out of band -----------------------------------
 if [[ -z "${BASE_IMAGE_ARN}" || -z "${BASE_IMAGE_VERSION}" ]]; then
   echo "error: --create-image requires --base-image-arn and --base-image-version." >&2
   echo "       Discover them with: aws lambda-microvms list-managed-microvm-images" >&2
@@ -376,56 +238,10 @@ fi
 
 IMAGE_NAME="${IMAGE_NAME:-${STACK_NAME}-abca-agent}"
 
-# Printed BEFORE the create call, so the reminder survives a create that fails
-# service-side validation (which is exactly what happened on the first live run).
 print_p1_reminder
 
 echo "==> Creating MicroVM image '${IMAGE_NAME}' (${MEMORY_MIB} MiB baseline)"
-# Flags use the Lambda MicroVMs service API shape (which differs from the
-# CloudFormation shape used by CfnMicrovmImage), all confirmed against the live
-# CLI/SDK model on 2026-07-31:
-#   * `ARM_64` is the only accepted architecture value — on BOTH surfaces (see
-#     below); `arm64` is rejected.
-#   * hooks are ENABLED/DISABLED with timeouts, NOT paths.
-#   * CORRECTION (live 2026-08-06, ADR-021 P2-F2): this comment used to claim the
-#     hook/architecture fields were "the ONE place the two shapes genuinely
-#     disagree" — that `CfnMicrovmImage` routes on a path string while this API
-#     takes a flag, and that both were correct for their own surface. That was
-#     WRONG, and it made the CDK-managed image path non-functional. CloudFormation
-#     enforces the SAME enums at change-set early validation, and rejected all
-#     five values the construct was sending:
-#       "/aws/lambda-microvms/runtime/v1/run is not a valid enum value. Supported
-#        values: [DISABLED, ENABLED]" (x4, one per hook)
-#       "arm64 is not a valid enum value. Supported values: [ARM_64]"
-#     The L1 types them as plain strings and documents no allowed values, which is
-#     how the wrong shape survived synth, unit tests and cdk-nag. The construct now
-#     sends ENABLED / ARM_64, i.e. exactly what this script always sent. Neither
-#     surface takes a hook path at all: the service calls fixed well-known routes,
-#     which the agent serves and `MICROVM_AGENT_HOOK_ROUTES` in
-#     `cdk/src/constructs/lambda-microvm-compute.ts` records for that purpose only.
-#   * `/ready` is MANDATORY whenever any lifecycle hook is enabled:
-#       "The ready (/ready) MicroVM image hook must be enabled when any MicroVM
-#        lifecycle hook (run, resume, suspend, or terminate) is enabled."
-#   * all six served hooks are enabled: `/ready` + `/validate` (build), `/run`,
-#     `/terminate`, `/suspend` and `/resume` (runtime). The non-secret lifecycle
-#     protocol marker describes the source's checkpoint/credential/gate protocol.
-#   * the timeouts mirror the construct's constants
-#     (`RUN_/READY_/VALIDATE_/TERMINATE_/LIFECYCLE_HOOK_TIMEOUT_SECONDS` in
-#     `cdk/src/constructs/lambda-microvm-compute.ts`), which carry the rationale
-#     for each value. A bash helper cannot import them, and "keep the two in step"
-#     as prose already FAILED once — `readyTimeoutInSeconds` stayed at 60 here when
-#     the construct went to 300 — so the invariant is now enforced by a unit test
-#     that parses this exact `--hooks` string and compares it against the
-#     synthesized template (`cdk/test/constructs/lambda-microvm-compute.test.ts`,
-#     "the out-of-band script's API request matches the CDK-managed image"). If that
-#     test fails, one of the two moved: fix the one that is wrong, do not relax the
-#     test. An out-of-band image built here must behave like a CDK-built one.
-#   * `readyTimeoutInSeconds` is 300, NOT 60: as of ADR-021 P2-F5 the `/ready` hook
-#     warms the 225 MiB `claude` binary before the snapshot is captured, so it does
-#     real work whose duration is a cold `exec`. Build hooks are allowed up to
-#     3600 s. `validateTimeoutInSeconds` deliberately stays at 60 — /validate gained
-#     no warm-up, so sharing a number would size it for work it does not do.
-#   * the BUILD connector (443 + 80) is used here, not the runtime one.
+# CreateMicrovmImage rejects a lifecycle hook (run, resume, suspend, terminate) unless the ready hook is enabled.
 CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
   --name "${IMAGE_NAME}" \
   --description "ABCA agent snapshot for ${STACK_NAME} (ADR-021, out-of-band build)" \
@@ -444,12 +260,6 @@ CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
 
 echo "${CREATE_RESPONSE}"
 
-# Every downstream call needs the image ARN, not the name:
-#   list-microvm-image-builds --image-identifier <bare name>
-#     -> ValidationException: Invalid ARN format: <name>
-# and RunMicrovm likewise rejects a bare name ("Malformed ARN"). Pull the ARN and
-# the real version string out of the response instead of telling the operator to
-# retype the name.
 IMAGE_ARN="$(CREATE_RESPONSE="${CREATE_RESPONSE}" python3 -c '
 import json, os
 print(json.loads(os.environ["CREATE_RESPONSE"]).get("imageArn", ""))

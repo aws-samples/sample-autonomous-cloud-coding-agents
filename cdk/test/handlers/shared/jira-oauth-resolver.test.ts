@@ -158,8 +158,6 @@ describe('resolveJiraOauthToken', () => {
         oauth_secret_arn: 'arn:secret:acme',
         status: 'active',
       },
-      // Cast: the test deliberately writes a malformed token to assert the
-      // resolver guards against it.
       storedToken: { access_token: 'partial' } as unknown as StoredOauthToken,
     });
     const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
@@ -213,8 +211,6 @@ describe('resolveJiraOauthToken', () => {
     });
 
     expect(result?.accessToken).toBe('jira_oauth_new');
-    // Atlassian expects a JSON body (NOT form-encoded — the one shape
-    // difference from Linear). It must carry client creds + refresh_token.
     const call = fetchImpl.mock.calls[0];
     expect(call[0]).toBe('https://auth.atlassian.com/oauth/token');
     expect(call[1]!.headers['Content-Type']).toBe('application/json');
@@ -223,7 +219,6 @@ describe('resolveJiraOauthToken', () => {
     expect(sent.refresh_token).toBe('rt-old');
     expect(sent.client_id).toBe('cid');
     expect(sent.client_secret).toBe('csec');
-    // PutSecretValue should have persisted the rotated token.
     const putCalls = clients.smSend.mock.calls.filter(
       (c) => c[0]!.constructor.name === 'PutSecretValueCommand',
     );
@@ -330,8 +325,6 @@ describe('resolveJiraOauthToken', () => {
       ...clients,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    // parseOauthSecret already rejects empty required fields, so the
-    // resolver returns null before refresh; either way no POST happens.
     expect(result).toBeNull();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -348,7 +341,6 @@ describe('resolveJiraOauthToken', () => {
     });
 
     await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
-    // Second call hits the cache, doesn't re-query DDB.
     await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
     const ddbCallsBeforeInvalidate = clients.ddbSend.mock.calls.length;
     expect(ddbCallsBeforeInvalidate).toBe(1);
@@ -373,7 +365,6 @@ describe('resolveJiraOauthToken', () => {
       expires_at: wellInFuture,
     });
 
-    // First GetSecretValue returns stale; second returns rotated.
     const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
       const name = command.constructor.name;
       if (name === 'GetSecretValueCommand') {
@@ -401,7 +392,6 @@ describe('resolveJiraOauthToken', () => {
     });
 
     expect(result?.accessToken).toBe('jira_concurrent_winner');
-    // Exactly ONE /oauth/token POST — no second refresh call.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const getSecretCalls = smSend.mock.calls.filter(
       (c) => c[0].constructor.name === 'GetSecretValueCommand',
@@ -441,7 +431,6 @@ describe('resolveJiraOauthToken', () => {
     });
 
     expect(result).toBeNull();
-    // No second /oauth/token POST once the refresh_token is permanently rejected.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -456,8 +445,6 @@ describe('resolveJiraOauthToken', () => {
       storedToken: stored,
     });
 
-    // A server_error (not invalid_grant) is a hard failure — the resolver
-    // must NOT attempt the concurrent-refresh re-read path.
     const fetchImpl = jest.fn().mockResolvedValueOnce({
       ok: false,
       status: 500,
@@ -497,8 +484,6 @@ describe('resolveJiraOauthToken', () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    // Persistence failure is logged but does not fail the resolve — the
-    // freshly-minted access token is still returned for this invocation.
     expect(result?.accessToken).toBe('jira_persist_fail_ok');
   });
 
@@ -510,8 +495,6 @@ describe('resolveJiraOauthToken', () => {
       if (command.constructor.name === 'GetSecretValueCommand') {
         const idx =
           smSend.mock.calls.filter((c) => c[0].constructor.name === 'GetSecretValueCommand').length - 1;
-        // First read: stale token. Second (re-read after invalid_grant):
-        // secret has gone missing → null.
         return { SecretString: idx === 0 ? JSON.stringify(stale) : undefined };
       }
       return {};
@@ -554,8 +537,6 @@ describe('resolveJiraOauthToken', () => {
     });
     expect(first).toBeNull();
 
-    // After the failure the cache should be invalidated — the second call
-    // re-reads SM rather than looping on the stale cached token.
     const fetchImpl2 = jest.fn().mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -586,11 +567,9 @@ describe('resolveJiraOauthToken', () => {
       },
       storedToken: makeStoredToken({ expires_at: new Date(Date.now() - 1000).toISOString() }),
     });
-    // The request's time limit, already run out: `AbortSignal.timeout` runs on a
-    // timer that jest's fake timers do not drive.
+    // Jest's fake timers do not drive `AbortSignal.timeout`.
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.abort(new Error('timed out')));
     const fetchImpl = jest.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      // No answer ever comes: only the signal of the request ends the wait.
       if (init?.signal?.aborted) reject(init.signal.reason as Error);
     }));
 
@@ -753,8 +732,6 @@ describe('resolveJiraOauthToken: forceRefresh (reactive-401 path, issue #370)', 
   });
 
   test('refreshes even when the stored token is NOT expiring', async () => {
-    // Token is valid for 12h (makeStoredToken default) — the proactive check
-    // would never refresh it. forceRefresh must refresh anyway.
     const stored = makeStoredToken({
       access_token: 'jira_oauth_valid',
       refresh_token: 'rt-old',
@@ -785,7 +762,6 @@ describe('resolveJiraOauthToken: forceRefresh (reactive-401 path, issue #370)', 
     });
 
     expect(result?.accessToken).toBe('jira_oauth_forced');
-    // A refresh actually happened (one /oauth/token POST + one persist).
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const putCalls = clients.smSend.mock.calls.filter(
       (c) => c[0]!.constructor.name === 'PutSecretValueCommand',
@@ -804,11 +780,9 @@ describe('resolveJiraOauthToken: forceRefresh (reactive-401 path, issue #370)', 
       storedToken: stored,
     });
 
-    // Prime the cache with a normal (non-forced) resolve — no refresh, token valid.
     const first = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, clients);
     expect(first?.accessToken).toBe('cached_token');
 
-    // Now force-refresh: must NOT return the cached token; must mint a new one.
     const fetchImpl = jest.fn().mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -890,14 +864,11 @@ describe('getRegistryRow / parseRegistryRow', () => {
     const ddb = asDdb(send);
     const first = await getRegistryRow(ddb, REGISTRY_TABLE, 'cloud-cache');
     expect(first?.status).toBe('active');
-    // Second read should be served from cache (no extra DDB call).
     await getRegistryRow(ddb, REGISTRY_TABLE, 'cloud-cache');
     expect(send).toHaveBeenCalledTimes(1);
   });
 
   test('a row read by getRegistryRowStrict is served to getRegistryRow from the cache', async () => {
-    // The webhook processor relies on this (#734): it reads the row strictly to
-    // decide on admission, and resolveJiraOauthToken then reads it leniently.
     const send = jest.fn()
       .mockResolvedValueOnce({
         Item: { site_url: 'https://x.atlassian.net', oauth_secret_arn: 'arn:s', status: 'active' },

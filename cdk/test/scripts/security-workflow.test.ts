@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// The two steps of `.github/workflows/security.yml` under test are shell written in the workflow file, and Actions runs
-// them once a week. A mistake there shows as a warning that never arrives.
-
 import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -48,7 +45,6 @@ globalThis.Date = class extends RealDate {
 };
 `;
 
-/** A shell function, so that no `gh` on PATH can answer in its place. */
 const GH = `gh() {
   while [ $# -gt 0 ]; do
     if [ "$1" = --body-file ]; then mv "$2" "$POSTED"; fi
@@ -80,12 +76,10 @@ function run(files: Record<string, string>, expiryOutcome = 'success'): Result {
     fs.writeFileSync(clock, CLOCK);
     fs.writeFileSync(summary, '');
 
-    // Under a git hook the inherited GIT_* variables point at the real repository, and in CI the inherited
-    // GITHUB_STEP_SUMMARY is the summary of the job that runs this suite.
+    // Git exports GIT_* variables to its hooks, and a child git that inherits them acts on the hook's repository.
     const inherited = Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'));
     const env = {
       ...Object.fromEntries(inherited),
-      // The reader names `node`: the one that runs this suite, with TODAY for its clock.
       PATH: [path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
       NODE_OPTIONS: `--require ${JSON.stringify(clock)}`,
       POSTED: posted,
@@ -106,7 +100,7 @@ function run(files: Record<string, string>, expiryOutcome = 'success'): Result {
     execFileSync('git', ['add', '--all'], { cwd: root, env, stdio: 'ignore' });
 
     for (const script of [EXPIRY.run, REPORT.run]) {
-      // The timeout is spawnSync's own: jest cannot stop a synchronous child.
+      // jest cannot stop a synchronous child.
       const result = spawnSync('bash', ['-c', `${GH}\n${script}`], { cwd: root, env, encoding: 'utf-8', timeout: 30_000 });
       if (result.status !== 0) {
         throw new Error(`a step exited with ${result.status}: ${result.error?.message ?? result.stderr}`);
@@ -159,8 +153,7 @@ describe('the weekly warning about scan ignores close to expiry', () => {
     ]);
   });
 
-  // The date is the first day on which trivy no longer applies the entry, so an
-  // entry dated TODAY has expired. The last entry is 22 days ahead.
+  // The date is the first day on which trivy no longer applies the entry.
   test('lists an image-scan ignore from 21 days before the day it stops applying', () => {
     const { listed } = run({
       'agent/.trivyignore': [

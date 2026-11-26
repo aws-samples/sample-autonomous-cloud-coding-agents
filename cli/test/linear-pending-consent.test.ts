@@ -17,15 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for the pending-consent store, which carries a PKCE verifier between the
- * two `bgagent linear setup` invocations a paste-back consent takes.
- *
- * The verifier is a ONE-TIME SECRET: with it plus a stolen authorization code an
- * attacker could complete the exchange. So the properties under test are security
- * properties, not conveniences — consume-on-read, expiry, and 0600 permissions.
- */
-
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -70,8 +61,6 @@ describe('pending consent round-trip', () => {
   });
 
   test('is CONSUMED on read — a verifier cannot be replayed', () => {
-    // One verifier, one attempt. Leaving it on disk after use would keep a live
-    // one-time secret around for no benefit.
     savePendingConsent(entry());
     takePendingConsent('acme');
     expect(() => takePendingConsent('acme')).toThrow(/No pending consent/);
@@ -94,10 +83,9 @@ describe('pending consent round-trip', () => {
 
 describe('pending consent refusals', () => {
   test('an expired entry is refused AND removed, pointing at how to restart', () => {
-    const old = new Date(Date.now() - 16 * 60 * 1000).toISOString(); // TTL is 15 min
+    const old = new Date(Date.now() - 16 * 60 * 1000).toISOString();
     savePendingConsent(entry({ createdAt: old }));
     expect(() => takePendingConsent('acme')).toThrow(/expired/);
-    // Consumed even on refusal: a dead one-time secret must not linger.
     expect(fs.existsSync(path.join(tmpDir, 'linear-pending-consent-acme.json'))).toBe(false);
   });
 
@@ -114,9 +102,6 @@ describe('pending consent refusals', () => {
   });
 
   test('a slug with path separators is REFUSED, not interpolated into a path', () => {
-    // The slug becomes part of a filename, and the file holds a live PKCE verifier.
-    // Callers do validate, but a security-relevant store must not depend on being
-    // called correctly — so the check lives here too.
     for (const bad of ['../../etc/passwd', 'a/b', '..', './x', 'a\\b', '']) {
       expect(() => takePendingConsent(bad)).toThrow(/Refusing to use|No pending consent/);
       expect(() => savePendingConsent(entry({ slug: bad }))).toThrow(/Refusing to use/);
@@ -124,10 +109,6 @@ describe('pending consent refusals', () => {
   });
 
   test('missing entry names a command that EXISTS', () => {
-    // Previously asserted `setup <slug> --hosted`. That flag was removed when
-    // onboarding was consolidated, so the recovery hint told operators to run
-    // something that fails before a new consent can start — and this test was what
-    // kept it that way.
     expect(() => takePendingConsent('nope')).toThrow(/bgagent linear setup nope/);
     expect(() => takePendingConsent('nope')).not.toThrow(/--hosted/);
   });

@@ -37,13 +37,12 @@ const NOW = Date.parse('2026-11-20T12:00:00.000Z');
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 
-/** ISO time `ms` milliseconds before NOW, in whole seconds as GitHub writes one. */
+// GitHub writes a time in whole seconds.
 const ago = (ms: number): string => new Date(NOW - ms).toISOString().replace('.000Z', 'Z');
 
 let fetchMock: jest.SpiedFunction<typeof fetch>;
 
 beforeEach(() => {
-  // A test that forgets its answer fails here, and never reaches the network.
   fetchMock = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('no answer is stubbed for this request'));
 });
 
@@ -51,14 +50,9 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-/** An answer of GitHub's GraphQL endpoint: JSON, with the status and, for an answer that asks to wait, the header that says so. */
 const answer = (body: unknown, status = 200, headers: Record<string, string> = {}): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...headers } });
 
-/**
- * Fields of a pull request, as the query asks for them: open, opened by ABCA's account from
- * the branch of task-1 in the repository itself, no review.
- */
 function pullRequest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     state: 'OPEN',
@@ -72,19 +66,15 @@ function pullRequest(overrides: Record<string, unknown> = {}): Record<string, un
   };
 }
 
-/** A 200 that holds a pull request, with 4,990 points left of the token's budget. */
 const found = (fields: Record<string, unknown> = {}): Response =>
   answer({ data: { rateLimit: { remaining: 4990 }, repository: { pullRequest: pullRequest(fields) } } });
 
 const person = (login: string) => ({ login, __typename: 'User' });
-/** A review by an account that can push to the repository, unless `canPush` says otherwise. */
 const review = (state: string, submittedAt: string | null, author: { login: string; __typename: string } | null, canPush = true) =>
   ({ state, submittedAt, authorCanPushToRepository: canPush, author });
 
-/** Read pull request 12 of acme/widgets and return what the read ends with: its result, or the error it throws. */
 const read = (): Promise<unknown> => fetchPullRequest('acme/widgets', 12, TOKEN).catch((err: unknown) => err);
 
-/** The snapshot of a read that found the pull request. */
 async function snapshotOf(fields: Record<string, unknown>): Promise<PullRequestSnapshot> {
   fetchMock.mockResolvedValueOnce(found(fields));
   const { read: result } = await fetchPullRequest('acme/widgets', 12, TOKEN);
@@ -125,9 +115,6 @@ describe('fetchPullRequest', () => {
       expect(second.variables).toEqual({ owner: 'Other-Org', name: 'next.js', number: 4711 });
       expect(Object.keys(first)).toEqual(['query', 'variables']);
       expect(second.query).toBe(first.query);
-      // GitHub answers with the fields a query selects and no others, and the stubs of this
-      // file answer the same whatever is asked: the read gets a state, its times, the head
-      // branch, the fork flag, the author and who can push only because the query names them.
       expect(first.query.replace(/\s+/g, ' ')).toBe(
         'query($owner: String!, $name: String!, $number: Int!) {'
         + ' rateLimit { remaining }'
@@ -141,7 +128,6 @@ describe('fetchPullRequest', () => {
     });
 
     test('is not sent for a repository whose name is not owner/name: GitHub has none to show', async () => {
-      // Text that would end a quoted argument, had the name been part of the query.
       const repo = 'acme/widgets") { id } } #';
 
       await expect(fetchPullRequest(repo, 12, TOKEN)).resolves.toEqual({ read: { kind: 'repo_not_visible' }, rateLimitRemaining: null });
@@ -150,7 +136,6 @@ describe('fetchPullRequest', () => {
   });
 
   describe('ends the run at once', () => {
-    // The bodies are GitHub's own where a case has one; none of their text may reach the error.
     test.each<[string, Response, 'token' | 'unavailable', number, string]>([
       [
         'a refused token (401)',
@@ -184,7 +169,6 @@ describe('fetchPullRequest', () => {
         'unavailable', 200, 'GitHub answered RATE_LIMITED',
       ],
       [
-        // Not JSON: the header alone says to wait, and the body is not read.
         'a 200 that asks to wait, as the answer to a secondary rate limit can be, whatever its body holds',
         new Response('<html><body>Please wait a few minutes before you try again.</body></html>', { status: 200, headers: { 'retry-after': '60' } }),
         'unavailable', 200, 'GitHub answered HTTP 200 and asked to wait',
@@ -195,7 +179,6 @@ describe('fetchPullRequest', () => {
         'unavailable', 503, 'GitHub answered HTTP 503 and asked to wait',
       ],
       [
-        // Any status but 401: without the header this one would fail its pull request and the run would go on.
         'a status about the one request that asks to wait (422)',
         answer({ message: 'Unprocessable Entity', documentation_url: 'https://docs.github.com/graphql' }, 422, { 'retry-after': '60' }),
         'unavailable', 422, 'GitHub answered HTTP 422 and asked to wait',
@@ -215,7 +198,6 @@ describe('fetchPullRequest', () => {
     });
   });
 
-  // One such read does not end the run: the caller counts how many come in a row.
   describe('gets no usable answer to this one read', () => {
     test.each<[string, Response, number]>([
       [
@@ -229,7 +211,6 @@ describe('fetchPullRequest', () => {
         502,
       ],
       [
-        // The status of an outage: the class is every 5xx, not the two above.
         'a service that is down (503)',
         new Response('upstream connect error or disconnect/reset before headers', { status: 503, headers: { 'content-type': 'text/plain' } }),
         503,
@@ -244,8 +225,6 @@ describe('fetchPullRequest', () => {
       expect(error).toMatchObject({ name: 'GitHubNoAnswerError', httpStatus: status, message: `GitHub answered HTTP ${status}` });
     });
 
-    // The message of such an error can quote what was sent: the read's error names the kind
-    // of the failure and the system's code for it, and does not carry the error along.
     test.each<[string, Error, string]>([
       [
         'a network error',
@@ -268,7 +247,7 @@ describe('fetchPullRequest', () => {
     });
 
     test('on a redirect, which the request tells fetch not to follow: the token goes nowhere else', async () => {
-      // What Node's fetch does with a 3xx answer when it is asked with `redirect: 'error'`.
+      // Node's fetch rejects a 3xx answer this way when it is asked with `redirect: 'error'`.
       fetchMock.mockRejectedValueOnce(new TypeError('fetch failed', { cause: new Error('unexpected redirect') }));
 
       const error = await read();
@@ -288,7 +267,6 @@ describe('fetchPullRequest', () => {
       expect(error).toMatchObject({ httpStatus: 200, message: 'GitHub gave no usable answer (SyntaxError)' });
     });
 
-    // Such a 200 says nothing about the pull request, and a token that GitHub holds back can get one.
     test.each<[string, unknown]>([
       [
         'holds a message and neither data nor errors',
@@ -372,11 +350,8 @@ describe('fetchPullRequest', () => {
     });
   });
 
-  // GitHub answered: such a failure is neither a stop nor a read without an answer.
   describe('fails the read of this one pull request', () => {
-    /** What the read says of a pull request that lacks a field the sweep decides by. */
     const INCOMPLETE = 'GitHub answered with a pull request that is missing its state, head branch, fork flag or close time';
-    /** The error with which GitHub says that a repository has no pull request under a number. */
     const MISS = {
       type: 'NOT_FOUND',
       path: ['repository', 'pullRequest'],
@@ -425,7 +400,6 @@ describe('fetchPullRequest', () => {
         },
         'GitHub answered with errors: NOT_FOUND',
       ],
-      // A miss is recorded for good: an answer that says less than the plain one, or more, is not taken for it.
       ['the error of a miss in an answer without data', { data: null, errors: [MISS] }, 'GitHub answered with errors: NOT_FOUND'],
       [
         'the error of a miss beside a second error',
@@ -486,7 +460,6 @@ describe('fetchPullRequest', () => {
       });
     });
 
-    // In every state: the read builds the snapshot of a finished pull request apart from that of an open one.
     test.each<[PullRequestSnapshot['state'], Record<string, unknown>]>([
       ['open', {}],
       ['merged', { state: 'MERGED', mergedAt: '2026-11-19T09:15:42Z', closedAt: '2026-11-19T09:15:43Z' }],
@@ -523,7 +496,6 @@ describe('fetchPullRequest', () => {
       expect(snapshot).toMatchObject({ firstReviewAt: '2026-11-18T11:30:00Z', changesRequested: 0 });
     });
 
-    // Each would be a first review and a change request if it counted.
     test.each([
       ['by the author of the pull request, as every reply ABCA posts is', review('CHANGES_REQUESTED', '2026-11-18T11:00:00Z', person('abca-agent'))],
       ['by a bot', review('CHANGES_REQUESTED', '2026-11-18T11:00:00Z', { login: 'copilot-pull-request-reviewer', __typename: 'Bot' })],
@@ -539,8 +511,7 @@ describe('fetchPullRequest', () => {
       expect(snapshot).toMatchObject({ firstReviewAt: null, changesRequested: 0 });
     });
 
-    // A reply to a review thread is a review that only comments, and GitHub reports a
-    // dismissed review as dismissed whatever it was: each is a review by someone else.
+    // GitHub reports a reply to a review thread as a COMMENTED review, and a dismissed review as DISMISSED whatever it was.
     test.each([
       ['only comments', 'COMMENTED'],
       ['was dismissed since', 'DISMISSED'],
@@ -614,10 +585,6 @@ describe('fetchPullRequest', () => {
   });
 });
 
-/**
- * A whole task record of new work that ended in a pull request nobody has read yet, as the
- * agent and the platform leave it.
- */
 function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
     task_id: 'task-1',
@@ -639,15 +606,13 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
   };
 }
 
-/** What the record of every task of an orchestration carries: the orchestration's id and the node the task works on. */
 const inOrchestration = (subIssueId: string): TaskRecord['channel_metadata'] =>
   ({ orchestration_id: 'orch_1', orchestration_sub_issue_id: subIssueId });
 
-/** A full name of `length` characters: an owner as long as GitHub lets one be, 39, then a slash and the name. */
+// GitHub lets an owner name be 39 characters at most.
 const repoOfLength = (length: number): string => `${'o'.repeat(39)}/${'n'.repeat(length - 40)}`;
 
 describe('pullRequestCandidate', () => {
-  /** When the task of the fixture finished. */
   const FINISHED_AT_MS = Date.parse('2026-11-18T10:24:00Z');
 
   test('follows the new pull request of a task that ended normally, under the repository and number of its record, with its finish time', () => {
@@ -693,7 +658,6 @@ describe('pullRequestCandidate', () => {
   });
 });
 
-/** `count` candidates with task ids that sort as their numbers do. */
 const candidates = (count: number): PullRequestCandidate[] => Array.from({ length: count }, (_, index) => ({
   taskId: `task-${String(index).padStart(4, '0')}`,
   repo: 'acme/widgets',
@@ -702,7 +666,6 @@ const candidates = (count: number): PullRequestCandidate[] => Array.from({ lengt
   finishedAtMs: NOW - 48 * HOUR_MS,
 }));
 const idsOf = (selected: readonly PullRequestCandidate[]): string[] => selected.map((candidate) => candidate.taskId);
-/** The first millisecond of the hour `hours` hours after an arbitrary one. */
 const hour = (hours: number): number => (494_000 + hours) * HOUR_MS;
 
 describe('selectForRun', () => {
@@ -714,7 +677,6 @@ describe('selectForRun', () => {
     const all = candidates(250);
     const ids = idsOf(all);
 
-    // 494,000 hours leave nothing when divided by 250.
     expect(idsOf(selectForRun(all, hour(0)))).toEqual(ids);
     expect(idsOf(selectForRun(all, hour(1)))).toEqual([...ids.slice(1), ids[0]]);
     expect(idsOf(selectForRun(all, hour(249)))).toEqual([ids[249], ...ids.slice(0, 249)]);
@@ -732,7 +694,6 @@ describe('selectForRun', () => {
     const all = candidates(600);
     const ids = idsOf(all);
 
-    // Three runs pass over 600 candidates, and 494,000 hours leave 2 when divided by 3.
     expect(idsOf(selectForRun(all, hour(0)))).toEqual([...ids.slice(400), ...ids.slice(0, 400)]);
     expect(idsOf(selectForRun(all, hour(1)))).toEqual(ids);
     expect(idsOf(selectForRun(all, hour(2)))).toEqual([...ids.slice(200), ...ids.slice(0, 200)]);
@@ -774,7 +735,6 @@ describe('selectForRun', () => {
   });
 
   test('one candidate more, short of a further run, moves the start of each run by one place at most', () => {
-    // Five runs pass over 1,001 to 1,250 candidates.
     for (const count of [1001, 1104, 1249]) {
       const before = candidates(count);
       const after = candidates(count + 1);
@@ -787,11 +747,9 @@ describe('selectForRun', () => {
   });
 });
 
-/** The pull request of task-1, which finished two days ago and has no state on record. */
 const CANDIDATE: PullRequestCandidate = { taskId: 'task-1', repo: 'acme/widgets', number: 12, recordedOpen: false, finishedAtMs: NOW - 48 * HOUR_MS };
 const RECORDED_OPEN: PullRequestCandidate = { ...CANDIDATE, recordedOpen: true };
 
-/** A snapshot of the pull request of task-1: open, opened from its branch in the repository itself, not reviewed. */
 const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
   state: 'open',
   headRef: 'bgagent/task-1/add-a-retry',
@@ -813,7 +771,6 @@ describe('decideRead', () => {
 
     expect(decideRead(CANDIDATE, merged, NOW)).toBe('record_final');
     expect(decideRead(RECORDED_OPEN, merged, NOW)).toBe('record_final');
-    // A merge is final: one dated ahead of the function's clock does not wait for it.
     expect(decideRead(CANDIDATE, snapshot({ state: 'merged', closedAt: ago(-MINUTE_MS) }), NOW)).toBe('record_final');
   });
 
@@ -849,7 +806,6 @@ describe('decideRead', () => {
 });
 
 describe('recordsNotFound', () => {
-  // A pull request that was just opened can be missing from an answer: the hour gives it time to show.
   test.each([
     ['a second less than an hour ago', false, HOUR_MS - 1000],
     ['exactly an hour ago', true, HOUR_MS],

@@ -24,10 +24,6 @@ import {
 } from '../deployment/features';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-constants';
 
-/**
- * Enough additional model grants that CDK splits the policy of the SessionRole
- * and of every backend's compute role during synthesis.
- */
 const EXTRA_MODEL_COUNT = 16;
 
 type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
@@ -58,12 +54,10 @@ export const STRUCTURAL_CONTEXT: Context = {
   'aws:cdk:version-reporting': true,
   'aws:cdk:enable-path-metadata': true,
   [DISABLE_ASSET_STAGING_CONTEXT]: true,
-  // Census profiles are explicit; a developer's abca.deployment.json must not change them.
   [DEPLOYMENT_PROFILE_CONTEXT]: 'none',
   [`availability-zones:account=${FIXTURE.account}:region=${FIXTURE.region}`]: FIXTURE.zones.map(zone => zone.zoneName),
 };
 
-/** A syntactically valid placeholder digest; census synthesis never builds the image. */
 const CENSUS_ARTIFACT_SHA256 = 'a'.repeat(64); // eslint-disable-line @typescript-eslint/no-magic-numbers
 
 function profile(compute: Compute, gateway: boolean, registry: boolean, vault: boolean, image: Image): SynthesisProfile {
@@ -79,7 +73,6 @@ function profile(compute: Compute, gateway: boolean, registry: boolean, vault: b
       enableToolGateway: gateway,
       enableAgentRegistry: registry,
       enableLinearIdentityVault: vault,
-      // MicroVM synthesis requires an explicit layout; census measures new installs.
       microvm_nested_stack: true,
       ...(image === 'managed' ? {
         microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
@@ -94,7 +87,6 @@ function profile(compute: Compute, gateway: boolean, registry: boolean, vault: b
   };
 }
 
-/** One profile product shared by the CLI and its coverage assertions. */
 export function synthesisProfiles(): readonly SynthesisProfile[] {
   const profiles: SynthesisProfile[] = [];
   for (const compute of ['agentcore', 'ecs', 'lambda-microvm'] as const) {
@@ -108,8 +100,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
     }
   }
 
-  // Probe supplemental options together for every backend's widest profile:
-  // IAM policy overflow means their effects cannot be added to default counts.
   const supplemental: SynthesisProfile[] = [
     profile('agentcore', false, true, false, 'none'),
     profile('agentcore', true, true, true, 'none'),
@@ -122,7 +112,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
       ...base.context,
       alertEmail: 'census@example.com',
       forkBlueprintRepo: 'example/census-blueprints',
-      // Adds a processor IAM statement + env (no resources); probed on the widest profiles.
       enableLinearAgentSessions: true,
     },
   }));
@@ -133,15 +122,11 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
     name: `${externalConsent.name}-external-consent`,
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
-  // With the approval, maintenance and MicroVM subsystems nested, every inline
-  // profile below fits the application budget; no rejection is expected.
   const topologies: SynthesisProfile[] = [...profiles, ...profiles.map(candidate => ({
     ...candidate,
     name: `${candidate.name}-split`,
     context: { ...candidate.context, networkTopology: 'split' },
   }))];
-  // Auto-pin still selects two zones. Explicit pins use every requested zone,
-  // adding eight resources that the original two-zone product could not expose.
   for (const base of supplemental.filter(candidate => candidate.context.enableToolGateway)) {
     for (const networkTopology of ['inline', 'split'] as const) {
       topologies.push({
@@ -155,8 +140,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
       });
     }
   }
-  // Model grants can overflow IAM policies without first exceeding the resource
-  // budget. Synthetic IDs exercise policy size only, not live model availability.
   const expandedModels = [
     ...DEFAULT_BEDROCK_MODEL_IDS,
     ...Array.from({ length: EXTRA_MODEL_COUNT }, (_, index) => `anthropic.claude-census-${index}-v1:0`),
@@ -170,8 +153,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
       });
     }
   }
-  // Additive probes: several backends in one stack (`compute_types`). Measured
-  // in both topologies; the first listed backend is the repository default.
   const additive: Array<readonly Compute[]> = [
     ['agentcore', 'lambda-microvm'], ['agentcore', 'ecs'], ['ecs', 'lambda-microvm'],
     ['agentcore', 'ecs', 'lambda-microvm'],
@@ -194,8 +175,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
       }
     }
   }
-  // The original selector remains additive: exercise real legacy inputs rather
-  // than relying on the equivalent explicit list to protect upgrade behavior.
   for (const compute of ['ecs', 'lambda-microvm'] as const) {
     const base = profile(compute, false, true, false, compute === 'lambda-microvm' ? 'managed' : 'none');
     const { compute_types: _explicit, ...context } = base.context;
@@ -207,9 +186,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
       });
     }
   }
-  // Deployment-profile cells (#836): minimal, each optional feature alone, the
-  // shared issue-orchestration and screenshot-to-tracker pairings, and every
-  // feature at once. Each switch is explicit so the legacy default never leaks in.
   const featureSets: ReadonlyArray<readonly [string, readonly DeploymentFeature[]]> = [
     ['minimal', []],
     ...DEPLOYMENT_FEATURES.map(feature => [feature, [feature]] as const),

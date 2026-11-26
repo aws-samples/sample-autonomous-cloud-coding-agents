@@ -29,31 +29,18 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** DLQ message retention for persistent-failure records (days). */
 const DLQ_RETENTION_DAYS = 14;
 
-/** DLQ-depth alarm metric period (minutes). */
 const DLQ_ALARM_PERIOD_MINUTES = 5;
 
-/** Max batching window before the Lambda is invoked on a partial batch (seconds). */
 const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
 
-/** Approval-metrics publisher Lambda memory (MB). */
 const PUBLISHER_MEMORY_MB = 256;
 
 /**
- * Properties for ``ApprovalMetricsPublisherConsumer`` — the Chunk 8
- * consumer that reads ``TaskEventsTable`` via DynamoDB Streams and
- * emits CloudWatch EMF log lines for the Cedar-HITL approval
- * dashboard widgets (§11.3, IMPL-28).
- *
- * This is **consumer #2** of the ``TaskEventsTable`` stream alongside
- * ``FanOutConsumer`` (consumer #1). DynamoDB Streams support up to 2
- * concurrent consumers per shard before throughput degradation; any
- * future third consumer should migrate the stream to Kinesis Data
- * Streams for DynamoDB rather than stacking a third
- * ``DynamoEventSource`` on this table. See the companion code comment
- * in ``task-events-table.ts``.
+ * Second consumer of the ``TaskEventsTable`` stream, alongside
+ * ``FanOutConsumer``. DynamoDB Streams throttles beyond 2 readers per shard:
+ * a third consumer needs Kinesis Data Streams for DynamoDB instead.
  */
 export interface ApprovalMetricsPublisherConsumerProps {
   /**
@@ -70,8 +57,7 @@ export interface ApprovalMetricsPublisherConsumerProps {
 
   /**
    * Max age of records in the batch before Lambda is invoked even if
-   * batch isn't full. Keeps metric latency bounded for low-volume
-   * periods.
+   * batch isn't full.
    * @default Duration.seconds(5)
    */
   readonly maxBatchingWindow?: Duration;
@@ -81,27 +67,14 @@ export interface ApprovalMetricsPublisherConsumerProps {
  * DynamoDB Stream → Lambda consumer that publishes Cedar-HITL approval
  * metrics to CloudWatch via EMF.
  *
- * The service-layer event-source-mapping filter pattern rejects
- * non-``agent_milestone`` records before invocation so the Lambda is
- * only billed for relevant traffic. The handler still applies a
- * secondary milestone-name allowlist (``APPROVAL_METRIC_MILESTONES``)
- * so an unexpected milestone reaching the classifier is observable
- * rather than silently dropped at the service layer. Both layers
- * matter: the filter pattern saves cost; the handler allowlist
- * preserves visibility.
- *
- * Poison-pill handling mirrors ``FanOutConsumer``: per-record
- * try/catch in the handler + ``reportBatchItemFailures: true`` +
- * 3-retry DLQ so one bad record doesn't stall the stream cursor.
+ * The event-source-mapping filter passes only ``agent_milestone`` inserts;
+ * the handler applies the ``APPROVAL_METRIC_MILESTONES`` allowlist. Failed
+ * records are reported per item, retried 3 times, then sent to the DLQ.
  */
 export class ApprovalMetricsPublisherConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
-  /** CloudWatch alarm that fires when the DLQ has at least one
-   *  poison-pill record. Concrete {@link cloudwatch.Alarm} because
-   *  ``AgentStack`` attaches the ``OperationalAlerts`` SNS topic to it
-   *  with ``addAlarmAction``, declared on ``Alarm``, not the
-   *  ``IAlarm`` interface (#629). */
+  /** CloudWatch alarm that fires when the DLQ has at least one poison-pill record. */
   public readonly dlqAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: ApprovalMetricsPublisherConsumerProps) {
@@ -110,19 +83,10 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
     const handlersDir = path.join(__dirname, '..', 'handlers');
 
     this.dlq = new sqs.Queue(this, 'ApprovalMetricsPublisherDlq', {
-      // Persistent failures (malformed records the handler's
-      // per-record try/catch throws on three times in a row) land
-      // here for operator inspection. Depth is alarmed below (#117).
       retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
-    // Explicit log group: without this declaration Lambda auto-creates
-    // the group on first invocation at the default retention (never
-    // expires) and the CDK IAM grant path is implicit. Declaring it
-    // here locks the retention window and keeps the grant graph
-    // discoverable by cdk-nag. Pattern mirrors
-    // ``ecs-agent-cluster.ts::TaskLogGroup``.
     const logGroup = new logs.LogGroup(this, 'ApprovalMetricsPublisherLogs', {
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -133,9 +97,6 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      // Publisher work is tiny (parse record, classify, emit EMF
-      // lines) — 256 MB is more than enough. Timeout is 1 minute to
-      // match fanout; actual invocations should finish in tens of ms.
       timeout: Duration.minutes(1),
       memorySize: PUBLISHER_MEMORY_MB,
       logGroup,
@@ -144,12 +105,6 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       },
     });
 
-    // Event-source-mapping filter pattern. Rejects non-
-    // ``agent_milestone`` records at the service layer so the Lambda
-    // is not billed for fanout-only records (``task_created``,
-    // ``pr_created``, etc.). The filter can only match top-level
-    // attributes (``event_type``, not ``metadata.milestone``) — the
-    // inner milestone check runs in the handler.
     const agentMilestoneFilter = FilterCriteria.filter({
       eventName: FilterRule.isEqual('INSERT'),
       dynamodb: {
@@ -169,8 +124,6 @@ export class ApprovalMetricsPublisherConsumer extends Construct {
       filters: [agentMilestoneFilter],
     }));
 
-    // #117: alarm on DLQ depth so poison-pill records don't silently
-    // accumulate without operator visibility.
     this.dlqAlarm = new cloudwatch.Alarm(this, 'DlqMessageAlarm', {
       metric: this.dlq.metricApproximateNumberOfMessagesVisible({
         period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),

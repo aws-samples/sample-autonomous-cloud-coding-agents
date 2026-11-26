@@ -77,7 +77,6 @@ describe('TaskDetailPage', () => {
     }
     fireEvent.click(screen.getAllByRole('button', { name: 'About turns' })[0]);
     expect(await screen.findByText(/A turn is one round of work/)).toBeInTheDocument();
-    // The activity can end with a line about something the agent did not do.
     fireEvent.click(screen.getAllByRole('button', { name: 'About activity' })[0]);
     expect(await screen.findByText(
       / When the task opened a new pull request, a last line says what became of it, once ABCA has read on GitHub that it was merged or closed\. It reads about once an hour\.$/,
@@ -86,9 +85,7 @@ describe('TaskDetailPage', () => {
 
   it('counts turns the way the turn limit does', async () => {
     renderRoute(`/tasks/${MOCK_IDS.running}`);
-    // Seven messages, five of which asked for tools; the fifth tool turn is still running.
     expect(await screen.findByText('5 of 60')).toBeInTheDocument();
-    // A task records its cost when it finishes.
     expect(screen.getByText('Shown when it finishes (limit $5.00)')).toBeInTheDocument();
   });
 
@@ -161,7 +158,6 @@ describe('TaskDetailPage', () => {
   it('lets you approve a paused task right on the page', async () => {
     renderRoute(`/tasks/${MOCK_IDS.awaiting}`);
     expect(await screen.findByText(/paused before an action that a person has to approve/)).toBeInTheDocument();
-    // The mock writes the request as the agent does, and the activity shows it.
     expect(await screen.findByText('Asked for approval: Soft-deny: terraform_apply')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     expect(await screen.findByText('Your approval came through, so it carried on')).toBeInTheDocument();
@@ -170,8 +166,6 @@ describe('TaskDetailPage', () => {
   });
 
   it('sends a message and shows it until the agent reads it', async () => {
-    // The mock agent reads messages after 5 s; a slow runner can pass that before the
-    // assertion, so this answer schedules no read.
     server.use(http.post(`${TEST_API_BASE}/tasks/:taskId/nudge`, ({ params }) => HttpResponse.json(
       { data: { task_id: String(params.taskId), nudge_id: 'nudge-test00000001', submitted_at: new Date().toISOString() } },
       { status: 202 },
@@ -215,13 +209,11 @@ describe('TaskDetailPage', () => {
     const feed = await screen.findByRole('list', { name: 'Activity' });
     await within(feed).findByText('Finished');
     expect(within(feed).getAllByRole('listitem').at(-1)).toHaveTextContent(line);
-    // The banner follows the same event: it no longer calls the pull request ready for review.
     expect(screen.getByText(banner)).toBeInTheDocument();
     expect(screen.queryByText(/is ready for review$/)).not.toBeInTheDocument();
   });
 
   it('keeps fetching briefly after a task finishes, so its final events still arrive', async () => {
-    // The task record says COMPLETED before its last event has been written.
     const all = mockData.events[MOCK_IDS.completed];
     let served = all.filter((e) => e.event_type !== 'task_completed');
     setTimeout(() => { served = all; }, 1_000);
@@ -253,13 +245,11 @@ describe('TaskDetailPage', () => {
   });
 
   it('says so when a running task goes quiet while its page stays open and no record changes', async () => {
-    // The interval clock and the date are in the test's hands, and still run on their own for the waits of the test.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], shouldAdvanceTime: true });
     try {
       renderRoute(`/tasks/${MOCK_IDS.running}`);
       await screen.findByRole('list', { name: 'Activity' });
       expect(screen.queryByText(/^No update for/)).not.toBeInTheDocument();
-      // Five minutes on. The agent reported 20 seconds before the page opened and not since.
       act(() => {
         vi.advanceTimersByTime(5 * 60_000);
       });

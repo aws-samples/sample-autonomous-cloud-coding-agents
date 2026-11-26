@@ -21,12 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 
-// pdf-parse v2 exposes a `PDFParse` CLASS (`new PDFParse({data}).getText()`), not
-// the v1 callable default. Mock it at that shape so the PDF-screening tests drive
-// the real v2 contract (see the PDF-extraction regression tests below). pdfjs runs
-// headless in the nodejs24.x Lambda, but ts-jest's CJS transform can't spin its
-// ESM worker under jest — so unit-mock the class and prove the wiring here; the
-// real extraction runs in attachment-screening-real-pdf.test.ts, in a child process.
+// Under Jest pdfjs cannot import() its ES module worker.
 const pdfGetTextMock = jest.fn();
 const pdfDestroyMock = jest.fn().mockResolvedValue(undefined);
 jest.mock('pdf-parse', () => ({
@@ -76,33 +71,28 @@ function mockBedrockBlock(): BedrockRuntimeClient {
   } as unknown as BedrockRuntimeClient;
 }
 
-// Minimal valid PNG: 1x1 pixel with valid IHDR (CRC is not checked by our parser)
 function minimalPng(): Buffer {
-  // PNG signature + IHDR chunk (length=13, "IHDR", width=1, height=1, bit_depth=8, color_type=2, zeros for rest + dummy CRC)
   return Buffer.from([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
-    0x00, 0x00, 0x00, 0x0d, // IHDR length = 13
-    0x49, 0x48, 0x44, 0x52, // "IHDR"
-    0x00, 0x00, 0x00, 0x01, // width = 1
-    0x00, 0x00, 0x00, 0x01, // height = 1
-    0x08, 0x02, 0x00, 0x00, 0x00, // bit_depth=8, color_type=2(RGB), compression, filter, interlace
-    0x00, 0x00, 0x00, 0x00, // CRC (dummy — not validated by dimension parser)
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x01,
+    0x08, 0x02, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
   ]);
 }
 
-// Minimal valid JPEG with SOF0 (dimensions 100x50)
 function minimalJpeg(width = 100, height = 50): Buffer {
-  // SOI + APP0 marker (minimal) + SOF0 with dimensions + EOI
   const soi = Buffer.from([0xff, 0xd8]);
-  // SOF0 marker
   const sof0 = Buffer.alloc(11);
   sof0[0] = 0xff;
   sof0[1] = 0xc0;
-  sof0.writeUInt16BE(8, 2); // segment length
-  sof0[4] = 8; // precision
+  sof0.writeUInt16BE(8, 2);
+  sof0[4] = 8;
   sof0.writeUInt16BE(height, 5);
   sof0.writeUInt16BE(width, 7);
-  sof0[9] = 1; // num components
+  sof0[9] = 1;
   const eoi = Buffer.from([0xff, 0xd9]);
   return Buffer.concat([soi, sof0, eoi]);
 }
@@ -188,7 +178,6 @@ describe('screenImage', () => {
     const result = await screenImage(content, 'image/png', 'test.png', config);
 
     expect(result.contentType).toBe('image/png');
-    // No re-encoding — content is passed through as-is
     expect(result.content).toBe(content);
     expect(result.checksum).toMatch(/^[0-9a-f]{64}$/);
     expect(result.screening.status).toBe('passed');
@@ -204,7 +193,7 @@ describe('screenImage', () => {
   });
 
   test('rejects GIF format', async () => {
-    const gif = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]); // GIF89a
+    const gif = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
     await expect(
       screenImage(gif, 'image/gif', 'anim.gif', config),
     ).rejects.toThrow(AttachmentScreeningError);
@@ -220,13 +209,12 @@ describe('screenImage', () => {
   });
 
   test('rejects oversized PNG dimensions before guardrail call', async () => {
-    // Build a PNG with IHDR declaring 9000x100 dimensions
     const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const ihdrLen = Buffer.alloc(4);
     ihdrLen.writeUInt32BE(13, 0);
     const ihdrType = Buffer.from('IHDR');
     const ihdrData = Buffer.alloc(13);
-    ihdrData.writeUInt32BE(9000, 0); // width > 8000
+    ihdrData.writeUInt32BE(9000, 0);
     ihdrData.writeUInt32BE(100, 4);
     ihdrData[8] = 8;
     ihdrData[9] = 2;
@@ -244,7 +232,6 @@ describe('screenImage', () => {
       }),
     ).rejects.toThrow(AttachmentScreeningError);
 
-    // Bedrock should never be called for oversized images
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -293,7 +280,6 @@ describe('screenImage', () => {
     };
 
     await expect(screenImage(png, 'image/png', 'fail.png', retryConfig)).rejects.toBeDefined();
-    // 1 initial + 3 retries = 4 attempts
     expect(send).toHaveBeenCalledTimes(4);
   });
 
@@ -309,12 +295,10 @@ describe('screenImage', () => {
     };
 
     await expect(screenImage(png, 'image/png', 'bad.png', retryConfig)).rejects.toBeDefined();
-    // Should not retry — only 1 attempt
     expect(send).toHaveBeenCalledTimes(1);
   });
 
   test('rejects large JPEG with unparseable dimensions (fail-closed)', async () => {
-    // 6 MB JPEG-like buffer with valid signature but no SOF marker
     const largeJpeg = Buffer.alloc(6 * 1024 * 1024);
     largeJpeg[0] = 0xff;
     largeJpeg[1] = 0xd8;
@@ -335,9 +319,6 @@ describe('screenImage', () => {
 });
 
 describe('screenTextFile', () => {
-  // jest config sets clearMocks:true, which wipes the PDFParse constructor's
-  // implementation + pdfDestroyMock's resolved value before each test. Re-establish
-  // them so `new PDFParse({data})` keeps returning the getText/destroy stubs.
   beforeEach(() => {
     (pdfDestroyMock as jest.Mock).mockResolvedValue(undefined);
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- re-arm the mocked ctor after clearMocks
@@ -390,14 +371,6 @@ describe('screenTextFile', () => {
     }
   });
 
-  // pdf-parse v2 is mocked at the PDFParse-class level (see the jest.mock at the
-  // top of this file). The prior code called the v1 callable shape
-  // (`pdfParseFn(buf)`), undefined on v2, so every PDF fail-closed as
-  // "processing unavailable". These assert the v2 contract:
-  // `new PDFParse({data}).getText()` → `{ text }`. Real end-to-end PDF extraction
-  // is tested in attachment-screening-real-pdf.test.ts, in a child process (ts-jest's
-  // CJS transform can't drive pdfjs' ESM worker, so a class mock is the right unit here).
-
   test('extracts and screens a PDF via the v2 PDFParse class', async () => {
     pdfGetTextMock.mockResolvedValueOnce({ text: 'Design spec: add CONTRIBUTORS', total: 1, pages: [] });
     const config = {
@@ -407,22 +380,12 @@ describe('screenTextFile', () => {
     };
     const result = await screenTextFile(Buffer.from('%PDF-1.4 real'), 'application/pdf', 'design.pdf', config);
     expect(result.screening.status).toBe('passed');
-    // The v2 API was actually driven: constructed with { data } + getText called.
     expect(pdfGetTextMock).toHaveBeenCalledTimes(1);
-    expect(pdfDestroyMock).toHaveBeenCalledTimes(1); // worker released
+    expect(pdfDestroyMock).toHaveBeenCalledTimes(1);
   });
 
   test('does not hand pdf-parse a view onto the CALLER\'s buffer', async () => {
-    // pdf-parse transfers ownership of whatever it is given to its worker, which
-    // DETACHES the underlying ArrayBuffer. A `new Uint8Array(content.buffer, …)`
-    // view shares that buffer with the caller's Buffer — and the caller uploads
-    // those same bytes to S3 AFTER screening returns. Sharing meant the upload read
-    // a detached buffer and threw "Cannot perform Construct on a detached
-    // ArrayBuffer"; fail-closed screening then rejected the task, so every PDF
-    // attachment was refused with "could not be stored". Observed in production.
-    //
-    // So this asserts the OWNERSHIP boundary: what pdf-parse receives must not share
-    // a backing store with what the caller keeps.
+    // pdf-parse transfers the buffer it is given to its worker, which detaches the underlying ArrayBuffer.
     const { PDFParse } = jest.requireMock('pdf-parse') as { PDFParse: jest.Mock };
     PDFParse.mockClear();
     pdfGetTextMock.mockResolvedValueOnce({ text: 'Design spec', total: 1, pages: [] });
@@ -433,9 +396,7 @@ describe('screenTextFile', () => {
       guardrailVersion: '1',
     });
     const passed = (PDFParse.mock.calls[0][0] as { data: Uint8Array }).data;
-    // Same bytes…
     expect(Buffer.from(passed).toString()).toBe(content.toString());
-    // …different backing store, so a transfer cannot detach the caller's copy.
     expect(passed.buffer).not.toBe(content.buffer);
   });
 
@@ -452,8 +413,6 @@ describe('screenTextFile', () => {
   });
 
   test('FAILS CLOSED on a PDF with more pages than can be screened (finding #1 — no partial-screen-full-deliver)', async () => {
-    // 51-page PDF but we only screen the first 50 → the whole file would be
-    // delivered to the agent with page 51 unscreened. Reject instead.
     pdfGetTextMock.mockResolvedValueOnce({ text: 'benign pages 1-50', total: 51, pages: [] });
     const config = { bedrockClient: mockBedrockPass(), guardrailId: 'g', guardrailVersion: '1' };
     await expect(
@@ -477,9 +436,6 @@ describe('screenTextFile', () => {
   });
 
   test('a pdfjs/DOMMatrix parse error logs a BUNDLING diagnostic, not just "corrupt PDF"', async () => {
-    // A Lambda that reaches this path but lacks the pdf-parse bundling carve-out
-    // throws a pdfjs/native-binding error. Detect the signature + log an
-    // actionable diagnostic so it's not misread as a bad user PDF.
     const { logger } = jest.requireActual('../../../src/handlers/shared/logger') as { logger: { error: (...a: unknown[]) => void } };
     const errSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
     pdfGetTextMock.mockRejectedValueOnce(new Error('DOMMatrix is not defined'));
@@ -487,7 +443,6 @@ describe('screenTextFile', () => {
     await expect(
       screenTextFile(Buffer.from('%PDF-1.4 real'), 'application/pdf', 'spec.pdf', config),
     ).rejects.toBeInstanceOf(AttachmentScreeningError);
-    // The loud diagnostic names the bundling cause + the fix.
     const logged = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(logged).toMatch(/BUNDLING bug/);
     expect(logged).toMatch(/nodeModules/);

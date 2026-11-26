@@ -119,8 +119,6 @@ describe('list command', () => {
   });
 
   test('follows next_token when a page holds fewer tasks than asked for', async () => {
-    // The API reads a bounded number of rows per request: with --repo or --status the
-    // tasks that match can all lie behind them.
     mockListTasks
       .mockResolvedValueOnce({ data: [], pagination: { next_token: 'T1', has_more: true } })
       .mockResolvedValueOnce({ data: [task('task-0')], pagination: { next_token: null, has_more: false } });
@@ -128,7 +126,6 @@ describe('list command', () => {
     const cmd = makeListCommand();
     await cmd.parseAsync(['node', 'test', '--repo', 'owner/repo']);
 
-    // The table and nothing else: not 'No tasks found.' followed by the hint.
     const printed = consoleSpy.mock.calls.map(c => c[0] as string);
     expect(printed).toEqual([expect.stringContaining('task-0')]);
     expect(mockListTasks).toHaveBeenCalledTimes(2);
@@ -136,7 +133,6 @@ describe('list command', () => {
   });
 
   test('lists more tasks than one page holds, asking each further page only for the tasks still missing', async () => {
-    // The API returns at most 100 tasks per request.
     const page = (first: number, count: number, token: string) => ({
       data: Array.from({ length: count }, (_, i) => task(`task-${first + i}`)),
       pagination: { next_token: token, has_more: true },
@@ -154,7 +150,6 @@ describe('list command', () => {
       [{ status: 'FAILED', repo: undefined, limit: 150, nextToken: 'T1' }],
       [{ status: 'FAILED', repo: undefined, limit: 50, nextToken: 'T2' }],
     ]);
-    // No task is dropped, so the last token resumes right after the last one printed.
     expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify({
       data: Array.from({ length: 250 }, (_, i) => task(`task-${i}`)),
       pagination: { next_token: 'T3', has_more: true },
@@ -180,7 +175,6 @@ describe('list command', () => {
     const cmd = makeListCommand();
     await cmd.parseAsync(['node', 'test', '--limit', limit]);
 
-    // 20 are wanted, the page size the API defaults to.
     expect(mockListTasks).toHaveBeenLastCalledWith({ status: undefined, repo: undefined, limit: 20, nextToken: 'T1' });
   });
 });

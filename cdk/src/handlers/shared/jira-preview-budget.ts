@@ -39,8 +39,6 @@ export class JiraPreviewBudget {
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      // Bound even SDK retries and OAuth resolution. Once expired, no later
-      // delivery step may start; comment transports also receive the signal.
       return await Promise.race([
         operation(),
         new Promise<never>((_resolve, reject) => {

@@ -53,8 +53,6 @@ describe('config', () => {
       expect(() => loadConfig()).toThrow('Not configured');
     });
 
-    // Not "Not configured": that sends the user to `bgagent configure`, which replaces a file
-    // that may only need a repair, without a word that the file was there.
     test.each([
       [
         'is cut short',
@@ -99,14 +97,11 @@ describe('config', () => {
         token_expiry: '2026-01-01T00:00:00.000Z',
       });
       const stat = fs.statSync(path.join(tmpDir, 'credentials.json'));
-      // 0o600 = owner read+write only (octal 600 = decimal 384)
       // eslint-disable-next-line no-bitwise
       expect(stat.mode & 0o777).toBe(0o600);
     });
 
     test('tightens a credentials file that already exists with loose permissions', () => {
-      // Restored from a backup, copied from another machine, or created by
-      // another tool: the file is there before the first save, world-readable.
       const p = path.join(tmpDir, 'credentials.json');
       fs.writeFileSync(p, '{}');
       fs.chmodSync(p, 0o644);
@@ -121,7 +116,6 @@ describe('config', () => {
     });
   });
 
-  // One bgagent process saves a refreshed token while others read the file (#1080).
   describe('writing the credentials file', () => {
     const OLD = { id_token: 'old-id', refresh_token: 'old-refresh', token_expiry: '2026-01-01T00:00:00.000Z' };
     const NEW = { id_token: 'new-id', refresh_token: 'new-refresh', token_expiry: '2026-02-01T00:00:00.000Z' };
@@ -129,16 +123,11 @@ describe('config', () => {
     const nodeFs = jest.requireActual<typeof fs>('fs');
     const credentials = (): string => path.join(tmpDir, 'credentials.json');
 
-    /** An error as the file system raises it: the `code` is what the caller of fs goes by. */
     function failure(code: string): NodeJS.ErrnoException {
       return Object.assign(new Error(`${code}: simulated`), { code });
     }
 
-    /**
-     * Make the file system report an owner, or a number of names, for `entry`. Only root can
-     * really change an owner, and on macOS fs.linkSync gives the second name to the file that
-     * a symbolic link names, not to the link.
-     */
+    // Only root can change an owner, and on macOS fs.linkSync gives the second name to the file a symbolic link names, not to the link.
     function report(call: 'lstatSync' | 'statSync', entry: string, as: { uid?: number; nlink?: number }): void {
       const real = nodeFs[call];
       jest.spyOn(nodeFs, call).mockImplementation(((file: fs.PathLike, options?: fs.StatSyncOptions) => {
@@ -148,7 +137,6 @@ describe('config', () => {
       }) as typeof fs.statSync);
     }
 
-    /** Run as the user `uid`, or where there are no user ids, as on Windows. */
     function runAs(uid: number | undefined): void {
       process.geteuid = uid === undefined ? undefined : () => uid;
     }
@@ -156,7 +144,6 @@ describe('config', () => {
 
     const ANOTHER_USER = 'belongs to another user';
     const SECOND_NAME = 'has more than one name, so someone else may have put it there';
-    /** What an entry that is not a regular file is refused with. */
     function refusal(entry: string, kind: string, reason: string): CliError {
       return new CliError(`Refusing to write to ${entry}: the ${kind} there ${reason}. Remove it, or choose another path.`);
     }
@@ -171,8 +158,6 @@ describe('config', () => {
       const rename = fs.renameSync;
       const atRename: unknown[] = [];
       jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce((from, to) => {
-        // A rename is one step only within a file system: the new file waits beside the old one,
-        // whole and owner-only, while a reader still gets the old login.
         atRename.push({
           read: loadCredentials(),
           from: path.dirname(String(from)),
@@ -229,9 +214,6 @@ describe('config', () => {
     });
 
     test('refuses a temporary name that is taken, and leaves what is there', () => {
-      // A path the user chose can be in a directory that others may write to: a link
-      // planted under the temporary name must not send the secret where it points, and
-      // it is not this save's to remove.
       const victim = path.join(tmpDir, 'victim');
       fs.writeFileSync(victim, 'untouched');
       const open = fs.openSync;
@@ -249,11 +231,8 @@ describe('config', () => {
     });
 
     test('gives every save a temporary file of its own, so two can run at once', () => {
-      // The process id alone does not tell two saves apart: containers that share the
-      // directory can give the same one to both.
       const rename = fs.renameSync;
       const renames = jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce((from, to) => {
-        // Another save, start to finish, while this one waits to rename.
         saveCredentials(OLD);
         rename(from, to);
       });
@@ -265,8 +244,6 @@ describe('config', () => {
       expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
     });
 
-    // A file that cannot be replaced is written where it is, as before #1080. EBUSY is what
-    // the rename answers for credentials.json mounted into a container as a single file.
     test.each(['EACCES', 'EPERM', 'EROFS', 'EBUSY', 'EXDEV', 'ENOENT', 'ENAMETOOLONG'])(
       'writes the file in place when the rename fails with %s',
       (code) => {
@@ -293,8 +270,6 @@ describe('config', () => {
     });
 
     test('writes the file in place in a directory that takes no new file', () => {
-      // No mock: the directory itself refuses the temporary file. It refuses root nothing,
-      // so for root this only shows that the save works.
       saveCredentials(OLD);
       fs.chmodSync(credentials(), 0o644);
       fs.chmodSync(tmpDir, 0o500);
@@ -309,10 +284,7 @@ describe('config', () => {
       expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
     });
 
-    // No mock here either. A name of 255 ASCII characters is the longest that most file
-    // systems take, so the temporary file, whose name is longer by its suffix, cannot be
-    // created. Where the longer name is taken the file is replaced, and this only shows
-    // that the save works.
+    // A name of 255 ASCII characters is the longest that most file systems take.
     test.each([
       ['writes a file in place', true],
       ['creates a file in place', false],
@@ -346,9 +318,6 @@ describe('config', () => {
       expect(modes).toEqual([0o600]);
     });
 
-    // Whose file is written in place. In /tmp the owner of a file can put a link under its
-    // name at any moment, so the file of another user is left alone. Root writes any file:
-    // one mounted into a container often belongs to a user of the host.
     test.each([
       ["writes the user's own file in place", { user: 1000, file: 1000 }, NEW],
       ['leaves the file of another user alone', { user: 1000, file: 2000 }, OLD],
@@ -382,8 +351,7 @@ describe('config', () => {
     });
 
     test('does not write through an entry that appeared where no file was', () => {
-      // In a directory with the sticky bit the rename fails with EPERM once someone else
-      // has put an entry under the name.
+      // In a directory with the sticky bit the rename fails with EPERM once someone else has put an entry under the name.
       const victim = path.join(tmpDir, 'victim');
       fs.writeFileSync(victim, 'untouched');
       jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce((_from, to) => {
@@ -398,9 +366,6 @@ describe('config', () => {
     });
 
     test('replaces the file that a symbolic link names, and keeps the link', () => {
-      // A dotfiles setup keeps credentials.json elsewhere and links to it. Here the link is
-      // relative and leads to a second one: the file to replace is where they end, which
-      // the text of the first link does not say.
       const elsewhere = path.join(tmpDir, 'dotfiles', 'credentials.json');
       const between = path.join(tmpDir, 'current.json');
       fs.mkdirSync(path.dirname(elsewhere));
@@ -413,7 +378,6 @@ describe('config', () => {
       const rename = fs.renameSync;
       const atRename: unknown[] = [];
       jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce((from, to) => {
-        // The new file waits beside the real one while a reader of the link gets the old login.
         atRename.push({ read: loadCredentials(), from: path.dirname(String(from)), to });
         rename(from, to);
       });
@@ -429,7 +393,6 @@ describe('config', () => {
     });
 
     test('writes the file that a symbolic link names in place when its directory takes no new file', () => {
-      // No mock, as above: for root the directory refuses nothing and the file is replaced.
       const elsewhere = path.join(tmpDir, 'dotfiles', 'credentials.json');
       fs.mkdirSync(path.dirname(elsewhere));
       fs.writeFileSync(elsewhere, JSON.stringify(OLD));
@@ -460,8 +423,7 @@ describe('config', () => {
     });
 
     test('writes through a symbolic link whose file has no path, and makes that file owner-only', () => {
-      // On Linux /dev/stdout leads to the file that stdout is, and a file that was deleted
-      // while open has no path to resolve the link to.
+      // On Linux /dev/stdout leads to the file that stdout is, and a file deleted while open has no path to resolve the link to.
       const elsewhere = path.join(tmpDir, 'elsewhere.json');
       fs.writeFileSync(elsewhere, '{}');
       fs.chmodSync(elsewhere, 0o644);
@@ -488,10 +450,7 @@ describe('config', () => {
     });
 
     test('writes a file that is named by one of its open descriptors, /dev/fd/N', () => {
-      // What `--output /dev/stdout > file` comes to. On macOS /dev/fd/N is the open file
-      // itself, and no file can be created beside it: it is written in place, through the
-      // descriptor. On Linux it is a symbolic link to the file, which is replaced: the
-      // descriptor then holds the old file, which has no name any more.
+      // On macOS /dev/fd/N is the open file itself and no file can be created beside it; on Linux it is a symbolic link to the file.
       const file = path.join(tmpDir, 'bundle.json');
       const fd = fs.openSync(file, 'w', 0o644);
       try {
@@ -508,9 +467,6 @@ describe('config', () => {
       }
     });
 
-    // Whose a symbolic link is decides whether it is followed: in a directory that others
-    // can write to, anyone can put one under the name the user is about to write. With a
-    // second name, a hard link, someone else can put a link of root's there.
     test.each([
       ['follows a symbolic link that the user made', { user: 1000, link: 1000, directory: 2000, names: 1 }, undefined],
       ['follows a symbolic link that root made', { user: 1000, link: 0, directory: 2000, names: 1 }, undefined],
@@ -537,14 +493,13 @@ describe('config', () => {
       expect(fs.readdirSync(tmpDir).sort()).toEqual(['credentials.json', 'elsewhere.json']);
     });
 
-    // Whoever made a FIFO reads what is written to it. The test holds the reading end
-    // itself, so that a write which is not refused ends instead of waiting for a reader.
     test.each([
       ['writes to a FIFO that the user made', { uid: 1000 }, undefined],
       ['refuses a FIFO that another user made', { uid: 3000 }, ANOTHER_USER],
       ['refuses a FIFO that has a second name', { uid: 1000, nlink: 2 }, SECOND_NAME],
     ])('%s', (_rule, reported, reason) => {
       execFileSync('mkfifo', [credentials()]);
+      // A write to a FIFO waits for a reader.
       // eslint-disable-next-line no-bitwise
       const reader = fs.openSync(credentials(), fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
       try {
@@ -565,9 +520,6 @@ describe('config', () => {
       }
     });
 
-    // The owner rule holds for a directory and a socket too, not for links and FIFOs
-    // alone: in a shared directory the owner of such an entry can put a link in its place
-    // once it was looked at.
     test('refuses a directory that belongs to another user', () => {
       fs.mkdirSync(credentials());
       runAs(1000);
@@ -578,9 +530,7 @@ describe('config', () => {
     });
 
     test('writes to a device whoever it belongs to and however many names it has', () => {
-      // Only a privileged user can make a device, so it is not something another user put
-      // at the path. Its reported owner says little: a user namespace reports an owner
-      // that it does not map as the overflow user.
+      // Only a privileged user can make a device, and a user namespace reports an owner that it does not map as the overflow user.
       const mode = fs.statSync('/dev/null').mode;
       runAs(1000);
       report('lstatSync', '/dev/null', { uid: 3000, nlink: 2 });
@@ -592,8 +542,6 @@ describe('config', () => {
     });
 
     test('does not take the link count of a directory for a second name', () => {
-      // Most file systems report more than one for every directory. A directory at the path
-      // fails as it always did.
       fs.mkdirSync(credentials());
       runAs(1000);
       report('lstatSync', credentials(), { uid: 1000, nlink: 2 });

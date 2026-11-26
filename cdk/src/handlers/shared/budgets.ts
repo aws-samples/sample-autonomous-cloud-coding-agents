@@ -89,8 +89,6 @@ export class BudgetScopeLimitError extends Error {
   override readonly name = 'BudgetScopeLimitError';
 }
 
-// The message is returned to whoever asked for the task, who is not always the
-// billed user: it must not name that user. createTaskCore logs the user id with it.
 function assertSupportedScopeCount(teamIds: readonly string[]): void {
   if (teamIds.length + 1 > MAX_BUDGET_SCOPES_PER_TASK) {
     throw new BudgetScopeLimitError(
@@ -123,8 +121,7 @@ export function taskBudgetMarkerKey(taskId: string): string {
 }
 
 /**
- * Sort key of the scoreboard's once-only claim. Same partition key as the rollup
- * marker, so the two items never collide, and not a row the budget queries read.
+ * Sort key of the scoreboard's once-only claim, under the rollup marker's partition key.
  */
 export const BUDGET_METRICS_PERIOD = 'METRICS';
 
@@ -232,9 +229,6 @@ async function resolveTeamIds(userId: string): Promise<string[]> {
   } catch (err) {
     const name = errorName(err);
     if (name === 'UserNotFoundException') {
-      // A deleted or externally federated Cognito identity can remain in a
-      // headless integration mapping. User-scope admission still applies, but
-      // there is no resolvable user-pool membership to attribute to teams.
       emitMissingTeamMembershipMetric(userId);
       logger.warn('Budget team membership user was not found; continuing without teams', {
         user_id: userId,
@@ -242,7 +236,7 @@ async function resolveTeamIds(userId: string): Promise<string[]> {
         error_name: name,
         metric_type: 'budget_team_membership_user_missing',
       });
-      return []; // user budgets remain enforced; an alarm pages on skipped team enforcement
+      return [];
     }
     logger.error('Failed to resolve budget team membership', {
       user_id: userId,
@@ -345,7 +339,6 @@ export async function loadBudgetStates(
   return states;
 }
 
-/** Read the authenticated user's own monthly estimated-spend status. */
 export async function loadPersonalBudgetStatus(
   userId: string,
   now: Date = new Date(),
@@ -396,10 +389,7 @@ export async function loadPersonalBudgetStatus(
 /**
  * Resolve relevant team memberships and enforce configured hard-stop budgets.
  *
- * When the budget table is not wired (unit tests or an older deployment),
- * admission is unchanged and only caller-supplied team IDs are returned.
- * Headless callers query for an existing team config before calling Cognito,
- * keeping the feature inert when operators have configured no team budgets.
+ * When the budget table is not wired, admission is unchanged and only caller-supplied team IDs are returned.
  */
 export async function checkBudgetAdmission(
   userId: string,

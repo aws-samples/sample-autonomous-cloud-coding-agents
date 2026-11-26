@@ -38,7 +38,6 @@ const STATE_LABEL: Readonly<Record<StepState, string>> = {
   skipped: 'skipped',
 };
 
-/** Colour of the line leading into a step: travelled, stopped there, or still ahead. */
 function connectorStyle(state: StepState): CSSProperties {
   const base: CSSProperties = { flex: '1 1 24px', minWidth: 16, height: 0, margin: '0 10px', borderTopWidth: 2 };
   if (state === 'todo' || state === 'skipped') return { ...base, borderTopStyle: 'dashed', borderTopColor: 'rgba(127, 127, 127, 0.45)' };

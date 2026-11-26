@@ -109,7 +109,6 @@ describe('format', () => {
     test('omits the queue line when position is null (GSI fail-open) or task not QUEUED', () => {
       const queuedNoPos: TaskDetail = { ...task, status: 'QUEUED', queue_position: null };
       expect(formatTaskDetail(queuedNoPos)).not.toContain('Queue:');
-      // RUNNING task with a stale position value should not render it either.
       const running: TaskDetail = { ...task, status: 'RUNNING', queue_position: 2 };
       expect(formatTaskDetail(running)).not.toContain('Queue:');
     });
@@ -139,13 +138,6 @@ describe('format', () => {
     });
 
     describe('agent_heartbeat_at (ADR-021 P2r2-F11)', () => {
-      // The field exists in DynamoDB and drives the orchestrator's hang detector,
-      // but was never projected into the API response — so `bgagent status`
-      // printed nothing while a 6-second-old beat sat in the table, and a live
-      // verification run concluded "heartbeats not observed". The CLI is the
-      // consumer that makes the signal actionable, so it renders the AGE (the beat
-      // is written every 45 s; the age is what tells you something is wrong).
-
       test('shows the heartbeat and its age while the task is still running', () => {
         const running: TaskDetail = {
           ...task,
@@ -159,8 +151,6 @@ describe('format', () => {
       });
 
       test('hides it on a terminal task, where the last beat is noise', () => {
-        // The fixture is COMPLETED and DOES carry a heartbeat, so this asserts the
-        // suppression rather than an absent value.
         expect(task.agent_heartbeat_at).not.toBeNull();
         expect(formatTaskDetail(task)).not.toContain('Heartbeat:');
       });
@@ -188,8 +178,6 @@ describe('format', () => {
       });
 
       test('degrades to a placeholder rather than throwing on a malformed value', () => {
-        // A bad timestamp must not take out `bgagent status` — the command a user
-        // reaches for when something is already wrong.
         const running: TaskDetail = {
           ...task,
           status: 'RUNNING',
@@ -201,9 +189,6 @@ describe('format', () => {
       });
 
       test('renders the age against an INJECTED now, deterministically', () => {
-        // Review nit: this function read `Date.now()` internally, unlike its
-        // `formatStatusSnapshot` sibling, so the only interesting case — a beat old
-        // enough to be the signal — could not be asserted without wall-clock games.
         const beat = '2026-08-07T00:00:00.000Z';
         const running: TaskDetail = {
           ...task,
@@ -372,10 +357,6 @@ describe('format', () => {
     });
 
     describe('HEARTBEAT column (in-guest liveness at list level)', () => {
-      // "Is anything still alive?" is a LIST question. While the field was only on
-      // the detail view, answering it meant one `bgagent status` per task — which is
-      // how a hung task goes unnoticed. Same suppression rules as the detail view so
-      // the two never disagree.
       const base: TaskSummary = {
         task_id: 'abc',
         status: 'RUNNING',
@@ -411,7 +392,6 @@ describe('format', () => {
         expect(formatTaskList([base], now)).toContain('—');
       });
 
-      /** The HEARTBEAT cell of the one task listed. */
       const heartbeatCell = (listed: TaskSummary) => formatTaskList([listed], now).split('\n')[2].split(/ {2,}/)[4];
 
       test.each(['agentcore', 'lambda-microvm'] as const)('renders the age on %s, where the agent keeps beating', (backend) => {
@@ -432,8 +412,6 @@ describe('format', () => {
       });
 
       test('a stale beat renders as an obviously large age, not as healthy', () => {
-        // The actionable case: the beat cadence is 45 s, so minutes of age is the
-        // signal. The orchestrator fails the task at grace 120 s + stale 240 s.
         const stale = { ...base, agent_heartbeat_at: '2026-08-06T23:55:00.000Z' };
         expect(formatTaskList([stale], now)).toContain('10m 30s ago');
       });

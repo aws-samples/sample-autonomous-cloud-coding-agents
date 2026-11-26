@@ -17,10 +17,7 @@
  *  SOFTWARE.
  */
 
-// --- Mocks ---
 const mockSmSend = jest.fn();
-// Minimal stand-in for the SDK's ResourceNotFoundException so `instanceof`
-// checks in resolveGitHubToken work against thrown mock errors (#251).
 class MockResourceNotFoundException extends Error {
   constructor(message = 'Secrets Manager can’t find the specified secret.') {
     super(message);
@@ -44,7 +41,6 @@ jest.mock('../../../src/handlers/shared/memory', () => ({
   loadMemoryContext: mockLoadMemoryContext,
 }));
 
-// Set env vars before importing
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token';
 process.env.USER_PROMPT_TOKEN_BUDGET = '100000';
 process.env.GUARDRAIL_ID = 'gr-test-123';
@@ -74,27 +70,14 @@ import {
 } from '../../../src/handlers/shared/context-hydration';
 import * as sanitization from '../../../src/handlers/shared/sanitization';
 
-// Mock global fetch
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 beforeEach(() => {
   jest.clearAllMocks();
   clearTokenCache();
-  // hydrateContext falls back to process.env.MEMORY_ID when no memoryId option
-  // is passed (context-hydration.ts:990). If MEMORY_ID leaks into the jest
-  // process env (set by another test file, or the deploy env when the suite
-  // runs in-container), the "memoryId not provided" tests would spuriously call
-  // loadMemoryContext and fail — an order/environment-dependent flake that
-  // forced the fork's build-gate to be bypassed with `git push --no-verify`.
-  // Pin a clean "no ambient memory" baseline; tests that want memory pass the
-  // memoryId option explicitly.
   delete process.env.MEMORY_ID;
 });
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
 
 function makeGraphQLThreadsResponse(
   threads: Array<{ isResolved?: boolean; comments: Array<Record<string, unknown>> }>,
@@ -123,10 +106,6 @@ function makeGraphQLThreadsResponse(
   };
 }
 
-// ---------------------------------------------------------------------------
-// resolveGitHubToken
-// ---------------------------------------------------------------------------
-
 describe('resolveGitHubToken', () => {
   test('fetches token from Secrets Manager', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
@@ -141,12 +120,11 @@ describe('resolveGitHubToken', () => {
     const token2 = await resolveGitHubToken('arn:aws:secretsmanager:us-east-1:123:secret:test');
     expect(token1).toBe('ghp_cached');
     expect(token2).toBe('ghp_cached');
-    expect(mockSmSend).toHaveBeenCalledTimes(1); // Only one SM call
+    expect(mockSmSend).toHaveBeenCalledTimes(1);
   });
 
   test('throws a missing_secret blocker when secret is empty', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: undefined });
-    // #251: empty secret → canonical BLOCKED[missing_secret] reason naming the ARN.
     await expect(resolveGitHubToken('arn:test')).rejects.toThrow(
       'BLOCKED[missing_secret]: the required GitHub token secret is empty (resource: arn:test)',
     );
@@ -154,8 +132,6 @@ describe('resolveGitHubToken', () => {
 
   test('throws a missing_secret blocker when secret does not exist', async () => {
     mockSmSend.mockRejectedValueOnce(new MockResourceNotFoundException());
-    // #251: ResourceNotFoundException → canonical reason naming the ARN so the
-    // classifier can tell the operator exactly which secret to wire.
     const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:missing';
     await expect(resolveGitHubToken(arn)).rejects.toThrow(
       `BLOCKED[missing_secret]: the required GitHub token secret does not exist (resource: ${arn})`,
@@ -163,11 +139,6 @@ describe('resolveGitHubToken', () => {
   });
 
   test('wraps an unreadable-secret SM error as an auth_failure blocker', async () => {
-    // #251 review fix: a secret that exists but can't be read (AccessDenied,
-    // throttling exhausted) is an environmental auth_failure — not a missing
-    // secret and not a silent-degrade. Wrap with the canonical reason naming the
-    // ARN so the classifier routes to the auth remedy instead of stranding the
-    // task with minimal context and no token.
     const arn = 'arn:aws:secretsmanager:us-east-1:123:secret:denied';
     mockSmSend.mockRejectedValueOnce(new Error('AccessDeniedException'));
     await expect(resolveGitHubToken(arn)).rejects.toThrow(
@@ -194,10 +165,6 @@ describe('resolveGitHubToken', () => {
     expect(mockSmSend).toHaveBeenCalledTimes(2);
   });
 });
-
-// ---------------------------------------------------------------------------
-// fetchGitHubIssue
-// ---------------------------------------------------------------------------
 
 describe('fetchGitHubIssue', () => {
   const issueResponse = {
@@ -323,10 +290,8 @@ describe('fetchGitHubIssue', () => {
     }
 
     test.each([
-      // [comments on the issue, oldest one hydrated]
       [45, 1],
       [150, 1],
-      // Above three pages the oldest pages are left out: 101 to 345 are pages 2 to 4
       [345, 101],
     ])('hydrates the newest of %i comments', async (total, oldest) => {
       mockIssueWithComments(total);
@@ -339,10 +304,6 @@ describe('fetchGitHubIssue', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// estimateTokens
-// ---------------------------------------------------------------------------
-
 describe('estimateTokens', () => {
   test('returns 0 for empty string', () => {
     expect(estimateTokens('')).toBe(0);
@@ -353,13 +314,9 @@ describe('estimateTokens', () => {
   });
 
   test('rounds up for non-divisible lengths', () => {
-    expect(estimateTokens('abcde')).toBe(2); // 5/4 = 1.25 → 2
+    expect(estimateTokens('abcde')).toBe(2);
   });
 });
-
-// ---------------------------------------------------------------------------
-// enforceTokenBudget
-// ---------------------------------------------------------------------------
 
 describe('enforceTokenBudget', () => {
   const makeIssue = (commentCount: number): GitHubIssueContext => ({
@@ -369,7 +326,7 @@ describe('enforceTokenBudget', () => {
     comments: Array.from({ length: commentCount }, (_, i) => ({
       id: 1000 + i,
       author: `user${i}`,
-      body: 'x'.repeat(400), // ~100 tokens per comment
+      body: 'x'.repeat(400),
     })),
   });
 
@@ -382,7 +339,6 @@ describe('enforceTokenBudget', () => {
 
   test('truncates oldest comments first when over budget', () => {
     const issue = makeIssue(5);
-    // Set a very small budget that can fit issue + 1-2 comments
     const result = enforceTokenBudget(issue, 'Fix', 200);
     expect(result.truncated).toBe(true);
     expect(result.issue!.comments.length).toBeLessThan(5);
@@ -401,10 +357,6 @@ describe('enforceTokenBudget', () => {
     expect(result.taskDescription).toBeUndefined();
   });
 });
-
-// ---------------------------------------------------------------------------
-// assembleUserPrompt
-// ---------------------------------------------------------------------------
 
 describe('assembleUserPrompt', () => {
   test('assembles with issue and task description', () => {
@@ -460,7 +412,6 @@ describe('assembleUserPrompt', () => {
   });
 
   test('matches Python assemble_prompt output format', () => {
-    // Cross-language consistency: verify the same structure
     const issue: GitHubIssueContext = {
       number: 1,
       title: 'Test issue',
@@ -469,7 +420,6 @@ describe('assembleUserPrompt', () => {
     };
     const result = assembleUserPrompt('T1', 'o/r', issue, 'Do the thing');
 
-    // The Python version joins parts with \n, so verify line structure
     const lines = result.split('\n');
     expect(lines[0]).toBe('Task ID: T1');
     expect(lines[1]).toBe('Repository: o/r');
@@ -484,12 +434,9 @@ describe('assembleUserPrompt', () => {
     };
     const result = assembleUserPrompt('TASK-SANITIZE', 'org/repo', issue, 'Fix bug');
 
-    // Script tag stripped from title
     expect(result).not.toContain('<script>');
-    // Instruction injection neutralized in body
     expect(result).toContain('[SANITIZED_PREFIX]');
     expect(result).toContain('[SANITIZED_INSTRUCTION]');
-    // iframe stripped from comment
     expect(result).not.toContain('<iframe');
     expect(result).toContain('Real comment');
   });
@@ -504,10 +451,6 @@ describe('assembleUserPrompt', () => {
     expect(result).toContain('Real task');
   });
 });
-
-// ---------------------------------------------------------------------------
-// fetchGitHubPullRequest — id fields
-// ---------------------------------------------------------------------------
 
 describe('fetchGitHubPullRequest — id fields', () => {
   test('returns id and in_reply_to_id on review comments', async () => {
@@ -562,10 +505,8 @@ describe('fetchGitHubPullRequest — id fields', () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
 
     const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
-    // Only the valid comment should be included
     expect(result!.review_comments).toHaveLength(1);
     expect(result!.review_comments[0].id).toBe(100);
-    // First valid comment becomes root — no in_reply_to_id
     expect(result!.review_comments[0].in_reply_to_id).toBeUndefined();
   });
 
@@ -585,10 +526,8 @@ describe('fetchGitHubPullRequest — id fields', () => {
 
     const result = await fetchGitHubPullRequest('owner/repo', 10, 'ghp_test');
     expect(result!.review_comments).toHaveLength(2);
-    // Comment 100 becomes root since the first comment was invalid
     expect(result!.review_comments[0].id).toBe(100);
     expect(result!.review_comments[0].in_reply_to_id).toBeUndefined();
-    // Comment 200 is a reply to the promoted root
     expect(result!.review_comments[1].id).toBe(200);
     expect(result!.review_comments[1].in_reply_to_id).toBe(100);
   });
@@ -644,10 +583,6 @@ describe('fetchGitHubPullRequest — id fields', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// hydrateContext
-// ---------------------------------------------------------------------------
-
 describe('hydrateContext', () => {
   const baseTask = {
     task_id: 'TASK001',
@@ -662,8 +597,6 @@ describe('hydrateContext', () => {
   };
 
   test('repo-less task: assembles from task_description, no GitHub fetch (#248 Phase 3)', async () => {
-    // No repo ⇒ the repo-less branch: no issue/PR fetch, no Repository: line,
-    // prompt is task_description only.
     const { repo: _omit, ...repoless } = baseTask;
     const task = {
       ...repoless,
@@ -678,13 +611,10 @@ describe('hydrateContext', () => {
     expect(result.sources).not.toContain('pull_request');
     expect(result.user_prompt).toContain('Summarise these papers');
     expect(result.user_prompt).not.toContain('Repository:');
-    // No GitHub calls for a repo-less task.
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   test('repo-less task: memory is keyed per-user (user:{user_id}), not per-repo (#248 Phase 3)', async () => {
-    // ADR-014 addendum: a repo-less task has no repo namespace; memory keys on
-    // user:{user_id}. This is the assertion that pins the per-user keying.
     const { repo: _omit, ...repoless } = baseTask;
     const task = {
       ...repoless,
@@ -703,9 +633,6 @@ describe('hydrateContext', () => {
   });
 
   test('repo-OPTIONAL workflow given a repo takes the repo-bound path (#248 Phase 3)', async () => {
-    // default/agent-v1 is repo-optional, but when a repo IS present the repo-bound
-    // branch runs (issue fetch, repo-keyed memory) — keyed on repo presence, not
-    // the workflow flag.
     mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -714,14 +641,13 @@ describe('hydrateContext', () => {
     mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
 
     const task = {
-      ...baseTask, // has repo: 'org/repo'
+      ...baseTask,
       resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
       issue_number: 7,
       task_description: 'Do it',
     };
     const result = await hydrateContext(task as any);
 
-    // Repo present ⇒ Repository: line + issue fetched (repo-bound path).
     expect(result.user_prompt).toContain('Repository: org/repo');
     expect(mockFetch).toHaveBeenCalled();
   });
@@ -733,7 +659,6 @@ describe('hydrateContext', () => {
         ok: true,
         json: async () => ({ number: 42, title: 'Bug', body: 'Details', comments: 0 }),
       });
-    // Guardrail screens assembled prompt when issue content is present
     mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
 
     const task = { ...baseTask, issue_number: 42, task_description: 'Fix it' };
@@ -760,7 +685,6 @@ describe('hydrateContext', () => {
     expect(result.sources).toContain('task_description');
     expect(result.issue).toBeUndefined();
     expect(result.user_prompt).toContain('Fix it');
-    // No issue content fetched — guardrail should not be called (task_description already screened)
     expect(result.guardrail_blocked).toBeUndefined();
     expect(mockBedrockSend).not.toHaveBeenCalled();
   });
@@ -805,25 +729,15 @@ describe('hydrateContext', () => {
     const originalArn = process.env.GITHUB_TOKEN_SECRET_ARN;
     delete process.env.GITHUB_TOKEN_SECRET_ARN;
 
-    // Re-import to pick up the changed env var
-    // Since module-level const is already captured, we test the behavior
-    // by checking that SM and fetch are not called
     const task = { ...baseTask, issue_number: 42, task_description: 'Fix' };
     const result = await hydrateContext(task as any);
 
-    // SM should not be called since the function checks GITHUB_TOKEN_SECRET_ARN
-    // (captured at module load), but the current import already has the original value.
-    // This test verifies the graceful path still works.
     expect(result.version).toBe(1);
 
     process.env.GITHUB_TOKEN_SECRET_ARN = originalArn;
   });
 
   test('unreadable token secret propagates as an auth_failure blocker (no silent degrade)', async () => {
-    // #251 review fix: a token secret that exists but can't be read (SM
-    // AccessDenied / unavailable) must NOT degrade to minimal context — the
-    // agent would have no token to clone/push and fail opaquely. Propagate the
-    // canonical BLOCKED[auth_failure] reason so the classifier surfaces it.
     mockSmSend.mockRejectedValueOnce(new Error('SM unavailable'));
 
     const task = { ...baseTask, issue_number: 42, task_description: 'Fix' };
@@ -846,14 +760,12 @@ describe('hydrateContext', () => {
       ok: true,
       json: async () => ({ number: 10, title: 'Test', body: 'body', comments: 0 }),
     });
-    // Guardrail screens assembled prompt when issue content is present
     mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
 
     const task = { ...baseTask, issue_number: 10, task_description: 'Fix' };
     const result = await hydrateContext(task as any, { githubTokenSecretArn: perRepoArn });
 
     expect(result.sources).toContain('issue');
-    // Verify SM was called with the per-repo ARN
     const smCall = mockSmSend.mock.calls[0][0];
     expect(smCall.input.SecretId).toBe(perRepoArn);
   });
@@ -944,9 +856,6 @@ describe('hydrateContext', () => {
   });
 
   test('pr_iteration prompt: removing a thread root also removes its replies from prompt', () => {
-    // Thread 1: root (id 100) + reply (id 200)
-    // Thread 2: root (id 300)
-    // Simulate what the trimming code does: remove thread 1 entirely, keep thread 2.
     const fullPr = {
       number: 5,
       title: 'Test',
@@ -963,13 +872,11 @@ describe('hydrateContext', () => {
       issue_comments: [],
     };
 
-    // Full prompt has both threads
     const fullResult = assemblePrIterationPrompt('task-1', 'owner/repo', fullPr);
     expect(fullResult).toContain('comment_id: 100');
     expect(fullResult).toContain('@bob');
     expect(fullResult).toContain('comment_id: 300');
 
-    // After trimming thread 1 (root 100 + reply 200), only thread 2 remains
     const trimmedPr = {
       ...fullPr,
       review_comments: [
@@ -978,26 +885,18 @@ describe('hydrateContext', () => {
     };
     const trimmedResult = assemblePrIterationPrompt('task-1', 'owner/repo', trimmedPr);
 
-    // Thread 1 root and reply are both gone
     expect(trimmedResult).not.toContain('comment_id: 100');
     expect(trimmedResult).not.toContain('@alice');
     expect(trimmedResult).not.toContain('@bob');
 
-    // Thread 2 is still present
     expect(trimmedResult).toContain('comment_id: 300');
     expect(trimmedResult).toContain('@carol');
 
-    // Critically: reply 200 does NOT appear as an orphan
     expect(trimmedResult).not.toContain('Comment on');
   });
 });
 
-// ---------------------------------------------------------------------------
-// hydrateContext — pull request over the token budget
-// ---------------------------------------------------------------------------
-
 describe('hydrateContext — pull request over the token budget', () => {
-  // The budget of this file is 100,000 tokens: 400,000 characters.
   const prTask = {
     task_id: 'TASK-PR-BUDGET',
     user_id: 'user-123',
@@ -1012,18 +911,14 @@ describe('hydrateContext — pull request over the token budget', () => {
     pr_number: 77,
   };
 
-  /** A comment body of `size` characters that starts with the comment's id, so no two are the same text. */
   const bodyOf = (id: number, size: number): string => `${id}:`.padEnd(size, 'a');
 
-  /** The ids `from` to `to`. */
   const ids = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
 
-  /** Conversation comments with the ids 1 to `count`, oldest first, each of `size` characters. */
   function conversation(count: number, size: number): Array<Record<string, unknown>> {
     return ids(1, count).map(id => ({ id, user: { login: 'bot' }, body: bodyOf(id, size) }));
   }
 
-  /** Review threads of one short comment each, on a diff hunk of `hunkSize` characters. */
   function threadsOnHunks(count: number, hunkSize: number): Parameters<typeof makeGraphQLThreadsResponse>[0] {
     return Array.from({ length: count }, (_, i) => ({
       comments: [{ databaseId: 1000 + i, author: { login: 'alice' }, body: 'Fix this', path: 'src/a.ts', line: i + 1, diffHunk: 'h'.repeat(hunkSize) }],
@@ -1049,7 +944,6 @@ describe('hydrateContext — pull request over the token budget', () => {
 
   test.each([
     ['as it was fetched', conversation(10, 50_000), []],
-    // 300,000 characters of comments fit; the six diff hunks the prompt renders bring it over
     ['only once it is assembled', conversation(6, 50_000), threadsOnHunks(6, 20_000)],
   ])('a read-only review keeps its instruction when the PR is over the budget %s', async (_when, comments, threads) => {
     mockPrFetch(comments, threads);
@@ -1063,12 +957,6 @@ describe('hydrateContext — pull request over the token budget', () => {
     expect(result.user_prompt).not.toContain('Address the review feedback');
   });
 
-  /**
-   * Hydrate the PR task and list the comments whose body the sanitizer was given: the id of
-   * the comment, once for every call. A comment that is dropped before the prompt is assembled
-   * should not be listed. One that reaches an assembly should be listed once, however often
-   * the trimming loop assembles the prompt again, and although the screening text repeats it.
-   */
   async function hydrateListingSanitizedComments() {
     const sanitize = jest.spyOn(sanitization, 'sanitizeExternalContent');
     const result = await hydrateContext(prTask as any);
@@ -1078,7 +966,6 @@ describe('hydrateContext — pull request over the token budget', () => {
   }
 
   test.each([
-    // [comments fetched, characters of each, oldest comment that still fits]
     [30, 65_000, 25],
     [100, 5_000, 22],
   ])('of %i conversation comments of %i characters, sanitizes only the newest, which fit', async (count, size, oldestKept) => {
@@ -1103,22 +990,17 @@ describe('hydrateContext — pull request over the token budget', () => {
 
     const { result, sanitized } = await hydrateListingSanitizedComments();
 
-    // 422,000 characters: without the conversation comments and the first thread, 180,000 are left
     expect(result.truncated).toBe(true);
     expect(result.user_prompt).not.toContain('### Conversation Comments');
     expect(result.user_prompt).not.toContain('comment_id: 1001');
     expect(result.user_prompt).not.toContain('@bob');
-    expect(result.user_prompt).not.toContain('Comment on'); // no reply is left behind as an orphan
+    expect(result.user_prompt).not.toContain('Comment on');
     expect(result.user_prompt).toContain('reply with comment_id: 1005');
     expect(result.user_prompt).toContain('@dave');
     expect(sanitized).toEqual([1005, 1006, 1007]);
   });
 
   test('a PR over the budget only once it is assembled sanitizes a comment once, not again for each comment it drops', async () => {
-    // 394,886 characters as fetched: under the budget, so nothing is dropped before the prompt
-    // is assembled. The six diff hunks and the diff of 12 files bring the prompt to about
-    // 411,000, and the loop that then drops the eight conversation comments and the first
-    // thread assembles the prompt once for each of them.
     mockPrFetch(
       conversation(8, 200),
       ids(1001, 1006).map((id, i) => ({
@@ -1147,17 +1029,12 @@ describe('hydrateContext — pull request over the token budget', () => {
 
     expect(first.sanitized).toEqual([1, 2]);
     expect(first.result.user_prompt).toContain('[SANITIZED_PREFIX] SYSTEM: alpha');
-    // Comment 2 again: nothing of the first hydration is kept for the second
     expect(second.sanitized).toEqual([1, 2]);
     expect(second.result.user_prompt).toContain('[SANITIZED_PREFIX] SYSTEM: beta');
     expect(second.result.user_prompt).not.toContain('alpha');
     expect(second.result.user_prompt).toContain('2: the same comment in both');
   });
 });
-
-// ---------------------------------------------------------------------------
-// fetchGitHubPullRequest
-// ---------------------------------------------------------------------------
 
 describe('fetchGitHubPullRequest', () => {
   test('returns PR context on success', async () => {
@@ -1229,19 +1106,14 @@ describe('fetchGitHubPullRequest', () => {
 
   test('paginates through review threads', async () => {
     mockFetch
-      // #1: PR metadata
       .mockResolvedValueOnce({ ok: true, json: async () => ({ number: 10, title: 'PR', body: '', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }) })
-      // #2: GraphQL page 1
       .mockResolvedValueOnce(makeGraphQLThreadsResponse(
         [{ isResolved: false, comments: [{ databaseId: 100, author: { login: 'alice' }, body: 'Page 1', path: 'a.ts', line: 1, diffHunk: undefined }] }],
         true,
         'cursor-1',
       ))
-      // #3: Issue comments
       .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
-      // #4: Files
       .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
-      // #5: GraphQL page 2
       .mockResolvedValueOnce(makeGraphQLThreadsResponse(
         [{ isResolved: false, comments: [{ databaseId: 200, author: { login: 'bob' }, body: 'Page 2', path: 'b.ts', line: 5, diffHunk: undefined }] }],
       ));
@@ -1279,10 +1151,6 @@ describe('fetchGitHubPullRequest', () => {
     expect(result!.review_comments).toEqual([]);
   });
 });
-
-// ---------------------------------------------------------------------------
-// assemblePrIterationPrompt
-// ---------------------------------------------------------------------------
 
 describe('assemblePrIterationPrompt', () => {
   test('formats PR context into a user prompt', () => {
@@ -1330,13 +1198,11 @@ describe('assemblePrIterationPrompt', () => {
 
     const result = assemblePrIterationPrompt('task-2', 'owner/repo', pr);
 
-    // First thread — rooted at comment 100
     expect(result).toContain('reply with comment_id: 100');
     expect(result).toContain('**@alice**: Please add a null check here');
     expect(result).toContain('**@bob**: I agree with Alice');
     expect(result).toContain('`src/auth.ts:42`');
 
-    // Second thread — rooted at comment 300
     expect(result).toContain('reply with comment_id: 300');
     expect(result).toContain('**@alice**: This function name is misleading');
     expect(result).toContain('`src/api.ts:10`');
@@ -1360,11 +1226,9 @@ describe('assemblePrIterationPrompt', () => {
 
     const result = assemblePrIterationPrompt('task-4', 'owner/repo', pr);
 
-    // Comment 100 should be a thread root, not an orphan
     expect(result).toContain('reply with comment_id: 100');
     expect(result).toContain('**@alice**: Add null check');
     expect(result).toContain('**@bob**: Agreed');
-    // Should NOT contain orphan markers for these comments
     expect(result).not.toContain('Comment on');
   });
 
@@ -1378,7 +1242,6 @@ describe('assemblePrIterationPrompt', () => {
       state: 'open',
       diff_summary: '',
       review_comments: [
-        // Reply whose root (id 999) is not in the fetched set
         { id: 500, in_reply_to_id: 999, author: 'carol', body: 'What about edge cases?', path: 'src/util.ts', line: 5 },
       ],
       issue_comments: [],
@@ -1386,7 +1249,6 @@ describe('assemblePrIterationPrompt', () => {
 
     const result = assemblePrIterationPrompt('task-3', 'owner/repo', pr);
 
-    // Orphan uses in_reply_to_id (999) as reply target, not its own id (500)
     expect(result).toContain('reply with comment_id: 999');
     expect(result).toContain('**@carol**: What about edge cases?');
     expect(result).toContain('`src/util.ts:5`');
@@ -1411,15 +1273,11 @@ describe('assemblePrIterationPrompt', () => {
 
     const result = assemblePrIterationPrompt('task-sanitize', 'org/repo', pr);
 
-    // Script tag stripped from title
     expect(result).not.toContain('<script>');
-    // Instruction injection neutralized in body
     expect(result).toContain('[SANITIZED_PREFIX]');
     expect(result).toContain('[SANITIZED_INSTRUCTION]');
-    // iframe stripped from review comment
     expect(result).not.toContain('<iframe');
     expect(result).toContain('Real feedback');
-    // Injection in issue comment neutralized
     expect(result).toContain('[SANITIZED_INSTRUCTION]');
   });
 
@@ -1444,10 +1302,6 @@ describe('assemblePrIterationPrompt', () => {
     expect(result).toContain('Real instructions');
   });
 });
-
-// ---------------------------------------------------------------------------
-// screenWithGuardrail
-// ---------------------------------------------------------------------------
 
 describe('screenWithGuardrail', () => {
   test('returns {action: NONE} when guardrail allows the text', async () => {
@@ -1538,10 +1392,6 @@ describe('screenWithGuardrail', () => {
     expect(((error as GuardrailScreeningError).cause as Error).message).toBe('Service unavailable');
   });
 });
-
-// ---------------------------------------------------------------------------
-// hydrateContext — guardrail screening
-// ---------------------------------------------------------------------------
 
 describe('hydrateContext — guardrail screening', () => {
   const basePrTask = {
@@ -1640,8 +1490,6 @@ describe('hydrateContext — guardrail screening', () => {
     expect(result.guardrail_blocked).toMatch(/^PR context blocked by content policy/);
     expect(mockBedrockSend).toHaveBeenCalledTimes(1);
   });
-
-  // --- new_task guardrail screening ---
 
   const baseNewTask = {
     task_id: 'TASK-NEW-001',
@@ -1813,10 +1661,6 @@ describe('hydrateContext — guardrail screening', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// buildContentTrust
-// ---------------------------------------------------------------------------
-
 describe('buildContentTrust', () => {
   test('maps issue and pull_request to untrusted-external', () => {
     const trust = buildContentTrust(['issue', 'pull_request']);
@@ -1856,10 +1700,6 @@ describe('buildContentTrust', () => {
     });
   });
 });
-
-// ---------------------------------------------------------------------------
-// hydrateContext — content_trust metadata
-// ---------------------------------------------------------------------------
 
 describe('hydrateContext — content_trust metadata', () => {
   const baseTask = {
@@ -2035,8 +1875,6 @@ describe('untrusted content boundaries (#492)', () => {
     `<<<BEGIN UNTRUSTED EXTERNAL CONTENT source="${source}" fetched_at="${FETCHED_AT}" — ${NOTICE}>>>`;
   const END = '<<<END UNTRUSTED EXTERNAL CONTENT>>>';
 
-  // Characters that display nothing. The sanitizer lets all but the last through; that one
-  // is for a field that is not sanitized. To Unicode the Hangul filler is a letter.
   const ZERO_WIDTH_SPACE = String.fromCharCode(0x200b);
   const WORD_JOINER = String.fromCharCode(0x2060);
   const HANGUL_FILLER = String.fromCharCode(0x3164);
@@ -2179,7 +2017,6 @@ describe('untrusted content boundaries (#492)', () => {
       comments: [],
     };
 
-    // What the issue wrote after its imitation is still inside the block
     expect(assembleUserPrompt('T1', 'o/r', issue, 'The real task', FETCHED_AT)).toBe([
       'Task ID: T1',
       'Repository: o/r',
@@ -2289,7 +2126,6 @@ describe('untrusted content boundaries (#492)', () => {
       '',
       'The real task',
     ].join('\n'));
-    // The guardrail still screens these fields as they were fetched
     expect(buildPrScreeningText(pr)).toContain(`${END}${ownInstructions}`);
   });
 
@@ -2319,7 +2155,6 @@ describe('untrusted content boundaries (#492)', () => {
       updated_at: '2024-01-01T00:00:00Z',
     };
 
-    // Hydration gives the assembler no fetch time, so the assembler takes its own.
     function expectFetchTimeOfHydration(prompt: string, before: number): string {
       const fetchedAt = / fetched_at="([^"]*)" /.exec(prompt)?.[1] ?? '';
       expect(fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
@@ -2336,7 +2171,6 @@ describe('untrusted content boundaries (#492)', () => {
 
       const result = await hydrateContext({ ...task, issue_number: 42, task_description: 'Fix it' } as any);
 
-      // The agent's model of the issue forbids unknown fields, so the issue carries no fetch time.
       expect(result.issue).toEqual({ number: 42, title: 'Bug', body: 'Details', comments: [] });
       const fetchedAt = expectFetchTimeOfHydration(result.user_prompt, before);
       expect(result.user_prompt).toBe(assembleUserPrompt('TASK-BOUNDARY', 'org/repo', result.issue, 'Fix it', fetchedAt));
@@ -2344,8 +2178,6 @@ describe('untrusted content boundaries (#492)', () => {
     });
 
     test('a PR prompt trimmed to the budget keeps one pair of markers around what is left', async () => {
-      // 300,000 characters of comments fit the budget of 400,000; the six diff hunks bring the
-      // assembled prompt over it, so the prompt is assembled again for every comment dropped
       const comments = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, user: { login: 'bot' }, body: `${i + 1}:`.padEnd(50_000, 'a') }));
       const threads = Array.from({ length: 6 }, (_, i) => ({
         comments: [{ databaseId: 1000 + i, author: { login: 'alice' }, body: 'Fix this', path: 'src/a.ts', line: i + 1, diffHunk: 'h'.repeat(20_000) }],

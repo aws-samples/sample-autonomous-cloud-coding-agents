@@ -21,26 +21,14 @@ import { CfnResource, IAspect } from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { IConstruct } from 'constructs';
 
-/** ABCA solution-attribution id (#319). Mirrors the deploy-time token in
- *  `main.ts` and the per-surface `ua` helpers. */
 const SOLUTION_ID = 'uksb-wt64nei4u6';
 
-/** Documented app-id value cap. Over-limit only warns (never truncates), but
- *  we clip defensively so a long stack name can't produce a noisy log. */
+// The AWS SDK's documented cap on an app-id value; a longer one only logs a warning.
 const APP_ID_MAX_LEN = 50;
 
-/** UA-token charset; `#` is the scheme separator, so it is excluded here. */
 const UA_TOKEN_UNSAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/g;
 
-/**
- * Sanitize an app-id value while preserving the `#` solution separator.
- *
- * The app-id value charset (`UA_VALUE_ESCAPE_REGEX` in the SDK) includes `#`,
- * which is the canonical `uksb-wt64nei4u6#{stack}` separator. Sanitizing the
- * whole string with `UA_TOKEN_UNSAFE` (which excludes `#`) would mangle that
- * separator to `-`, so we split on `#`, sanitize each segment independently,
- * and rejoin — preserving `#` boundaries while stripping any other unsafe char.
- */
+// The app-id value charset (`UA_VALUE_ESCAPE_REGEX` in the SDK) includes `#`.
 function sanitizeAppId(value: string): string {
   return value
     .split('#')
@@ -48,26 +36,16 @@ function sanitizeAppId(value: string): string {
     .join('#');
 }
 
-/**
- * Clip an app-id value to the documented cap, then drop a `#` left dangling at
- * the tail by the clip. Internal `#` separators are untouched — only a trailing
- * one (produced when the 50-char boundary lands right after a separator) is
- * stripped, so the SDK never renders a cosmetic `app/…#`.
- */
 function clipAppId(value: string): string {
   const clipped = value.slice(0, APP_ID_MAX_LEN);
   return clipped.endsWith('#') ? clipped.slice(0, -1) : clipped;
 }
 
 /**
- * Build the `AWS_SDK_UA_APP_ID` value for a deployment.
- *
- * `uksb-wt64nei4u6#{stackName}` — the SDK reads this env var natively and
- * renders `app/uksb-wt64nei4u6#{stackName}` on every request, so no client
- * code is involved. CloudFormation stack names are `[A-Za-z0-9-]` (already a
- * subset of the app-id charset), but a non-CFN override value is sanitized
- * defensively. Both branches preserve `#` as the solution separator (only
- * other unsafe chars become `-`), then clip to the documented 50-char cap.
+ * Build the `AWS_SDK_UA_APP_ID` value for a deployment:
+ * `uksb-wt64nei4u6#{stackName}`, or the sanitized `override`, clipped to 50
+ * characters. The SDK reads this env var natively and renders it as the
+ * `app/` segment of every request.
  *
  * Returns `undefined` for an explicit empty override — the caller then omits
  * the env var entirely, which is the customer opt-out (no `app/` segment).
@@ -82,15 +60,8 @@ export function buildAppId(stackName: string, override?: string): string | undef
 }
 
 /**
- * Aspect that sets `AWS_SDK_UA_APP_ID` on every Lambda function in scope so
- * the SDK-native `app/` solution-attribution segment rides every outbound AWS
- * API call — current and future functions alike, without per-function wiring
- * (the structural guarantee a hand-threaded env var can't make). The
- * per-surface `ABCA_COMPONENT` (the `md/` label) is still set on each
- * construct's env block; this aspect owns only the universal app-id.
- *
- * Applied once at the stack level. A `undefined` appId (empty override) makes
- * this a no-op, so the customer opt-out leaves no `app/` segment anywhere.
+ * Aspect that sets `AWS_SDK_UA_APP_ID` on every Lambda function in scope.
+ * An `undefined` appId makes it a no-op.
  */
 export class SolutionUaAspect implements IAspect {
   public constructor(private readonly appId: string | undefined) {}
@@ -112,14 +83,8 @@ export class SolutionUaAspect implements IAspect {
 
 /**
  * Aspect that sets `ABCA_COMPONENT` (the `md/` solution-attribution label) on
- * every Lambda function in scope. Applied at a construct scope so all of an
- * integration's functions share one component label (`webhook`, …) without
- * hand-editing each function's `environment` block — and any future function
- * added to that construct is covered automatically.
- *
- * Apply this only to scopes whose functions all share the one label; surfaces
- * that set `ABCA_COMPONENT` directly in their env block (task-api `api`,
- * orchestrator/reconcilers `orchestr`) do not use this aspect.
+ * every Lambda function in scope. Apply it only to scopes whose functions all
+ * share the one label.
  */
 export class ComponentUaAspect implements IAspect {
   public constructor(private readonly component: string) {}

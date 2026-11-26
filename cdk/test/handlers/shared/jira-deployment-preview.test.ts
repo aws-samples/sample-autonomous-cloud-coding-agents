@@ -97,7 +97,6 @@ test('standalone Jira task posts ADF screenshot and live links on its stored iss
 });
 
 test('duplicate and concurrent deployments create only one Jira comment', async () => {
-  // Exactly two deliveries exercise the claim race.
   // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
   await Promise.all([deliver(), deliver()]);
   await deliver();
@@ -192,7 +191,6 @@ test('the standalone claim is conditional on an absent claim attribute', async (
   expect(claim.input.ConditionExpression).toBe('attribute_exists(task_id) AND attribute_not_exists(jira_preview_claimed)');
 });
 
-// A stored `false` would block every later delivery, as `true` does.
 const _claimIsTrueOrAbsent: [Exclude<TaskRecord['jira_preview_claimed'], true | undefined>] extends [never] ? true : never = true;
 
 test('an iteration with a synthetic reply target never calls Jira', async () => {
@@ -220,8 +218,6 @@ test('untrusted screenshots are rejected before claiming or posting', async () =
 });
 
 test('an untrusted screenshot does not keep an iteration from refreshing its status comment', async () => {
-  // The writer is mocked here. The real one leaves out a URL that is not allowed,
-  // which jira-iteration-comment.test.ts covers.
   const task = {
     ...original,
     channel_metadata: { ...original.channel_metadata, trigger_comment_id: 'trigger', iteration_reply_comment_id: '123' },

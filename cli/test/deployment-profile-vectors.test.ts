@@ -24,10 +24,6 @@ import { conflictingContextOverrides } from '../src/commands/setup';
 import { DeploymentFeatures, deploymentProfileCandidates, parseDeploymentProfile } from '../src/deployment-profile';
 import { CliError } from '../src/errors';
 
-/**
- * The CLI carries its own copy of the profile logic, and the CDK suite runs the same vectors
- * (#1016). Their shape is described in ``contracts/deployment-profile-vectors/README.md``.
- */
 const VECTOR_DIR = path.join(__dirname, '..', '..', 'contracts', 'deployment-profile-vectors');
 const SOURCE = 'abca.deployment.json';
 
@@ -59,7 +55,6 @@ describe('deployment-profile vectors: parsing a profile', () => {
     if (expected.error === undefined) {
       expect(parseDeploymentProfile(profile, SOURCE)).toEqual(expected.profile);
     } else {
-      // A CliError, not its text: toThrow matches a string as a fragment, and an error by its class and whole message.
       expect(() => parseDeploymentProfile(profile, SOURCE)).toThrow(new CliError(`Invalid deployment profile ${SOURCE}: ${expected.error}`));
     }
   });
@@ -73,8 +68,6 @@ describe('deployment-profile vectors: context switches', () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  // The CLI resolves no selection of its own: setup refuses to deploy while persistent
-  // context holds a switch that synthesis would let override the selection.
   test.each(load<ContextCase>('context.json'))('$name', ({ features, context, expected }) => {
     fs.writeFileSync(path.join(root, 'cdk', 'cdk.context.json'), JSON.stringify(context));
     expect(conflictingContextOverrides(root, features))

@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-// Which Cognito tokens the unified authorizer lets in. api-key-authorizer.test.ts
-// replaces the verifier with a mock; here the real aws-jwt-verify checks tokens
-// signed with a key pair made when the test runs, so the rules themselves are
-// tested: one test per rule.
-
 import * as crypto from 'crypto';
 import type { APIGatewayRequestAuthorizerEvent } from 'aws-lambda';
 
@@ -35,9 +30,6 @@ const mockPoolKeys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const mockKeyId = 'pool-key-1';
 const mockDownloadKeys = jest.fn().mockRejectedValue(new Error('this test must not download signing keys'));
 
-// The real verifier. Its key lookup is answered here: the public key of the
-// pair above is loaded up front, and a download (the only network call the
-// verifier can make) is refused.
 jest.mock('aws-jwt-verify', () => {
   const actual = jest.requireActual('aws-jwt-verify');
   const { SimpleJwksCache } = jest.requireActual('aws-jwt-verify/jwk');
@@ -65,7 +57,6 @@ import { handler } from '../../src/handlers/api-key-authorizer';
 
 const POOL_ISSUER = 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool';
 
-/** A Cognito id token of the pool for the CLI client, signed with the pool's key unless another is given. */
 function idToken(claims: Record<string, unknown> = {}, signingKey: crypto.KeyObject = mockPoolKeys.privateKey): string {
   const encode = (part: object): string => Buffer.from(JSON.stringify(part)).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
@@ -76,7 +67,6 @@ function idToken(claims: Record<string, unknown> = {}, signingKey: crypto.KeyObj
   return `${signed}.${crypto.sign('sha256', Buffer.from(signed), signingKey).toString('base64url')}`;
 }
 
-/** Run the authorizer on a bearer token: its decision, and what it logged. */
 async function authorize(token: string): Promise<{ effect: string; principalId: string; logged: string }> {
   const stdout = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
   const result = await handler({
@@ -98,10 +88,6 @@ describe('api-key-authorizer — Cognito tokens accepted on the JWT path', () =>
     expect(await authorize(idToken())).toMatchObject({ effect: 'Allow', principalId: 'user-1' });
   });
 
-  // Each refusal below differs from the accepted token in one respect and is
-  // checked with its reason: a token refused for another reason proves nothing.
-
-  // The audience rule: only a token of the app client named in APP_CLIENT_ID.
   test('Deny for an id token that another app client of the pool issued', async () => {
     const { effect, logged } = await authorize(idToken({ aud: 'another-client' }));
     expect(effect).toBe('Deny');

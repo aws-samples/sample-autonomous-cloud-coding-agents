@@ -17,31 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Is each onboarded Linear workspace's OAuth authorization still usable?
- *
- * Why this needs its own check: when a workspace's authorization dies, the
- * platform goes SILENT rather than loud. The webhook processor can't resolve a
- * token, logs "workspace not resolvable — dropping event", and returns — so a
- * user applies the trigger label and gets nothing at all: no comment, no
- * reaction, no state change. The only evidence is a CloudWatch line nobody is
- * watching. Observed 2026-07-25: a workspace's authorization was revoked
- * upstream and every event silently dropped for over an hour.
- *
- * The distinction this check exists to make: an EXPIRED access token is normal
- * and self-healing (the resolver refreshes it on the next call), whereas a
- * REVOKED authorization needs a human to re-authorize. Both look like "auth
- * broken" from the outside, so reporting "expired" as a failure would cry wolf
- * on every idle workspace, and reporting "revoked" as fine would hide a total
- * outage. So we ask the surface, and only treat a rejected REFRESH as a failure.
- *
- * Read-only BY DEFAULT: it probes with the stored access token, and only when that is
- * rejected does it distinguish expiry from revocation using the locally-known expiry.
- * Supplying `verifyRefresh` opts into a real rotation — `verifyLinearRefreshAndPersist`
- * consumes the refresh token and writes the rotated bundle back — which is why it is a
- * caller-supplied option rather than the default.
- */
-
 import {
   GetSecretValueCommand,
   PutSecretValueCommand,
@@ -53,26 +28,18 @@ import { verifyLinearRefreshAndPersist } from './linear-oauth';
 import { linearVaultUserId, mintLinearTokenFromVault, type VaultMintResult } from './linear-vault';
 import { makeClient } from './ua';
 
-/** Linear's GraphQL endpoint — a cheap authenticated probe target. */
 const LINEAR_GRAPHQL_ENDPOINT = 'https://api.linear.app/graphql';
 
-/** Smallest authenticated query that proves a token is live. */
 const VIEWER_PROBE_QUERY = '{ viewer { id } }';
 
-/** How each workspace's authorization looks right now. */
 export type LinearAuthState =
   /** Access token accepted — the workspace is fully working. */
   | 'active'
   /**
-   * INDETERMINATE, and deliberately never reported as healthy. The access token
-   * is rejected and expired and a refresh token is stored — which is BOTH the
-   * normal idle-workspace shape AND the exact shape of a workspace whose refresh
-   * token has been revoked (live-caught 2026-07-25: the access token had expired
-   * ~48 minutes earlier and the refresh token was dead, and this check reported
-   * it as fine).
-   *
-   * The shallow probe cannot separate those two, so it must not pretend to. Pass
-   * ``verifyRefresh`` to resolve it definitively — see
+   * INDETERMINATE, and never reported as healthy. The access token is rejected
+   * and expired and a refresh token is stored — which is both the normal
+   * idle-workspace shape and the shape of a workspace whose refresh token has
+   * been revoked. Pass ``verifyRefresh`` to resolve it — see
    * {@link CheckLinearAuthOptions.verifyRefresh}.
    */
   | 'expired_indeterminate'
@@ -95,30 +62,17 @@ export interface LinearWorkspaceAuthHealth {
   readonly detail: string;
 }
 
-/** Registry row fields this check reads. */
 interface RegistryRow {
   readonly linear_workspace_id?: string;
   readonly workspace_slug?: string;
   readonly oauth_secret_arn?: string;
   readonly status?: string;
-  /** Stamped by the platform when it detected the authorization was dead. */
   readonly revoked_at?: string;
   readonly revoked_reason?: string;
-  /**
-   * Set when the workspace is managed by the AgentCore Identity token vault.
-   *
-   * Read here because the Secrets-Manager bundle is NOT the credential for these
-   * workspaces: a vault onboarding writes no access token by design, so judging
-   * them by the bundle reported every healthy vault workspace as `revoked` — and
-   * this report is what an operator consults to explain a latched row.
-   */
   readonly provider_name?: string;
-  /** Subject the vault grant was bound to at consent time. */
   readonly vault_user_id?: string;
 }
 
-/** The stored-secret fields this check reads. Deliberately narrow: the token
- *  values are used only to make one probe call and are never returned. */
 interface StoredToken {
   readonly access_token?: string;
   readonly refresh_token?: string;
@@ -126,7 +80,6 @@ interface StoredToken {
   readonly workspace_slug?: string;
 }
 
-/** Probe outcome, kept separate from the verdict so the mapping is testable. */
 export type ProbeResult = 'accepted' | 'rejected' | 'error';
 
 /**
@@ -134,30 +87,20 @@ export type ProbeResult = 'accepted' | 'rejected' | 'error';
  * ``expired_indeterminate``.
  *
  * ``refreshed`` means the grant is alive AND the rotated token was persisted.
- * That persistence is not optional: Linear rotates the refresh token on every
- * use, so a verifier that refreshes without saving the result destroys the
- * workspace's token chain — which is exactly how an ad-hoc probe stranded a
- * healthy workspace on 2026-07-25. A verifier that cannot persist must not
- * refresh at all.
+ * Linear rotates the refresh token on every use, so a verifier that cannot
+ * persist must not refresh at all.
  */
 export type RefreshVerifyResult = 'refreshed' | 'rejected' | 'error';
 
-/**
- * Attempt the refresh for one workspace and persist the rotation. Injected
- * rather than implemented here so this module keeps doing one job (reporting),
- * the destructive-if-done-wrong half is written once beside the other OAuth
- * write paths, and tests can supply a fake.
- */
+/** Attempt the refresh for one workspace and persist the rotation. */
 export type LinearRefreshVerifier = (workspace: {
   readonly workspaceId: string;
   readonly oauthSecretArn: string;
 }) => Promise<RefreshVerifyResult>;
 
-/** Ask the surface whether an access token is still accepted. Injectable so
- *  tests don't reach the network. */
+/** Ask the surface whether an access token is still accepted. */
 export type LinearProbe = (accessToken: string) => Promise<ProbeResult>;
 
-/** Default probe: a minimal authenticated GraphQL query. */
 const probeLinearAccessToken: LinearProbe = async (accessToken) => {
   try {
     const response = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
@@ -167,9 +110,7 @@ const probeLinearAccessToken: LinearProbe = async (accessToken) => {
     });
     if (response.status === 401 || response.status === 403) return 'rejected';
     if (!response.ok) return 'error';
-    // Linear reports auth failures as 200 + an errors array as well as via 401,
-    // so a body check is needed — treating a 200 as proof would report a dead
-    // token as healthy.
+    // Linear reports auth failures as 200 + an errors array as well as via 401.
     const body = await response.json() as { data?: { viewer?: { id?: string } } };
     return body?.data?.viewer?.id ? 'accepted' : 'rejected';
   } catch {
@@ -177,8 +118,8 @@ const probeLinearAccessToken: LinearProbe = async (accessToken) => {
   }
 };
 
-/** True when ``expiresAt`` is in the past (or unparseable, which we treat as
- *  expired — the resolver does the same, preferring an extra refresh). */
+/** True when ``expiresAt`` is in the past (or absent or unparseable, which we
+ *  treat as expired). */
 export function isExpired(expiresAt: string | undefined, now: Date = new Date()): boolean {
   if (!expiresAt) return true;
   const ts = new Date(expiresAt).getTime();
@@ -186,11 +127,6 @@ export function isExpired(expiresAt: string | undefined, now: Date = new Date())
   return now.getTime() >= ts;
 }
 
-/**
- * Map a probe result + stored-token facts to a verdict. Pure, so the
- * expired-vs-revoked distinction — the whole point of the check — is testable
- * without a network or a live workspace.
- */
 export function classifyAuthState(
   probe: ProbeResult,
   token: { hasRefreshToken: boolean; expiresAt?: string },
@@ -198,8 +134,6 @@ export function classifyAuthState(
 ): LinearAuthState {
   if (probe === 'accepted') return 'active';
   if (probe === 'error') return 'unknown';
-  // Rejected. An expired token with a refresh token in hand is the normal
-  // idle-workspace case and heals itself on the next resolve.
   if (isExpired(token.expiresAt, now) && token.hasRefreshToken) return 'expired_indeterminate';
   return 'revoked';
 }
@@ -207,22 +141,15 @@ export function classifyAuthState(
 export interface CheckLinearAuthOptions {
   readonly region: string;
   readonly registryTableName: string;
-  /** Injectable for tests. */
   readonly probe?: LinearProbe;
   /**
    * Supply this to RESOLVE ``expired_indeterminate`` instead of reporting it.
-   * Omitted by default because it performs a real token rotation: correct and
-   * non-destructive (it persists the new token, exactly as the platform's own
-   * refresh does), but a state-changing action an operator should opt into.
+   * It performs a real token rotation and persists the new token.
    */
   readonly verifyRefresh?: LinearRefreshVerifier;
   /**
-   * Mint the vault-managed token for one workspace, or null when the vault cannot
-   * produce one (consent required, provider missing, service unavailable).
-   *
-   * Supplied by the caller so this module keeps its narrow AWS surface and stays
-   * testable without an AgentCore stub. Omitted ⇒ vault-managed workspaces are
-   * reported `unknown` rather than judged by a bundle that is empty by design.
+   * Mint the vault-managed token for one workspace. Omitted ⇒ vault-managed
+   * workspaces are reported `unknown`.
    */
   readonly mintVaultToken?: (args: {
     readonly providerName: string;
@@ -234,8 +161,8 @@ export interface CheckLinearAuthOptions {
 
 /**
  * Report the authorization health of every workspace in the registry.
- * Never throws: a workspace that can't be assessed comes back ``unknown`` so
- * one broken row doesn't hide the others.
+ * A workspace that can't be assessed comes back ``unknown``; a failed read of
+ * the registry throws.
  */
 export async function checkLinearWorkspaceAuth(
   options: CheckLinearAuthOptions,
@@ -245,12 +172,6 @@ export async function checkLinearWorkspaceAuth(
   const now = options.now ?? new Date();
 
   const ddb = documentClient(region);
-  // Paginate. A single Scan page stops at DynamoDB's 1MB limit, so a registry
-  // large enough to span pages would silently omit workspaces — and an omitted
-  // REVOKED workspace is the one case that must never be missed, because the
-  // report would then read as clean. Any read failure propagates to the caller,
-  // which reports it as a warn rather than a pass (a partial scan is not a
-  // clean bill of health).
   const rows: RegistryRow[] = [];
   let exclusiveStartKey: Record<string, unknown> | undefined;
   do {
@@ -269,9 +190,6 @@ export async function checkLinearWorkspaceAuth(
     const workspaceId = row.linear_workspace_id ?? '(unknown)';
     const slug = row.workspace_slug ?? workspaceId;
 
-    // `bgagent linear remove-workspace` revokes the row with this reason. That is an
-    // admin choice, not a dead grant: reporting it as REVOKED fails doctor and tells the
-    // operator to re-authorize a workspace they deliberately removed.
     if (row.status === 'revoked' && row.revoked_reason === 'admin_removed') {
       out.push({
         workspaceId,
@@ -283,17 +201,6 @@ export async function checkLinearWorkspaceAuth(
       continue;
     }
     if (row.status === 'revoked') {
-      // The platform itself recorded this when a refresh was rejected, which is
-      // the authoritative signal — more reliable than anything this check can
-      // infer from a token, and it carries when it happened.
-      //
-      // With ONE exception. A `vault_consent_required` latch is not Linear refusing
-      // anything; it is an inference from the vault answering with an authorization
-      // URL, and this codebase has already shipped a bug that produced that answer
-      // spuriously. Taking it at face value here is what makes a wrong latch look
-      // confirmed — so when the vault can still be asked, ask it, and say plainly
-      // when the record and the live grant disagree. The runtime resolver re-probes
-      // the same rows for the same reason.
       const staleLatchSuspected = row.revoked_reason === 'vault_consent_required'
         && Boolean(row.provider_name) && Boolean(options.mintVaultToken);
       if (staleLatchSuspected) {
@@ -302,9 +209,6 @@ export async function checkLinearWorkspaceAuth(
           userId: row.vault_user_id,
           workspaceId,
         });
-        // Only a MINTED token overturns the record. `unavailable` leaves the recorded
-        // verdict standing, which is the conservative direction here: the row already
-        // says revoked, and a failure to re-probe is no evidence against it.
         if (reprobe.kind === 'token' && await probe(reprobe.accessToken) === 'accepted') {
           out.push({
             workspaceId,
@@ -334,13 +238,6 @@ export async function checkLinearWorkspaceAuth(
       });
       continue;
     }
-    // ─── Vault-managed workspaces ─────────────────────────────────────
-    // Assessed through the vault, in the same order the runtime resolver uses. A
-    // fresh vault onboarding deliberately stores NO access token — the vault holds
-    // the grant — so the Secrets-Manager checks below have nothing to read and
-    // concluded `revoked` for every healthy one of these. That was the worst place
-    // to be wrong: this report is what an operator opens to find out whether a
-    // latched row is genuinely dead.
     if (row.provider_name) {
       if (!options.mintVaultToken) {
         out.push({
@@ -358,11 +255,6 @@ export async function checkLinearWorkspaceAuth(
         workspaceId,
       });
       if (minted.kind === 'unavailable') {
-        // Not a verdict about the grant. `platform doctor` renders `revoked` as a hard
-        // fail whose remedy is `bgagent linear setup`, and a re-consent can replace the
-        // Linear installation — so calling a throttle or a missing permission "revoked"
-        // sends an operator to destroy a grant that works. Same choice this module
-        // already makes when it has no way to query the vault at all.
         out.push({
           workspaceId,
           workspaceSlug: slug,
@@ -383,11 +275,6 @@ export async function checkLinearWorkspaceAuth(
         continue;
       }
       const vaultToken = minted.accessToken;
-      // `hasRefreshToken: false` and no expiry: the vault owns renewal, so there is
-      // no `expired_indeterminate` case to land in — a minted token that Linear
-      // rejects is simply dead. Reporting it indeterminate would also point the
-      // operator at `--verify-refresh`, which only knows how to rotate a
-      // Secrets-Manager bundle this workspace does not have.
       const vaultState = classifyAuthState(await probe(vaultToken), { hasRefreshToken: false }, now);
       out.push({
         workspaceId,
@@ -441,18 +328,11 @@ export async function checkLinearWorkspaceAuth(
       now,
     );
 
-    // Resolve the one state the shallow probe cannot decide. Only attempted when
-    // the operator opted in, and only for that state — never for a workspace
-    // already known active or revoked, so a healthy grant is never rotated just
-    // to produce a report.
     if (state === 'expired_indeterminate' && options.verifyRefresh) {
       const verified = await options.verifyRefresh({
         workspaceId,
         oauthSecretArn: row.oauth_secret_arn,
       });
-      // A verifier error leaves the state indeterminate rather than guessing: it
-      // must not turn a transient network failure into a "revoked" verdict that
-      // sends an operator to re-authorize a working workspace.
       if (verified === 'refreshed') state = 'active';
       else if (verified === 'rejected') state = 'revoked';
     }
@@ -468,7 +348,6 @@ export async function checkLinearWorkspaceAuth(
   return out;
 }
 
-/** Operator-facing wording per state, remedy included where one applies. */
 function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: string): string {
   switch (state) {
     case 'active':
@@ -493,13 +372,10 @@ function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: s
  * The production vault minter for {@link CheckLinearAuthOptions.mintVaultToken}.
  *
  * Read-only with respect to the grant: `GetResourceOauth2Token` returns the cached
- * token and does not rotate or consume it, so unlike `--verify-refresh` this needs
- * no operator opt-in.
+ * token and does not rotate or consume it.
  *
  * The subject falls back to the derived `linear-workspace-<orgId>` form for
- * workspaces onboarded before it was recorded on the row — the same fallback the
- * Lambda resolver uses. Getting it wrong here does not fail loudly; it returns no
- * token, which this check would report as a dead workspace.
+ * workspaces onboarded before it was recorded on the row.
  */
 export function makeLinearVaultTokenMinter(
   region: string,
@@ -516,8 +392,7 @@ export function makeLinearVaultTokenMinter(
 /**
  * The production {@link LinearRefreshVerifier}: binds Secrets Manager to
  * {@link verifyLinearRefreshAndPersist}, which owns the refresh-and-save
- * sequencing (and the rule that a rotation which wasn't persisted is reported as
- * an error, never as health).
+ * sequencing.
  */
 export function makeLinearRefreshVerifier(region: string): LinearRefreshVerifier {
   const sm = makeClient(SecretsManagerClient, { region });

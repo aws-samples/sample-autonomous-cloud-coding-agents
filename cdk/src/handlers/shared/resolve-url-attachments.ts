@@ -17,22 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * URL attachment resolution: SSRF-safe fetch, screen, and upload to S3.
- *
- * During context hydration, URL attachments (type: 'url', screening: pending)
- * are fetched from their source URLs with full SSRF protection:
- *   1. DNS resolution pinning (resolve, validate IP, connect to resolved IP)
- *   2. Private IP range blocking
- *   3. Redirect validation (re-check IPs after each redirect, max 2)
- *   4. Timeout and size limits
- *
- * Fetched content is screened through the same Bedrock Guardrail pipeline as
- * inline/presigned attachments, then uploaded to S3.
- *
- * Tests: cdk/test/handlers/shared/resolve-url-attachments.test.ts
- */
-
 import { promises as dns } from 'dns';
 import type { IncomingHttpHeaders } from 'http';
 import * as https from 'https';
@@ -45,28 +29,13 @@ import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type AttachmentRecord } from './types';
 import { isAllowedMimeType, isPrivateIp, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateMagicBytes } from './validation';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const URL_FETCH_TIMEOUT_MS = 10_000;
-/**
- * Time for all URL attachments of one task together. The hosts behind the URLs
- * decide how long each request takes, and the orchestrator function that waits
- * for them has 60 s for its whole invocation (ORCHESTRATOR_TIMEOUT_SECONDS).
- */
 const URL_RESOLUTION_BUDGET_MS = 30_000;
 const MAX_REDIRECTS = 2;
 
-/** Inclusive lower bound for HTTP redirect status codes (3xx). */
 const HTTP_REDIRECT_STATUS_MIN = 300;
 
-/** Exclusive upper bound for HTTP redirect status codes (first non-3xx). */
 const HTTP_REDIRECT_STATUS_MAX = 400;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export interface ResolveUrlAttachmentsOptions {
   readonly s3Client: S3Client;
@@ -76,37 +45,20 @@ export interface ResolveUrlAttachmentsOptions {
   readonly githubInstallationDomain?: string;
 }
 
-/** What ssrfSafeFetch reads of one HTTP answer. */
 interface PinnedResponse {
   readonly status: number;
   readonly headers: IncomingHttpHeaders;
   readonly body: Buffer;
 }
 
-// ---------------------------------------------------------------------------
-// SSRF protection
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve DNS and validate the resolved IP is not in a private range.
- * Returns the resolved IP address for connection pinning.
- *
- * DNS resolution pinning prevents the DNS rebinding attack:
- *   1. Attacker's DNS returns a public IP on first lookup (passes validation)
- *   2. Attacker's DNS returns a private IP on second lookup (reaches internal services)
- *   3. By resolving once and pinning the connection to that IP, we eliminate the TOCTOU window
- */
 async function resolveAndValidate(hostname: string): Promise<string> {
   let addresses: string[];
 
   try {
-    // Try IPv4 first (more common for HTTP endpoints)
     addresses = await dns.resolve4(hostname);
   } catch (ipv4Err: any) {
-    // Only fall through to IPv6 for NODATA/NXDOMAIN — system errors should propagate
     const dnsNoRecordCodes = ['ENODATA', 'ENOTFOUND', 'NODATA'];
     if (!dnsNoRecordCodes.includes(ipv4Err?.code)) {
-      // System-level DNS failure (ENOMEM, ESERVFAIL, etc.) — do not mask
       try {
         addresses = await dns.resolve6(hostname);
       } catch (ipv6Err) {
@@ -116,7 +68,6 @@ async function resolveAndValidate(hostname: string): Promise<string> {
         );
       }
     } else {
-      // No IPv4 records — try IPv6
       try {
         addresses = await dns.resolve6(hostname);
       } catch (ipv6Err) {
@@ -134,7 +85,6 @@ async function resolveAndValidate(hostname: string): Promise<string> {
     );
   }
 
-  // Validate all resolved IPs — reject if any is private
   for (const ip of addresses) {
     const privateReason = isPrivateIp(ip);
     if (privateReason) {
@@ -145,31 +95,21 @@ async function resolveAndValidate(hostname: string): Promise<string> {
     }
   }
 
-  // Return the first valid IP for connection pinning
   return addresses[0];
 }
 
-/**
- * Build a pinned URL that connects to the resolved IP while preserving
- * the original path, query, and port. The Host header carries the real
- * hostname for TLS SNI / virtual-host routing.
- */
 function buildPinnedUrl(originalUrl: URL, resolvedIp: string): URL {
   const pinned = new URL(originalUrl.toString());
-  // For IPv6 addresses, wrap in brackets for URL hostname
   pinned.hostname = resolvedIp.includes(':') ? `[${resolvedIp}]` : resolvedIp;
   return pinned;
 }
 
 /**
- * Perform an HTTPS request using Node.js native https module with proper
- * TLS servername for DNS pinning. This is necessary because global fetch()
- * uses the URL hostname for SNI — when connecting to a resolved IP, the
- * certificate check fails unless servername is overridden.
- *
- * Returns the status, headers and body as received, not a fetch Response: that
- * constructor throws for 204, 205, 304 and any status outside 200-599, and a
- * throw inside the 'end' listener is an uncaught exception, not a rejection.
+ * Global fetch() uses the URL hostname for SNI: when connecting to a resolved IP,
+ * the certificate check fails unless servername is overridden.
+ * The fetch Response constructor throws for 204, 205, 304 and any status outside
+ * 200-599, and a throw inside the 'end' listener is an uncaught exception, not a
+ * rejection.
  */
 async function pinnedHttpsRequest(
   pinnedUrl: URL,
@@ -177,7 +117,7 @@ async function pinnedHttpsRequest(
   options: { headers: Record<string, string>; signal: AbortSignal },
 ): Promise<PinnedResponse> {
   return new Promise<PinnedResponse>((resolve, reject) => {
-    const hostname = pinnedUrl.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+    const hostname = pinnedUrl.hostname.replace(/^\[|\]$/g, '');
     const port = Number(pinnedUrl.port || '443');
 
     const agent = new https.Agent({
@@ -234,17 +174,6 @@ async function pinnedHttpsRequest(
   });
 }
 
-/**
- * Fetch a URL with SSRF protections: DNS pinning, private IP rejection,
- * redirect validation, timeout, and size limit.
- *
- * DNS pinning: we resolve the hostname, validate the IP is public, then
- * rewrite the fetch URL to connect directly to that IP (with the original
- * Host header for TLS SNI). This closes the DNS rebinding TOCTOU window.
- *
- * `deadline` (epoch ms) ends the time for all URL attachments of the task:
- * no request starts after it and none runs past it.
- */
 async function ssrfSafeFetch(
   url: string,
   deadline: number,
@@ -258,13 +187,10 @@ async function ssrfSafeFetch(
     );
   }
 
-  // Resolve DNS and validate IP before connecting
   const resolvedIp = await resolveAndValidate(parsedUrl.hostname);
 
-  // Build the pinned URL that connects to the validated IP
   let pinnedUrl = buildPinnedUrl(parsedUrl, resolvedIp);
 
-  // Determine if we should send auth headers (only to GitHub)
   const headers: Record<string, string> = {
     'Host': parsedUrl.hostname,
     'User-Agent': 'ABCA-Attachment-Fetcher/1.0',
@@ -280,9 +206,7 @@ async function ssrfSafeFetch(
   let response: PinnedResponse;
   const outOfTime = `URL attachments could not be fetched and screened within ${URL_RESOLUTION_BUDGET_MS / 1000}s (stopped at ${url}).`;
 
-  // Fetch with redirect following (re-validate each redirect target)
   while (true) {
-    // A request gets the time left until the deadline, at most URL_FETCH_TIMEOUT_MS.
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       throw new AttachmentResolutionError(outOfTime);
@@ -291,8 +215,6 @@ async function ssrfSafeFetch(
     const timeout = setTimeout(() => controller.abort(), Math.min(URL_FETCH_TIMEOUT_MS, remainingMs));
 
     try {
-      // Use pinnedHttpsRequest with proper TLS servername for DNS pinning.
-      // Connects to the resolved IP while using the original hostname for SNI.
       response = await pinnedHttpsRequest(pinnedUrl, currentHostname, {
         headers,
         signal: controller.signal,
@@ -313,7 +235,6 @@ async function ssrfSafeFetch(
       clearTimeout(timeout);
     }
 
-    // Handle redirects
     if (response.status >= HTTP_REDIRECT_STATUS_MIN && response.status < HTTP_REDIRECT_STATUS_MAX) {
       const location = response.headers.location;
       if (!location) {
@@ -329,7 +250,6 @@ async function ssrfSafeFetch(
         );
       }
 
-      // Re-validate the redirect target
       const redirectUrl = new URL(location, currentUrl);
       if (redirectUrl.protocol !== 'https:') {
         throw new AttachmentResolutionError(
@@ -340,10 +260,8 @@ async function ssrfSafeFetch(
       currentUrl = redirectUrl.toString();
       currentHostname = redirectUrl.hostname;
 
-      // Pin the redirect target to its resolved IP
       pinnedUrl = buildPinnedUrl(redirectUrl, redirectIp);
 
-      // Don't send auth headers to non-GitHub redirect targets
       if (!isGitHubUrl(redirectUrl.hostname, options?.githubInstallationDomain)) {
         delete headers.Authorization;
       }
@@ -354,7 +272,6 @@ async function ssrfSafeFetch(
     break;
   }
 
-  // 3xx was handled in the loop: any other status outside 2xx is a failed fetch.
   if (response.status < 200 || response.status >= HTTP_REDIRECT_STATUS_MIN) {
     throw new AttachmentResolutionError(
       `URL attachment fetch failed with status ${response.status}: ${url}`,
@@ -367,7 +284,6 @@ async function ssrfSafeFetch(
     );
   }
 
-  // The size limit was enforced while the body was read (pinnedHttpsRequest).
   const contentType = response.headers['content-type'] || 'application/octet-stream';
 
   return {
@@ -383,19 +299,14 @@ function isGitHubUrl(hostname: string, installationDomain?: string): boolean {
   return githubHosts.some(h => lower === h || lower.endsWith(`.${h}`));
 }
 
-// ---------------------------------------------------------------------------
-// Main resolution function
-// ---------------------------------------------------------------------------
-
 /**
  * Resolve URL attachments: fetch, screen, upload to S3.
  *
- * Takes the task's attachment records (from DynamoDB), resolves any with
+ * Takes the task's attachment records, resolves any with
  * screening.status === 'pending' and type === 'url', and returns the full
  * updated attachment list.
  *
  * Throws AttachmentResolutionError if any URL attachment cannot be resolved.
- * The caller (orchestrator) should let this propagate to fail the task.
  */
 export async function resolveUrlAttachments(
   attachments: AttachmentRecord[],
@@ -419,8 +330,6 @@ export async function resolveUrlAttachments(
   const resolved = new Map<string, AttachmentRecord>();
   const deadline = Date.now() + URL_RESOLUTION_BUDGET_MS;
 
-  // The task-wide size limit counts what the task already holds (inline, uploaded,
-  // pre-screened) and every URL attachment as it is fetched: a link has no size before.
   let totalBytes = attachments.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);
 
   for (const att of pendingUrls) {
@@ -430,7 +339,6 @@ export async function resolveUrlAttachments(
       );
     }
 
-    // Fetch with SSRF protection
     const { content, finalContentType } = await ssrfSafeFetch(att.source_url, deadline, {
       githubToken: options.githubToken,
     });
@@ -449,15 +357,11 @@ export async function resolveUrlAttachments(
       );
     }
 
-    // Determine actual content type from the HTTP response (preferred over any placeholder
-    // set during validation). If the user explicitly declared a content_type on the URL
-    // attachment, use it; otherwise use what the server returned.
     const resolvedContentType = (att.content_type && att.content_type !== 'application/octet-stream')
       ? att.content_type
       : finalContentType;
     const isImage = resolvedContentType.startsWith('image/');
 
-    // Validate content-type is in the allowlist (attacker controls the response header)
     const attachmentType = isImage ? 'image' : 'file';
     if (!isAllowedMimeType(resolvedContentType, attachmentType)) {
       throw new AttachmentResolutionError(
@@ -466,7 +370,6 @@ export async function resolveUrlAttachments(
       );
     }
 
-    // Validate magic bytes match declared content type (prevents polyglot/masquerade)
     if (!validateMagicBytes(content, resolvedContentType)) {
       throw new AttachmentResolutionError(
         `URL attachment '${att.filename}' content does not match declared type '${resolvedContentType}'. ` +
@@ -474,7 +377,6 @@ export async function resolveUrlAttachments(
       );
     }
 
-    // Screen the fetched content
     let screenResult;
     try {
       screenResult = isImage
@@ -499,7 +401,6 @@ export async function resolveUrlAttachments(
       );
     }
 
-    // Upload screened content to S3
     const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${userId}/${taskId}/${att.attachment_id}/${att.filename}`;
     let putResult;
     try {
@@ -523,10 +424,8 @@ export async function resolveUrlAttachments(
       );
     }
 
-    // Use checksum from screening (already computed over the cleaned content)
     const checksum = screenResult.checksum;
 
-    // Estimate token cost for images
     let tokenEstimate: number | undefined;
     if (isImage) {
       tokenEstimate = estimateImageTokensFromBuffer(screenResult.content, resolvedContentType);
@@ -553,6 +452,5 @@ export async function resolveUrlAttachments(
     });
   }
 
-  // Merge resolved records back into the full attachment list
   return attachments.map(att => resolved.get(att.attachment_id) ?? att);
 }

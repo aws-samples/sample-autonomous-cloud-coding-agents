@@ -17,10 +17,6 @@
  *  SOFTWARE.
  */
 
-// Fan-out Linear dispatcher for agent-session tasks (ADR-018 Phase 2). A
-// separate file from fanout-task-events.test.ts because the flag is read when
-// the module builds CHANNEL_DEFAULTS, so it must be set before import.
-
 const mockDdbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -61,7 +57,6 @@ import {
 } from '../../src/handlers/fanout-task-events';
 import { SESSION_STOP_CANCELLED_VIA } from '../../src/handlers/shared/linear-agent-session-event';
 
-/** Route to the Linear dispatcher only, so the other channels stay out of the assertions. */
 const LINEAR_ONLY: TaskNotificationsConfig = {
   slack: { enabled: false },
   github: { enabled: false },
@@ -90,7 +85,6 @@ function ev(eventType: string, metadata?: Record<string, unknown>): FanOutEvent 
   return { task_id: 't-sess', event_id: `e-${eventType}`, event_type: eventType, timestamp: '2026-11-04T00:00:00Z', metadata };
 }
 
-/** Get → the given task; Update → succeeds unless `updateError` is set. */
 function mockTask(task: Record<string, unknown>, updateError?: Error): void {
   mockDdbSend.mockReset().mockImplementation(async (cmd: { _type: string }) => {
     if (cmd._type === 'Get') return { Item: task };
@@ -130,12 +124,10 @@ test('pr_created attaches the PR to the session and announces it, post-once', as
   expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', {
     type: 'action', action: 'Opened pull request', parameter: 'https://github.com/acme/web/pull/7',
   });
-  // The link and the activity are marked separately, so each retries on its own.
   expect(updates().map((u) => u.UpdateExpression)).toEqual([
     'SET linear_session_pr_link_event_id = :eid',
     'SET linear_pr_comment_event_id = :eid',
   ]);
-  // Session tasks never fall through to issue comments.
   expect(mockPostIssueComment).not.toHaveBeenCalled();
 });
 
@@ -147,7 +139,6 @@ test('pr_created after a stop stays quiet (the final status carries the link)', 
 });
 
 test('a retried pr_created does not attach the PR link a second time', async () => {
-  // First attempt: link attached, activity failed transiently → record retried.
   mockTask({
     ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7', linear_session_pr_link_event_id: 'e-first',
   });
@@ -216,8 +207,6 @@ test('a session stop closes the session: its cancel stamps the post-once marker'
   await routeEvent(ev('task_cancelled', { cancelled_via: SESSION_STOP_CANCELLED_VIA }), LINEAR_ONLY);
   expect(updates().map((u) => u.UpdateExpression)).toEqual(['SET linear_final_comment_event_id = :eid']);
 
-  // ...so a later terminal event for the same task (reconciler task_failed /
-  // task_stranded, a second task_cancelled) posts nothing under "Stopped."
   for (const later of ['task_failed', 'task_stranded', 'task_cancelled']) {
     mockTask({ ...SESSION_TASK, status: 'CANCELLED', linear_final_comment_event_id: 'e-task_cancelled' });
     await routeEvent(ev(later), LINEAR_ONLY);
@@ -301,12 +290,10 @@ describe('keep-alive heartbeat', () => {
   });
 
   test('a missed task read does not switch the task\'s keep-alive off', async () => {
-    // First turn: the row is not readable yet (or the read missed).
     mockDdbSend.mockReset().mockResolvedValue({});
     await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
     expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 
-    // Next turn the row is there: it must be read, and the session kept alive.
     mockTask(SESSION_TASK);
     await routeEvent(ev('agent_turn', { turn: 2 }), LINEAR_ONLY);
     expect(gets()).toHaveLength(1);

@@ -28,8 +28,6 @@ import stat
 import zipfile
 
 
-# Keep these in step with the local COPY sources in agent/Dockerfile. The
-# packaging regression checks both directions; COPY --from uses remote stages.
 INPUTS = (
     "agent/pyproject.toml",
     "agent/uv.lock",
@@ -63,6 +61,7 @@ def source_files(root: Path):
     dockerfile = root / "agent/Dockerfile"
     if dockerfile.is_symlink() or not dockerfile.is_file():
         raise ValueError("agent/Dockerfile must be a regular file")
+    # Lambda MicroVMs builds the `Dockerfile` at the zip root, with the zip root as build context.
     yield "Dockerfile", dockerfile
     for name in INPUTS:
         for path in walk(root / name):
@@ -74,8 +73,6 @@ def build(root: Path, output: Path):
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, path in files:
-            # File dates, checkout locations, uid/gid and umask must not cause
-            # needless image versions. Preserve just the executable permission.
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.create_system = 3
             mode = 0o755 if path.stat().st_mode & 0o111 else 0o644

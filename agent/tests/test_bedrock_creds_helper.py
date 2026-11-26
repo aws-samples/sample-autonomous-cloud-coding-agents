@@ -1,15 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Unit tests for the Bedrock credential helper (#215, cost attribution).
-
-The helper feeds Claude Code's ``awsCredentialExport``: it assumes the per-task
-SessionRole with ``{user_id, repo, task_id}`` STS tags so Bedrock spend is
-attributable, and **fails open** to ambient credentials when attribution is not
-configured or the assume fails — losing chargeback granularity is not a security
-incident, unlike the fail-closed tenant-data path in ``aws_session``.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -74,7 +65,6 @@ def test_resolve_assumes_role_with_session_tags(attr_file):
     with patch("boto3.client", return_value=sts):
         creds = helper.resolve_credentials()
 
-    # The assume carried exactly the tenant tags, and a tagged session name.
     _, kwargs = sts.assume_role.call_args
     assert kwargs["Tags"] == tags
     assert kwargs["RoleArn"] == "arn:aws:iam::1:role/SR"
@@ -88,8 +78,6 @@ def test_resolve_assumes_role_with_session_tags(attr_file):
 
 
 def test_resolve_obtains_sts_client_via_platform_client(attr_file):
-    """The STS client is built through aws_session.platform_client (carrying the
-    md/ solution User-Agent), not a naked boto3.client. (#319)"""
     tags = build_session_tags("u1", "owner/repo", "task123")
     helper.write_attribution_file("arn:aws:iam::1:role/SR", tags, attr_file)
 
@@ -110,8 +98,6 @@ def test_resolve_obtains_sts_client_via_platform_client(attr_file):
 
 
 def test_resolve_fails_open_when_boto3_imports_unavailable(attr_file, capsys):
-    """If the in-function boto3/platform_client import fails, the helper degrades
-    to ambient creds rather than raising — the graceful (fail-open) guard holds."""
     import builtins
 
     helper.write_attribution_file(
@@ -134,14 +120,13 @@ def test_resolve_fails_open_when_boto3_imports_unavailable(attr_file, capsys):
 
 
 def test_resolve_fails_open_when_no_attribution_file(attr_file):
-    # File never written → fall back to ambient creds, never raise.
     frozen = SimpleNamespace(access_key="AMB", secret_key="S", token="T")
     ambient = MagicMock()
     ambient.get_credentials.return_value.get_frozen_credentials.return_value = frozen
     with patch("botocore.session.get_session", return_value=ambient):
         creds = helper.resolve_credentials()
     assert creds["AccessKeyId"] == "AMB"
-    assert "Expiration" not in creds  # ambient creds are returned unbounded
+    assert "Expiration" not in creds
 
 
 def _ambient(access_key="AMB"):
@@ -167,15 +152,12 @@ def test_resolve_fails_open_on_expected_assume_error_and_warns(attr_file, capsys
     ):
         creds = helper.resolve_credentials()
     assert creds["AccessKeyId"] == "AMB"
-    # Fail-open must be observable, and flagged as the expected (not unexpected) case.
     err = capsys.readouterr().err
     assert "assume_role failed" in err and "UNTAGGED" in err
     assert "UNEXPECTED" not in err
 
 
 def test_resolve_flags_unexpected_error_distinctly(attr_file, capsys):
-    # A non-boto error (e.g. a logic bug, bad STS response shape) must still
-    # fail open but be labeled UNEXPECTED so it isn't mistaken for AccessDenied.
     helper.write_attribution_file(
         "arn:aws:iam::1:role/SR", build_session_tags("u", "r", "t"), attr_file
     )
@@ -191,7 +173,6 @@ def test_resolve_flags_unexpected_error_distinctly(attr_file, capsys):
 
 
 def test_resolve_distinguishes_corrupt_config_from_absent(attr_file, capsys):
-    # File present but malformed → louder signal than a plain absent file.
     with open(attr_file, "w") as fh:
         fh.write("{not json")
     with patch("botocore.session.get_session", return_value=_ambient()):
@@ -205,7 +186,6 @@ def test_resolve_emits_empty_when_no_credentials_at_all(attr_file, capsys):
     ambient.get_credentials.return_value = None
     with patch("botocore.session.get_session", return_value=ambient):
         creds = helper.resolve_credentials()
-    # Empty object → Claude Code falls back to its own default-chain resolution.
     assert creds == {}
     assert "no resolvable AWS credentials" in capsys.readouterr().err
 

@@ -1,21 +1,3 @@
-"""Regression guard for the session-wide git isolation in ``conftest.py`` (#855).
-
-An in-process assertion cannot prove that isolation: wherever this suite normally
-runs, the variables it removes are absent to begin with, so deleting the scrub
-would leave such a test green. This test therefore starts a fresh interpreter
-with the environment a git hook in a linked worktree hands to pytest — plus
-stand-ins for the contributor's user and system git config — imports
-``tests.conftest`` the way pytest does, and then runs the unguarded git commands
-a careless fixture would run.
-
-The interpreter is handed every variable the conftest block removes, not only the
-ones those git commands react to, and reports which are still set after the
-import: a name dropped from that block fails here by name.
-
-Every hostile value points into ``tmp_path``. No real repository or config file
-is named anywhere, so a broken scrub fails this test without leaking into one.
-"""
-
 import json
 import os
 import subprocess
@@ -24,9 +6,6 @@ from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent.parent
 
-# What tests/conftest.py removes: git's own list of the variables that tie a
-# command to one repository (`git rev-parse --local-env-vars`). A second copy on
-# purpose — read from conftest, a name dropped there would be dropped here too.
 _REPOSITORY_VARIABLES = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
@@ -84,9 +63,6 @@ print(json.dumps({
 
 
 def test_git_config_is_pinned_where_nothing_can_be_created():
-    # git replaces a config file by renaming a new one over it, so a pinned path
-    # that exists — the null device included — or that could be created is one
-    # root can write. A path below the null device is not, for anyone.
     for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         path = os.environ.get(name, "")
         assert path and not os.path.lexists(path) and not os.path.isdir(os.path.dirname(path)), (
@@ -97,22 +73,18 @@ def test_git_config_is_pinned_where_nothing_can_be_created():
 
 
 def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
-    hook_git_dir = tmp_path / "repository-the-hook-ran-in"  # must never be created
+    hook_git_dir = tmp_path / "repository-the-hook-ran-in"
     user_config = tmp_path / "user-gitconfig"
     user_config.write_text("[user]\n\temail = contributor@user-config.example\n")
     system_config = tmp_path / "system-gitconfig"
     system_config.write_text("[user]\n\temail = contributor@system-config.example\n")
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
-    # A repository that CONTAINS the temp directory, as a version-controlled $HOME does.
     enclosing = tmp_path / "enclosing"
     (enclosing / "tmp" / "not-a-repo").mkdir(parents=True)
 
     hostile: dict[str, str] = {
         **os.environ,
-        # Every variable conftest removes arrives set (to a placeholder inside tmp_path),
-        # so that the probe can name the ones the import left behind. The entries below
-        # replace the placeholder where the probe's git commands act on the value.
         **dict.fromkeys(_REPOSITORY_VARIABLES, str(hook_git_dir)),
         "PYTHONPATH": str(AGENT_DIR / "src"),
         "TMPDIR": str(enclosing / "tmp"),
@@ -122,14 +94,12 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
         "GIT_WORK_TREE": str(tmp_path),
         "GIT_CONFIG_GLOBAL": str(user_config),
         "GIT_CONFIG_SYSTEM": str(system_config),
-        # What `git -c user.email=... commit` passes on to the hooks it runs …
+        # What `git -c user.email=... commit` passes on to the hooks it runs.
         "GIT_CONFIG_PARAMETERS": "'user.email'='contributor@command-line.example'",
-        # … and what a shell exports to configure git without a file.
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "user.email",
         "GIT_CONFIG_VALUE_0": "contributor@command-line.example",
     }
-    # The child must establish these itself; do not let it inherit this session's.
     hostile.pop("GIT_CONFIG_NOSYSTEM", None)
     hostile.pop("GIT_CEILING_DIRECTORIES", None)
 

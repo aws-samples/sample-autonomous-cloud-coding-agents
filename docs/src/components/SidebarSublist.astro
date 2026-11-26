@@ -1,11 +1,7 @@
 ---
-/**
- * Starlight SidebarSublist with absolute URLs for the docs home link (same rationale as SiteTitle).
- */
 import { Icon, Badge } from '@astrojs/starlight/components';
 import SidebarRestorePoint from '@astrojs/starlight/components/SidebarRestorePoint.astro';
 
-/** Mirrors Starlight’s sidebar tree shape (only what this template uses). */
 type SidebarLinkEntry = {
 	type: 'link';
 	href: string;
@@ -49,7 +45,6 @@ function resolveHref(href: string): string {
 			return homeAbs;
 		}
 	} catch {
-		/* keep href */
 	}
 	return href;
 }

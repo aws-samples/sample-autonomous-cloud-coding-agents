@@ -1,5 +1,3 @@
-"""Unit tests for linear_reactions — channel gating + GraphQL wire shape."""
-
 from __future__ import annotations
 
 import threading
@@ -21,9 +19,6 @@ from linear_reactions import (
 
 @pytest.fixture(autouse=True)
 def _reset_module_state():
-    """Reset module-level caches and the auth circuit breaker between tests
-    so one test's state never leaks into another (viewer cache, consecutive
-    auth-failure counter, circuit-open flag)."""
     linear_reactions._viewer_id_cache = None
     linear_reactions._consecutive_auth_failures = 0
     linear_reactions._auth_circuit_open = False
@@ -61,14 +56,6 @@ def _reactions_response(reactions: list[dict]) -> MagicMock:
 
 
 def _clean_start_calls(reaction_id: str = "r-new") -> list[MagicMock]:
-    """Side-effect list for a typical react_task_started call where the
-    issue has no prior bgagent reactions to sweep. Order matches the
-    runtime call sequence: 👀 is posted first; the sweep (viewer +
-    reactions queries) runs after on a background thread.
-      1. reactionCreate → returns the new 👀 id
-      2. viewer query → returns the bot's id (sweep)
-      3. issue reactions query → returns empty list (sweep)
-    """
     return [
         _ok_response(reaction_id=reaction_id),
         _viewer_response("viewer-bot"),
@@ -77,10 +64,6 @@ def _clean_start_calls(reaction_id: str = "r-new") -> list[MagicMock]:
 
 
 def _join_sweep_thread(timeout: float = 2.0) -> None:
-    """Block until the daemonized sweep thread (started by react_task_started)
-    finishes. Tests that assert on call counts must call this after the
-    function returns — otherwise the sweep may still be in flight and
-    `requests.post` mock counts will race."""
     for t in threading.enumerate():
         if t.name == "linear-reactions-sweep":
             t.join(timeout=timeout)
@@ -105,8 +88,6 @@ def _ok_delete_response() -> MagicMock:
 
 
 class TestChannelGate:
-    """Non-Linear channels are silent no-ops — no network, no log noise."""
-
     def test_start_noop_for_slack(self):
         with patch("linear_reactions.requests.post") as post:
             assert react_task_started("slack", {"linear_issue_id": "X"}) is None
@@ -123,7 +104,6 @@ class TestChannelGate:
             post.assert_not_called()
 
     def test_start_noop_when_issue_id_missing(self):
-        """Linear channel but no issue_id — can't address a reaction."""
         with patch("linear_reactions.requests.post") as post:
             assert react_task_started("linear", {}) is None
             assert react_task_started("linear", None) is None
@@ -131,10 +111,7 @@ class TestChannelGate:
 
 
 class TestLinearPath:
-    """channel='linear' with issue id → correct GraphQL shape per hook."""
-
     def test_start_posts_eyes_and_returns_reaction_id(self, monkeypatch):
-        """Happy path: 👀 posted first → sweep dispatched on background thread."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with patch(
             "linear_reactions.requests.post",
@@ -142,20 +119,16 @@ class TestLinearPath:
         ) as post:
             rid = react_task_started("linear", {"linear_issue_id": "issue-123"})
             assert rid == "react-42"
-            # First call is the user-visible reactionCreate for 👀; this lands
-            # before the sweep starts so the agent never blocks on Linear API.
             create_call = post.call_args_list[0]
             assert create_call.args[0] == LINEAR_GRAPHQL_URL
             assert create_call.kwargs["headers"]["Authorization"] == "lin_api_test"
             vars_ = create_call.kwargs["json"]["variables"]
             assert vars_["issueId"] == "issue-123"
             assert vars_["emoji"] == EMOJI_STARTED
-            # Wait for sweep to finish so we can assert it ran.
             _join_sweep_thread()
             assert post.call_count == 3
 
     def test_finish_success_deletes_eyes_then_posts_check(self, monkeypatch):
-        """✅ path: delete the 👀 reaction first, then post the success emoji."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with patch(
             "linear_reactions.requests.post",
@@ -168,9 +141,7 @@ class TestLinearPath:
                 started_reaction_id="react-42",
             )
             assert post.call_count == 2
-            # First call: delete
             assert post.call_args_list[0].kwargs["json"]["variables"] == {"id": "react-42"}
-            # Second call: create ✅
             assert post.call_args_list[1].kwargs["json"]["variables"]["emoji"] == EMOJI_SUCCESS
             assert post.call_args_list[1].kwargs["json"]["variables"]["issueId"] == "issue-abc"
 
@@ -190,7 +161,6 @@ class TestLinearPath:
             assert post.call_args_list[1].kwargs["json"]["variables"]["emoji"] == EMOJI_FAILURE
 
     def test_finish_without_reaction_id_only_posts_terminal(self, monkeypatch):
-        """If the 👀 POST failed earlier, there's nothing to delete — skip deletion."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with patch(
             "linear_reactions.requests.post",
@@ -207,9 +177,6 @@ class TestLinearPath:
 
 
 class TestAgentSessionTasks:
-    """A task started from a native Linear agent session posts no reactions —
-    the session shows its state — but still moves the issue's workflow state."""
-
     SESSION_METADATA: ClassVar[dict[str, str]] = {
         "linear_issue_id": "issue-1",
         "linear_agent_session_id": "session-1",
@@ -244,17 +211,13 @@ class TestAgentSessionTasks:
 
 
 class TestFailureIsSwallowed:
-    """Reactions are advisory — network/API failures never propagate."""
-
     def test_http_error_does_not_raise(self, monkeypatch):
-        """All three calls (viewer, reactions, create) return 500 — must not raise."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         resp = MagicMock()
         resp.status_code = 500
         resp.content = b"server error"
         resp.json.return_value = {}
         with patch("linear_reactions.requests.post", return_value=resp):
-            # must not raise
             react_task_started("linear", {"linear_issue_id": "issue-1"})
 
     def test_request_exception_does_not_raise(self, monkeypatch):
@@ -262,11 +225,9 @@ class TestFailureIsSwallowed:
 
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with patch("linear_reactions.requests.post", side_effect=rq.ConnectionError("nope")):
-            # must not raise
             react_task_finished("linear", {"linear_issue_id": "issue-1"}, success=True)
 
     def test_graphql_errors_do_not_raise(self, monkeypatch):
-        """All three calls return GraphQL `errors` envelopes — must not raise."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         resp = MagicMock()
         resp.status_code = 200
@@ -287,9 +248,6 @@ class TestFailureIsSwallowed:
         ids=["html", "null", "list", "number", "string"],
     )
     def test_200_without_a_json_object_does_not_raise(self, monkeypatch, body):
-        """A 200 whose body is a proxy's HTML page, or JSON that is not an object,
-        is one more failure: raised out of the hook, it would turn a finished task
-        into FAILED. A real ``requests.Response``, so it fails the way requests does."""
         import requests as rq
 
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
@@ -297,61 +255,39 @@ class TestFailureIsSwallowed:
         resp.status_code = 200
         resp._content = body
         with patch("linear_reactions.requests.post", return_value=resp):
-            # must not raise
             react_task_finished("linear", {"linear_issue_id": "issue-1"}, success=True)
             assert linear_reactions._graphql("query Q { x }", {}) is None
 
 
 class TestSweepStaleReactions:
-    """react_task_started sweeps prior bgagent-owned 👀/✅/❌ before posting
-    the new 👀, so re-runs (label removed and re-applied; or pre-container ❌
-    from the orchestrator/processor followed by a successful retry) don't
-    show stale terminal markers next to the new 👀.
-
-    Scoping rules the tests pin:
-      - delete only the 3 bgagent emojis (eyes, white_check_mark, x)
-      - delete only reactions owned by the API-token viewer
-      - never touch human-added reactions, even if they happen to use the
-        same emoji
-      - never touch bot reactions of OTHER emojis (defensive)
-      - sweep failures don't block the 👀 post that follows
-    """
-
     def test_sweep_deletes_only_viewer_owned_bgagent_emojis(self, monkeypatch):
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         prior_reactions = [
-            # Bot's own prior 👀, ✅, ❌ — should all be deleted.
             {"id": "r-bot-eyes", "emoji": EMOJI_STARTED, "user": {"id": "viewer-bot"}},
             {"id": "r-bot-check", "emoji": EMOJI_SUCCESS, "user": {"id": "viewer-bot"}},
             {"id": "r-bot-x", "emoji": EMOJI_FAILURE, "user": {"id": "viewer-bot"}},
-            # Human-added 👀 — must NOT be deleted (different user id).
             {"id": "r-human-eyes", "emoji": EMOJI_STARTED, "user": {"id": "user-alice"}},
-            # Bot's reaction of a non-bgagent emoji — must NOT be deleted (defensive).
             {"id": "r-bot-thumbsup", "emoji": "thumbsup", "user": {"id": "viewer-bot"}},
-            # Human reaction with a non-bgagent emoji — must NOT be deleted.
             {"id": "r-human-rocket", "emoji": "rocket", "user": {"id": "user-bob"}},
         ]
         delete_resp = _ok_delete_response()
         with patch(
             "linear_reactions.requests.post",
             side_effect=[
-                _ok_response(reaction_id="r-new-eyes"),  # new 👀 (first, user-visible)
-                _viewer_response("viewer-bot"),  # sweep: viewer fetch
-                _reactions_response(prior_reactions),  # sweep: reactions query
-                delete_resp,  # delete r-bot-eyes
-                delete_resp,  # delete r-bot-check
-                delete_resp,  # delete r-bot-x
+                _ok_response(reaction_id="r-new-eyes"),
+                _viewer_response("viewer-bot"),
+                _reactions_response(prior_reactions),
+                delete_resp,
+                delete_resp,
+                delete_resp,
             ],
         ) as post:
             rid = react_task_started("linear", {"linear_issue_id": "issue-1"})
             assert rid == "r-new-eyes"
             _join_sweep_thread()
 
-            # First call is the reactionCreate for the new 👀.
             assert post.call_args_list[0].kwargs["json"]["variables"]["emoji"] == EMOJI_STARTED
 
-            # Pull out the reactionDelete calls and assert they are exactly
-            # the 3 bot-owned bgagent reactions, no more, no less.
             delete_ids = [
                 call.kwargs["json"]["variables"]["id"]
                 for call in post.call_args_list
@@ -360,7 +296,6 @@ class TestSweepStaleReactions:
             assert sorted(delete_ids) == sorted(["r-bot-eyes", "r-bot-check", "r-bot-x"])
 
     def test_sweep_noop_when_issue_has_no_prior_reactions(self, monkeypatch):
-        """Empty reactions list → no deletes, just the new 👀."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with patch(
             "linear_reactions.requests.post",
@@ -368,15 +303,10 @@ class TestSweepStaleReactions:
         ) as post:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
             _join_sweep_thread()
-            # 3 calls total: create (👀), viewer, reactions (empty). No deletes.
             queries = [c.kwargs["json"]["query"] for c in post.call_args_list]
             assert sum("reactionDelete" in q for q in queries) == 0
 
     def test_sweep_noop_when_viewer_fetch_fails(self, monkeypatch):
-        """Viewer fetch returning errors short-circuits the sweep — we
-        can't safely filter without knowing the viewer id, so skip rather
-        than risk deleting a human's reaction. The 👀 post still runs
-        (and succeeds first, before the sweep even starts)."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         viewer_err = MagicMock()
         viewer_err.status_code = 200
@@ -389,13 +319,10 @@ class TestSweepStaleReactions:
             rid = react_task_started("linear", {"linear_issue_id": "issue-1"})
             assert rid == "r-new"
             _join_sweep_thread()
-            # 2 calls: 👀 first (success), then failed viewer. No reactions query, no deletes.
             assert post.call_count == 2
             assert post.call_args_list[0].kwargs["json"]["variables"]["emoji"] == EMOJI_STARTED
 
     def test_sweep_failure_does_not_block_eyes_post(self, monkeypatch):
-        """Reactions query fails → sweep gives up but the 👀 already landed
-        (it posts first, before the sweep starts)."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         reactions_err = MagicMock()
         reactions_err.status_code = 500
@@ -415,17 +342,15 @@ class TestSweepStaleReactions:
             assert post.call_count == 3
 
     def test_viewer_id_cached_across_calls(self, monkeypatch):
-        """Second call within the same container reuses the cached viewer id —
-        no second viewer query, just create + reactions."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with patch(
             "linear_reactions.requests.post",
             side_effect=[
-                _ok_response(reaction_id="r-1"),  # 1st call's 👀
-                _viewer_response("viewer-bot"),  # 1st call's viewer fetch (sweep)
-                _empty_reactions_response(),  # 1st call's reactions query (sweep)
-                _ok_response(reaction_id="r-2"),  # 2nd call's 👀
-                _empty_reactions_response(),  # 2nd call's reactions only (cached viewer)
+                _ok_response(reaction_id="r-1"),
+                _viewer_response("viewer-bot"),
+                _empty_reactions_response(),
+                _ok_response(reaction_id="r-2"),
+                _empty_reactions_response(),
             ],
         ) as post:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
@@ -433,21 +358,13 @@ class TestSweepStaleReactions:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
             _join_sweep_thread()
             queries = [c.kwargs["json"]["query"] for c in post.call_args_list]
-            # Only one viewer query across both calls.
             assert sum("Viewer" in q for q in queries) == 1
 
     def test_sweep_preserves_just_posted_eyes_via_exclude_id(self, monkeypatch):
-        """If Linear's reactions query happens to return our just-posted 👀
-        (e.g. on a tight retry where the prior run's reaction id was reused
-        by Linear), the sweep MUST NOT delete it — exclude_id is what keeps
-        the new marker safe. Tests would otherwise pass with exclude_id=None
-        because the prior reaction ids never collide with the new one."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         new_rid = "r-new-eyes"
         prior_reactions = [
-            # The just-posted 👀 — sweep must SKIP this one.
             {"id": new_rid, "emoji": EMOJI_STARTED, "user": {"id": "viewer-bot"}},
-            # An older bgagent ❌ from a prior run — sweep MUST delete this.
             {"id": "r-old-x", "emoji": EMOJI_FAILURE, "user": {"id": "viewer-bot"}},
         ]
         with patch(
@@ -456,7 +373,7 @@ class TestSweepStaleReactions:
                 _ok_response(reaction_id=new_rid),
                 _viewer_response("viewer-bot"),
                 _reactions_response(prior_reactions),
-                _ok_delete_response(),  # only one delete expected
+                _ok_delete_response(),
             ],
         ) as post:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
@@ -466,13 +383,9 @@ class TestSweepStaleReactions:
                 for call in post.call_args_list
                 if "reactionDelete" in call.kwargs["json"]["query"]
             ]
-            # The new 👀 must NOT be deleted; only the old ❌ should be.
             assert delete_ids == ["r-old-x"]
 
     def test_sweep_finishes_with_the_token_it_was_started_with(self, monkeypatch):
-        """The sweep is a thread and can still be running when its task ends,
-        which is when ``run_task`` takes ``LINEAR_API_TOKEN`` out of the
-        environment."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         responses = iter(
             [
@@ -486,8 +399,8 @@ class TestSweepStaleReactions:
         )
 
         def linear(_url, **request):
-            if "Viewer" in request["json"]["query"]:  # the first call of the sweep
-                monkeypatch.delenv("LINEAR_API_TOKEN")  # the task ends
+            if "Viewer" in request["json"]["query"]:
+                monkeypatch.delenv("LINEAR_API_TOKEN")
             return next(responses)
 
         with patch("linear_reactions.requests.post", side_effect=linear) as post:
@@ -495,11 +408,9 @@ class TestSweepStaleReactions:
             _join_sweep_thread()
 
         sent_with = [call.kwargs["headers"]["Authorization"] for call in post.call_args_list]
-        assert sent_with == ["lin_api_test"] * 4  # the 👀, then the three calls of the sweep
+        assert sent_with == ["lin_api_test"] * 4
 
     def test_sweep_sends_each_call_with_its_own_token(self, monkeypatch):
-        """``LINEAR_API_TOKEN`` is the token of the task that is running, which
-        need not be the task of the sweep any more."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_of_the_next_task")
         with patch(
             "linear_reactions.requests.post",
@@ -514,12 +425,9 @@ class TestSweepStaleReactions:
             linear_reactions._sweep_stale_reactions("issue-1", "lin_api_test")
 
         sent_with = [call.kwargs["headers"]["Authorization"] for call in post.call_args_list]
-        assert sent_with == ["lin_api_test"] * 3  # the viewer, the reactions, the delete
+        assert sent_with == ["lin_api_test"] * 3
 
     def test_logged_answer_does_not_show_the_token_the_sweep_was_given(self, monkeypatch, capfd):
-        """In what ``_graphql`` logs of an answer and of an error, ``***`` stands
-        for a token that was handed to the call. Without one, the text is logged
-        as it is."""
         import requests as rq
 
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_of_the_next_task")
@@ -546,16 +454,6 @@ class TestSweepStaleReactions:
 
 
 class TestAuthCircuitBreaker:
-    """The circuit breaker in `_graphql` flips open after
-    ``_AUTH_FAILURE_THRESHOLD`` consecutive 401/403s and short-circuits all
-    subsequent calls until container restart. Auto-reset fixture clears
-    ``_consecutive_auth_failures`` and ``_auth_circuit_open`` between tests.
-
-    These tests target `_graphql` directly via the public `react_task_started`
-    entry point — by exhausting the auth-failure budget on early sweeps and
-    asserting later calls don't hit the network.
-    """
-
     def _auth_response(self, status: int = 401) -> MagicMock:
         resp = MagicMock()
         resp.status_code = status
@@ -564,9 +462,6 @@ class TestAuthCircuitBreaker:
         return resp
 
     def test_three_consecutive_401s_open_the_circuit(self, monkeypatch):
-        """Threshold is 3 — call `_graphql` directly via the private API to
-        exercise the increment + open logic without depending on the
-        public-API call shape."""
         import linear_reactions
 
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
@@ -582,8 +477,6 @@ class TestAuthCircuitBreaker:
         assert linear_reactions._auth_circuit_open is True
 
     def test_open_circuit_short_circuits_subsequent_calls(self, monkeypatch):
-        """Once the circuit is open, no network calls — the function returns
-        None immediately."""
         import linear_reactions
 
         linear_reactions._auth_circuit_open = True
@@ -593,8 +486,6 @@ class TestAuthCircuitBreaker:
             post.assert_not_called()
 
     def test_2xx_response_resets_failure_counter(self, monkeypatch):
-        """A 200 between 401s clears the counter — the circuit only trips on
-        consecutive failures, not cumulative."""
         import linear_reactions
 
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
@@ -607,20 +498,17 @@ class TestAuthCircuitBreaker:
             side_effect=[
                 self._auth_response(401),
                 self._auth_response(401),
-                ok,  # resets counter
+                ok,
                 self._auth_response(401),
                 self._auth_response(401),
             ],
         ):
             for _ in range(5):
                 linear_reactions._graphql("query Q { x }", {})
-        # 2 failures after the reset, threshold=3 → circuit still closed.
         assert linear_reactions._consecutive_auth_failures == 2
         assert linear_reactions._auth_circuit_open is False
 
     def test_non_auth_errors_do_not_increment_failure_counter(self, monkeypatch):
-        """A 500 is a server problem, not an auth problem — must not
-        contribute to the auth-failure budget."""
         import linear_reactions
 
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
@@ -638,7 +526,6 @@ class TestAuthCircuitBreaker:
         assert linear_reactions._auth_circuit_open is False
 
     def test_403_treated_same_as_401(self, monkeypatch):
-        """Both auth-failure status codes count toward the threshold."""
         import linear_reactions
 
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
@@ -656,11 +543,6 @@ class TestAuthCircuitBreaker:
 
 
 class TestTransitionIssueState:
-    """Workflow-state transition: a writeable single task moves the issue
-    Backlog → In Progress →
-    In Review, forward-only. Mocks ``_graphql`` directly so we assert on the
-    decision logic, not the wire format (covered elsewhere)."""
-
     _STATES: ClassVar[list[dict]] = [
         {"id": "s-backlog", "name": "Backlog", "type": "backlog", "position": 0},
         {"id": "s-todo", "name": "Todo", "type": "unstarted", "position": 1},
@@ -687,7 +569,7 @@ class TestTransitionIssueState:
         with patch("linear_reactions._graphql", side_effect=fake_graphql):
             linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
         assert len(set_calls) == 1
-        assert set_calls[0]["stateId"] == "s-prog"  # preferred name wins
+        assert set_calls[0]["stateId"] == "s-prog"
 
     def test_in_progress_to_in_review_on_finish(self):
         set_calls = []
@@ -703,7 +585,6 @@ class TestTransitionIssueState:
         assert set_calls[0]["stateId"] == "s-review"
 
     def test_never_demotes_a_completed_issue(self):
-        """A human already marked it Done — a start transition must NOT reopen it."""
         set_calls = []
 
         def fake_graphql(query, variables):
@@ -714,11 +595,9 @@ class TestTransitionIssueState:
 
         with patch("linear_reactions._graphql", side_effect=fake_graphql):
             linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
-        assert set_calls == []  # backward move (completed → started) skipped
+        assert set_calls == []
 
     def test_without_a_preferred_name_the_lowest_position_state_wins(self):
-        """No state of the type carries a preferred name: take the first one in
-        the team's own workflow order (lowest position; list order breaks a tie)."""
         states = [
             {"id": "s-backlog", "name": "Backlog", "type": "backlog", "position": 0},
             {"id": "s-qa", "name": "QA", "type": "started", "position": 7},
@@ -751,8 +630,6 @@ class TestTransitionIssueState:
         assert set_calls == []
 
     def test_gate_off_means_started_does_not_transition(self, monkeypatch):
-        """react_task_started with transition_state=False posts 👀 but never
-        touches issue state (the read_only/planning path)."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with (
             patch("linear_reactions._transition_issue_state") as trans,
@@ -791,7 +668,6 @@ class TestTransitionIssueState:
         trans.assert_called_once_with("issue-1", "started", ["In Review"])
 
     def test_finish_failure_does_not_transition(self, monkeypatch):
-        """A failed run leaves the state (In Progress) — the ❌ conveys it."""
         monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
         with (
             patch("linear_reactions._transition_issue_state") as trans,

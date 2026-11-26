@@ -1,5 +1,3 @@
-"""Unit tests for hooks.py — Cedar policy SDK hook callbacks."""
-
 import asyncio
 import hashlib
 import json as _json
@@ -8,8 +6,6 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-# Hard import (not importorskip): without cedarpy the engine denies every call.
-# These tests must then fail, not drop out of the run.
 import cedarpy  # noqa: F401
 import pytest
 
@@ -30,16 +26,12 @@ from policy import PolicyEngine
 
 @pytest.fixture(autouse=True)
 def _reset_stuck_summary():
-    """Clear the stuck-guard summary between tests so one test's spin doesn't
-    leak into the next (module-level, process-lifetime). The #251 blocker latch
-    is cleared before every test of the suite by ``conftest.py``."""
     reset_stuck_summary()
     yield
     reset_stuck_summary()
 
 
 def _run(coro):
-    """Helper to run async coroutine in tests."""
     return asyncio.run(coro)
 
 
@@ -59,8 +51,6 @@ class TestPreToolUseHook:
         assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
     def test_denies_restricted_tool(self):
-        # #248 Phase 2a: a read-only engine hard-denies Write (keyed on
-        # context.read_only, not the principal literal).
         engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         hook_input = {
             "hook_event_name": "PreToolUse",
@@ -164,8 +154,6 @@ class TestPreToolUseHook:
         }
 
     def test_denies_string_json_list_tool_input(self):
-        # A string that decodes to a JSON list ("[1,2]") is valid JSON but not
-        # an object — must fail closed with the explicit reason.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         result = _run(
             pre_tool_use_hook(self._non_dict_hook_input("[1,2]"), "test-nd", {}, engine=engine)
@@ -177,8 +165,6 @@ class TestPreToolUseHook:
         )
 
     def test_denies_string_json_scalar_tool_input(self):
-        # A string that decodes to a JSON scalar ('"foo"') is valid JSON but
-        # not an object.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         result = _run(
             pre_tool_use_hook(self._non_dict_hook_input('"foo"'), "test-nd", {}, engine=engine)
@@ -190,7 +176,6 @@ class TestPreToolUseHook:
         )
 
     def test_denies_direct_non_dict_tool_input(self):
-        # A non-dict passed directly (not via a JSON string) — e.g. a list.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         result = _run(
             pre_tool_use_hook(self._non_dict_hook_input([1, 2]), "test-nd", {}, engine=engine)
@@ -203,11 +188,6 @@ class TestPreToolUseHook:
 
 
 class TestSelfRecloneGuard:
-    """Lost-deliverable defense, layer 1: block a Bash re-clone of the task's
-    OWN repo (the agent
-    sometimes cloned into a sibling dir and stranded its work off the tracked
-    branch). Scoped to the task repo — dependency/fixture clones must pass."""
-
     def test_matches_gh_repo_clone_bare_slug(self):
         assert _is_self_reclone("cd /workspace && gh repo clone owner/repo", "owner/repo")
 
@@ -221,16 +201,12 @@ class TestSelfRecloneGuard:
         assert _is_self_reclone("git -C /workspace clone owner/repo", "owner/repo")
 
     def test_case_insensitive_and_dotgit_config(self):
-        # config.repo_url may carry a trailing .git or mixed case.
         assert _is_self_reclone("gh repo clone Owner/Repo", "owner/repo.git")
 
     def test_ignores_clone_of_a_different_repo(self):
-        # A dependency/fixture clone is legitimate and must NOT be blocked.
         assert not _is_self_reclone("git clone https://github.com/other/dep.git", "owner/repo")
 
     def test_ignores_a_repo_whose_name_only_contains_the_task_repo(self):
-        # A sibling repository is a different repository: the slug has to match
-        # as a whole name, not as a piece of a longer owner or repository name.
         assert not _is_self_reclone(
             "git clone https://github.com/owner/repo-docs.git /tmp/docs", "owner/repo"
         )
@@ -240,8 +216,6 @@ class TestSelfRecloneGuard:
             "git clone https://github.com/owner/repo.github.io", "owner/repo"
         )
         assert not _is_self_reclone("git clone git@github.com:owner/repo_v2.git", "owner/repo")
-        # The task repository itself is still caught where its name ends at a
-        # quote or a slash.
         assert _is_self_reclone('gh repo clone "owner/repo"', "owner/repo")
         assert _is_self_reclone("git clone https://github.com/owner/repo/ /tmp/x", "owner/repo")
 
@@ -249,15 +223,12 @@ class TestSelfRecloneGuard:
         assert not _is_self_reclone("git status && git commit -am wip", "owner/repo")
 
     def test_ignores_mention_of_repo_without_clone_verb(self):
-        # Naming the repo in a non-clone command (e.g. a gh pr create) is fine.
         assert not _is_self_reclone("gh pr create --repo owner/repo --title x", "owner/repo")
 
     def test_no_repo_url_is_noop(self):
         assert not _is_self_reclone("gh repo clone owner/repo", "")
 
     def test_ignores_clone_phrase_inside_pr_body(self):
-        # Observed false positive: the clone command quoted inside a --body value
-        # is PROSE, not an executed clone. Must NOT be blocked.
         cmd = (
             'gh pr create --repo owner/repo --base main --title "add marker" '
             '--body "I deliberately did NOT run gh repo clone owner/repo; I worked in place."'
@@ -273,16 +244,11 @@ class TestSelfRecloneGuard:
         )
 
     def test_still_blocks_clone_before_a_body_arg(self):
-        # A REAL clone chained before a body-carrying command must still be caught
-        # (the free-text truncation only drops what's AFTER the first body arg).
         cmd = 'gh repo clone owner/repo && gh pr create --repo owner/repo --body "x"'
         assert _is_self_reclone(cmd, "owner/repo")
 
     def test_blocks_clone_using_the_branch_short_flag(self):
-        # ``-b`` is git clone's own ``--branch`` short form AND gh's ``--body``.
-        # The guard used to cut the command at the first free-text flag BEFORE
-        # looking for the clone verb, so this ordinary command slipped through
-        # entirely — reopening the stranded-work failure the guard exists to stop.
+        # ``-b`` is git clone's own ``--branch`` short form and gh's ``--body``.
         assert _is_self_reclone(
             "git clone -b main https://github.com/owner/repo /w/repo", "owner/repo"
         )
@@ -296,15 +262,11 @@ class TestSelfRecloneGuard:
         )
 
     def test_blocks_clone_chained_after_an_unrelated_message_flag(self):
-        # The ``-m`` belongs to the commit, not to the clone that follows it. A
-        # free-text argument must only swallow the rest of ITS OWN shell segment.
         assert _is_self_reclone(
             "git commit -m wip && gh repo clone owner/repo /w/repo", "owner/repo"
         )
 
     def test_blocks_a_clone_on_its_own_line_after_a_line_with_a_text_flag(self):
-        # A line break ends a command as ``&&`` does. The ``-b`` and the ``-m``
-        # belong to the command on the line above, not to the clone.
         assert _is_self_reclone(
             "cd /workspace\ngit checkout -b fix/foo\ngh repo clone owner/repo repo2", "owner/repo"
         )
@@ -314,55 +276,36 @@ class TestSelfRecloneGuard:
         clone = "gh repo clone owner/repo x"
         for command in (
             f"git commit -m 'wip'\n{clone}",
-            # below a body that itself runs over several lines
             f'gh pr comment 7 --body "first line\nsecond line"\n{clone}',
-            # an apostrophe in a comment opens no string that ends in the last line
             f"# don't lose the branch\ngit checkout -b fix/foo\n{clone}\necho 'done'",
-            # below a here-document: in a string, and with an indented last line
             f'git commit -m "$(cat <<\'EOF\'\nfor a 5" disk\nEOF\n)"\n{clone}',
             f"cat > setup.sh <<-EOF\n\tpython -m venv .venv\n\tEOF\n{clone}",
-            # in a here-document that a shell reads, as before
             f"bash <<'EOF'\nset -e\n{clone}\nEOF",
-            # below the two characters of the operator where they begin no text
             f"echo $((1 << 4))\ngit checkout -b fix/foo\n{clone}",
             f"cat > a.txt <<EOF\ntext\nEOF\ngit commit -m 'it began with <<EOF'\n{clone}",
-            # below a body in single quotes that runs over two lines
             f"git commit -m 'first line\nsecond line'\n{clone}",
-            # below a here-document whose text holds an apostrophe
             f"cat > notes.txt <<EOF\ndon't forget\nEOF\ngit checkout -b fix/foo\n{clone}",
         ):
             assert _is_self_reclone(command, "owner/repo"), command
 
     def test_a_line_of_text_that_reads_like_a_clone_is_no_command(self):
-        # The counterpart: a line break inside quotes ends no command, and the
-        # lines of a here-document belong to the command that reads them,
-        # whatever quotes they hold.
         clone = "git clone https://github.com/owner/repo"
         for command in (
-            # an escaped double quote in the first line of the body, and in a later one
             f'gh pr create --title "docs" --body "for a 5\\" disk\n{clone}\ndone"',
             f'gh pr create --title "docs" --body "first\nfor a 5\\" disk\n{clone}\ndone"',
-            # a single quote written as '\'' inside a body in single quotes
             f"git commit -m 'it'\\''s documented\n{clone}'",
-            # a second string that begins in the line where the first one ends
             f'git commit -m "docs:\nsetup" -m "see\n{clone}"',
-            # a body that holds the two characters of the here-document operator
             f'gh pr create --title "docs" --body "first\nx << 2\n{clone}"',
-            # a here-document: read as a body, in a string, with an indented end
             f"gh pr create --title docs --body-file - <<'EOF'\n## Setup\n{clone}\nEOF",
             f'git commit -m "$(cat <<\'EOF\'\nfor a 5" disk\n{clone}\nEOF\n)"',
             f"gh pr create --title docs --body-file - <<-EOF\n\t{clone}\n\tEOF\ngit status",
-            # a blank before the word, and a text that names the word
             f"gh pr create --title docs --body-file - << 'EOF'\n## Setup\n{clone}\nEOF",
             f"gh pr create --title docs --body-file - <<'EOF'\nthe EOF line ends it\n{clone}\nEOF",
-            # the task repository named by the line below a clone of another one
             "git clone https://github.com/other/dep.git\ngh pr view 7 --repo owner/repo",
         ):
             assert not _is_self_reclone(command, "owner/repo"), command
 
     def test_still_ignores_prose_after_a_body_flag_in_the_same_segment(self):
-        # The counterpart: within one segment, a verb appearing after the body
-        # value opens is prose. These must stay allowed.
         assert not _is_self_reclone(
             'gh pr create --body "do not run gh repo clone owner/repo"', "owner/repo"
         )
@@ -371,11 +314,6 @@ class TestSelfRecloneGuard:
         )
 
     def test_blocks_a_clone_wrapped_across_lines_with_a_backslash(self):
-        """A trailing backslash continues the SAME command onto the next line.
-
-        Splitting on a bare newline separated the verb from the repo, so the slug
-        was never found in the verb's segment and a wrapped self re-clone walked
-        through — including the ``-b`` form this guard was hardened to catch."""
         assert _is_self_reclone(
             "git clone \\\n  https://github.com/owner/repo /w/repo", "owner/repo"
         )
@@ -385,17 +323,9 @@ class TestSelfRecloneGuard:
         assert _is_self_reclone(
             "git clone --depth 1 \\\n  https://github.com/owner/repo x", "owner/repo"
         )
-        # The continuation can split the VERB itself, not just its arguments —
-        # this is the case that needs the joining, since no amount of segment
-        # handling reunites ``git`` with ``clone`` across the break.
         assert _is_self_reclone("git \\\n  clone https://github.com/owner/repo x", "owner/repo")
 
     def test_ignores_a_clone_quoted_inside_a_MULTI_LINE_body(self):
-        """A multi-line --body/-m value is the normal way an agent writes a PR body.
-
-        Its quoted text routinely documents a clone command. Treating a bare
-        newline as a command separator put that line in its own segment with no
-        preceding free-text flag, so a legitimate ``gh pr create`` was denied."""
         body = "## Setup\ngit clone https://github.com/owner/repo\ncd repo\nmise run setup"
         assert not _is_self_reclone(
             f'gh pr create --title "docs: onboarding" --body "{body}"',
@@ -407,8 +337,6 @@ class TestSelfRecloneGuard:
         )
 
     def test_requires_command_position_not_substring(self):
-        # The verb must be in command position (start / after a separator), not an
-        # arbitrary substring like a path or flag value.
         assert _is_self_reclone("echo hi; gh repo clone owner/repo", "owner/repo")
         assert not _is_self_reclone("ls /tmp/gh-repo-clone-notes/owner/repo", "owner/repo")
 
@@ -432,8 +360,6 @@ class TestSelfRecloneGuard:
         assert "work in place" in reason.lower()
 
     def test_the_log_line_of_a_denied_reclone_quotes_the_screened_command(self, capfd):
-        # The log line quotes 160 characters of the command, screened like the
-        # output of a tool before it is cut.
         command = (
             f"cd /workspace && git clone https://deploy:{_URL_VALUE}@github.com/owner/repo.git w"
         )
@@ -467,11 +393,9 @@ class TestSelfRecloneGuard:
         result = _run(
             pre_tool_use_hook(hook_input, "test-dep", {}, engine=engine, repo_url="owner/repo")
         )
-        # Not blocked by the reclone guard — falls through to Cedar (which permits).
         assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
     def test_hook_without_repo_url_does_not_block(self):
-        # Legacy call shape (no repo_url threaded) must not crash or over-block.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         hook_input = {
             "hook_event_name": "PreToolUse",
@@ -505,8 +429,6 @@ class TestTruncate:
         assert len(out) == 8
 
     def test_small_max_len_does_not_slice_negatively(self):
-        # Regression: for max_len <= 3, ``max_len - 3`` slices negatively
-        # (dropping chars off the END). Guard returns a plain prefix instead.
         from hooks import _truncate
 
         assert _truncate("abcdef", 2) == "ab"
@@ -516,9 +438,6 @@ class TestTruncate:
 
 _SCREENING_ERROR = "[Output redacted: screening error — fail-closed]"
 
-# What the hook answers when a response cannot be screened, by tool: the
-# response as the CLI hands it over, and what the answer looks like for a
-# marker. Checked against the pinned CLI, which takes each of these answers.
 _FAIL_CLOSED_CASES = [
     pytest.param(
         "Bash",
@@ -665,11 +584,6 @@ _FAIL_CLOSED_CASES = [
 
 
 class TestRedactionMarkerGuard:
-    """A redaction marker stands, in what the model is shown, for a value that
-    the screening of tool output hides. Written into a file it would take the
-    place of that value, in the repository and in the pull request, so a Write
-    or an Edit that would add one is refused."""
-
     MARKER = "[REDACTED-AWS_KEY]"
     ON_DISK = "A=1\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
     SHOWN = f"A=1\nAWS_ACCESS_KEY_ID={MARKER}\n"
@@ -693,7 +607,6 @@ class TestRedactionMarkerGuard:
     def test_refuses_a_write_that_restates_what_the_agent_was_shown(self, tmp_path):
         target = tmp_path / "settings.ini"
         target.write_text(self.ON_DISK, encoding="utf-8")
-        # What a Read of the file hands the model is the scanner's copy of it.
         assert hooks.scan_tool_output(self.ON_DISK).redacted_content == self.SHOWN
         trajectory = MagicMock()
 
@@ -720,8 +633,6 @@ class TestRedactionMarkerGuard:
         assert output["permissionDecision"] == "deny"
 
     def test_refuses_a_write_that_holds_a_marker_once_more_than_the_file(self, tmp_path):
-        # The file holds the marker as a text of its own (an expectation in a
-        # test) and a value that the screening hides as well.
         target = tmp_path / "test_scanner.py"
         target.write_text(f'EXPECTED = "{self.MARKER}"\n' + self.ON_DISK, encoding="utf-8")
         output = self._decide(
@@ -752,7 +663,6 @@ class TestRedactionMarkerGuard:
         assert output["permissionDecision"] == "deny"
         reason = output["permissionDecisionReason"]
         assert marker in reason
-        # The longest marker there is: the instruction is not cut off.
         assert reason.endswith("do not include the line.")
 
     def test_knows_every_marker_of_the_scanner(self):
@@ -763,7 +673,6 @@ class TestRedactionMarkerGuard:
             assert hooks._REDACTION_MARKER_RE.fullmatch(f"[REDACTED-{label}]"), label
 
     def test_lets_a_write_through_that_keeps_the_markers_the_file_holds(self, tmp_path):
-        # A test of the scanner holds the marker as a text of its own.
         target = tmp_path / "test_scanner.py"
         target.write_text(f'EXPECTED = "{self.MARKER}"\n', encoding="utf-8")
         output = self._decide(
@@ -876,7 +785,6 @@ class TestPostToolUseHook:
         assert "updatedToolOutput" in output
         assert "BEGIN RSA PRIVATE KEY" not in output["updatedToolOutput"]
         assert "[REDACTED-PRIVATE_KEY]" in output["updatedToolOutput"]
-        # Surrounding content preserved
         assert "file contents:" in output["updatedToolOutput"]
         assert "end" in output["updatedToolOutput"]
 
@@ -894,14 +802,12 @@ class TestPostToolUseHook:
         }
         result = _run(post_tool_use_hook(hook_input, "test-6", {}))
         output = result["hookSpecificOutput"]
-        # The key is found inside the dict, which keeps its shape.
         assert output["updatedToolOutput"] == {"output": "[REDACTED-AWS_KEY]"}
 
     def test_redacts_a_built_in_tool_response_in_its_own_shape(self):
-        # What the CLI hands over for Bash. It takes a rewrite of a built-in
-        # tool only under ``updatedToolOutput`` and only in the tool's own
-        # shape; ``updatedMCPToolOutput`` is applied to MCP tools alone, so the
-        # model received the key although the hook reported a redaction.
+        # The CLI takes a rewrite of a built-in tool only under ``updatedToolOutput``
+        # and only in the tool's own shape; ``updatedMCPToolOutput`` is applied to
+        # MCP tools alone.
         hook_input = {
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
@@ -925,7 +831,6 @@ class TestPostToolUseHook:
         assert "updatedMCPToolOutput" not in output
 
     def test_redacts_nested_and_listed_strings_and_leaves_the_rest(self):
-        # Read nests the text; an MCP tool answers with a list of blocks.
         read = {
             "type": "text",
             "file": {
@@ -975,8 +880,6 @@ class TestPostToolUseHook:
         ]
 
     def test_a_string_with_nothing_to_redact_is_passed_on_whole(self, monkeypatch):
-        # The scanner reads only the start of a very long string and returns
-        # that part. Its copy must not replace a string it found nothing in.
         import output_scanner
 
         monkeypatch.setattr(output_scanner, "_MAX_SCAN_LENGTH", 40)
@@ -1010,8 +913,6 @@ class TestPostToolUseHook:
         assert output["hookEventName"] == "PostToolUse"
         assert "updatedToolOutput" not in output
 
-    # ---- Telemetry integration ----
-
     def test_trajectory_called_on_redaction(self):
         trajectory = MagicMock()
         hook_input = {
@@ -1022,7 +923,6 @@ class TestPostToolUseHook:
         _run(post_tool_use_hook(hook_input, "test-t1", {}, trajectory=trajectory))
         trajectory.write_output_screening_decision.assert_called_once()
         call_args = trajectory.write_output_screening_decision.call_args
-        # positional args: tool_name, findings, redacted, duration_ms
         assert call_args[0][0] == "Bash"
         assert "AWS_KEY detected" in call_args[0][1]
 
@@ -1035,8 +935,6 @@ class TestPostToolUseHook:
         }
         _run(post_tool_use_hook(hook_input, "test-t2", {}, trajectory=trajectory))
         trajectory.write_output_screening_decision.assert_not_called()
-
-    # ---- Scanner exception handling (fail-closed) ----
 
     def test_fail_closed_on_scanner_exception(self):
         hook_input = {
@@ -1066,7 +964,6 @@ class TestPostToolUseHook:
         assert any("SCANNER_ERROR" in f for f in call_args[0][1])
 
     def test_a_response_that_cannot_be_scanned_in_full_is_blanked_in_full(self):
-        # The scanner fails on one string only, the text of the file.
         from output_scanner import scan_tool_output as real_scan
 
         def scan(text):
@@ -1094,8 +991,7 @@ class TestPostToolUseHook:
         self, tool_name, response, blanked
     ):
         # The CLI checks a rewritten response against the output schema of the
-        # tool and passes the ORIGINAL on when it does not fit: a blanked
-        # "type" of Read or "mode" of Grep let the raw text through.
+        # tool and passes the ORIGINAL on when it does not fit.
         hook_input = {
             "hook_event_name": "PostToolUse",
             "tool_name": tool_name,
@@ -1116,10 +1012,6 @@ class TestPostToolUseHook:
         }
 
     def test_fail_closed_does_not_claim_a_redaction_for_a_tool_it_was_not_checked_for(self, capfd):
-        # The hook does not know the output schema of this tool, so it cannot
-        # tell whether the CLI takes the blanked response (the blanked "status"
-        # is none of the values that schema allows): the log line and the
-        # screening event must not claim a redaction.
         hook_input = {
             "hook_event_name": "PostToolUse",
             "tool_name": "TodoWrite",
@@ -1138,7 +1030,6 @@ class TestPostToolUseHook:
 
     @pytest.mark.parametrize(("tool_name", "response", "blanked"), _FAIL_CLOSED_CASES)
     def test_wrapper_fails_closed_in_a_form_the_cli_takes(self, tool_name, response, blanked):
-        # The callback handed to the SDK, when the hook itself crashes.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         post = build_hook_matchers(engine=engine)["PostToolUse"][0].hooks[0]
         hook_input = {
@@ -1155,8 +1046,6 @@ class TestPostToolUseHook:
 
 
 class TestDetectEgressDenial:
-    """#251 egress-denial signature scan."""
-
     def test_no_match_on_clean_output(self):
         assert detect_egress_denial("Successfully installed package\n") == (False, None)
         assert detect_egress_denial("") == (False, None)
@@ -1181,15 +1070,11 @@ class TestDetectEgressDenial:
         assert host == "github.com"
 
     def test_connection_refused_without_host(self):
-        # Detection-only signature — fires but names no host.
         detected, host = detect_egress_denial("Error: connect ECONNREFUSED — Connection refused")
         assert detected is True
         assert host is None
 
     def test_urllib3_captures_real_host_not_class_path(self):
-        # The requests/urllib3 error embeds the urllib3 class path BEFORE the
-        # real host; a naive lazy match would grab the class path. We anchor on
-        # HTTPSConnectionPool(host='…') / Failed to resolve '…' instead.
         stderr = (
             "HTTPSConnectionPool(host='pypi.org', port=443): Max retries exceeded "
             "with url: /simple/ (Caused by NameResolutionError("
@@ -1203,8 +1088,6 @@ class TestDetectEgressDenial:
 
 
 class TestPostToolUseEgressBlocker:
-    """#251: PostToolUse emits egress_denied + latches the terminal reason."""
-
     def test_emits_egress_denied_event_with_host(self, progress):
         hook_input = {
             "hook_event_name": "PostToolUse",
@@ -1242,22 +1125,15 @@ class TestPostToolUseEgressBlocker:
         assert not [c for c in progress.calls if c[0] == "write_agent_blocked"]
 
     def test_hostless_signature_emits_event_but_does_not_latch_terminal_reason(self, progress):
-        # A detection-only signature ("Connection refused") commonly fires for an
-        # internal localhost race, not an egress denial. It should surface as an
-        # observability event but MUST NOT poison the authoritative terminal
-        # reason (which would send the operator to the DNS Firewall for nothing).
         hook_input = {
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "tool_response": "curl http://127.0.0.1:8080 — Connection refused",
         }
         _run(post_tool_use_hook(hook_input, "t-hostless", {}, progress=progress))
-        # Event fired (heuristic live-stream signal)…
         assert [c for c in progress.calls if c[0] == "write_agent_blocked"]
-        # …but the terminal carry-path was NOT latched (no host captured).
         assert last_blocker_reason() is None
 
-    # An exception for the last would make the hook's wrapper blank the output of the tool.
     @pytest.mark.parametrize(
         "tool_name",
         [
@@ -1282,7 +1158,6 @@ class TestPostToolUseEgressBlocker:
         assert [b["resource"] for b in blocked] == ["registry.example.com"]
 
     def test_a_host_in_the_page_that_a_fetch_brought_back_does_not_latch(self, progress):
-        # A fetch that cannot connect is a call that failed (TestPostToolUseFailure).
         hook_input = {
             "hook_event_name": "PostToolUse",
             "tool_name": "WebFetch",
@@ -1302,7 +1177,6 @@ class TestPostToolUseEgressBlocker:
 
 
 def _failed_bash(command: str, error: str) -> dict:
-    """The PostToolUseFailure event of a Bash command that exits non-zero."""
     return {
         "hook_event_name": "PostToolUseFailure",
         "tool_name": "Bash",
@@ -1315,15 +1189,10 @@ def _failed_bash(command: str, error: str) -> dict:
 
 _LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
 _DIGITS = "0123456789"
-# Stands where the password of a URL would.
+# The secret scan of the repository reads this file: values in the shape of credentials
+# are put together from pieces.
 _URL_VALUE = "Sup3r" + "S3cretPassw0rd" + _DIGITS
 
-# Credentials as they stand in a command or in its output: what stands in front
-# of the value, the value, what follows it. The values have the shape of
-# credentials and are put together from pieces here, because the secret scan of
-# the repository reads this file; the AWS pair is the one AWS publishes in its
-# documentation. The last form is known to the redaction of the log lines only,
-# the others to the scanner of tool output.
 _QUOTED_CREDENTIALS = [
     pytest.param(
         "psql postgresql://app_user:",
@@ -1371,7 +1240,6 @@ _QUOTED_CREDENTIALS = [
 
 
 def _pieces_in(value: str, text: str) -> list[str]:
-    """The four-character pieces of *value* that *text* holds."""
     pieces = {value[i : i + 4] for i in range(len(value) - 3)}
     return sorted(piece for piece in pieces if piece in text)
 
@@ -1379,11 +1247,9 @@ def _pieces_in(value: str, text: str) -> list[str]:
 class TestPostToolUseFailure:
     """A tool call that fails fires PostToolUseFailure and never PostToolUse
     (for Bash: a non-zero exit, unless the CLI reads the status as an answer,
-    such as 1 from grep without a match), so the egress detector and the stuck
-    guard have to be fed from that event as well."""
+    such as 1 from grep without a match)."""
 
     OOM = "Exit code 134\nFATAL ERROR: JavaScript heap out of memory"
-    # The tests build a placeholder in the shape of a token from this.
     LETTERS = _LETTERS
 
     def _callback(self, progress=None):
@@ -1404,18 +1270,14 @@ class TestPostToolUseFailure:
         assert "during Bash" in blocked[0]["detail"]
         assert (last_blocker_reason() or "").startswith("BLOCKED[egress_denied]:")
 
-    # The last is the all-zero address that a dev server prints as the one it
-    # listens on, put together here so that the linter does not take it for a bind.
+    # The last is the all-zero address, put together here so that the linter does not
+    # take it for a bind.
     @pytest.mark.parametrize(
         "host", ["localhost", "127.0.0.1", "127.0.0.2", "LOCALHOST", ".".join("0000")]
     )
     def test_a_failed_connection_to_loopback_does_not_latch_the_terminal_reason(
         self, progress, host
     ):
-        # `curl http://localhost:3000/health` before the dev server is up. The
-        # event is written, but a task that later fails for another reason must
-        # not be reported as egress denied, with the remedy to allowlist
-        # localhost in the DNS Firewall.
         event = _failed_bash(
             f"curl http://{host}:3000/health",
             f"Exit code 7\ncurl: (7) Failed to connect to {host} port 3000 after 0 ms: "
@@ -1426,8 +1288,6 @@ class TestPostToolUseFailure:
         blocked = [c[1] for c in progress.calls if c[0] == "write_agent_blocked"]
         assert [b["resource"] for b in blocked] == [host]
 
-    # WebFetch opens its connection itself, as a command does. A file tool
-    # opens none, and an MCP tool hands on what a server answered.
     @pytest.mark.parametrize(
         ("tool_name", "latched"),
         [("WebFetch", True), ("Read", False), ("mcp__abca_gateway__repo_config", False)],
@@ -1459,12 +1319,10 @@ class TestPostToolUseFailure:
         assert "mise //cdk:test" in output["additionalContext"]
         milestones = [c[1]["milestone"] for c in progress.calls if c[0] == "write_agent_milestone"]
         assert milestones == ["stuck_steer"]
-        # One advisory per repeated command: the fourth failure adds nothing.
         assert _run(callback(event, "tu-1", {})) == {}
 
     def test_max_turns_summary_is_latched_without_a_stop_hook(self):
-        # An agent that keeps calling tools never reaches the Stop hook, and
-        # the CLI runs none when it cuts the run off at max_turns.
+        # The CLI runs no Stop hook when it cuts a run off at max_turns.
         from stuck_guard import WINDOW
 
         callback = self._callback()
@@ -1473,8 +1331,6 @@ class TestPostToolUseFailure:
         assert "last tool calls repeated: `mise //cdk:test`" in (last_stuck_summary() or "")
 
     def test_max_turns_summary_is_screened_like_tool_output(self):
-        # The summary quotes the repeated command and its output, and the
-        # pipeline appends it to the task's error message.
         from stuck_guard import WINDOW
 
         callback = self._callback()
@@ -1500,16 +1356,12 @@ class TestPostToolUseFailure:
             pytest.param(
                 "curl -sS -X POST https://api.example.com/v1/items"
                 " -H 'Authorization: Bearer {letters}{letters}'",
-                # The cut falls on the marker now.
                 "-H 'Authorization: [REDACTED-…",
                 id="a bearer token in a curl header",
             ),
         ],
     )
     def test_max_turns_summary_drops_the_start_of_a_token_that_the_cut_splits(self, command, kept):
-        # The guard quotes 80 characters of the command, and the cut would fall
-        # inside the token. The command is screened before the guard cuts it,
-        # so the token is replaced while it is whole.
         from stuck_guard import WINDOW
 
         callback = self._callback()
@@ -1525,7 +1377,6 @@ class TestPostToolUseFailure:
         assert "Invalid username or token" in summary
 
     def _summary_after_repeating(self, command: str, error: str) -> str:
-        """The turn-limit summary once the same failure has filled the guard's window."""
         from stuck_guard import WINDOW, StuckGuard
 
         guard = StuckGuard()
@@ -1543,11 +1394,6 @@ class TestPostToolUseFailure:
     def test_max_turns_summary_holds_no_piece_of_a_credential_wherever_the_cut_falls(
         self, where, before, value, after
     ):
-        # The summary quotes 80 characters of the command and 120 of its output
-        # and ends up in the error message of the task. The scanner and the
-        # redaction of the log lines know most credentials only whole, so both
-        # texts are screened before the guard cuts them. Here the credential is
-        # moved through the cut, one position at a time.
         from stuck_guard import _CMD_PREVIEW_LEN
 
         limit = _CMD_PREVIEW_LEN if where == "command" else 120
@@ -1566,9 +1412,6 @@ class TestPostToolUseFailure:
     def test_the_advisory_its_milestone_and_its_log_line_quote_the_screened_command(
         self, progress, capfd
     ):
-        # The advisory quotes 80 characters of the command, the stuck_steer
-        # milestone 60 of the advisory, and the log line the whole command in
-        # lower case. The cut of the first falls inside the password here.
         command = (
             "cd /workspace/repo/services/api && "
             f"psql postgresql://app_user:{_URL_VALUE}@db.internal:5432/app"
@@ -1587,8 +1430,6 @@ class TestPostToolUseFailure:
         assert not _pieces_in(_URL_VALUE.lower(), logged.lower())
 
     def test_the_log_line_of_the_advisory_is_screened_as_one_text(self, capfd):
-        # The log line names the call by the guard's signature. For a tool
-        # without a command or a file path that is its whole input.
         value = _LETTERS + "0123"
         event = {
             "hook_event_name": "PostToolUseFailure",
@@ -1606,7 +1447,6 @@ class TestPostToolUseFailure:
         assert not _pieces_in(value.lower(), logged.lower())
 
     def test_max_turns_summary_is_screened_again_when_it_is_read(self, monkeypatch):
-        # Whatever writes the latch: nothing leaves it unscreened.
         monkeypatch.setattr(
             hooks,
             "_LAST_STUCK_SUMMARY",
@@ -1632,9 +1472,6 @@ class TestPostToolUseFailure:
 
 
 class TestPreToolUsePolicyFailClosed:
-    """#251 (decision E): fail-closed denies emit policy_fail_closed; intentional
-    hard-denies do NOT. Branches on the structured flag, not a reason string."""
-
     def _deny_input(self):
         return {
             "hook_event_name": "PreToolUse",
@@ -1644,7 +1481,7 @@ class TestPreToolUsePolicyFailClosed:
 
     def test_fail_closed_deny_emits_blocker(self, progress):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        engine._cedarpy = None  # force "policy engine unavailable" fail-closed
+        engine._cedarpy = None
         result = _run(
             pre_tool_use_hook(self._deny_input(), "t-fc", {}, engine=engine, progress=progress)
         )
@@ -1652,11 +1489,9 @@ class TestPreToolUsePolicyFailClosed:
         blocked = [c for c in progress.calls if c[0] == "write_agent_blocked"]
         assert len(blocked) == 1
         assert blocked[0][1]["kind"] == "policy_fail_closed"
-        # Terminal carry-path latched too.
         assert (last_blocker_reason() or "").startswith("BLOCKED[policy_fail_closed]:")
 
     def test_hard_deny_does_not_emit_blocker(self, progress):
-        # A read-only engine hard-denies Write — intentional, fail_closed=False.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
         hook_input = {
             "hook_event_name": "PreToolUse",
@@ -1669,8 +1504,6 @@ class TestPreToolUsePolicyFailClosed:
         assert last_blocker_reason() is None
 
     def test_fail_closed_still_denies_without_progress(self):
-        # No-fail-closed-regression (cross-cutting AC): the deny is unchanged
-        # whether or not the blocker emit is wired.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         engine._cedarpy = None
         result = _run(pre_tool_use_hook(self._deny_input(), "t-fc2", {}, engine=engine))
@@ -1690,7 +1523,6 @@ class TestBuildHookMatchers:
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         matchers = build_hook_matchers(engine=engine)
         pre_matcher = matchers["PreToolUse"][0]
-        # HookMatcher has matcher=None (match all) and hooks list
         assert pre_matcher.matcher is None
         assert len(pre_matcher.hooks) == 1
 
@@ -1712,7 +1544,6 @@ class TestBuildHookMatchers:
         original = _ApprovalDeadline.from_recorded("2026-09-15T23:00:00Z", 30)
         try:
             matchers = build_hook_matchers(engine=engine, task_id="callback-budget")
-            # Gates are bounded in wall-clock time on every backend, suspended or not.
             protected_window = SHARED_CONSTANTS["approval_timeout_s"]["max"]
             assert matchers["PreToolUse"][0].timeout > protected_window
             assert engine.task_default_timeout_s == 30
@@ -1725,14 +1556,10 @@ class TestBuildHookMatchers:
 
     def test_matchers_with_trajectory(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Pass None for trajectory — should still work
         matchers = build_hook_matchers(engine=engine, trajectory=None)
         assert "PreToolUse" in matchers
         assert "PostToolUse" in matchers
 
-    # The SDK calls the closures that build_hook_matchers returns, not the hook
-    # functions that the other tests call. What a closure hands on to its hook
-    # is checked here.
     def _callbacks(self, engine, **kwargs) -> dict:
         matchers = build_hook_matchers(
             engine, task_id="t", user_id="u-1", repo_url="owner/repo", **kwargs
@@ -1751,11 +1578,9 @@ class TestBuildHookMatchers:
         assert decide("npm test")[0] == "allow"
         assert decide("rm -rf /")[0] == "deny"
         assert trajectory.write_policy_decision.called
-        # The repository of the task reaches the guard against a second clone.
         decision, reason = decide("gh repo clone owner/repo")
         assert decision == "deny"
         assert "ALREADY cloned" in reason
-        # An error inside the gate is a deny, whatever the SDK would make of it.
         with patch.object(engine, "evaluate_tool_use", side_effect=RuntimeError("boom")):
             decision, reason = decide("npm test")
         assert decision == "deny"
@@ -1797,9 +1622,6 @@ class TestBuildHookMatchers:
         assert "write_agent_blocked" in progress.milestones()
 
     def test_both_tool_result_callbacks_feed_one_guard(self):
-        # The guard counts the failures among the last tool calls. The calls
-        # that complete reach it through the other callback: an agent that has
-        # recovered is not reported as repeating a failure.
         from stuck_guard import WINDOW, WINDOW_FAIL_THRESHOLD
 
         callbacks = self._callbacks(PolicyEngine(task_type="new_task", repo="owner/repo"))
@@ -1815,8 +1637,6 @@ class TestBuildHookMatchers:
         for _ in range(WINDOW):
             _run(callbacks["PostToolUseFailure"](failed, "tu-1", {}))
         assert "last tool calls repeated" in (last_stuck_summary() or "")
-        # The calls that complete bring the failures in the window below the
-        # number that counts as repeating, and one more failure does not lift it.
         for _ in range(WINDOW - WINDOW_FAIL_THRESHOLD + 1):
             _run(callbacks["PostToolUse"](completed, "tu-2", {}))
         _run(callbacks["PostToolUseFailure"](failed, "tu-3", {}))
@@ -1837,36 +1657,11 @@ class TestBuildHookMatchers:
         assert "Injecting 1 denial(s) for task t" in capfd.readouterr().out
 
 
-# ===========================================================================
-# Chunk 3: REQUIRE_APPROVAL path integration (§6.5, IMPL-24)
-# ===========================================================================
-#
-# Tests in this section drive the REQUIRE_APPROVAL branch of
-# ``pre_tool_use_hook`` with a fake ``task_state`` module so we can run the
-# full control-flow without a real boto3 client. They lock:
-#
-#   - Happy APPROVED / DENIED / TIMED_OUT paths.
-#   - IMPL-24 VM-throttle + late-approval race (APPROVED / DENIED / still-PENDING
-#     / row-gone branches).
-#   - Cap + per-minute rate-limit short-circuits (no DDB write attempted).
-#   - ``approval_timeout_capped`` emission for both clip reasons.
-#   - ``approval_ceiling_shrinking`` emit-once latch.
-#   - Denial injection queued + ``_denial_between_turns_hook`` drain / cancel
-#     short-circuit.
-#   - ``permissionDecisionReason`` is ANSI-stripped and ≤500 chars on DENY.
-
-
 def _sha256_of(tool_input: dict) -> str:
-    """Mirror of ``policy._sha256_tool_input`` for seeding the cache in tests."""
     return hashlib.sha256(_json.dumps(tool_input, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-# --- Test scaffolding -----------------------------------------------------
-
-
 class _FakeApprovalWriteError(Exception):
-    """Mirror of ``task_state.ApprovalWriteError`` for the fake module."""
-
     def __init__(self, message: str = "cancelled", cancellation_reasons: list | None = None):
         super().__init__(message)
         self.cancellation_reasons = cancellation_reasons or []
@@ -1883,20 +1678,6 @@ class _FakeApprovalTablesUnavailable(RuntimeError):
 
 
 class _FakeTaskState:
-    """Substitute for the ``task_state`` module in hook tests.
-
-    Exposes the same callables and exception classes the hook uses, but
-    records calls + lets each call's outcome be scripted per-test.
-
-    Row lookups are scripted in two phases:
-      - ``get_row_script`` — consumed during the poll phase. When empty,
-        returns PENDING.
-      - ``reread_row`` — returned by ``get_approval_row`` ONLY after
-        ``best_effort_update_approval_status`` has been called (the
-        IMPL-24 re-read). Lets race tests force the poll to time out and
-        then script the re-read's outcome separately from the poll rows.
-    """
-
     ApprovalWriteError = _FakeApprovalWriteError
     ApprovalResumeError = _FakeApprovalResumeError
     ApprovalTablesUnavailable = _FakeApprovalTablesUnavailable
@@ -1908,24 +1689,11 @@ class _FakeTaskState:
         self.update_calls: list[tuple[str, str, str, str | None]] = []
         self.resume_calls: list[tuple[str, str]] = []
         self.get_calls: list[tuple[str, str, bool]] = []
-        # Chunk 7: Persisted gate-counter bumps recorded per call so tests
-        # can assert the hook fires the DDB write on the REQUIRE_APPROVAL
-        # path (§13.6). Kept separate from session counter (in-engine).
         self.gate_count_calls: list[str] = []
-        # Allow tests to force the DDB increment to return False (best-effort
-        # failure) without raising; hook should keep going.
         self.gate_count_return = True
-        # Poll behaviour — deque of row dicts or exceptions returned by
-        # successive get_approval_row calls during the poll phase.
         self.get_row_script: deque[Any] = deque()
-        # IMPL-24 re-read row: returned AFTER ``best_effort_update_approval_status``
-        # has been called (that's how the hook signals a race). Unset by
-        # default; tests that exercise the race path set this explicitly.
         self.reread_row: Any = _FakeTaskState._SENTINEL_UNSET
-        # Override for the best_effort_update_approval_status return bool.
-        # Default is True (condition held, wrote TIMED_OUT).
         self.best_effort_return = True
-        # Hooks into the write / resume path so tests can inject errors.
         self.write_raises: Exception | None = None
         self.resume_raises: Exception | None = None
         self.best_effort_raises: Exception | None = None
@@ -1957,7 +1725,6 @@ class _FakeTaskState:
         return self.best_effort_return
 
     def increment_approval_gate_count_in_ddb(self, task_id: str, *, client=None) -> bool:
-        """Record Chunk 7 DDB counter bumps; return configurable best-effort bool."""
         self.gate_count_calls.append(task_id)
         return self.gate_count_return
 
@@ -1965,14 +1732,11 @@ class _FakeTaskState:
         self, task_id: str, request_id: str, *, consistent_read: bool = True, client=None
     ) -> dict | None:
         self.get_calls.append((task_id, request_id, consistent_read))
-        # Race-path branch: any call AFTER
-        # ``best_effort_update_approval_status`` is the IMPL-24 re-read.
         if self.update_calls and self.reread_row is not _FakeTaskState._SENTINEL_UNSET:
             if isinstance(self.reread_row, Exception):
                 raise self.reread_row
             return self.reread_row
         if not self.get_row_script:
-            # Default: row still PENDING (drives poll to timeout).
             return {
                 "task_id": task_id,
                 "request_id": request_id,
@@ -1985,8 +1749,6 @@ class _FakeTaskState:
 
 
 class _RecordingProgress:
-    """Progress-writer double that records every approval_* milestone call."""
-
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self._disabled = False
@@ -2016,12 +1778,7 @@ def progress():
 
 @pytest.fixture()
 def engine_with_soft_gate():
-    """A PolicyEngine configured so a single blueprint soft-deny rule fires.
-
-    Using a blueprint rule keeps the fixture independent of the built-in
-    soft policies' evolution — tests remain stable if ``force_push_any``
-    etc. change annotations.
-    """
+    """A PolicyEngine configured so a single blueprint soft-deny rule fires."""
     blueprint_soft = (
         '@tier("soft")\n'
         '@rule_id("test_bash_foo")\n'
@@ -2050,14 +1807,6 @@ def _hook_input(tool_name: str = "Bash", command: str = "echo foo") -> dict:
 
 
 def _prime_approval(fake: _FakeTaskState, terminal_row: dict) -> None:
-    """Queue an ``APPROVED``/``DENIED`` row on the second poll iteration.
-
-    The first iteration sees PENDING (so the poll proceeds into the
-    terminal-read branch on the next tick); the second sees the user's
-    terminal decision. Using two entries keeps tests honest about the
-    poll loop actually running rather than short-circuiting on the first
-    iteration.
-    """
     fake.get_row_script.extend(
         [
             {"status": "PENDING"},
@@ -2067,13 +1816,6 @@ def _prime_approval(fake: _FakeTaskState, terminal_row: dict) -> None:
 
 
 def _fast_poll(monkeypatch):
-    """Collapse poll intervals so tests run instantly.
-
-    Swaps ``asyncio.sleep`` for a no-op AND advances ``hooks.time.monotonic``
-    by the requested sleep duration each call so the monotonic deadline
-    trips without waiting for real UTC time to pass. When scripted rows
-    run out, the fake returns PENDING until that deadline.
-    """
     fake_clock = {"now": 0.0}
 
     def _monotonic() -> float:
@@ -2233,7 +1975,6 @@ class TestApprovalDeadline:
         fake_task_state.best_effort_return = False
         fake_task_state.reread_row = reread_row
         if reread_row is None:
-            # A missing/TTL-reaped row during the poll also stays fail-closed.
             fake_task_state.get_row_script.append(None)
         if cancelled:
             fake_task_state.resume_raises = _FakeApprovalResumeError("cancelled")
@@ -2310,9 +2051,6 @@ class TestApprovalDeadline:
         assert not fake_task_state.resume_calls
 
 
-# --- Happy paths ----------------------------------------------------------
-
-
 class TestApprovedPath:
     def test_approved_returns_allow_and_propagates_scope(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
@@ -2337,8 +2075,6 @@ class TestApprovedPath:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
-        # Scope propagated: subsequent Bash calls should hit the allowlist
-        # fast-path rather than the rule.
         assert engine_with_soft_gate.allowlist.matches("Bash", {"command": "echo bar"})
         milestones = progress.milestones()
         assert "write_approval_requested" in milestones
@@ -2366,14 +2102,11 @@ class TestApprovedPath:
             )
         )
 
-        # No scope added → next identical call re-gates.
         assert not engine_with_soft_gate.allowlist.matches("Bash", {"command": "echo foo"})
 
     def test_tool_type_session_covers_later_calls_of_the_approved_tool(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # `bgagent approve --scope tool_type_session` names no tool: it means
-        # the tool of the call that is waiting.
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state,
@@ -2445,7 +2178,6 @@ class TestApprovedPath:
             "tool_input": {"file_path": "notes.md", "content": "x"},
         }
         engine = self._approve_with_tool_group_session(fake_task_state, write_call, monkeypatch)
-        # Write is in the file_write group, which also holds Edit.
         assert engine.allowlist.matches("Write", {"file_path": "notes-2.md"})
         assert engine.allowlist.matches("Edit", {"file_path": "notes.md"})
         assert not engine.allowlist.matches("Bash", {"command": "echo foo"})
@@ -2463,8 +2195,6 @@ class TestDeniedPath:
     def test_another_call_of_the_denied_rule_is_refused_without_a_second_request(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # The user denied `echo foo`. `echo foo2` is another input that the same
-        # rule gates: it is refused at once and the user is not asked again.
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state,
@@ -2520,11 +2250,9 @@ class TestDeniedPath:
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "build makefile first" in result["hookSpecificOutput"]["permissionDecisionReason"]
-        # Denial queued for Stop-hook injection.
         drained = engine_with_soft_gate.drain_denial_injections()
         assert len(drained) == 1
         assert drained[0]["reason"] == "build makefile first"
-        # Recent-decision cache populated — identical next call auto-denies.
         follow_up = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo foo"})
         assert follow_up.outcome.value == "deny"
         assert "Recent DENIED within 60s" in follow_up.reason
@@ -2532,11 +2260,6 @@ class TestDeniedPath:
 
 
 class TestPersistentGateCount:
-    """Chunk 7 (§13.6): REQUIRE_APPROVAL path must bump BOTH the session
-    counter and the TaskTable-persisted counter so a container restart
-    resumes the cumulative gate budget.
-    """
-
     def test_require_approval_path_calls_ddb_counter_bump(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
@@ -2559,23 +2282,17 @@ class TestPersistentGateCount:
             )
         )
 
-        # Session counter bumped (existing behavior).
         assert engine_with_soft_gate.approval_gate_count == 1
-        # DDB counter bump called with the task_id.
         assert fake_task_state.gate_count_calls == ["01KTASK"]
 
     def test_ddb_counter_failure_does_not_block_the_gate(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        """§13.6: counter is a safety bound, not a correctness bound.
-        Best-effort failure must NOT short-circuit the approval flow."""
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state,
             {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"},
         )
-        # Signal a best-effort failure on the DDB counter write (e.g. IAM
-        # drift, throttling, missing env). The hook must keep going.
         fake_task_state.gate_count_return = False
 
         result = _run(
@@ -2591,17 +2308,13 @@ class TestPersistentGateCount:
             )
         )
 
-        # Approval flow still completes — user approved, hook allows.
         assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
-        # Session counter still bumped even though DDB write "failed".
         assert engine_with_soft_gate.approval_gate_count == 1
-        # DDB bump was still attempted.
         assert fake_task_state.gate_count_calls == ["01KTASK"]
 
     def test_cap_exceeded_does_not_call_ddb_counter(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        """Cap short-circuit happens BEFORE Step 6, so no DDB bump."""
         _fast_poll(monkeypatch)
         engine_with_soft_gate._approval_gate_count = engine_with_soft_gate.approval_gate_cap
 
@@ -2622,15 +2335,9 @@ class TestPersistentGateCount:
 
 
 class TestCacheHitObservability:
-    """IMPL-23: a recent-decision cache hit must emit a `policy_decision`
-    milestone so cache-driven denies remain visible in the event stream.
-    """
-
     def test_cache_hit_emits_policy_decision_cached(
         self, fake_task_state, progress, engine_with_soft_gate
     ):
-        # Seed the cache so the next identical call hits Step 2.5 cache
-        # and returns DENY with cache_hit_metadata populated.
         engine_with_soft_gate.recent_decisions.record(
             "Bash",
             _sha256_of({"command": "echo foo"}),
@@ -2653,7 +2360,6 @@ class TestCacheHitObservability:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        # Cache-hit event emitted with IMPL-23 metadata.
         assert "write_policy_decision_cached" in progress.milestones()
         cached_calls = [c for c in progress.calls if c[0] == "write_policy_decision_cached"]
         assert len(cached_calls) == 1
@@ -2662,20 +2368,16 @@ class TestCacheHitObservability:
         assert metadata["cached_decision"] == "DENIED"
         assert metadata["cached_reason"] == "user said too risky"
         assert metadata["original_decision_ts"] == "2026-05-07T12:00:00Z"
-        # No approval row written — cache hits intentionally bypass the
-        # approval pipeline (§12.8).
         assert fake_task_state.write_calls == []
 
     def test_non_cache_deny_does_not_emit_cached_milestone(
         self, fake_task_state, progress, engine_with_soft_gate
     ):
-        """Hard-deny and soft-deny DENY paths don't populate cache_hit_metadata,
-        so the cache-hit observability event must NOT fire for them."""
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
 
         _run(
             pre_tool_use_hook(
-                _hook_input(command="rm -rf /"),  # hard-deny
+                _hook_input(command="rm -rf /"),
                 "tu-1",
                 {},
                 engine=engine,
@@ -2693,9 +2395,6 @@ class TestTimedOutPath:
     def test_a_timeout_does_not_count_as_a_denial_of_the_rule(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # Nobody answered the request for `echo foo`. The same call is refused
-        # for a while, but another call that the rule gates is asked about again:
-        # nobody said no to the rule.
         _fast_poll(monkeypatch)
         engine_with_soft_gate._task_default_timeout_s = 30
 
@@ -2722,12 +2421,9 @@ class TestTimedOutPath:
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
         _fast_poll(monkeypatch)
-        # Every poll returns PENDING → deadline reached → TIMED_OUT.
-        # Seed enough PENDING rows to exhaust the deadline quickly.
         fake_task_state.get_row_script.extend([{"status": "PENDING"}] * 5)
-        fake_task_state.best_effort_return = True  # timer wins the race
+        fake_task_state.best_effort_return = True
 
-        # Force a short effective timeout by shrinking the task default.
         engine_with_soft_gate._task_default_timeout_s = 30
 
         result = _run(
@@ -2744,13 +2440,10 @@ class TestTimedOutPath:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        # A timeout is not a refusal: the model gets no stop-language.
         assert result["hookSpecificOutput"]["permissionDecisionReason"] == "User timed_out"
-        assert fake_task_state.update_calls  # TIMED_OUT write attempted
+        assert fake_task_state.update_calls
         assert fake_task_state.update_calls[-1][2] == "TIMED_OUT"
         assert "write_approval_timed_out" in progress.milestones()
-        # A retry of the same call is fast-denied without a "None" reason leaking
-        # into the agent-visible message (seen live as "...within 60s: None").
         retry = engine_with_soft_gate.evaluate_tool_use(
             _hook_input()["tool_name"], _hook_input()["tool_input"]
         )
@@ -2759,8 +2452,6 @@ class TestTimedOutPath:
 
 
 class TestApprovalRowExpiry:
-    """Approval rows keep DynamoDB's ``ttl`` next to the explicit deadline."""
-
     def test_row_expires_after_its_deadline_plus_the_cleanup_margin(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
@@ -2789,17 +2480,6 @@ class TestApprovalRowExpiry:
 
 
 class TestChunk8aOutcomeEventSchema:
-    """Chunk 8a: outcome events must carry the fields the
-    ApprovalMetricsPublisher Lambda needs for its CloudWatch metrics:
-    ``created_at`` (decision-latency computation),
-    ``effective_timeout_s`` (timeout-breakdown histogram),
-    ``matching_rule_ids`` (rule_id dimension). Hooks.py propagates these
-    from the approval row ``row["created_at"]`` / ``row["timeout_s"]`` /
-    ``decision.matching_rule_ids`` — the assertions below keep the wiring
-    honest so a future refactor that drops one of the kwargs is caught
-    before the dashboard silently shows NaN.
-    """
-
     def _last_call(self, progress: _RecordingProgress, name: str) -> dict:
         for recorded_name, kwargs in reversed(progress.calls):
             if recorded_name == name:
@@ -2827,10 +2507,6 @@ class TestChunk8aOutcomeEventSchema:
             )
         )
         kwargs = self._last_call(progress, "write_approval_granted")
-        # row["created_at"] is an ISO-8601 timestamp generated at hook
-        # entry; we don't care about its exact value, only that it
-        # propagates through to the writer call. A None here would
-        # mean hooks.py dropped the kwarg — regression.
         assert kwargs.get("created_at") is not None
 
     def test_denied_propagates_created_at(
@@ -2877,30 +2553,17 @@ class TestChunk8aOutcomeEventSchema:
             )
         )
         kwargs = self._last_call(progress, "write_approval_timed_out")
-        # All three Chunk 8a fields must propagate.
         assert kwargs.get("created_at") is not None
         assert kwargs.get("effective_timeout_s") == 30
-        # ``matching_rule_ids`` is a list copied from decision — shape-check only.
         rule_ids = kwargs.get("matching_rule_ids")
         assert isinstance(rule_ids, list)
-        # engine_with_soft_gate fixture uses a single blueprint rule
-        # with @rule_id("test_bash_foo") — should be present.
         assert "test_bash_foo" in rule_ids
 
 
-# --- IMPL-24: VM-throttle + late-approval race ---------------------------
-
-
 class TestLateApprovalRace:
-    """§13.12 — timer trips a hair before the user's APPROVE / DENY lands."""
-
     def _race_run(self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, reread_row):
         _fast_poll(monkeypatch)
-        # Poll iterations all see PENDING (the user's write lands between
-        # the last poll and the TIMED_OUT best-effort write). The fake
-        # defaults to PENDING when the script is empty, so no explicit
-        # seeding is needed.
-        fake_task_state.best_effort_return = False  # ConditionCheckFailed
+        fake_task_state.best_effort_return = False
         fake_task_state.reread_row = reread_row
         engine_with_soft_gate._task_default_timeout_s = 30
 
@@ -2931,7 +2594,6 @@ class TestLateApprovalRace:
         milestones = progress.milestones()
         assert "write_approval_late_win" in milestones
         assert "write_approval_granted" in milestones
-        # Scope propagated despite the race.
         assert engine_with_soft_gate.allowlist.matches("Bash", {"command": "echo bar"})
 
     def test_denied_reread_wins(
@@ -2959,7 +2621,6 @@ class TestLateApprovalRace:
             {"status": "PENDING"},
         )
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        # No late_win emitted — re-read found no terminal decision.
         assert "write_approval_late_win" not in progress.milestones()
 
     def test_row_gone_falls_through_to_timed_out(
@@ -2970,7 +2631,7 @@ class TestLateApprovalRace:
             progress,
             engine_with_soft_gate,
             monkeypatch,
-            None,  # TTL reaped between TIMED_OUT write failure and re-read
+            None,
         )
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "write_approval_late_win" not in progress.milestones()
@@ -2978,8 +2639,6 @@ class TestLateApprovalRace:
     def test_an_error_of_the_timed_out_write_still_reads_the_row_again(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # The write of TIMED_OUT fails with an error of its own (throttling, the
-        # network). The user's approval may be on the row all the same.
         fake_task_state.best_effort_raises = RuntimeError("ThrottlingException")
         result = self._race_run(
             fake_task_state,
@@ -3005,11 +2664,7 @@ class TestLateApprovalRace:
         milestones = progress.milestones()
         assert "write_approval_late_win" not in milestones
         assert "write_approval_timed_out" in milestones
-        # The task still goes back to RUNNING.
         assert len(fake_task_state.resume_calls) == 1
-
-
-# --- Cap + rate-limit + resume failure branches --------------------------
 
 
 class TestCapAndRateLimit:
@@ -3033,14 +2688,13 @@ class TestCapAndRateLimit:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert fake_task_state.write_calls == []  # no DDB write attempted
+        assert fake_task_state.write_calls == []
         assert "write_approval_cap_exceeded" in progress.milestones()
 
     def test_rate_limit_exceeded_short_circuits(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
         _fast_poll(monkeypatch)
-        # Seed 20 timestamps in the window.
         for _ in range(hooks.APPROVAL_RATE_LIMIT):
             engine_with_soft_gate.record_approval_gate_timestamp()
 
@@ -3096,8 +2750,6 @@ class TestResumeFailure:
     def test_any_other_resume_error_denies_the_approved_call(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # Throttling, the network: the task record still says that the task
-        # waits for this approval, so the approved call must not run.
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state,
@@ -3172,8 +2824,6 @@ class TestWriteFailure:
     def test_any_other_write_error_denies_and_is_not_waited_for(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # Throttling, the network: neither of the two errors the hook knows by
-        # name. No request was written, so there is no answer to wait for.
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state, {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"}
@@ -3228,10 +2878,6 @@ class TestWriteFailure:
     def test_an_input_that_cannot_be_hashed_is_denied_and_nothing_is_written(
         self, fake_task_state, progress, engine_with_soft_gate
     ):
-        # The approval row and the recent-decision cache are keyed by the
-        # engine's hash of the tool input. An input that JSON cannot represent
-        # has no such hash: the engine refuses the call, also when its command
-        # is one the soft rule gates, and no request is opened for it.
         hook_input = _hook_input()
         hook_input["tool_input"]["env"] = {"PATH", "HOME"}
 
@@ -3257,16 +2903,9 @@ class TestWriteFailure:
         assert "write_approval_requested" not in progress.milestones()
 
 
-# --- Timeout clipping + ceiling shrinking --------------------------------
-
-
 class TestTimeoutCapping:
     def test_rule_annotation_clip_emits_milestone(self, fake_task_state, progress, monkeypatch):
         _fast_poll(monkeypatch)
-        # Rule annotates 60s but task default stays at the engine default
-        # (300s). The engine's _merge_annotations returns
-        # decision.timeout_s=60 — the hook sees decision.timeout_s <
-        # task_default_timeout_s and emits the capped milestone.
         blueprint_soft = (
             '@tier("soft")\n'
             '@rule_id("test_bash_foo")\n'
@@ -3311,7 +2950,6 @@ class TestTimeoutCapping:
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
         _fast_poll(monkeypatch)
-        # Force a remaining-lifetime value that clips below the task default.
         monkeypatch.setattr(hooks, "_remaining_maxlifetime_s", lambda: 200)
         engine_with_soft_gate._task_default_timeout_s = 300
         _prime_approval(
@@ -3335,9 +2973,7 @@ class TestTimeoutCapping:
         capped = [c for c in progress.calls if c[0] == "write_approval_timeout_capped"]
         assert capped
         assert capped[0][1]["reason"] == "maxLifetime_ceiling"
-        # matching_rule_ids is omitted when reason is maxLifetime_ceiling.
         assert capped[0][1]["matching_rule_ids"] is None
-        # Of the 200 s that are left, 120 are kept for the cleanup.
         assert capped[0][1]["effective_timeout_s"] == 80
         assert fake_task_state.write_calls[0][2]["timeout_s"] == 80
 
@@ -3364,24 +3000,17 @@ class TestTimeoutCapping:
                 )
             )["hookSpecificOutput"]
 
-        # After the 120 s for the cleanup, 149 s leave one second less than the
-        # shortest window of 30 s: nobody could answer in time, nobody is asked.
         refused = decide(149)
         assert refused["permissionDecision"] == "deny"
         assert "insufficient maxLifetime" in refused["permissionDecisionReason"]
         assert fake_task_state.write_calls == []
         assert "write_approval_requested" not in progress.milestones()
-        # One second more, and the request is written with that shortest window.
         assert decide(150)["permissionDecision"] == "allow"
         assert fake_task_state.write_calls[0][2]["timeout_s"] == 30
 
     def test_the_hook_waits_no_longer_than_the_window_it_reports(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, approval_clock
     ):
-        # Nobody answers. With 200 s left the hook gives up after 80 s, not
-        # after the 300 s that were asked for: the cleanup keeps its 120 s.
-        # The window starts at the request's stamp, a whole second, and
-        # approval_clock holds the wall clock there: the wait is 80 s exactly.
         _fast_poll(monkeypatch)
         monkeypatch.setattr(hooks, "_remaining_maxlifetime_s", lambda: 200)
         engine_with_soft_gate._task_default_timeout_s = 300
@@ -3425,7 +3054,6 @@ class TestTimeoutCapping:
                 task_state_module=fake_task_state,
             )
         )
-        # Second pass on the same engine — latch should block a repeat.
         fake_task_state.get_row_script.clear()
         _prime_approval(
             fake_task_state,
@@ -3446,9 +3074,6 @@ class TestTimeoutCapping:
 
         shrink = [c for c in progress.calls if c[0] == "write_approval_ceiling_shrinking"]
         assert len(shrink) == 1, "approval_ceiling_shrinking must emit once per task"
-
-
-# --- permissionDecisionReason sanitization -------------------------------
 
 
 class TestPermissionDecisionReasonSanitization:
@@ -3485,14 +3110,10 @@ class TestPermissionDecisionReasonSanitization:
 
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         assert "\x1b" not in reason
-        # Deny reason is wrapped in authoritative stop-language (see
-        # _apply_user_decision in hooks.py) — the raw reason text is
-        # still embedded verbatim after the AUTHORITATIVE DENY prefix.
         assert reason.startswith("AUTHORITATIVE DENY from human reviewer:")
         assert "forbidden" in reason
 
     def _denied_reason(self, fake_task_state, progress, engine, monkeypatch, deny_reason):
-        """The reason the model receives when the reviewer denies ``echo foo``."""
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state,
@@ -3515,8 +3136,6 @@ class TestPermissionDecisionReasonSanitization:
     def test_denied_reason_names_the_rule_and_tells_the_agent_not_to_retry(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # Compared whole, on purpose: the text is an instruction to the model,
-        # and a change of its wording is a decision that has to show here.
         reason = self._denied_reason(
             fake_task_state, progress, engine_with_soft_gate, monkeypatch, "build makefile first"
         )
@@ -3529,7 +3148,6 @@ class TestPermissionDecisionReasonSanitization:
     def test_a_long_reason_is_shortened_and_the_stop_language_is_kept(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, length
     ):
-        # 223 is the shortest reason that does not fit here, 2000 the longest the API accepts.
         reason = self._denied_reason(
             fake_task_state, progress, engine_with_soft_gate, monkeypatch, "x" * length
         )
@@ -3540,7 +3158,6 @@ class TestPermissionDecisionReasonSanitization:
     def test_a_cut_inside_an_escape_sequence_leaves_no_escape_character(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
-        # With this rule a shortened reason keeps 219 characters, and the 219th is the ESC.
         ansi_reason = "x" * 218 + "\x1b[31m" + "y" * 300
         reason = self._denied_reason(
             fake_task_state, progress, engine_with_soft_gate, monkeypatch, ansi_reason
@@ -3551,8 +3168,6 @@ class TestPermissionDecisionReasonSanitization:
     def test_rule_names_that_do_not_fit_are_shortened_and_the_stop_language_is_kept(
         self, fake_task_state, progress, monkeypatch
     ):
-        # Two rules gate the call, and their names alone take more room than the
-        # stop-language leaves: nothing is left for the reviewer's reason.
         soft_rules = "\n".join(
             f'@tier("soft")\n@rule_id("{rule_id}")\n'
             'forbid (principal, action == Agent::Action::"execute_bash", resource) '
@@ -3570,9 +3185,6 @@ class TestPermissionDecisionReasonSanitization:
         assert reason.startswith("AUTHORITATIVE DENY from human reviewer:  (matching rules: ")
 
 
-# --- Denial-injection hook ----------------------------------------------
-
-
 class TestDenialBetweenTurnsHook:
     def test_drain_produces_user_denial_xml(self, engine_with_soft_gate):
         engine_with_soft_gate.queue_denial_injection(
@@ -3584,7 +3196,6 @@ class TestDenialBetweenTurnsHook:
         assert "<user_denial" in block
         assert 'request_id="01KREQ"' in block
         assert "no prod pushes" in block
-        # Queue is drained so it does not re-inject next turn.
         assert engine_with_soft_gate.drain_denial_injections() == []
 
     def test_cancel_short_circuits_drain(self, engine_with_soft_gate):
@@ -3595,7 +3206,6 @@ class TestDenialBetweenTurnsHook:
             {"engine": engine_with_soft_gate, "task_id": "01K", "_cancel_requested": True}
         )
         assert out == []
-        # Queue is PRESERVED — cancel-wins, nothing drained.
         drained = engine_with_soft_gate.drain_denial_injections()
         assert len(drained) == 1
 
@@ -3607,19 +3217,15 @@ class TestDenialBetweenTurnsHook:
         )
         out = _denial_between_turns_hook({"engine": engine_with_soft_gate, "task_id": "01K"})
         assert "&lt;/user_denial&gt;" in out[0]
-        assert "<user_denial" in out[0]  # only the envelope tags are raw
+        assert "<user_denial" in out[0]
 
     def test_no_engine_is_noop(self):
         assert _denial_between_turns_hook({"task_id": "01K"}) == []
 
     def test_registered_after_cancel_and_nudge(self):
-        # Invariant for §6.5 finding #2: cancel → nudge → denial.
         assert hooks.between_turns_hooks[-1] is _denial_between_turns_hook
 
     def test_stop_hook_drains_denials_when_no_cancel(self, engine_with_soft_gate):
-        # End-to-end via stop_hook: a queued denial is surfaced as a
-        # decision=block reason, and a concurrent cancel flag suppresses
-        # it entirely.
         engine_with_soft_gate.queue_denial_injection(
             request_id="01KREQ", reason="denial text", decided_at="t1"
         )
@@ -3633,30 +3239,19 @@ class TestDenialBetweenTurnsHook:
                 engine=engine_with_soft_gate,
             )
         )
-        # Cancel is not flagged in this run; nudge reader sees no task in
-        # DDB and returns []. Denial should be injected.
         assert result.get("decision") == "block"
         assert "<user_denial" in result.get("reason", "")
 
 
 class TestRemainingMaxlifetime:
-    """_remaining_maxlifetime_s parses TASK_STARTED_AT correctly."""
-
     def test_iso_timestamp_parsed_as_utc_regardless_of_local_tz(self, monkeypatch):
-        # The trailing Z means UTC. Before the fix, strptime produced a naive
-        # datetime whose .timestamp() used the container's local TZ, skewing
-        # the remaining-lifetime math by the UTC offset (wrong approval
-        # timeouts / spurious insufficient-lifetime denies on non-UTC hosts).
         import time as time_module
         from datetime import datetime
 
         started = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
         monkeypatch.setenv("TASK_STARTED_AT", "2026-06-11T12:00:00Z")
         monkeypatch.setenv("AGENTCORE_MAX_LIFETIME_S", "28800")
-        # Freeze "now" at exactly 1000s after the UTC start time.
         monkeypatch.setattr(hooks.time, "time", lambda: started.timestamp() + 1000, raising=True)
-        # Simulate a non-UTC container: if the implementation regresses to
-        # local-time interpretation, the result shifts by the TZ offset.
         monkeypatch.setenv("TZ", "America/New_York")
         time_module.tzset()
         try:
@@ -3666,9 +3261,8 @@ class TestRemainingMaxlifetime:
             time_module.tzset()
 
     def test_timestamp_with_milliseconds_is_parsed(self, monkeypatch):
-        # The shape the orchestrator really sends: Date.toISOString() always
-        # prints three fractional digits. Read as unparseable, it switched the
-        # lifetime ceiling of every approval gate off.
+        # The orchestrator sends ``Date.toISOString()``, which always prints three
+        # fractional digits.
         from datetime import datetime
 
         started = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
@@ -3709,12 +3303,9 @@ class TestRemainingMaxlifetime:
 
 
 class TestStuckGuardHookIntegration:
-    """The tool hooks feed the guard and hand its advisory to the model."""
-
     def test_post_tool_use_returns_the_steer_with_the_third_identical_failure(self, progress):
-        # A failure that does reach PostToolUse: the pipeline's exit status is
-        # that of ``tail``. The advisory has to come back with the tool result:
-        # an agent that keeps calling tools never reaches the Stop hook.
+        # The exit status of a pipeline is that of its last command, here ``tail``: this
+        # failure reaches PostToolUse.
         from stuck_guard import STEER_THRESHOLD, StuckGuard
 
         guard = StuckGuard()
@@ -3738,7 +3329,6 @@ class TestStuckGuardHookIntegration:
         assert "STOP retrying" in outputs[-1]["additionalContext"]
         assert "yarn build 2>&1 | tail -5" in outputs[-1]["additionalContext"]
         assert "write_agent_milestone" in progress.milestones()
-        # The guard has given its one advisory for this command.
         assert guard.evaluate().kind == "none"
 
     def test_post_tool_use_returns_steer_and_redaction_together(self):
@@ -3762,7 +3352,6 @@ class TestStuckGuardHookIntegration:
         }
 
     def _completed_bash(self, stdout: str) -> dict:
-        """A command whose exit status is that of ``tail``, as the CLI reports it."""
         return {
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
@@ -3771,11 +3360,6 @@ class TestStuckGuardHookIntegration:
         }
 
     def test_a_failure_shown_on_the_line_after_a_url_with_a_password_still_counts(self):
-        # The guard reads the response of a completed Bash call as one text, in
-        # which a line break is a backslash and an "n". Screened in that form,
-        # the marker for the URL takes the start of the next line with it, and
-        # with it the word that shows the failure. The strings of the response
-        # are screened one by one, before they become that text.
         from stuck_guard import STEER_THRESHOLD, StuckGuard
 
         guard = StuckGuard()
@@ -3790,9 +3374,6 @@ class TestStuckGuardHookIntegration:
         assert [("additionalContext" in output) for output in outputs] == [False, False, True]
 
     def test_max_turns_summary_of_a_completed_command_holds_no_token_from_a_line_start(self):
-        # The same text again: a token that begins a line of the output stands
-        # directly behind the "n" of the line break there, and the scanner
-        # looks for the start of a word.
         from stuck_guard import WINDOW, StuckGuard
 
         guard = StuckGuard()
@@ -3821,16 +3402,11 @@ class TestStuckGuardHookIntegration:
         for _ in range(WINDOW):
             call("yarn build 2>&1 | tail -5", "bash: line 1: yarn: command not found")
         assert "last tool calls repeated" in (last_stuck_summary() or "")
-        # The agent recovers: the window is no longer dominated by one failure.
         for step in range(2):
             call(f"echo step {step}", "ok")
         assert last_stuck_summary() is None
 
     def test_a_completed_call_of_another_tool_than_bash_is_no_failure(self):
-        # A build script that holds "exit 1", read three times in a task. The
-        # call completed, whatever the text it returned says; only a Bash
-        # command can hide a failure behind its exit status. The advisory
-        # arrives in the middle of the work and tells the model to stop.
         from stuck_guard import STEER_THRESHOLD, WINDOW, StuckGuard
 
         guard = StuckGuard()
@@ -3860,7 +3436,6 @@ class TestStuckGuardHookIntegration:
         assert last_stuck_summary() is None
 
     def test_post_tool_use_record_error_never_blocks_screening(self):
-        # A guard that raises on record must not break the PASS_THROUGH path.
         from stuck_guard import StuckGuard
 
         class _Boom(StuckGuard):

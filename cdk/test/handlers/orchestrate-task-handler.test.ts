@@ -17,17 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Drives the orchestrate-task durable handler with a fake durable-execution context
- * and a fake compute strategy, for the step logic that is the same on every backend:
- * what the admission step tells the channel, what the start-session step does when
- * the durable SDK runs it again, and how long the poll loop waits. The last describe
- * puts the real status poll behind the handler, for the two backends that use it.
- */
-
-// `withDurableExecution` wraps the handler at import time; unwrap it so the raw
-// (event, context) function is testable. The rest of the SDK stays real: the fake
-// context below decides step retries with the SDK's own default strategy.
 jest.mock('@aws/durable-execution-sdk-js', () => ({
   ...jest.requireActual('@aws/durable-execution-sdk-js'),
   withDurableExecution: (fn: unknown) => fn,
@@ -42,8 +31,7 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   reportIssueFailure: (...a: unknown[]) => mockReportJiraFailure(...a),
 }));
 
-// The table behind the real `pollTaskStatus`, which the last describe puts in place
-// of its stub. `from` is a plain function: `resetAllMocks` would empty a jest.fn().
+// `from` is a plain function: `jest.resetAllMocks()` would strip the implementation from a jest.fn().
 const mockDdbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn() }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -104,9 +92,6 @@ import { TaskStatus, type TaskStatusType } from '../../src/constructs/task-statu
 import { handler as exportedHandler } from '../../src/handlers/orchestrate-task';
 import type { PollState } from '../../src/handlers/shared/orchestrator';
 
-// The mock at the top of this file makes `withDurableExecution` return the function it is
-// given, so the export is the raw durable handler here: it takes the task event and a
-// durable context, not the Lambda invocation envelope its declared type describes.
 const handler = exportedHandler as unknown as DurableExecutionHandler<{ task_id: string }, void>;
 
 const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test';
@@ -121,12 +106,6 @@ const ECS_HANDLE = {
 
 type WaitStrategy = (state: PollState) => { shouldContinue: boolean; delay?: { seconds: number } };
 
-/**
- * A durable-execution context that runs a step the way the SDK does: when the body
- * throws, the step's `retryStrategy` (the SDK's default when it has none) decides
- * whether the body runs again. Delays are not waited for. `waitForCondition` keeps
- * the handler's wait strategy for the test to question and reports a finished task.
- */
 function fakeContext() {
   let waitStrategy: WaitStrategy | undefined;
   return {
@@ -149,11 +128,6 @@ function fakeContext() {
   };
 }
 
-/**
- * The same context, but `waitForCondition` polls as the SDK does: the handler's check
- * runs until its wait strategy says stop, and an error it throws fails the wait, which
- * fails the execution. Delays are not waited for.
- */
 function pollingContext(maxPolls = 10) {
   return {
     ...fakeContext().ctx,
@@ -172,8 +146,6 @@ function pollingContext(maxPolls = 10) {
   };
 }
 
-// The task row as the handler sees it. The stubs below move `status` the way the real
-// helpers do, so a step that reads the row again sees what an earlier step wrote.
 let taskStatus: TaskStatusType;
 let channel: Record<string, unknown>;
 
@@ -236,8 +208,6 @@ describe('admission step at the concurrency cap', () => {
   test.each(channels)('says nothing on the $name issue when the task was not queued', async ({ notice, task }) => {
     channel = task;
     mockAdmissionControl.mockResolvedValue(false);
-    // queueTask answers false when another writer (a user cancel) changed the
-    // status first: the task is CANCELLED and will never start.
     mockQueueTask.mockResolvedValue(false);
 
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
@@ -257,10 +227,6 @@ describe('start-session step', () => {
   });
 
   test('starts no session when the durable SDK runs the step again after it failed the task', async () => {
-    // AgentCore throttles the first InvokeAgentRuntime and has recovered by the
-    // time the SDK retries the step. The first attempt already moved the task
-    // to FAILED, so a session started now would run for a task the user was
-    // told has failed.
     mockStartSession
       .mockRejectedValueOnce(Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' }))
       .mockResolvedValue(HANDLE);
@@ -284,8 +250,6 @@ describe('start-session step', () => {
   });
 
   test('starts no session when only a strongly consistent read shows the cancel', async () => {
-    // The cancel committed just before the step: a read that is not strongly
-    // consistent may still answer HYDRATING.
     mockHydrateAndTransition.mockImplementation(async () => {
       taskStatus = TaskStatus.CANCELLED;
       return { repo_url: 'org/repo', task_id: 'TASK001' };
@@ -307,9 +271,6 @@ describe('start-session step', () => {
     ['agentcore', HANDLE],
     ['ecs', ECS_HANDLE],
   ])('starts one %s session when the session_started event cannot be written', async (computeType, handle) => {
-    // The task is RUNNING and its row names the session when the event write
-    // fails. If the step threw now, the durable SDK would run it again, the
-    // task would not read as over, and every run would start another session.
     mockLoadBlueprintConfig.mockResolvedValue({ compute_type: computeType, runtime_arn: RUNTIME_ARN });
     mockStartSession.mockResolvedValue(handle);
     mockEmitTaskEvent.mockRejectedValueOnce(
@@ -323,7 +284,6 @@ describe('start-session step', () => {
     expect(outcome.status).toBe('fulfilled');
     expect(taskStatus).toBe(TaskStatus.RUNNING);
     expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
-    // The event is missing from the task's stream: the log has to say why.
     expect(mockLogWarn).toHaveBeenCalledWith(
       expect.stringContaining('session_started'),
       expect.objectContaining({ session_id: handle.sessionId }),
@@ -332,7 +292,6 @@ describe('start-session step', () => {
 });
 
 describe('poll window', () => {
-  /** The handler's decision after `attempts` polls of a task that is still RUNNING. */
   async function pollDecisions(pollIntervalMs?: number) {
     mockLoadBlueprintConfig.mockResolvedValue({
       compute_type: 'agentcore', runtime_arn: RUNTIME_ARN, poll_interval_ms: pollIntervalMs,
@@ -366,7 +325,6 @@ describe('poll window', () => {
 });
 
 describe('status reads that fail during the wait', () => {
-  // The real poll, over a table whose reads the test decides.
   const { pollTaskStatus } = jest.requireActual<typeof import('../../src/handlers/shared/orchestrator')>(
     '../../src/handlers/shared/orchestrator',
   );
@@ -386,7 +344,6 @@ describe('status reads that fail during the wait', () => {
       mockStartSession.mockResolvedValue(handle);
     });
 
-    // Three polls are a minute at the default interval, nine are four and a half.
     test.each([3, 9])('waits out %i failed reads in a row and finalizes the task as it ended', async (failedReads) => {
       for (let read = 0; read < failedReads; read++) mockDdbSend.mockRejectedValueOnce(throttled);
       mockDdbSend.mockResolvedValueOnce({ Item: { status: TaskStatus.COMPLETED } });
@@ -403,8 +360,6 @@ describe('status reads that fail during the wait', () => {
       expect(mockFailTask).not.toHaveBeenCalled();
     });
 
-    // The first poll can read the row before the start step's RUNNING write is visible.
-    // Missed polls keep that status, and it must not end the wait: the task is running.
     test('waits out failed reads that follow a stale first read of the status', async () => {
       mockDdbSend.mockResolvedValueOnce({ Item: { status: TaskStatus.HYDRATING } });
       for (let read = 0; read < 9; read++) mockDdbSend.mockRejectedValueOnce(throttled);
@@ -431,7 +386,6 @@ describe('status reads that fail during the wait', () => {
       await expect(handler({ task_id: 'TASK001' }, pollingContext() as never))
         .rejects.toThrow('not authorized to perform: dynamodb:GetItem');
 
-      // The denied read is the last one: it is not waited out as a missed poll.
       expect(mockDdbSend).toHaveBeenCalledTimes(2);
       expect(mockFinalizeTask).not.toHaveBeenCalled();
       expect(mockFailTask).not.toHaveBeenCalled();

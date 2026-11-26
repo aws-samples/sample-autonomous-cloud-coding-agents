@@ -37,12 +37,10 @@ describe('emitWebhookScreeningFailedMetric', () => {
     expect(line).toMatch(/^\{.*\}\n$/);
     expect(JSON.parse(line)).toEqual({
       _aws: {
-        // Milliseconds since the epoch, as the format requires.
         Timestamp: now,
         CloudWatchMetrics: [{
           Namespace: 'ABCA/Webhooks',
-          // One metric per DimensionSet. The empty set is the total the alarm reads:
-          // without it CloudWatch holds only the per-source metrics and the alarm sees no data.
+          // One metric per DimensionSet: without the empty set CloudWatch holds only the per-source metrics.
           Dimensions: [['source'], []],
           Metrics: [{ Name: 'WebhookScreeningFailed', Unit: 'Count' }],
         }],

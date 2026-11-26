@@ -56,9 +56,7 @@ describe('ops-queries', () => {
   });
 
   test('findStuckTasks parses each status query into a distinct, status-tagged row', async () => {
-    // Older than both thresholds, as rows the index query returns always are.
     const oldCreated = new Date(Date.now() - 3 * 3600_000).toISOString();
-    // One distinct task per status query (Promise.all fires three queries).
     lowLevelSend
       .mockResolvedValueOnce({
         Items: [{
@@ -85,7 +83,6 @@ describe('ops-queries', () => {
 
     const tasks = await findStuckTasks('us-east-1', 'TaskTable');
     expect(tasks).toHaveLength(3);
-    // Each row carries the status of the query that produced it, not a shared value.
     const byId = Object.fromEntries(tasks.map((t) => [t.task_id, t.status]));
     expect(byId['task-submitted']).toBe('SUBMITTED');
     expect(byId['task-hydrating']).toBe('HYDRATING');
@@ -135,7 +132,6 @@ describe('ops-queries', () => {
   test('findStuckTasks ages a task by the time it entered its status, not by its creation', async () => {
     const ago = (seconds: number) => new Date(Date.now() - seconds * 1000).toISOString();
     lowLevelSend
-      // SUBMITTED: waited in the admission queue for three hours, picked up a minute ago.
       .mockResolvedValueOnce({
         Items: [{
           task_id: { S: 'picked-up-just-now' },
@@ -145,7 +141,6 @@ describe('ops-queries', () => {
         }],
       })
       .mockResolvedValueOnce({ Items: [] })
-      // AWAITING_APPROVAL: all created long ago; two paused ten minutes ago, one three hours ago.
       .mockResolvedValueOnce({
         Items: [{
           task_id: { S: 'paused-just-now' },
@@ -153,8 +148,6 @@ describe('ops-queries', () => {
           created_at: { S: ago(5 * 3600) },
           status_created_at: { S: `AWAITING_APPROVAL#${ago(600)}` },
         }, {
-          // A row that still carries the entry time of an earlier status is aged
-          // from that time all the same, as the reconciler ages it.
           task_id: { S: 'paused-just-now-earlier-entry' },
           user_id: { S: 'user-1' },
           created_at: { S: ago(5 * 3600) },
@@ -198,8 +191,6 @@ describe('ops-queries', () => {
     }
   });
 
-  // The stack does not publish its cap, so the CLI carries a copy. Read as text:
-  // the CLI must not import the CDK package (same technique as model-id.test.ts).
   test('the default per-user limit is the cap the stack deploys', () => {
     const stack = fs.readFileSync(
       path.join(__dirname, '..', '..', '..', 'cdk', 'src', 'stacks', 'agent.ts'),
@@ -296,13 +287,10 @@ describe('ops-queries', () => {
 
   test('buildConcurrencyReport reports a per-user error row instead of aborting', async () => {
     docSend
-      // Scan returns two users.
       .mockResolvedValueOnce({
         Items: [{ user_id: 'user-1', active_count: 1 }, { user_id: 'user-2', active_count: 2 }],
       })
-      // user-1 live count succeeds.
       .mockResolvedValueOnce({ Items: [{ status: 'RUNNING' }] })
-      // user-2 live count throttles — must not blank the whole report.
       .mockRejectedValueOnce(
         Object.assign(new Error('throughput exceeded'), {
           name: 'ProvisionedThroughputExceededException',

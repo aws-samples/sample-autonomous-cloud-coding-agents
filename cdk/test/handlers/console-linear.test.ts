@@ -60,10 +60,6 @@ import { handler } from '../../src/handlers/console-linear';
 const ISSUE = '11111111-1111-4111-8111-111111111111';
 const PROJECT = '22222222-2222-4222-8222-222222222222';
 const MAPPING = { linear_project_id: PROJECT, repo: 'acme/game', label_filter: 'bgagent', linear_workspace_id: 'w1', status: 'active' };
-/**
- * A row written before `onboard-project` recorded the owning workspace. Its label holds
- * what a shell would expand or end a quoted word at: the printed command must carry it whole.
- */
 const LEGACY_MAPPING = { linear_project_id: PROJECT, repo: 'acme/game', label_filter: 'say "go" $5 it\'s', status: 'active' };
 const LEGACY_COMMAND = `\`bgagent linear onboard-project ${PROJECT} --repo acme/game --label 'say "go" $5 it'\\''s'\``;
 
@@ -110,7 +106,6 @@ describe('GET /repos/{repo_id}/linear-issues', () => {
     expect(project.issues.map((i: { agent: unknown }) => i.agent)).toEqual([
       { kind: 'available' },
       { kind: 'task', task_id: 't-b', status: 'RUNNING', pr_url: null, mine: true },
-      // Someone else's task: shown as worked on, without a link into it.
       { kind: 'task', task_id: null, status: 'COMPLETED', pr_url: 'https://github.com/acme/game/pull/9', mine: false },
     ]);
     expect(resolveToken).toHaveBeenCalledWith('w1', 'Registry');
@@ -124,9 +119,6 @@ describe('GET /repos/{repo_id}/linear-issues', () => {
   });
 
   test('stops calling a labeled issue starting once its webhook can no longer be on the way', async () => {
-    // The label stays on an epic whose sub-issues carry the tasks, and on an issue whose
-    // start was refused: neither ever gets a task of its own. Reported like work the
-    // caller cannot open, so the page neither shows a spinner nor polls for one.
     linear.listOpenProjectIssues.mockResolvedValue([issue('a', ['bgagent'], minutesAgo(11)), issue('b', ['bgagent'], minutesAgo(180))]);
     lookupTask.mockResolvedValue({ kind: 'none' });
     const withTheAgent = { kind: 'task', task_id: null, status: null, pr_url: null, mine: false };
@@ -141,8 +133,6 @@ describe('GET /repos/{repo_id}/linear-issues', () => {
   });
 
   test('gives the command that records the workspace for a project mapped before it was recorded', async () => {
-    // Re-running setup does not touch the mapping; onboard-project rewrites it, so the
-    // command carries the mapping's own repository and label.
     send.mockResolvedValue({ Items: [LEGACY_MAPPING] });
     const res = await handler(list());
     expect(res.statusCode).toBe(200);

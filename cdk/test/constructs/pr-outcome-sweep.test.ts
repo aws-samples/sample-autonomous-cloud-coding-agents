@@ -25,7 +25,6 @@ import { PrOutcomeSweep } from '../../src/constructs/pr-outcome-sweep';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
 import { TaskTable } from '../../src/constructs/task-table';
 
-/** The logical id of the one resource of `type` whose id starts with `prefix`. */
 function idOf(template: Template, type: string, prefix: string): string {
   const ids = Object.keys(template.findResources(type)).filter((id) => id.startsWith(prefix));
   expect(ids).toHaveLength(1);
@@ -42,7 +41,6 @@ describe('PrOutcomeSweep', () => {
 
   beforeAll(() => {
     const stack = new Stack(new App(), 'TestStack');
-    // The real table constructs: the index the sweep is granted is the one the task table declares.
     const taskTable = new TaskTable(stack, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(stack, 'TaskEventsTable');
     const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
@@ -127,8 +125,6 @@ describe('PrOutcomeSweep', () => {
     expect(policies).toHaveLength(1);
     const role = idOf(template, 'AWS::IAM::Role', 'PrOutcomeSweepSweepFnServiceRole');
     expect(policies[0].Properties.Roles).toEqual([{ Ref: role }]);
-    // The whole policy: no Scan, no other index, no creation or deletion of a task, no read,
-    // change or deletion of an event, no write to the secret.
     expect(policies[0].Properties.PolicyDocument.Statement).toEqual([
       {
         Action: 'dynamodb:Query',
@@ -151,7 +147,6 @@ describe('PrOutcomeSweep', () => {
         Resource: { Ref: secret },
       },
     ]);
-    // Beside that policy, the role has the managed policy that lets a function write its logs.
     expect(template.findResources('AWS::IAM::Role')[role].Properties.ManagedPolicyArns).toEqual([
       { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']] },
     ]);

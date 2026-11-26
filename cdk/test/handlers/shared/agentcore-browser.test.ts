@@ -26,7 +26,6 @@ jest.mock('@aws-sdk/client-bedrock-agentcore', () => ({
   StopBrowserSessionCommand: jest.fn((input: unknown) => ({ _type: 'Stop', input })),
 }));
 
-// Static credentials so SigV4 doesn't reach for real AWS metadata.
 jest.mock('@aws-sdk/credential-provider-node', () => ({
   defaultProvider: () => async () => ({
     accessKeyId: 'AKIATEST',
@@ -38,12 +37,6 @@ jest.mock('@aws-sdk/credential-provider-node', () => ({
 class FakeWebSocket extends EventEmitter {
   public static last: FakeWebSocket | null = null;
   public static onConstruct: ((url: string, ws: FakeWebSocket) => void) | null = null;
-  /**
-   * Per-test scripted reactions. Each function returns either:
-   *  - an object: a CDP response keyed back to the request id
-   *  - an object with `events` array: response + extra unsolicited events (e.g. Network.responseReceived) emitted before the response
-   *  - null: no response (caller times out)
-   */
   public static reactions: Array<
     (msg: { id: number; method: string; sessionId?: string }) =>
       | Record<string, unknown>
@@ -73,8 +66,6 @@ class FakeWebSocket extends EventEmitter {
     if (!reaction) return;
     const result = reaction(msg);
     if (result === null) return;
-    // Detect the `{_response, _events}` wrapper for tests that need to
-    // emit unsolicited events alongside the request's response.
     if ('_response' in result) {
       const wrapped = result as {
         _response: Record<string, unknown>;
@@ -107,14 +98,12 @@ jest.mock('ws', () => ({
 
 import { captureScreenshot } from '../../../src/handlers/shared/agentcore-browser';
 
-/** Helper: emit Page.loadEventFired on the next tick. */
 function emitLoadEventFired(): void {
   setImmediate(() => {
     FakeWebSocket.last!.emit('message', JSON.stringify({ method: 'Page.loadEventFired' }));
   });
 }
 
-/** Build a Network.responseReceived event for the main document with the given status. */
 function networkResponseEvent(status: number, frameId = 'frame-1'): Record<string, unknown> {
   return {
     method: 'Network.responseReceived',
@@ -132,7 +121,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
     FakeWebSocket.last = null;
     FakeWebSocket.reactions = [];
     FakeWebSocket.onConstruct = null;
-    // Skip the 2-second post-load settle.
     const realSetTimeout = global.setTimeout;
     jest.spyOn(global, 'setTimeout').mockImplementation(((cb: () => void, ms?: number) => {
       if (typeof ms === 'number' && ms === 2000) {
@@ -146,7 +134,7 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
       sessionId: 'sess-1',
       streams: { automationStream: { streamEndpoint: 'wss://example.com/automation' } },
     });
-    bedrockSend.mockResolvedValueOnce({}); // Stop in finally
+    bedrockSend.mockResolvedValueOnce({});
   });
 
   afterEach(() => {
@@ -155,20 +143,14 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
 
   test('200 main-document status → captures screenshot as before', async () => {
     FakeWebSocket.reactions = [
-      // Target.getTargets
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
-      // Target.attachToTarget
       () => ({ result: { sessionId: 'flat-sess' } }),
-      // Page.enable
       () => ({ result: {} }),
-      // Network.enable
       () => ({ result: {} }),
-      // Page.navigate — also emit Network.responseReceived (200) + load event
       () => ({
         _response: { result: { frameId: 'frame-1' } },
         _events: [networkResponseEvent(200, 'frame-1')],
       }),
-      // Page.captureScreenshot
       () => ({ result: { data: Buffer.from('PNG-200').toString('base64') } }),
     ];
     emitLoadEventFired();
@@ -187,7 +169,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
         _response: { result: { frameId: 'frame-1' } },
         _events: [networkResponseEvent(404, 'frame-1')],
       }),
-      // Page.captureScreenshot should NEVER be called — fail loud if it is
       () => {
         throw new Error('captureScreenshot should not run on non-2xx');
       },
@@ -216,11 +197,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
   });
 
   test('301 redirect → main document status is the redirect; throw', async () => {
-    // 3xx responses are still non-2xx so we treat them as failure; CDP's
-    // typical behaviour with redirects is that the FINAL response gets
-    // a 200 type=Document, but if a 3xx surfaces we should not silently
-    // capture an unexpected page. (Real-world: Vercel auth-wall returns
-    // 200 directly so this is mostly defensive — but assert the policy.)
     FakeWebSocket.reactions = [
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
       () => ({ result: { sessionId: 'flat-sess' } }),
@@ -237,8 +213,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
   });
 
   test('Network.responseReceived for non-Document resource is ignored', async () => {
-    // Only Document-type responses set the captured status. JS/CSS/XHR
-    // responses on the same frame must not trigger the non-2xx branch.
     FakeWebSocket.reactions = [
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
       () => ({ result: { sessionId: 'flat-sess' } }),
@@ -247,12 +221,10 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
       () => ({
         _response: { result: { frameId: 'frame-1' } },
         _events: [
-          // A 404 on a stylesheet request — not the main document.
           {
             method: 'Network.responseReceived',
             params: { type: 'Stylesheet', frameId: 'frame-1', response: { status: 404 } },
           },
-          // The actual main-document response is 200.
           networkResponseEvent(200, 'frame-1'),
         ],
       }),
@@ -264,9 +236,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
   });
 
   test('sub-frame 404 after main-frame 200 → still captures (per-frame attribution)', async () => {
-    // An embedded iframe (ad, widget) can 404 while the page itself is fine.
-    // Before per-frame tracking, "latest Document status wins" let the
-    // sub-frame's 404 overwrite the main frame's 200 → spurious skip.
     FakeWebSocket.reactions = [
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
       () => ({ result: { sessionId: 'flat-sess' } }),
@@ -288,8 +257,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
   });
 
   test('sub-frame 200 after main-frame 404 → still throws (per-frame attribution)', async () => {
-    // The inverse race: a 404 page that embeds a 200 sub-frame must not
-    // have its failure masked by the later sub-frame response.
     FakeWebSocket.reactions = [
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
       () => ({ result: { sessionId: 'flat-sess' } }),
@@ -314,8 +281,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
   });
 
   test('redirect chain on the main frame → final status wins', async () => {
-    // Same frameId re-fires for each hop; the last recorded status is the
-    // final response (here 200 after a 302 hop) → capture proceeds.
     FakeWebSocket.reactions = [
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
       () => ({ result: { sessionId: 'flat-sess' } }),
@@ -343,7 +308,7 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
       () => ({ result: {} }),
       () => ({ result: {} }),
       () => ({
-        _response: { result: {} }, // no frameId in the navigate response
+        _response: { result: {} },
         _events: [networkResponseEvent(503, 'frame-unknown')],
       }),
     ];
@@ -374,14 +339,11 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
   });
 
   test('no Network.responseReceived event ever fires → falls through (pre-#287 behaviour)', async () => {
-    // Defensive: if some service variant doesn't emit Network events,
-    // we still capture optimistically rather than blocking the pipeline.
     FakeWebSocket.reactions = [
       () => ({ result: { targetInfos: [{ targetId: 't1', type: 'page', url: 'about:blank' }] } }),
       () => ({ result: { sessionId: 'flat-sess' } }),
       () => ({ result: {} }),
       () => ({ result: {} }),
-      // Page.navigate — no events emitted alongside; only the response.
       () => ({ result: { frameId: 'frame-1' } }),
       () => ({ result: { data: Buffer.from('PNG').toString('base64') } }),
     ];
@@ -392,7 +354,6 @@ describe('captureScreenshot — main-document status check (issue #287)', () => 
   });
 
   test('a command that gets no answer reports the time it was given, not what is left when the timer fires', async () => {
-    // The browser never answers the first command; the capture has 200 ms.
     FakeWebSocket.reactions = [() => null];
 
     const error = await captureScreenshot('https://preview.example.com', { timeoutMs: 200 }).catch((e: unknown) => e);

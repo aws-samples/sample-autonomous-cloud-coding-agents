@@ -33,12 +33,10 @@ import { parseBody } from './shared/validation';
 const sm = makeClient(SecretsManagerClient);
 const SECRET_PREFIX = 'bgagent/webhook/';
 
-// In-memory secret cache with 5-minute TTL
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
-/** Length of the ``sha256=`` prefix GitHub-style signatures carry. */
 const SIGNATURE_PREFIX_LENGTH = 'sha256='.length;
 
 async function getSecret(webhookId: string): Promise<string | null> {
@@ -52,8 +50,6 @@ async function getSecret(webhookId: string): Promise<string | null> {
     const result = await sm.send(new GetSecretValueCommand({
       SecretId: `${SECRET_PREFIX}${webhookId}`,
     }));
-    // Treat empty / whitespace-only SecretString as null — an empty secret
-    // must never reach HMAC, or HMAC('', body) becomes forgeable.
     if (!isUsableHmacSecret(result.SecretString)) {
       logger.error('Webhook secret is empty — refusing to use for HMAC', { webhook_id: webhookId });
       return null;
@@ -64,7 +60,7 @@ async function getSecret(webhookId: string): Promise<string | null> {
     const errorName = (err as Error)?.name;
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Webhook secret not found in Secrets Manager', { webhook_id: webhookId });
-      return null; // missing per-webhook secret is an expected config state; other SM errors rethrow below
+      return null;
     }
     logger.error('Failed to fetch webhook secret from Secrets Manager', {
       webhook_id: webhookId,
@@ -76,8 +72,6 @@ async function getSecret(webhookId: string): Promise<string | null> {
 }
 
 function verifySignature(body: string, secret: string, signature: string): boolean {
-  // Defense-in-depth: getSecret already filters empty secrets, but HMAC('')
-  // must always be rejected — anyone can compute it.
   if (!isUsableHmacSecret(secret)) {
     return false;
   }
@@ -111,13 +105,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   const requestId = ulid();
 
   try {
-    // 1. Extract webhook auth context (injected by REQUEST authorizer)
     const webhookCtx = extractWebhookContext(event);
     if (!webhookCtx) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid webhook authentication.', requestId);
     }
 
-    // 2. Verify HMAC-SHA256 signature
     const signature = getHeader(event.headers, 'X-Webhook-Signature');
     if (!signature) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing X-Webhook-Signature header.', requestId);
@@ -137,16 +129,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Invalid webhook signature.', requestId);
     }
 
-    // 3. Parse request body
     const body = parseBody<CreateTaskRequest>(event.body);
     if (!body) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
 
-    // 4. Extract idempotency key
     const idempotencyKey = getHeader(event.headers, 'Idempotency-Key');
 
-    // 5. Delegate to shared core
     return await createTaskCore(body, {
       userId: webhookCtx.userId,
       channelSource: 'webhook',

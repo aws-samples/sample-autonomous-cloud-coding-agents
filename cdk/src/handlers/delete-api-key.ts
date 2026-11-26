@@ -34,8 +34,7 @@ const API_KEY_RETENTION_DAYS = Number(process.env.API_KEY_RETENTION_DAYS ?? '30'
 /**
  * DELETE /v1/api-keys/{key_id} — Soft-revoke an API key.
  *
- * Mirrors webhook revocation: ownership mismatch returns 404 (not 403) so the
- * API is not an existence oracle for another user's key IDs.
+ * Ownership mismatch returns 404 (not 403).
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();

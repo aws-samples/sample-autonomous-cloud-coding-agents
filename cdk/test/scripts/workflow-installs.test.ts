@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-// Yarn 1 installs this repository. It ignores an option it does not know without saying so. With `--immutable`, the flag
-// of Yarn Berry, it rewrites `yarn.lock` as a plain install does. `--frozen-lockfile` is the flag it reads.
+// Yarn 1 ignores an option it does not know without saying so. With `--immutable`, the flag of Yarn Berry, it rewrites
+// `yarn.lock` as a plain install does. `--frozen-lockfile` is the flag it reads.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -49,8 +49,6 @@ const WORKFLOW_INSTALLS = WORKFLOW_FILES.flatMap(installs);
 const MISE_INSTALLS = ['mise.toml', 'cdk/mise.toml', 'cli/mise.toml', 'docs/mise.toml', 'web/mise.toml'].flatMap(installs);
 
 describe('workflow steps that run `yarn install` themselves', () => {
-  // No workflow has such a step at present, so the rule is for the next one.
-  // The first assertion shows that the workflows were listed: without it the rule would pass on an empty list.
   test('pass --frozen-lockfile, the flag Yarn 1 reads, and nothing else', () => {
     expect(WORKFLOW_FILES).toContain(BUILD);
     expect(WORKFLOW_INSTALLS.filter(({ command }) => command !== 'yarn install --frozen-lockfile')).toEqual([]);
@@ -59,7 +57,7 @@ describe('workflow steps that run `yarn install` themselves', () => {
 
 describe('the installs of the mise tasks, which the build checks for lockfile drift', () => {
   // With each of these three flags Yarn 1 leaves yarn.lock as it is.
-  // `--frozen-lockfile` lets a changed `resolutions` entry or workspace manifest pass. Only a rewritten yarn.lock shows those.
+  // `--frozen-lockfile` lets a changed `resolutions` entry or workspace manifest pass.
   test('may rewrite yarn.lock', () => {
     expect(MISE_INSTALLS).not.toHaveLength(0);
     expect(MISE_INSTALLS.filter(({ command }) => /--(frozen|pure|no)-lockfile\b/.test(command))).toEqual([]);
@@ -67,9 +65,6 @@ describe('the installs of the mise tasks, which the build checks for lockfile dr
 });
 
 describe('the build, whose step "Fail on lockfile drift" looks for a yarn.lock that the install rewrote', () => {
-  // A yarn call of its own would have to be frozen to pass the first test, and the drift step would then find nothing.
-  // mise appends what follows `--` to the last command of a task, which for the install task of a package is `yarn install`.
-  // Once, because a line does not say which job a second install is in.
   test('installs once, with the mise task and before that step, not with a yarn call of its own', () => {
     const order = ['mise run install', '- name: Fail on lockfile drift'];
     const lines = fs.readFileSync(path.join(ROOT, BUILD), 'utf-8').split('\n').map((line) => line.trim());

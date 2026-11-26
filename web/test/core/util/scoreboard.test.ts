@@ -33,23 +33,14 @@ import {
 import { mockScoreboard } from '../../../src/mocks/fixtures';
 
 const NOW = new Date('2026-11-19T12:00:00Z');
-/** A busy month after another one: most of its new pull requests are merged. */
 const MONTH = mockScoreboard('30d', NOW);
-/** Two weeks in a repository ABCA has read no pull request of: a week without a verified pull request, after a week with one pull request. */
 const WEEK = mockScoreboard('7d', NOW);
 
 const ALL_TILES = SECTIONS.flatMap((section) => section.tiles);
 const TILES = new Map(ALL_TILES.map((spec) => [spec.label, spec]));
-/** Between the two units of a duration. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
-/** The one tile whose number is of the whole response, not of a period. */
 const WAITING = 'Pull requests open for more than 7 days';
 
-/**
- * A tile of the page, with its number, its line and its tasks as functions of a period.
- * The board they are read with is the month's: only the tile of {@link WAITING} reads it,
- * and its tests name the board.
- */
 function tile(label: string, board: Scoreboard = MONTH) {
   const spec = TILES.get(label);
   if (!spec) throw new Error(`no tile "${label}"`);
@@ -62,7 +53,6 @@ function tile(label: string, board: Scoreboard = MONTH) {
   };
 }
 
-/** The month's numbers with some of them replaced. */
 function month(overrides: Partial<ScoreboardPeriod>): ScoreboardPeriod {
   return { ...MONTH.current, ...overrides };
 }
@@ -71,7 +61,6 @@ const NOTHING = { count: 0, total: 0 };
 const NO_VERIFIED_PR = { ...MONTH.current.outcomes, verified_pr: 0 };
 const NO_TOUCHPOINT = { approve: 0, clarify: 0, follow_up: 0, cancel: 0 };
 
-/** The new pull requests of a period, by what ABCA last read of them on GitHub. */
 function states(merged: number, closed: number, open: number, unread: number): ScoreboardPeriod['pull_requests'] {
   return { merged, closed, open, unread };
 }
@@ -139,7 +128,6 @@ describe('the sections of the page', () => {
   it('say nowhere that a merge or a review is out of sight: the three sentences that did', () => {
     expect(SECTIONS[1].notMeasured).toBe('Not measured by ABCA: change failure rate and time to restore, which need deploy and incident data, and'
       + ' whether a merged change was later reverted.');
-    // The page times the first review; what it cannot see is the time people spend on reviewing.
     expect(SECTIONS[2].notMeasured).toBe('Not measured by ABCA: the hours people spent, the time people spent reviewing, and work a person did by hand.');
     expect(tile('Not reworked through ABCA, so far').explanation.how)
       .toMatch(/ are not visible to ABCA, reviews on GitHub are not counted here, and recent pull requests can still be sent back\.$/);
@@ -179,8 +167,6 @@ describe('the bubbles of the numbers that rest on a read of GitHub', () => {
     [
       'Merged, so far',
       'how',
-      // A pull request the token cannot read, or that GitHub does not have under the recorded number, is followed:
-      // the line under the number counts it as not read.
       "Not read: pull requests ABCA's token cannot read or GitHub does not have. Not followed: those of a task that failed, and of an orchestration.",
     ],
     ['Merged without being sent back', 'how', 'with no change request by a reviewer with write access and no follow-up task of yours'],
@@ -206,7 +192,6 @@ describe('a tile over a busy month', () => {
     ],
     ['Waited in line', '8%', '4 of 48 tasks that waited in line or started'],
     ['Ended in a verified pull request', '70%', '26 of 37 tasks that asked for a new pull request'],
-    // The one not read is outside the share: 20 of 28 would be 71%.
     ['Merged, so far', '74%', '20 of 27 new pull requests that ABCA has read on GitHub. 2 closed without merging, 5 still open. 1 not read.'],
     ['Merged without being sent back', '85%', '17 of 20 merged pull requests'],
     ['Not reworked through ABCA, so far', '79%', '22 of 28 new pull requests'],
@@ -219,7 +204,6 @@ describe('a tile over a busy month', () => {
     [
       'Spend per verified pull request',
       '$4.12',
-      // The figure names what its divisor leaves out: the pull requests that can still be merged, and the one not read.
       '$107.12 on 45 tasks that write code and started. 3 have no recorded cost.'
         + ' $5.36 per merged pull request so far: 20 merged, 5 still open, 1 not read.',
     ],
@@ -296,7 +280,6 @@ describe('a tile over a busy month', () => {
     expect(tile('Time to verified pull request').value(single)).toBe(`2h${NO_BREAK_SPACE}5m`);
     expect(tile('Time to verified pull request').detail?.(single)).toBe('Median of 1 verified pull request.');
     expect(tile('Time to merged pull request').value(single)).toBe(`1d${NO_BREAK_SPACE}2h`);
-    // One pull request is not "1 of them", and its one review has a time, not a typical time.
     expect(tile('Time to merged pull request').detail?.(single))
       .toBe('Median of 1 merged pull request. It had a review by someone else, 2h after the task finished.');
     expect(tile('Waited in line').detail?.(single)).toBe('1 of 1 task that waited in line or started');
@@ -427,7 +410,6 @@ describe('a tile with nothing to divide by', () => {
 });
 
 describe('the numbers over the merged pull requests of a period', () => {
-  /** A period of the month in which no pull request is merged. */
   function unmerged(pullRequests: ScoreboardPeriod['pull_requests'], newPullRequests: Partial<ScoreboardPeriod['outcomes']> = {}): ScoreboardPeriod {
     return month({
       outcomes: { ...MONTH.current.outcomes, ...newPullRequests },
@@ -490,7 +472,6 @@ describe('the numbers over the merged pull requests of a period', () => {
       'ABCA has not read the new pull request of this period on GitHub. The 2 of an orchestration are not followed.',
     ],
   ])('"Merged, so far" names the pull requests of an orchestration, which ABCA does not follow, %s', (_where, period, detail) => {
-    // "Not reworked through ABCA, so far", beside it, counts them: without the sentence the two totals differ unexplained.
     expect(tile('Merged, so far').detail?.(period)).toBe(detail);
   });
 
@@ -540,7 +521,6 @@ describe('the numbers over the merged pull requests of a period', () => {
 });
 
 describe(`"${WAITING}", the one number of the whole response`, () => {
-  /** What the tile shows for a response: its number, the line under it, the tasks it links. */
   function shown(board: Scoreboard) {
     const waiting = tile(WAITING, board);
     return { value: waiting.value(board.current), detail: waiting.detail?.(board.current), tasks: waiting.tasks?.(board.current) };
@@ -555,7 +535,6 @@ describe(`"${WAITING}", the one number of the whole response`, () => {
     expect(shown(board)).toEqual({ value: '0', detail: null, tasks: board.open_over_7d });
   });
 
-  /** The month's response with that many more verified pull requests in each period than ABCA follows: an orchestration's. */
   function withOrchestration(current: number, before: number): Scoreboard {
     if (!MONTH.previous) throw new Error('the month has no period before it');
     const more = (period: ScoreboardPeriod, count: number): ScoreboardPeriod => (
@@ -585,7 +564,6 @@ describe(`"${WAITING}", the one number of the whole response`, () => {
       'The scoreboard did not read far enough back to count these.',
     ],
     [
-      // What a count leaves out is said under a count: under a dash the one line is the reason.
       'ABCA has read none of them, and the periods hold pull requests of an orchestration too',
       { ...withOrchestration(20, 1), open_over_7d: null },
       'ABCA has not read these pull requests on GitHub.',
@@ -621,7 +599,6 @@ describe('previousLine', () => {
   });
 
   it('is absent when the period before has nothing to compute the number from', () => {
-    // A period before in which no task asked for a new pull request.
     const before = month({
       outcomes: { ...MONTH.current.outcomes, verified_pr: 0, unverified_pr: 0 },
       time_to_verified_pr_s: null,
@@ -631,7 +608,6 @@ describe('previousLine', () => {
       time_to_merge_s: null,
     });
     expect(ALL_TILES.map((spec) => previousLine(spec, { ...MONTH, previous: before }))).toEqual(ALL_TILES.map(() => null));
-    // The merged share is a share of the pull requests ABCA has read: with none read there is nothing to quote.
     expect(previousLine(tile('Merged, so far'), { ...MONTH, previous: month({ pull_requests: states(0, 0, 0, 21) }) })).toBeNull();
   });
 
@@ -641,7 +617,6 @@ describe('previousLine', () => {
 });
 
 describe('the sentences around the tiles', () => {
-  /** What follows the counts: which period a task belongs to, and what "verified" proves. */
   const RULES = 'A task counts in the period it finished in. A verified pull request is one opened after the'
     + " repository's build command passed, which proves only what that command checks.";
 

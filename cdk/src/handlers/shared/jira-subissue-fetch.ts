@@ -136,8 +136,7 @@ async function fetchPage(
  * Read a Jira parent's authored subtasks and standard blocker links.
  *
  * Standard blocker links must remain inside the authored child set; an external
- * blocker would make the persisted graph permanently unreleasable, so it is
- * rejected before any rows are written.
+ * blocker is rejected (`kind: 'error'`).
  */
 export async function fetchJiraSubIssueGraph(
   accessToken: string,

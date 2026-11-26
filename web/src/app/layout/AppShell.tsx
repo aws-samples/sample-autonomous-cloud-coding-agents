@@ -38,14 +38,12 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Costs', href: '/costs' },
 ];
 
-/** Crescent moon: shown in light mode, switches to dark. */
 const MOON_ICON = (
   <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
     <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
   </svg>
 );
 
-/** Sun: shown in dark mode, switches to light. */
 const SUN_ICON = (
   <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
     <circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="2" />
@@ -59,10 +57,6 @@ function shortReason(reason: string): string {
   return reason.length > REASON_LENGTH ? `${reason.slice(0, REASON_LENGTH - 1)}…` : reason;
 }
 
-/**
- * The bell in the top bar: notifications, which today are approval requests. A dot
- * shows when one is waiting; each opens its task, and the approvals page lists them all.
- */
 function approvalsMenu(pending: readonly PendingApprovalSummary[]): TopNavigationProps.MenuDropdownUtility {
   const count = pending.length;
   const items: TopNavigationProps.MenuDropdownUtility['items'] = count === 0
@@ -86,7 +80,6 @@ function approvalsMenu(pending: readonly PendingApprovalSummary[]): TopNavigatio
   };
 }
 
-/** Highlights the nav entry for the current route, including nested routes like /tasks/:id. */
 function activeHref(pathname: string): string {
   const match = NAV_ITEMS.filter((item) => item.type === 'link' && item.href !== '/')
     .map((item) => (item as SideNavigationProps.Link).href)

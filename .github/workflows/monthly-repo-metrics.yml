@@ -1,6 +1,4 @@
 name: monthly-repo-metrics
-# Files two issues on the 1st of each month with github/issue-metrics reports
-# (time-to-first-response, time-to-close, …) over last month's issues and PRs.
 on:
   workflow_dispatch: {}
   schedule:

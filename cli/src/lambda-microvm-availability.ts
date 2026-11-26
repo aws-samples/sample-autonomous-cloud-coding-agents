@@ -35,7 +35,6 @@ export const LAMBDA_MICROVM_REMEDY =
   `Launch regions: ${CAPABILITY_CATALOG.compute['lambda-microvm'].regions?.join(', ')}. `
   + 'Use --compute-type agentcore or --compute-type ecs in other regions.';
 
-/** Probe the read-only image catalog used to detect regional service availability. */
 export async function probeLambdaMicrovmAvailability(
   region: string,
   clientFactory: LambdaMicrovmProbeClientFactory =

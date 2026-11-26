@@ -103,7 +103,6 @@ describe('replay command', () => {
       await makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', file]);
       expect(existsSync(file)).toBe(true);
       expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(BUNDLE);
-      // stdout stays clean; confirmation goes to stderr.
       expect(consoleSpy).not.toHaveBeenCalled();
       expect(errSpy).toHaveBeenCalledWith(`Wrote replay bundle to ${file}`);
     } finally {
@@ -137,10 +136,8 @@ describe('replay command', () => {
     const dir = mkdtempSync(join(tmpdir(), 'replay-test-'));
     const link = join(dir, 'bundle.json');
     const elsewhere = join(dir, 'elsewhere.json');
-    // A link that leads nowhere does not count as an existing file: no --force is needed.
     symlinkSync(elsewhere, link);
-    // Only root can change the owner of a link, so the test changes what lstat reports:
-    // an owner who is neither the user, nor root, nor the owner of the directory.
+    // Only root can change the owner of a link.
     const nodeFs = jest.requireActual<typeof import('node:fs')>('node:fs');
     const lstat = nodeFs.lstatSync;
     const stranger = statSync(dir).uid + 1;
@@ -165,13 +162,11 @@ describe('replay command', () => {
     const dir = mkdtempSync(join(tmpdir(), 'replay-test-'));
     const file = join(dir, 'exists.json');
     try {
-      // Pre-create the file.
       await makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', file]);
       mockGetReplay.mockClear();
       await expect(
         makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', file]),
       ).rejects.toThrow(/Refusing to overwrite/);
-      // The refusal short-circuits before the network call.
       expect(mockGetReplay).not.toHaveBeenCalled();
     } finally {
       rmSync(dir, { recursive: true, force: true });

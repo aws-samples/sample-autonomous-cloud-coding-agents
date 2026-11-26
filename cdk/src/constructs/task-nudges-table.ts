@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for TaskNudgesTable construct.
- */
 export interface TaskNudgesTableProps {
   /**
    * Optional table name override.
@@ -45,7 +42,7 @@ export interface TaskNudgesTableProps {
 }
 
 /**
- * DynamoDB table for Phase 2 nudge messages.
+ * DynamoDB table for nudge messages.
  *
  * Schema: task_id (PK) + nudge_id (SK, ULID).
  *
@@ -62,9 +59,6 @@ export interface TaskNudgesTableProps {
  * and carry a short TTL (~120s) so they are cleaned up automatically.
  */
 export class TaskNudgesTable extends Construct {
-  /**
-   * The underlying DynamoDB table. Use this to grant access or read the table name.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: TaskNudgesTableProps = {}) {
@@ -85,8 +79,6 @@ export class TaskNudgesTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
-      // No DynamoDB stream — nudges are poll-consumed by the agent runtime,
-      // not fanned out to external channels like TaskEventsTable.
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
   }

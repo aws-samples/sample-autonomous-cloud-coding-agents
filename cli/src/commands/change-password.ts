@@ -23,13 +23,10 @@ import { CliError } from '../errors';
 import { promptSecret } from '../prompt-secret';
 
 /**
- * Prompt for a new password twice and confirm the two entries match. Shared by
- * ``bgagent change-password`` and the first-login ``NEW_PASSWORD_REQUIRED``
- * challenge in ``bgagent login`` so both use the same masked, confirmed prompt.
+ * Prompt for a new password twice and confirm the two entries match.
  *
  * Cognito enforces the real password policy server-side; we only guard against
- * a typo (mismatch) and an empty entry here — leaking policy specifics client
- * side would drift from the pool config.
+ * a typo (mismatch) and an empty entry here.
  */
 export async function promptNewPasswordWithConfirmation(): Promise<string> {
   const next = await promptSecret('New password: ');
@@ -43,13 +40,6 @@ export async function promptNewPasswordWithConfirmation(): Promise<string> {
   return next;
 }
 
-/**
- * ``bgagent change-password`` — rotate the signed-in user's Cognito password.
- *
- * Interactive: prompts for the current password, then the new password twice.
- * Delegates to ``changePassword`` in the auth layer, which verifies the current
- * password and lets Cognito enforce the password policy on the new one.
- */
 export function makeChangePasswordCommand(): Command {
   return new Command('change-password')
     .description('Change your Cognito password (requires an active `bgagent login` session)')

@@ -41,7 +41,6 @@ const DRIVER = `
   );
 `;
 
-// As in a Lambda bundle, the code is CommonJS without pdf-parse, which a native import() finds in node_modules.
 const BUNDLE = buildSync({
   stdin: { contents: DRIVER, resolveDir: CDK_ROOT },
   bundle: true,
@@ -53,7 +52,6 @@ const BUNDLE = buildSync({
   external: ['@aws-sdk/*', 'pdf-parse'],
 }).outputFiles[0].text;
 
-/** A valid PDF with one line of plain ASCII text on each page, built in memory. */
 function pdfWithPages(pageTexts: string[]): Buffer {
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
@@ -82,14 +80,18 @@ function pdfWithPages(pageTexts: string[]): Buffer {
 
 function screenInChild(pdf: Buffer): unknown {
   const stdout = execFileSync(process.execPath, ['-'], {
-    cwd: CDK_ROOT, // pdf-parse and the AWS SDK resolve from here
+    // pdf-parse and the AWS SDK resolve from here: Node resolves a script read from stdin from the working directory.
+    cwd: CDK_ROOT,
     input: BUNDLE,
-    env: { ...process.env, PDF_BASE64: pdf.toString('base64') }, // not an argument: the error of a failed child starts with its command line
+    // Not an argument: the error of a failed execFileSync starts with the child's command line.
+    env: { ...process.env, PDF_BASE64: pdf.toString('base64') },
     encoding: 'utf-8',
-    stdio: 'pipe', // the child's stderr stays out of the test output; the error of a failed child carries it
-    timeout: 30_000, // a child that never exits fails the test, where Jest cannot interrupt a synchronous call
+    // With no stdio given, execFileSync writes the child's stderr to the parent's; piped, the error of a failed child carries it.
+    stdio: 'pipe',
+    // Jest cannot interrupt a synchronous call, so its test timeout does not end a child that never exits.
+    timeout: 30_000,
   });
-  // The module's INFO and WARN logs and the notices of pdfjs go to stdout as well: the outcome is the last line.
+  // pdfjs prints its notices on stdout: the outcome is the last line.
   return JSON.parse(stdout.trimEnd().split('\n').at(-1) ?? '');
 }
 

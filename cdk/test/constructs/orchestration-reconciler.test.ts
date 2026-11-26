@@ -70,9 +70,7 @@ describe('OrchestrationReconciler', () => {
   });
 
   test('filters the stream to TERMINAL statuses only (skips RUNNING/heartbeat churn)', () => {
-    // The handler ignores non-terminal records; the stream FilterCriteria makes
-    // that explicit so every non-terminal TaskTable write platform-wide doesn't
-    // invoke the reconciler. One filter pattern per terminal status (OR-ed).
+    // Lambda ORs the filter patterns of an event source.
     template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
       FilterCriteria: {
         Filters: Match.arrayWith([
@@ -88,7 +86,6 @@ describe('OrchestrationReconciler', () => {
   });
 
   test('provisions a DLQ for poison stream records', () => {
-    // At least one SQS queue (the reconciler DLQ).
     const queues = template.findResources('AWS::SQS::Queue');
     expect(Object.keys(queues).length).toBeGreaterThanOrEqual(1);
   });
@@ -103,7 +100,6 @@ describe('OrchestrationReconciler', () => {
 describe('OrchestrationReconciler — grants', () => {
   test('grants the function read/write on the orchestration table', () => {
     const template = synth();
-    // The function role should have a policy referencing dynamodb actions.
     const policies = template.findResources('AWS::IAM::Policy');
     const hasDdb = Object.values(policies).some((p) => {
       const statements = (p.Properties as { PolicyDocument: { Statement: Array<{ Action?: unknown }> } })
@@ -114,7 +110,6 @@ describe('OrchestrationReconciler — grants', () => {
   });
 });
 
-// Minimal sanity that the props type accepts an ITable.
 describe('OrchestrationReconciler — typing', () => {
   test('accepts imported tables', () => {
     const app = new App();

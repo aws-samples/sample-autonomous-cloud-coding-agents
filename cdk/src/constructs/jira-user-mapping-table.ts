@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for JiraUserMappingTable construct.
- */
 export interface JiraUserMappingTableProps {
   /**
    * Optional table name override.
@@ -62,9 +59,6 @@ export class JiraUserMappingTable extends Construct {
    */
   public static readonly PLATFORM_USER_INDEX = 'PlatformUserIndex';
 
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: JiraUserMappingTableProps = {}) {

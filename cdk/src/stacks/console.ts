@@ -17,18 +17,6 @@
  *  SOFTWARE.
  */
 
-// The operator console (`web/`): a static single-page app served by CloudFront from
-// a private S3 bucket, signing users in against the platform's existing Cognito user
-// pool with Cognito managed login (authorization code + PKCE).
-//
-// Its own top-level stack rather than part of `AgentStack`: the application stack runs
-// close to CloudFormation's 500-resource limit, and the console has an independent
-// lifecycle (UI releases should not touch the platform's resources).
-//
-// Exposure: the app shell (HTML/JS/CSS) is public, like any SPA served from a CDN. It
-// contains no data or secrets; the only values it learns at runtime (`config.json`:
-// API URL, user pool and public client ids, login domain) are public identifiers. All
-// data comes from the REST API, which requires a Cognito token on every route.
 import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { ArnFormat, Aws, CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
@@ -66,9 +54,7 @@ export interface OperatorConsoleStackProps extends StackProps {
   readonly removalPolicy?: RemovalPolicy;
   /**
    * Onboarded repositories and the platform GitHub token. With both, the stack adds a
-   * small console API (`GET /repos/{repo_id}/issues`) for the issue picker. It lives
-   * here, not on the platform API, so console features never spend the platform
-   * stack's resource budget.
+   * small console API (`GET /repos/{repo_id}/issues`) for the issue picker.
    */
   readonly repoTable?: dynamodb.ITable;
   readonly githubTokenSecret?: secretsmanager.ISecret;
@@ -94,16 +80,12 @@ export interface ConsoleLinearProps {
 }
 
 const HANDLERS_DIR = path.join(__dirname, '..', 'handlers');
-/** Covers the GitHub calls (8 s for all pages together) plus a cold start. */
 const ISSUES_HANDLER_TIMEOUT_SECONDS = 15;
 const LINEAR_HANDLER_TIMEOUT_SECONDS = 20;
 const LINEAR_HANDLER_MEMORY_MB = 512;
 
-/** Hashed bundle files never change, so browsers may cache them for a year. */
 const IMMUTABLE_CACHE = s3deploy.CacheControl.fromString('public, max-age=31536000, immutable');
-/** index.html and config.json must be fetched fresh, or a release would not reach browsers. */
 const NO_CACHE = s3deploy.CacheControl.fromString('no-cache');
-/** How long a console sign-in lasts before the user must sign in again (a working day). */
 const SESSION_HOURS = 12;
 
 export class OperatorConsoleStack extends Stack {
@@ -138,11 +120,9 @@ export class OperatorConsoleStack extends Stack {
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-        // AWS-managed: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy.
-        // The Content-Security-Policy ships in index.html, so no custom policy resource is needed.
         responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
       },
-      // Client-side routes (/tasks/…) have no object in S3; OAC reports a missing key as 403.
+      // S3 behind OAC reports a missing key as 403, not 404.
       errorResponses: [403, 404].map((httpStatus) => ({
         httpStatus,
         responseHttpStatus: 200,
@@ -166,7 +146,6 @@ export class OperatorConsoleStack extends Stack {
     const origins_ = [origin, ...(props.additionalOrigins ?? [])];
     this.appClient = new cognito.UserPoolClient(this, 'ConsoleClient', {
       userPool: props.userPool,
-      // A browser app cannot keep a secret: public client, authorization code + PKCE.
       generateSecret: false,
       authFlows: {},
       oAuth: {
@@ -193,7 +172,6 @@ export class OperatorConsoleStack extends Stack {
       destinationBucket: bucket,
       sources: [s3deploy.Source.asset(props.assetDirectory, { exclude: ['index.html'] })],
       cacheControl: [IMMUTABLE_CACHE],
-      // Keep earlier hashed bundles: browsers mid-session still reference them.
       prune: false,
     });
 
@@ -218,7 +196,6 @@ export class OperatorConsoleStack extends Stack {
       distribution: this.distribution,
       distributionPaths: ['/*'],
     });
-    // The new index.html must only appear once the bundle it references is in place.
     entry.node.addDependency(assets);
 
     new CfnOutput(this, 'ConsoleUrl', { value: this.consoleUrl, description: 'Operator console URL' });
@@ -226,7 +203,6 @@ export class OperatorConsoleStack extends Stack {
     this.suppressNagFindings(bucket);
   }
 
-  /** `GET /repos/{repo_id}/issues` behind the platform's Cognito user pool. */
   private createConsoleApi(
     userPool: cognito.IUserPool,
     repoTable: dynamodb.ITable,
@@ -240,7 +216,7 @@ export class OperatorConsoleStack extends Stack {
     const api = new apigw.RestApi(this, 'ConsoleApi', {
       restApiName: 'OperatorConsoleApi',
       description: 'Console-only routes (GitHub and Linear issue pickers). Every method requires a Cognito ID token.',
-      // The platform stack already owns the account-level API Gateway CloudWatch role.
+      // API Gateway keeps one CloudWatch role per account and Region (AWS::ApiGateway::Account).
       cloudWatchRole: false,
       deployOptions: {
         stageName: 'v1',
@@ -249,7 +225,6 @@ export class OperatorConsoleStack extends Stack {
         accessLogDestination: new apigw.LogGroupLogDestination(accessLogs),
         accessLogFormat: apigw.AccessLogFormat.jsonWithStandardFields(),
       },
-      // Only the console's own origin(s), unlike the platform API's '*'.
       defaultCorsPreflightOptions: {
         allowOrigins: [...allowedOrigins],
         allowMethods: ['GET', 'POST', 'OPTIONS'],
@@ -307,17 +282,13 @@ export class OperatorConsoleStack extends Stack {
     return api;
   }
 
-  /** GET /repos/{repo_id}/linear-issues and POST /linear-issues/{issue_id}/start. */
   private addLinearRoutes(api: apigw.RestApi, authorizer: apigw.IAuthorizer, validator: apigw.IRequestValidator, linear: ConsoleLinearProps): void {
     const fn = new lambda.NodejsFunction(this, 'ConsoleLinearFn', {
       entry: path.join(HANDLERS_DIR, 'console-linear.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      // A repo can map several projects; each is one token lookup plus one Linear query.
       timeout: Duration.seconds(LINEAR_HANDLER_TIMEOUT_SECONDS),
-      // The shared Linear modules load a large dependency graph; at the 128 MB default the
-      // function ran out of memory during init, before handling any request.
       memorySize: LINEAR_HANDLER_MEMORY_MB,
       environment: {
         LINEAR_PROJECT_MAPPING_TABLE_NAME: linear.projectMappingTable.tableName,
@@ -330,18 +301,14 @@ export class OperatorConsoleStack extends Stack {
     });
     linear.projectMappingTable.grantReadData(fn);
     linear.workspaceRegistryTable.grantReadData(fn);
-    // Only which issues already have a task: Query on the Linear-issue index, nothing else.
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:Query'],
       resources: [`${linear.taskTable.tableArn}/index/${TaskTable.LINEAR_ISSUE_INDEX}`],
     }));
-    // Write a start claim, and remove it again if adding the label fails.
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
       resources: [linear.webhookDedupTable.tableArn],
     }));
-    // Per-workspace Linear OAuth tokens (created by `bgagent linear setup`). Put: the
-    // resolver writes back the rotated token when it refreshes an expiring one.
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
       resources: [Stack.of(this).formatArn({
@@ -391,8 +358,6 @@ export class OperatorConsoleStack extends Stack {
       { id: 'AwsSolutions-CFR4', reason: 'Uses the default *.cloudfront.net certificate; no custom domain, so no minimum-TLS-version override applies.' },
     ], true);
 
-    // Same CDK-managed singletons as LinearVaultConsentPage: found by id prefix so a
-    // CDK upgrade that changes their hash does not silently drop the suppression.
     for (const child of this.node.children) {
       if (!child.node.id.startsWith('Custom::CDKBucketDeployment') && !child.node.id.startsWith('Custom::S3AutoDeleteObjects')) continue;
       NagSuppressions.addResourceSuppressions(child, [

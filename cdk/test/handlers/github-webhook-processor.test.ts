@@ -23,7 +23,6 @@ jest.mock('@aws-sdk/client-s3', () => ({
   PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
 }));
 
-// DynamoDB doc client — drives persistScreenshotUrl.
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -88,7 +87,6 @@ import { normalizeAmplifyPreviewCheck } from '../../src/handlers/shared/github-d
 import { logger } from '../../src/handlers/shared/logger';
 import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
 
-/** `head.repo` of a pull request whose branch is in the repository itself, as the GitHub API returns it. */
 const OWN_REPO = { full_name: 'owner/repo' };
 
 function payload(overrides: Record<string, unknown> = {}): { raw_body: string } {
@@ -106,9 +104,6 @@ function payload(overrides: Record<string, unknown> = {}): { raw_body: string } 
 }
 
 function fetchOk(jsonValue: unknown, status = 200): jest.SpyInstance {
-  // A list is the answer of the lookup by commit. Each pull request in it lives
-  // in owner/repo (`base.repo`, as the GitHub API returns it) unless the test
-  // gives it another base, or none.
   const body = Array.isArray(jsonValue)
     ? jsonValue.map((pr: Record<string, unknown>) => ({ base: { repo: OWN_REPO }, ...pr }))
     : jsonValue;
@@ -120,7 +115,6 @@ function fetchOk(jsonValue: unknown, status = 200): jest.SpyInstance {
   } as unknown as Response);
 }
 
-/** The inputs of the task-table commands of one kind (Get, Update, Query), in the order sent. */
 function sentToTable(type: string): Array<Record<string, unknown>> {
   return ddbSend.mock.calls
     .map((c) => c[0] as { _type: string; input: Record<string, unknown> })
@@ -142,11 +136,6 @@ describe('github-webhook-processor handler', () => {
     findLinearIssueMock.mockReset();
     extractLinearIdentifierMock.mockReset();
     extractFromBranchMock.mockReset();
-    // Default: persistScreenshotUrl's UpdateItem succeeds with a NON-integration
-    // task record (no orchestration_sub_issue_id) → standalone Linear comment
-    // still posts, as the pre-existing tests expect. One answer serves both of its
-    // commands: the GetItem reads `Item` (the repository of the branch's task),
-    // the UpdateItem reads `Attributes` (the task before the write).
     ddbSend.mockReset().mockResolvedValue({ Item: { repo: 'owner/repo' }, Attributes: { channel_metadata: {} } });
   });
 
@@ -175,7 +164,6 @@ describe('github-webhook-processor handler', () => {
     jest.useFakeTimers();
     try {
       resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-      // Four calls (delays = [0, 5s, 10s, 20s]) all return empty list.
       fetchOk([]);
       fetchOk([]);
       fetchOk([]);
@@ -207,10 +195,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('picks the head-SHA owner when commit-pulls returns a stacked chain', async () => {
-    // A stacked sub-issue chain: the deploy SHA `abc1234` is the head of
-    // PR 73, but the commit-pulls API also lists PRs 74 and 75 stacked on
-    // top (their history contains the commit). The PR whose own head is
-    // the SHA must win, so the screenshot routes to 73's branch.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([
       { number: 73, state: 'open', title: 't73', body: 'b73', head: { ref: 'bgagent/01T/abca-152-x', sha: 'abc1234', repo: OWN_REPO } },
@@ -233,8 +217,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('the pull request whose head is the deployed commit wins over a lower number that only contains it', async () => {
-    // Pull request 75 is older than 80 but was rebased on top of 80's branch:
-    // its history contains the deployed commit, 80's branch ends with it.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([
       { number: 75, state: 'open', title: 't75', body: '', head: { ref: 'feature-on-top', sha: 'def5678', repo: OWN_REPO } },
@@ -251,9 +233,7 @@ describe('github-webhook-processor handler', () => {
 
   test('a pull request that lives in another repository is not taken for the deployment\'s own', async () => {
     // GitHub lists the open pull requests of a commit by the repository of their
-    // HEAD branch. Somebody opened, in a repository of their own, pull request 3 from
-    // the branch of owner/repo's pull request 10: both are in the answer, and
-    // the other one may come first.
+    // HEAD branch, so the answer includes pull requests that live in other repositories.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     const head = { ref: 'bgagent/01TASKID/tidy-up-the-footer', sha: 'abc1234', repo: OWN_REPO };
     fetchOk([
@@ -269,9 +249,6 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // Number 3 is a number of the other repository: the comment goes to the
-    // deployment's own pull request, and the title the other author wrote is
-    // not searched for an issue.
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 10 }));
     expect(findLinearIssueMock).not.toHaveBeenCalled();
@@ -287,7 +264,6 @@ describe('github-webhook-processor handler', () => {
     try {
       resolveGitHubTokenMock.mockResolvedValue('gh-tok');
       const answer = [{ number: 3, state: 'open', title: 'GLX-7', body: '', head: { ref: 'bgagent/01TASKID/x', sha: 'abc1234', repo: OWN_REPO }, base }];
-      // Four calls (delays = [0, 5s, 10s, 20s]), the same answer each time.
       fetchOk(answer);
       fetchOk(answer);
       fetchOk(answer);
@@ -311,9 +287,7 @@ describe('github-webhook-processor handler', () => {
     ['second', false],
   ])('a second pull request from the branch of an ABCA pull request does not take its place, listed %s', async (_label, listedFirst) => {
     // In a public repository anyone can open a pull request from an existing
-    // branch into another branch of the repository itself. Number 23 is one,
-    // from the branch of ABCA's pull request 10, with a title of its author's
-    // choice. Which of the two GitHub lists first must not matter.
+    // branch into another branch of the repository itself.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     const head = { ref: 'bgagent/01TASKID/tidy-up-the-footer', sha: 'abc1234', repo: OWN_REPO };
     const own = { number: 10, state: 'open', title: 'Tidy up the footer', body: '', head };
@@ -328,8 +302,6 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // The comment goes to the pull request that was opened first, and the
-    // other author's title is not searched for an issue.
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 10 }));
     expect(findLinearIssueMock).not.toHaveBeenCalled();
@@ -337,10 +309,8 @@ describe('github-webhook-processor handler', () => {
   });
 
   test.each([
-    // Two pull requests from one ordinary branch, both with the deployed commit as head.
     ['from an ordinary branch', 'abc1234', true],
     ['from an ordinary branch', 'abc1234', false],
-    // The deployed commit is the head of neither (a commit further down in both).
     ['when the deployed commit is no pull request\'s head', 'fff0000', true],
     ['when the deployed commit is no pull request\'s head', 'fff0000', false],
   ])('of two pull requests %s the lower number is taken (head %s, higher number listed first: %s)', async (_label, headSha, higherFirst) => {
@@ -369,7 +339,6 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // Capture leaves 30s for post-capture work, including optional Jira delivery.
     expect(captureScreenshotMock.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(80_000);
     expect(captureScreenshotMock).toHaveBeenCalledWith(
       'https://preview.example.com',
@@ -377,7 +346,6 @@ describe('github-webhook-processor handler', () => {
     );
     expect(s3Send).toHaveBeenCalledTimes(1);
     const putArg = (s3Send.mock.calls[0][0] as { input: { Key: string; ContentType: string } }).input;
-    // Key carries the high-entropy suffix (key entropy).
     expect(putArg.Key).toMatch(/^screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png$/);
     expect(putArg.ContentType).toBe('image/png');
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
@@ -416,13 +384,11 @@ describe('github-webhook-processor handler', () => {
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockRejectedValueOnce(new Error('GitHub 502'));
 
-    // Should not throw — the handler is best-effort.
     await expect(handler(payload())).resolves.toBeUndefined();
   });
 
   test('Linear branch fires when registry table set + identifier in PR title', async () => {
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-    // No branch identifier here — exercises the title fallback path.
     fetchOk([{ number: 17, state: 'open', title: 'ABCA-42 fix login', body: 'body', head: { ref: 'feature-x', sha: 'abc1234' } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
@@ -447,9 +413,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('a Linear task\'s preview goes to the issue and workspace on its own record, not to an identifier lookup', async () => {
-    // Two workspaces on one stack, acme and globex, each with a team ENG and an
-    // issue ENG-7. The identifier in the branch cannot tell them apart; the task
-    // that opened the pull request names globex's issue.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{ number: 17, state: 'open', title: 'ENG-7 fix login', body: '', head: { ref: 'bgagent/01TASKID/eng-7-fix-login', sha: 'abc1234', repo: OWN_REPO } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
@@ -464,7 +427,6 @@ describe('github-webhook-processor handler', () => {
       },
     });
     extractFromBranchMock.mockReturnValueOnce('ENG-7');
-    // What a lookup by identifier answers here: the workspace it happens to ask first.
     findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-acme', linearWorkspaceId: 'ws-acme', workspaceSlug: 'acme' }));
     postIssueCommentMock.mockResolvedValueOnce({ ok: true });
 
@@ -480,9 +442,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('a task started from a Linear comment gets its preview although nothing in the pull request names the issue', async () => {
-    // Such a task is described by the comment alone ("add a dark mode toggle"),
-    // so neither its branch nor the title or body of its pull request carries
-    // the identifier. Its record names the issue, the workspace and the reply.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{ number: 7, state: 'open', title: 'Add a dark mode toggle', body: '', head: { ref: 'bgagent/01TASKID/add-a-dark-mode-toggle', sha: 'abc1234', repo: OWN_REPO } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
@@ -517,9 +476,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('a pull request whose branch names a task of another repository writes nothing onto that task', async () => {
-    // Whoever opens a pull request chooses its branch name, and a task id is no
-    // secret: it is in the branch name of every ABCA pull request. Here a pull
-    // request in owner/repo names a task of other/repo.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{ number: 17, state: 'open', title: 'ENG-7', body: '', head: { ref: 'bgagent/01OTHERSTASK/eng-7-x', sha: 'abc1234', repo: OWN_REPO } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
@@ -534,17 +490,13 @@ describe('github-webhook-processor handler', () => {
       },
     });
     extractFromBranchMock.mockReturnValue('ENG-7');
-    // The one workspace that has ENG-7 is the other repository's.
     findLinearIssueMock.mockResolvedValue(lookupFound({ issueId: 'issue-of-other-repo', linearWorkspaceId: 'ws-globex', workspaceSlug: 'globex' }));
     postIssueCommentMock.mockResolvedValue({ ok: true });
     const warn = jest.spyOn(logger, 'warn');
 
     await handler(payload());
 
-    // The pull request gets its own comment ...
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
-    // ... the other repository's task is left as it was, so its own first
-    // deployment is still its first, and nothing goes to its tracker.
     expect(sentToTable('Update')).toEqual([]);
     expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       event: 'screenshot.persist_failed', task_id: '01OTHERSTASK',
@@ -555,14 +507,11 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('after such a pull request the task\'s own first deployment still posts its headline comment', async () => {
-    // A write onto the other repository's task left a screenshot on it, so that
-    // task's own first deployment was taken for a later push and posted nothing.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     captureScreenshotMock.mockResolvedValue(new Uint8Array([1]));
     s3Send.mockResolvedValue({});
     upsertTaskCommentMock.mockResolvedValue({ commentId: 'cmt-1' });
     postIssueCommentMock.mockResolvedValue({ ok: true });
-    // The task row of other/repo, kept across the two deployments.
     const row: Record<string, unknown> = {
       repo: 'other/repo',
       channel_source: 'linear',
@@ -578,7 +527,6 @@ describe('github-webhook-processor handler', () => {
     const ref = 'bgagent/01OTHERSTASK/eng-7-x';
     extractFromBranchMock.mockReturnValue('ENG-7');
 
-    // First a pull request in owner/repo that names the task, then the task's own.
     fetchOk([{ number: 17, state: 'open', title: 'ENG-7', body: '', head: { ref, sha: 'abc1234', repo: OWN_REPO } }]);
     await handler(payload());
     const otherRepo = { full_name: 'other/repo' };
@@ -599,9 +547,6 @@ describe('github-webhook-processor handler', () => {
     ['a fork that was deleted', null, 'screenshot.head_repo_missing'],
     ['a branch whose repository GitHub does not name', undefined, 'screenshot.head_repo_missing'],
   ])('a pull request from %s cannot name a task of this repository by its branch', async (_label, headRepo, event) => {
-    // The task ids of owner/repo are in the branch names of its own pull
-    // requests, and a fork can give its branch any of those names. Only a branch
-    // of the repository itself may name a task.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{ number: 17, state: 'open', title: 'ENG-7', body: '', head: { ref: 'bgagent/01TASKID/eng-7-x', sha: 'abc1234', repo: headRepo } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
@@ -622,8 +567,6 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // The pull request gets its comment; the task is neither read nor written,
-    // and nothing goes to its tracker.
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     expect(ddbSend).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ event, task_id: '01TASKID' }));
@@ -633,8 +576,7 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('a task whose blueprint spells the repository in another letter case is this repository\'s task', async () => {
-    // GitHub reports its own spelling of a repository name and answers to any
-    // other; the task record has the spelling of the blueprint.
+    // GitHub reports its own spelling of a repository name and answers to any other.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     const asGitHubSpellsIt = { full_name: 'Owner/Repo' };
     fetchOk([{
@@ -670,10 +612,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('branch-name identifier wins over a predecessor named in the PR body (stacked PR)', async () => {
-    // A stacked PR closes one issue but its body mentions the PREDECESSOR
-    // issue first ("cherry-picked from predecessor branch ..."). Branch-first
-    // routing must win so the screenshot lands on the issue this PR actually
-    // implements, not the predecessor named earlier in the body.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{
       number: 73,
@@ -685,8 +623,6 @@ describe('github-webhook-processor handler', () => {
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
-    // Real extractor behaviour: ABCA-152 from the branch, nothing from the
-    // title, and from the body the predecessor ABCA-151, which it names first.
     extractFromBranchMock.mockReturnValueOnce('ABCA-152');
     extractLinearIdentifierMock.mockReturnValueOnce(null).mockReturnValueOnce('ABCA-151');
     findLinearIssueMock.mockImplementation(async (identifier: string) => lookupFound({
@@ -698,7 +634,6 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // Routed to ABCA-152 from the branch; the predecessor is never looked up.
     expect(extractFromBranchMock).toHaveBeenCalledWith('bgagent/01TASK/abca-152-link-lisbon-from-destinationsht');
     expect(findLinearIssueMock.mock.calls).toEqual([['ABCA-152', 'LinearWorkspaceRegistry']]);
     expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
@@ -706,8 +641,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('a word and a number in the branch name do not hide the identifier in the title', async () => {
-    // Upper-cased, `feature/upgrade-node-22` reads as the identifier NODE-22. No
-    // workspace has such an issue; the title names the real one.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{ number: 17, state: 'open', title: 'ENG-42: Upgrade to Node 22', body: '', head: { ref: 'feature/upgrade-node-22', sha: 'abc1234' } }]);
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
@@ -715,7 +648,6 @@ describe('github-webhook-processor handler', () => {
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
     extractFromBranchMock.mockReturnValueOnce('NODE-22');
     extractLinearIdentifierMock.mockReturnValueOnce('ENG-42').mockReturnValueOnce(null);
-    // Every workspace answers that it has no NODE-22.
     findLinearIssueMock.mockImplementation(async (identifier: string) => identifier === 'ENG-42'
       ? lookupFound({ issueId: 'issue-42', linearWorkspaceId: 'ws-1', workspaceSlug: 'abca' })
       : LOOKUP_ABSENT);
@@ -729,9 +661,6 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('an identifier that could not be looked up is not replaced by one further down', async () => {
-    // The branch names the pull request's own issue; its body names a predecessor
-    // first. While Linear cannot be asked about the first, the second must not
-    // get the preview: it is an issue this pull request only mentions.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     fetchOk([{
       number: 73,
@@ -761,10 +690,10 @@ describe('github-webhook-processor handler', () => {
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
-    extractFromBranchMock.mockReturnValueOnce(null); // branch produces no match
+    extractFromBranchMock.mockReturnValueOnce(null);
     extractLinearIdentifierMock
-      .mockReturnValueOnce(null) // title produces no match
-      .mockReturnValueOnce('ABCA-42'); // body does
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce('ABCA-42');
     findLinearIssueMock.mockResolvedValueOnce(lookupFound({
       issueId: 'issue-uuid',
       linearWorkspaceId: 'ws-1',
@@ -806,7 +735,6 @@ describe('github-webhook-processor handler', () => {
     await handler(payload());
 
     expect(postIssueCommentMock).not.toHaveBeenCalled();
-    // The line the troubleshooting guide tells operators to look for.
     expect(info).toHaveBeenCalledWith('Linear identifier did not resolve to an issue — skipping Linear post', {
       identifiers: ['ABCA-42'], repo: 'owner/repo', pr_number: 17,
     });
@@ -826,7 +754,6 @@ describe('github-webhook-processor handler', () => {
     }));
     postIssueCommentMock.mockResolvedValueOnce({ ok: false, retryable: false });
 
-    // No throw — postIssueComment returning false is just logged.
     await expect(handler(payload())).resolves.toBeUndefined();
   });
 
@@ -844,15 +771,13 @@ describe('github-webhook-processor handler', () => {
     const upd = ddbSend.mock.calls.find((c) => c[0]?._type === 'Update');
     expect(upd).toBeDefined();
     const input = upd![0].input as { Key: { task_id: string }; ExpressionAttributeValues: Record<string, string> };
-    expect(input.Key.task_id).toBe('01TASKID'); // 2nd branch segment
+    expect(input.Key.task_id).toBe('01TASKID');
     expect(input.ExpressionAttributeValues[':u']).toMatch(/cloudfront\.net\/screenshots/);
-    expect(input.ExpressionAttributeValues[':p']).toBe('https://preview.example.com'); // the deploy preview URL
+    expect(input.ExpressionAttributeValues[':p']).toBe('https://preview.example.com');
   });
 
   test('integration node deploy persists the URL but does NOT post a standalone Linear comment', async () => {
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
-    // The integration node's PR — branch + title both name the PARENT epic,
-    // which WOULD route a Linear comment onto the parent.
     fetchOk([{
       number: 191,
       state: 'open',
@@ -863,7 +788,6 @@ describe('github-webhook-processor handler', () => {
     captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
     s3Send.mockResolvedValueOnce({});
     upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
-    // The persisted task record marks this as the synthetic integration node.
     ddbSend.mockReset().mockResolvedValue({
       Item: { repo: 'owner/repo' },
       Attributes: { channel_metadata: { orchestration_sub_issue_id: 'orch_1__integration' } },
@@ -873,22 +797,13 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // URL persisted (panel embed path) …
     expect(ddbSend.mock.calls.some((c) => c[0]?._type === 'Update')).toBe(true);
-    // … the GitHub PR comment still posts (load-bearing on the PR) …
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
-    // … but NO standalone Linear comment on the parent epic.
     expect(findLinearIssueMock).not.toHaveBeenCalled();
     expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
 
   describe('re-deploy on a Linear issue that has iteration replies', () => {
-    // The task of the branch already has a screenshot, so this deployment is a
-    // later push. The issue has two iteration tasks, newest first as the index
-    // returns them with the repository it projects; each reply waits for the
-    // preview of its own commit. `repos` names the repository of an iteration
-    // task that is not owner/repo's; `asGitHubSpellsIt` is the repository as the
-    // pull request carries it.
     function reDeploy(headShas: Record<string, string>, repos: Record<string, string> = {}, asGitHubSpellsIt = OWN_REPO): void {
       resolveGitHubTokenMock.mockResolvedValue('gh-tok');
       fetchOk([{
@@ -915,14 +830,12 @@ describe('github-webhook-processor handler', () => {
             })),
           };
         }
-        // The repository of the branch's task, or the commit of an iteration task.
         if (cmd._type === 'Get') return { Item: { repo: 'owner/repo', head_sha: headShas[cmd.input.Key!.task_id] } };
         return { Attributes: { screenshot_url: 'https://d1.cloudfront.net/old.png', channel_metadata: {} } };
       });
     }
 
     test('stores the screenshot on the iteration that pushed the commit and appends the preview to its reply', async () => {
-      // The deployed commit belongs to the OLDER iteration, not the newest one.
       reDeploy({ 'iter-2': 'fff0000', 'iter-1': 'abc1234' });
 
       await handler(payload());
@@ -944,7 +857,6 @@ describe('github-webhook-processor handler', () => {
         }),
       ]);
       expect(appendOnceToCommentMock).toHaveBeenCalledTimes(1);
-      // The marker is part of the appended text: a redelivery finds it and appends nothing.
       expect(appendOnceToCommentMock).toHaveBeenCalledWith(
         { linearWorkspaceId: 'ws-1', registryTableName: 'LinearWorkspaceRegistry' },
         'reply-1',
@@ -966,15 +878,10 @@ describe('github-webhook-processor handler', () => {
     });
 
     test('a pull request that names an issue of another repository writes nothing onto that issue\'s iteration task', async () => {
-      // The issue of this deployment came from an identifier in the pull request,
-      // which whoever writes its title chooses. Both iteration tasks of that
-      // issue belong to globex/site.
       reDeploy({ 'iter-2': 'fff0000', 'iter-1': 'eee1111' }, { 'iter-2': 'globex/site', 'iter-1': 'globex/site' });
 
       await handler(payload());
 
-      // The task of the branch gets its screenshot; the other repository's
-      // iteration task and its reply get nothing.
       expect(sentToTable('Update')).toEqual([expect.objectContaining({ Key: { task_id: '01ORIG' } })]);
       expect(appendOnceToCommentMock).not.toHaveBeenCalled();
       expect(postIssueCommentMock).not.toHaveBeenCalled();
@@ -998,7 +905,6 @@ describe('github-webhook-processor handler', () => {
     });
 
     test('an iteration is found when GitHub spells the repository in another letter case than its blueprint', async () => {
-      // The iteration tasks have the blueprint's spelling, owner/repo.
       reDeploy({ 'iter-2': 'fff0000', 'iter-1': 'abc1234' }, {}, { full_name: 'Owner/Repo' });
 
       await handler(payload({ repository: { full_name: 'Owner/Repo' } }));
@@ -1099,8 +1005,6 @@ describe('validated Amplify PR routing', () => {
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (url) => ({
       ok: true,
       status: 200,
-      // The commit-pulls endpoint would pick PR 41. Only a lookup by number
-      // preserves the PR encoded in the preview URL through task persistence.
       json: async () => String(url).endsWith('/pulls/42') ? pr42 : [pr41, pr42],
     } as Response));
     const task = { task_id: taskId, repo: 'owner/repo', head_sha: sha, channel_source: source, channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'TG-42' } };
@@ -1112,7 +1016,6 @@ describe('validated Amplify PR routing', () => {
     expect(captureScreenshotMock).toHaveBeenCalledWith('https://pr-42.app123.amplifyapp.com', expect.anything());
     expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 42 }));
     expect(ddbSend.mock.calls[0][0].input.Key).toEqual({ task_id: taskId });
-    // The branch of the validated pull request is in owner/repo itself, so it names the task.
     expect(sentToTable('Update')).toEqual([expect.objectContaining({ Key: { task_id: taskId } })]);
     if (source === 'jira') {
       expect(deliverJiraMock).toHaveBeenCalledWith(expect.anything(), 'TaskTable', 'JiraRegistry', task,

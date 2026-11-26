@@ -21,12 +21,8 @@ import { ACTIVE_STATUSES, PRE_ACTIVE_STATUSES, TERMINAL_STATUSES } from '../api/
 import type { TaskStatusType, TaskSummary } from '../api/types';
 
 /**
- * Liveness thresholds mirrored from the orchestrator
- * (`cdk/src/handlers/shared/orchestrator.ts`): a RUNNING task is treated as
- * stranded once it has run past the grace period and its last heartbeat is
- * older than the stale threshold. Not on ECS, where the agent writes its
- * heartbeat once, at its start, and the orchestrator goes by the container
- * instead. The console only flags; the reconciler acts.
+ * Liveness thresholds: a RUNNING task is treated as stranded once it has run past the
+ * grace period and its last heartbeat is older than the stale threshold.
  */
 export const AGENT_HEARTBEAT_GRACE_SEC = 120;
 export const AGENT_HEARTBEAT_STALE_SEC = 240;
@@ -61,12 +57,11 @@ function ageSec(iso: string | null, now: Date): number | null {
   return Number.isNaN(t) ? null : (now.getTime() - t) / 1000;
 }
 
-/** True when a RUNNING task's agent has stopped reporting liveness. Never on ECS: one report there says nothing about the agent later. */
+/** True when a RUNNING task's agent has stopped reporting liveness. Never on ECS. */
 export function hasStaleHeartbeat(task: TaskSummary, now: Date = new Date()): boolean {
   if (task.status !== 'RUNNING' || task.compute_type === 'ecs') return false;
   const heartbeatAge = ageSec(task.agent_heartbeat_at, now);
   if (heartbeatAge !== null) return heartbeatAge > AGENT_HEARTBEAT_STALE_SEC;
-  // No beat yet: the summary has no started_at, so the last status change stands in for it.
   const runningAge = ageSec(task.updated_at, now);
   return runningAge !== null && runningAge > AGENT_HEARTBEAT_GRACE_SEC + AGENT_HEARTBEAT_STALE_SEC;
 }

@@ -31,9 +31,6 @@ import {
   observabilityPolicy,
 } from '../../src/bootstrap/policies';
 
-/**
- * Extracts all ```json ... ``` fenced code blocks from a markdown string.
- */
 function extractJsonBlocks(markdown: string): string[] {
   const blocks: string[] = [];
   const regex = /```json\n([\s\S]*?)```/g;
@@ -50,9 +47,6 @@ interface NormalizedStatement {
   resources: string[];
 }
 
-/**
- * Normalizes policy statements for comparison by sorting actions and resources.
- */
 function normalizeStatements(
   statements: Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }>,
 ): NormalizedStatement[] {
@@ -70,11 +64,9 @@ function normalizeStatements(
 describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', () => {
   const stack = new Stack();
 
-  // Read the source-of-truth markdown
   const markdownPath = join(__dirname, '..', '..', '..', 'docs', 'design', 'DEPLOYMENT_ROLES.md');
   const markdown = readFileSync(markdownPath, 'utf-8');
 
-  // Extract JSON blocks: [0]=trust, [1]=infrastructure, [2]=application, [3]=observability, [4]=ECS, [5]=Lambda MicroVMs
   const jsonBlocks = extractJsonBlocks(markdown);
   const goldenInfra = JSON.parse(jsonBlocks[1]);
   const goldenApp = JSON.parse(jsonBlocks[2]);
@@ -82,7 +74,6 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
   const goldenEcs = JSON.parse(jsonBlocks[4]);
   const goldenLambdaMicrovm = JSON.parse(jsonBlocks[5]);
 
-  // Resolve TypeScript policies via CDK Stack
   const tsInfra = stack.resolve(infrastructurePolicy());
   const tsApp = stack.resolve(applicationPolicy());
   const tsObs = stack.resolve(observabilityPolicy());
@@ -90,7 +81,6 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
   const tsComputeEcs = stack.resolve(computeEcsPolicy());
   const tsComputeLambdaMicrovm = stack.resolve(computeLambdaMicrovmPolicy());
 
-  // --- Infrastructure and Application: direct parity ---
   const directTestCases: Array<{
     name: string;
     golden: { Statement: Array<Record<string, unknown>> };
@@ -129,9 +119,7 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
     });
   }
 
-  // --- Observability: golden includes BedrockAgentCore which was extracted ---
   describe('Observability policy', () => {
-    // Filter out the BedrockAgentCore statement from the golden baseline
     const goldenObsStatements = goldenObs.Statement as Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }>;
     const goldenObsWithoutAgentCore = goldenObsStatements.filter((s) => s.Sid !== 'BedrockAgentCore');
 
@@ -159,7 +147,6 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
     });
   });
 
-  // --- Compute-AgentCore: extracted BedrockAgentCore matches golden observability ---
   describe('Compute-AgentCore policy', () => {
     const goldenObsStatements = goldenObs.Statement as Array<{ Sid?: string; Action?: string | string[]; Resource?: string | string[] }>;
     const goldenAgentCoreStatement = goldenObsStatements.filter((s) => s.Sid === 'BedrockAgentCore');
@@ -188,9 +175,7 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
     });
   });
 
-  // --- Compute-ECS: matches block 4 (ECS conditional) from markdown ---
   describe('Compute-ECS policy', () => {
-    // Block 4 is a single statement object, not a full policy document
     const goldenEcsStatement = goldenEcs as { Sid?: string; Action?: string | string[]; Resource?: string | string[] };
     const goldenNorm = normalizeStatements([goldenEcsStatement]);
     const tsNorm = normalizeStatements(
@@ -216,7 +201,6 @@ describe('Golden-file parity: TypeScript policies match DEPLOYMENT_ROLES.md', ()
     });
   });
 
-  // --- Compute-LambdaMicrovms: matches block 5 from markdown ---
   describe('Compute-LambdaMicrovms policy', () => {
     const goldenNorm = normalizeStatements(goldenLambdaMicrovm.Statement);
     const tsNorm = normalizeStatements(

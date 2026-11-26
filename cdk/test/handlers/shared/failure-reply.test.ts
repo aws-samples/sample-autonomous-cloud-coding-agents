@@ -22,12 +22,6 @@ import { renderFailureReply, renderPanelFailureReason } from '../../../src/handl
 
 describe('renderFailureReply — failure is a conversation', () => {
   describe('build/test failure — the real gating shape, as verified live', () => {
-    // A build/test regression persists as
-    // status=FAILED, build_passed=null, error_message="Task did not succeed
-    // (agent_status='success', build_ok=False)". The agent finished fine; only
-    // the build gate failed. (The previous COMPLETED+build_passed===false
-    // assumption NEVER occurs live — that bug shipped to dev and was only caught
-    // by deliberately forcing a regression.)
     const body = renderFailureReply({
       status: TaskStatus.FAILED,
       buildPassed: null,
@@ -35,10 +29,6 @@ describe('renderFailureReply — failure is a conversation', () => {
       taskId: 't1',
     });
 
-    // The agent runs the configured build INSIDE the
-    // microVM, so the failing output is in CloudWatch — NOT the PR's GitHub
-    // checks (the repo may have no CI). The old "see the PR's checks" copy
-    // pointed the user at an empty surface. Point at the build log by task id.
     test('points at the CloudWatch build log by task id, not the PR checks', () => {
       expect(body).toMatch(/^❌/);
       expect(body).toMatch(/build\/tests didn't pass/i);
@@ -68,9 +58,6 @@ describe('renderFailureReply — failure is a conversation', () => {
   });
 
   describe('build TIMEOUT — distinct from a red build', () => {
-    // The agent finished cleanly but the build verify exceeded its wall-clock
-    // limit and was killed → error_message carries build_ok=timeout. This is a
-    // different diagnosis (slow build / cap too low), NOT "your code is broken".
     const body = renderFailureReply({
       status: TaskStatus.FAILED,
       errorMessage: "Task did not succeed (agent_status='success', build_ok=timeout)",
@@ -89,7 +76,6 @@ describe('renderFailureReply — failure is a conversation', () => {
     });
 
     test('a timeout is NOT misread as an agent crash (no classified-title path)', () => {
-      // It must take the build branch, not the classifyError/CloudWatch-crash branch.
       expect(body).not.toMatch(/Unexpected error|didn't complete/i);
     });
   });
@@ -102,15 +88,12 @@ describe('renderFailureReply — failure is a conversation', () => {
         taskId: 'task-xyz',
       });
       expect(body).toMatch(/^❌/);
-      expect(body).toMatch(/Exceeded max turns/i); // classified title
+      expect(body).toMatch(/Exceeded max turns/i);
       expect(body).toMatch(/CloudWatch for task `task-xyz`/);
-      // TIMEOUT + retryable → a plain reply-to-retry next step.
       expect(body).toMatch(/reply here with any extra guidance/i);
     });
 
     test('infra/compute failure → "temporary, retry, else contact admin" next step (not a generic guidance ask)', () => {
-      // A coding child hit a transient compute failure. The user's question was
-      // "do I retry, or tell my admin?" — the reply must answer it.
       const body = renderFailureReply({
         status: TaskStatus.FAILED,
         errorMessage: 'Session start failed: InvalidParameterException: TaskDefinition is inactive',
@@ -119,13 +102,10 @@ describe('renderFailureReply — failure is a conversation', () => {
       expect(body).toMatch(/temporary infrastructure issue|mid-update|compute environment/i);
       expect(body).toMatch(/reply here to try again/i);
       expect(body).toMatch(/contact your ABCA admin/i);
-      // It must NOT ask for "guidance" — the user's input is irrelevant to an infra retry.
       expect(body).not.toMatch(/extra guidance/i);
     });
 
     test('nothing delivered (deliverable=lost) → asks for guidance, not "temporary infrastructure issue, try again"', () => {
-      // The delivery gate cannot tell lost work from a run that correctly changed
-      // nothing (#751), and a retry cannot help the second.
       const input = {
         status: TaskStatus.FAILED,
         errorMessage: 'Task did not succeed (agent_status=success, deliverable=lost): the coding task reported success '
@@ -151,16 +131,14 @@ describe('renderFailureReply — failure is a conversation', () => {
     });
 
     test('truncates a long raw error to an excerpt with an ellipsis', () => {
-      const longErr = 'boom '.repeat(200); // 1000 chars
+      const longErr = 'boom '.repeat(200);
       const body = renderFailureReply({ status: TaskStatus.FAILED, errorMessage: longErr, taskId: 't2' });
       expect(body).toContain('…');
-      // The reply stays compact — nowhere near the 1000-char raw error.
       expect(body.length).toBeLessThan(400);
     });
 
     test('unclassifiable error → generic fallback title, still points at CloudWatch', () => {
       const body = renderFailureReply({ status: TaskStatus.FAILED, errorMessage: 'weird thing', taskId: 't3' });
-      // UNKNOWN_CLASSIFICATION title is "Unexpected error".
       expect(body).toMatch(/Unexpected error/i);
       expect(body).toMatch(/CloudWatch for task `t3`/);
     });
@@ -172,9 +150,6 @@ describe('renderFailureReply — failure is a conversation', () => {
     });
 
     test('a genuine agent crash (agent_status=error_*) reads as agent failure, NOT build', () => {
-      // An agent crash mid-execution — distinct from the build-gate-failed
-      // shape (which carries agent_status='success'). Must get the CloudWatch
-      // pointer, not the softer "PR's checks" build copy.
       const body = renderFailureReply({
         status: TaskStatus.FAILED,
         errorMessage: 'Task did not succeed (agent_status=\'error_during_execution\', build_ok=False)',
@@ -195,7 +170,6 @@ describe('renderPanelFailureReason — the failed-node sub-line on the epic pane
     });
     expect(reason).toMatch(/combined build failed after merging the sub-issue branches/i);
     expect(reason).toMatch(/build log in CloudWatch for task `t-int`/);
-    // No raw build output leaks into the panel.
     expect(reason).not.toMatch(/build_ok/i);
   });
 
@@ -214,7 +188,6 @@ describe('renderPanelFailureReason — the failed-node sub-line on the epic pane
     });
     expect(reason).toMatch(/Exceeded max turns/i);
     expect(reason).toMatch(/CloudWatch for task `t-crash`/);
-    // An agent crash is NOT a build failure — no combined-build wording.
     expect(reason).not.toMatch(/combined build/i);
   });
 

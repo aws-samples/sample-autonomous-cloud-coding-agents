@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # cleanup-ephemeral-stacks.sh — Delete ephemeral CloudFormation stacks older than MAX_AGE_HOURS.
 #
-# Targets stacks deployed by this CDK app that do NOT have termination protection.
-# Handles stuck ENI cleanup (AgentCore/Lambda Hyperplane ENIs) before deletion.
-#
 # Usage:
 #   AWS_PROFILE=abca ./scripts/cleanup-ephemeral-stacks.sh [--dry-run] [--max-age-hours N] [--prefix PREFIX] [--region REGION]
 #
@@ -41,7 +38,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate numeric input — guards the age arithmetic against injection/garbage.
 if ! [[ "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]]; then
   echo "Error: --max-age-hours must be a non-negative integer (got: '$MAX_AGE_HOURS')" >&2
   exit 1
@@ -50,8 +46,6 @@ fi
 MAX_AGE_SECONDS=$((MAX_AGE_HOURS * 3600))
 NOW=$(date +%s)
 
-# Surface the blast radius before touching anything. Confirms the operator is
-# pointed at the account/identity they think they are (defense in depth).
 CALLER_IDENTITY=$(aws sts get-caller-identity \
   --region "$REGION" \
   --query '[Account,Arn]' --output text 2>/dev/null) || {
@@ -70,12 +64,6 @@ echo "  Dry run:       $DRY_RUN"
 echo "  Prefix filter: ${PREFIX:-<none>}"
 echo ""
 
-# List all stacks (excluding deleted ones).
-# DELETE_FAILED is included so a stack that previously failed to delete is
-# re-targeted on the next run (delete-stack is idempotent and retries it).
-# Capture the exit code separately from emptiness: an API failure (auth,
-# throttle, IAM) must NOT look like "nothing to clean" — that would exit 0
-# and silently skip the whole run.
 if ! STACKS=$(aws cloudformation list-stacks \
   --region "$REGION" \
   --stack-status-filter \
@@ -97,12 +85,10 @@ SKIPPED=0
 FAILED=0
 
 while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
-  # Apply prefix filter
   if [[ -n "$PREFIX" && "$STACK_NAME" != "$PREFIX"* ]]; then
     continue
   fi
 
-  # Get stack details (description, termination protection, tags)
   STACK_INFO=$(aws cloudformation describe-stacks \
     --region "$REGION" \
     --stack-name "$STACK_NAME" \
@@ -113,38 +99,24 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
   TERMINATION_PROTECTED=$(echo "$STACK_INFO" | cut -f2)
   STATUS=$(echo "$STACK_INFO" | cut -f3)
 
-  # Only target stacks from this CDK app. Prefix-match, not exact-match: the
-  # app description carries an optional solution-id suffix (e.g.
-  # "ABCA Development Stack (uksb-...)", see cdk/src/main.ts) that operators may
-  # add or strip. An exact-equality check silently matches zero stacks whenever
-  # the suffix is present. (Tag-based filtering would be even more robust —
-  # tracked as a follow-up.)
   if [[ "$DESCRIPTION" != "ABCA Development Stack"* ]]; then
     continue
   fi
 
-  # Never touch termination-protected stacks
   if [[ "$TERMINATION_PROTECTED" == "True" ]]; then
     echo "  SKIP (protected): $STACK_NAME"
     ((SKIPPED++)) || true
     continue
   fi
 
-  # Skip stacks in active transitions
   if [[ "$STATUS" == *"IN_PROGRESS"* ]]; then
     echo "  SKIP (in progress): $STACK_NAME ($STATUS)"
     ((SKIPPED++)) || true
     continue
   fi
 
-  # Check age. Parse the CreationTime to epoch seconds (GNU date, then BSD date).
-  # CreationTime is UTC (e.g. 2026-06-18T00:23:10.123Z). The BSD branch strips
-  # the fractional seconds and trailing Z, so it MUST parse as UTC (-u) — without
-  # it, BSD `date -j` assumes local time and a stack reads N hours off (8h on a
-  # PST Mac), wrongly skipping/deleting near the age boundary. GNU `date -d`
-  # honours the Z natively.
-  # FAIL CLOSED: if both parsers fail we cannot trust the age, so SKIP rather than
-  # risk deleting a stack we can't prove is old enough.
+  # CreationTime is UTC (e.g. 2026-06-18T00:23:10.123Z). GNU `date -d` honours the Z natively;
+  # BSD `date -j` assumes local time unless given -u.
   CREATED_EPOCH=$(date -d "$CREATION_TIME" +%s 2>/dev/null || date -j -u -f "%Y-%m-%dT%H:%M:%S" "${CREATION_TIME%%.*}" +%s 2>/dev/null || echo "")
   if ! [[ "$CREATED_EPOCH" =~ ^[0-9]+$ ]]; then
     echo "  SKIP (unparseable creation time '$CREATION_TIME'): $STACK_NAME"
@@ -169,8 +141,7 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
     continue
   fi
 
-  # --- ENI cleanup (handles stuck VPC deletion) ---
-  # Find security groups owned by this stack
+  # Stuck AgentCore/Lambda Hyperplane ENIs block the VPC deletion.
   SG_IDS=$(aws cloudformation list-stack-resources \
     --region "$REGION" \
     --stack-name "$STACK_NAME" \
@@ -179,7 +150,6 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
 
   if [[ -n "$SG_IDS" && "$SG_IDS" != "None" ]]; then
     for SG_ID in $SG_IDS; do
-      # Find ENIs attached to this security group.
       # shellcheck disable=SC2016  # backticks are JMESPath literal syntax for --query, must NOT expand
       ENIS=$(aws ec2 describe-network-interfaces \
         --region "$REGION" \
@@ -199,11 +169,9 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
           fi
         done <<< "$ENIS"
 
-        # Wait briefly for detachment
         echo "    Waiting 15s for ENI detachment..."
         sleep 15
 
-        # Delete the ENIs
         AVAILABLE_ENIS=$(aws ec2 describe-network-interfaces \
           --region "$REGION" \
           --filters "Name=group-id,Values=$SG_ID" "Name=status,Values=available" \
@@ -222,14 +190,7 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
     done
   fi
 
-  # --- Delete the stack ---
-  # Only count a deletion we actually initiated. Tolerate a single failure
-  # (e.g. AccessDenied, transient throttling) without aborting the whole run —
-  # set -e would otherwise kill the loop mid-pass and orphan later stacks.
   echo "    Deleting stack $STACK_NAME..."
-  # Let stderr through: this is the one call where the API error matters —
-  # AccessDenied vs ValidationError vs throttling are diagnosed differently.
-  # Suppressing it would leave the operator with only a generic failure line.
   if aws cloudformation delete-stack \
     --region "$REGION" \
     --stack-name "$STACK_NAME"; then

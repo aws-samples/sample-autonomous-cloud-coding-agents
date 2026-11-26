@@ -1,13 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""The agent's direct CloudWatch Logs writers against a real Logs API.
-
-Three writers put events into the application log group, each on its own stream
-per task: the trajectory (``trajectory/<task_id>``), the metrics report
-(``metrics/<task_id>``) and fatal errors (``agent_error/<task_id>``).
-"""
-
 from __future__ import annotations
 
 import json
@@ -58,8 +51,7 @@ class TestTrajectoryStream:
         _TrajectoryWriter(task_id).write_policy_decision("Read", True, "permit", 0.1)
         second = _TrajectoryWriter(task_id)
 
-        # The stream already exists: CreateLogStream answers
-        # ResourceAlreadyExistsException, which the writer must swallow.
+        # CreateLogStream answers ResourceAlreadyExistsException for a stream that exists.
         second.write_policy_decision("Edit", True, "permit", 0.1)
 
         assert second._failure_count == 0
@@ -88,7 +80,6 @@ class TestTrajectoryStream:
         logs = emulator.client("logs")
         writer = _TrajectoryWriter(task_id)
 
-        # No log group yet: CreateLogStream is refused and this event is lost.
         writer.write_policy_decision("Read", True, "permit", 0.1)
         logs.create_log_group(logGroupName=group)
         try:
@@ -131,7 +122,6 @@ class TestMetricsAndErrorStreams:
         self, emulator, log_group, task_id
     ):
         log_error_cw("Agent failed: missing built-in hard-deny policies", task_id=task_id)
-        # The mirror runs on a daemon thread so it cannot block the failing path.
         for thread in threading.enumerate():
             if thread.name == "agent-error-cw-write":
                 thread.join(timeout=30)

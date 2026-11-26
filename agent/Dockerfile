@@ -1,49 +1,17 @@
 ARG TARGETPLATFORM=linux/arm64
 ARG GH_VERSION=2.103.3
-# SHA-256 of gh_${GH_VERSION}_linux_<arch>.tar.gz, copied from the release's
-# gh_${GH_VERSION}_checksums.txt. Bump these with GH_VERSION.
 ARG GH_SHA256_AMD64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
 ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
 
-# Every external image is pinned by DIGEST, not by tag.
-#
-# A tag is a moving pointer. When one moves, the layer that copies from it changes,
-# and so does every layer built after it — here that is the ~400 MB apt install, the
-# node install, and the dependency sync. The image is then rebuilt and re-pushed in
-# full for a commit that touched only, say, a doc. That is slow everywhere and
-# painful on a modest uplink, and it also means two builds of the same commit can
-# produce different images, which is the more serious half of the problem.
-#
-# `mise:latest` was the worst case: a tag with no version at all, republished
-# whenever upstream feels like it. Pinning is what makes a rebuild depend on OUR
-# changes rather than on upstream's release schedule. The mise stage names a
-# release for the same reason: `latest` beside a digest does not say which
-# release the digest is, and its age cannot be checked against the cooldown.
-#
 # Each digest is a multi-platform index, so `--platform=$TARGETPLATFORM` still
-# selects the right architecture — verified to include linux/arm64.
-#
-# To bump: `docker buildx imagetools inspect <image>:<tag>` and copy the Digest.
-# Keep the tag alongside the digest; it documents what the digest is meant to be.
+# selects the right architecture.
 FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.6@sha256:d4de1845114f6d73e90e15f7642885f74f3ca93074491038a2b9c43e4b897f21 AS mise
 
 FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
-# Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
 
-# Install system dependencies in multiple layers:
-#   - Node.js 24 LTS (required by Claude Code CLI)
-#   - git (repo operations)
-#   - build-essential (native compilation for some repos)
-#   - curl (downloads)
 RUN apt-get update && \
-    # Patch any base-image CVEs that have a fix available in the
-    # current Debian point release. Without this, transitive system-
-    # library CVEs (e.g. libnghttp2 CVE-2026-27135) ride the base
-    # ``python:3.13-slim`` tag until upstream rebuilds, which can be
-    # weeks. ``--no-install-recommends`` keeps the upgrade narrow and
-    # reproducible — only already-installed packages get bumped.
     apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -51,12 +19,10 @@ RUN apt-get update && \
         build-essential \
         ca-certificates \
         gnupg && \
-    # Cleanup early to keep peak disk usage low during builds.
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# GitHub CLI from the official release, checked against the SHA-256 pinned above.
-# A build from source needs proxy.golang.org: github.com/microsoft/dev-tunnels
+# A build of gh from source needs proxy.golang.org: github.com/microsoft/dev-tunnels
 # v0.2.0 has no Go tags left, and many corporate networks block the proxy (#1077).
 ARG GH_VERSION
 ARG GH_SHA256_AMD64
@@ -76,46 +42,28 @@ RUN set -eu; \
     rm -rf "/tmp/${archive}" "/tmp/gh_${GH_VERSION}_linux_${arch}"; \
     gh --version
 
-# Node.js 24 LTS (https://nodejs.org/en/about/previous-releases)
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Enable Corepack so ``yarn`` / ``pnpm`` resolve out of the box. Many target
-# repos (including ABCA itself) drive installs with ``yarn install`` via their
-# build command; without this, ``yarn`` is "command not found" (exit 127) and
-# the build-verification GATE runs inert — a green build is reported for a repo
-# we never actually built (live-caught 2026-06-29 dogfooding ABCA-on-ABCA: the
-# agent had to hand-build a ``~/bin/yarn`` shim every run). Corepack ships with
-# Node 24; ``enable`` installs the yarn/pnpm shims onto PATH.
 RUN corepack enable && corepack prepare yarn@stable --activate || corepack enable
 
 # pip of the base image (26.2.2) vendors urllib3 2.7.0 and msgpack 1.1.2, which
 # the image scan reports as HIGH (CVE-2026-97687, CVE-2026-97689,
 # CVE-2026-114613, GHSA-6v7p-g79w-8964); pip 26.3 vendors the fixed releases.
-# Delete this line when the base image ships pip 26.3 or later.
 RUN python -m pip install --no-cache-dir --root-user-action=ignore pip==26.3
 
-# Install Claude Code CLI (the Python SDK requires this binary)
-# Then update known vulnerable transitive packages where fixed versions exist.
-# Pinned 2.1.319 to match the CLI bundled by claude-agent-sdk 0.2.179 (see
-# agent/pyproject.toml) — the SDK and the on-PATH CLI must agree on the control
-# protocol. The Claude 5.5 models the platform defaults to (#953) are rejected
-# by CLI builds older than 2.1.280 ("does not support this model"), so this pin
-# is also what makes the default model invocable at all. It also keeps the
-# awsCredentialExport behavior #215 needs (present since 2.1.176): returned
-# creds are cached until 5 min before the JSON's `Expiration`, so an
-# 8 h task re-assumes the 1 h-capped SessionRole before expiry. Older builds
-# only refreshed hourly on a timer, racing the role-chaining cap.
+# The SDK and the on-PATH CLI must agree on the control protocol: the pin is the CLI
+# that claude-agent-sdk bundles (agent/pyproject.toml).
+# CLI builds older than 2.1.280 reject the Claude 5.5 models ("does not support
+# this model", #953).
 # claude-code@2.1.x ships an error-shim at bin/claude.exe that its postinstall
 # (install.cjs) replaces with the platform-native ELF binary. That postinstall
 # can silently fall back (leaving the shim in place) — the shim then dies at
 # runtime with "Exec format error: 'claude'" even though the native binary is
-# present as an optional dep, just never wired up. Re-run install.cjs explicitly
-# after the install so the native binary is placed at build time, and hard-verify
-# it exec's (``claude --version`` fails the build if the shim is still on PATH).
+# present as an optional dep, just never wired up.
 RUN npm install -g npm@latest && \
     npm install -g @anthropic-ai/claude-code@2.1.319 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
@@ -123,51 +71,25 @@ RUN npm install -g npm@latest && \
     node "${CLAUDE_NPM_ROOT}/install.cjs" && \
     claude --version
 
-# Install uv (fast Python package manager) — pinned by digest, not just version:
-# a published tag can be re-pushed, and this COPY sits above the dependency sync,
-# so a silent move here invalidates it. See the digest note at the top of the file.
-# Dependabot's docker updates have only ever changed the FROM lines of this file:
+# Dependabot's docker updates have only ever changed the FROM lines of this file (observed):
 # bump this line by hand, to the `uv` version of mise.toml and agent/mise.toml.
 COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /usr/local/bin/uv
 
-# Install Python dependencies via uv. Build context is repo root (set in
-# ``cdk/src/stacks/agent.ts``) so source paths are prefixed with ``agent/``.
 COPY agent/pyproject.toml agent/uv.lock /app/
 RUN uv sync --frozen --no-dev --directory /app
 
-# Copy agent code (ARG busts cache so file edits are always picked up)
 ARG CACHE_BUST=0
 COPY agent/src/ /app/src/
-# Cedar HITL built-in policy files (hard_deny.cedar + soft_deny.cedar).
-# ``agent/src/policy.py::_POLICIES_DIR`` resolves to ``/app/policies``
-# at import time; without these files the PolicyEngine init raises
-# ``missing built-in hard-deny policies`` and every task fails at 0
-# turns before the agent even connects to the CLI. Discovered during
-# Chunk 10 E2E T2.2 — the Dockerfile previously only copied ``src/``.
 COPY agent/policies/ /app/policies/
-# Cross-language constants (S9). ``agent/src/policy.py`` reads
-# ``/app/contracts/constants.json`` at import; the same file is consumed
-# by ``cdk/src/handlers/shared/types.ts`` at synth time. See
-# ``contracts/README.md`` for the contract.
 COPY contracts/ /app/contracts/
-# First-party workflow files (#248). ``agent/src/workflow/loader.py`` resolves
-# ``_WORKFLOWS_ROOT`` to ``/app/workflows`` (parents[2] of /app/src/workflow/)
-# and loads ``<domain>/<name>-vN.yaml`` plus ``schema/workflow.schema.json`` at
-# task time; without these files every workflow load fails with
-# ``WorkflowValidationError: workflow '...' not found at /app/workflows/...``.
 COPY agent/workflows/ /app/workflows/
 COPY agent/prepare-commit-msg.sh /app/
 # Claude Code managed settings (#215). The highest-precedence settings layer —
 # loaded regardless of setting_sources and unoverridable by the untrusted cloned
-# repo's project .claude/settings.json. Carries awsCredentialExport so Bedrock
-# calls use session-tagged credentials for cost attribution. For MicroVM workers,
-# the helper returns no exported keys: the parent's scoped container provider
-# handles renewal without Claude's stale awsCredentialExport cache.
-# Placing awsCredentialExport (an arbitrary command) anywhere the target repo
-# can influence would be RCE with the compute role, so it lives ONLY here.
+# repo's project .claude/settings.json.
 COPY agent/managed-settings.json /etc/claude-code/managed-settings.json
 
-# Create non-root user (Claude Code CLI refuses bypassPermissions as root)
+# Claude Code CLI refuses bypassPermissions as root.
 RUN useradd -m -s /bin/bash agent && \
     mkdir -p /workspace && \
     chown agent:agent /workspace /app
@@ -179,19 +101,10 @@ ENV PATH="/app/.venv/bin:/home/agent/.local/share/mise/shims:/home/agent/.local/
 
 # The server starts under `opentelemetry-instrument` (CMD below), which loads every
 # installed OpenTelemetry instrumentation. Those of `requests` and `urllib3` copy
-# the trace context and the task's correlation baggage (session id, user id,
-# repository) into the headers of every request they send, also to hosts outside
-# the platform: the agent calls Linear and Atlassian with `requests`. The AWS
-# distro switches the two off only in its agent observability mode
-# (AGENT_OBSERVABILITY_ENABLED=true). No backend of this repository sets that flag,
-# so without this line the Lambda MicroVM backend and a local `run.sh --server` load
-# both, and AgentCore does unless the service sets the flag itself.
-#
-# An explicit value replaces the list the distro applies in that mode, so this is
-# that list, whole: a runtime that sets the flag loads what it loaded before.
-# boto3 and the tool gateway client are not in it and stay instrumented.
-# agent/tests/test_image_instrumentation.py fails when the list loses `requests`
-# or `urllib3`, or is no longer the list of the pinned aws-opentelemetry-distro.
+# the trace context and the baggage into the headers of every request they send,
+# also to hosts outside the platform. The AWS distro switches the two off only in
+# its agent observability mode (AGENT_OBSERVABILITY_ENABLED=true), and an explicit
+# value replaces the list the distro applies in that mode.
 ENV OTEL_PYTHON_DISABLED_INSTRUMENTATIONS="http,sqlalchemy,psycopg2,pymysql,sqlite3,aiopg,asyncpg,mysql_connector,urllib3,requests,system_metrics,google-genai,jinja2"
 
 WORKDIR /workspace

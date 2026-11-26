@@ -24,7 +24,6 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { documentClient, lowLevelClient } from './dynamo-clients';
 
-/** Align with ``reconcile-stranded-tasks.ts`` defaults. */
 export const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
 export const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 7200;
 /** The per-user cap the stack deploys (``maxConcurrentTasksPerUser`` in ``cdk/src/stacks/agent.ts``). */
@@ -91,9 +90,6 @@ async function queryStuckByStatus(
       const userId = item.user_id?.S;
       const createdAt = item.created_at?.S;
       if (!taskId || !userId || !createdAt) continue;
-      // Age by time in the current status, as the reconciler does (#441):
-      // status_created_at is `<STATUS>#<iso>`, and created_at is the fallback
-      // for a row without a readable one.
       const enteredAt = item.status_created_at?.S?.split('#')[1];
       const age = ageSeconds(enteredAt && !Number.isNaN(Date.parse(enteredAt)) ? enteredAt : createdAt);
       if (age < thresholdSeconds) continue;
@@ -200,8 +196,6 @@ export async function buildConcurrencyReport(
           drift: storedCount - actualCount,
         });
       } catch (err) {
-        // One user's failed live count must not blank the whole operational
-        // view — report the row with the error so the operator still sees it.
         rows.push({
           user_id: userId,
           stored_count: storedCount,

@@ -28,7 +28,6 @@ const NS_WIDTH = 16;
 const NAME_WIDTH = 24;
 const VERSION_WIDTH = 12;
 
-/** Read + parse a JSON file argument, failing with a friendly CliError. */
 function readJsonFile(label: string, filePath: string): Record<string, unknown> {
   let raw: string;
   try {

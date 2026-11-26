@@ -17,24 +17,15 @@
  *  SOFTWARE.
  */
 
-/**
- * Drives the poll loop of the orchestrate-task handler with the real ECS strategy,
- * for what a task that DescribeTasks does not return does to the task. The session
- * start is stubbed: only `pollSession` talks to (a mocked) ECS here.
- */
-
 jest.mock('@aws/durable-execution-sdk-js', () => ({
   withDurableExecution: (fn: unknown) => fn,
 }));
 
-// Read when the strategy module loads. Without a payload bucket the finalize step
-// has nothing to delete, whatever the environment of the test runner sets.
 delete process.env.ECS_PAYLOAD_BUCKET;
 
 const CLUSTER_ARN = 'arn:aws:ecs:us-east-1:123456789012:cluster/test-cluster';
 const TASK_ARN = 'arn:aws:ecs:us-east-1:123456789012:task/test-cluster/abc123';
 const HANDLE = { sessionId: TASK_ARN, strategyType: 'ecs', clusterArn: CLUSTER_ARN, taskArn: TASK_ARN };
-/** What DescribeTasks answers for a task it cannot see. */
 const TASK_MISSING = { tasks: [], failures: [{ arn: TASK_ARN, reason: 'MISSING' }] };
 
 const mockEcsSend = jest.fn();
@@ -71,11 +62,8 @@ import { TaskStatus } from '../../../../src/constructs/task-status';
 import { handler as exportedHandler } from '../../../../src/handlers/orchestrate-task';
 import type { PollState } from '../../../../src/handlers/shared/orchestrator';
 
-// `withDurableExecution` is mocked to return the function it is given, so the export
-// is the raw durable handler: it takes the task event and a durable context.
 const handler = exportedHandler as unknown as DurableExecutionHandler<{ task_id: string }, void>;
 
-/** A durable context that runs steps inline and polls until the wait strategy says stop. */
 const loopingContext = {
   step: async (_name: string, fn: () => Promise<unknown>) => fn(),
   waitForCondition: async (
@@ -95,7 +83,6 @@ const loopingContext = {
 beforeEach(() => {
   mockEcsSend.mockReset();
   mockFailTask.mockReset();
-  // Unless a test says otherwise, the task row stays RUNNING.
   mockPollTaskStatus.mockReset().mockImplementation(async (_taskId: string, state: PollState) => ({
     attempts: state.attempts + 1,
     lastStatus: TaskStatus.RUNNING,
@@ -104,8 +91,7 @@ beforeEach(() => {
 
 describe('orchestrate-task poll loop for an ECS task that DescribeTasks does not return', () => {
   test('does not fail the task when the first poll, right after RunTask, misses it', async () => {
-    // The ECS API is eventually consistent: the second poll sees the task, and
-    // by the third the agent has written COMPLETED.
+    // The ECS API is eventually consistent.
     mockEcsSend
       .mockResolvedValueOnce(TASK_MISSING)
       .mockResolvedValueOnce({ tasks: [{ lastStatus: 'RUNNING' }] });

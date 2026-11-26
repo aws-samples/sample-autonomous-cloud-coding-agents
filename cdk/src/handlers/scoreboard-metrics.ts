@@ -17,22 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Scoreboard step of the TaskTable stream consumer: one metric line per finished
- * task, in the `ABCA/Factory` namespace.
- *
- * A finished record is rewritten for as long as it lives and its stream records are
- * redelivered, so a task is claimed before it is counted: one conditional put of a
- * marker in the budget table. That table has no stream this consumer reads, so the
- * claim is not delivered back as another record of the task. The line is built from
- * a consistent read of the task; the stream image only decides whether to claim.
- *
- * A line is written at most once per task. It is lost when the process dies between
- * the claim and the line, and when the SDK retries a claim whose response was lost
- * (the retry reads as "already claimed"). The marker is not released: a later
- * delivery of the same task finds it taken.
- */
-
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBRecord } from 'aws-lambda';
 import { TERMINAL_STATUSES } from '../constructs/task-status';
@@ -45,20 +29,14 @@ const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const BUDGET_TABLE_NAME = process.env.BUDGET_TABLE_NAME!;
 const ddb = makeDocClient();
 
-/**
- * The age past which a finish is not claimed. A stream keeps a record for 24 hours, so a
- * finish is first delivered within that time: an older one is a later rewrite of a task
- * that finished before this step was deployed, or whose first claim failed. CloudWatch
- * drops a timestamp older than 14 days, and a younger one would land as data from before
- * the deployment.
- */
+/** DynamoDB Streams keeps a record for 24 hours. CloudWatch drops a timestamp older than 14 days. */
 const MAX_FINISH_AGE_MS = 24 * 3600 * 1000;
 
 /**
  * Publish one finished task's facts to the metric stream, at most once per task. True when a
  * line was written; false when the record is not one to count, when the table holds no
  * finished task, or when another delivery holds the claim. Throws when the read or the
- * claim fails for any other reason: the caller logs and counts that.
+ * claim fails for any other reason.
  */
 export async function publishTaskMetrics(record: DynamoDBRecord): Promise<boolean> {
   if (record.eventName !== 'INSERT' && record.eventName !== 'MODIFY') return false;
@@ -67,11 +45,9 @@ export async function publishTaskMetrics(record: DynamoDBRecord): Promise<boolea
   const finished = TERMINAL_STATUSES.some((status) => status === image?.status?.S);
   if (!image || !taskId || !finished) return false;
   const nowMs = Date.now();
-  // An image without a finish time is not too old (NaN compares false): the claim decides.
   const finishedAtMs = finishTimeMs({ completed_at: image.completed_at?.S, updated_at: image.updated_at?.S });
   if (nowMs - finishedAtMs > MAX_FINISH_AGE_MS) return false;
 
-  // The read first: a stream image of a task the table does not hold claims nothing.
   const got = await ddb.send(new GetCommand({
     TableName: TASK_TABLE_NAME,
     Key: { task_id: taskId },
@@ -87,13 +63,11 @@ export async function publishTaskMetrics(record: DynamoDBRecord): Promise<boolea
       Item: {
         scope_key: taskBudgetMarkerKey(taskId),
         period: BUDGET_METRICS_PERIOD,
-        // Outlives the task record, so a rewrite of it during retention cannot count twice.
         ttl: Math.floor(nowMs / 1000) + BUDGET_ROLLUP_RETENTION_DAYS * 24 * 3600,
       },
       ConditionExpression: 'attribute_not_exists(scope_key)',
     }));
   } catch (err) {
-    // Another delivery holds the claim: there is nothing to count.
     if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return false;
     throw err;
   }

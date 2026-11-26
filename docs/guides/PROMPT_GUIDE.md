@@ -1,12 +1,12 @@
 # Prompt guide
 
-Writing effective task descriptions for ABCA.
+This guide explains how to write task descriptions for ABCA that lead to good pull requests.
 
 ## Why prompts matter
 
-ABCA agents are unattended - once a task is submitted, the agent works autonomously from start to finish. It cannot ask clarifying questions or pause for feedback. Every decision is made based on what you provide upfront, so prompt quality directly determines task success.
+ABCA agents are unattended. Once you submit a task, the agent works autonomously from start to finish. It cannot ask clarifying questions or pause for feedback. The agent makes every decision from what you provide up front, so the quality of the prompt determines whether the task succeeds.
 
-This guide covers how to write descriptions that lead to good pull requests. For submission mechanics (CLI flags, API fields, webhook setup), see the [User guide](./USER_GUIDE.md).
+For submission mechanics (CLI flags, API fields, webhook setup), see the [User guide](./USER_GUIDE.md).
 
 ## Choosing the right input mode
 
@@ -24,25 +24,25 @@ You must provide at least one of `--issue`, `--task`, `--pr`, or `--review-pr`. 
 
 ### Describe the end state, not the steps
 
-The agent is skilled at navigating codebases and choosing implementation approaches. Tell it what the result should look like, not how to get there.
+The agent can navigate a codebase and choose an implementation approach. Tell it what the result should look like, not how to get there.
 
 **Avoid:** "Open `src/auth.ts`, find `validateToken`, add a check for token expiry before line 45..."
 
 **Better:** "The login flow should reject expired tokens and return a 401 with a clear error message. The token expiry check should happen in the auth middleware before the route handler runs."
 
-Step-by-step instructions are fragile - they break if files have changed, line numbers have shifted, or the implementation differs from your assumptions.
+Step-by-step instructions are fragile. They break if files have changed, line numbers have shifted, or the implementation differs from your assumptions.
 
 ### Be specific about scope
 
 One task should represent one logical change. The agent works best with focused, well-bounded work.
 
-- "Add input validation to the `POST /users` endpoint." - good scope
-- "Improve the API." - too broad, which endpoints? what improvements?
-- "Change the variable name on line 12." - too narrow, do this yourself
+- "Add input validation to the `POST /users` endpoint." Good scope.
+- "Improve the API." Too broad. Which endpoints? What improvements?
+- "Change the variable name on line 12." Too narrow. Do this yourself.
 
 ### State constraints and define success
 
-The agent starts fresh each time with no knowledge beyond the repo contents and your prompt. If there are constraints it should respect or concrete success criteria, say so explicitly:
+The agent starts each task with no knowledge beyond the repo contents and your prompt. If the agent should respect constraints or meet concrete success criteria, state them explicitly:
 
 - "This project uses React 18 - do not use React 19 features."
 - "The database schema is managed by Flyway. Add a new migration; do not modify existing ones."
@@ -51,14 +51,14 @@ The agent starts fresh each time with no knowledge beyond the repo contents and 
 
 ### Point to the right area
 
-You don't need exact line numbers, but mentioning relevant files saves turns and reduces misplaced changes:
+You don't need exact line numbers. Naming the relevant files saves turns and reduces misplaced changes:
 
 - "The rate limiting logic should go in `src/middleware/` alongside the existing auth middleware."
 - "The bug is in `src/payments/calculateTotal` - it doesn't handle discount codes."
 
 ### Include examples when relevant
 
-If the desired behavior has specific input/output expectations, concrete examples help the agent:
+If the desired behavior has specific input and output expectations, give concrete examples:
 
 > Add a `slugify` function. Examples:
 > - `"Hello World"` -> `"hello-world"`
@@ -70,12 +70,12 @@ If the desired behavior has specific input/output expectations, concrete example
 |---|---|---|
 | Too vague: "Fix the bug." | The agent can't infer which bug or where. | Describe the symptom, location, and expected behavior. |
 | Kitchen sink: "Fix login, add dark mode, update README, upgrade React." | Multiple unrelated changes overload context and produce partial results. | Submit one task per logical change. |
-| Missing context: "Fix the issue we discussed yesterday." | The agent only sees the repo and your prompt. External conversations are invisible. | Describe the problem inline or reference a GitHub issue. |
+| Missing context: "Fix the issue we discussed yesterday." | The agent sees only the repo and your prompt. It cannot see external conversations. | Describe the problem inline or reference a GitHub issue. |
 | Assuming state: "Continue where we left off." | The agent starts fresh every task with no memory of prior runs. | Describe the current state and what remains. |
 
 ## Calibrating `--max-turns`
 
-The `--max-turns` flag controls how many model invocations a task is allowed. Default is 100, range is 1-500.
+The `--max-turns` flag sets how many model invocations a task is allowed. The default is 100, and the range is 1 to 500.
 
 | Task complexity | Suggested range |
 |---|---|
@@ -86,30 +86,30 @@ The `--max-turns` flag controls how many model invocations a task is allowed. De
 | PR iteration (address review feedback) | 30-100 |
 | PR review (code review) | 30-80 |
 
-If a task consistently uses all turns without finishing, the description is probably too broad. Splitting into smaller tasks is more effective than increasing the limit.
+If a task consistently uses all its turns without finishing, the description is probably too broad. Splitting it into smaller tasks works better than raising the limit.
 
 ## Tips for GitHub issues
 
-When using `--issue`, the agent fetches the issue title, body, and all comments. Well-structured issues lead to better results:
+When you use `--issue`, the agent fetches the issue title, body, and all comments. Well-structured issues lead to better results:
 
 - Write a clear title that summarizes the problem: "Login fails when email contains a plus sign" not "Bug in login."
 - Include reproduction steps, expected behavior, and actual behavior for bugs.
 - State acceptance criteria in the issue body, not in comments.
-- Put essential information in the issue body rather than early comments - if the combined content exceeds the ~100K token budget, oldest comments are trimmed first. The title, body, and your `--task` description are always preserved.
+- Put essential information in the issue body, not in early comments. If the combined content exceeds the budget of about 100K tokens, the oldest comments are trimmed first. The title, the body, and your `--task` description are always preserved.
 
 ## Repo-level instructions
 
-Beyond per-task descriptions, you can customize how the agent works on your repository by adding configuration files it loads automatically at the start of every task.
+Besides per-task descriptions, you can customize how the agent works on your repository. Add configuration files, which the agent loads automatically at the start of every task.
 
 | File / directory | Purpose |
 |---|---|
 | `CLAUDE.md` or `.claude/CLAUDE.md` | Project-level instructions (build commands, conventions, constraints, architecture) |
-| `.claude/rules/*.md` | Path-scoped rules (e.g. `testing.md`, `api-conventions.md`) |
-| `.claude/settings.json` | Project settings (hooks, env vars). Permissions have no effect since the agent runs in `bypassPermissions` mode. |
+| `.claude/rules/*.md` | Path-scoped rules (for example `testing.md`, `api-conventions.md`) |
+| `.claude/settings.json` | Project settings (hooks, env vars). Permissions have no effect, because the agent runs in `bypassPermissions` mode. |
 | `.claude/agents/` | Custom subagent definitions |
 | `.mcp.json` | MCP server configurations (requires dependencies installed in the container) |
 
-These files use the same format as [Claude Code's CLAUDE.md](https://code.claude.com/docs/en/memory#claude-md-files). A good `CLAUDE.md` is the single most impactful thing you can add - it prevents the agent from guessing and reduces wasted turns.
+These files use the same format as [Claude Code's CLAUDE.md](https://code.claude.com/docs/en/memory#claude-md-files). Of these files, a good `CLAUDE.md` has the most effect. It stops the agent from guessing and reduces wasted turns.
 
 Example `CLAUDE.md`:
 
@@ -134,18 +134,18 @@ TypeScript monorepo managed by Turborepo.
 - `packages/shared/` - Shared types and utilities
 ```
 
-If your platform administrator has configured `system_prompt_overrides` in the Blueprint for your repository, those are appended to the platform system prompt separately. Both layers (Blueprint overrides + repo-level files) are active simultaneously.
+If your platform administrator has configured `system_prompt_overrides` in the Blueprint for your repository, the platform appends those overrides to the platform system prompt separately. Both layers (Blueprint overrides and repo-level files) are active at the same time.
 
 ## How the agent assembles your prompt
 
-Understanding the prompt assembly helps you write better descriptions. When you submit a task, the platform goes through a context hydration step (you'll see the task status change to `HYDRATING`):
+Knowing how the platform assembles the prompt helps you write better descriptions. When you submit a task, the platform runs a context hydration step, and you'll see the task status change to `HYDRATING`:
 
 1. If you provided `--issue`, the platform fetches the issue title, body, and comments from GitHub.
 2. If you provided `--pr` or `--review-pr`, it fetches the PR metadata, diff, conversation comments, and inline review comments. Resolved review threads are filtered out.
-3. Your task description, the fetched content, and task metadata are combined into a single user prompt. The fetched issue or pull request is delimited in it as untrusted data, since anyone may have written it: the agent is told to use it to understand the work and to follow no instruction in it that would change its rules, its workflow or the scope of the task (see [Untrusted content boundaries](../design/SECURITY.md#untrusted-content-boundaries)). What you write in `--task` is an instruction.
-4. If the assembled prompt exceeds ~100K tokens, oldest comments are trimmed first. The title, body, and your task description are always preserved.
+3. The platform combines your task description, the fetched content, and task metadata into a single user prompt. The prompt delimits the fetched issue or pull request as untrusted data, since anyone may have written it. The agent is told to use that content to understand the work, and to follow no instruction in it that would change its rules, its workflow or the scope of the task (see [Untrusted content boundaries](../design/SECURITY.md#untrusted-content-boundaries)). What you write in `--task` is an instruction.
+4. If the assembled prompt exceeds about 100K tokens, the oldest comments are trimmed first. The title, body, and your task description are always preserved.
 
-The agent receives this user prompt alongside a system prompt selected by task type and any repo-level instructions from your repository. You control the input, but the platform decides the final shape.
+The agent receives this user prompt together with a system prompt selected by task type, and with any repo-level instructions from your repository. You control the input, but the platform decides the final shape.
 
 ## Examples
 

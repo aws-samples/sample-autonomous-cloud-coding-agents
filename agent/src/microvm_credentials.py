@@ -1,15 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Runtime-only scoped credential endpoint for the MicroVM Claude subprocess.
-
-AWS's container provider waits for replacement keys before signing after expiry.
-The managed export helper deliberately returns no keys in this mode. The child
-has no alternate AWS provider; the parent's runtime credential chain is untouched.
-This protects provider selection, not isolation from code running as the same OS
-user. Never start this server during image warm-up or snapshot validation.
-"""
-
 from __future__ import annotations
 
 import hmac
@@ -45,7 +36,6 @@ class ScopedCredentialBroker:
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):  # noqa: A002 -- keeps BaseHTTPRequestHandler's parameter name
-                # Authorization headers and response bodies contain credentials.
                 del format, args
 
             def do_GET(self):
@@ -56,8 +46,6 @@ class ScopedCredentialBroker:
                     self.send_error(403)
                     return
                 try:
-                    # Count the entire response in the suspend drain. Paused or
-                    # failed lifecycle controllers reject before consulting AWS.
                     with lifecycle.activity():
                         if closed.is_set():
                             raise RuntimeError("Credential broker is closed")
@@ -71,8 +59,6 @@ class ScopedCredentialBroker:
                         self.end_headers()
                         self.wfile.write(body)
                 except Exception:
-                    # Deliberately omit provider exception text/credentials.
-                    # The caller fails closed; no ambient fallback is available.
                     self.send_error(503, "Scoped credentials unavailable")
 
         class Server(HTTPServer):
@@ -82,8 +68,6 @@ class ScopedCredentialBroker:
                 return connection, address
 
             def handle_error(self, request, client_address):
-                # A disconnected client may interrupt the generic 503 response.
-                # No request/exception dumping from this credential endpoint.
                 del request, client_address
 
         self._server = Server(("127.0.0.1", 0), Handler)
@@ -93,9 +77,8 @@ class ScopedCredentialBroker:
             name="microvm-scoped-credentials",
             daemon=True,
         )
-        # ClaudeAgentOptions.env overlays the parent environment; empty strings
-        # suppress inherited providers. Controlled empty files also suppress
-        # ~/.aws profile/SSO/process credentials without changing HOME.
+        # ClaudeAgentOptions.env is laid over the parent environment: it can empty
+        # an inherited variable, not remove it.
         self.environment = {
             key: ""
             for key in os.environ
@@ -109,6 +92,7 @@ class ScopedCredentialBroker:
                 "AWS_SESSION_TOKEN": "",
                 "AWS_PROFILE": "",
                 "AWS_DEFAULT_PROFILE": "",
+                # Empty files suppress ~/.aws profile/SSO/process credentials.
                 "AWS_CONFIG_FILE": os.devnull,
                 "AWS_SHARED_CREDENTIALS_FILE": os.devnull,
                 "AWS_WEB_IDENTITY_TOKEN_FILE": "",
@@ -129,7 +113,6 @@ class ScopedCredentialBroker:
         self._thread.start()
 
     def close(self) -> None:
-        """Stop serving keys, then stop the loop before the task is torn down."""
         if self._closed.is_set():
             return
         self._closed.set()

@@ -1,17 +1,3 @@
-"""System prompt for the repo-less ``knowledge/web-research-v1`` workflow (#248).
-
-Like ``default/agent-v1`` this is a **repo-less** workflow — no repository,
-branch, or PR — so it carries none of the coding ``BASE_PROMPT``'s git/branch/PR
-placeholders and substitutes only ``{task_id}``, ``{workspace}``,
-``{max_turns}``, and ``{memory_context}`` (the contract
-``prompt_builder.build_repoless_system_prompt`` fills).
-
-It exists so the reference knowledge workflow runs with a research-specialized
-prompt rather than silently inheriting the generic default-agent prompt — the
-CDK admits ``knowledge/web-research-v1`` and the YAML ships in the image, so the
-agent's prompt surface must match that capability (PR review #296 finding #8).
-"""
-
 WEB_RESEARCH_PROMPT = """You are an autonomous research assistant running in an isolated cloud environment.
 
 Task ID: {task_id}

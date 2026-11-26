@@ -45,11 +45,6 @@ import {
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
 import { DEFAULT_LABEL_FILTER } from '../../../src/handlers/shared/trigger-label';
 
-/**
- * A stand-in surface adapter. The rollup is exercised through the Channel it
- * actually calls, so these tests assert the neutral operations (and the
- * capability guards) rather than any one surface's API.
- */
 type FakeChannel = ReturnType<typeof makeFakeChannel>;
 
 function makeFakeChannel() {
@@ -99,17 +94,11 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
   });
 
   test('a surface that returns no usable comment id reports no panel id', async () => {
-    // A blank id must not be persisted — the next edit would address a comment
-    // that doesn't exist. "No id" is the honest answer.
     channel.upsertComment.mockResolvedValue({ commentId: '' });
     expect(await upsertEpicPanel({ channel, parent, children: [row('a', 'running')] })).toEqual(LOOKUP_ABSENT);
   });
 
   test('in progress → re-opens the parent to running (regression allowed) + 👀', async () => {
-    // A settled epic sits in awaiting-review; re-opening moves backward WITHIN
-    // the same state category, which the adapter refuses unless asked. Without
-    // the opt-in the re-open is silently dropped and the epic reads finished
-    // while children are running.
     await upsertEpicPanel({
       channel, parent, children: [row('a', 'running')], inProgress: true, mirrorParentState: true,
     });
@@ -147,25 +136,18 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
   });
 
   test('the REAL Slack adapter drives the epic panel, with its omitted ops skipped', async () => {
-    // The engine claim under test: an unmodified rollup drives a genuinely
-    // different surface. Slack omits transitionState/revertState (no workflow
-    // state), so the capability guards must skip them and still deliver the
-    // panel — proving the abstraction on a real adapter, not a fake.
     const slack = makeSlackChannel();
     const id = await upsertEpicPanel({
       channel: slack,
       parent: { issueId: slackThreadRef('C1', '1700000000.001'), credentialsRef: 'T1' },
       children: [row('a', 'succeeded')],
       inProgress: false,
-      mirrorParentState: true, // asks for a state mirror Slack cannot do
+      mirrorParentState: true,
     });
-    // The panel landed...
     expect(id).toEqual(lookupFound('1700000000.002'));
     expect(slackFetchTsMock).toHaveBeenCalled();
-    // ...the ✅ marker went on the thread root...
     const adds = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add');
     expect((adds[0][2] as { name: string }).name).toBe('white_check_mark');
-    // ...and NOTHING attempted a state transition (there is no such Slack method).
     const methods = [
       ...slackFetchMock.mock.calls.map((c) => c[1]),
       ...slackFetchTsMock.mock.calls.map((c) => c[1]),
@@ -174,25 +156,16 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
   });
 
   test('a DOWNSTREAM surface the core never imports drives the panel end to end', async () => {
-    // The extensibility claim, exercised rather than asserted about: this surface
-    // exists only in this test, is resolved through the same registry lookup the
-    // reconciler uses, and reaches the engine with no edit to the interface, the
-    // lookup, or the rollup. Slack proves the interface fits a non-tracker, but it
-    // ships in-tree — so it cannot show that nothing in the core has to know.
     const posted: Array<{ issue: string; body: string }> = [];
     const unregister = registerChannelFactory('acme-tracker', (registryTable) => ({
       kind: 'acme-tracker',
       postComment: async () => null,
       upsertComment: async (issue, body) => {
-        // The per-surface credentials table reached the adapter, so a panel is
-        // addressed with this tenant's credentials and not another surface's.
         expect(registryTable).toBe('AcmeRegistry');
         posted.push({ issue: issue.issueId, body });
         return { commentId: 'acme-panel-1' };
       },
       reportFailure: async () => undefined,
-      // Reactions supported; workflow state deliberately NOT — a third capability
-      // shape, different from both Linear (all of it) and Slack (none of it).
       replaceIssueReaction: async () => true,
     }));
     try {
@@ -204,13 +177,12 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
         parent: { issueId: 'acme-epic-1', credentialsRef: 'acme-tenant-1' },
         children: [row('a', 'succeeded')],
         inProgress: false,
-        mirrorParentState: true, // asks for a transition this surface cannot do
+        mirrorParentState: true,
       });
 
       expect(id).toEqual(lookupFound('acme-panel-1'));
       expect(posted).toHaveLength(1);
       expect(posted[0].issue).toBe('acme-epic-1');
-      // The panel body is the engine's own rendering — the surface supplied none of it.
       expect(posted[0].body).toContain('ABCA orchestration complete');
     } finally {
       unregister();
@@ -244,11 +216,8 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
 
 describe('cascadeNodeLabel — the short name used inside a cascade reason', () => {
   test('integration node → "the integration" (not its raw synthetic title)', () => {
-    // The raw integration-node title read clumsily
-    // in the possessive reason "Integration — combine sub-issue results's change".
     const label = cascadeNodeLabel('orch_abc__integration', undefined, 'Integration — combine sub-issue results');
     expect(label).toBe('the integration');
-    // Reads cleanly in the possessive: "the integration's change".
     expect(`updating to include ${label}'s change`).toBe("updating to include the integration's change");
   });
 
@@ -263,8 +232,6 @@ describe('cascadeNodeLabel — the short name used inside a cascade reason', () 
 });
 
 describe('renderEpicPanel — the single maturing panel', () => {
-  // Named for its shape: an EpicPanelRow (what the panel renders), distinct from
-  // the file-level `row`, which builds an OrchestrationChildRow (what is stored).
   const panelRow = (sub: string, status: string, opts: Partial<EpicPanelRow> = {}): EpicPanelRow => ({
     sub_issue_id: sub, child_status: status, ...opts,
   });
@@ -291,30 +258,16 @@ describe('renderEpicPanel — the single maturing panel', () => {
       .toContain('⚠️ **ABCA orchestration finished with failures**');
   });
 
-  // A SETTLED-with-failures panel tells the user how to retry. Not shown while
-  // in-flight or on a clean complete.
   test('the retry hint leads with the comment and offers the label only as a fallback', () => {
-    // Presenting the two as equivalent was wrong: re-applying the label is a
-    // gesture with four possible meanings (add sub-issues / retry / still running /
-    // already complete) resolved from graph state, so on an epic that gained a
-    // sub-issue AND has a failure it does strictly more than a retry.
     const body = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded'), panelRow('b', 'failed')] });
     expect(body).toContain('To retry:');
     expect(body).toContain('`@bgagent retry`');
-    // The label is still discoverable — just not billed as the same thing. It
-    // must be the label that actually TRIGGERS: this assertion previously pinned
-    // a hardcoded project-specific label, so the hint told users to re-apply
-    // something the webhook does not filter on and nothing happened.
     expect(body).toContain('re-applying the `bgagent` label');
     expect(body).not.toContain('either way');
-    // The comment must be named before the label, so the reliable route reads first.
     expect(body.indexOf('`@bgagent retry`')).toBeLessThan(body.indexOf('re-applying'));
   });
 
   test('the retry hint names the project\'s own trigger label, not a hardcoded one', () => {
-    // The trigger label is per-project configurable, so a hint that hardcodes one
-    // is wrong for every project that renamed it — the user follows the
-    // instruction and nothing fires.
     const body = renderEpicPanel({
       inProgress: false,
       rows: [panelRow('a', 'succeeded'), panelRow('b', 'failed')],
@@ -332,7 +285,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
   test('no retry hint on a clean complete, or while still in progress', () => {
     expect(renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded')] }))
       .not.toContain('To retry:');
-    // in-flight, even with a not-yet-terminal failed sibling shown: no hint until settled.
     expect(renderEpicPanel({ inProgress: true, rows: [panelRow('a', 'released'), panelRow('b', 'failed')] }))
       .not.toContain('To retry:');
   });
@@ -341,11 +293,11 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
-        panelRow('a', 'released', { display_id: 'ENG-1', title: 'A' }), // running, no PR yet
+        panelRow('a', 'released', { display_id: 'ENG-1', title: 'A' }),
         panelRow('b', 'succeeded', { display_id: 'ENG-2', title: 'B', pr_url: 'https://github.com/o/r/pull/9' }),
       ],
     });
-    expect(body).toContain('🔄 ENG-1: A — running\n'); // no — [PR] suffix
+    expect(body).toContain('🔄 ENG-1: A — running\n');
     expect(body).not.toContain('ENG-1: A — running — [PR]');
     expect(body).toContain('✅ ENG-2: B — succeeded — [PR](https://github.com/o/r/pull/9)');
   });
@@ -366,8 +318,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
   });
 
   test('a mid-update row keeps the header in-progress (does NOT count as done)', () => {
-    // inProgress is passed true by the caller when any row is updating; the
-    // updating row is excluded from the done count.
     const body = renderEpicPanel({
       inProgress: true,
       rows: [
@@ -375,7 +325,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
         panelRow('b', 'succeeded'),
       ],
     });
-    expect(body).toContain('· 1/2 complete'); // only b counts as done
+    expect(body).toContain('· 1/2 complete');
   });
 
   test('integration node renders friendly, never its raw id', () => {
@@ -401,7 +351,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
         panelRow('orch_x__integration', 'failed', { failureReason: reason }),
       ],
     });
-    // The integration row + its sub-line on the very next line (indented ↳).
     expect(body).toContain(`- ❌ Integration — combined result — failed\n    ↳ ${reason}`);
   });
 
@@ -410,8 +359,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
     const succeeded = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'succeeded', { failureReason: reason })] });
     expect(succeeded).not.toContain('↳');
     expect(succeeded).not.toContain(reason);
-    // A skipped row (predecessor failed) gets no sub-line either — only the
-    // node that actually failed carries the diagnostic.
     const skipped = renderEpicPanel({ inProgress: false, rows: [panelRow('a', 'skipped', { failureReason: reason })] });
     expect(skipped).not.toContain('↳');
   });
@@ -423,8 +370,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
   });
 
   test('embeds the preview screenshot when present', () => {
-    // No combinedPrUrl → no integration node merged anything, so this is the
-    // final node's own preview and must NOT be labelled "combined".
     const body = renderEpicPanel({
       inProgress: false,
       rows: [panelRow('a', 'succeeded')],
@@ -435,9 +380,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
   });
 
   test('labels it "Combined preview" only when an integration node merged the leaves', () => {
-    // The combined PR callout is the signal that several leaves were merged.
-    // Calling a chain's final-node preview "combined" would tell a reviewer
-    // branches were merged when none were.
     const combined = renderEpicPanel({
       inProgress: false,
       rows: [panelRow('a', 'succeeded')],
@@ -461,9 +403,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
       combinedPreviewUrl: 'https://my-app-abc123.vercel.app',
     });
     expect(body).toContain('🖼️ **Preview**');
-    // Linked image: the embedded screenshot opens the running site.
     expect(body).toContain('[![preview](https://cdn/x.png)](https://my-app-abc123.vercel.app)');
-    // Plain "open it" link too, for clients that don't render linked images.
     expect(body).toContain('[Open the preview](https://my-app-abc123.vercel.app)');
   });
 
@@ -474,9 +414,8 @@ describe('renderEpicPanel — the single maturing panel', () => {
       combinedScreenshotUrl: 'https://cdn/x.png',
       combinedPreviewUrl: 'https://preview.vercel.app/x)](https://evil/a.png)',
     });
-    // No raw `](` breakout delimiter from the attacker-controlled preview URL.
     expect(body).not.toContain('x)](https://evil');
-    expect(body).toContain('%29'); // encoded paren survives
+    expect(body).toContain('%29');
   });
 
   test('falls back to a plain embedded image when no preview URL is known', () => {
@@ -486,7 +425,7 @@ describe('renderEpicPanel — the single maturing panel', () => {
       combinedScreenshotUrl: 'https://cdn/x.png',
     });
     expect(body).toContain('![preview](https://cdn/x.png)');
-    expect(body).not.toContain('[![preview]'); // not a linked image
+    expect(body).not.toContain('[![preview]');
     expect(body).not.toContain('Open the preview');
   });
 
@@ -501,7 +440,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
     expect(body.indexOf('ENG-1')).toBeLessThan(body.indexOf('ENG-9'));
   });
 
-  /** The row lines of a panel body, in the order they are shown. */
   const rowLines = (body: string) => body.split('\n').filter((line) => line.startsWith('- '));
 
   test('identifiers are sorted by their number: ENG-9 comes before ENG-10', () => {
@@ -521,8 +459,6 @@ describe('renderEpicPanel — the single maturing panel', () => {
   });
 
   test('the integration row is the last one, whatever the team key', () => {
-    // The synthetic node has no identifier, so it was sorted by its id
-    // (orch_<hash>__integration), which comes before WEB-1 and after ENG-1.
     const body = renderEpicPanel({
       inProgress: true,
       rows: [

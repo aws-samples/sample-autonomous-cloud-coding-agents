@@ -35,9 +35,8 @@ jest.mock('../../src/config', () => ({
 }));
 
 /**
- * What a deployed stack holds in a secret nobody has set: CDK creates it with
- * CloudFormation's generated password (32 characters, at least one upper-case
- * letter, lower-case letter, digit and punctuation character).
+ * CDK creates a secret that is given no value with CloudFormation's generated password: 32 characters,
+ * at least one upper-case letter, lower-case letter, digit and punctuation character.
  */
 const GENERATED_PASSWORD = 'Aa1!'.repeat(8);
 
@@ -47,13 +46,11 @@ describe('github command', () => {
   const run = (...args: string[]): Promise<unknown> =>
     makeGithubCommand().parseAsync(['node', 'github', ...args, '--region', 'us-east-1']);
 
-  /** The secret currently holds `stored`; writes succeed. */
   function secretHolds(stored: string): void {
     smSend.mockImplementation(async (command: unknown) =>
       (command instanceof GetSecretValueCommand ? { SecretString: stored } : {}));
   }
 
-  /** Every value the command wrote, in order. */
   const written = (): unknown[] => smSend.mock.calls
     .map((call) => call[0] as unknown)
     .filter((command): command is PutSecretValueCommand => command instanceof PutSecretValueCommand)
@@ -81,7 +78,6 @@ describe('github command', () => {
   });
 
   test('set-token warns before replacing a stored token', async () => {
-    // Built with repeat() so that no token-shaped literal sits in the source.
     secretHolds(`ghp_${'a1B2'.repeat(9)}`);
 
     await run('set-token');
@@ -95,7 +91,6 @@ describe('github command', () => {
     await run('set-webhook-secret');
 
     expect(output()).not.toContain('already configured');
-    // What it says instead, whatever the secret holds.
     expect(output()).toContain('This replaces the signing secret stored for the stack.');
     expect(written()).toEqual([{ SecretId: 'arn:GitHubWebhookSecretArn', SecretString: 'value-typed-by-the-operator' }]);
   });

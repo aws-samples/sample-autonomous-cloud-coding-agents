@@ -17,17 +17,13 @@
  *  SOFTWARE.
  */
 
-// Single place handlers obtain a `RegistryClient`. Keeping the concrete adapter
-// choice here (not in each handler) means the substrate swap touches one file.
-
 import { AgentRegistryClient } from './agent-registry-client';
 import type { RegistryClient } from './client';
 
-/** Cognito group names that gate publish / approval (#246, REGISTRY.md §10). */
+/** Cognito group names that gate publish / approval. */
 export const REGISTRY_PUBLISHER_GROUP = 'RegistryPublisher';
 export const REGISTRY_APPROVER_GROUP = 'RegistryApprover';
 
-/** Build the registry client from the handler's environment. */
 export function makeRegistryClient(): RegistryClient {
   const registryId = process.env.AGENT_REGISTRY_ID;
   if (!registryId) {

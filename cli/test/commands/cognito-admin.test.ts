@@ -275,8 +275,6 @@ describe('adminInviteUser (#238 — temporary password, first-login rotation)', 
       'SecretPass123!',
     );
 
-    // Exactly one call: AdminCreateUser. No AdminSetUserPassword (which would
-    // promote to a permanent password and skip the first-login challenge).
     expect(cognitoSend).toHaveBeenCalledTimes(1);
     const input = cognitoSend.mock.calls[0][0].input;
     expect(input).toEqual(expect.objectContaining({
@@ -285,7 +283,6 @@ describe('adminInviteUser (#238 — temporary password, first-login rotation)', 
       TemporaryPassword: 'SecretPass123!',
       MessageAction: 'SUPPRESS',
     }));
-    // Guard against a regression that re-introduces a permanent password.
     expect(input).not.toHaveProperty('Permanent');
   });
 

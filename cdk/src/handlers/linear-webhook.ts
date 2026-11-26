@@ -37,28 +37,12 @@ const lambdaClient = makeClient(LambdaClient);
 const WEBHOOK_SECRET_ARN = process.env.LINEAR_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME!;
 const PROCESSOR_FUNCTION_NAME = process.env.LINEAR_WEBHOOK_PROCESSOR_FUNCTION_NAME!;
-/** Optional. When unset, the per-workspace signing-secret path is skipped
- *  and only the stack-wide secret is consulted (back-compat for installs
- *  predating per-workspace secrets). */
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
-/**
- * Dedup window (seconds). Must exceed Linear's full retry horizon: first
- * retry is +1m, then +1h, then +6h (~7h total from the initial delivery).
- * A window shorter than this lets the +1h / +6h retries land after the
- * dedup row has TTL'd out, which would double-create the task when an
- * ack was lost. 8h is comfortably over the horizon with slack for clock
- * skew, without making stale rows live meaningfully longer (DDB TTL is
- * async best-effort anyway).
- */
+// Linear retries a failed delivery at +1m, +1h and +6h: about 7h after the first attempt.
 const DEDUP_TTL_HOURS = 8;
 const DEDUP_TTL_SECONDS = DEDUP_TTL_HOURS * 3600;
 
-/**
- * Shape of the top-level Linear webhook payload we care about for dedup + routing.
- * Full payload is forwarded to the processor without re-serialization risk —
- * the processor parses its own copy from the raw body.
- */
 interface LinearWebhookEnvelope {
   readonly action?: string;
   readonly type?: string;
@@ -69,30 +53,17 @@ interface LinearWebhookEnvelope {
     readonly id?: string;
     readonly [key: string]: unknown;
   };
-  /** Present on `AgentSessionEvent` deliveries (agent-session channel). */
   readonly agentSession?: {
     readonly id?: string;
   };
 }
 
-/** Log a delivery the receiver acknowledges without forwarding. */
 function logIgnoredWebhookType(
   payload: { type?: string; action?: string; organizationId?: string },
   agentSessionsEnabled: boolean,
 ): void {
-  // Agent-session / app-notification events are the fingerprint of an
-  // OAuth app configured as a Linear *agent* (agent-activity events turned
-  // on). With the agent-session channel OFF, ABCA never consumes these,
-  // AND when they're enabled Linear renders an @mention of the app as its
-  // interactive agent-activity surface instead of a normal comment thread,
-  // which breaks the maturing-reply/reaction UX. Surface this at WARN (not
-  // a silent INFO ignore) so an operator can see "this workspace's app is
-  // in agent mode" and either disable agent/app events or deploy with
-  // `enableLinearAgentSessions=true`. See docs/guides for the config.
   const AGENT_MODE_TYPES = ['AppUserNotification', 'AgentSession', 'AgentSessionEvent', 'AgentActivity'];
   if (!agentSessionsEnabled && payload.type !== undefined && AGENT_MODE_TYPES.includes(payload.type)) {
-    // Message text unchanged from before the agent-session channel existed —
-    // operators' metric filters key on it. The remedy hint rides a field.
     logger.warn(
       'Ignoring Linear agent-mode webhook — the OAuth app appears configured as a Linear agent '
       + '(agent/app events enabled). ABCA uses plain comment threads; agent mode makes @mentions render '
@@ -130,11 +101,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(401, { error: 'Missing signature' });
     }
 
-    // Parse body ONCE — we peek at the orgId before signature verification
-    // so we can pick the right per-workspace signing secret. The orgId is
-    // untrusted at this point; it only selects WHICH secret to verify
-    // against. An attacker can claim any orgId but still needs the
-    // matching signing secret to forge a valid signature.
     let payload: LinearWebhookEnvelope;
     try {
       payload = JSON.parse(event.body) as LinearWebhookEnvelope;
@@ -144,22 +110,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
-    // `null` parses, but reading a field of it throws: answer as for unparseable JSON.
     if (payload === null) {
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
 
-    // Try the per-workspace secret first. Falls through to the stack-wide
-    // path if (a) registry table not configured, (b) no orgId in body
-    // (or one that is not a string: the registry key is a string, and
-    // DynamoDB rejects a lookup by any other type),
-    // (c) workspace not in registry, or (d) workspace's stored secret
-    // lacks `webhook_signing_secret`. Per-workspace MISMATCH is fatal —
-    // do NOT fall back, that would let an attacker bypass per-workspace
-    // signatures by also matching the stack-wide one. REVOKED is also
-    // fatal: a workspace that has been deactivated must not be able to
-    // ride the stack-wide fallback (which `setup` mirrored from the
-    // first workspace's signing secret) back into a verified state.
     let verified = false;
     if (WORKSPACE_REGISTRY_TABLE && typeof payload.organizationId === 'string' && payload.organizationId) {
       const result = await verifyLinearRequestForWorkspace(
@@ -181,30 +135,17 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
         return jsonResponse(401, { error: 'Workspace not active' });
       } else if (result === 'shared-secret') {
-        // The signature matched, but against a secret this workspace shares with
-        // another on the same stack — so it proves the sender knows SOME tenant's
-        // secret, not this one's. Fatal for the same reason `mismatch` is: falling
-        // through would re-admit it via the stack-wide path.
         logger.warn('Linear webhook verified against a secret shared with another workspace — rejecting', {
           linear_workspace_id: payload.organizationId,
           remedy: 'bgagent linear update-webhook-secret <slug>',
         });
         return jsonResponse(401, { error: 'Workspace signing secret is not its own' });
       }
-      // 'no-per-workspace-secret' falls through to the stack-wide path
-      // below — back-compat for installs predating per-workspace secrets.
     }
 
-    // Whether the stack-wide secret was what verified this delivery. Forwarded to the
-    // processor, which routes from body-supplied identifiers that a tenant-less secret
-    // cannot attest to.
     let verifiedViaStackWide = false;
 
     if (!verified) {
-      // The stack-wide secret is bound to no workspace, so on a stack with more than one
-      // it cannot say which tenant sent this — and the body's `organizationId` is the
-      // attacker's to choose. Refuse rather than guess. Single-workspace installs keep
-      // the fallback: there, the only tenant it could mean is the only tenant there is.
       const activeWorkspaces = await countActiveLinearWorkspaces(WORKSPACE_REGISTRY_TABLE);
       if (activeWorkspaces > 1) {
         logger.warn('Refusing the stack-wide fallback on a multi-workspace stack', {
@@ -222,10 +163,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return jsonResponse(401, { error: 'Invalid signature' });
       }
       verifiedViaStackWide = true;
-      // Stack-wide fallback succeeded. Log positively so operators
-      // diagnosing a per-workspace verification regression have a
-      // breadcrumb that says "this workspace is verifying via the
-      // back-compat path" rather than its own per-workspace secret.
       logger.info('Linear webhook verified via stack-wide fallback secret', {
         linear_workspace_id: payload.organizationId,
         per_workspace_registry_configured: Boolean(WORKSPACE_REGISTRY_TABLE),
@@ -240,11 +177,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(401, { error: 'Stale webhook timestamp' });
     }
 
-    // Issue events drive task creation; Comment events drive the comment
-    // trigger (an @bgagent mention on a sub-issue re-iterates its PR). With the
-    // agent-session flag on, AgentSessionEvent `created`/`prompted` deliveries
-    // drive the native Linear agent channel (ADR-018 Phase 2). Every other type
-    // is acknowledged silently so Linear stops retrying.
     const agentSessionsEnabled = isLinearAgentSessionsEnabled();
     const isAgentSessionDelivery = agentSessionsEnabled && payload.type === AGENT_SESSION_EVENT_TYPE;
     if (payload.type !== 'Issue' && payload.type !== 'Comment' && !isAgentSessionDelivery) {
@@ -252,8 +184,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true });
     }
 
-    // data.id is the issue id (Issue events) or the comment id (Comment
-    // events); agent-session deliveries carry the session id instead.
     const { id: dataId, missingMessage } = isAgentSessionDelivery
       ? { id: payload.agentSession?.id, missingMessage: 'Linear webhook missing agentSession.id' }
       : { id: payload.data?.id, missingMessage: 'Linear webhook missing data.id' };
@@ -266,24 +196,14 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       logger.info('Ignoring unhandled AgentSessionEvent action', { action });
       return jsonResponse(200, { ok: true });
     }
-    // Comment events: only forward creates (an edited/removed comment must not
-    // re-fire the agent). Issue events keep their existing create/update gate
-    // downstream in the processor.
     if (payload.type === 'Comment' && action !== 'create') {
       logger.info('Ignoring non-create Comment webhook', { action });
       return jsonResponse(200, { ok: true });
     }
     const issueId = dataId;
 
-    // Dedup via conditional PutItem.
-    //
-    // Linear's `webhookId` in the payload body is the *webhook configuration*
-    // ID — reused on every delivery, not per-delivery. `webhookTimestamp`
-    // (UNIX ms) is unique per delivery; Linear reuses it for retries of a
-    // single delivery. Compose `${issueId}#${action}#${webhookTimestamp}` so
-    // retries of the same event collapse (same timestamp) while distinct
-    // events do not. A missing timestamp would have already failed the replay
-    // check above, so treat its presence as a precondition.
+    // Linear's `webhookId` identifies the webhook configuration: it is the same on every delivery.
+    // `webhookTimestamp` (UNIX ms) is unique per delivery, and Linear reuses it when it retries that delivery.
     const dedupKey = `${issueId}#${action}#${payload.webhookTimestamp}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
@@ -307,14 +227,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
-    // Async-invoke the processor with the raw body so it can re-parse safely.
     try {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
-        // The verified context travels with the body. Without it the processor cannot
-        // tell a delivery whose tenant the signature attested from one whose tenant is
-        // only claimed, and it routes from that claim.
         Payload: new TextEncoder().encode(JSON.stringify({
           raw_body: event.body,
           verified_via_stack_wide: verifiedViaStackWide,
@@ -326,9 +242,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         issue_id: issueId,
         action,
       });
-      // Roll back the dedup row so Linear's next retry (+1m / +1h / +6h) can
-      // try dispatch again. Without this, all retries would hit the dedup TTL
-      // (8h) and silently drop the task forever.
       try {
         await ddb.send(new DeleteCommand({
           TableName: DEDUP_TABLE_NAME,

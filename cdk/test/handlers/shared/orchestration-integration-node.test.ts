@@ -78,7 +78,6 @@ describe('withIntegrationNode', () => {
   test('synthetic node id is idempotency-key safe (no "#", matches /^[A-Za-z0-9_-]+$/)', () => {
     const r = withIntegrationNode([n('A'), n('B')], ORCH);
     const id = r.nodes[r.nodes.length - 1].id;
-    // releaseChild builds `${orch}_${sub}` and createTaskCore validates it.
     expect(`${ORCH}_${id}`).toMatch(/^[a-zA-Z0-9_-]{1,128}$/);
   });
 });

@@ -118,14 +118,11 @@ beforeEach(() => {
     }
     return {};
   });
-  // Service emulator: same-token/same-request replay returns the original ID.
-  // This tests our use of the API contract; AWS retention still needs live proof.
+  // MicroVM API contract: a replay with the same clientToken and the same request returns the original id.
   mockMicrovmSend.mockReset().mockImplementation(async ({ kind, input: command }) => {
     if (kind === 'terminate') return {};
     const token = command.clientToken ?? `sdk-generated-${created.size}`;
     if (!created.has(token)) created.set(token, structuredClone(command));
-    // A replay that changes the request is a different call, not a retry;
-    // afterEach asserts every replay matched its original request.
     replays.push([created.get(token), command]);
     if (lostResponses-- > 0) {
       throw Object.assign(new Error('response lost after creation'), { name: 'TimeoutError' });

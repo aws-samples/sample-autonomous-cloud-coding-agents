@@ -32,35 +32,26 @@ import { auditProfile, DEFAULT_BUDGETS, WorkerResult } from '../../src/synthesis
 import { FIXTURE, STRUCTURAL_CONTEXT, SynthesisProfile, synthesisProfiles } from '../../src/synthesis/profiles';
 import { projectContext } from '../../src/synthesis/workspace';
 
-/** Application-stack outputs and resource-path markers that only exist with a feature. */
 const FEATURE_MARKERS: Readonly<Record<DeploymentFeature, { output?: string; path: string }>> = {
   slack: { output: 'SlackAppManifestJson', path: '/SlackIntegration/' },
   linear: { output: 'LinearWebhookSecretArn', path: '/LinearIntegration/' },
   jira: { output: 'JiraWebhookSecretArn', path: '/JiraIntegration/' },
   deployPreviewScreenshots: { output: 'GitHubWebhookUrl', path: '/GitHubScreenshotIntegration/' },
   agentRegistry: { output: 'RegistryApiUrl', path: '/AgentRegistryStack/' },
-  // Tool Gateway publishes no output; its resources are the marker.
   toolGateway: { path: '/ToolGateway/' },
 };
 const APPLICATION_TEMPLATE = 'backgroundagent-dev.template.json';
-/** The role each backend's agent runs as: it carries the model grants. */
 const COMPUTE_ROLES: Readonly<Record<ComputeBackend, string>> = {
   'agentcore': '/Runtime/ExecutionRole',
   'ecs': '/EcsAgentCluster/TaskRole',
   'lambda-microvm': '/LambdaMicrovmCompute/ExecutionRole',
 };
-/**
- * Census cell that synthesizes the legacy topology (no profile): what every stack
- * deployed before ADR-024 runs today.
- */
 const LEGACY_CELL = 'agentcore-gw0-reg1-vault0-none';
-/** Types whose logical-ID change replaces a resource that holds data (mirrors the CLI's data-loss gate). */
 const STATE_BEARING_TYPES = new Set([
   'AWS::DynamoDB::Table', 'AWS::DynamoDB::GlobalTable', 'AWS::SecretsManager::Secret', 'AWS::S3::Bucket',
   'AWS::Cognito::UserPool', 'AWS::KMS::Key', 'AWS::Logs::LogGroup', 'AWS::CloudFormation::Stack',
   'AWS::BedrockAgentCore::Memory', 'AWS::EC2::VPC',
 ]);
-/** Root-stack resource counts of the inline feature cells, reused by the footprint check. */
 const featureRootResources = new Map<string, number>();
 
 async function synthesizeInto(directory: string, profile: SynthesisProfile) {
@@ -85,9 +76,6 @@ async function synthesizeInto(directory: string, profile: SynthesisProfile) {
   return { assembly, census };
 }
 
-// Exercise the same full gate product as the offline census in the normal build.
-// Each configuration is synthesized once, including real CDK metadata and
-// parent/nested templates for all quota checks.
 describe.each(synthesisProfiles())('$name deployment', profile => {
   let directory: string;
   let census: AssemblyCensus;
@@ -124,8 +112,6 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
     expect(audit.failures).toEqual([]);
   });
 
-  // A deliberate rejection has no assembly to inspect. The audit above verifies
-  // the exact guard and also fails if the configuration unexpectedly synthesizes.
   if (profile.expectedError) return;
 
   if (profile.context.bedrockModels) {
@@ -200,9 +186,8 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
     expect(count('AWS::CDK::Metadata')).toBeGreaterThan(0);
   });
 
-  // Generated from main before ADR-024 (legacy-state-ids.json). A refactor that moves a
-  // construct changes its logical ID, and CloudFormation would replace the table or secret
-  // in every existing stack. Regenerate only for an intentional, documented migration.
+  // Moving a construct changes its logical ID, and CloudFormation replaces a resource
+  // whose logical ID changes.
   if (profile.name === LEGACY_CELL) {
     test('keeps the logical IDs of every state-bearing resource of pre-profile stacks', () => {
       const ids = census.templates.flatMap(template => template.inventory
@@ -240,7 +225,6 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
   });
 
   test('leaves no IAM grant on an omitted tracker\'s secrets or task-table index', () => {
-    // Policy documents only: descriptions and nag reasons may name the prefixes.
     const policies = census.templates.flatMap(({ file }) => {
       const resources = JSON.parse(readFileSync(path.join(directory, file), 'utf8')).Resources ?? {};
       return Object.values(resources as Record<string, { Type: string; Properties?: Record<string, unknown> }>)
@@ -257,7 +241,6 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
     for (const [key, marker] of markers) {
       if (profile.context[key] !== true) expect([marker, policies.includes(marker)]).toEqual([marker, false]);
     }
-    // Each enabled tracker's agents can still read its OAuth bundles.
     if (profile.context.enableLinear === true) expect(policies).toContain('bgagent-linear-oauth-');
     if (profile.context.enableJira === true) expect(policies).toContain('bgagent-jira-oauth-');
   });
@@ -274,8 +257,6 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
 });
 
 describe('deployment-profile footprints', () => {
-  // Reuses the cells above when they ran; synthesizes any that were filtered out,
-  // so this check does not depend on test order or on the cells passing.
   beforeAll(async () => {
     for (const label of ['minimal', ...DEPLOYMENT_FEATURES]) {
       if (featureRootResources.has(label)) continue;
@@ -289,7 +270,6 @@ describe('deployment-profile footprints', () => {
     }
   }, 300_000);
 
-  // The wizard shows these numbers; keep the catalog within reach of synthesis.
   test.each(DEPLOYMENT_FEATURES)('catalogs the root-stack footprint of %s', feature => {
     const minimal = featureRootResources.get('minimal');
     const single = featureRootResources.get(feature);

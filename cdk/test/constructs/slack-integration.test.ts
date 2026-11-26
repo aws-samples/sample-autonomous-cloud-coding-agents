@@ -53,7 +53,6 @@ describe('SlackIntegration construct', () => {
   });
 
   test('creates three Slack DynamoDB tables (installation + user mapping + channel mapping)', () => {
-    // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping + SlackChannelMapping = 5
     template.resourceCountIs('AWS::DynamoDB::Table', 5);
   });
 
@@ -68,13 +67,10 @@ describe('SlackIntegration construct', () => {
   });
 
   test('creates 6 Lambda functions', () => {
-    // oauth-callback, events, commands, command-processor, link, interactions
-    // (outbound notify runs on FanOutConsumer as a dispatcher, not its own fn)
     template.resourceCountIs('AWS::Lambda::Function', 6);
   });
 
   test('creates API Gateway resources under /slack', () => {
-    // Verify /slack/* routes exist
     template.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'slack',
     });
@@ -105,13 +101,7 @@ describe('SlackIntegration construct', () => {
   });
 
   test('construct no longer owns a TaskEventsTable stream consumer', () => {
-    // This construct used to own ``SlackNotifyFn`` plus its
-    // own ``DynamoEventSource`` on ``TaskEventsTable``. Outbound Slack
-    // delivery now runs through ``FanOutConsumer`` as a per-channel
-    // dispatcher so ``TaskEventsTable`` stays within the DynamoDB
-    // one-reader-per-shard practical limit. The assertion pins that the
-    // migration did not regress: this construct must not create any
-    // ``AWS::Lambda::EventSourceMapping`` at all.
+    // DynamoDB Streams has a practical limit of one reader per shard, and FanOutConsumer already reads this stream.
     template.resourceCountIs('AWS::Lambda::EventSourceMapping', 0);
   });
 

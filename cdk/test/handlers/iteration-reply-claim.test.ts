@@ -17,12 +17,6 @@
  *  SOFTWARE.
  */
 
-// The conditional-write semantics of the once-only reply claim, on their own.
-// Both handlers that use it are tested end-to-end elsewhere; this pins the
-// expressions themselves, because getting a condition subtly wrong here is
-// invisible in a mocked handler test but decides whether a human's request ends
-// up answered once, twice, or never.
-
 import {
   claimTerminalReply,
   MAX_REPLY_ATTEMPTS,
@@ -38,20 +32,16 @@ const TABLE = 'TaskTable';
 const TASK = 'iter-task-1';
 const STAMP = '2026-07-26T01:14:04.301Z';
 
-/** The rejection DynamoDB raises when a ConditionExpression is not satisfied. */
 function conditionalFailure(): Error {
   const err = new Error('The conditional request failed');
   (err as { name?: string }).name = 'ConditionalCheckFailedException';
   return err;
 }
 
-/** The command input of the Nth send call. */
 function inputOf(call: number): Record<string, unknown> {
   return (send.mock.calls[call][0] as { input: Record<string, unknown> }).input;
 }
 
-// Spied rather than module-mocked (the repo's idiom) so the assertions read the
-// same logger the code under test writes to.
 let warnSpy: jest.SpyInstance;
 let infoSpy: jest.SpyInstance;
 
@@ -64,7 +54,6 @@ beforeEach(() => {
 
 afterEach(() => jest.restoreAllMocks());
 
-/** Structured fields of the Nth warn call. */
 function warnFields(call = 0): Record<string, unknown> {
   return warnSpy.mock.calls[call][1] as Record<string, unknown>;
 }
@@ -78,7 +67,6 @@ describe('claimTerminalReply', () => {
       TableName: TABLE,
       Key: { task_id: TASK },
       UpdateExpression: 'SET ack_replied_at = :now',
-      // Only-if-absent is what makes this once-only across redeliveries.
       ConditionExpression: 'attribute_not_exists(ack_replied_at)',
       ExpressionAttributeValues: { ':now': STAMP },
     });
@@ -88,13 +76,10 @@ describe('claimTerminalReply', () => {
     send.mockRejectedValueOnce(conditionalFailure());
 
     expect(await claimTerminalReply(ddb, TABLE, TASK, STAMP)).toEqual({ won: false });
-    // Losing is the expected outcome for every redelivery, so it must not warn —
-    // otherwise the logs cry wolf on healthy runs.
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
   test('a claim write that ERRORS does not win either — replying could duplicate', async () => {
-    // The write may or may not have landed, so the safe read is "not mine".
     send.mockRejectedValueOnce(new Error('ProvisionedThroughputExceeded'));
 
     expect(await claimTerminalReply(ddb, TABLE, TASK, STAMP)).toEqual({ won: false });
@@ -110,23 +95,13 @@ describe('releaseReplyClaim', () => {
 
     const input = inputOf(0);
     expect(input.UpdateExpression).toContain('REMOVE ack_replied_at');
-    // Counting in the same write is what keeps the budget honest: a separate
-    // increment could be lost between the two and restore the unbounded spin.
     expect(input.UpdateExpression).toContain('ack_reply_attempts');
-    // A blind REMOVE would, when this release is delayed past another delivery's
-    // successful claim-and-reply, strip that writer's claim and let a third
-    // delivery reply again — one lost reply becoming a duplicated one.
     expect(input.ConditionExpression).toContain('ack_replied_at = :ours');
-    // And the budget is enforced by the condition, not by a later read.
     expect(input.ConditionExpression).toContain('ack_reply_attempts < :max');
     expect((input.ExpressionAttributeValues as Record<string, unknown>)[':max']).toBe(MAX_REPLY_ATTEMPTS);
   });
 
   test('a spent budget reports EXHAUSTED, so the caller settles instead of waiting', async () => {
-    // The live failure this bound prevents: releasing the claim writes to the task
-    // record, and the reconciler consumes that record's stream — so a release
-    // re-wakes the handler that performed it. With a reply that can never succeed
-    // (its comment was deleted) that spun ~900 times in six minutes.
     send
       .mockRejectedValueOnce(conditionalFailure())
       .mockResolvedValueOnce({ Item: { ack_reply_attempts: MAX_REPLY_ATTEMPTS } });
@@ -135,9 +110,6 @@ describe('releaseReplyClaim', () => {
   });
 
   test('a claim that is no longer OURS is distinguished from a spent budget', async () => {
-    // Both surface as a failed condition but need opposite handling: another
-    // delivery owning the reply means nothing is stuck, so the caller must NOT
-    // settle over it.
     send
       .mockRejectedValueOnce(conditionalFailure())
       .mockResolvedValueOnce({ Item: { ack_reply_attempts: 1 } });
@@ -163,8 +135,6 @@ describe('releaseReplyClaim', () => {
   });
 
   test('an infra failure reports exhausted — the claim is still held', async () => {
-    // AccessDenied or a throttle leaves the claim in place, so promising a retry
-    // would leave the request looking unanswered indefinitely.
     send.mockRejectedValueOnce(new Error('AccessDeniedException'));
 
     expect(await releaseReplyClaim(ddb, TABLE, TASK, STAMP)).toBe('exhausted');
@@ -194,8 +164,6 @@ describe('terminalReplyClaimed', () => {
     expect(inputOf(0)).toMatchObject({
       Key: { task_id: TASK },
       ProjectionExpression: 'ack_replied_at',
-      // An eventually-consistent read is exactly how a stale progress edit slips
-      // past a settle that has already happened.
       ConsistentRead: true,
     });
   });

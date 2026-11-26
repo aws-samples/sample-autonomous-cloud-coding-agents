@@ -56,7 +56,6 @@ async function describeStack(region: string, stackName: string) {
   }
 }
 
-/** Read all CloudFormation stack outputs. */
 export async function listStackOutputs(region: string, stackName: string): Promise<StackOutputEntry[]> {
   const stack = await describeStack(region, stackName);
   return (stack.Outputs ?? [])
@@ -74,7 +73,7 @@ const REQUIRED_CONFIGURE_OUTPUT_KEYS = ['ApiUrl', 'UserPoolId', 'AppClientId'] a
 
 /**
  * Resolve configure fields from stack outputs.
- * Returns null when any required output is missing (used by operator pre-configure flows).
+ * Returns null when any required output is missing.
  */
 export async function resolveConfigureBundleFromStack(
   region: string,
@@ -91,8 +90,6 @@ export async function resolveConfigureBundleFromStack(
   }
   return {
     api_url: apiUrl,
-    // Optional: only present once the registry (#246) is deployed. `bgagent
-    // registry` commands require it; other commands don't.
     ...(registryApiUrl ? { registry_api_url: registryApiUrl } : {}),
     region,
     user_pool_id: userPoolId,
@@ -122,8 +119,6 @@ export async function fetchConfigureBundleFromStack(
  * Read several CloudFormation stack outputs with one DescribeStacks call.
  *
  * The result is keyed by output name, with null for an output the stack does not have.
- * A command that needs more than one output asks for them together: one
- * {@link getStackOutput} per key describes the whole stack once per key.
  */
 export async function getStackOutputs<K extends string>(
   region: string,
@@ -136,7 +131,6 @@ export async function getStackOutputs<K extends string>(
   )) as Record<K, string | null>;
 }
 
-/** Read a single CloudFormation stack output by key. */
 export async function getStackOutput(
   region: string,
   stackName: string,
@@ -149,10 +143,8 @@ export async function getStackOutput(
 /**
  * Read a single stack output: null when the stack has no such output, or does not exist.
  *
- * Where {@link getStackOutput} fails on a missing stack, this takes it as an answer: the
- * integration commands also run before the stack, or the part of it they ask about, is
- * deployed. Any other failure (credentials, permissions, region) is rethrown as the SDK
- * raised it, so that it cannot pass for "not deployed".
+ * Any other failure (credentials, permissions, region) is rethrown as the SDK
+ * raised it.
  */
 export async function findStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
@@ -164,8 +156,9 @@ export async function findStackOutput(region: string, stackName: string, outputK
   } catch (err) {
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
+    // CloudFormation reports a missing stack as a `ValidationError`: "Stack with id … does not exist".
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
+      return null;
     }
     throw err;
   }

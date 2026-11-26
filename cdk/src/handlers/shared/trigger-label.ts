@@ -17,16 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Trigger-label helpers.
- *
- * A project's ``label_filter`` (default ``bgagent``) names the Linear label that
- * starts a task. Kept pure — no I/O, no Linear or AWS types — so the label
- * decision is unit-testable on its own; the webhook processor does the I/O of
- * resolving the filter from the project mapping.
- */
-
-/** Normalise a label name for comparison: trim + lower-case. */
 function norm(name: string | undefined | null): string {
   return (name ?? '').trim().toLowerCase();
 }

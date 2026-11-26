@@ -17,11 +17,7 @@
  *  SOFTWARE.
  */
 
-// The repository of a task and the repository of a deployment are one repository
-// in any letter case: GitHub answers to every spelling of a name and reports its
-// own, a task has the spelling of its blueprint. The screenshot processor
-// compares them that way before it hands a task on; these tests hold the two
-// comparisons of the Jira delivery to the same rule.
+// GitHub answers to every letter case of a repository name and reports its own spelling.
 
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { deliverJiraDeploymentPreview } from '../../../src/handlers/shared/jira-deployment-preview';
@@ -40,7 +36,6 @@ jest.mock('../../../src/handlers/shared/jira-iteration-comment', () => ({
 const post = jest.mocked(postIssueCommentAdf);
 const iteration = jest.mocked(updateJiraIterationComment);
 
-/** The task that opened the pull request, with the repository as `repo` spells it. */
 const taskOf = (repo: string): TaskRecord => ({
   task_id: 'original',
   user_id: 'user-1',
@@ -54,7 +49,6 @@ const taskOf = (repo: string): TaskRecord => ({
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 });
-/** A later task on the same Jira issue, started by a comment: it pushed the commit `deployed`. */
 const iterationOf = (repo: string): TaskRecord => ({
   ...taskOf(repo),
   task_id: 'iteration',
@@ -62,7 +56,6 @@ const iterationOf = (repo: string): TaskRecord => ({
   channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'ENG-42', trigger_comment_id: 'trigger', iteration_reply_comment_id: '200' },
 });
 
-/** The tasks of the Jira issue, as its index lists them and as the table holds them. */
 let onTheIssue: TaskRecord[];
 const send = jest.fn(async (command: unknown) => {
   if (command instanceof QueryCommand) return { Items: onTheIssue };
@@ -73,7 +66,6 @@ const send = jest.fn(async (command: unknown) => {
 const ddb = { send } as unknown as DynamoDBDocumentClient;
 const updates = () => send.mock.calls.filter(([command]) => command instanceof UpdateCommand);
 
-/** The deployment of commit `sha` of the repository that GitHub reports as `owner/repo`. */
 const deliver = (task: TaskRecord, sha: string) => deliverJiraDeploymentPreview(
   ddb, 'tasks', 'registry', task, 'owner/repo', sha, 'https://cdn.example.com/shot.png', 'https://preview.example.com', () => 30_000,
 );

@@ -17,18 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Per-user concurrency seats against the AWS Emulator (ADR-013 Tier 2a).
- *
- * A seat is one unit of `active_count` in UserConcurrencyTable: admission takes
- * it with a conditional increment and finalization gives it back. The durable
- * `orchestrate-task` entry point needs the Lambda durable-execution service, so
- * these tests call the functions its steps call (`shared/orchestrator.ts`), plus
- * the real `create-task`, `get-task` and `reconcile-concurrency` handlers.
- *
- * Runs only through `jest.emulator.config.js` (see ./harness).
- */
-
 import { randomUUID } from 'node:crypto';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
@@ -38,8 +26,6 @@ import { UserConcurrencyTable } from '../../src/constructs/user-concurrency-tabl
 
 const MAX_SEATS = 3;
 
-// Handlers read their configuration at module load, so the environment is set
-// before any handler is imported. Names are unique to this file's run.
 const run = randomUUID().slice(0, 8);
 process.env.TASK_TABLE_NAME = `emu-${run}-tasks`;
 process.env.TASK_EVENTS_TABLE_NAME = `emu-${run}-events`;
@@ -56,17 +42,14 @@ import { apiEvent, emulatorTables } from './harness';
 
 const ddb = makeDocClient();
 
-/** A user no other test has written for, so tests need no cleanup between them. */
 const newUser = (): string => `user-${randomUUID()}`;
 
-/** Submit a repo-less task through the real create-task handler and load its record. */
 async function submitted(userId: string): Promise<TaskRecord> {
   const result = await createTask(apiEvent(userId, { httpMethod: 'POST', body: JSON.stringify({ task_description: 'Summarize the open issues' }) }));
   expect(result.statusCode).toBe(201);
   return loadTask(JSON.parse(result.body).data.task_id);
 }
 
-/** Take a submitted task as far as RUNNING the way the orchestrator's steps do: admit, hydrate, start. */
 async function running(userId: string): Promise<string> {
   const task = await submitted(userId);
   expect(await admissionControl(task)).toBe(true);
@@ -75,13 +58,11 @@ async function running(userId: string): Promise<string> {
   return task.task_id;
 }
 
-/** The agent's terminal write: RUNNING to COMPLETED. */
 async function complete(taskId: string): Promise<void> {
   await transitionTask(taskId, TaskStatus.RUNNING, TaskStatus.FINALIZING);
   await transitionTask(taskId, TaskStatus.FINALIZING, TaskStatus.COMPLETED);
 }
 
-/** Seats the user holds according to UserConcurrencyTable. */
 async function seats(userId: string): Promise<number> {
   const { Item } = await ddb.send(new GetCommand({
     TableName: process.env.USER_CONCURRENCY_TABLE_NAME,
@@ -109,7 +90,6 @@ describe('concurrency seats against the AWS Emulator', () => {
     expect(admitted.filter(Boolean)).toHaveLength(MAX_SEATS);
     expect(await seats(user)).toBe(MAX_SEATS);
 
-    // The orchestrator parks a task that lost admission; GET then ranks it among the user's queued tasks.
     const losers = tasks.filter((_, i) => !admitted[i]);
     for (const task of losers) expect(await queueTask(task)).toBe(true);
     const positions: number[] = [];
@@ -137,7 +117,6 @@ describe('concurrency seats against the AWS Emulator', () => {
   test('the concurrency reconciler repairs a leaked seat from the real index', async () => {
     const user = newUser();
     await running(user);
-    // A seat with no live task behind it, as a finalize step that never ran leaves.
     expect(await admissionControl({ user_id: user } as TaskRecord)).toBe(true);
     expect(await seats(user)).toBe(2);
 
@@ -146,12 +125,6 @@ describe('concurrency seats against the AWS Emulator', () => {
     expect(await seats(user)).toBe(1);
   });
 
-  // KNOWN FAILURES: executable witnesses for two seat defects on main, reproduced
-  // here with real conditional writes rather than mocked `send` calls. Kept as
-  // `test.failing` so the suite stays green and flags the day the fix lands (open
-  // PR #1009 addresses both). Each was run once as a plain `test` to confirm it
-  // fails on its last assertion and not on setup; the passing tests above cover
-  // the same setup.
   test.failing('#1003: a replayed finalize step does not release a second seat', async () => {
     const user = newUser();
     const done = await running(user);
@@ -165,14 +138,9 @@ describe('concurrency seats against the AWS Emulator', () => {
     expect(await seats(user)).toBe(1);
   });
 
-  // No issue reports this one: reconcile-concurrency counts four hard-coded
-  // statuses, while the design and ACTIVE_STATUSES say a task awaiting approval
-  // holds its seat.
   test.failing('the concurrency reconciler keeps the seat of a task awaiting approval', async () => {
     const user = newUser();
     const paused = await running(user);
-    // The Python agent is the only writer of this status; this writes the status
-    // attributes its approval-request transition writes.
     await ddb.send(new UpdateCommand({
       TableName: process.env.TASK_TABLE_NAME,
       Key: { task_id: paused },

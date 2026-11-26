@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for TaskEventsTable construct.
- */
 export interface TaskEventsTableProps {
   /**
    * Optional table name override.
@@ -53,9 +50,6 @@ export interface TaskEventsTableProps {
  * ULIDs provide chronological sort order within each task.
  */
 export class TaskEventsTable extends Construct {
-  /**
-   * The underlying DynamoDB table. Use this to grant access or read the table name.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: TaskEventsTableProps = {}) {
@@ -76,21 +70,8 @@ export class TaskEventsTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
-      // DynamoDB Streams feed the Phase 1b fan-out plane (Slack, GitHub comments,
-      // email) via a Lambda subscriber. NEW_IMAGE is sufficient — consumers only
-      // need the event payload, not old/new diffs. Enabling Streams on an existing
-      // table is an in-place CloudFormation update (no table replacement).
-      //
-      // CONSUMER BUDGET (Chunk 8 architectural note): this stream currently
-      // has TWO consumers: `FanOutConsumer` (Slack / GitHub / email dispatch)
-      // and `ApprovalMetricsPublisherConsumer` (Cedar-HITL EMF emission for
-      // the CloudWatch dashboard widgets in §11.3). DynamoDB Streams are
-      // designed for up to 2 concurrent consumers per shard before throughput
-      // degrades. Any future third consumer should migrate this table to
-      // **Kinesis Data Streams for DynamoDB** (opt-in, different API) rather
-      // than stacking a third `DynamoEventSource` on the legacy Streams
-      // interface. Adding a third Lambda here without that migration will
-      // silently degrade fanout + metrics latency for the whole stack.
+      // DynamoDB Streams throttles a shard that more than two consumers read, and this
+      // stream has two. A third needs Kinesis Data Streams for DynamoDB.
       stream: dynamodb.StreamViewType.NEW_IMAGE,
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });

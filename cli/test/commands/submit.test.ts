@@ -27,7 +27,6 @@ import { abortableSleep } from '../../src/retry';
 import { Attachment } from '../../src/types';
 
 jest.mock('../../src/api-client');
-// The pauses between two reads of a task whose uploads are being confirmed: over at once.
 jest.mock('../../src/retry', () => ({
   ...jest.requireActual('../../src/retry'),
   abortableSleep: jest.fn(() => Promise.resolve()),
@@ -212,9 +211,6 @@ describe('submit command', () => {
   });
 
   test('errors when --repo is omitted without --workflow', async () => {
-    // #248 LOW: --repo is no longer a hard requiredOption (repo-less workflows
-    // need to be submittable), but it stays mandatory unless --workflow selects
-    // a workflow the server can admit repo-less.
     const cmd = makeSubmitCommand();
     await expect(
       cmd.parseAsync([
@@ -266,7 +262,6 @@ describe('submit command', () => {
       '--task', 'Research the tradeoffs',
     ]);
 
-    // No ``repo`` key in the body — the server admits it as repo-less.
     expect(mockCreateTask).toHaveBeenCalledWith(
       { workflow_ref: 'knowledge/web-research-v1', task_description: 'Research the tradeoffs' },
       undefined,
@@ -379,8 +374,6 @@ describe('submit command', () => {
   });
 
   test('--trace is opt-in — absent flag omits the field entirely (not false)', async () => {
-    // Keeping the wire payload slim: omit rather than send ``trace:
-    // false`` so the server's default-false branch is the common path.
     mockCreateTask.mockResolvedValue({ task_id: 't-normal', status: 'SUBMITTED' });
 
     const cmd = makeSubmitCommand();
@@ -460,7 +453,6 @@ describe('submit command', () => {
       await makeSubmitCommand().parseAsync(['node', 'test', '--repo', 'owner/repo', '--task', 'ok']);
       expect(mockCreateTask.mock.calls[0][0]).not.toHaveProperty('microvm_sleep_after_s');
     });
-    // --approval-timeout ------------------------------------------------------
 
     test('forwards --approval-timeout as approval_timeout_s', async () => {
       mockCreateTask.mockResolvedValue({ task_id: 't-at', status: 'SUBMITTED' });
@@ -534,8 +526,6 @@ describe('submit command', () => {
       expect(mockCreateTask).not.toHaveBeenCalled();
     });
 
-    // --pre-approve (repeatable) ---------------------------------------------
-
     test('--pre-approve accepts short-form scope', async () => {
       mockCreateTask.mockResolvedValue({ task_id: 't-pa', status: 'SUBMITTED' });
       const cmd = makeSubmitCommand();
@@ -552,7 +542,6 @@ describe('submit command', () => {
     test.each(['this_call', 'tool_type_session', 'tool_group_session'])(
       '--pre-approve rejects %s, which stands for a call that is waiting for approval',
       async (scope) => {
-        // The agent cannot start a task with one of these as a pre-approval.
         mockCreateTask.mockResolvedValue({ task_id: 't-pa', status: 'SUBMITTED' });
         const cmd = makeSubmitCommand();
         cmd.exitOverride();
@@ -609,10 +598,6 @@ describe('submit command', () => {
     });
 
     test('--pre-approve rejects empty prefix body', async () => {
-      // ``rule:`` alone has a prefix match but no scope body — the CLI
-      // needs to reject rather than silently forward a placeholder to
-      // the server (which would also reject, just with an extra round
-      // trip).
       const cmd = makeSubmitCommand();
       cmd.exitOverride();
       await expect(
@@ -661,7 +646,6 @@ describe('submit command', () => {
     let dir: string;
 
     beforeEach(() => {
-      // What the command takes for the working directory: an attachment has to be inside it.
       dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-submit-'));
       cwdSpy = jest.spyOn(process, 'cwd').mockReturnValue(dir);
       stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -684,7 +668,6 @@ describe('submit command', () => {
       ...files.flatMap(file => ['--attachment', path.join(dir, file)]),
     ]);
 
-    /** What the API answers when it waits for the upload of each of these files: the task lists their attachments. */
     const pendingUploads = (...filenames: string[]) => ({
       task_id: 'task-1',
       status: 'PENDING_UPLOADS',
@@ -705,13 +688,11 @@ describe('submit command', () => {
       })),
     });
 
-    /** The first byte of each file that was posted to storage, in the order of the uploads. */
     const uploadedFiles = () => Promise.all(jest.mocked(global.fetch).mock.calls.map(async ([, init]) => {
       const file = (init?.body as FormData).get('file') as Blob;
       return new Uint8Array(await file.arrayBuffer())[0];
     }));
 
-    // The API takes PNG and JPEG images only: validateAttachments answers 400 for the other two.
     test.each(['.gif', '.webp'])('refuses a %s file before anything is sent', async (ext) => {
       fs.writeFileSync(path.join(dir, `diagram${ext}`), 'x');
 
@@ -722,8 +703,6 @@ describe('submit command', () => {
     });
 
     test('sends at most 3 MB of files inline and uploads the ones beyond it', async () => {
-      // Seven files of 450 KB: each is small enough to go inline, together they are 3.08 MB,
-      // and the API refuses a request that carries more than 3 MB of inline data.
       const names = [1, 2, 3, 4, 5, 6, 7].map(n => `shot-${n}.png`);
       for (const name of names) fs.writeFileSync(path.join(dir, name), Buffer.alloc(450 * 1024));
       mockCreateTask.mockResolvedValue(pendingUploads('shot-7.png'));
@@ -739,14 +718,11 @@ describe('submit command', () => {
     });
 
     test('uploads the right file for each upload when files have the same name', async () => {
-      // "shot.png" in three folders: the first is small and goes inline, the other two are over
-      // the 500 KB inline limit, so the API answers with two uploads of "shot.png".
       for (const [folder, size, content] of [['first', 10, 1], ['second', 600 * 1024, 2], ['third', 600 * 1024, 3]] as const) {
         fs.mkdirSync(path.join(dir, folder));
         fs.writeFileSync(path.join(dir, folder, 'shot.png'), Buffer.alloc(size, content));
       }
       const answer = pendingUploads('shot.png', 'shot.png');
-      // The task lists the attachment of the inline file first, as screened already.
       const inline = { ...answer.attachments[0], attachment_id: 'att-inline', size_bytes: 10, screening_status: 'passed' };
       mockCreateTask.mockResolvedValue({ ...answer, attachments: [inline, ...answer.attachments] });
 
@@ -756,9 +732,6 @@ describe('submit command', () => {
     });
 
     test('uploads each file for its own attachment when the same command is sent again', async () => {
-      // before/shot.png and after/shot.png are both over the inline limit. A confirmation that ran
-      // out of time has screened the first. The command sent again with its Idempotency-Key is
-      // answered with the task and one instruction: for the upload that is still missing.
       for (const [folder, content] of [['before', 1], ['after', 2]] as const) {
         fs.mkdirSync(path.join(dir, folder));
         fs.writeFileSync(path.join(dir, folder, 'shot.png'), Buffer.alloc(600 * 1024, content));
@@ -786,8 +759,6 @@ describe('submit command', () => {
     });
 
     test('uploads nothing when the answer does not list the attachment an upload is for', async () => {
-      // The API lists the attachments of a task beside its upload instructions. Without the
-      // list nothing says which of two files of one name an instruction is for.
       fs.writeFileSync(path.join(dir, 'diagram.png'), Buffer.alloc(600 * 1024));
       mockCreateTask.mockResolvedValue({ ...pendingUploads('diagram.png'), attachments: null });
 
@@ -804,8 +775,7 @@ describe('submit command', () => {
         'Upload timed out for diagram.png after 120s.',
       ],
       [
-        // What fetch rejects with when its signal fires: a DOMException, which is not an
-        // Error of the realm Jest runs this file in.
+        // fetch rejects an aborted request with a DOMException, which is not an `Error` of the realm Jest runs tests in.
         'as a timeout when fetch rejects with its own abort error',
         new DOMException('This operation was aborted', 'AbortError'),
         'Upload timed out for diagram.png after 120s.',
@@ -830,7 +800,6 @@ describe('submit command', () => {
     let argv: string[];
 
     beforeEach(() => {
-      // A file over the 500 KB inline limit, inside what the command takes for the working directory.
       dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-submit-'));
       fs.writeFileSync(path.join(dir, 'diagram.png'), Buffer.alloc(600 * 1024));
       cwdSpy = jest.spyOn(process, 'cwd').mockReturnValue(dir);
@@ -874,7 +843,6 @@ describe('submit command', () => {
     // API Gateway ends the request after 29 s; the confirmation runs on behind it.
     const gatewayTimeout = () => new ApiError(504, 'HTTP_ERROR', 'HTTP 504: Gateway Timeout', '');
     const stillPending = { task_id: 'task-1', status: 'PENDING_UPLOADS' };
-    // What a confirmation is answered for a task that has ended.
     const refused = (status: string) => new ApiError(
       409, 'UPLOADS_NOT_PENDING', `Task is in status '${status}' and cannot accept upload confirmations. (UPLOADS_NOT_PENDING)`, 'req-2',
     );
@@ -892,13 +860,11 @@ describe('submit command', () => {
       expect(mockGetTask).toHaveBeenCalledTimes(3);
       expect(abortableSleep).toHaveBeenCalledTimes(3);
       expect(abortableSleep).toHaveBeenCalledWith(5_000);
-      // The task that was read is the answer: no second confirmation.
       expect(mockConfirmUploads).toHaveBeenCalledTimes(1);
       expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(running, null, 2));
     });
 
     test('prints a task that has completed by the time it is read', async () => {
-      // Reads that failed for a while, or a laptop that slept: the task ran to its end meanwhile.
       const completed = { task_id: 'task-1', status: 'COMPLETED', error_message: null };
       mockConfirmUploads.mockRejectedValueOnce(gatewayTimeout()).mockRejectedValue(refused('COMPLETED'));
       mockGetTask.mockResolvedValue(completed);
@@ -925,13 +891,11 @@ describe('submit command', () => {
 
       await makeSubmitCommand().parseAsync(argv);
 
-      // 33 reads 5 s apart are 165 s: a confirmation runs for 180 s at most, and 29 s had passed.
       expect(mockGetTask).toHaveBeenCalledTimes(33);
       expect(mockConfirmUploads).toHaveBeenCalledTimes(2);
       expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(submitted, null, 2));
     });
 
-    // A read that fails for a moment says nothing about the confirmation, which runs on.
     test.each([
       ['is answered 502', new ApiError(502, 'HTTP_ERROR', 'HTTP 502: Bad Gateway', '')],
       ['loses its connection', new TypeError('fetch failed')],

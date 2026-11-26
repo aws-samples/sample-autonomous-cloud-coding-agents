@@ -19,7 +19,6 @@
 
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 const mockAgentCoreSend = jest.fn();
 const mockEcsSend = jest.fn();
@@ -121,11 +120,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockAgentCoreSend.mockResolvedValue({});
   mockEcsSend.mockResolvedValue({});
-  // Default: GetCommand returns running task, UpdateCommand + PutCommand succeed
   mockSend
-    .mockResolvedValueOnce({ Item: RUNNING_TASK }) // GetCommand
-    .mockResolvedValueOnce({}) // UpdateCommand
-    .mockResolvedValueOnce({}); // PutCommand (event)
+    .mockResolvedValueOnce({ Item: RUNNING_TASK })
+    .mockResolvedValueOnce({})
+    .mockResolvedValueOnce({});
 });
 
 describe('cancel-task handler', () => {
@@ -147,7 +145,6 @@ describe('cancel-task handler', () => {
     expect(body.data.status).toBe('CANCELLED');
     expect(body.data.cancelled_at).toBeDefined();
 
-    // 2 DynamoDB calls: Get + one transaction (CANCELLED transition + task_cancelled event)
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockSend.mock.calls[1][0]._type).toBe('TransactWrite');
   });
@@ -213,7 +210,6 @@ describe('cancel-task handler', () => {
 
     expect(result.statusCode).toBe(409);
     expect(JSON.parse(result.body).error.code).toBe('TASK_ALREADY_TERMINAL');
-    // The event rides the same transaction, so losing the race writes nothing.
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
     expect(mockEcsSend).not.toHaveBeenCalled();
@@ -261,7 +257,6 @@ describe('cancel-task handler', () => {
 
     expect(result.statusCode).toBe(200);
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
-    // Every attempt carries the same event id, so a retry cannot write two events.
     const eventIds = mockSend.mock.calls.slice(1).map((c) => c[0].input.TransactItems[1].Put.Item.event_id);
     expect(eventIds).toHaveLength(3);
     expect(new Set(eventIds).size).toBe(1);
@@ -388,7 +383,6 @@ describe('cancel-task handler', () => {
     const cmd = mockEcsSend.mock.calls[0][0];
     expect(cmd.input.cluster).toBe('arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster');
     expect(cmd.input.task).toBe('arn:aws:ecs:us-east-1:123456789012:task/abc123');
-    // AgentCore should NOT have been called
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
   });
 
@@ -414,10 +408,6 @@ describe('cancel-task handler', () => {
 
   test.each(['HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'])('terminates only the MicroVM session when cancelling %s', async (status) => {
     mockSend.mockReset();
-    // NOTE: RUNNING_TASK carries `agent_runtime_arn`, and RUNTIME_ARN is also set
-    // in this suite's env — exactly the mixed-deployment shape that would send a
-    // MicroVM task down the AgentCore branch if the microvm check did not come
-    // first. This test is the regression guard for that branch ordering.
     const microvmTask = {
       ...RUNNING_TASK,
       status,
@@ -438,7 +428,6 @@ describe('cancel-task handler', () => {
     expect(mockMicrovmSend).toHaveBeenCalledTimes(1);
     const cmd = mockMicrovmSend.mock.calls[0][0];
     expect(cmd._type).toBe('TerminateMicrovm');
-    // The SDK request key is `microvmIdentifier`, not `microvmId`.
     expect(cmd.input).toEqual({ microvmIdentifier: 'mvm-0123456789abcdef' });
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
     expect(mockEcsSend).not.toHaveBeenCalled();
@@ -455,7 +444,6 @@ describe('cancel-task handler', () => {
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(200);
     expect(mockMicrovmSend).not.toHaveBeenCalled();
-    // Must NOT silently fall through to stopping an unrelated AgentCore runtime.
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
   });
 
@@ -493,7 +481,6 @@ describe('cancel-task handler', () => {
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(200);
     expect(mockEcsSend).not.toHaveBeenCalled();
-    // Falls back to AgentCore because RUNTIME_ARN env var is set
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
   });
 

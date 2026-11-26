@@ -24,7 +24,6 @@ import sharedConstants from '../../../../../contracts/constants.json';
 
 export const MICROVM_LIFECYCLE_PROTOCOL = String(sharedConstants.microvm_lifecycle.protocol_version);
 export const MICROVM_IMAGE_PROTOCOL_ENV = sharedConstants.microvm_lifecycle.image_protocol_env;
-// Optional discovery/enrichment must not hold up an already registered worker.
 export const MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS = 3_000;
 const MAX_IMAGE_IDENTITY_LENGTH = 2048;
 

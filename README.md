@@ -30,43 +30,43 @@ https://github.com/user-attachments/assets/7d7356fa-f9f6-43c4-a618-94b5aa4f3f16
 
 ## What is ABCA
 
-**ABCA (Autonomous Background Coding Agents on AWS)** is a sample of what a self-hosted background coding agents platform might look like on AWS. You submit a coding task (via Slack, Linear, Jira, CLI, or webhook), walk away, and come back to a ready-to-review PR. The agent clones the repo, writes code, runs tests, and opens the PR autonomously in an isolated cloud environment. No babysitting, no IDE sessions, no back-and-forth.
+**ABCA (Autonomous Background Coding Agents on AWS)** is a sample of a self-hosted platform for background coding agents on AWS. You submit a coding task through Slack, Linear, Jira, the CLI, or a webhook, leave it, and return to a PR that is ready for review. The agent clones the repo, writes code, runs tests, and opens the PR autonomously in an isolated cloud environment. The task needs no supervision, no IDE session, and no conversation while it runs.
 
 ## Why it matters
 
-- **Reclaim engineer time** — routine work runs in the background while humans focus on design and decisions
-- **Faster cycle time** — tasks execute 24/7, no queue behind a human's calendar
-- **Consistent quality** — every run includes lint, tests, and policy checks by default
-- **Learns over time** — memory records task outcomes and per-repo learnings and feeds them into future runs
-- **Cost-controlled** — per-task budgets, concurrency limits, and Cedar policy enforcement built in
+- **Reclaim engineer time.** Routine work runs in the background while engineers work on design and decisions.
+- **Faster cycle time.** Tasks run 24/7 and do not wait for a person to be available.
+- **Consistent quality.** Every run includes lint, tests, and policy checks by default.
+- **Learns over time.** Memory records task outcomes and per-repo learnings and feeds them into future runs.
+- **Cost-controlled.** Per-task budgets, concurrency limits, and Cedar policy enforcement are built in.
 
 ## The Use Case
 
-Users submit tasks through webhooks, CLI, Slack, Linear, or Jira. For each task, the orchestrator runs a **workflow**: an isolated environment is provisioned, an agent clones the target GitHub repository and works on the task. Depending on the workflow, the agent opens a new pull request (`coding/new-task-v1`), iterates on an existing PR to address review feedback (`coding/pr-iteration-v1`), or posts a read-only review on a PR (`coding/pr-review-v1`).
+Users submit tasks through webhooks, CLI, Slack, Linear, or Jira. For each task, the orchestrator runs a **workflow**. An isolated environment is provisioned, and an agent clones the target GitHub repository and works on the task. Depending on the workflow, the agent opens a new pull request (`coding/new-task-v1`), iterates on an existing PR to address review feedback (`coding/pr-iteration-v1`), or posts a read-only review on a PR (`coding/pr-review-v1`).
 
 Key characteristics:
 
-- **Ephemeral environments** — each task starts fresh, no in-process state carries over
-- **Asynchronous** — no real-time conversation during execution
-- **Repository-scoped** — coding tasks target a specific repo (some workflows, such as `knowledge/web-research-v1`, run without one)
-- **Outcome-measurable** — the PR is either merged, revised, or rejected
-- **Fire and forget** — submit, forget, review the outcome
+- **Ephemeral environments.** Each task starts fresh. No in-process state carries over.
+- **Asynchronous.** There is no real-time conversation during execution.
+- **Repository-scoped.** Coding tasks target a specific repo. Some workflows, such as `knowledge/web-research-v1`, run without one.
+- **Outcome-measurable.** The PR is merged, revised, or rejected.
+- **Fire and forget.** Submit the task and review the outcome later.
 
 ## How it works
 
-Each task follows a **workflow** — a declarative definition (see [`agent/workflows/`](./agent/workflows/) and [WORKFLOWS.md](./docs/design/WORKFLOWS.md)) that mixes deterministic steps (no LLM, predictable, cheap) with agentic steps (LLM-driven, flexible, expensive). Per-repo settings such as compute, model, and turn limits come from the repository's Blueprint configuration.
+Each task follows a **workflow**. A workflow is a declarative definition (see [`agent/workflows/`](./agent/workflows/) and [WORKFLOWS.md](./docs/design/WORKFLOWS.md)) that mixes deterministic steps (no LLM, predictable, cheap) with agentic steps (LLM-driven, flexible, expensive). Per-repo settings such as compute, model, and turn limits come from the repository's Blueprint configuration.
 
-1. **Admission** — the orchestrator validates the request, checks concurrency limits, and queues the task if needed.
-2. **Context hydration** — the platform gathers context: task description, GitHub issue or PR review context, and memory from past tasks on the same repo. The agent also loads the repository's `CLAUDE.md` instructions.
-3. **Pre-flight** — fail-closed readiness checks verify GitHub API reachability and repository access before consuming compute. Doomed tasks fail fast with a clear reason (`GITHUB_UNREACHABLE`, `REPO_NOT_FOUND_OR_NO_ACCESS`) instead of burning runtime.
-4. **Agent execution** — the agent runs in an isolated MicroVM with persistent session storage for select caches: clones the repo, creates a branch, edits code, commits, runs tests and lint. The orchestrator polls for completion without blocking compute.
-5. **Finalization** — build and lint results are verified and reported in the PR body (a failing build marks the task `FAILED`), the task outcome and learnings are written to memory, and the orchestrator infers the result (PR or commits found) and updates task status.
+1. **Admission.** The orchestrator validates the request, checks concurrency limits, and queues the task if needed.
+2. **Context hydration.** The platform gathers context: task description, GitHub issue or PR review context, and memory from past tasks on the same repo. The agent also loads the repository's `CLAUDE.md` instructions.
+3. **Pre-flight.** Fail-closed readiness checks verify GitHub API reachability and repository access before the task consumes compute. A task that cannot succeed fails early with a clear reason (`GITHUB_UNREACHABLE`, `REPO_NOT_FOUND_OR_NO_ACCESS`) instead of using runtime.
+4. **Agent execution.** The agent runs in an isolated MicroVM with persistent session storage for select caches. It clones the repo, creates a branch, edits code, commits, and runs tests and lint. The orchestrator polls for completion without blocking compute.
+5. **Finalization.** Build and lint results are verified and reported in the PR body. A failing build marks the task `FAILED`. The task outcome and learnings are written to memory. The orchestrator infers the result (PR or commits found) and updates the task status.
 
 Beyond single tasks:
 
-- **Sub-issue orchestration** — a Linear parent issue or Jira ticket with sub-issues runs as a dependency graph, releasing each child task in order.
-- **Operator console** — an optional web console ([`web/`](./web/README.md)) shows running tasks, stuck tasks, and pending approvals.
-- **Agent Registry** — versioned MCP servers, Cedar policy modules, and skills that tasks can load at runtime ([REGISTRY.md](./docs/design/REGISTRY.md)).
+- **Sub-issue orchestration.** A Linear parent issue or Jira ticket with sub-issues runs as a dependency graph that releases each child task in order.
+- **Operator console.** An optional web console ([`web/`](./web/README.md)) shows running tasks, stuck tasks, and pending approvals.
+- **Agent Registry.** Versioned MCP servers, Cedar policy modules, and skills that tasks can load at runtime ([REGISTRY.md](./docs/design/REGISTRY.md)).
 
 For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
@@ -74,7 +74,7 @@ For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
 See the note above for maintenance status and the planned transition to V2.
 
-See [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) for planned work; use priority labels (`P0`, `P1`, etc.) to indicate urgency.
+See [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) for planned work. Use priority labels such as `P0` and `P1` to indicate urgency.
 
 ## Getting started
 
@@ -90,13 +90,13 @@ cd sample-autonomous-cloud-coding-agents
 claude --plugin-dir docs/abca-plugin
 ```
 
-The `--plugin-dir` flag tells Claude Code to load the local plugin from the `docs/abca-plugin/` directory. The plugin's skills, commands, agents, and hooks will be available immediately.
+The `--plugin-dir` flag tells Claude Code to load the local plugin from the `docs/abca-plugin/` directory. The plugin's skills, commands, agents, and hooks are available immediately.
 
-> **Tip:** If you use Claude Code via VS Code or JetBrains, you can add `--plugin-dir docs/abca-plugin` to the extension's CLI arguments setting.
+> **Tip.** If you use Claude Code through VS Code or JetBrains, add `--plugin-dir docs/abca-plugin` to the extension's CLI arguments setting.
 
 #### What the plugin provides
 
-**Skills** (guided multi-step workflows — Claude activates these automatically based on your request):
+**Skills** are guided multi-step workflows. Claude activates them automatically based on your request:
 
 | Skill | Triggers on | What it does |
 |-------|------------|--------------|
@@ -107,7 +107,7 @@ The `--plugin-dir` flag tells Claude Code to load the local plugin from the `doc
 | `troubleshoot` | "debug", "error", "not working", "failed" | Diagnose deployment, auth, or task execution issues |
 | `status` | "status", "health check", "is ABCA running" | Platform health check: stack status, running tasks, build health |
 
-**Agents** (specialized subagents, spawned automatically or via the Agent tool):
+**Agents** are specialized subagents, spawned automatically or through the Agent tool:
 
 | Agent | When it's used |
 |-------|---------------|
@@ -116,11 +116,11 @@ The `--plugin-dir` flag tells Claude Code to load the local plugin from the `doc
 
 **Hook** (runs automatically):
 
-A `SessionStart` hook advertises available skills and agents so Claude can proactively suggest them when your request matches.
+A `SessionStart` hook advertises the available skills and agents so that Claude can suggest them when your request matches.
 
 #### Local plugin development
 
-If you're modifying the plugin itself, here's the file layout:
+If you modify the plugin itself, this is the file layout:
 
 ```
 docs/abca-plugin/
@@ -145,7 +145,7 @@ docs/abca-plugin/
 - Agents are flat `.md` files with YAML frontmatter
 - The hook advertises plugin capabilities only (no project-specific content)
 
-**After editing plugin files**, restart Claude Code with `claude --plugin-dir docs/abca-plugin` to pick up changes.
+After you edit plugin files, restart Claude Code with `claude --plugin-dir docs/abca-plugin` to pick up the changes.
 
 ### Manual installation and deployment
 
@@ -156,11 +156,11 @@ Then, follow the [User Guide](./docs/guides/USER_GUIDE.md) to learn how to use t
 
 ## Documentation
 
-A documentation site is available containing design documents and guides to deploy and use the platform. You can access it [here](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/).
+The [documentation site](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/) contains design documents and guides to deploy and use the platform.
 
 ## Known issues
 
-Deployment, upgrade and teardown issues, with their workarounds, are listed under [Known deployment issues](./docs/guides/DEPLOYMENT_GUIDE.md#known-deployment-issues) in the deployment guide. In particular, deleting a stack can stop in `DELETE_FAILED` for hours while AgentCore releases its network interfaces: see [Teardown blocked by AgentCore network interfaces](./docs/guides/DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentcore-network-interfaces).
+Deployment, upgrade and teardown issues, with their workarounds, are listed under [Known deployment issues](./docs/guides/DEPLOYMENT_GUIDE.md#known-deployment-issues) in the deployment guide. In particular, deleting a stack can stop in `DELETE_FAILED` for hours while AgentCore releases its network interfaces. See [Teardown blocked by AgentCore network interfaces](./docs/guides/DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentcore-network-interfaces).
 
 ## Disclaimer
 

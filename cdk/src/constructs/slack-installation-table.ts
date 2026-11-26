@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for SlackInstallationTable construct.
- */
 export interface SlackInstallationTableProps {
   /**
    * Optional table name override.
@@ -52,9 +49,6 @@ export interface SlackInstallationTableProps {
  * Bot tokens are stored in Secrets Manager at `bgagent/slack/{team_id}`.
  */
 export class SlackInstallationTable extends Construct {
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: SlackInstallationTableProps = {}) {

@@ -96,7 +96,6 @@ describe('events command', () => {
     const output = consoleSpy.mock.calls[0][0] as string;
     expect(output).toContain('A');
     expect(output).toContain('B');
-    // No "(More events available)" hint when draining everything.
     expect(consoleSpy.mock.calls.every(c => !String(c[0]).includes('More events available'))).toBe(true);
   });
 
@@ -128,9 +127,6 @@ describe('events command', () => {
   });
 
   test('--all --limit N caps the TOTAL events, not the page size', async () => {
-    // Regression: --limit was once forwarded as the server's per-page size
-    // during the drain, so `--all --limit 2` returned EVERY event in
-    // 2-event pages instead of 2 events total.
     mockGetTaskEvents
       .mockResolvedValueOnce({
         data: [
@@ -144,23 +140,15 @@ describe('events command', () => {
     const cmd = makeEventsCommand();
     await cmd.parseAsync(['node', 'test', 'abc', '--all', '--limit', '2', '--output', 'json']);
 
-    // Limit satisfied by the first page — no second fetch, output truncated.
     expect(mockGetTaskEvents).toHaveBeenCalledTimes(1);
     expect(mockGetTaskEvents).toHaveBeenCalledWith('abc', { nextToken: undefined });
     const parsed = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(parsed.data).toHaveLength(2);
     expect(parsed.data.map((e: { event_id: string }) => e.event_id)).toEqual(['e1', 'e2']);
-    // Regression: the raw last-page cursor was once returned alongside the
-    // sliced events — has_more=true and a next_token pointing PAST the
-    // dropped events, so a script following it silently skipped them. The
-    // cap must emit a terminal cursor.
     expect(parsed.pagination).toEqual({ has_more: false, next_token: null });
   });
 
   test('--all prints a truncation notice in text mode when the page cap trips', async () => {
-    // Every page reports has_more=true, so the drain stops only at the
-    // defensive MAX_PAGES cap (100). Without the notice, a capped drain is
-    // indistinguishable from a complete one in text mode.
     mockGetTaskEvents.mockResolvedValue({
       data: [{ event_id: 'e', event_type: 'A', timestamp: 't', metadata: {} }],
       pagination: { next_token: 'tok-loop', has_more: true },

@@ -3,7 +3,6 @@ name: Security
 on:
   workflow_dispatch: {}
   schedule:
-    # Weekly: Monday 12:00 UTC
     - cron: "0 12 * * 1"
 
 concurrency:
@@ -69,15 +68,6 @@ jobs:
           mise run --continue-on-error security 2>&1 | tee security-log.txt
         continue-on-error: true
 
-      # A scan ignore stops applying on its expiry date. From that day the
-      # finding is reported again: for an osv-scanner.toml entry the required
-      # dependency scan (security-pr.yml) fails on every pull request, for a
-      # .trivyignore entry the image scan fails in this suite and in the
-      # pre-push hook. Warn 21 days ahead. A date that cannot be read is
-      # reported too, and so is an osv-scanner expiry written in a form this
-      # line reader does not follow. ignore-expiry.md is empty when there is
-      # nothing to warn about. cdk/test/scripts/security-workflow.test.ts runs
-      # this step and the report below with bash.
       - name: Warn about scan ignores that expire within 21 days
         id: expiry
         run: |
@@ -137,15 +127,7 @@ jobs:
             echo "No scan ignore expires within 21 days."
           fi
 
-      # One rolling issue instead of a new issue per failing run: comment on the
-      # open issue that has this exact title, or create it. `!cancelled()` so a
-      # failure of the step above cannot suppress the report of a failed suite.
-      # That failure is reported as well: when the expiry check did not finish,
-      # a run that looks clean says nothing about ignores that are about to expire.
-      # Only an issue that this workflow opened is reused: the lookup asks for
-      # `author:app/github-actions`, the account that GITHUB_TOKEN writes as. An
-      # issue with the same title from anyone else is ignored and a new one is
-      # created. Change the qualifier if this step ever writes with another token.
+      # `app/github-actions` is the account that GITHUB_TOKEN writes as.
       - name: Report to the rolling issue
         if: ${{ !cancelled() }}
         env:

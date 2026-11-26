@@ -54,8 +54,6 @@ describe('isLambdaMicrovmRegionSupported', () => {
   });
 
   test('rejects undefined and empty input rather than defaulting to supported', () => {
-    // A missing AWS_REGION must never read as "supported" — the static gate is a
-    // deny-by-default check, and the live probes are what self-heal false denials.
     expect(isLambdaMicrovmRegionSupported(undefined)).toBe(false);
     expect(isLambdaMicrovmRegionSupported('')).toBe(false);
   });

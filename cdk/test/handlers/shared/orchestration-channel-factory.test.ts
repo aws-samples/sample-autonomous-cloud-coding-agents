@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// The adapters resolve tokens on use, not on construction, so the factory can be
-// exercised without any network — only the modules it selects between are stubbed
-// out at the transport layer.
 jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
@@ -44,33 +41,22 @@ describe('channelForSource', () => {
   });
 
   test('an orchestration with no recorded channel is treated as Linear', () => {
-    // Rows seeded before the field existed carry no source, and Linear was the
-    // only surface that could have seeded them — so defaulting keeps their
-    // feedback working rather than silencing it.
     expect(channelForSource(undefined, BOTH)?.kind).toBe('linear');
   });
 
   test('a surface whose registry is not configured yields no adapter', () => {
-    // Skipping is the safe answer: building another surface's adapter would
-    // address the wrong tenant.
     expect(channelForSource('jira', { linear: 'LinearRegistry' })).toBeUndefined();
     expect(channelForSource('linear', { jira: 'JiraRegistry' })).toBeUndefined();
     expect(channelForSource(undefined, {})).toBeUndefined();
   });
 
   test('a trigger channel with no issue-tracking surface yields no adapter', () => {
-    // 'api' / 'slack' submissions have no issue to post a panel on; the engine
-    // must skip rather than guess at a surface.
     for (const source of ['api', 'webhook', 'slack', 'unknown-future-surface']) {
       expect(channelForSource(source, BOTH)).toBeUndefined();
     }
   });
 
   test('a NEW surface can be added without editing this module or the interface', () => {
-    // The extensibility tenet: adopting ABCA for another tracker must not require
-    // patching the core. A closed union/switch would force every consumer to merge
-    // an upstream change for one more surface, so this asserts the registry is
-    // genuinely open — a surface registers itself and the lookup finds it.
     const built: string[] = [];
     const unregister = registerChannelFactory('acme-tracker', (table) => {
       built.push(table);
@@ -79,7 +65,6 @@ describe('channelForSource', () => {
     try {
       const ch = channelForSource('acme-tracker', { 'acme-tracker': 'AcmeRegistry' });
       expect(ch?.kind).toBe('acme-tracker');
-      // The factory got its own credentials table, not another surface's.
       expect(built).toEqual(['AcmeRegistry']);
       expect(registeredChannelSources()).toContain('acme-tracker');
     } finally {
@@ -95,8 +80,6 @@ describe('channelForSource', () => {
   });
 
   test('replacing a registered surface is reversible', () => {
-    // A test (or a downstream override) may swap an adapter; restoring must put
-    // the original back rather than deleting the entry.
     const unregister = registerChannelFactory('linear', () => ({ kind: 'stub-linear' } as unknown as Channel));
     expect(channelForSource('linear', BOTH)?.kind).toBe('stub-linear');
     unregister();
@@ -104,13 +87,10 @@ describe('channelForSource', () => {
   });
 
   test('the returned adapter carries the registry it was given', async () => {
-    // A wrong registry would resolve a token for the wrong tenant, so prove the
-    // per-surface table actually reaches the adapter.
     const linear = channelForSource('linear', BOTH);
     expect(linear?.kind).toBe('linear');
     const jira = channelForSource('jira', BOTH);
     expect(jira?.kind).toBe('jira');
-    // Distinct adapters, not the same object handed back twice.
     expect(linear).not.toBe(jira);
   });
 });

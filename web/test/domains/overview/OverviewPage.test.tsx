@@ -30,12 +30,9 @@ import { server, TEST_API_BASE } from '../../helpers/server';
 describe('OverviewPage', () => {
   it('counts work by state in plain words', async () => {
     renderRoute('/');
-    // RUNNING x3, AWAITING_APPROVAL and HYDRATING are working; one task is queued.
     expect(await screen.findByRole('link', { name: 'Working now: 5' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Waiting to start: 1' })).toBeInTheDocument();
-    // Two running tasks have been quiet for minutes. The one on ECS is not counted: its agent reports once, at its start.
     expect(screen.getByRole('link', { name: 'No updates lately: 1' })).toBeInTheDocument();
-    // The budget failure and the no-changes run are recent; the timeout is older than 24 hours.
     expect(screen.getByRole('link', { name: 'Failed or ran out of time (24h): 2' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Done (24h): 1' })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('link', { name: 'Approval requests: 1' })).toBeInTheDocument());
@@ -47,7 +44,6 @@ describe('OverviewPage', () => {
     const icon = screen.getByRole('button', { name: 'About failed or ran out of time (24h)' });
     expect(screen.getAllByRole('button', { name: /^About / })).toHaveLength(COUNTERS.length);
     expect(link).not.toContainElement(icon);
-    // The longest label wraps in a narrow column: its icon then stays on the line of its last word.
     expect(screen.getAllByText('(24h)').find((word) => word.contains(icon))).toHaveStyle({ whiteSpace: 'nowrap' });
 
     fireEvent.focus(icon);
@@ -59,7 +55,6 @@ describe('OverviewPage', () => {
         + ' Cancelled tasks are not counted, though the list the number opens shows them, and older tasks too.',
     }));
 
-    // The counter still leads to its tasks.
     fireEvent.click(link);
     await waitFor(() => expect(router.state.location.search).toBe('?view=unsuccessful'));
     expect(router.state.location.pathname).toBe('/tasks');
@@ -99,7 +94,6 @@ describe('OverviewPage', () => {
   });
 
   it('flags a task that goes quiet while the page stays open and no record changes', async () => {
-    // The interval clock and the date are in the test's hands, and still run on their own for the waits of the test.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], shouldAdvanceTime: true });
     try {
       let reads = 0;
@@ -109,7 +103,6 @@ describe('OverviewPage', () => {
       }));
       renderRoute('/');
       expect(await screen.findByRole('link', { name: 'No updates lately: 1' })).toBeInTheDocument();
-      // Five minutes on. The agent of the mock's running task reported 20 seconds before the page opened and not since.
       act(() => {
         vi.advanceTimersByTime(5 * 60_000);
       });

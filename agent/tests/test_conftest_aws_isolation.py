@@ -1,19 +1,3 @@
-"""Regression guards for the session-wide AWS isolation in ``conftest.py``.
-
-Neither half can be shown by an ordinary test:
-
-* the credential scrub — wherever this suite normally runs there is nothing to
-  scrub, so deleting it would change nothing. The first test hands a fresh
-  interpreter every credential source botocore knows and asks botocore what it
-  finds once ``tests.conftest`` is imported;
-* the send guard — it only acts when a request is attempted, so the other tests
-  each attempt one and check what the guard does with it.
-
-Every credential here is an obvious fake, and the requests this module attempts
-on purpose are aimed at a closed local port, so they cannot reach AWS even if the
-guard under test is broken.
-"""
-
 import json
 import os
 import subprocess
@@ -59,10 +43,6 @@ def test_no_credential_source_survives_importing_conftest(tmp_path):
     legacy.write_text(f"AWSAccessKeyId={FAKE_KEY}\nAWSSecretKey=fake\n")
     token = tmp_path / "token"
     token.write_text("not-a-token")
-    # The files botocore reads when no variable names another one. A CI runner has
-    # no ~/.aws and no ~/.boto, so without a home directory that holds them nothing
-    # would show that conftest.py pins the file variables instead of only removing
-    # them.
     home = tmp_path / "home"
     (home / ".aws").mkdir(parents=True)
     (home / ".aws" / "credentials").write_text(f"[default]\n{keys}")
@@ -126,20 +106,17 @@ def _client_aimed_at_a_closed_port():
 
 
 def test_a_request_to_aws_is_refused_recorded_and_fails_the_session(monkeypatch):
-    # This test attempts a request on purpose: keep it out of the real session's record.
     monkeypatch.setattr(conftest, "_blocked_aws_requests", [])
     client = _client_aimed_at_a_closed_port()
 
     with pytest.raises(RuntimeError, match="unit tests must not reach AWS"):
         client.get_caller_identity()
 
-    [attempt] = conftest._blocked_aws_requests  # exactly one: refused, not retried
+    [attempt] = conftest._blocked_aws_requests
     assert attempt.startswith(f"POST {CLOSED_PORT}/ from ")
     assert f"{Path(__file__).name}:" in attempt, "the report must name the line that sent"
     assert "test_a_request_to_aws_is_refused" in attempt, "…and the test that was running"
 
-    # Code under test usually swallows the refusal and its test stays green, so the
-    # attempt has to fail the session through the exit status, and say why.
     monkeypatch.setattr(conftest, "_hang_watchdog", SimpleNamespace(cancel=lambda: None))
     session = SimpleNamespace(exitstatus=pytest.ExitCode.OK)
     conftest.pytest_sessionfinish(session, pytest.ExitCode.OK)
@@ -153,9 +130,6 @@ def test_a_request_to_aws_is_refused_recorded_and_fails_the_session(monkeypatch)
 
 
 def test_a_request_from_a_deleted_working_directory_is_recorded_too(tmp_path, monkeypatch):
-    # A test may delete the directory it works in. The guard must not need that
-    # directory to describe an attempt: one it fails to describe is one it does not
-    # record, and a session whose code under test swallowed the error would pass.
     recorded: list[str] = []
     monkeypatch.setattr(conftest, "_blocked_aws_requests", recorded)
     client = _client_aimed_at_a_closed_port()
@@ -168,16 +142,13 @@ def test_a_request_from_a_deleted_working_directory_is_recorded_too(tmp_path, mo
         with pytest.raises(RuntimeError, match="unit tests must not reach AWS"):
             client.get_caller_identity()
     finally:
-        monkeypatch.chdir(tmp_path)  # an existing directory again, before anything is reported
+        monkeypatch.chdir(tmp_path)
 
     assert len(recorded) == 1, recorded
     assert f"{Path(__file__).name}:" in recorded[0], "the report must name the line that sent"
 
 
 def test_only_the_configured_dynamodb_local_origin_is_let_through(monkeypatch):
-    # CI names a loopback DynamoDB Local in ABCA_DDB_LOCAL_ENDPOINT for the MicroVM
-    # checkpoint transaction tests. That exact origin reaches the real transport;
-    # the same host on another port is still refused and recorded.
     recorded: list[str] = []
     monkeypatch.setattr(conftest, "_blocked_aws_requests", recorded)
     sent: list[str] = []

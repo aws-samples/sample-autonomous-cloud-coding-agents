@@ -51,7 +51,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing webhook_id path parameter.', requestId);
     }
 
-    // 1. Fetch webhook record
     const result = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { webhook_id: webhookId },
@@ -62,19 +61,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(404, ErrorCode.WEBHOOK_NOT_FOUND, 'Webhook not found.', requestId);
     }
 
-    // 2. Verify ownership
     if (record.user_id !== userId) {
       return errorResponse(404, ErrorCode.WEBHOOK_NOT_FOUND, 'Webhook not found.', requestId);
     }
 
-    // 3. Check if already revoked
     if (record.status === 'revoked') {
       return errorResponse(409, ErrorCode.WEBHOOK_ALREADY_REVOKED, 'Webhook is already revoked.', requestId);
     }
 
     const now = new Date().toISOString();
 
-    // 4. Soft-revoke in DynamoDB
     const updated = await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
       Key: { webhook_id: webhookId },
@@ -84,7 +80,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ReturnValues: 'ALL_NEW',
     }));
 
-    // 5. Schedule secret deletion (7-day recovery window)
     try {
       await sm.send(new DeleteSecretCommand({
         SecretId: `${SECRET_PREFIX}${webhookId}`,

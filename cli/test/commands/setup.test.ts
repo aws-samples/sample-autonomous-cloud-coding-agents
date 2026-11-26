@@ -40,7 +40,6 @@ const BUNDLE: CliConfig = {
   api_url: 'https://api.example.com/v1/', region: 'us-east-1', user_pool_id: 'pool', client_id: 'client',
 };
 const NO_CHANGES = 'Stack backgroundagent-dev\nThere were no differences\n';
-/** Shape of real `cdk diff` output (aws-cdk 2.x formatter): the impact word ends each resource line. */
 const DELETES_SLACK_TABLE = [
   'Stack backgroundagent-dev',
   'Resources',
@@ -52,9 +51,7 @@ let root: string;
 let configDir: string;
 let out: string[];
 let runs: { args: readonly string[]; env: NodeJS.ProcessEnv; logFile: string; profileAtRun?: string }[];
-/** Everything the wizard printed, as plain text. */
 const text = () => out.join('');
-/** Deploy event lines in `cdk deploy --progress events` format. */
 const event = (n: number, total: number, status: string, constructPath: string, id: string, reason = '') =>
   `backgroundagent-dev | ${n}/${total} | 1:00:00 PM | ${status.padEnd(20)} | AWS::Lambda::Function | backgroundagent-dev/${constructPath}/Resource (${id}) ${reason}`;
 
@@ -62,10 +59,8 @@ function stack(outputs: Record<string, string>, status = 'UPDATE_COMPLETE', para
   return { outputs: new Map(Object.entries(outputs)), parameters: new Map(Object.entries(parameters)), status, account: '123456789012' };
 }
 
-/** A current ABCA bootstrap that already allows AgentCore. */
 const BOOTSTRAPPED = stack({ BootstrapPolicyVersion: '1.12.0' }, 'UPDATE_COMPLETE', { ComputeTypes: 'agentcore' });
 
-/** Name-aware stack lookup: only the listed stacks (plus a current bootstrap unless overridden) exist. */
 const stacks = (byName: Record<string, ExistingStack | null>) => async (_region: string, name: string) =>
   (name in byName ? byName[name] : name === 'CDKToolkit' ? BOOTSTRAPPED : null) ?? null;
 
@@ -84,7 +79,6 @@ function deps(overrides: FakeOptions = {}): SetupDeps {
     setBootstrapComputeTypes: async () => undefined,
     callerIdentity: async () => ({ account: '123456789012', arn: 'arn:aws:sts::123456789012:assumed-role/Admin/me' }),
     listDeployments: async () => [],
-    // Running out of scripted answers behaves like a closed terminal.
     ask: async () => {
       if (answers.length === 0) throw setupCancelled();
       return answers.shift()!;
@@ -93,7 +87,6 @@ function deps(overrides: FakeOptions = {}): SetupDeps {
       const profilePath = path.join(root, DEPLOYMENT_PROFILE_FILE);
       runs.push({ ...options, args, profileAtRun: fs.existsSync(profilePath) ? fs.readFileSync(profilePath, 'utf-8') : undefined });
       if (args[0] === '//cdk:diff') {
-        // The candidate profile must exist while the diff runs.
         const candidate = args[args.length - 1].replace('deploymentProfile=', '');
         expect(fs.existsSync(candidate)).toBe(true);
         return { code: overrides.diffCode ?? 0, output: overrides.diff ?? NO_CHANGES };
@@ -112,12 +105,9 @@ const profileOnDisk = () => {
   const file = path.join(root, DEPLOYMENT_PROFILE_FILE);
   return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf-8')).features : undefined;
 };
-/** Most tests name the stack; the picker has its own tests below. */
 const setup = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'us-east-1', stackName: 'backgroundagent-dev', ...opts }, d);
-/** Accept the account confirmation (defaults to yes). */
 const ACCOUNT_OK = '';
 const ENTER_ALL = ['', '', '', '', '', ''];
-/** Accept the preselected compute (AgentCore) on a new installation. */
 const COMPUTE_DEFAULT = '';
 const profileFile = () => JSON.parse(fs.readFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), 'utf-8'));
 
@@ -145,7 +135,6 @@ describe('new installation', () => {
     expect(text()).toContain('New installation: every optional feature defaults to off (the governed minimal profile).');
     expect(profileOnDisk()).toEqual(MINIMAL_DEPLOYMENT_FEATURES);
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
-    // Diff ran before the repository profile existed; deploy ran after, on that same file.
     expect(runs[0].profileAtRun).toBeUndefined();
     expect(runs[1].profileAtRun).toBe(serializeDeploymentProfile({ features: MINIMAL_DEPLOYMENT_FEATURES, compute: ['agentcore'] }));
     expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'stackName=backgroundagent-dev']));
@@ -153,7 +142,6 @@ describe('new installation', () => {
       '//cdk:deploy', '--', '-c', 'stackName=backgroundagent-dev',
       '-c', `deploymentProfile=${path.join(root, DEPLOYMENT_PROFILE_FILE)}`, '--all', '--require-approval', 'never', '--progress', 'events',
     ]);
-    // Raw CDK output goes to log files, not the terminal.
     expect(runs.map(r => path.basename(r.logFile))).toEqual(['setup-changes.log', 'setup-deploy.log']);
     expect(text()).toContain('Deployment complete in');
     expect(text()).toContain(`API      ${BUNDLE.api_url}`);
@@ -352,7 +340,6 @@ describe('compute changes on the review screen', () => {
 });
 
 describe('compute the Region does not support', () => {
-  // eu-central-1 has the core AgentCore services but no Lambda MicroVMs.
   const UNAVAILABLE = /Lambda MicroVMs \('lambda-microvm'\) is unavailable in eu-central-1 \(supported: us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1\)/;
   const withMicrovm = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore,lambda-microvm' }) });
   const inUnlistedRegion = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'eu-central-1', stackName: 'backgroundagent-dev', ...opts }, d);
@@ -367,7 +354,6 @@ describe('compute the Region does not support', () => {
   });
 
   test('rejects before asking about any feature', async () => {
-    // One answer (the account): a feature prompt would run out of answers and cancel instead.
     await expect(inUnlistedRegion({ compute: 'lambda-microvm' }, deps({ answers: [ACCOUNT_OK] }))).rejects.toThrow(UNAVAILABLE);
   });
 
@@ -510,14 +496,11 @@ describe('failures and cancellation', () => {
     expect(text()).toContain('✗ Deployment failed after');
     expect(text()).toContain('Slack — SlackIntegration/EventsFn');
     expect(text()).toContain('Code storage limit exceeded');
-    // A cancellation is a consequence, not a cause.
     expect(text()).not.toContain('Resource creation cancelled');
-    // The CLI abbreviates paths under $HOME to `~`; on CI runners os.tmpdir() lives under $HOME.
     const deployLog = path.join(configDir, 'logs', 'backgroundagent-dev', 'setup-deploy.log');
     const home = os.homedir();
     const shownLog = deployLog.startsWith(`${home}${path.sep}`) ? `~${deployLog.slice(home.length)}` : deployLog;
     expect(text()).toContain(`Full log: ${shownLog}`);
-    // Logs live outside the repository, where the deploy's cdk.out cleanup cannot remove them.
     expect(runs.every(run => run.logFile.startsWith(configDir))).toBe(true);
     expect(profileOnDisk()?.slack).toBe(true);
     expect(fs.existsSync(path.join(configDir, 'config.json'))).toBe(false);
@@ -531,7 +514,6 @@ describe('failures and cancellation', () => {
   });
 
   test('a deploy stopped by a preflight shows the preflight message, not the closing line of mise', async () => {
-    // What mise prints when the first command of //cdk:deploy exits non-zero.
     const deployLines = [
       '[//cdk:deploy] bootstrap preflight: FAIL: CDKToolkit is a default CDK bootstrap (no BootstrapPolicyVersion output).',
       '[//cdk:deploy] To bypass at your own risk: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.',
@@ -540,7 +522,6 @@ describe('failures and cancellation', () => {
     ];
     await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
     expect(text()).toContain('bootstrap preflight: FAIL: CDKToolkit is a default CDK bootstrap');
-    // FAIL counts as an error; without that, the last raw lines are listed, mise's timing line among them.
     expect(text()).not.toContain('Finished in');
     expect(text()).not.toContain('ERROR task failed');
   });
@@ -683,7 +664,6 @@ describe('brand-new accounts', () => {
     expect(text()).toContain('Install the CDK bootstrap (one-time, least-privilege deploy roles)');
     expect(text()).toContain('Allow the selected compute in the CDK bootstrap');
     expect(profileFile().compute).toEqual(['ecs']);
-    // Bootstrap runs after confirmation and before the deploy, pinned to the account and Region.
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:bootstrap', '//cdk:deploy']);
     expect(runs[1].args).toEqual(['//cdk:bootstrap', '--', 'aws://123456789012/us-east-1']);
     expect(text()).toContain('✓ Preparing your AWS account (CDK bootstrap)');
@@ -728,7 +708,6 @@ describe('brand-new accounts', () => {
     expect(text()).toContain('uses the standard CDK bootstrap');
     expect(setBootstrapComputeTypes).not.toHaveBeenCalled();
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
-    // //cdk:deploy's bootstrap preflight fails on a standard bootstrap, so setup skips it and says so.
     expect(runs[1].env.ABCA_SKIP_BOOTSTRAP_PREFLIGHT).toBe('1');
     expect(text()).toContain('ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1');
   });
@@ -851,7 +830,6 @@ describe('account and deployment selection', () => {
     expect(text()).toContain('3) Create a new deployment');
     expect(text()).toContain('Stack    team-b (existing');
     expect(runs[1].args).toEqual(expect.arrayContaining(['-c', 'stackName=team-b']));
-    // An additional stack gets its own profile file; the shared one is untouched.
     expect(fs.existsSync(path.join(root, 'abca.deployment.team-b.json'))).toBe(true);
     expect(fs.existsSync(path.join(root, DEPLOYMENT_PROFILE_FILE))).toBe(false);
   });
@@ -862,7 +840,6 @@ describe('account and deployment selection', () => {
     await pick({ answers, listDeployments: async () => deployed, describeStack })();
     expect(text()).toContain("'team-b' already exists");
     expect(text()).toContain('Use letters, numbers and hyphens');
-    // A stack the picker did not list (e.g. a failed first create) is still detected, with a way out.
     expect(text()).toContain("'old-stack' exists (UPDATE_COMPLETE) but is not a working ABCA deployment; delete it, or rerun with --stack-name old-stack.");
     expect(text()).toContain('Stack    backgroundagent-dev-2 (new installation)');
     expect(text()).toContain('This adds a separate deployment alongside the existing one(s)');

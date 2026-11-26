@@ -104,14 +104,12 @@ describe('AgentMemory construct', () => {
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
-          // Read permissions
           Match.objectLike({
             Action: Match.arrayWith([
               'bedrock-agentcore:RetrieveMemoryRecords',
             ]),
             Effect: 'Allow',
           }),
-          // Write permissions
           Match.objectLike({
             Action: 'bedrock-agentcore:CreateEvent',
             Effect: 'Allow',

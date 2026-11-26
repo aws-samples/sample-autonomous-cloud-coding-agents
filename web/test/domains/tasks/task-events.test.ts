@@ -24,7 +24,6 @@ import { loadTaskEvents, MAX_TASK_EVENTS } from '../../../src/domains/tasks/hook
 
 const event = (n: number): TaskEvent => ({ event_id: `e${String(n).padStart(5, '0')}`, event_type: 'agent_turn', timestamp: `t${n}`, metadata: {} });
 
-/** An events API over `stored`, paging like the real one; records each call's parameters. */
 function fakeApi(stored: TaskEvent[]) {
   const calls: Array<Record<string, unknown>> = [];
   const api = {

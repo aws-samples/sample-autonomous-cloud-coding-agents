@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for SlackChannelMappingTable construct.
- */
 export interface SlackChannelMappingTableProps {
   /**
    * Optional table name override.
@@ -46,29 +43,10 @@ export interface SlackChannelMappingTableProps {
 
 /**
  * DynamoDB table mapping Slack channels to a default GitHub repository.
- *
- * The Slack analogue of {@link LinearProjectMappingTable}: it lets a workspace
- * admin onboard a channel so members no longer have to type `owner/repo` in
- * every `@mention` — a bare mention in the channel routes to the mapped repo.
- *
  * Schema: channel_id (PK) — composite key `{team_id}#{channel_id}`.
- * The composite key keeps a single equality-queryable partition key while
- * staying globally unique across workspaces (a Slack channel id can repeat
- * across teams).
- *
- * Fields:
- * - repo — `owner/repo` the channel defaults to
- * - default_label — optional task label filter (reserved for future use)
- * - status — 'active' | 'removed'
- * - onboarded_at, updated_at — ISO timestamps
- *
- * The table is schemaless apart from the partition key; new fields are additive
- * and read with defaults, so existing rows need no migration.
+ * A Slack channel id can repeat across teams.
  */
 export class SlackChannelMappingTable extends Construct {
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: SlackChannelMappingTableProps = {}) {

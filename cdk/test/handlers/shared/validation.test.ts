@@ -82,9 +82,6 @@ describe('isValidRepo', () => {
   });
 
   test('rejects pure-dot path segments while keeping dotted names', () => {
-    // `owner/..` is a path token, not a repo name — the char class allows
-    // dots so the multi-slash rule alone never caught the single-segment
-    // traversal shapes. Dotted REAL names (next.js) must keep working.
     expect(isValidRepo('owner/..')).toBe(false);
     expect(isValidRepo('owner/.')).toBe(false);
     expect(isValidRepo('../repo')).toBe(false);
@@ -96,9 +93,7 @@ describe('isValidRepo', () => {
 });
 
 describe('hasTaskSpec', () => {
-  // The coding/new-task-v1 contract: one_of issue_number / task_description.
   const CODING = { oneOf: ['issue_number', 'task_description'] } as const;
-  // The pr_* contract: all_of pr_number.
   const PR = { allOf: ['pr_number'] } as const;
 
   test('returns true when issue_number satisfies one_of', () => {
@@ -233,8 +228,8 @@ describe('isValidWebhookName', () => {
   });
 
   test('rejects names longer than 64 characters', () => {
-    expect(isValidWebhookName('a' + 'b'.repeat(63))).toBe(true); // 64 chars OK
-    expect(isValidWebhookName('a' + 'b'.repeat(64))).toBe(false); // 65 chars too long
+    expect(isValidWebhookName('a' + 'b'.repeat(63))).toBe(true);
+    expect(isValidWebhookName('a' + 'b'.repeat(64))).toBe(false);
   });
 
   test('rejects names with invalid characters', () => {
@@ -244,8 +239,7 @@ describe('isValidWebhookName', () => {
   });
 
   test('rejects a name that is not a string', () => {
-    // The name comes from a parsed JSON body. Each of these reads as a valid
-    // name once converted to a string, which the pattern test does on its own.
+    // RegExp.test converts its argument to a string, and each of these reads as a valid name once converted.
     expect(isValidWebhookName(42)).toBe(false);
     expect(isValidWebhookName(true)).toBe(false);
     expect(isValidWebhookName(['a'])).toBe(false);
@@ -379,11 +373,9 @@ describe('pagination token encode/decode', () => {
   });
 
   test('decode returns null for a token that is no cursor', () => {
-    // null and not undefined: a caller has to tell a damaged token from no token.
     expect(decodePaginationToken('not-valid-base64!!!')).toBeNull();
-    // A real token that lost its end.
     expect(decodePaginationToken('eyJ0YXNrX2lkIjoiMDFL')).toBeNull();
-    // JSON, but no object: DynamoDB takes nothing else for a start key.
+    // DynamoDB takes nothing but an object for a start key.
     for (const json of ['1', '"a"', '[1]', 'null']) {
       expect(decodePaginationToken(Buffer.from(json).toString('base64'))).toBeNull();
     }
@@ -407,8 +399,8 @@ describe('isValidWorkflowRef', () => {
   });
 
   test('returns false for syntactically invalid refs', () => {
-    expect(isValidWorkflowRef('new_task')).toBe(false); // no domain/name-vN shape
-    expect(isValidWorkflowRef('coding/new-task')).toBe(false); // missing -vN
+    expect(isValidWorkflowRef('new_task')).toBe(false);
+    expect(isValidWorkflowRef('coding/new-task')).toBe(false);
     expect(isValidWorkflowRef('')).toBe(false);
     expect(isValidWorkflowRef(42)).toBe(false);
     expect(isValidWorkflowRef(true)).toBe(false);
@@ -421,7 +413,6 @@ describe('isValidUlid', () => {
   });
 
   test('accepts ULIDs containing every allowed character', () => {
-    // timestamp-only characters 0-9 and a spread of allowed letters
     expect(isValidUlid('0123456789ABCDEFGHJKMNPQRS')).toBe(true);
     expect(isValidUlid('TVWXYZ0123456789ABCDEFGHJK')).toBe(true);
   });
@@ -432,8 +423,8 @@ describe('isValidUlid', () => {
 
   test('rejects wrong length', () => {
     expect(isValidUlid('')).toBe(false);
-    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FA')).toBe(false); // 25
-    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAVX')).toBe(false); // 27
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FA')).toBe(false);
+    expect(isValidUlid('01ARZ3NDEKTSV4RRFFQ69G5FAVX')).toBe(false);
   });
 
   test('rejects Crockford-excluded letters I, L, O, U', () => {
@@ -479,21 +470,14 @@ describe('validatePrNumber', () => {
 });
 
 describe('validateAttachments', () => {
-  // Helper: minimal valid PNG (1x1 pixel)
   const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
     0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52]);
   const pngBase64 = PNG_HEADER.toString('base64');
 
-  // Helper: valid JSON content
   const jsonContent = Buffer.from('{"key": "value"}');
   const jsonBase64 = jsonContent.toString('base64');
 
   test('full-buffer-validates an inline attachment whose type was DETECTED, not declared', () => {
-    // The magic-bytes check used to be gated on a DECLARED content_type, leaving
-    // the detected path unchecked — the weaker of the two, since a detected type is
-    // only a guess from an 8 KB prefix scan. So ~8 KB of clean ASCII followed by
-    // binary was guessed `text/plain` and admitted, laundering non-text bytes past
-    // the very check that was hardened to catch them.
     const launder = Buffer.concat([
       Buffer.from('A'.repeat(8192)),
       Buffer.from([0x00, 0xFF, 0xFE, 0x00]),
@@ -504,9 +488,6 @@ describe('validateAttachments', () => {
   });
 
   test('still admits inline content whose DETECTED type is genuinely correct', () => {
-    // The guard above must not cost the detection path its purpose: a real PNG and
-    // real JSON with no declared content_type still resolve and pass. Otherwise the
-    // fix trades a laundering hole for spurious rejections of valid uploads.
     const detectedPng = validateAttachments([{ type: 'image', data: pngBase64 }]);
     expect(detectedPng.valid).toBe(true);
     const detectedJson = validateAttachments([{ type: 'file', data: jsonBase64 }]);
@@ -613,8 +594,6 @@ describe('validateAttachments', () => {
   });
 
   test('rejects attachments that are not a list', () => {
-    // One attachment object where a list is expected counted as no attachments:
-    // the task was created without it and nothing told the client.
     const result = validateAttachments({ type: 'file', filename: 'log.txt', data: 'aGVsbG8=' } as never);
     expect(result).toEqual({ valid: false, error: 'attachments must be an array' });
   });
@@ -634,20 +613,17 @@ describe('validateAttachments', () => {
     ['image', 'image/png'],
     ['file', 'text/plain'],
   ])('rejects a url on an attachment of type %s', (type, contentType) => {
-    // Only type 'url' is fetched. The entry passed for a presigned upload that
-    // declares no size, and the task then waited for an upload nobody would make.
     const result = validateAttachments([{ type, url: 'https://example.com/shot.png', content_type: contentType }]);
     expect(result).toEqual({ valid: false, error: "attachments[0]: url is only allowed for type 'url'" });
   });
 
   test('rejects data that is not a string', () => {
-    // Took the same way: no decoded data, and no declared size asked for.
     const result = validateAttachments([{ type: 'file', data: 123, content_type: 'text/plain' }]);
     expect(result).toEqual({ valid: false, error: 'attachments[0]: data must be a base64 string' });
   });
 
   test('rejects inline data exceeding 500 KB', () => {
-    const bigData = Buffer.alloc(501 * 1024).fill(0x50); // starts with P (text-ish)
+    const bigData = Buffer.alloc(501 * 1024).fill(0x50);
     const result = validateAttachments([{
       type: 'file', data: bigData.toString('base64'), content_type: 'text/plain', filename: 'big.txt',
     }]);
@@ -752,28 +728,20 @@ describe('validateMagicBytes', () => {
   });
 
   test('rejects a text type whose bytes are not decodable UTF-8', () => {
-    // 0xC3 starts a 2-byte sequence but 0x28 is not a valid continuation byte, and
-    // 0xFF never appears in UTF-8 at all. Neither carries a NUL, so the null-byte
-    // scan below would pass them — only the decode catches this.
+    // UTF-8: 0xC3 starts a 2-byte sequence and 0x28 is no continuation byte; 0xFF never appears;
+    // a lone continuation byte (0x80, 0x81) does not decode.
     expect(validateMagicBytes(Buffer.from([0x48, 0xC3, 0x28]), 'text/plain')).toBe(false);
     expect(validateMagicBytes(Buffer.from([0xFF, 0xFE, 0x41]), 'application/json')).toBe(false);
-    // A lone continuation byte is equally undecodable, and 0xC3 0x28 must fail for
-    // a non-text-prefixed type too, not only for text/plain.
     expect(validateMagicBytes(Buffer.from([0xff, 0xfe, 0x80, 0x81]), 'text/plain')).toBe(false);
     expect(validateMagicBytes(Buffer.from([0xc3, 0x28]), 'application/json')).toBe(false);
   });
 
   test('does not false-reject a multi-byte char that straddles the old 8 KB cutoff', () => {
-    // 8191 ASCII bytes + a 3-byte char crossing what used to be the 8192-byte
-    // cutoff. Decoding the whole buffer sees the complete character, so it must
-    // pass; a prefix-only decode would have cut it in half and rejected it.
     const buf = Buffer.concat([Buffer.alloc(8191, 0x61), Buffer.from('本', 'utf-8')]);
     expect(validateMagicBytes(buf, 'text/plain')).toBe(true);
   });
 
   test('a long ASCII preamble does not launder trailing binary', () => {
-    // The check used to look at only the first 8 KB, so a benign preamble longer
-    // than that let arbitrary bytes through behind it. Validate the whole buffer.
     const payload = Buffer.concat([
       Buffer.from('A'.repeat(9000)),
       Buffer.from([0xC3, 0x28]),
@@ -782,8 +750,6 @@ describe('validateMagicBytes', () => {
   });
 
   test('accepts multi-byte UTF-8 text (not just ASCII)', () => {
-    // The decode must not reject legitimate non-ASCII text, in either a text/* or
-    // an application/json content type.
     expect(validateMagicBytes(Buffer.from('héllo — 世界 🎉', 'utf8'), 'text/plain')).toBe(true);
     expect(validateMagicBytes(Buffer.from('café — 日本語 ✅', 'utf-8'), 'text/markdown')).toBe(true);
   });
@@ -884,27 +850,21 @@ describe('attachment type maps (derived, single source of truth)', () => {
     expect(EXTENSION_TO_MIME.pdf).toBe('application/pdf');
     expect(EXTENSION_TO_MIME.png).toBe('image/png');
     expect(EXTENSION_TO_MIME.jpg).toBe('image/jpeg');
-    expect(EXTENSION_TO_MIME.jpeg).toBe('image/jpeg'); // alias
+    expect(EXTENSION_TO_MIME.jpeg).toBe('image/jpeg');
     expect(EXTENSION_TO_MIME.log).toBe('text/x-log');
-    // Unsupported extensions resolve to nothing.
     expect(EXTENSION_TO_MIME.docx).toBeUndefined();
     expect(EXTENSION_TO_MIME.zip).toBeUndefined();
   });
 
   test('SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL is a human list derived from the allowlist (incl. JPEG alias)', () => {
     const label = SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL;
-    // JPEG alias is listed (design nit): a user with a .jpeg file sees it's supported.
     for (const ext of ['PNG', 'JPG', 'JPEG', 'TXT', 'CSV', 'MD', 'JSON', 'PDF', 'LOG']) {
       expect(label).toContain(ext);
     }
-    // Derived + upper-cased, comma-separated, no unsupported types leak in.
     expect(label).not.toMatch(/docx|zip/i);
   });
 
   test('every MIME in MIME_TO_EXTENSION is actually allowed by isAllowedMimeType (design concern)', () => {
-    // Guards against the allowlist + the extension map drifting: the rejection
-    // message (derived from the map) must never advertise a type that
-    // isAllowedMimeType still rejects.
     for (const mime of Object.keys(MIME_TO_EXTENSION)) {
       const kind = mime.startsWith('image/') ? 'image' : 'file';
       expect(isAllowedMimeType(mime, kind)).toBe(true);

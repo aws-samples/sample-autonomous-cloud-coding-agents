@@ -19,11 +19,6 @@
 
 import type { AuthAdapter, AuthSession, AuthUser } from '../app/providers/auth/AuthProvider';
 
-/**
- * Local-only sign-in for mock mode. It is reachable only through the
- * `__MOCK__`-guarded import in main.tsx, so it never ships in a production bundle,
- * and the mock API it pairs with accepts any token.
- */
 const MOCK_USER: AuthUser = { id: 'mock-user-0001', email: 'operator@example.com', groups: ['operators'] };
 
 const SIGNED_OUT_KEY = 'abca-mock-signed-out';

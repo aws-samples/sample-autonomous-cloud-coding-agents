@@ -87,8 +87,6 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 describe('MicroVM lifecycle policy', () => {
-  // Out-of-the-box timing: the contract's approval default (300 s) with the
-  // contract's sleep-after default (60 s). Suspension must actually engage.
   const defaultGate = () => snapshot({
     sleepAfterSeconds: undefined,
     approval: {
@@ -107,8 +105,6 @@ describe('MicroVM lifecycle policy', () => {
     expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 59_000 }))
       .toMatchObject({ action: 'wait', reason: 'suspend-grace', nextPollInMs: 1000 });
     expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 60_000 })).toMatchObject({ action: 'suspend' });
-    // Once the suspend intent for this gate is recorded, it stays asleep until the
-    // wake margin before the ORIGINAL deadline (300 - 60 = 240 s).
     const asleep = { ...current, intent: { ...intent(), deadline_ms: NOW + 300_000 } };
     expect(policy('SUSPENDED', { snapshot: asleep, nowMs: NOW + 239_000 }))
       .toMatchObject({ action: 'wait', reason: 'intentionally-suspended', nextPollInMs: 1000 });
@@ -166,7 +162,6 @@ describe('MicroVM lifecycle policy', () => {
     expect(policy('SUSPENDED', { ...asleep, suspendCheckpointConfirmed: true }))
       .toMatchObject({ action: 'wait', reason: 'intentionally-suspended' });
     expect(policy('SUSPENDED', asleep)).toMatchObject({ action: 'wait', reason: 'intentionally-suspended' });
-    // The hook may still be answering while SUSPENDING: no verdict yet.
     expect(policy('SUSPENDING', { ...asleep, suspendCheckpointConfirmed: false }))
       .toMatchObject({ action: 'wait', reason: 'intentionally-suspended' });
   });

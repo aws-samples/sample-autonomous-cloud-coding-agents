@@ -17,44 +17,16 @@
  *  SOFTWARE.
  */
 
-// Latch and announce a revoked Linear authorization (#812).
-//
-// Until this existed the platform detected revocation perfectly and then did
-// nothing with it: the operator found out because a user's task silently failed,
-// and every later event re-detected the same dead grant with no dedup.
-//
-// TWO PROPERTIES THIS FILE EXISTS TO GUARANTEE.
-//
-// 1. ANNOUNCE ONCE. A revoked workspace keeps receiving events, so alerting on
-//    detection would page per event. Dedup is an independent `revocation_announced_at`
-//    claim, NOT the status latch — the caller announces BEFORE latching, because a
-//    publish that failed after the latch could never be retried (every later event saw
-//    an already-revoked row and said nothing).
-//
-// 2. DO NOT ANNOUNCE THROUGH THE BROKEN CHANNEL. The dead credential is Linear's
-//    own, so a Linear comment cannot report it — that is precisely the path that no
-//    longer works. Notification goes to SNS (operator email/Slack subscription),
-//    which has an independent credential and therefore still works when Linear
-//    does not.
-//
-// Everything here is best-effort: recording or announcing a diagnosis must never
-// turn a feedback outage into a thrown handler.
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
 import { logger } from './logger';
 import { makeClient } from './ua';
 
-/**
- * Mirrors `RevocationDetail` from the resolver, declared locally ON PURPOSE: the
- * resolver owns the latch and calls into this module, so this module depends on
- * nothing of the resolver's. The `source` union appearing in both is the contract.
- */
 export interface AnnounceableRevocation {
   readonly linearWorkspaceId: string;
   readonly workspaceSlug?: string;
   readonly source: 'secrets-manager-refresh' | 'vault-consent-required';
 }
 
-/** Why the grant is dead, in words an operator can act on. */
 const SOURCE_EXPLANATION: Record<AnnounceableRevocation['source'], string> = {
   'secrets-manager-refresh':
     'Linear rejected the stored refresh token, so the saved authorization can no longer be renewed.',
@@ -71,12 +43,7 @@ export function revocationAlertTopicArn(): string | undefined {
 /**
  * Announce ONE revoked authorization to the operator.
  *
- * Dedup is the caller's `claimRevocationAnnouncement`, not the status latch, so a
- * failed publish stays retryable.
- *
- * Never throws — this runs inside token resolution, where an exception would turn a
- * notification outage into a broken webhook handler. It RETURNS whether the publish
- * landed, so the caller can release its claim and let a later detection retry.
+ * Never throws. Returns whether the publish landed.
  */
 export async function announceRevocation(
   detail: AnnounceableRevocation,

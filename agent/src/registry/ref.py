@@ -1,43 +1,20 @@
-"""Strict ``registry://`` reference grammar for the agent asset registry (#246).
-
-::
-
-    registry://<kind>/<namespace>/<name>@<constraint>
-      kind       = [a-z][a-z0-9_]*            snake_case: mcp_server, cedar_policy_module
-      namespace  = [a-z][a-z0-9-]*
-      name       = [a-z0-9][a-z0-9._-]*
-      constraint = [^~]?MAJOR.MINOR.PATCH[-prerelease]   exact / caret / tilde only
-
-The ``@<constraint>`` pin is MANDATORY (fail-closed: no implicit "latest").
-
-This module mirrors ``cdk/src/handlers/shared/registry/ref.ts`` byte-for-byte and
-is exercised by the ``contracts/registry-resolution/`` parity corpus. Keep the two
-in lockstep — a change here without the matching TS change (or vice versa) is a
-parity break that CI must catch.
-"""
-
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-# MVP asset kinds the registry loads end-to-end or stages.
 REGISTRY_KINDS = ("mcp_server", "cedar_policy_module", "skill")
-# Reserved kinds accepted by the grammar but rejected at publish (no loader yet).
 RESERVED_KINDS = ("plugin", "subagent", "prompt_fragment", "capability")
 
-# Structural split — scheme + 3 path segments + the (mandatory) constraint.
 # ``\Z`` (absolute end of string), not ``$``: Python's ``$`` also matches just
 # before a trailing newline, so ``$`` would accept ``…@1.0.0\n`` that the JS
-# mirror (ref.ts, no ``m`` flag) rejects — a byte-for-byte parity break.
+# mirror (ref.ts, no ``m`` flag) rejects.
 # The constraint is ``.+`` in the JS mirror, where the dot matches none of the four
 # line terminators. Python's dot stops at ``\n`` only, so the class is spelled out.
 _REF_SHAPE = re.compile(
     r"^registry://([a-z][a-z0-9_]*)/([a-z][a-z0-9-]*)/([a-z0-9][a-z0-9._-]*)"
     r"@([^\n\r\u2028\u2029]+)\Z"
 )
-# exact / caret / tilde over MAJOR.MINOR.PATCH with an optional prerelease.
-# Rejects ``*``, ``latest``, ``>=``, ``<=``, x-ranges, and bare prerelease modifiers.
 # ``re.ASCII``: without it ``\d`` matches every Unicode decimal digit, which ``int()``
 # then converts. In the JS mirror ``\d`` is 0-9.
 _CONSTRAINT = re.compile(
@@ -45,18 +22,14 @@ _CONSTRAINT = re.compile(
 )
 _OP_BY_PREFIX = {"": "exact", "^": "caret", "~": "tilde"}
 
-# JS ``Number.MAX_SAFE_INTEGER`` (2**53 - 1). Python int is arbitrary-precision,
-# but the TS parser rounds components above this, so both sides must reject them
-# to agree on version selection (#246 parity — see registry/ref.ts).
+# JS ``Number.MAX_SAFE_INTEGER`` (2**53 - 1): the TS parser rounds components above it.
 _MAX_SAFE_INT = 9007199254740991
 
 
 class RefError(ValueError):
     """Raised when a ``registry://`` ref is malformed.
 
-    ``reason`` is one of ``INVALID_REGISTRY_REF`` / ``INVALID_CONSTRAINT`` — the
-    same reason tokens the TS resolver reports, so both sides agree on *why* a
-    ref failed, not just *that* it failed.
+    ``reason`` is one of ``INVALID_REGISTRY_REF`` / ``INVALID_CONSTRAINT``.
     """
 
     def __init__(self, reason: str, message: str) -> None:
@@ -66,7 +39,7 @@ class RefError(ValueError):
 
 @dataclass(frozen=True)
 class ParsedConstraint:
-    op: str  # exact | caret | tilde
+    op: str
     major: int
     minor: int
     patch: int
@@ -88,9 +61,7 @@ def parse_constraint(raw: str) -> ParsedConstraint | None:
     if not m:
         return None
     prefix, major, minor, patch, prerelease = m.groups()
-    # A component with more digits than _MAX_SAFE_INT is above it (there are no
-    # leading zeros). Checked on the text, because int() raises a plain ValueError
-    # for more than 4300 digits, where the TS parser answers INVALID_CONSTRAINT.
+    # Checked on the text: int() raises ValueError for more than 4300 digits.
     if max(len(major), len(minor), len(patch)) > len(str(_MAX_SAFE_INT)):
         return None
     major_i, minor_i, patch_i = int(major), int(minor), int(patch)

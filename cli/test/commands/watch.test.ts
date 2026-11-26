@@ -33,19 +33,16 @@ import { TaskEvent } from '../../src/types';
 
 jest.mock('../../src/api-client');
 
-// Config is mocked per-test.
 jest.mock('../../src/config', () => ({
   loadConfig: jest.fn(),
 }));
 
-// Auth token fetch is stubbed — the real getAuthToken loads config + credentials.
 jest.mock('../../src/auth', () => ({
   getAuthToken: jest.fn().mockResolvedValue('test-id-token'),
 }));
 
 const loadConfig = loadConfigMocked as jest.MockedFunction<typeof loadConfigMocked>;
 
-/** Default config for polling tests. */
 const CONFIG_POLLING = {
   api_url: 'https://api.example.com',
   region: 'us-east-1',
@@ -53,7 +50,6 @@ const CONFIG_POLLING = {
   client_id: 'test-client-id',
 };
 
-// Helper to create a TaskEvent
 function makeEvent(overrides: Partial<TaskEvent> & { event_type: string }): TaskEvent {
   const { event_id, event_type, timestamp, metadata, ...rest } = overrides;
   return {
@@ -64,10 +60,6 @@ function makeEvent(overrides: Partial<TaskEvent> & { event_type: string }): Task
     ...rest,
   } as TaskEvent;
 }
-
-// ---------------------------------------------------------------------------
-// renderEvent — formatting
-// ---------------------------------------------------------------------------
 
 describe('renderEvent', () => {
   test('renders agent_turn', () => {
@@ -168,7 +160,6 @@ describe('renderEvent', () => {
     expect(output).toContain('★ custom_phase');
     expect(output).toContain('"phase":7');
     expect(output).toContain('"note":"halfway"');
-    // ``milestone`` is already rendered in the prefix — not duplicated in the dump.
     expect(output).not.toContain('"milestone"');
   });
 
@@ -257,10 +248,6 @@ describe('renderEvent', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// watch command — polling path
-// ---------------------------------------------------------------------------
-
 describe('watch command — polling', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
   let stderrSpy: jest.SpiedFunction<typeof process.stderr.write>;
@@ -275,8 +262,6 @@ describe('watch command — polling', () => {
     loadConfig.mockReset();
     loadConfig.mockReturnValue(CONFIG_POLLING);
     process.exitCode = undefined;
-    // L3 item 5: module-level retry counter is process-lived; reset between
-    // tests so the flap warn fires deterministically in the dedicated test.
     _resetSessionRetries();
 
     (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
@@ -293,9 +278,7 @@ describe('watch command — polling', () => {
   });
 
   afterEach(() => {
-    // beforeEach resets exitCode between tests, but only afterEach saves
-    // the LAST test's value (130 from the SIGINT test) from leaking into
-    // the Jest worker's own exit status — green assertions, exit 130.
+    // Jest's sandboxed `process` writes the real exitCode: a value left set becomes the exit code of a green in-band run.
     process.exitCode = undefined;
     consoleSpy.mockRestore();
     stderrSpy.mockRestore();
@@ -334,8 +317,6 @@ describe('watch command — polling', () => {
   });
 
   test('does not re-display already seen events', async () => {
-    // Snapshot returns 2 events + status=RUNNING; polling then catches up
-    // with exactly the 1 new event past the cursor, then COMPLETED.
     const snapshotEvents = [
       makeEvent({ event_id: 'evt-001', event_type: 'agent_milestone', metadata: { milestone: 'repo_setup', details: '' } }),
       makeEvent({ event_id: 'evt-002', event_type: 'agent_turn', metadata: { turn: 1, model: 'c4', tool_calls_count: 0 } }),
@@ -373,10 +354,7 @@ describe('watch command — polling', () => {
     const cmd = makeWatchCommand();
     await cmd.parseAsync(['node', 'test', 'task-dedup']);
 
-    // Snapshot prints 2, catchUp returns 1 → 3 total console.log calls.
     expect(consoleSpy.mock.calls.length).toBe(3);
-    // catchUp must be called with the snapshot's last event_id as the cursor.
-    // Chunk H added a ``{signal}`` trailing arg for Ctrl+C propagation.
     expect(mockCatchUpEvents).toHaveBeenCalledWith(
       'task-dedup',
       'evt-002',
@@ -385,11 +363,6 @@ describe('watch command — polling', () => {
   });
 
   test('polling drains all events past the 100-item page limit (regression: BLOCKER silent-stall)', async () => {
-    // Snapshot returns the first 100 events; server reports has_more=true.
-    // Polling must call catchUpEvents(taskId, 'evt-100'), which drains the
-    // tail. Regression guard for the silent-stall bug where watch passed
-    // {limit: 100} with no after-cursor and the server replayed the same
-    // oldest 100 events forever.
     const snapshotEvents = Array.from({ length: 100 }, (_, i) =>
       makeEvent({
         event_id: `evt-${String(i + 1).padStart(3, '0')}`,
@@ -432,7 +405,6 @@ describe('watch command — polling', () => {
     const cmd = makeWatchCommand();
     await cmd.parseAsync(['node', 'test', 'task-big']);
 
-    // Snapshot prints 100 events, catchUp returns the 50-event tail.
     expect(consoleSpy.mock.calls.length).toBe(150);
     expect(mockCatchUpEvents).toHaveBeenCalledWith(
       'task-big',
@@ -484,7 +456,6 @@ describe('watch command — polling', () => {
     const cmd = makeWatchCommand();
     await cmd.parseAsync(['node', 'test', 'task-already-done']);
 
-    // The snapshot event should have been rendered exactly once.
     const stdout = consoleSpy.mock.calls.map(c => String(c[0])).join('\n');
     expect(stdout).toContain('done');
     expect(process.exitCode).toBe(0);
@@ -503,32 +474,24 @@ describe('watch command — polling', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  // -------- Chunk H: transient retry + abort propagation --------
-
   test('retries transient 5xx on getTaskEvents and exits cleanly when the next call succeeds', async () => {
-    // Empty snapshot → polling loop fires getTaskEvents. First call 503s,
-    // retry succeeds with an empty page, then the task-detail poll returns
-    // COMPLETED. The command must exit 0, not propagate the 503.
     mockGetTaskEvents
-      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }) // snapshot
+      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } })
       .mockRejectedValueOnce(new ApiError(503, 'SERVICE_UNAVAILABLE', 'svc down', 'req-1'))
       .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } });
 
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
-      .mockResolvedValueOnce({ status: 'COMPLETED' }); // after retry succeeded
+      .mockResolvedValueOnce({ status: 'RUNNING' })
+      .mockResolvedValueOnce({ status: 'COMPLETED' });
 
     const cmd = makeWatchCommand();
     await cmd.parseAsync(['node', 'test', 'task-retry-5xx']);
 
     expect(process.exitCode).toBe(0);
-    // Three getTaskEvents calls total: snapshot, failed, retry-succeeded.
     expect(mockGetTaskEvents).toHaveBeenCalledTimes(3);
   });
 
   test('does not retry on 4xx — deterministic errors propagate immediately', async () => {
-    // Snapshot succeeds with RUNNING; the first poll returns a 403 which is
-    // deterministic. The command must surface it without retrying.
     mockGetTaskEvents
       .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } })
       .mockRejectedValueOnce(new ApiError(403, 'FORBIDDEN', 'nope', 'req-1'));
@@ -538,15 +501,10 @@ describe('watch command — polling', () => {
     const cmd = makeWatchCommand();
     await expect(cmd.parseAsync(['node', 'test', 'task-403'])).rejects.toThrow();
 
-    // Exactly one failing poll after the snapshot; no retries on 4xx.
     expect(mockGetTaskEvents).toHaveBeenCalledTimes(2);
   });
 
   test('does not retry on 401 auth-expired — surfaces login hint immediately', async () => {
-    // A token that expires mid-session previously got silently retried 5
-    // times then presented with a misleading "re-run to resume" message.
-    // The retry classifier must treat 401 as non-transient so the user
-    // sees the real ``bgagent login`` hint on the first failure.
     mockGetTaskEvents
       .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } })
       .mockRejectedValueOnce(new ApiError(401, 'UNAUTHORIZED', 'token expired', 'req-1'));
@@ -559,10 +517,6 @@ describe('watch command — polling', () => {
   });
 
   test('does not retry on CliError (programmer / contract violation) — propagates first failure', async () => {
-    // Whitelist contract: only 5xx ApiError + TypeError('fetch failed')
-    // retry. Everything else (including our own CliError) is terminal so
-    // real bugs surface immediately instead of hiding behind 5 silent
-    // retries.
     mockGetTaskEvents
       .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } })
       .mockRejectedValueOnce(new CliError('bad response shape'));
@@ -575,15 +529,9 @@ describe('watch command — polling', () => {
   });
 
   test('SIGINT mid-poll sets exit code 130 (POSIX convention)', async () => {
-    // Snapshot succeeds with RUNNING; the first poll's getTaskEvents is
-    // set up to fire SIGINT on the *next* event loop tick before it
-    // resolves. The poll loop should check signal.aborted and exit via
-    // the aborted branch — process.exitCode must be 130, not 0/1.
     mockGetTaskEvents
-      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }) // snapshot
+      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } })
       .mockImplementationOnce(async () => {
-        // Fire SIGINT just before returning so the poll loop sees
-        // signal.aborted === true after the await.
         process.emit('SIGINT' as never);
         return { data: [], pagination: { next_token: null, has_more: false } };
       });
@@ -597,11 +545,6 @@ describe('watch command — polling', () => {
   });
 
   test('session-level retry counter surfaces a "flapping" stderr warn exactly once (L3 item 5)', async () => {
-    // Regression guard: before L3, ``withTransientRetry`` reset the
-    // per-op attempt counter on every successful poll. A 50% flapping
-    // upstream would retry-and-recover forever without ever surfacing
-    // a signal to the user. The session counter accumulates across all
-    // retries; crossing 10 emits the stderr warn once.
     _resetSessionRetries();
     const realSetTimeout = global.setTimeout;
     global.setTimeout = ((fn: () => void) => {
@@ -610,14 +553,10 @@ describe('watch command — polling', () => {
     }) as unknown as typeof setTimeout;
 
     try {
-      // Snapshot (1 call to each), then a flapping pattern: fail-then-succeed
-      // alternating for getTaskEvents so each poll incurs exactly 1 retry.
-      // We need >= 10 retries to cross the threshold, so run 12 flap cycles
-      // followed by a terminal poll.
       mockGetTaskEvents.mockResolvedValueOnce({
         data: [],
         pagination: { next_token: null, has_more: false },
-      }); // snapshot
+      });
 
       for (let i = 0; i < 12; i += 1) {
         mockGetTaskEvents.mockRejectedValueOnce(
@@ -629,23 +568,17 @@ describe('watch command — polling', () => {
         });
       }
 
-      // Snapshot task poll + per-loop polls. Return COMPLETED after enough
-      // flaps to cross the threshold (12 retries → well past the 10 threshold).
       let taskCallCount = 0;
       mockGetTask.mockImplementation(async () => {
         taskCallCount += 1;
-        // 1 snapshot + 12 poll iterations = terminal on the 13th task call
         return { status: taskCallCount >= 13 ? 'COMPLETED' : 'RUNNING' };
       });
 
       const cmd = makeWatchCommand();
       await cmd.parseAsync(['node', 'test', 'task-flapping']);
 
-      // Session counter must have accumulated past the threshold.
       expect(_getSessionRetries()).toBeGreaterThanOrEqual(10);
 
-      // Warn must have fired EXACTLY once despite crossing threshold
-      // multiple times (threshold 10, saw 12 retries).
       const stderrOutput = stderrSpy.mock.calls.map(c => String(c[0])).join('');
       const warnMatches = stderrOutput.match(/upstream is flapping/g) ?? [];
       expect(warnMatches).toHaveLength(1);
@@ -657,18 +590,7 @@ describe('watch command — polling', () => {
   });
 
   test('exhausted retry budget throws a "re-run to resume" message', async () => {
-    // Snapshot succeeds; then every subsequent events call fails with 503.
-    // Budget is 5 retries, so the command must reject with a clear message
-    // pointing the user back at ``bgagent watch``. We stub ``setTimeout``
-    // globally to run synchronously so the jittered backoff sleeps don't
-    // blow the Jest timeout.
     const realSetTimeout = global.setTimeout;
-    // Run every scheduled timer on the next microtask — retry sleeps +
-    // cadence sleeps both resolve promptly so the poll loop can churn
-    // through the failure budget without blowing the Jest timeout. Using
-    // ``queueMicrotask`` (rather than a synchronous ``fn()``) preserves
-    // the callback/handler ordering the real implementation expects
-    // inside ``abortableSleep``.
     global.setTimeout = ((fn: () => void) => {
       queueMicrotask(fn);
       return 0 as unknown as NodeJS.Timeout;
@@ -678,8 +600,6 @@ describe('watch command — polling', () => {
         data: [],
         pagination: { next_token: null, has_more: false },
       });
-      // MAX_TRANSIENT_RETRIES = 5 → 1 initial failure + 5 retries = 6 total.
-      // Queuing exactly 6 makes the test's intent obvious.
       for (let i = 0; i < 6; i += 1) {
         mockGetTaskEvents.mockRejectedValueOnce(new ApiError(503, 'SERVICE_UNAVAILABLE', 'svc down', `req-${i}`));
       }
@@ -691,8 +611,6 @@ describe('watch command — polling', () => {
       await expect(run).rejects.toThrow(
         /Exceeded retry budget.*Re-run .bgagent watch/,
       );
-      // The message counts the six requests that failed, and the exit code is the one
-      // `--wait` gives up with: 1 is what a task that ended FAILED returns.
       await expect(run).rejects.toThrow(/after 6 transient failures/);
       await expect(run).rejects.toBeInstanceOf(CliError);
       await expect(run).rejects.toHaveProperty('exitCode', 2);
@@ -702,9 +620,6 @@ describe('watch command — polling', () => {
   });
 
   test('SIGINT during initial snapshot exits 130 without logging a failure', async () => {
-    // Snapshot-level abort must surface as exit 130, NOT as an
-    // "Initial snapshot failed: The operation was aborted" error log.
-    // The snapshot mock throws an AbortError after the user interrupt.
     mockGetTaskEvents.mockImplementationOnce(async () => {
       process.emit('SIGINT' as never);
       const err = new Error('The operation was aborted');
@@ -722,11 +637,6 @@ describe('watch command — polling', () => {
   });
 
   test('non-abort error during snapshot still propagates with its original message', async () => {
-    // Race guard: a real error (e.g. token expired) during snapshot
-    // must NOT be swallowed by the exit-130 path even if the user
-    // coincidentally hits Ctrl+C at the same moment. The snapshot
-    // catch branch only honors 130 for actual AbortError from our
-    // signal; other errors carry their ``bgagent login`` hint through.
     mockGetTaskEvents.mockRejectedValueOnce(
       new ApiError(401, 'UNAUTHORIZED', 'token expired (UNAUTHORIZED)\nHint: Run `bgagent login`', 'req-1'),
     );
@@ -736,17 +646,10 @@ describe('watch command — polling', () => {
 
     const cmd = makeWatchCommand();
     await expect(cmd.parseAsync(['node', 'test', 'task-real-err'])).rejects.toThrow(/token expired/);
-    // Must NOT have exited 130 — real errors win over coincidental abort.
     expect(process.exitCode).not.toBe(130);
   });
 
   test('initial snapshot retries transient errors before giving up (cold-start hardening)', async () => {
-    // Regression guard: Chunk H wrapped the polling loop's API calls
-    // in ``withTransientRetry`` but left ``fetchInitialSnapshot``
-    // making raw calls. A single cold-start ``fetch failed`` / 5xx on
-    // the snapshot would crash the watch command before the polling
-    // loop got a chance to stabilise (observed Scenario 2 deploy
-    // validation). The snapshot must now retry transient errors too.
     _resetSessionRetries();
     const realSetTimeout = global.setTimeout;
     global.setTimeout = ((fn: () => void) => {
@@ -755,24 +658,20 @@ describe('watch command — polling', () => {
     }) as unknown as typeof setTimeout;
 
     try {
-      // getTaskEvents: 503 → 503 → success. getTask: succeeds cleanly.
       mockGetTaskEvents
         .mockRejectedValueOnce(new ApiError(503, 'SERVICE_UNAVAILABLE', 'cold-start 1', 'req-1'))
         .mockRejectedValueOnce(new ApiError(503, 'SERVICE_UNAVAILABLE', 'cold-start 2', 'req-2'))
-        .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }) // snapshot success
-        .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }); // first poll
+        .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } })
+        .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } });
 
-      mockGetTask.mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
-        .mockResolvedValueOnce({ status: 'COMPLETED' }); // first poll
+      mockGetTask.mockResolvedValueOnce({ status: 'RUNNING' })
+        .mockResolvedValueOnce({ status: 'COMPLETED' });
 
       const cmd = makeWatchCommand();
       await cmd.parseAsync(['node', 'test', 'task-cold-start']);
 
-      // All three snapshot getTaskEvents attempts fired (2 retries + 1 success).
-      // Plus 1 polling-loop call after snapshot completes.
       expect(mockGetTaskEvents).toHaveBeenCalledTimes(4);
       expect(process.exitCode).toBe(0);
-      // The session retry counter recorded the 2 snapshot retries.
       expect(_getSessionRetries()).toBeGreaterThanOrEqual(2);
     } finally {
       global.setTimeout = realSetTimeout;
@@ -780,10 +679,6 @@ describe('watch command — polling', () => {
   });
 
   test('initial snapshot exhausts retry budget on persistent 5xx and surfaces a "re-run" hint', async () => {
-    // Budget-exhaustion path: the retry wrapper gives up after
-    // MAX_TRANSIENT_RETRIES (5) attempts and throws a message that
-    // tells the user to re-run. The cursor is durable, so resumption
-    // is safe.
     _resetSessionRetries();
     const realSetTimeout = global.setTimeout;
     global.setTimeout = ((fn: () => void) => {
@@ -792,11 +687,6 @@ describe('watch command — polling', () => {
     }) as unknown as typeof setTimeout;
 
     try {
-      // 6 attempts will be made (attempt=1..5 all throw, attempt=6
-      // crosses the budget). getTaskEvents is the only leg that fails;
-      // its sibling getTask succeeds once, and after SIG #2's abort
-      // plumbing kicks in, getTask's retry loop is short-circuited by
-      // the aborted signal rather than burning its own budget.
       mockGetTaskEvents.mockRejectedValue(
         new ApiError(503, 'SERVICE_UNAVAILABLE', 'persistent flap', 'req-x'),
       );
@@ -807,9 +697,7 @@ describe('watch command — polling', () => {
       await expect(run).rejects.toThrow(
         /Exceeded retry budget .* Re-run `bgagent watch/,
       );
-      // An API that is down from the first request ends the same way: exit code 2.
       await expect(run).rejects.toHaveProperty('exitCode', 2);
-      // 6 attempts: 5 retries + the initial call.
       expect(mockGetTaskEvents).toHaveBeenCalledTimes(6);
     } finally {
       global.setTimeout = realSetTimeout;
@@ -817,12 +705,6 @@ describe('watch command — polling', () => {
   });
 
   test('snapshot error aborts the shared controller so a sibling retry loop terminates (resource-leak guard)', async () => {
-    // SIG #2 regression guard: the two snapshot calls run under
-    // ``Promise.all`` with independent retry wrappers. If one leg
-    // throws a non-transient error (401), the sibling leg must NOT
-    // keep retrying a flaky 503 in the background — that would pollute
-    // CloudWatch metrics, burn sessionRetries, and hit rate limits
-    // after the command has already decided to fail.
     _resetSessionRetries();
     const realSetTimeout = global.setTimeout;
     global.setTimeout = ((fn: () => void) => {
@@ -831,10 +713,6 @@ describe('watch command — polling', () => {
     }) as unknown as typeof setTimeout;
 
     try {
-      // getTaskEvents: 401 (non-transient, rethrows immediately).
-      // getTask: would retry 503 indefinitely if not aborted. We
-      // verify the abort cancels the second call before it burns
-      // the full retry budget.
       mockGetTaskEvents.mockRejectedValueOnce(
         new ApiError(401, 'UNAUTHORIZED', 'token expired', 'req-e'),
       );
@@ -847,11 +725,6 @@ describe('watch command — polling', () => {
       const cmd = makeWatchCommand();
       await expect(cmd.parseAsync(['node', 'test', 'task-abort'])).rejects.toThrow(/token expired/);
 
-      // Without the abort in the snapshot catch, getTask would retry
-      // MAX_TRANSIENT_RETRIES times before giving up. With the abort,
-      // it should stop at most a handful of attempts in (the exact
-      // count depends on Promise.all race timing with queueMicrotask,
-      // but it must be strictly less than 6 = initial + 5 retries).
       expect(taskAttempts).toBeLessThan(6);
     } finally {
       global.setTimeout = realSetTimeout;
@@ -859,9 +732,6 @@ describe('watch command — polling', () => {
   });
 
   test('initial snapshot does NOT retry 4xx errors (auth failures should surface immediately)', async () => {
-    // 4xx errors are deterministic — retrying would be futile and
-    // would delay the user's ``bgagent login`` hint. The retry wrapper
-    // classifies 401 as non-transient and rethrows immediately.
     mockGetTaskEvents.mockRejectedValueOnce(
       new ApiError(401, 'UNAUTHORIZED', 'token expired', 'req-1'),
     );
@@ -871,24 +741,16 @@ describe('watch command — polling', () => {
 
     const cmd = makeWatchCommand();
     await expect(cmd.parseAsync(['node', 'test', 'task-401'])).rejects.toThrow(/token expired/);
-    // Exactly one attempt — no retries on 4xx.
     expect(mockGetTaskEvents).toHaveBeenCalledTimes(1);
   });
 
   test('SIGINT after terminal status lands still honors exit 130 (POSIX contract)', async () => {
-    // If the user Ctrl+Cs between onTerminal firing and the command
-    // resolving, their intent to interrupt is the load-bearing signal.
-    // The ``signal.aborted`` check must come before ``finalStatus`` so
-    // shells see 130, not 0.
     mockGetTaskEvents
-      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }) // snapshot
-      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } }); // first poll
+      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } })
+      .mockResolvedValueOnce({ data: [], pagination: { next_token: null, has_more: false } });
 
-    // Task returns COMPLETED on first poll; we abort during the
-    // task-detail call so ``finalStatus`` AND ``signal.aborted`` are
-    // both set by the time runPolling evaluates its exit-code block.
     mockGetTask
-      .mockResolvedValueOnce({ status: 'RUNNING' }) // snapshot
+      .mockResolvedValueOnce({ status: 'RUNNING' })
       .mockImplementationOnce(async () => {
         process.emit('SIGINT' as never);
         return { status: 'COMPLETED' };
@@ -901,16 +763,8 @@ describe('watch command — polling', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Chunk H: transient retry jitter — pure function
-// ---------------------------------------------------------------------------
-
 describe('transientRetryDelayMs (equal-jitter backoff)', () => {
   test('never returns 0 — equal-jitter floor prevents retry storms', () => {
-    // Self-DOS guard: a full-jitter impl (``Math.random() * base``)
-    // can produce 0 delays and tight-loop a degraded service. Equal
-    // jitter pins at least half the base delay as a fixed floor.
-    // Sample enough attempts and values to catch any leak.
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       for (let i = 0; i < 200; i += 1) {
         const ms = transientRetryDelayMs(attempt);
@@ -921,15 +775,11 @@ describe('transientRetryDelayMs (equal-jitter backoff)', () => {
 
   test('respects the 5000 ms ladder ceiling', () => {
     for (let i = 0; i < 200; i += 1) {
-      // Attempt 10 would produce base = 500 * 1024 if unbounded.
       expect(transientRetryDelayMs(10)).toBeLessThanOrEqual(5_000);
     }
   });
 
   test('pins the backoff curve: 1-based attempts → 1000/2000/4000/5000ms bases', () => {
-    // Regression pin: an extraction to retry.ts once changed the exponent
-    // to 2**(attempt-1), silently halving every delay. Equal jitter means
-    // the result lies in [base/2, base) — assert both bounds per attempt.
     const expectedBases = [1000, 2000, 4000, 5000, 5000];
     expectedBases.forEach((base, idx) => {
       const attempt = idx + 1;
@@ -942,10 +792,6 @@ describe('transientRetryDelayMs (equal-jitter backoff)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Chunk H: adaptive cadence state machine — pure function
-// ---------------------------------------------------------------------------
-
 describe('nextCadence (adaptive polling state)', () => {
   test('stays at 500 ms when events are arriving', () => {
     const s0 = { intervalMs: 500, consecutiveEmptyPolls: 0 };
@@ -954,7 +800,6 @@ describe('nextCadence (adaptive polling state)', () => {
   });
 
   test('climbs the backoff ladder on consecutive empty polls', () => {
-    // Ladder is 1 s → 2 s → 5 s and caps at 5 s.
     let s = { intervalMs: 500, consecutiveEmptyPolls: 0 };
     s = nextCadence(s, false);
     expect(s).toEqual({ intervalMs: 1_000, consecutiveEmptyPolls: 1 });
@@ -962,7 +807,6 @@ describe('nextCadence (adaptive polling state)', () => {
     expect(s).toEqual({ intervalMs: 2_000, consecutiveEmptyPolls: 2 });
     s = nextCadence(s, false);
     expect(s).toEqual({ intervalMs: 5_000, consecutiveEmptyPolls: 3 });
-    // Further empty polls stay pinned at the cap — don't escalate beyond 5 s.
     s = nextCadence(s, false);
     expect(s).toEqual({ intervalMs: 5_000, consecutiveEmptyPolls: 4 });
   });
@@ -974,18 +818,7 @@ describe('nextCadence (adaptive polling state)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// formatTerminalMessage — carry-forward from Scenario 7-ext take 3 polish
-// ---------------------------------------------------------------------------
-
 describe('formatTerminalMessage', () => {
-  // Pre-fix, watch printed ``Task completed.`` / ``Task failed.`` with
-  // no task_id and no failure classification — a user watching multiple
-  // tasks (or scrolling back through a log) couldn't tell which task
-  // ended or why. The formatter now includes the task_id always, and
-  // the error classification (or raw message) on non-COMPLETED
-  // terminals.
-
   test('COMPLETED renders task_id + status without an error clause', () => {
     expect(formatTerminalMessage({
       task_id: '01KQ...XXX',
@@ -996,11 +829,6 @@ describe('formatTerminalMessage', () => {
   });
 
   test('FAILED with structured classification renders category + title + raw first line', () => {
-    // Chunk 10 E2E T2.2 follow-up: the classification alone is
-    // a human-readable summary but the raw error_message carries
-    // load-bearing context (file paths, IDs, remediation hints) that
-    // users need inline. Append the first line so multi-line stack
-    // traces don't spill into the terminal render.
     expect(formatTerminalMessage({
       task_id: 'T1',
       status: 'FAILED',
@@ -1018,8 +846,6 @@ describe('formatTerminalMessage', () => {
   });
 
   test('FAILED with known classification but no error_message keeps the classification-only path', () => {
-    // When the server classified but dropped the raw message, the
-    // category+title is all we have — don't append a dangling em-dash.
     expect(formatTerminalMessage({
       task_id: 'T1b',
       status: 'FAILED',
@@ -1035,11 +861,6 @@ describe('formatTerminalMessage', () => {
   });
 
   test('FAILED with UNKNOWN classification prefers raw error_message over the bland title', () => {
-    // Chunk 10 E2E T2.2 key fix: the classifier's catch-all branch
-    // previously turned ``missing built-in hard-deny policies: ...``
-    // (a concrete, actionable error) into the useless string
-    // ``unknown: Unexpected error`` on the user's terminal. The real
-    // signal was in ``error_message`` all along — show it.
     expect(formatTerminalMessage({
       task_id: 'T1c',
       status: 'FAILED',
@@ -1057,9 +878,6 @@ describe('formatTerminalMessage', () => {
   });
 
   test('FAILED with UNKNOWN classification and no error_message falls back to the bland title', () => {
-    // Edge case: UNKNOWN + null message should still render SOMETHING
-    // rather than a bare prefix, so the user at least knows it wasn't
-    // a success.
     expect(formatTerminalMessage({
       task_id: 'T1d',
       status: 'FAILED',
@@ -1075,9 +893,6 @@ describe('formatTerminalMessage', () => {
   });
 
   test('FAILED without classification falls back to error_message', () => {
-    // Classifier gap / older records / transient: the raw
-    // ``error_message`` is the only signal. Trim whitespace so the
-    // fallback doesn't leak leading/trailing newlines into the TTY.
     expect(formatTerminalMessage({
       task_id: 'T2',
       status: 'FAILED',
@@ -1087,7 +902,6 @@ describe('formatTerminalMessage', () => {
   });
 
   test('FAILED with neither classification nor message degrades to bare prefix', () => {
-    // Defense-in-depth: never emit a trailing space / orphan colon.
     expect(formatTerminalMessage({
       task_id: 'T3',
       status: 'FAILED',
@@ -1097,11 +911,6 @@ describe('formatTerminalMessage', () => {
   });
 
   test('CANCELLED with non-unknown classification still renders category + title + first line', () => {
-    // Regression guard: the ``status === 'COMPLETED'`` check must be
-    // exact so CANCELLED / TIMED_OUT still render the classification.
-    // Note: cancellation currently classifies as ``unknown: User
-    // cancelled``, which falls through to the raw-message path —
-    // test the NON-unknown branch with a synthesized classification.
     expect(formatTerminalMessage({
       task_id: 'T4',
       status: 'CANCELLED',

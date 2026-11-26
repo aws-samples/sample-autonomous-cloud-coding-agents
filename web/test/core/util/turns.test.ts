@@ -32,7 +32,6 @@ const result = (tool: string, output: string, isError = false) => ev('agent_tool
 
 describe('buildTurns', () => {
   it('starts a new turn after each answer that asked for tools, like the platform counts', () => {
-    // A finished task with these events reports turns_completed = 3 (two tool turns + the final answer).
     const turns = buildTurns([
       message(), message('Looking around.', 1), call('Bash', "{'command': 'ls'}"), result('Bash', 'a.ts\nb.ts'),
       message(), message('', 1), call('Read', "{'file_path': '/w/a.ts'}"), result('Read', 'export const a = 1;'),

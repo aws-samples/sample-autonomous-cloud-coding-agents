@@ -1,12 +1,3 @@
-"""The diagnostics under ``scripts/diagnostics``: the exit status follows the verdict.
-
-Both scripts are run by hand when a deployed agent yields no messages, and what
-they answer decides where the search goes next. Each test runs a script the way
-the shell does, as ``__main__``, with the one thing it reaches outside the process
-replaced: the SDK client that would start the Claude Code CLI, or the child
-process whose output it reads. No CLI is started and nothing is sent to Bedrock.
-"""
-
 import asyncio
 import runpy
 import shutil
@@ -18,14 +9,12 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, Tex
 
 _DIAGNOSTICS = Path(__file__).resolve().parents[1] / "scripts" / "diagnostics"
 
-# What the CLI reports when the account may not invoke the model.
 _REFUSAL = (
     'API Error: 403 {"message":"You don\'t have access to the model with the specified model ID."}'
 )
 
 
 def _exit_status(script: str) -> int:
-    """Run a diagnostic as ``python <script>`` would and return its exit status."""
     try:
         runpy.run_path(str(_DIAGNOSTICS / script), run_name="__main__")
     except SystemExit as exit_:
@@ -34,11 +23,6 @@ def _exit_status(script: str) -> int:
 
 
 def _sdk_smoke(monkeypatch, *messages, raises: Exception | None = None) -> int:
-    """Exit status of the SDK smoke test when the CLI yields ``messages``.
-
-    With ``raises``, the stream raises it after the last message.
-    """
-
     class Client:
         def __init__(self, options):
             pass
@@ -58,7 +42,6 @@ def _sdk_smoke(monkeypatch, *messages, raises: Exception | None = None) -> int:
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("ANTHROPIC_MODEL", "global.anthropic.claude-opus-5-5")
-    # The script sets this itself when it is missing; set here, it is removed again.
     monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     return _exit_status("test_sdk_smoke.py")
 
@@ -116,7 +99,6 @@ def test_sdk_smoke_fails_when_the_run_raises_after_its_result(monkeypatch, capsy
     out = capsys.readouterr().out
     assert "PASS" not in out
     assert "raised an exception" in out
-    # The result arrived, so the verdict for a run that has none would be false.
     assert "INDETERMINATE" not in out
     assert out.index("Errors:") < out.index("FAIL")
     assert status == 1
@@ -154,8 +136,6 @@ def test_sdk_smoke_keeps_its_verdict_when_the_run_raises_before_its_result(
 
 
 class _Child:
-    """In place of the child process: ``count`` JSON lines on stdout, then end of file."""
-
     def __init__(self, count: int) -> None:
         self._lines = [b'{"index": %d}\n' % index for index in range(count)]
         self.stdout = self
@@ -174,16 +154,13 @@ class _Child:
 def test_subprocess_threading_exit_status_follows_the_threaded_read(
     monkeypatch, capsys, read_in_thread, expected_status
 ):
-    # The script reads its child three times: in the main thread (the baseline), in a
-    # background thread under asyncio.run(), and in one under run_coroutine_threadsafe().
-    # The child writes seven messages.
     reads = iter([7, read_in_thread, 7])
 
     async def spawn(*_command, **_pipes):
         return _Child(next(reads))
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(shutil, "which", lambda _name: None)  # leaves the Node.js half out
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
 
     status = _exit_status("test_subprocess_threading.py")
 

@@ -17,10 +17,6 @@
  *  SOFTWARE.
  */
 
-// The upload instructions of a task that waits for presigned uploads. create-task-core reads
-// ATTACHMENTS_BUCKET_NAME when it loads, and create-task-core.test.ts loads it without a bucket.
-// A presign that fails is in create-task-core-presign-failure.test.ts.
-
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -37,7 +33,6 @@ jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
 
 jest.mock('@aws-sdk/client-s3', () => ({ S3Client: jest.fn(() => ({})) }));
 
-// A presigned POST as S3 would sign it: the fields that were asked for, and the object key.
 interface PresignParams {
   readonly Key: string;
   readonly Conditions: unknown[];
@@ -74,7 +69,6 @@ describe('createTaskCore upload instructions', () => {
         task_description: 'Summarise the attached notes',
         attachments: [
           { type: 'file', content_type: 'text/plain', filename: 'notes.txt', expected_size_bytes: 10 },
-          // Fetched during hydration: pending as well, but not an upload.
           { type: 'url', url: 'https://example.com/spec.pdf' },
           { type: 'image', content_type: 'image/png', filename: 'diagram.png', expected_size_bytes: 2_000_000 },
         ],
@@ -89,7 +83,6 @@ describe('createTaskCore upload instructions', () => {
     const task = mockSend.mock.calls.map(([command]) => command).find(command => command.input.TableName === 'Tasks').input.Item;
     const uploads = task.attachments.filter((a: { type: string }) => a.type !== 'url');
     expect(uploads.map((a: { filename: string }) => a.filename)).toEqual(['notes.txt', 'diagram.png']);
-    // The key is the one confirm-uploads looks the upload up under.
     expect(data.upload_instructions).toEqual(uploads.map((a: { attachment_id: string; filename: string; content_type: string }) => ({
       attachment_id: a.attachment_id,
       filename: a.filename,
@@ -130,7 +123,6 @@ describe('createTaskCore upload instructions', () => {
           source_url: 'https://example.com/spec.pdf',
           screening: { status: 'pending' },
         },
-        // Screened by a confirmation that ran out of time and saved its progress.
         {
           attachment_id: 'att-screened',
           type: 'image',
@@ -167,8 +159,6 @@ describe('createTaskCore upload instructions', () => {
     }
 
     test('a task that still waits for its uploads comes with new instructions for them', async () => {
-      // The first answer held the only copy of the instructions. A client whose upload or
-      // confirmation failed sends the request again, and needs them to finish the task.
       const result = await replay(task);
 
       expect(result.statusCode).toBe(200);
@@ -182,9 +172,7 @@ describe('createTaskCore upload instructions', () => {
         upload_fields: { 'Content-Type': 'text/plain', 'key': 'attachments/user-123/task-1/att-notes/notes.txt' },
         upload_expires_at: expect.any(String),
       }]);
-      // The cleanup cancels the task 30 minutes after it was created, not after this answer.
       expect(data.task_expires_at).toBe('2026-11-17T10:30:00.000Z');
-      // No second task, no write.
       expect(mockSend.mock.calls.map(([command]) => command._type)).toEqual(['Query', 'Get']);
     });
 

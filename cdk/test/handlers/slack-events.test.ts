@@ -20,7 +20,6 @@
 import * as crypto from 'crypto';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -89,7 +88,6 @@ function signedEvent(body: string, retryNum?: string, retryReason?: string): API
   return makeEvent(body, headers);
 }
 
-/** JSON bodies of the calls made to one Slack Web API method, in call order. */
 function slackCalls(method: string): Array<Record<string, unknown>> {
   return fetchMock.mock.calls
     .filter(([url]) => String(url) === `https://slack.com/api/${method}`)
@@ -103,7 +101,6 @@ describe('slack-events handler', () => {
     smSend.mockReset();
     fetchMock.mockReset();
     invalidateSlackSecretCache(process.env.SLACK_SIGNING_SECRET_ARN!);
-    // Default: signing secret fetched on demand
     smSend.mockImplementation((cmd: { _type: string }) => {
       if (cmd._type === 'GetSecretValue') return Promise.resolve({ SecretString: SIGNING_SECRET });
       return Promise.resolve({});
@@ -138,7 +135,6 @@ describe('slack-events handler', () => {
     smSend.mockImplementation(() => Promise.resolve({ SecretString: undefined }));
     invalidateSlackSecretCache(process.env.SLACK_SIGNING_SECRET_ARN!);
     const body = JSON.stringify({ type: 'url_verification', challenge: 'initial' });
-    // No signature provided — pre-setup flow
     const result = await handler(makeEvent(body, {}));
     expect(result.statusCode).toBe(200);
     expect(JSON.parse(result.body)).toEqual({ challenge: 'initial' });
@@ -153,8 +149,6 @@ describe('slack-events handler', () => {
   });
 
   test('refuses an unsigned url_verification when the signing secret is scheduled for deletion', async () => {
-    // Not "not populated yet": the secret exists and cannot be read, so the
-    // request cannot be verified and must not be answered.
     smSend.mockImplementation(() => Promise.reject(Object.assign(
       new Error("You can't perform this operation on the secret because it was marked for deletion."),
       { name: 'InvalidRequestException' },
@@ -176,15 +170,10 @@ describe('slack-events handler', () => {
     });
     const result = await handler(signedEvent(body, '1'));
     expect(result.statusCode).toBe(200);
-    // No lambda invocation because the retry is short-circuited
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
   test('processes the first retry of a mention whose first delivery got an HTTP error', async () => {
-    // The first delivery was answered 5xx or 429 (Secrets Manager throttled the
-    // signing-secret read, API Gateway throttled the request). This handler
-    // answers a mention with a non-2xx status only when it did not invoke the
-    // processor, so nothing was submitted: the retry is the user's request.
     fetchMock.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ ok: true }),
@@ -207,11 +196,9 @@ describe('slack-events handler', () => {
   });
 
   test.each([
-    // The first delivery may have been processed, only too slowly for Slack.
     ['1', 'http_timeout'],
     ['1', 'unknown_error'],
-    // The reason describes the attempt before this one, not the first delivery:
-    // that one may have been processed and then timed out.
+    // X-Slack-Retry-Reason describes the attempt before this one, not the first delivery.
     ['2', 'http_error'],
   ])('drops retry %s of a mention with reason %s without reprocessing', async (retryNum, retryReason) => {
     const body = JSON.stringify({
@@ -225,7 +212,7 @@ describe('slack-events handler', () => {
   });
 
   test('reprocesses retries for app_uninstalled (security-critical)', async () => {
-    ddbSend.mockResolvedValueOnce({}); // UpdateCommand
+    ddbSend.mockResolvedValueOnce({});
     smSend.mockImplementation((cmd: { _type: string }) => {
       if (cmd._type === 'GetSecretValue') return Promise.resolve({ SecretString: SIGNING_SECRET });
       if (cmd._type === 'DeleteSecret') return Promise.resolve({});
@@ -238,9 +225,7 @@ describe('slack-events handler', () => {
     });
     const result = await handler(signedEvent(body, '2'));
     expect(result.statusCode).toBe(200);
-    // DDB was updated (status→revoked) even though this is a retry
     expect(ddbSend).toHaveBeenCalledTimes(1);
-    // And the secret deletion happened
     const deleteCalled = smSend.mock.calls.some(([cmd]) => cmd._type === 'DeleteSecret');
     expect(deleteCalled).toBe(true);
   });
@@ -254,13 +239,11 @@ describe('slack-events handler', () => {
     });
     const result = await handler(signedEvent(body));
     expect(result.statusCode).toBe(500);
-    // Critical invariant: don't delete secret if install is still "active" in DDB
     const deleteCalled = smSend.mock.calls.some(([cmd]) => cmd._type === 'DeleteSecret');
     expect(deleteCalled).toBe(false);
   });
 
   test('forwards app_mention to command processor with :eyes: reaction', async () => {
-    // First fetch is reactions.add for :eyes:, returns { ok: true }
     fetchMock.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ ok: true }),
@@ -270,7 +253,6 @@ describe('slack-events handler', () => {
       if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
         return Promise.resolve({ SecretString: SIGNING_SECRET });
       }
-      // Bot token lookup
       return Promise.resolve({ SecretString: 'xoxb-bot' });
     });
 
@@ -294,16 +276,11 @@ describe('slack-events handler', () => {
     expect(payload.text).toContain('submit');
     expect(payload.text).toContain('org/repo#42');
     expect(payload.channel_id).toBe('C1');
-    // Reactions.add was called
     const reactionCall = fetchMock.mock.calls.find(([url]) => String(url).includes('reactions.add'));
     expect(reactionCall).toBeTruthy();
   });
 
   test('app_mention without repo is forwarded to the processor (channel-default fallback)', async () => {
-    // The events handler no longer answers no-repo mentions inline — it forwards
-    // them so the processor can apply the channel's onboarded default repo (and,
-    // only if there is none, reply with guidance). The whole text is forwarded
-    // as the submit description.
     fetchMock.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ ok: true }),
@@ -322,12 +299,10 @@ describe('slack-events handler', () => {
     });
     const result = await handler(signedEvent(body));
     expect(result.statusCode).toBe(200);
-    // Forwarded to the processor rather than answered inline.
     expect(lambdaSend).toHaveBeenCalledTimes(1);
     const [invokeCmd] = lambdaSend.mock.calls[0];
     const invokePayload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
     expect(invokePayload.text).toBe('submit just a question');
-    // No inline "Please include a repo" reply from the events handler.
     const postedReply = fetchMock.mock.calls.find(
       ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('Please include a repo'),
     );
@@ -335,11 +310,8 @@ describe('slack-events handler', () => {
   });
 
   test.each([
-    // A slash word need not be a repo, and the first one need not be the
-    // repo: the processor decides, it can ask what is onboarded.
     ['<@BOT> fix the CI/CD pipeline', 'submit fix the CI/CD pipeline'],
     ['<@BOT> make the client/server handshake retry in acme/api#7', 'submit make the client/server handshake retry in acme/api#7'],
-    // Line breaks and indentation are part of what the user wrote.
     ['<@BOT> fix this in org/repo:\n  line two', 'submit fix this in org/repo:\n  line two'],
   ])('forwards the text of a mention as written: %j', async (text, forwarded) => {
     fetchMock.mockResolvedValue({
@@ -360,8 +332,6 @@ describe('slack-events handler', () => {
   });
 
   describe('a mention written as a reply inside a thread', () => {
-    // ts is the mention itself, thread_ts the first message of the thread,
-    // which somebody else may have written.
     const body = JSON.stringify({
       type: 'event_callback',
       team_id: 'T1',
@@ -453,8 +423,7 @@ describe('slack-events handler', () => {
       },
     });
     const result = await handler(signedEvent(body));
-    expect(result.statusCode).toBe(200); // Still 200 — Slack retries give a second chance
-    // Should have swapped reaction: remove :eyes:, add :x:, then post error message
+    expect(result.statusCode).toBe(200);
     const removeCall = fetchMock.mock.calls.find(
       ([url, opts]) => String(url).includes('reactions.remove') && String((opts as { body: string }).body).includes('eyes'),
     );

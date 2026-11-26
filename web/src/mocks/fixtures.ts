@@ -17,12 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Synthetic data for mock mode and tests. One task per situation the console
- * must handle (healthy, stale heartbeat, awaiting approval, queued, failed, ...).
- * All timestamps are relative to `now` so the data always looks current.
- */
-
 import type {
   LinearIssueSummary,
   PendingApprovalSummary,
@@ -35,7 +29,7 @@ import type {
   TaskEvent,
 } from '../core/api/types';
 
-/** A change the mock backend applies once its time comes: how mock tasks "progress". */
+/** A change the mock backend applies once its time comes. */
 export interface ScheduledChange {
   readonly taskId: string;
   readonly dueMs: number;
@@ -51,7 +45,7 @@ export interface MockData {
   scheduled: ScheduledChange[];
   /** Idempotency-Key → task id, so a repeated submit returns the first task. */
   idempotency: Record<string, string>;
-  /** Open GitHub issues per repository, for the issue picker. */
+  /** Open GitHub issues per repository. */
   issues: Record<string, RepoIssueSummary[]>;
   /** The signed-in user's monthly budget (GET /tasks?view=budget). */
   budget: PersonalBudgetStatus;
@@ -75,14 +69,10 @@ export interface MockLinearProject {
 }
 
 export interface FixtureOptions {
-  /**
-   * Add a month of finished tasks with costs, so the Costs page has something to show
-   * in mock mode. Off for tests, which count the core fixture set.
-   */
+  /** Add a month of finished tasks with costs. */
   readonly history?: boolean;
 }
 
-/** 26-character ULID-shaped id ending in a readable suffix. */
 function mockId(suffix: string): string {
   return `01JF3KQZ8X${suffix.padStart(16, '0')}`.slice(0, 26);
 }
@@ -112,11 +102,6 @@ const MIN = 60;
 const HOUR = 3600;
 const DAY = 24 * HOUR;
 
-/**
- * The mock's one approval request, as the agent writes it in two places: on the pending
- * request and in the milestone of its task. The reason is the agent's own text, which names
- * the rules that held the action; the preview is the tool's input as JSON.
- */
 const APPROVAL_REQUEST = {
   request_id: 'req-01JF3KR0APPROVE00000001',
   tool_name: 'Bash',
@@ -176,17 +161,14 @@ function event(taskId: string, index: number, at: string, eventType: string, met
   return { event_id: `${taskId}-${String(index).padStart(4, '0')}`, event_type: eventType, timestamp: at, metadata };
 }
 
-/** Metadata for an `agent_tool_call`, with the preview in the agent's truncated dict-repr format. */
 function tool(name: string, preview: string): Record<string, unknown> {
   return { tool_name: name, tool_input_preview: preview, turn: 1 };
 }
 
-/** Metadata for an `agent_tool_result`: the first part of what the tool printed. */
 function result(name: string, output: string, isError = false): Record<string, unknown> {
   return { tool_name: name, content_preview: output, is_error: isError, turn: 1 };
 }
 
-/** Oldest-first event history; the handlers sort as the API would. */
 function lifecycle(now: Date, taskId: string, startedAgoS: number, steps: Array<[number, string, Record<string, unknown>?]>): TaskEvent[] {
   const base: Array<[number, string, Record<string, unknown>?]> = [
     [startedAgoS + 30, 'task_created'],
@@ -199,8 +181,7 @@ function lifecycle(now: Date, taskId: string, startedAgoS: number, steps: Array<
 
 /**
  * The mock tasks and what goes with them. A task has a cost once it has finished, and
- * none when it was cancelled or ran out of time: the agent records the cost in its last
- * write, which those tasks never make.
+ * none when it was cancelled or ran out of time.
  */
 export function buildFixtures(now: Date = new Date(), { history = false }: FixtureOptions = {}): MockData {
   const tasks: TaskDetail[] = [
@@ -225,7 +206,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       agent_heartbeat_at: ago(now, 9 * MIN),
       turns_completed: 31,
     }),
-    // On ECS the agent reports once, at its start: a report this old is all there is, and the task is healthy.
     task(now, {
       task_id: MOCK_IDS.ecs,
       status: 'RUNNING',
@@ -254,7 +234,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
     task(now, {
       task_id: MOCK_IDS.queued,
       status: 'QUEUED',
-      // The backend is recorded when a session starts.
       compute_type: null,
       task_description: 'Use cursor pagination, 50 per page',
       issue_number: 214,
@@ -365,7 +344,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       build_passed: true,
       lint_passed: true,
     }),
-    // Two whose pull request has ended, one each way: the last line of their activity says how, on a later day.
     task(now, {
       task_id: MOCK_IDS.prMerged,
       status: 'COMPLETED',
@@ -439,7 +417,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       [13 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
       [10 * MIN, 'agent_tool_call', tool('Bash', "{'command': 'terraform plan -target=module.staging_database', 'description': 'Preview the staging database change'}")],
       [9 * MIN, 'agent_turn', { turn: 6, text_preview: 'The plan only changes the staging database. Next I need to apply it.' }],
-      // As the agent writes it: a milestone, with the request in its metadata.
       [2 * MIN, 'agent_milestone', { milestone: 'approval_requested', ...APPROVAL_REQUEST, input_preview: APPROVAL_INPUT }],
     ]),
     [MOCK_IDS.ecs]: lifecycle(now, MOCK_IDS.ecs, 18 * MIN, [
@@ -463,7 +440,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       [9 * DAY + 17 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
       [9 * DAY + 2 * MIN, 'agent_milestone', { milestone: 'pr_created' }],
       [9 * DAY, 'task_completed'],
-      // As ABCA's hourly read of GitHub writes it, once: within the hour after the merge.
       [8 * DAY + 2 * HOUR, 'pr_outcome_recorded', {
         pr_state: 'merged',
         pr_closed_at: ago(now, 8 * DAY + 2 * HOUR + 25 * MIN),
@@ -476,7 +452,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       [6 * DAY + 17 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
       [6 * DAY + 2 * MIN, 'agent_milestone', { milestone: 'pr_created' }],
       [6 * DAY, 'task_completed'],
-      // A close is recorded once it is an hour old, since a closed pull request can be reopened: here 1 h 40 min after it.
       [4 * DAY + 3 * HOUR, 'pr_outcome_recorded', {
         pr_state: 'closed',
         pr_closed_at: ago(now, 4 * DAY + 4 * HOUR + 40 * MIN),
@@ -562,7 +537,6 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
   return { tasks, events, pending, scheduled: [], idempotency: {}, issues, budget, linear };
 }
 
-/** Deterministic pseudo-random tasks spread over the last 30 days. */
 function costHistory(now: Date): TaskDetail[] {
   const repos = ['acme/payments-api', 'acme/web-frontend', 'acme/infra', 'acme/docs', 'acme/mobile-app', 'acme/data-pipeline'];
   const sources = ['api', 'api', 'api', 'linear', 'jira', 'slack'] as const;
@@ -579,7 +553,6 @@ function costHistory(now: Date): TaskDetail[] {
     const status = rand() < 0.8 ? 'COMPLETED' : rand() < 0.6 ? 'FAILED' : 'CANCELLED';
     const repo = repos[Math.floor(rand() * rand() * repos.length)];
     const source = sources[Math.floor(rand() * sources.length)];
-    // Drawn for every task, so that the sequence stays what it was; a cancelled task records none.
     const cost = Number((0.2 + rand() * rand() * 4).toFixed(2));
     out.push(task(now, {
       task_id: mockId(`HIST${String(i).padStart(4, '0')}`),
@@ -601,18 +574,6 @@ function costHistory(now: Date): TaskDetail[] {
 
 type PeriodSample = Omit<ScoreboardPeriod, 'from' | 'to'>;
 
-/**
- * Scoreboard numbers per range: fixed samples, not computed from the mock tasks. `30d`
- * is a busy month with a month before it: most of its new pull requests are merged, a few
- * are closed or still open, one is not read. `7d` is two weeks in a repository ABCA has
- * read no pull request of: a week without a verified pull request, whose two pull requests
- * without a passed build are not read, after a week with one such pull request. The page
- * shows its tiles without a number, and no count of the pull requests that wait: the one
- * that is old enough is not read. The tasks started with blanket approval, and the two
- * whose pull request has been open for more than 7 days, are core fixture tasks, so their
- * links open. No sample counts a guardrail stop or the pull request of an orchestration:
- * no fixture task is either.
- */
 const SCOREBOARD_SAMPLES: Readonly<Record<ScoreboardRange, {
   days: number;
   current: PeriodSample;

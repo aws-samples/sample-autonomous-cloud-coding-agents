@@ -31,24 +31,14 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** DLQ message retention for persistent-failure records (days). */
 const DLQ_RETENTION_DAYS = 14;
 
-/** Max batching window before the Lambda is invoked on a partial batch (seconds). */
 const DEFAULT_MAX_BATCHING_WINDOW_SECONDS = 5;
 
-/** DLQ-depth alarm metric period (minutes). */
 const DLQ_ALARM_PERIOD_MINUTES = 5;
 
-/** Fan-out consumer Lambda memory (MB). */
 const FANOUT_MEMORY_MB = 256;
 
-/**
- * Properties for `FanOutConsumer` — the Phase 1b §8.9 fan-out plane
- * consumer that reads `TaskEventsTable` via DynamoDB Streams and
- * dispatches interesting events to non-interactive channels (Slack,
- * GitHub PR comments, email).
- */
 export interface FanOutConsumerProps {
   /** The TaskEventsTable whose stream this consumer reads from. Must
    *  have `stream: NEW_IMAGE` enabled (see `TaskEventsTable`). */
@@ -58,8 +48,7 @@ export interface FanOutConsumerProps {
    * TaskTable — the GitHub dispatcher needs read access to resolve
    * repo + pr_number + existing github_comment_id for a task, and
    * write access to persist the comment_id + etag after an upsert.
-   * Optional: if omitted, the GitHub dispatcher skips (log-only) and
-   * Slack / Email continue to run as stubs.
+   * Optional: if omitted, the GitHub dispatcher skips (log-only).
    */
   readonly taskTable?: dynamodb.ITable;
 
@@ -80,59 +69,44 @@ export interface FanOutConsumerProps {
   /**
    * Secrets Manager ARN-prefix pattern for per-workspace Slack bot
    * tokens. Required ONLY when the platform deploys SlackIntegration —
-   * the Slack dispatcher reads bot tokens at this scope. Matches the
-   * other "guarded by prop" grants (taskTable, repoTable,
-   * githubTokenSecret): a deployment without Slack onboarding gets no
-   * dangling IAM permission to ``bgagent/slack/*``. Typically passed
+   * the Slack dispatcher reads bot tokens at this scope. Typically passed
    * as ``Stack.of(this).formatArn({ ..., resourceName:
-   * 'bgagent/slack/*' })``. Found in PR #79 review (#2 CRITICAL).
+   * 'bgagent/slack/*' })``.
    */
   readonly slackSecretArnPattern?: string;
 
   /**
    * LinearWorkspaceRegistryTable — the Linear dispatcher reads this to
    * resolve per-workspace OAuth tokens at comment-post time. Optional:
-   * when omitted, the dispatcher logs and skips so a deployment without
-   * Linear onboarding doesn't accumulate dangling IAM grants.
+   * when omitted, the dispatcher logs and skips.
    */
   readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
 
   /**
    * Secrets Manager ARN-prefix pattern for per-workspace Linear OAuth
-   * bundles. Mirrors ``slackSecretArnPattern`` shape — typically
-   * ``bgagent-linear-oauth-*``. Required when ``linearWorkspaceRegistryTable``
-   * is set; without it the dispatcher would resolve the registry row but
-   * fail at the SM GetSecretValue call.
+   * bundles — typically ``bgagent-linear-oauth-*``. Required when
+   * ``linearWorkspaceRegistryTable`` is set.
    */
   readonly linearOauthSecretArnPattern?: string;
 
   /**
-   * Linear native agent-session channel (ADR-018 Phase 2). When true, sets
+   * Linear native agent-session channel. When true, sets
    * ``LINEAR_AGENT_SESSIONS_ENABLED`` so the Linear dispatcher subscribes to
-   * per-turn events (session keep-alive). Session tasks' activities are emitted
-   * with the same registry + OAuth-secret grants as Linear comments — no new
-   * IAM. Default false.
+   * per-turn events (session keep-alive). Default false.
    */
   readonly linearAgentSessionsEnabled?: boolean;
 
   /**
    * JiraWorkspaceRegistryTable — the Jira dispatcher reads this to resolve
-   * per-tenant OAuth tokens at comment-post time (issue #573). Optional:
-   * when omitted, the dispatcher logs and skips so a deployment without
-   * Jira onboarding doesn't accumulate dangling IAM grants. Mirrors
-   * ``linearWorkspaceRegistryTable``.
+   * per-tenant OAuth tokens at comment-post time. Optional:
+   * when omitted, the dispatcher logs and skips.
    */
   readonly jiraWorkspaceRegistryTable?: dynamodb.ITable;
 
   /**
-   * Secrets Manager ARN-prefix pattern for per-tenant Jira OAuth bundles.
-   * Mirrors ``linearOauthSecretArnPattern`` — typically
-   * ``bgagent-jira-oauth-*``. Required when ``jiraWorkspaceRegistryTable``
-   * is set; without it the dispatcher would resolve the registry row but
-   * fail at the SM GetSecretValue call. GetSecretValue + PutSecretValue
-   * because the resolver rotates an expiring token in place (the fan-out
-   * Lambda is trusted stack code, same as the orchestrator + webhook
-   * processor).
+   * Secrets Manager ARN-prefix pattern for per-tenant Jira OAuth bundles —
+   * typically ``bgagent-jira-oauth-*``. Required when
+   * ``jiraWorkspaceRegistryTable`` is set.
    */
   readonly jiraOauthSecretArnPattern?: string;
 
@@ -145,8 +119,7 @@ export interface FanOutConsumerProps {
 
   /**
    * Max age of records in the batch before Lambda is invoked even if
-   * batch isn't full. Keeps fan-out latency bounded for low-volume
-   * periods.
+   * batch isn't full.
    *
    * @default Duration.seconds(5)
    */
@@ -155,9 +128,7 @@ export interface FanOutConsumerProps {
 
 /**
  * DynamoDB Stream → Lambda consumer that fans out task events to
- * non-interactive channels. Ships as a skeleton per design §8.9 —
- * per-channel dispatcher integrations land incrementally without any
- * change to the agent or CLI.
+ * non-interactive channels.
  *
  * Errors in individual records do NOT fail the batch. Persistent
  * failures land in the DLQ attached to the event source mapping so
@@ -166,14 +137,7 @@ export interface FanOutConsumerProps {
 export class FanOutConsumer extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
-  /** Fires when records land in the fan-out DLQ — a silent fan-out
-   *  outage (every Slack/GitHub/Linear notification failing) would
-   *  otherwise accumulate unnoticed for the queue's 14-day retention.
-   *  Kept as the concrete {@link cloudwatch.Alarm} (matching the
-   *  ``errorAlarm`` precedent in task-orchestrator.ts) because
-   *  ``AgentStack`` attaches the ``OperationalAlerts`` SNS topic to it
-   *  with ``addAlarmAction``, declared on ``Alarm``, not the
-   *  ``IAlarm`` interface (#629). */
+  /** Fires when records land in the fan-out DLQ. */
   public readonly dlqDepthAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: FanOutConsumerProps) {
@@ -182,17 +146,10 @@ export class FanOutConsumer extends Construct {
     const handlersDir = path.join(__dirname, '..', 'handlers');
 
     this.dlq = new sqs.Queue(this, 'FanOutDlq', {
-      // Persistent failures (e.g., dispatcher throws non-caught error
-      // three times in a row) land here for operator inspection.
       retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
-    // Explicit log group: without this Lambda auto-creates the group
-    // at first invocation with no retention cap. Declaring it here
-    // locks retention, makes the IAM grant graph discoverable by
-    // cdk-nag, and matches the pattern used in
-    // ``ApprovalMetricsPublisherConsumer`` and ``ecs-agent-cluster``.
     const logGroup = new logs.LogGroup(this, 'FanOutFnLogs', {
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -211,15 +168,8 @@ export class FanOutConsumer extends Construct {
       },
     });
 
-    // Solution-attribution component label (#319): fan-out is part of the
-    // orchestration plane. The universal `app/` segment (AWS_SDK_UA_APP_ID) is
-    // set by the stack-level SolutionUaAspect.
     this.fn.addEnvironment('ABCA_COMPONENT', 'orchestr');
 
-    // GitHub dispatcher plumbing. Each grant/env var is guarded so the
-    // fan-out plane still deploys cleanly in a dev environment that
-    // hasn't onboarded the RepoTable or a platform GitHub token yet —
-    // the dispatcher will log-and-skip rather than crash.
     if (props.taskTable) {
       props.taskTable.grantReadWriteData(this.fn);
       this.fn.addEnvironment('TASK_TABLE_NAME', props.taskTable.tableName);
@@ -233,13 +183,6 @@ export class FanOutConsumer extends Construct {
       this.fn.addEnvironment('GITHUB_TOKEN_SECRET_ARN', props.githubTokenSecret.secretArn);
     }
 
-    // Slack dispatcher reads per-workspace bot tokens from Secrets
-    // Manager (``bgagent/slack/<team_id>``). Scope the grant to the
-    // caller-provided prefix so the fan-out Lambda cannot read
-    // unrelated platform secrets — matches the policy the old
-    // standalone ``SlackNotifyFn`` held before issue #64. Guarded on
-    // ``slackSecretArnPattern`` so deployments without Slack
-    // onboarding don't get a dangling IAM grant (PR #79 review #2).
     if (props.slackSecretArnPattern) {
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
@@ -247,12 +190,6 @@ export class FanOutConsumer extends Construct {
       }));
     }
 
-    // Linear dispatcher plumbing. Same guarded shape as Slack/GitHub:
-    // a deployment without Linear onboarding gets no IAM grants and
-    // the dispatcher logs-and-skips on missing env. The registry table
-    // tells us per-workspace OAuth-secret ARN; the secret holds the
-    // access token that ``postIssueComment`` uses to drive
-    // ``commentCreate`` GraphQL.
     if (props.linearWorkspaceRegistryTable) {
       props.linearWorkspaceRegistryTable.grantReadData(this.fn);
       this.fn.addEnvironment(
@@ -262,10 +199,6 @@ export class FanOutConsumer extends Construct {
     }
     if (props.linearOauthSecretArnPattern) {
       this.fn.addToRolePolicy(new iam.PolicyStatement({
-        // GetSecretValue + PutSecretValue: the resolver may rotate the
-        // OAuth token (writes the refreshed bundle back to SM) — same
-        // grants the LinearIntegration's webhook-processor Lambda holds
-        // for the same reason.
         actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
         resources: [props.linearOauthSecretArnPattern],
       }));
@@ -275,12 +208,6 @@ export class FanOutConsumer extends Construct {
       this.fn.addEnvironment('LINEAR_AGENT_SESSIONS_ENABLED', 'true');
     }
 
-    // Jira dispatcher plumbing (issue #573). Same guarded shape as Linear:
-    // a deployment without Jira onboarding gets no IAM grants and the
-    // dispatcher logs-and-skips on missing env. The registry table resolves
-    // the per-tenant OAuth-secret ARN; the secret holds the access token
-    // ``postIssueCommentAdf`` uses to POST the final-status comment via the
-    // Jira REST v3 API.
     if (props.jiraWorkspaceRegistryTable) {
       props.jiraWorkspaceRegistryTable.grantReadData(this.fn);
       this.fn.addEnvironment(
@@ -290,19 +217,11 @@ export class FanOutConsumer extends Construct {
     }
     if (props.jiraOauthSecretArnPattern) {
       this.fn.addToRolePolicy(new iam.PolicyStatement({
-        // GetSecretValue + PutSecretValue: resolving an expiring token
-        // refreshes it in place — same grants the orchestrator + Jira
-        // webhook-processor Lambdas hold.
         actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
         resources: [props.jiraOauthSecretArnPattern],
       }));
     }
 
-    // Alarm on any record landing in the DLQ. Notifications are
-    // best-effort by design, so individual failures don't fail the
-    // batch — which means the DLQ is the ONLY persistent signal of a
-    // fan-out outage. Threshold 1 / single period: even one poisoned
-    // record means three Lambda retries already failed.
     this.dlqDepthAlarm = new cloudwatch.Alarm(this, 'FanOutDlqDepthAlarm', {
       metric: this.dlq.metricApproximateNumberOfMessagesVisible({
         period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
@@ -322,9 +241,6 @@ export class FanOutConsumer extends Construct {
       startingPosition: StartingPosition.LATEST,
       batchSize: props.batchSize ?? 100,
       maxBatchingWindow: props.maxBatchingWindow ?? Duration.seconds(DEFAULT_MAX_BATCHING_WINDOW_SECONDS),
-      // Fan-out delivery is best-effort; don't block the stream if one
-      // poisonous record blows up the Lambda. After 3 retries, send the
-      // record batch to the DLQ and advance the iterator.
       retryAttempts: 3,
       onFailure: new SqsDlq(this.dlq),
       reportBatchItemFailures: true,

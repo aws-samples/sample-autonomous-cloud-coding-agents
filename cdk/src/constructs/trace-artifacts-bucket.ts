@@ -21,25 +21,10 @@ import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 
-/** Lifecycle expiry for trace artifacts (design §10.1). */
 export const TRACE_ARTIFACT_TTL_DAYS = 7;
 
-/** Re-exported from the import-free module that Lambda handlers read it from. */
 export { TRACE_OBJECT_KEY_PREFIX } from '../handlers/shared/storage-names';
 
-/**
- * This bucket holds a SECOND, disjoint key space the agent writes to:
- * ``artifacts/<task_id>/<name>``, a task's declared output. There is deliberately
- * no exported constant for it, because nothing on the platform side reads an
- * artifact today. Any component that starts to MUST be granted on that prefix
- * alone and never on the bucket, or it could reach ``traces/<user_id>/`` — a full
- * agent trajectory including tool input and output, readable only by the user who
- * produced it.
- */
-
-/**
- * Properties for TraceArtifactsBucket construct.
- */
 export interface TraceArtifactsBucketProps {
   /**
    * Removal policy for the bucket.
@@ -48,15 +33,9 @@ export interface TraceArtifactsBucketProps {
   readonly removalPolicy?: RemovalPolicy;
 
   /**
-   * Whether to auto-delete objects when the bucket is removed. Mirrors
-   * the developer-ergonomic goal of ``TaskTable`` / ``TaskEventsTable``
-   * (no hand-cleanup required before ``cdk destroy``). Unlike DynamoDB
-   * tables — which auto-empty on table delete — S3 requires a custom
-   * resource to clear out the bucket, so enabling this flag deploys
-   * CDK's ``Custom::S3AutoDeleteObjects`` Lambda with delete permissions
-   * on this bucket (wider IAM surface than the SessionRole's
-   * prefix-scoped ``s3:PutObject`` alone suggests; the auto-delete
-   * Lambda role is active, not just during destroy).
+   * Whether to auto-delete objects when the bucket is removed. Enabling it
+   * deploys CDK's ``Custom::S3AutoDeleteObjects`` Lambda with delete permissions
+   * on this bucket.
    * @default true
    */
   readonly autoDeleteObjects?: boolean;
@@ -70,17 +49,8 @@ export interface TraceArtifactsBucketProps {
  * callbacks) to ``s3://<bucket>/traces/<user_id>/<task_id>.jsonl.gz``.
  * The CLI retrieves it via a presigned URL issued by the
  * ``get-trace-url`` handler.
- *
- * Security / hygiene:
- *  - ``blockPublicAccess: BLOCK_ALL`` + ``enforceSSL: true`` —
- *    no public read, TLS-only transport.
- *  - ``encryption: S3_MANAGED`` — server-side encryption at rest.
- *  - 7-day lifecycle expiry per §10.1 (debug captures are not an
- *    archival concern; tight TTL keeps storage cost bounded and caps
- *    the blast radius of an accidental permission leak).
  */
 export class TraceArtifactsBucket extends Construct {
-  /** The underlying S3 bucket. */
   public readonly bucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: TraceArtifactsBucketProps = {}) {
@@ -95,10 +65,7 @@ export class TraceArtifactsBucket extends Construct {
           id: 'trace-artifacts-ttl',
           enabled: true,
           expiration: Duration.days(TRACE_ARTIFACT_TTL_DAYS),
-          // Reap incomplete multipart uploads after 1 day. Object
-          // expiration does not apply to in-flight MPUs (they are not
-          // objects yet), so a separate reaper is needed to keep stale
-          // upload parts from lingering and accruing storage cost.
+          // S3 object expiration does not apply to incomplete multipart uploads.
           abortIncompleteMultipartUploadAfter: Duration.days(1),
         },
       ],

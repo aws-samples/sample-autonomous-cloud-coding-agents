@@ -17,39 +17,14 @@
  *  SOFTWARE.
  */
 
-/**
- * Re-stack planning — pure logic.
- *
- * When a predecessor sub-issue's PR branch changes after a dependent already
- * merged it in, the dependent is STALE. This module computes WHICH dependents
- * must be re-stacked and IN WHAT ORDER, given an orchestration snapshot and
- * the sub-issue whose branch changed. No I/O — the handler does the GitHub /
- * DynamoDB / task-creation side effects using this plan.
- *
- * Rules:
- *  - Re-stack only the changed node's TRANSITIVE dependents (everything
- *    downstream that built on it, directly or indirectly).
- *  - A dependent is re-stackable only if it has actually started — it carries
- *    a ``child_task_id`` + ``child_branch_name`` (released). A still-``blocked``
- *    dependent will pick up the new predecessor code when it is first
- *    released, so it needs no re-stack.
- *  - Order dependents in topological order (a dependent is re-stacked only
- *    after the predecessors it merges have been re-stacked), so each re-stack
- *    merges already-current predecessor branches.
- *  - The changed node itself is NOT re-stacked (its own branch is what changed).
- */
-
 import type { OrchestrationChildRow } from './orchestration-store';
 
-/** A single dependent to re-stack, with the predecessor branches to merge in. */
 export interface RestackStep {
-  /** The dependent sub-issue row to re-stack. */
   readonly child: OrchestrationChildRow;
   /**
    * The branches to merge into the dependent's branch — its predecessors'
    * CURRENT head branches (the changed node's branch + any sibling
-   * predecessor branches the dependent also depends on). The agent merges
-   * these into the existing dependent branch.
+   * predecessor branches the dependent also depends on).
    */
   readonly mergeBranches: readonly string[];
 }
@@ -73,8 +48,6 @@ export function planRestack(
   const byId = new Map(children.map((c) => [c.sub_issue_id, c]));
   if (!byId.has(changedSubIssueId)) return [];
 
-  // ── 1. Transitive dependents of the changed node (BFS down the DAG). ──
-  // successorsOf[x] = nodes that depend ON x.
   const successors = new Map<string, string[]>();
   for (const c of children) {
     for (const dep of c.depends_on) {
@@ -90,21 +63,13 @@ export function planRestack(
     for (const next of successors.get(id) ?? []) queue.push(next);
   }
 
-  // ── 2. Keep only dependents that have STARTED (have a branch to re-stack).
-  // A blocked dependent will see the new code when it is first released.
   const restackable = [...affected]
     .map((id) => byId.get(id)!)
     .filter((c) => c.child_branch_name && RELEASED_OR_TERMINAL.has(c.child_status));
 
-  // ── 3. Topological order over the affected sub-graph, so a dependent is
-  // re-stacked after the predecessors it will merge. Kahn over edges among
-  // the restackable set (+ the changed node as the always-ready source).
   const inScope = new Set(restackable.map((c) => c.sub_issue_id));
   const ordered = topoOrder(restackable, inScope);
 
-  // ── 4. For each, the branches to merge = its predecessors' current head
-  // branches that are in scope (the changed node + affected predecessors).
-  // The changed node's own branch is included so direct dependents re-merge it.
   return ordered.map((child) => {
     const mergeBranches = child.depends_on
       .filter((dep) => dep === changedSubIssueId || inScope.has(dep))
@@ -117,18 +82,9 @@ export function planRestack(
 /**
  * Plan the re-stack of a changed node's DIRECT (one-hop) started dependents.
  *
- * Used by the reconciler-driven cascade: when an
- * iteration/restack task on node X completes, we re-stack only the children
- * that depend DIRECTLY on X — each of those, when ITS restack task completes,
- * re-fires the reconciler and cascades to ITS dependents. Doing one hop per
- * completion (rather than ``planRestack``'s whole transitive set at once) is
- * what keeps a chain correct: C must re-stack only AFTER B's branch carries
- * the new code, not racing B's restack task.
- *
  * A direct dependent is re-stackable only if it has STARTED (released/terminal
  * with a branch). Its merge-list is its predecessors' current head branches —
- * the changed node + any sibling predecessors that have a branch — so a
- * diamond fan-in re-merges every arm it depends on.
+ * the changed node + any sibling predecessors that have a branch.
  *
  * @param children full orchestration child snapshot (excl. meta)
  * @param changedSubIssueId the node whose branch just changed
@@ -149,9 +105,6 @@ export function planDirectRestack(
 
   return directDependents
     .map((child) => {
-      // Merge every predecessor that currently has a branch — the changed
-      // node plus any sibling predecessors (so a diamond fan-in re-merges all
-      // arms, not just the one that changed).
       const mergeBranches = child.depends_on
         .map((dep) => byId.get(dep)?.child_branch_name)
         .filter((b): b is string => Boolean(b));
@@ -160,7 +113,6 @@ export function planDirectRestack(
     .filter((step) => step.mergeBranches.length > 0);
 }
 
-/** Kahn's algorithm over the in-scope sub-graph (deterministic by id). */
 function topoOrder(
   nodes: readonly OrchestrationChildRow[],
   inScope: ReadonlySet<string>,
@@ -178,7 +130,6 @@ function topoOrder(
   while (ready.length > 0) {
     const id = ready.shift()!;
     out.push(byId.get(id)!);
-    // decrement successors within scope
     for (const c of nodes) {
       if (c.depends_on.includes(id)) {
         const d = (indeg.get(c.sub_issue_id) ?? 0) - 1;

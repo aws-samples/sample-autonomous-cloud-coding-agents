@@ -115,7 +115,6 @@ describe('runPlatformDoctor', () => {
     expect(results.find((r) => r.id === 'active_repos')?.status).toBe('pass');
     expect(cognitoSend).toHaveBeenCalledTimes(2);
     expect(bedrockSend).toHaveBeenCalledTimes(1);
-    // Each output reaches the argument it is read for.
     expect(results.find((r) => r.id === 'cognito_config')?.detail)
       .toBe('User pool us-east-1_pool and client client123 are valid.');
     expect(global.fetch).toHaveBeenCalledWith('https://api.example/v1/tasks', { method: 'GET' });
@@ -266,10 +265,6 @@ describe('runPlatformDoctor', () => {
     const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });
     const check = results.find((r) => r.id === 'lambda_microvm_availability');
 
-    // `warn`, not `fail`: the subject of this test is that a non-Error rejection is still
-    // surfaced in the detail. Its status used to be `fail`, which carried the directive
-    // "check the Region / model availability" remedy — wrong for a transient service
-    // error, which says nothing about whether MicroVMs are available.
     expect(check?.status).toBe('warn');
     expect(check?.detail).toContain('service unavailable');
     expect(check?.detail).toContain('did not complete');

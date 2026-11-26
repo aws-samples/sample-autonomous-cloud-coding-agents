@@ -10,26 +10,26 @@ title: "Interactive Agents: Async Interaction Design"
 
 ## Executive summary
 
-ABCA runs background coding agents that clone a repo, implement a task, run tests, and open a pull request. Tasks run from minutes to hours inside an isolated cloud runtime. The interaction model is **asynchronous by design**: users submit a task and move on; the agent works without supervision; results arrive through notifications (Slack / GitHub comment / email) and as pull requests.
+ABCA runs background coding agents that clone a repo, implement a task, run tests, and open a pull request. Tasks run for minutes to hours inside an isolated cloud runtime. The interaction model is **asynchronous by design**. Users submit a task and move on. The agent works without supervision. Results arrive through notifications (Slack, GitHub comment, or email) and as pull requests.
 
-This document describes the interactivity surfaces layered on top of that model — how users **check in on**, **steer**, and **gate** running agents without requiring a live connection to the compute substrate.
+This document describes the interaction features built on top of that model. With them, users **check in on**, **steer**, and **gate** running agents without a live connection to the compute substrate.
 
 ### Interaction capabilities
 
-1. **Submit** — `POST /tasks` with a repo and task description. Fire-and-forget by default; the CLI returns a `task_id` and exits.
-2. **Status** — `bgagent status <id>` returns a deterministic, templated snapshot of current state (last milestone, current turn, elapsed time, cost so far). Backed by a Lambda reading `TaskEventsTable`; no LLM, no hallucination, no agent interruption.
-3. **Watch** — `bgagent watch <id>` polls `TaskEventsTable` with an adaptive interval (500 ms when events are arriving, back-off to 5 s when idle). Same endpoint used under the hood for foreground-block UX on `ask` and for HITL approval waits.
-4. **Nudge** — `bgagent nudge <id> "<text>"` writes a row into `TaskNudgesTable`. The agent reads pending nudges between turns, acknowledges with a `nudge_acknowledged` milestone event, and integrates the nudge on its next turn.
-5. **Ask** — `bgagent ask <id> "<question>"` (Phase 2) writes a question row. The agent answers at the next between-turns boundary; the answer surfaces as a `status_response` event. CLI default is foreground block-and-poll with a spinner; task and answer are both durable if the CLI disconnects.
-6. **Approval gates** — Phase 3 Cedar-driven hard gates. Agent emits `approval_requested`, waits for a decision from `bgagent approve` / `bgagent deny` or a Slack button-press. Detailed design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
+1. **Submit.** `POST /tasks` with a repo and task description. Fire-and-forget by default. The CLI returns a `task_id` and exits.
+2. **Status.** `bgagent status <id>` returns a deterministic, templated snapshot of current state (last milestone, current turn, elapsed time, cost so far). A Lambda that reads `TaskEventsTable` backs it. There is no LLM, no hallucination, and no agent interruption.
+3. **Watch.** `bgagent watch <id>` polls `TaskEventsTable` with an adaptive interval (500 ms when events are arriving, back-off to 5 s when idle). The foreground-block UX of `ask` and the HITL approval waits use the same endpoint.
+4. **Nudge.** `bgagent nudge <id> "<text>"` writes a row into `TaskNudgesTable`. The agent reads pending nudges between turns, acknowledges them with a `nudge_acknowledged` milestone event, and integrates the nudge on its next turn.
+5. **Ask.** `bgagent ask <id> "<question>"` (Phase 2) writes a question row. The agent answers at the next between-turns boundary, and the answer appears as a `status_response` event. By default the CLI blocks in the foreground and polls, with a spinner. The task and the answer are both durable if the CLI disconnects.
+6. **Approval gates.** Phase 3 adds Cedar-driven hard gates. The agent emits `approval_requested` and waits for a decision from `bgagent approve`, `bgagent deny`, or a Slack button press. [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) has the detailed design.
 
 ### Core architectural choices
 
-- **Single AgentCore Runtime** authenticated via IAM (SigV4) from the orchestrator Lambda. No JWT-authenticated runtime, no direct CLI-to-runtime path.
-- **Durable event table (`TaskEventsTable`)** is the one source of truth for agent progress. Every reader — CLI, Slack/GitHub/email dispatchers, status Lambda — reads from this table, never from the live agent.
-- **Polling-only CLI.** No SSE, no WebSockets. DDB eventually-consistent reads with an `event_id` cursor are cheap, reliable, and compute-agnostic.
-- **Notification plane as first-class.** A FanOutConsumer Lambda subscribes to `TaskEventsTable` DDB Streams and routes per-event-type to per-channel dispatcher Lambdas (Slack, email, GitHub comment). Per-channel defaults ship in v1.
-- **Agent interaction via the hook mechanism the Claude Agent SDK provides.** Nudges, asks, and approvals all use `Stop` / between-turns hooks; no mechanism outside the SDK's contract is required.
+- **Single AgentCore Runtime.** The orchestrator Lambda authenticates to it with IAM (SigV4). There is no JWT-authenticated runtime and no direct path from the CLI to the runtime.
+- **Durable event table (`TaskEventsTable`).** This table is the one source of truth for agent progress. Every reader reads from this table, never from the live agent. The readers are the CLI, the Slack, GitHub, and email dispatchers, and the status Lambda.
+- **Polling-only CLI.** The CLI uses no SSE and no WebSockets. Eventually consistent DDB reads with an `event_id` cursor are cheap, reliable, and compute-agnostic.
+- **Notification plane as first-class.** A FanOutConsumer Lambda subscribes to `TaskEventsTable` DDB Streams and routes each event by type to per-channel dispatcher Lambdas (Slack, email, GitHub comment). Per-channel defaults ship in v1.
+- **Agent interaction via the hook mechanism the Claude Agent SDK provides.** Nudges, asks, and approvals all use `Stop` hooks, which run between turns. They need no mechanism outside the SDK's contract.
 
 ---
 
@@ -66,24 +66,24 @@ This document describes the interactivity surfaces layered on top of that model 
 
 ### Primary goals
 
-- **Compute-agnostic.** Nothing in the interaction surface depends on a specific compute substrate. The agent could run on AgentCore today and ECS tomorrow with no changes to the CLI or notification plane.
-- **Survive disconnect.** Every interaction is durable in DynamoDB. A CLI crash, a closed laptop, or a flaky network never kills a task and never loses a reply.
-- **Fire-and-forget by default.** Users submit and move on. Active observation is opt-in through `status`/`watch`.
+- **Compute-agnostic.** Nothing in the interaction design depends on a specific compute substrate. The agent could run on AgentCore today and ECS tomorrow with no changes to the CLI or notification plane.
+- **Survive disconnect.** Every interaction is durable in DynamoDB. A CLI crash, a closed laptop, or a flaky network never stops a task and never loses a reply.
+- **Fire-and-forget by default.** Users submit and move on. Active observation is opt-in through `status` or `watch`.
 - **No UX choice at submission time.** There is exactly one submit command and one observation command. Users do not pick between "resilient" and "live" when they submit.
-- **Notification as first-class.** When the agent needs a human (approval gate, ask response, task completion), it reaches the user through their configured channel — not by hoping the user is watching a terminal.
+- **Notification as first-class.** When the agent needs a human (approval gate, ask response, task completion), it reaches the user through their configured channel. It does not rely on the user watching a terminal.
 
 ### Explicit non-goals
 
 - Token-by-token live streaming. Users want to know *what step* the agent is on, not *what character* it's typing.
-- Sub-200 ms interaction latency. Human interaction in an async coding workflow is calibrated to seconds, not milliseconds.
-- Transactional undo of agent actions. Tool calls are committed; the agent cannot retroactively revert a filesystem change because a user objected after the fact.
-- Pair-programming / co-edit modes. A different product shape.
+- Sub-200 ms interaction latency. Human interaction in an async coding workflow is measured in seconds, not milliseconds.
+- Transactional undo of agent actions. Tool calls are committed. The agent cannot revert a filesystem change because a user objected afterwards.
+- Pair-programming or co-edit modes. Those are a different product.
 
 ### Requirements traceability
 
 | Req | Covered by |
 |---|---|
-| R1. Users don't pick compute or observability at submission | Single submit command; `TaskEventsTable` is compute-agnostic |
+| R1. Users don't pick compute or observability at submission | Single submit command. `TaskEventsTable` is compute-agnostic |
 | R2. Fire-and-forget runs independently | Orchestrator path runs without a client connection |
 | R3. HITL notification when configured | `approval_requested` event → FanOutConsumer → Slack/email |
 | R4. Users can check in + steer any time | `bgagent status` + `bgagent watch` + `bgagent nudge` + (Phase 2) `bgagent ask` |
@@ -154,8 +154,8 @@ This document describes the interactivity surfaces layered on top of that model 
 
 Key properties:
 
-- **One write path in, one read path out.** Every durable agent signal lands in `TaskEventsTable` (or `TaskTable` for state transitions). Every consumer reads from there.
-- **Orchestrator is the only substrate-aware component.** Replace `InvokeAgentRuntime` with `ecs:RunTask` and the CLI + notification plane don't notice.
+- **One write path in, one read path out.** Every durable agent signal is written to `TaskEventsTable` (or `TaskTable` for state transitions). Every consumer reads from there.
+- **The orchestrator is the only component that knows the compute substrate.** Replace `InvokeAgentRuntime` with `ecs:RunTask`, and the CLI and the notification plane are unaffected.
 - **No client holds a live connection to the agent.** `watch` is a polling loop against `TaskEventsTable`, not a stream from the runtime.
 
 ---
@@ -164,102 +164,102 @@ Key properties:
 
 ### 3.1 AgentCore Runtime (IAM-authenticated)
 
-A single AgentCore Runtime, invoked via `bedrock-agentcore:InvokeAgentRuntime` with SigV4 from the orchestrator Lambda. No JWT authorizer; no direct CLI access.
+There is a single AgentCore Runtime, which the orchestrator Lambda invokes through `bedrock-agentcore:InvokeAgentRuntime` with SigV4. It has no JWT authorizer and no direct CLI access.
 
-- **Input:** task payload from orchestrator (task_id, repo, task_description, optional initial_approvals, optional trace_flag)
-- **Output:** none via response stream — the runtime is invoked fire-and-forget. All observable state flows through `TaskEventsTable` and `TaskTable`.
-- **Lifecycle:** `idleRuntimeSessionTimeout` and `maxLifetime` both set to 8 hours (AgentCore max). A running task holds the session; an idle runtime is evicted by AgentCore.
-- **Compute substitutability:** replacing this with ECS/Fargate is a change confined to the orchestrator + the AgentCore Runtime CDK construct. Nothing else in the system observes the difference.
+- **Input:** the task payload from the orchestrator (task_id, repo, task_description, optional initial_approvals, optional trace_flag).
+- **Output:** none through the response stream. The runtime is invoked fire-and-forget. All observable state goes through `TaskEventsTable` and `TaskTable`.
+- **Lifecycle:** `idleRuntimeSessionTimeout` and `maxLifetime` are both set to 8 hours, the AgentCore maximum. A running task holds the session. AgentCore evicts an idle runtime.
+- **Compute substitutability:** replacing this runtime with ECS/Fargate changes only the orchestrator and the AgentCore Runtime CDK construct. Nothing else in the system sees the difference.
 
 ### 3.2 OrchestratorFn
 
-Durable-execution Lambda that owns the task lifecycle from submission to terminal state.
+OrchestratorFn is a durable-execution Lambda that owns the task lifecycle from submission to terminal state.
 
 Responsibilities:
-- **Admission control** — atomic DDB conditional update on `UserConcurrencyTable` (`active_count < max`); a task over the limit is parked as `QUEUED` (#441).
+- **Admission control.** An atomic DDB conditional update on `UserConcurrencyTable` (`active_count < max`). A task over the limit is parked as `QUEUED` (#441).
 - **State transition** `SUBMITTED → HYDRATING → RUNNING → FINALIZING → terminal`.
-- **Invocation** — calls `InvokeAgentRuntime` with SigV4.
-- **Poll loop** — waits for the agent to land a terminal status in `TaskTable`; enforces heartbeat watchdog; transitions to `FAILED` if the container dies.
-- **Finalize** — TTL + concurrency decrement + synthesized terminal event.
+- **Invocation.** Calls `InvokeAgentRuntime` with SigV4.
+- **Poll loop.** Waits for the agent to write a terminal status to `TaskTable`, enforces the heartbeat watchdog, and transitions the task to `FAILED` if the container dies.
+- **Finalize.** TTL, concurrency decrement, and synthesized terminal event.
 
-Hydration (blueprint merge, repo config, PAT retrieval, prompt assembly) is targeted to live **inside the agent container at startup**, not in the orchestrator. This keeps the orchestrator thin, lets heavy I/O fail inside a durable 8 h runtime rather than a 15 min Lambda, and gives the runtime container the IAM it needs for those reads anyway.
+The target is for hydration (blueprint merge, repo config, PAT retrieval, prompt assembly) to run **inside the agent container at startup**, not in the orchestrator. That placement keeps the orchestrator thin, lets heavy I/O fail inside a durable 8 h runtime instead of a 15 min Lambda, and gives the runtime container the IAM that it needs for those reads anyway.
 
-> **Status (2026-04-30):** the rev-6 PR ships with hydration still in the orchestrator Lambda for scope reasons — moving it is pure architectural relocation with no user-visible delta and a ~2,700 lines porting surface (TypeScript → Python with new boto3 clients and a GraphQL GitHub path). Tracked as AD-11 carry-forward in upstream [issue #53](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/53) — current plan is a hybrid split: keep lightweight preflight in the orchestrator, move heavy I/O hydration to the container. Contract drift during the deferral window is bounded by the `SUPPORTED_HYDRATED_CONTEXT_VERSION` version gate in `agent/src/models.py`.
+> **Status (2026-04-30):** the rev-6 PR ships with hydration still in the orchestrator Lambda, for scope reasons. Moving it is pure architectural relocation with no user-visible change, and the port is about 2,700 lines (TypeScript to Python, with new boto3 clients and a GraphQL GitHub path). The move is tracked as the AD-11 carry-forward in upstream [issue #53](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/53). The current plan is a hybrid split: keep lightweight preflight in the orchestrator, and move heavy I/O hydration to the container. The `SUPPORTED_HYDRATED_CONTEXT_VERSION` version gate in `agent/src/models.py` bounds contract drift during the deferral window.
 
 ### 3.3 SubmitTaskFn
 
-Validates a submission, writes the `TaskRecord` with `status=SUBMITTED`, emits a `task_created` event, and async-invokes `OrchestratorFn`.
+SubmitTaskFn validates a submission, writes the `TaskRecord` with `status=SUBMITTED`, emits a `task_created` event, and invokes `OrchestratorFn` asynchronously.
 
-- Single path for all tasks. No `execution_mode` branching.
-- Works identically for CLI-initiated submissions (Cognito JWT) and webhook-initiated submissions (HMAC, after the webhook authorizer).
+- All tasks take a single path. There is no `execution_mode` branching.
+- It works identically for CLI-initiated submissions (Cognito JWT) and webhook-initiated submissions (HMAC, after the webhook authorizer).
 
 ### 3.4 TaskEventsTable
 
-The durable event spine. PK = `task_id`, SK = `event_id` (ULID), TTL enabled, **DDB Streams enabled** (`NEW_IMAGE`).
+`TaskEventsTable` is the durable event spine. PK = `task_id`, SK = `event_id` (ULID), TTL enabled, **DDB Streams enabled** (`NEW_IMAGE`).
 
 Writers:
-- `ProgressWriter` (inside the agent container) — per tool call, per turn, per milestone, cost updates, errors.
-- `OrchestratorFn` — `task_created`, `hydration_*`, `session_started`, `task_*`, `preflight_*`, `admission_queued`, `guardrail_blocked`.
-- Cancel/reconciler handlers — `task_cancelled`, `task_stranded`.
+- `ProgressWriter` (inside the agent container) writes an event per tool call, per turn, and per milestone, and writes cost updates and errors.
+- `OrchestratorFn` writes `task_created`, `hydration_*`, `session_started`, `task_*`, `preflight_*`, `admission_queued`, and `guardrail_blocked`.
+- The cancel and reconciler handlers write `task_cancelled` and `task_stranded`.
 
 Readers:
-- `get-task-events` Lambda (backs `bgagent watch` and `bgagent events`).
-- `bgagent status` Lambda (templated snapshot).
-- `FanOutConsumer` (stream-subscribed; see §6).
+- The `get-task-events` Lambda, which backs `bgagent watch` and `bgagent events`.
+- The `bgagent status` Lambda (templated snapshot).
+- `FanOutConsumer`, which subscribes to the stream (see §6).
 
-Cost profile is negligible: eventually-consistent queries with a cursor return ~0.5 RCU per page. 50 simultaneous watchers polling every 2 seconds is pennies per active hour.
+The cost is negligible. Eventually consistent queries with a cursor consume about 0.5 RCU per page. 50 simultaneous watchers that poll every 2 seconds cost pennies per active hour.
 
 ### 3.5 TaskTable
 
-Task state machine: `SUBMITTED → HYDRATING → RUNNING → FINALIZING → {COMPLETED, FAILED, CANCELLED, TIMED_OUT}` with Phase 3 adding `AWAITING_APPROVAL`.
+The task state machine is `SUBMITTED → HYDRATING → RUNNING → FINALIZING → {COMPLETED, FAILED, CANCELLED, TIMED_OUT}`. Phase 3 adds `AWAITING_APPROVAL`.
 
-Writers: create-task, orchestrator, cancel, agent pipeline (terminal write), reconcilers. Transitions are conditional DDB writes; illegal transitions are rejected.
+The writers are create-task, the orchestrator, cancel, the agent pipeline (terminal write), and the reconcilers. Transitions are conditional DDB writes, and illegal transitions are rejected.
 
 ### 3.6 TaskNudgesTable
 
-PK = `task_id`, SK = `nudge_id`. A row represents a pending user steering message.
+PK = `task_id`, SK = `nudge_id`. A row is a pending steering message from a user.
 
-Producer: `POST /tasks/{id}/nudge` handler (after ownership check, guardrail scan, and rate-limit conditional update).
-Consumer: agent between-turns hook reads pending nudges, emits `nudge_acknowledged` milestone, and injects the nudge text into the next turn via `decision: "block"`.
+Producer: the `POST /tasks/{id}/nudge` handler, after the ownership check, the guardrail scan, and the rate-limit conditional update.
+Consumer: the agent's between-turns hook, which reads pending nudges, emits a `nudge_acknowledged` milestone, and injects the nudge text into the next turn through `decision: "block"`.
 
 ### 3.7 TaskApprovalsTable (Phase 3)
 
-Phase 3 approval-request spine. Detailed schema in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). Semantics summary:
-- Agent writes an approval row with the request context.
-- Agent transitions `RUNNING → AWAITING_APPROVAL` and enters a poll loop.
-- User responds via REST (`POST /tasks/{id}/approvals/{request_id}`) or via a Slack button dispatched by the notification plane.
-- On decision, agent transitions back to `RUNNING`; denial reasons are injected as Stop-hook steering on the next turn.
+`TaskApprovalsTable` is the Phase 3 approval-request table. [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) has the detailed schema. The semantics in summary:
+- The agent writes an approval row with the request context.
+- The agent transitions `RUNNING → AWAITING_APPROVAL` and enters a poll loop.
+- The user responds through REST (`POST /tasks/{id}/approvals/{request_id}`) or through a Slack button that the notification plane dispatches.
+- On a decision, the agent transitions back to `RUNNING`. Denial reasons are injected as Stop-hook steering on the next turn.
 
 ### 3.8 FanOutConsumer (router)
 
-Lambda subscribed to `TaskEventsTable` DDB Streams (relying on the DynamoDB Streams **default** `ParallelizationFactor` of 1, which preserves per-`task_id` ordering by shard — not set explicitly in `fanout-consumer.ts`; see §6.1). Reads per-task notification config (from `TaskTable` metadata or `RepoTable` defaults), filters events by channel subscription, and invokes per-channel dispatcher Lambdas.
+FanOutConsumer is a Lambda subscribed to `TaskEventsTable` DDB Streams. It relies on the DynamoDB Streams **default** `ParallelizationFactor` of 1, which preserves per-`task_id` ordering by shard. `fanout-consumer.ts` does not set the factor explicitly (see §6.1). The Lambda reads the per-task notification config (from `TaskTable` metadata or `RepoTable` defaults), filters events by channel subscription, and invokes per-channel dispatcher Lambdas.
 
-- **SlackDispatchFn** — posts to configured channel / DM. Includes action buttons for `approval_required` events.
-- **EmailDispatchFn** — SES.
-- **GitHubDispatchFn** — edits a single GitHub issue comment in place via `PATCH /repos/{o}/{r}/issues/comments/{id}`. On 404 (comment deleted upstream) falls back to POSTing a fresh comment. Per-task ordering is guaranteed upstream by the DDB Streams default `ParallelizationFactor` of 1 (see §6.1), so no conditional-request header is needed (and GitHub's REST API does not accept `If-Match` on this endpoint — see §6.4).
+- **SlackDispatchFn.** Posts to the configured channel or DM. Includes action buttons for `approval_required` events.
+- **EmailDispatchFn.** SES.
+- **GitHubDispatchFn.** Edits a single GitHub issue comment in place through `PATCH /repos/{o}/{r}/issues/comments/{id}`. On a 404 (the comment was deleted upstream) it falls back to POSTing a fresh comment. The DDB Streams default `ParallelizationFactor` of 1 guarantees per-task ordering upstream (see §6.1), so no conditional-request header is needed. Also, GitHub's REST API does not accept `If-Match` on this endpoint (see §6.4).
 
-Detailed routing and default filters in §6.
+§6 has the detailed routing and the default filters.
 
 ### 3.9 Reconcilers
 
-Two scheduled Lambdas that backstop the state machine:
+Two scheduled Lambdas act as a backstop for the state machine:
 
-- **Stranded-task reconciler** (every 5 min) — catches tasks stuck in non-terminal states past a unified timeout (`STRANDED_TIMEOUT_SECONDS=1200` default). Covers `OrchestratorFn` async-invoke crashes and container crashes. Transitions stuck tasks to `FAILED` with a `task_stranded` event.
-- **Concurrency reconciler** (every 15 min) — recomputes `active_count` per user by querying the `UserStatusIndex` GSI and corrects drift in `UserConcurrencyTable`.
+- **Stranded-task reconciler** (every 5 min). Catches tasks that stay in a non-terminal state past a unified timeout (`STRANDED_TIMEOUT_SECONDS=1200` by default). It covers `OrchestratorFn` async-invoke crashes and container crashes, and it transitions stuck tasks to `FAILED` with a `task_stranded` event.
+- **Concurrency reconciler** (every 15 min). Recomputes `active_count` per user from a query of the `UserStatusIndex` GSI and corrects drift in `UserConcurrencyTable`.
 
 ### 3.10 CLI (`bgagent`)
 
 Commands:
-- `submit` — fire-and-forget; returns `task_id`.
-- `status <id>` — templated snapshot.
-- `watch <id>` — adaptive polling loop.
-- `events <id>` — raw event stream (debug).
-- `nudge <id> "<text>"` — steer.
-- `cancel <id>` — stop the task.
-- `ask <id> "<question>"` (Phase 2) — ask the agent a question.
-- `approve <id>` / `deny <id>` / `pending` / `policies` (Phase 3) — HITL.
+- `submit` is fire-and-forget and returns `task_id`.
+- `status <id>` returns a templated snapshot.
+- `watch <id>` runs an adaptive polling loop.
+- `events <id>` prints the raw event stream (debug).
+- `nudge <id> "<text>"` steers the agent.
+- `cancel <id>` stops the task.
+- `ask <id> "<question>"` (Phase 2) asks the agent a question.
+- `approve <id>`, `deny <id>`, `pending`, and `policies` (Phase 3) are the HITL commands.
 
-Authentication: Cognito User Pool ID token in `Authorization` header for all REST calls. Token caching in `~/.bgagent/credentials.json` with auto-refresh.
+Authentication: all REST calls carry a Cognito User Pool ID token in the `Authorization` header. The CLI caches tokens in `~/.bgagent/credentials.json` and refreshes them automatically.
 
 ---
 
@@ -267,7 +267,7 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 
 ### 4.1 Schema
 
-`TaskEventsTable` row:
+A `TaskEventsTable` row:
 
 ```jsonc
 {
@@ -292,11 +292,11 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 | `task_created` | SubmitTaskFn | New task accepted |
 | `hydration_started` / `hydration_completed` | Agent startup | Blueprint + repo config loaded |
 | `session_started` | Orchestrator | AgentCore session established |
-| `agent_turn` | Runner | One model-roundtrip completed; includes turn number, model, thinking preview |
+| `agent_turn` | Runner | One model-roundtrip completed. Includes turn number, model, thinking preview |
 | `agent_tool_call` | Runner / PreToolUse hook | About to invoke a tool |
 | `agent_tool_result` | Runner / PostToolUse hook | Tool returned |
 | `agent_milestone` | Agent code (pipeline, hooks) | Named checkpoint (`repo_cloned`, `pr_opened`, `nudge_acknowledged`, ...) |
-| `agent_cost_update` | Runner | Cumulative token + dollar cost; its `turn` is the turn number the `agent_turn` events carry |
+| `agent_cost_update` | Runner | Cumulative token and dollar cost. Its `turn` is the turn number the `agent_turn` events carry |
 | `agent_error` | Runner | Handled exception |
 | `approval_required` (P3) | PreToolUse Cedar hook | Cedar policy requires user decision |
 | `approval_decided` (P3) | Approve/Deny Lambda | User responded |
@@ -305,15 +305,15 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 | `pr_created` | Pipeline | PR opened for the task |
 | `task_completed` / `task_failed` / `task_cancelled` / `task_stranded` | Orchestrator / reconciler | Terminal |
 
-Named milestones (`pr_created`, `nudge_acknowledged`, `repo_setup_complete`, …) are written as `agent_milestone` events with `metadata.milestone` carrying the name. The fan-out router unwraps an allowlisted subset (§6.2) so per-channel default filters can target milestone names directly (e.g. GitHub's default set includes `pr_created`); unlisted milestone names stay wrapped and do not route. The watch CLI renders all milestones regardless of the allowlist.
+Named milestones (`pr_created`, `nudge_acknowledged`, `repo_setup_complete`, …) are written as `agent_milestone` events, and `metadata.milestone` carries the name. The fan-out router unwraps an allowlisted subset (§6.2) so that per-channel default filters can target milestone names directly. For example, GitHub's default set includes `pr_created`. Milestone names that are not on the allowlist stay wrapped and are not routed. The watch CLI renders all milestones, whatever the allowlist says.
 
 ### 4.3 Previews and truncation
 
-Text fields (thinking, tool input, tool output, error details) are truncated to 200 characters by default to keep event rows small. The `--trace` flag raises the cap to 4 KB and additionally writes a full trajectory to S3 (see §10).
+Text fields (thinking, tool input, tool output, error details) are truncated to 200 characters by default to keep event rows small. The `--trace` flag raises the cap to 4 KB and also writes a full trajectory to S3 (see §10).
 
 ### 4.4 Cursor semantics
 
-Consumers page `TaskEventsTable` using `event_id` as a cursor: `KeyConditionExpression: task_id = :id AND event_id > :cursor`, `ConsistentRead: true`. ULID sort order is time-monotonic, so lexical comparison gives time ordering.
+Consumers page through `TaskEventsTable` with `event_id` as a cursor: `KeyConditionExpression: task_id = :id AND event_id > :cursor`, `ConsistentRead: true`. ULID sort order is time-monotonic, so lexical comparison gives time ordering.
 
 ---
 
@@ -326,11 +326,11 @@ $ bgagent submit --repo org/repo "fix the auth timeout bug"
 task submitted: abc123
 ```
 
-Writes `TaskRecord`, fires orchestrator, returns. The CLI does not wait. `--wait` flag is available for scripting (blocks until terminal state, returns non-zero on failure).
+The command writes the `TaskRecord`, starts the orchestrator, and returns. The CLI does not wait. A `--wait` flag is available for scripting. It blocks until a terminal state and returns non-zero on failure.
 
 ### 5.2 `bgagent status`
 
-Deterministic, templated snapshot. No LLM.
+`bgagent status` returns a deterministic, templated snapshot, with no LLM.
 
 ```
 $ bgagent status abc123
@@ -344,23 +344,23 @@ Task abc123 — RUNNING (3m 14s elapsed)
 ```
 
 Implementation:
-- Lambda reads the last N events from `TaskEventsTable` + current `TaskRecord`.
-- Renders from a fixed template. Never calls an LLM. Never hallucinates.
-- Fast (<200 ms P95), free, safe to call repeatedly.
-- `Turn` is the number of answers of the model so far against `max_turns`, which limits that count: the `turn` of the newest `agent_turn` event while the task runs, the record's `turns_completed` once it has finished (the event's `turn` if the record holds no count). The record's `turns_attempted` is the Claude Code CLI's own counter, which grows with every tool result (as of the pinned CLI 2.1.319) and can exceed `max_turns`; it is not shown against the limit.
+- The Lambda reads the last N events from `TaskEventsTable` and the current `TaskRecord`.
+- It renders from a fixed template. It never calls an LLM and never hallucinates.
+- It is fast (<200 ms P95), free, and safe to call repeatedly.
+- `Turn` is the number of answers of the model so far, shown against `max_turns`, which limits that count. While the task runs, the number is the `turn` of the newest `agent_turn` event. Once the task has finished, it is the record's `turns_completed`, or the event's `turn` if the record holds no count. The record's `turns_attempted` is the Claude Code CLI's own counter. That counter grows with every tool result (as of the pinned CLI 2.1.319) and can exceed `max_turns`. It is not shown against the limit.
 
 ### 5.3 `bgagent watch`
 
-Polling loop against `GET /tasks/{id}/events?after=<cursor>` with **adaptive interval**:
+`bgagent watch` is a polling loop against `GET /tasks/{id}/events?after=<cursor>` with an **adaptive interval**:
 
 - Start at 500 ms.
-- If a poll returns ≥1 event, keep at 500 ms.
-- If a poll returns 0 events, back off: 1 s, 2 s, 5 s (cap).
+- If a poll returns at least 1 event, stay at 500 ms.
+- If a poll returns 0 events, back off to 1 s, then 2 s, then 5 s (the cap).
 - Reset to 500 ms on the next event.
 
-Renders events as they arrive. Exits on terminal status. Cursor is the last `event_id` seen.
+The command renders events as they arrive and exits on a terminal status. The cursor is the last `event_id` seen.
 
-Cost profile: 50 simultaneous watchers × ~0.5 RCU per empty poll × 5 s intervals when idle ≈ negligible.
+The cost is negligible: 50 simultaneous watchers at about 0.5 RCU per empty poll and 5 s intervals when idle.
 
 ### 5.4 `bgagent nudge`
 
@@ -370,17 +370,17 @@ nudge queued: nudge_01JX...
 ```
 
 Flow:
-1. CLI `POST /tasks/{id}/nudge` → rate-limit conditional update + `PutItem` in `TaskNudgesTable`.
-2. Agent's Stop hook fires between turns. Calls `nudge_reader.read_pending(task_id)` — returns all pending nudges for this task (concatenated into one `<user_nudge>` block if multiple).
-3. Hook emits `nudge_acknowledged` milestone to `ProgressWriter` **before** returning to the SDK. User sees this event immediately via `watch` or Slack.
-4. Hook returns `{"decision": "block", "reason": <formatted_nudge_text>}`. The SDK treats this as the start of the next user turn; the agent incorporates the nudge on its response.
-5. Nudge row is marked consumed via conditional update (`consumed_at` set only if currently null).
+1. The CLI calls `POST /tasks/{id}/nudge`, which runs the rate-limit conditional update and a `PutItem` in `TaskNudgesTable`.
+2. The agent's Stop hook fires between turns. It calls `nudge_reader.read_pending(task_id)`, which returns all pending nudges for this task. Several nudges are concatenated into one `<user_nudge>` block.
+3. The hook emits a `nudge_acknowledged` milestone to `ProgressWriter` **before** it returns to the SDK. The user sees this event immediately in `watch` or Slack.
+4. The hook returns `{"decision": "block", "reason": <formatted_nudge_text>}`. The SDK treats this as the start of the next user turn, and the agent incorporates the nudge in its response.
+5. The nudge row is marked consumed through a conditional update (`consumed_at` is set only if it is currently null).
 
-**Cost model — honest:** the nudge burns one turn from the task's `max_turns` budget. The acknowledgment rides in the same turn (the combined-turn ack pattern). This is the mechanism a nudge uses to inject its text mid-run; there is no "append to system prompt mid-conversation" API (see Appendix A; A.2 describes the one other way, text that a hook attaches to a tool result).
+**Cost model.** The nudge costs one turn of the task's `max_turns` budget. The acknowledgment is part of the same turn (the combined-turn ack pattern). This is the mechanism a nudge uses to inject its text mid-run. There is no "append to system prompt mid-conversation" API. See Appendix A. Section A.2 describes the one other way, text that a hook attaches to a tool result.
 
 ### 5.5 `bgagent ask` (Phase 2)
 
-Ask the agent a natural-language question that requires its own reasoning. Always burns a turn. Always has latency (bounded above by the agent's current turn duration, which can be minutes).
+The command asks the agent a natural-language question that requires the agent's own reasoning. An ask always costs a turn and always has latency. The latency is bounded above by the duration of the agent's current turn, which can be minutes.
 
 **CLI default: foreground block-and-poll with a spinner.**
 
@@ -395,33 +395,33 @@ herd under load. Added jitter to spread retries across the window.
 ```
 
 Flow:
-1. CLI `POST /tasks/{id}/asks` → `{ask_id, cursor}`.
-2. CLI polls `GET /events?after=<cursor>&type=status_response&correlation_id=<ask_id>` with adaptive interval.
-3. Spinner renders last `agent_turn` / `agent_tool_call` so the user sees the agent is alive.
-4. Agent's between-turns hook reads the pending ask, injects it as a user turn via `decision: "block"`, agent answers, hook emits `status_response{ask_id, content, turn}`.
-5. CLI prints the response and exits.
+1. The CLI calls `POST /tasks/{id}/asks` and receives `{ask_id, cursor}`.
+2. The CLI polls `GET /events?after=<cursor>&type=status_response&correlation_id=<ask_id>` with an adaptive interval.
+3. The spinner renders the last `agent_turn` or `agent_tool_call`, so the user sees that the agent is still running.
+4. The agent's between-turns hook reads the pending ask and injects it as a user turn through `decision: "block"`. The agent answers, and the hook emits `status_response{ask_id, content, turn}`.
+5. The CLI prints the response and exits.
 
 Flags:
-- default → foreground block
-- `--no-wait` → returns `ask_id` immediately; response delivered via Slack/watch
-- `--timeout N` → override default 5 min (hard cap 10 min)
+- By default the command blocks in the foreground.
+- `--no-wait` returns `ask_id` immediately. The response is delivered through Slack or `watch`.
+- `--timeout N` overrides the default of 5 min (hard cap 10 min).
 
-**Durability:** the ask row lives in DDB regardless of CLI state. If the user Ctrl-Cs or the terminal closes, the ask still executes; the response is retrievable via `bgagent asks show <ask_id>`, `bgagent watch`, or Slack.
+**Durability:** the ask row is in DDB whatever the state of the CLI. If the user presses Ctrl-C or the terminal closes, the ask still executes. The response can be retrieved with `bgagent asks show <ask_id>`, `bgagent watch`, or Slack.
 
-**Rate limit:** 1 open ask per task per user (429 otherwise). Forward-compatible with multi-user team scenarios.
+**Rate limit:** 1 open ask per task per user (429 otherwise). The limit is forward-compatible with multi-user team scenarios.
 
 ### 5.6 `bgagent approve` / `deny` / `pending` / `policies` (Phase 3)
 
-HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). Summary:
+These are the HITL approval commands. All flows are REST and DDB, with no streaming. [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) has the detailed design. In summary:
 
-- Agent emits `approval_required` with the tool context.
-- Notification plane dispatches the event (Slack with action buttons, email, GitHub).
-- User responds via `bgagent approve <id>`, `bgagent deny <id> --reason "…"`, or Slack button click.
-- Agent's poll loop sees the decision and proceeds or deny-steers.
+- The agent emits `approval_required` with the tool context.
+- The notification plane dispatches the event (Slack with action buttons, email, GitHub).
+- The user responds with `bgagent approve <id>`, `bgagent deny <id> --reason "…"`, or a Slack button click.
+- The agent's poll loop sees the decision, and the agent proceeds or takes the denial as steering.
 
 ### 5.7 `bgagent cancel`
 
-Writes `cancellation_requested` flag on `TaskRecord`; agent's between-turns hook checks it and terminates. Agent's PR-short-circuit logic commits partial work before exit.
+The command writes the `cancellation_requested` flag on the `TaskRecord`. The agent's between-turns hook checks the flag and terminates. The agent's PR-short-circuit logic commits partial work before exit.
 
 ---
 
@@ -442,10 +442,10 @@ TaskEventsTable ──DDB Stream──▶ FanOutConsumer
                   Slack Web API    SES        GitHub REST API
 ```
 
-- Single Lambda subscribes to the DDB Stream. Stateless; fails-forward into SQS DLQ on per-event errors.
-- Per-`task_id` shard ordering is preserved for free because the DynamoDB Streams `ParallelizationFactor` **defaults to 1**. Note: `cdk/src/constructs/fanout-consumer.ts` configures the `DynamoEventSource` **without** setting `parallelizationFactor`, so this ordering guarantee rests on the AWS default rather than an explicit setting. If this guarantee must be enforced against future default changes or accidental edits, set `parallelizationFactor: 1` explicitly on the event source.
-- Router reads per-task notification config (channel enablement + event-type filters), then invokes the relevant dispatcher Lambda(s) per event.
-- Dispatchers are separate Lambdas so a GitHub API outage doesn't block Slack notifications.
+- A single Lambda subscribes to the DDB Stream. It is stateless, and on a per-event error it fails forward into an SQS DLQ.
+- Per-`task_id` shard ordering is preserved without extra configuration, because the DynamoDB Streams `ParallelizationFactor` **defaults to 1**. `cdk/src/constructs/fanout-consumer.ts` configures the `DynamoEventSource` **without** setting `parallelizationFactor`, so this ordering guarantee depends on the AWS default, not on an explicit setting. To enforce the guarantee against future changes of the default or accidental edits, set `parallelizationFactor: 1` explicitly on the event source.
+- The router reads the per-task notification config (channel enablement and event-type filters), then invokes the relevant dispatcher Lambdas for each event.
+- Dispatchers are separate Lambdas so that a GitHub API outage does not block Slack notifications.
 
 ### 6.2 Per-channel defaults (v1)
 
@@ -455,31 +455,31 @@ TaskEventsTable ──DDB Stream──▶ FanOutConsumer
 | **Email** | `task_completed`, `task_failed`, `approval_required` | — |
 | **GitHub issue comment** | `pr_created`, terminal status (single edit-in-place comment) | — already minimal |
 
-Rationale: if Slack pings on every milestone, users mute the bot within days. Default to the minimal set that surfaces decision-requiring events and completion; power users opt into verbose streams.
+Rationale: if Slack pings on every milestone, users mute the bot within days. The default is the minimal set that reports completion and the events that require a decision. Power users opt into verbose streams.
 
 ### 6.3 Slack approval buttons
 
-`approval_required` events delivered to Slack include `Approve` / `Deny` action buttons. On click, Slack invokes an interaction callback Lambda which writes to `TaskApprovalsTable` via the same `POST /approvals` path the CLI uses. This gives the common case (reviewer in Slack, not at a terminal) a one-click response path.
+`approval_required` events delivered to Slack include `Approve` and `Deny` action buttons. On a click, Slack invokes an interaction callback Lambda, which writes to `TaskApprovalsTable` through the same `POST /approvals` path that the CLI uses. A reviewer who is in Slack and not at a terminal, the common case, can then respond with one click.
 
 ### 6.4 GitHub issue comment — edit-in-place
 
-A single comment per task, edited in place as the agent progresses (terminal states + `pr_created` by default).
+Each task has a single comment, edited in place as the agent progresses (terminal states and `pr_created` by default).
 
-**Concurrency:** Per-`task_id` ordering is guaranteed upstream by DDB Streams on `TaskEventsTable` via the default `ParallelizationFactor` of 1 (not set explicitly in `fanout-consumer.ts` — see §6.1), and the fanout Lambda is the only writer on its own comment, so concurrent edits of the same comment body are not possible — last-writer-wins is safe because there is no concurrent writer to lose to. The dispatcher issues a single PATCH per event (no GET round-trip, no conditional headers). If the comment has been deleted upstream (404), it falls back to POSTing a fresh comment.
+**Concurrency:** DDB Streams on `TaskEventsTable` guarantees per-`task_id` ordering upstream through the default `ParallelizationFactor` of 1, which `fanout-consumer.ts` does not set explicitly (see §6.1), and the fanout Lambda is the only writer on its own comment, so concurrent edits of the same comment body are not possible. Last-writer-wins is safe because there is no concurrent writer to lose to. The dispatcher issues a single PATCH per event (no GET round-trip, no conditional headers). If the comment has been deleted upstream (404), the dispatcher falls back to POSTing a fresh comment.
 
 **Tolerated races (bounded, logged, not silenced):**
 
-- *Persist failure after successful POST* — if the GitHub POST succeeds but the subsequent `TaskTable` UpdateItem that persists `github_comment_id` fails non-benignly (DDB throttling, IAM deny, etc.), the next event for the same task re-POSTs a second comment. Bounded to at most one duplicate per task per failure window (the per-invocation cap stops runaway). Logged at ERROR with `error_id: FANOUT_GITHUB_PERSIST_FAILED` so operators can alarm and reconcile. A sweeper that matches on the `bgagent:task-id=` marker body prefix is a post-v1 follow-up.
-- *404 → POST race between sibling invocations* — if the previously-posted comment was deleted upstream and two consecutive fanout invocations independently re-POST before either persists the new id, both POSTs land. The UpdateItem uses `ConditionExpression: github_comment_id = :prev` so only the first persist wins; the sibling's `saveCommentState` surfaces a benign `ConditionalCheckFailedException` at INFO and the sibling's comment survives on GitHub as an orphan (the `bgagent:` marker makes it reconcilable offline).
-- *Transient `loadTaskForComment` failure* — if the task record's GetItem fails transiently, `routeEvent`'s `Promise.allSettled` records the dispatcher as rejected and the batch continues. No write lands. The event is effectively dropped; the next event (e.g. `task_completed` after `pr_created`) will render the current task state.
+- *Persist failure after successful POST.* If the GitHub POST succeeds but the subsequent `TaskTable` UpdateItem that persists `github_comment_id` fails non-benignly (for example DDB throttling or an IAM deny), the next event for the same task POSTs a second comment. This is bounded to at most one duplicate per task per failure window (the per-invocation cap stops a runaway). It is logged at ERROR with `error_id: FANOUT_GITHUB_PERSIST_FAILED` so that operators can alarm on it and reconcile. A sweeper that matches on the `bgagent:task-id=` marker body prefix is a post-v1 follow-up.
+- *404 → POST race between sibling invocations.* If the previously posted comment was deleted upstream and two consecutive fanout invocations each POST again before either persists the new id, both POSTs succeed. The UpdateItem uses `ConditionExpression: github_comment_id = :prev`, so only the first persist wins. The sibling's `saveCommentState` logs a benign `ConditionalCheckFailedException` at INFO, and the sibling's comment stays on GitHub as an orphan (the `bgagent:` marker makes it reconcilable offline).
+- *Transient `loadTaskForComment` failure.* If the GetItem of the task record fails transiently, the `Promise.allSettled` in `routeEvent` records the dispatcher as rejected and the batch continues. Nothing is written. The event is in effect dropped. The next event (for example `task_completed` after `pr_created`) renders the current task state.
 
-**Legacy field:** A previous revision persisted `github_comment_etag` on the TaskRecord. That field is no longer written or read; items that still carry it from earlier deploys are ignored by the DocumentClient (fields not declared on the typed surface pass through untouched). No migration required.
+**Legacy field:** A previous revision persisted `github_comment_etag` on the TaskRecord. That field is no longer written or read. Items that still carry it from earlier deploys are ignored by the DocumentClient (fields that the type does not declare pass through untouched). No migration is required.
 
-**Why not ETag / `If-Match`:** An earlier revision attempted optimistic concurrency via GitHub's ETag and `If-Match`. In-account validation (PR #52 Scenario 7-extended) proved this does not work: GitHub's REST API rejects conditional-request headers on `PATCH /issues/comments/{id}` with `HTTP 400 "Conditional request headers are not allowed in unsafe requests unless supported by the endpoint"`. The ETag returned on GET is a cache validator only; the write endpoint does not honor it. Upstream ordering via the DDB-Stream configuration above is sufficient on its own.
+**Why not ETag / `If-Match`:** An earlier revision attempted optimistic concurrency with GitHub's ETag and `If-Match`. In-account validation (PR #52 Scenario 7-extended) proved that this does not work. GitHub's REST API rejects conditional-request headers on `PATCH /issues/comments/{id}` with `HTTP 400 "Conditional request headers are not allowed in unsafe requests unless supported by the endpoint"`. The ETag returned on GET is a cache validator only, and the write endpoint does not honor it. Upstream ordering through the DDB-Stream configuration above is sufficient on its own.
 
 ### 6.5 Per-task notification config
 
-Submitted with the task (optional) or resolved from repo defaults:
+The config is submitted with the task (optional) or resolved from the repo defaults:
 
 ```jsonc
 {
@@ -509,23 +509,23 @@ Submitted with the task (optional) or resolved from repo defaults:
 
 ### 7.2 Nudge security
 
-- Ownership check: the Lambda verifies `user_id` (from Cognito claims) matches the task's `user_id` before accepting the nudge.
+- Ownership check: the Lambda verifies that `user_id` (from the Cognito claims) matches the task's `user_id` before it accepts the nudge.
 - Rate limit: 10 nudges per task per minute (conditional update on a `RATE#<task>#MINUTE#<bucket>` row).
 - Size cap: 2 KB per nudge.
-- Guardrail pre-screen: Bedrock guardrail scans nudge text for prompt-injection patterns before persisting.
+- Guardrail pre-screen: a Bedrock guardrail scans the nudge text for prompt-injection patterns before the nudge is persisted.
 
 ### 7.3 Approval security (Phase 3)
 
-- Ownership check on approve/deny.
-- Atomic state transition via `TransactWriteItems` (approval row + TaskTable status).
-- Recent-decision cache (60 s) prevents retry-loop storms.
-- Denial reason sanitized by the DenyTaskFn Lambda (Bedrock output scanner) before persisting.
+- Ownership check on approve and deny.
+- Atomic state transition through `TransactWriteItems` (approval row and TaskTable status).
+- A recent-decision cache (60 s) prevents retry-loop storms.
+- The DenyTaskFn Lambda sanitizes the denial reason (Bedrock output scanner) before it is persisted.
 
 ### 7.4 Event table privacy
 
-- Previews truncate to 200 chars → low risk of accidental secret capture in common cases.
+- Previews are truncated to 200 chars, so the risk of accidental secret capture is low in common cases.
 - The runner screens the text of its events before `ProgressWriter` cuts it to a preview: the model's thinking and text, tool input, tool output and the message of a session error. What the output scanner (`agent/src/output_scanner.py`) or the redaction of log lines takes for a credential is replaced by a marker such as `[REDACTED-AWS_KEY]`.
-- `--trace` flag opts into larger previews + S3 trajectory dumps; S3 objects are written to a user-scoped prefix with short TTL.
+- The `--trace` flag opts into larger previews and S3 trajectory dumps. The S3 objects are written to a user-scoped prefix with a short TTL.
 
 ---
 
@@ -553,12 +553,12 @@ RUNNING ──▶ AWAITING_APPROVAL ──▶ RUNNING    (approve or deny-with-s
               └──▶ FAILED       (stranded reconciler catches abandoned approval)
 ```
 
-The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but alive). See [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) for full semantics.
+The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but alive). See [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) for the full semantics.
 
 ### 8.3 Write rules
 
 - Every transition is a conditional DDB write: `#status = :fromStatus`.
-- Illegal transitions are rejected at the storage layer (not enforced in code).
+- The storage layer rejects illegal transitions (they are not enforced in code).
 - The valid-transition table lives in `cdk/src/constructs/task-status.ts`.
 
 ---
@@ -571,21 +571,21 @@ The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but aliv
 |---|---|---|
 | `ProgressWriter` | Fail-open (3-strike circuit breaker) | Event telemetry must never crash the task |
 | Nudge/ask rate-limit conditional update | Fail-closed (return 429) | Accurate throttling is a product guarantee |
-| Cedar policy evaluation | Fail-closed (treat as DENY) | Security-critical; unknown outcome = deny |
-| Approval poll DDB read | Fail-open with tolerance (10 consecutive failures → TIMED_OUT) | Tolerate transient DDB errors; fail closed on sustained |
+| Cedar policy evaluation | Fail-closed (treat as DENY) | Security-critical. Unknown outcome = deny |
+| Approval poll DDB read | Fail-open with tolerance (10 consecutive failures → TIMED_OUT) | Tolerate transient DDB errors. Fail closed on sustained errors |
 | Notification dispatcher | Fail-open (log + DLQ) | A Slack outage must not block the agent |
 
 ### 9.2 Unified debugging: event correlation
 
-Every log line, event, and metric carries `task_id`. CloudWatch Logs Insights queries across all Lambdas on `task_id = "abc123"` give the full cross-component picture.
+Every log line, event, and metric carries `task_id`. CloudWatch Logs Insights queries across all Lambdas on `task_id = "abc123"` give the full picture across components.
 
 ### 9.3 OpenTelemetry
 
-Each component emits OTEL traces with `task_id` as a baggage item. OrchestratorFn starts the root span; AgentCore runtime continues it via env-var propagation; Lambdas downstream of DDB Streams resume from the event's `traceparent` attribute.
+Each component emits OTEL traces with `task_id` as a baggage item. OrchestratorFn starts the root span. The AgentCore runtime continues it through env-var propagation. Lambdas downstream of DDB Streams resume from the event's `traceparent` attribute.
 
 ### 9.4 Dashboards
 
-CloudWatch dashboard shows, per task:
+A CloudWatch dashboard shows the following for each task:
 - State transitions timeline
 - Event rate by type
 - Cost accumulation
@@ -593,7 +593,7 @@ CloudWatch dashboard shows, per task:
 
 ### 9.5 Alarms
 
-The alarms the stack deploys notify the `OperationalAlerts` topic. For this design that is the DLQ-depth alarm of the fan-out consumer, the signal that the fail-open notification dispatcher of section 9.1 is losing events. The topic has no subscriber until an operator adds one: see [Alarm notifications](/sample-autonomous-cloud-coding-agents/architecture/observability#alarm-notifications).
+The alarms the stack deploys notify the `OperationalAlerts` topic. For this design that is the DLQ-depth alarm of the fan-out consumer, the signal that the fail-open notification dispatcher of section 9.1 is losing events. The topic has no subscriber until an operator adds one. See [Alarm notifications](/sample-autonomous-cloud-coding-agents/architecture/observability#alarm-notifications).
 
 ---
 
@@ -601,113 +601,113 @@ The alarms the stack deploys notify the `OperationalAlerts` topic. For this desi
 
 ### 10.1 `--trace` flag
 
-Without live streaming, a developer debugging a misbehaving agent needs a richer offline view than the default 200-char event previews. The `--trace` flag:
+Without live streaming, a developer who debugs a misbehaving agent needs more offline detail than the default 200-char event previews give. The `--trace` flag provides it:
 
 ```
 $ bgagent submit --trace "fix the auth bug"
 ```
 
 Changes for a trace-enabled task:
-- `ProgressWriter` preview truncation raised from 200 chars → 4 KB.
-- Full agent trajectory (SDK message log, tool I/O, hook callbacks) written to S3 on task completion.
-- A `trajectory_uploaded` milestone event with the S3 URI is emitted; the CLI can surface it at the end of `watch` or `status`.
+- The `ProgressWriter` preview truncation is raised from 200 chars to 4 KB.
+- The full agent trajectory (SDK message log, tool I/O, hook callbacks) is written to S3 on task completion.
+- A `trajectory_uploaded` milestone event with the S3 URI is emitted. The CLI can show it at the end of `watch` or `status`.
 
 Storage:
 - S3 prefix: `s3://<bucket>/traces/<user_id>/<task_id>.jsonl.gz`.
 - TTL: 7 days (lifecycle policy).
-- Pre-signed URLs available via `bgagent trace download <task_id>`.
+- Pre-signed URLs are available through `bgagent trace download <task_id>`.
 
 ### 10.2 When to use it
 
 - Reproducible failure modes during development.
 - Customer-reported "agent did the wrong thing" incidents.
-- Reward-hacking / hallucination audits.
+- Reward-hacking or hallucination audits.
 
-Not intended for routine observability — that's what `watch` and notifications are for.
+The flag is not intended for routine observability. Use `watch` and notifications for that.
 
 ---
 
 ## 11. Architectural decisions
 
-Short summaries of the load-bearing choices. Each decision is phrased as the chosen option; rationales are concise.
+Short summaries of the choices that the rest of the design depends on. Each decision is phrased as the chosen option, with a concise rationale.
 
 ### AD-1. Single AgentCore Runtime, IAM-authenticated
 
-Exactly one runtime, invoked via SigV4 from the orchestrator. The CLI never talks directly to the runtime.
+There is exactly one runtime, which the orchestrator invokes with SigV4. The CLI never talks directly to the runtime.
 
-*Why:* Compute-substrate portability (ECS/Fargate swap requires only orchestrator changes); simpler auth; one runtime to operate and observe. Direct CLI-to-runtime paths would reintroduce substrate coupling and force a choice between live-stream and durability at submission time.
+*Why:* The compute substrate stays portable (a swap to ECS/Fargate requires only orchestrator changes), auth is simpler, and there is one runtime to operate and observe. Direct CLI-to-runtime paths would couple the design to the compute substrate again and force a choice between live stream and durability at submission time.
 
 ### AD-2. Polling-only CLI
 
-`bgagent watch` / `bgagent status` / `bgagent ask` all use REST-polling against `TaskEventsTable` with an adaptive interval. No SSE. No WebSockets.
+`bgagent watch`, `bgagent status`, and `bgagent ask` all use REST polling against `TaskEventsTable` with an adaptive interval. No SSE. No WebSockets.
 
-*Why:* Human-scale interaction latency (seconds) is well-served by polling; DDB costs are trivial; no streaming infrastructure to build, operate, or secure. Cursor, GitHub Copilot coding agent, and Codex all use the same pattern.
+*Why:* Polling is fast enough for interaction latency on a human scale (seconds). DDB costs are trivial. There is no streaming infrastructure to build, operate, or secure. Cursor, GitHub Copilot coding agent, and Codex all use the same pattern.
 
 ### AD-3. `TaskEventsTable` as the single event spine
 
-Every durable signal from the agent flows through this table. Every consumer reads from it.
+Every durable signal from the agent goes through this table. Every consumer reads from it.
 
-*Why:* Decouples the agent from every consumer. CLI, Slack bot, GitHub integration, and any future web UI all read the same substrate without touching the runtime.
+*Why:* The table decouples the agent from every consumer. The CLI, the Slack bot, the GitHub integration, and any future web UI all read the same table and never touch the runtime.
 
 ### AD-4. Notification plane as first-class
 
-FanOutConsumer routes events per-channel with sensible defaults shipping in v1.
+FanOutConsumer routes events per channel, and v1 ships with per-channel defaults.
 
 *Why:* In an async product, notifications are the primary UX. Shipping without defaults would cause users to mute integrations on day one.
 
 ### AD-5. Nudge acknowledgment via combined-turn ack
 
-The between-turns hook emits a `nudge_acknowledged` milestone to `ProgressWriter` **before** returning `decision: "block"` with the nudge text. One turn burned (same as today); acknowledgment visible immediately.
+The between-turns hook emits a `nudge_acknowledged` milestone to `ProgressWriter` **before** it returns `decision: "block"` with the nudge text. The nudge costs one turn (same as today), and the acknowledgment is visible immediately.
 
-*Why:* The Claude Agent SDK does not expose a mechanism to append to system context mid-conversation. The `HookEvent` enum is fixed; `ClaudeAgentOptions.system_prompt` is construction-time only. `hookSpecificOutput.additionalContext` was recorded here as user-visible-only; with the pinned SDK a `PostToolUse` or `PostToolUseFailure` hook can hand text to the model through it, attached to the tool result (Appendix A.2). The stuck guard uses that; a nudge still arrives through the Stop hook. One-turn-per-nudge is the cost of that path; we surface it honestly rather than pretending it's free.
+*Why:* The Claude Agent SDK does not expose a mechanism to append to system context mid-conversation. The `HookEvent` enum is fixed, and `ClaudeAgentOptions.system_prompt` is set only at construction. `hookSpecificOutput.additionalContext` was recorded here as visible only to the user. With the pinned SDK, a `PostToolUse` or `PostToolUseFailure` hook can hand text to the model through it, attached to the tool result (Appendix A.2). The stuck guard uses that route. A nudge still arrives through the Stop hook. One turn per nudge is the cost of the Stop-hook path. We state that cost instead of presenting the nudge as free.
 
 ### AD-6. `bgagent status` is deterministic; `bgagent ask` is the agent
 
-`status` = templated Lambda reading `TaskEventsTable`. `ask` = a real question to the agent, always costs a turn, always has latency.
+`status` is a templated Lambda that reads `TaskEventsTable`. `ask` is a real question to the agent. It always costs a turn and always has latency.
 
-*Why:* Users understand dashboard reads vs. questions-to-a-thinking-entity. One command per contract is clearer than one command with a flag that silently changes execution model.
+*Why:* Users understand the difference between reading a dashboard and asking a question of an entity that thinks. One command per contract is clearer than one command with a flag that silently changes the execution model.
 
 ### AD-7. `bgagent ask` foreground block-and-poll
 
-Default UX blocks with a spinner showing current agent activity. Durable underneath — CLI disconnect does not cancel the ask or lose the answer.
+The default UX blocks with a spinner that shows the current agent activity. The ask is durable. A CLI disconnect does not cancel the ask or lose the answer.
 
-*Why:* Matches user expectation of a synchronous CLI call. Survives a closed laptop. Spinner surfaces the bounded-but-non-trivial latency (turns can take minutes) without feeling like a hang.
+*Why:* This matches the user's expectation of a synchronous CLI call and survives a closed laptop. The spinner shows the bounded but non-trivial latency (turns can take minutes), so the wait does not look like a hang.
 
 ### AD-8. HITL: hard gates only in v1
 
-Phase 3 ships hard gates. No soft questions, no "proceed with default if no response" semantics.
+Phase 3 ships hard gates. It has no soft questions and no "proceed with default if no response" semantics.
 
-*Why:* Soft-question-with-timeout creates a ticking-clock UX that's actively hostile in an async workflow. "Gate or no gate" is the coherent choice. A future `effect: "advise"` tier (non-blocking FYI events, no timeout) is documented in the Phase 3 design as post-v1.
+*Why:* A soft question with a timeout gives the user a deadline, which is hostile to an async workflow. "Gate or no gate" is the coherent choice. A future `effect: "advise"` tier (non-blocking FYI events, no timeout) is documented in the Phase 3 design as post-v1.
 
 ### AD-9. GitHub edit-in-place via DDB-Stream ordering, not SQS FIFO
 
-DDB Streams on `TaskEventsTable` give per-`task_id` ordering via the **default** `ParallelizationFactor` of 1. This default is relied upon rather than set explicitly: `cdk/src/constructs/fanout-consumer.ts` configures the `DynamoEventSource` without `parallelizationFactor`. If the ordering guarantee must be made robust against default changes, set `parallelizationFactor: 1` explicitly. The fanout Lambda is the only writer on its own comment, so no concurrent writer exists to race — last-writer-wins is safe. The dispatcher PATCHes directly (no GET-then-PATCH, no conditional headers).
+DDB Streams on `TaskEventsTable` give per-`task_id` ordering through the **default** `ParallelizationFactor` of 1. The code relies on this default and does not set it explicitly. `cdk/src/constructs/fanout-consumer.ts` configures the `DynamoEventSource` without `parallelizationFactor`. To make the ordering guarantee hold if the default changes, set `parallelizationFactor: 1` explicitly. The fanout Lambda is the only writer on its own comment, so no concurrent writer exists to race, and last-writer-wins is safe. The dispatcher PATCHes directly (no GET-then-PATCH, no conditional headers).
 
-*Why:* Simpler than SQS FIFO (no queue, no DLQ, no per-group throughput ceiling), and lower latency than a GET-then-PATCH round-trip.
+*Why:* This is simpler than SQS FIFO (no queue, no DLQ, no per-group throughput ceiling) and has lower latency than a GET-then-PATCH round-trip.
 
-*Rejected alternative — `If-Match` ETag:* An earlier revision of this design used optimistic concurrency via GitHub's ETag. Deploy-validation (PR #52 Scenario 7-extended) proved that `PATCH /issues/comments/{id}` rejects `If-Match` with HTTP 400 (`"Conditional request headers are not allowed in unsafe requests unless supported by the endpoint"`). The ETag returned on GET is a cache validator only. Upstream DDB-Stream ordering makes the ETag unnecessary anyway.
+*Rejected alternative, `If-Match` ETag:* An earlier revision of this design used optimistic concurrency through GitHub's ETag. Deploy-validation (PR #52 Scenario 7-extended) proved that `PATCH /issues/comments/{id}` rejects `If-Match` with HTTP 400 (`"Conditional request headers are not allowed in unsafe requests unless supported by the endpoint"`). The ETag returned on GET is a cache validator only. Upstream DDB-Stream ordering makes the ETag unnecessary anyway.
 
 ### AD-10. Stranded-task reconciler with a unified timeout
 
 One timeout value covers all stranded cases (orchestrator crash, container crash, general abandonment).
 
-*Why:* The interactive-specific timeout disappeared along with the interactive path. One reconciler, one threshold, easier to reason about.
+*Why:* The interactive-specific timeout went away with the interactive path. One reconciler with one threshold is easier to reason about.
 
 ### AD-11. Agent-side hydration (hybrid split; partially deferred)
 
 Blueprint merging, repo config, PAT retrieval, and prompt assembly are targeted for the agent container at startup, not the orchestrator Lambda.
 
-*Why:* Hydration artifacts (cloned repos, merged blueprints, rendered prompts) are large and only needed inside the runtime. Failures belong inside the durable 8 h runtime rather than a 15 min Lambda. The runtime already has the IAM it needs for those reads. Industry precedent (Cursor background agents, GitHub Copilot coding agent, Devin, Temporal's activity-worker pattern, LangGraph's queue-worker split) converges on worker-side hydration for long-running async agents.
+*Why:* Hydration artifacts (cloned repos, merged blueprints, rendered prompts) are large and needed only inside the runtime. Failures belong inside the durable 8 h runtime, not in a 15 min Lambda. The runtime already has the IAM it needs for those reads. Industry precedent (Cursor background agents, GitHub Copilot coding agent, Devin, Temporal's activity-worker pattern, LangGraph's queue-worker split) converges on worker-side hydration for long-running async agents.
 
-*Target shape — hybrid split:* keep the **cheap preflight** in the orchestrator (PAT validity check, repo-existence check, guardrail screen on the raw `task_description`) so we still fail fast before burning an AgentCore compute slot. Move the **heavy I/O hydration** (GitHub issue / PR fetch including review threads, prompt assembly, Memory retrieval, S3 blueprint reads) into the agent container.
+*Target shape, hybrid split:* keep the **cheap preflight** in the orchestrator (PAT validity check, repo-existence check, guardrail screen on the raw `task_description`) so that a task still fails fast before it uses an AgentCore compute slot. Move the **heavy I/O hydration** (GitHub issue / PR fetch including review threads, prompt assembly, Memory retrieval, S3 blueprint reads) into the agent container.
 
-*Status (2026-04-30):* **deferred to a follow-up PR**, tracked at [upstream issue #53](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/53). Rev-6 ships with full hydration still in the orchestrator Lambda. Reasons: (a) pure architectural relocation with no user-visible change, (b) ~2,700 lines porting surface (1,190 LOC of `context-hydration.ts` + 1,514 LOC of tests) requiring new boto3 surfaces in the container and a GraphQL GitHub client, (c) PR #52 already ships 10,000+ lines of changes across the SSE removal — folding in hydration would blur the review narrative. The Pydantic `SUPPORTED_HYDRATED_CONTEXT_VERSION` gate in `agent/src/models.py` bounds drift risk during the deferral window.
+*Status (2026-04-30):* **deferred to a follow-up PR**, tracked at [upstream issue #53](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/53). Rev-6 ships with full hydration still in the orchestrator Lambda. Reasons: (a) the move is pure architectural relocation with no user-visible change, (b) the port is about 2,700 lines (1,190 LOC of `context-hydration.ts` and 1,514 LOC of tests) and requires new boto3 clients in the container and a GraphQL GitHub client, (c) PR #52 already ships 10,000+ lines of changes across the SSE removal, and adding hydration would make that PR harder to review. The Pydantic `SUPPORTED_HYDRATED_CONTEXT_VERSION` gate in `agent/src/models.py` bounds drift risk during the deferral window.
 
 ### AD-12. `--trace` as the debug escape hatch
 
-Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
+Opt-in per task: 4 KB previews and the full trajectory to S3 with a TTL.
 
-*Why:* Without live streaming, debugging needs a richer offline artifact. Opt-in keeps normal-task storage costs flat.
+*Why:* Without live streaming, debugging needs a more detailed offline artifact. Because the flag is opt-in, storage costs for normal tasks stay flat.
 
 ---
 
@@ -715,13 +715,13 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ### Phase 1 — v1 PR
 
-- Single orchestrator path; delete all direct-SSE / two-runtime / interactive-mode infrastructure
+- Single orchestrator path. Delete all direct-SSE, two-runtime, and interactive-mode infrastructure
 - `bgagent status` (deterministic)
 - `bgagent watch` with adaptive polling interval
 - `bgagent nudge` with combined-turn acknowledgment
-- FanOutConsumer router + per-channel default filters
+- FanOutConsumer router and per-channel default filters
 - GitHub edit-in-place dispatcher (DDB-Stream ordering, 404 → POST fallback)
-- Stub Slack/email dispatchers (log-only, ready for real integration in Phase 2)
+- Stub Slack and email dispatchers (log-only, ready for real integration in Phase 2)
 - Unified stranded-task reconciler timeout
 - `--trace` debug flag
 
@@ -729,13 +729,13 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 - `bgagent ask` end-to-end (REST, agent-side between-turns hook, foreground block-and-poll CLI, durability-on-disconnect)
 - Real Slack dispatcher (webhook + action buttons → approval callback Lambda)
-- Per-task notification config + `bgagent notifications configure`
+- Per-task notification config and `bgagent notifications configure`
 
 ### Phase 3 — Cedar HITL
 
 - Hard-gate approval gates with Cedar policy evaluation
 - `bgagent approve` / `deny` / `pending` / `policies`
-- `AWAITING_APPROVAL` state + orchestrator handling
+- `AWAITING_APPROVAL` state and orchestrator handling
 - Full design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates)
 
 ### Phase 4 — Dispatcher polish
@@ -748,10 +748,10 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ### Deferred
 
-- **LLM-synthesized status summary** — `bgagent ask` without targeting the agent; Lambda calls an LLM to narrate state. Cost + hallucination trade-offs; revisit if v1 feedback warrants. Tracked as a [GitHub issue](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) under **Smart progress updates**.
-- **Cedar `effect: "advise"` tier** — non-blocking FYI policy tier for post-v1. Design sketch in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
-- **Outbound WebSocket from agent** — only if a concrete sub-200 ms latency requirement surfaces. Agent-initiated egress avoids dual-auth problems and works on any compute.
-- **Multi-user watch** — multiple users attached to the same task's live event stream (teams).
+- **LLM-synthesized status summary.** `bgagent ask` without targeting the agent. A Lambda calls an LLM to narrate the state. It has cost and hallucination trade-offs. Revisit it if v1 feedback warrants. Tracked as a [GitHub issue](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) under **Smart progress updates**.
+- **Cedar `effect: "advise"` tier.** A non-blocking FYI policy tier for post-v1. [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) has a design sketch.
+- **Outbound WebSocket from agent.** Only if a concrete sub-200 ms latency requirement appears. Agent-initiated egress avoids dual-auth problems and works on any compute.
+- **Multi-user watch.** Multiple users attached to the live event stream of the same task (teams).
 
 ---
 
@@ -759,23 +759,23 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 | ID | Question | Owner |
 |---|---|---|
-| Q1 | Retention policy for `--trace` S3 artifacts — 7 days or 30? Size cap per user? | Design |
+| Q1 | Retention policy for `--trace` S3 artifacts. 7 days or 30? Size cap per user? | Design |
 | Q2 | Should `bgagent pending` (Phase 3) show all pending approvals across all of a user's tasks, or filter to a single `task_id`? | Phase 3 impl |
-| Q3 | Slack action button callbacks — Slack signing secret rotation strategy? | Phase 2 impl |
-| Q4 | Per-repo default notification config precedence vs per-task overrides — does per-task always win? Partial overrides? | Phase 4 impl |
-| Q5 | `bgagent ask` concurrent limit — do we expose `--queue` semantics to explicitly enqueue vs 429? | Phase 2 impl |
+| Q3 | Slack action button callbacks. What is the rotation strategy for the Slack signing secret? | Phase 2 impl |
+| Q4 | Per-repo default notification config precedence vs per-task overrides. Does per-task always win? Partial overrides? | Phase 4 impl |
+| Q5 | `bgagent ask` concurrent limit. Do we expose `--queue` semantics to explicitly enqueue vs 429? | Phase 2 impl |
 
 ---
 
 ## Appendix A — Claude Agent SDK reference
 
-Pinned version: `claude-agent-sdk==0.2.179` (Python; see `agent/pyproject.toml`).
+Pinned version: `claude-agent-sdk==0.2.179` (Python, see `agent/pyproject.toml`).
 
-> **Caution — re-verify against 0.2.x.** The hook-surface details in this
+> **Caution, re-verify against 0.2.x.** The hook-surface details in this
 > appendix (the `HookEvent` enum members, `PostToolUseFailure`, the Stop-hook
-> return-value contract, etc.) were originally written against
+> return-value contract, and others) were originally written against
 > `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.179`, and the
-> SDK's hook API may have changed across that range. Before relying on any
+> SDK's hook API may have changed across that range. Before you rely on any
 > specific enum member or hook signature below, verify it against the installed
 > 0.2.x SDK and the actual usage in `agent/src/hooks.py`.
 
@@ -784,26 +784,26 @@ Pinned version: `claude-agent-sdk==0.2.179` (Python; see `agent/pyproject.toml`)
 `HookEvent` enum: `PreToolUse | PostToolUse | PostToolUseFailure | UserPromptSubmit | Stop | SubagentStart | SubagentStop | PreCompact | PermissionRequest | Notification`.
 
 Our usage:
-- `PreToolUse` → Cedar policy evaluation (Phase 3), `can_use_tool`-style allow/deny. A call that needs an approval waits here for the decision.
-- `PostToolUse` → output scanner (secret/PII redaction); the egress-denial detector and the stuck guard see every tool call that completed.
-- `PostToolUseFailure` → egress-denial detector and stuck guard for a tool call that failed. The CLI fires this event, and no `PostToolUse`, for such a call (for Bash: a command that exits non-zero, unless the CLI reads that status as an answer, such as 1 from `grep` without a match).
-- `Stop` (between-turns) → `_cancel_between_turns_hook`, `_nudge_between_turns_hook`, `_denial_between_turns_hook` (deny-with-steering), in this order.
+- `PreToolUse` runs the Cedar policy evaluation (Phase 3), a `can_use_tool`-style allow or deny. A call that needs an approval waits here for the decision.
+- `PostToolUse` runs the output scanner (secret and PII redaction). The egress-denial detector and the stuck guard see every tool call that completed.
+- `PostToolUseFailure` runs the egress-denial detector and the stuck guard for a tool call that failed. The CLI fires this event, and no `PostToolUse`, for such a call. For Bash, such a call is a command that exits non-zero, unless the CLI reads that status as an answer, such as 1 from `grep` without a match.
+- `Stop` (between-turns) runs `_cancel_between_turns_hook`, `_nudge_between_turns_hook`, and `_denial_between_turns_hook` (deny-with-steering), in this order.
 
 ### A.2 Between-turns injection mechanism
 
 Stop hook return values:
-- `{}` → no-op, SDK proceeds to stop or loop.
-- `{"decision": "block", "reason": "<text>"}` → SDK emits `reason` as a synthetic user turn; agent responds on its next iteration.
+- `{}` is a no-op. The SDK proceeds to stop or loop.
+- With `{"decision": "block", "reason": "<text>"}`, the SDK emits `reason` as a synthetic user turn, and the agent responds on its next iteration.
 
 This is the mechanism that nudges and deny-with-steering use to inject agent-visible text mid-conversation. Implications:
-- Every nudge, ask, and deny-with-steering burns one turn from `max_turns`.
-- No "append to system prompt mid-run" primitive exists. `ClaudeAgentOptions.system_prompt` is set at construction.
+- Every nudge, ask, and deny-with-steering costs one turn of `max_turns`.
+- No "append to system prompt mid-run" API exists. `ClaudeAgentOptions.system_prompt` is set at construction.
 
-A hook that runs after a tool call can hand text to the model as well. With the pinned SDK (0.2.179, CLI 2.1.319), `hookSpecificOutput.additionalContext` returned by a `PostToolUse` or `PostToolUseFailure` hook reaches the model: the CLI sends it with the tool result, in the same request, as a system reminder, so it burns no turn. The stuck guard's advisory about a failing command that the agent keeps repeating is delivered this way (`_observe_tool_result` in `agent/src/hooks.py`), because an agent that keeps calling tools never reaches the Stop hook. This appendix used to say that such text does not reach the model's context (GitHub issues `claude-code#18427`, `claude-code#19643`); that does not hold for the pinned version.
+A hook that runs after a tool call can hand text to the model as well. With the pinned SDK (0.2.179, CLI 2.1.319), `hookSpecificOutput.additionalContext` returned by a `PostToolUse` or `PostToolUseFailure` hook reaches the model. The CLI sends it with the tool result, in the same request, as a system reminder, so it costs no turn. The stuck guard's advisory about a failing command that the agent keeps repeating is delivered this way (`_observe_tool_result` in `agent/src/hooks.py`), because an agent that keeps calling tools never reaches the Stop hook. This appendix used to say that such text does not reach the model's context (GitHub issues `claude-code#18427`, `claude-code#19643`). That does not hold for the pinned version.
 
 ### A.3 Mid-run cancellation
 
-`ClaudeSDKClient.interrupt()` cancels the current turn without rolling back prior tool results. Used in our cancel path along with `cancellation_requested` flag on `TaskRecord`.
+`ClaudeSDKClient.interrupt()` cancels the current turn without rolling back prior tool results. Our cancel path uses it together with the `cancellation_requested` flag on the `TaskRecord`.
 
 ---
 
@@ -811,17 +811,17 @@ A hook that runs after a tool call can hand text to the model as well. With the 
 
 ### B.1 Service contract
 
-- HTTP on port 8080: `/invocations` (JSON + optional SSE response), `/ping` (liveness).
+- HTTP on port 8080: `/invocations` (JSON and an optional SSE response), `/ping` (liveness).
 - `/ping` returning `"HealthyBusy"` signals an active session and prevents idle eviction.
-- `maxLifetime` and `idleRuntimeSessionTimeout` both configurable up to 8 hours. We set both to the maximum.
+- `maxLifetime` and `idleRuntimeSessionTimeout` are both configurable up to 8 hours. We set both to the maximum.
 
 ### B.2 Invocation
 
-`bedrock-agentcore:InvokeAgentRuntime` — SigV4-authenticated API call from the orchestrator. Payload is the task context; response is ignored (fire-and-forget).
+`bedrock-agentcore:InvokeAgentRuntime` is a SigV4-authenticated API call from the orchestrator. The payload is the task context. The response is ignored (fire-and-forget).
 
 ### B.3 Session management
 
-Same `runtimeSessionId` routes to the same MicroVM **within the same runtime ARN**. We use this property for the agent's own internal resumability (re-invocation with the same session ID lands on the same container if it's still alive), but never for CLI→runtime direct attach (which we don't do).
+The same `runtimeSessionId` routes to the same MicroVM **within the same runtime ARN**. We use this property for the agent's own internal resumability. A re-invocation with the same session ID reaches the same container if that container is still alive. We never use the property to attach the CLI directly to the runtime, which we don't do.
 
 ---
 
@@ -831,14 +831,14 @@ Products surveyed for interaction patterns (primary sources: product docs, engin
 
 | Product | Interaction model | Notes |
 |---|---|---|
-| **Devin (Cognition)** | Slack-thread chat during execution; fully async notifications | Closest analog; mid-run Q&A via in-thread messages is a shipped feature |
-| **GitHub Copilot coding agent** | Fire-and-forget; progress visible as commits/PR activity | No mid-run steering; notifications via GitHub itself |
-| **OpenAI Codex (cloud)** | SSE in web UI; external view is polling; no mid-run course-correction | Explicitly documents inability to steer mid-run |
-| **Replit Agent** | Task board UI; user checks progress; no live terminal stream | Novel: automated "Decision-Time Guidance" (internal classifier-driven steering) |
-| **Cursor background agents** | Pure fire-and-forget; user manually checks state | No built-in completion notifications (open feature request) |
+| **Devin (Cognition)** | Slack-thread chat during execution, fully async notifications | Closest analog. Mid-run Q&A through in-thread messages is a shipped feature |
+| **GitHub Copilot coding agent** | Fire-and-forget. Progress visible as commits and PR activity | No mid-run steering. Notifications through GitHub itself |
+| **OpenAI Codex (cloud)** | SSE in web UI. External view is polling. No mid-run course-correction | Explicitly documents inability to steer mid-run |
+| **Replit Agent** | Task board UI. User checks progress. No live terminal stream | Novel: automated "Decision-Time Guidance" (internal classifier-driven steering) |
+| **Cursor background agents** | Pure fire-and-forget. User manually checks state | No built-in completion notifications (open feature request) |
 
 Key observations:
-- Fire-and-forget + notifications is the dominant pattern for long-running coding agents.
-- Mid-run steering exists only where there's a persistent conversation surface (Devin's Slack thread); our `bgagent nudge` + `bgagent ask` is the equivalent.
-- No product ships "proceed with default if no response" for approval gates. Hard gates or no gates — that's the shipped landscape.
-- Polling-based observation is ubiquitous and well-tolerated at minute-to-hour task durations.
+- Fire-and-forget with notifications is the dominant pattern for long-running coding agents.
+- Mid-run steering exists only where there is a persistent conversation channel (Devin's Slack thread). Our `bgagent nudge` and `bgagent ask` are the equivalent.
+- No product ships "proceed with default if no response" for approval gates. Products ship hard gates or no gates.
+- Polling-based observation is ubiquitous, and users tolerate it well at minute-to-hour task durations.

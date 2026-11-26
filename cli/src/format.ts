@@ -19,15 +19,12 @@
 
 import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, PaginatedResponse, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
-/** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
 
-/** Render a USD cost as ``$0.0000`` (shared by the detail view and replay bundle). */
 function formatCostUsd(cost: number | string): string {
   return `$${Number(cost).toFixed(COST_USD_DECIMALS)}`;
 }
 
-/** Render a pass/fail gate verdict; ``dash`` for a null (gate did not run). */
 function formatVerdict(passed: boolean | null, dash = '—'): string {
   return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
 }
@@ -36,11 +33,7 @@ function formatVerdict(passed: boolean | null, dash = '—'): string {
  * Format a TaskDetail as a key-value detail view.
  *
  * @param task - the task detail from ``GET /tasks/{id}``.
- * @param now - reference time for relative durations (epoch ms). Injected rather
- *   than read inside, matching {@link formatStatusSnapshot}: the heartbeat line
- *   renders an AGE, so without an anchor this function is non-deterministic and
- *   its only interesting case (a stale beat) cannot be asserted. Defaults to
- *   ``Date.now()`` in production; tests pass a fixed value.
+ * @param now - reference time for relative durations (epoch ms).
  */
 export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): string {
   const lines: string[] = [
@@ -60,12 +53,9 @@ export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): st
   if (task.task_description) {
     lines.push(`Description: ${task.task_description}`);
   }
-  // Repo-less workflows have no branch (branch_name is ''); only show the line
-  // when there is one.
   if (task.branch_name) {
     lines.push(`Branch:      ${task.branch_name}`);
   }
-  // Admission queue (#441): show FIFO position + rough ETA while QUEUED.
   if (task.status === 'QUEUED' && task.queue_position !== null) {
     lines.push(`Queue:       position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
   }
@@ -97,13 +87,6 @@ export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): st
   if (task.completed_at) {
     lines.push(`Completed:   ${task.completed_at}`);
   }
-  // In-guest liveness (ADR-021 P2r2-F11). Shown only while the task is still
-  // going: that is the window in which "is the agent alive?" is a live question,
-  // and where a stale value is the actionable signal — the orchestrator's own hang
-  // detector reads the same field. On a terminal task the last beat is just noise
-  // next to Completed/Duration, and on `ecs` its age is no signal. The relative age
-  // is what an operator actually needs, so it is rendered alongside the timestamp
-  // rather than instead of it.
   const heartbeat = liveHeartbeat(task);
   if (heartbeat) {
     lines.push(`Heartbeat:   ${heartbeat} (${heartbeatAge(heartbeat, now)})`);
@@ -120,8 +103,6 @@ export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): st
   return lines.join('\n');
 }
 
-/** Render the ``~Xm wait`` suffix for a queued task's position line (#441).
- *  Empty string when the server could not estimate a wait. */
 function formatQueueEta(estimatedWaitS: number | null): string {
   if (estimatedWaitS === null || !Number.isFinite(estimatedWaitS)) {
     return '';
@@ -135,7 +116,6 @@ function formatQueueEta(estimatedWaitS: number | null): string {
  *
  * @param tasks - the summaries from ``GET /v1/tasks``.
  * @param now - reference time for the HEARTBEAT column's relative age (epoch ms).
- *   Injected for the same reason as {@link formatStatusSnapshot}'s.
  */
 export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): string {
   if (tasks.length === 0) {
@@ -152,14 +132,8 @@ export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): 
     return [
       t.task_id,
       t.status,
-      // Repo-less workflows (#248 Phase 3) have no repo — show a dash.
       t.repo ?? '—',
       t.created_at,
-      // In-guest liveness, at LIST level: "is anything still alive?" is asked
-      // across tasks, and one `bgagent status` at a time is how a hung task goes
-      // unnoticed. A dash where the age is no signal: on a terminal task (the last
-      // beat is noise beside a final status), on `ecs`, and where the agent has not
-      // beaten — same rule as the detail view, so the two never disagree.
       heartbeat ? `${heartbeatAge(heartbeat, now)} ago` : PLACEHOLDER,
       truncate(desc, DESCRIPTION_COLUMN_WIDTH),
     ];
@@ -172,35 +146,20 @@ export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): 
  * Render the deterministic ``bgagent status`` snapshot described in
  * ``docs/design/INTERACTIVE_AGENTS.md`` §5.2.
  *
- * Pure function: takes the task detail, a small window of recent events
- * (newest first), and an anchor ``now`` so callers can freeze time in
- * tests. Never calls an LLM and never fabricates state — every rendered
- * field is either read directly from ``task`` / ``events`` or is a
- * simple relative-time derivation.
- *
  * Degrades gracefully when fields are missing (just-submitted task, no
  * events yet, no cost recorded) by emitting a placeholder (``—``) rather
- * than ``undefined`` or ``NaN``. This is the contract users rely on when
- * calling ``status`` repeatedly during a task's lifetime.
+ * than ``undefined`` or ``NaN``.
  *
  * @param task - the task detail from ``GET /tasks/{id}``.
  * @param events - up to N recent events, ordered newest-first.
  * @param now - the reference time for relative durations (epoch ms).
- *   Defaults to ``Date.now()`` in production; tests pass a fixed value.
  */
 export function formatStatusSnapshot(
   task: TaskDetail,
   events: readonly TaskEvent[],
   now: number = Date.now(),
 ): string {
-  // Defensive sort. The server contract (``?desc=1`` on
-  // ``GET /tasks/{id}/events``) returns newest-first, and every helper
-  // below relies on ``events[0]`` being the most recent event. If that
-  // invariant is ever violated upstream — a GSI reconfig, a middleware
-  // reorder, a caller wiring the formatter to a different endpoint — a
-  // front-to-back walk would silently render the *oldest* tool call as
-  // "Current" with no user-visible signal. ULIDs are lexicographically
-  // time-sortable, so a descending ``localeCompare`` is always correct.
+  // ULIDs are lexicographically time-sortable.
   const sorted = [...events].sort((a, b) => b.event_id.localeCompare(a.event_id));
 
   const header = `Task ${task.task_id} — ${task.status} (${elapsedDescription(task, now)})`;
@@ -211,10 +170,6 @@ export function formatStatusSnapshot(
   const lastActivityEvent = findLatestActivity(sorted);
   const blockerEvent = findLatest(sorted, 'agent_blocked');
 
-  // ``TaskEvent.timestamp`` is typed ``string``, but the event table is
-  // weakly typed at the storage layer — an agent regression could write
-  // a row without a valid timestamp. Guard so a missing field renders
-  // as the placeholder rather than the literal ``undefined``.
   const lastEventTs = sorted[0]?.timestamp;
   const lastEventLine = typeof lastEventTs === 'string' && lastEventTs.length > 0
     ? lastEventTs
@@ -223,28 +178,15 @@ export function formatStatusSnapshot(
   const lines: string[] = [
     header,
     `  Repo:          ${task.repo ?? '— (repo-less)'}`,
-    // Channel provenance — ``api`` for CLI / Cognito submits,
-    // ``webhook`` for HMAC-signed inbound webhook submits. Shown on
-    // every task so a user looking at a surprising task's status can
-    // immediately tell whether it was triggered by an automation / CI
-    // webhook vs. a manual submission.
     `  Channel:       ${task.channel_source || PLACEHOLDER}`,
   ];
-  // Non-default workflows carry meaningful context for the default
-  // snapshot (a coding/pr-iteration-v1 against #42 is a different mental
-  // model than coding/new-task-v1). Mirrors the ``formatTaskDetail`` treatment.
   if (task.resolved_workflow && task.resolved_workflow.id !== DEFAULT_CODING_WORKFLOW_ID) {
     const prSuffix = task.pr_number !== null ? ` (PR #${task.pr_number})` : '';
     lines.push(`  Workflow:      ${task.resolved_workflow.id}${prSuffix}`);
   }
-  // Render the task description under its own heading with wrapped
-  // continuation lines so long prompts stay readable in a ~80-column
-  // terminal without truncating information the user already typed.
   if (task.task_description) {
     lines.push(...formatDescriptionLines(task.task_description));
   }
-  // Admission queue (#441): while QUEUED the pipeline has not started, so
-  // position + ETA are the most useful lines a user can see.
   if (task.status === 'QUEUED' && task.queue_position !== null) {
     lines.push(`  Queue:         position ${task.queue_position}${formatQueueEta(task.estimated_wait_s)}`);
   }
@@ -254,21 +196,10 @@ export function formatStatusSnapshot(
     `  Current:       ${describeCurrent(task, lastActivityEvent)}`,
     `  Cost:          ${describeCost(task, lastCostEvent)}`,
   );
-  // #251: surface the latest environmental blocker prominently — a missing
-  // secret / egress denial is the single most actionable thing a watcher can
-  // see, and it may precede the terminal failure by many turns. Suppress it on
-  // a COMPLETED task: the blocker was recovered from (e.g. self-remediated), so
-  // a historical ⛔ line would misrepresent a successful outcome as blocked.
   const blockerLine = task.status === 'COMPLETED' ? null : describeBlocker(blockerEvent, now);
   if (blockerLine !== null) {
     lines.push(`  Blocker:       ${blockerLine}`);
   }
-  // Non-COMPLETED terminal statuses should show the reason inline so
-  // users do not have to chase it through ``status --wait`` or an
-  // ``events`` log grep. Prefer the structured classification when the
-  // API computed one; fall back to the raw ``error_message`` so a
-  // classifier gap does not swallow the only signal we have. Never
-  // emit a trailing empty line.
   const reasonLine = describeReason(task);
   if (reasonLine !== null) {
     lines.push(`  Reason:        ${reasonLine}`);
@@ -282,12 +213,6 @@ export function formatStatusSnapshot(
   if (task.artifact_uri) {
     lines.push(`  Artifact:      ${task.artifact_uri}`);
   }
-  // In-guest liveness, next to the control-plane freshness line it complements
-  // (ADR-021 P2r2-F11). `Last event:` says when the platform last heard *about*
-  // the task; `Heartbeat:` says when the agent last said it was alive — the same
-  // field the orchestrator's hang detector reads, on a fixed 45 s cadence, so its
-  // AGE is the diagnostic. Suppressed on a terminal task (the last beat is noise
-  // beside a final status), on `ecs`, and when the agent has not beaten yet.
   const heartbeat = liveHeartbeat(task);
   if (heartbeat) {
     const age = relativeTime(heartbeat, now) ?? PLACEHOLDER;
@@ -298,17 +223,8 @@ export function formatStatusSnapshot(
   return lines.join('\n');
 }
 
-/** Word-wrap column width used for the ``Description:`` block in the
- *  status snapshot. Keeps the rendered snapshot readable at the
- *  conventional 80-column terminal width while leaving headroom for
- *  the 2-space indent + 15-char label gutter (``  Description:   ``)
- *  that the other snapshot lines use. */
 const DESCRIPTION_WRAP_WIDTH = 60;
 
-/** Render the task description across one or more lines with a
- *  dedicated label on the first line and continuation padding on the
- *  rest. Preserves the user's intent: no truncation, no
- *  reflowing inside the paragraph beyond whitespace word-wrap. */
 function formatDescriptionLines(description: string): string[] {
   const label = '  Description:   ';
   const indent = ' '.repeat(label.length);
@@ -334,50 +250,23 @@ function formatDescriptionLines(description: string): string[] {
   return wrapped.map((line, i) => (i === 0 ? label + line : indent + line));
 }
 
-/** Render the terminal-failure reason for the status snapshot. Returns
- *  ``null`` for COMPLETED / still-running tasks so the caller can skip
- *  the whole line.
- *
- *  When the API's classifier matched a known pattern, show the
- *  category + title (human-actionable summary) AND append the first
- *  line of the raw ``error_message`` as evidence — without it,
- *  diagnosing novel failure modes requires an out-of-band log dive.
- *
- *  When the classifier fell back to the catch-all UNKNOWN (``unknown:
- *  Unexpected error``), the title is useless on its own — show the
- *  raw ``error_message`` instead so operators see the real signal
- *  immediately. Discovered during Chunk 10 E2E T2.2: the agent
- *  container surfaced a concrete, actionable string
- *  (``missing built-in hard-deny policies: /app/policies/hard_deny.cedar``)
- *  but the CLI rendered ``unknown: Unexpected error``, hiding the
- *  only useful diagnostic. */
 function describeReason(task: TaskDetail): string | null {
   if (task.status === 'COMPLETED') return null;
   if (!TERMINAL_STATUSES.includes(task.status)) return null;
   const cls = task.error_classification;
   const msg = task.error_message?.trim();
   if (cls && cls.category !== 'unknown') {
-    // Known classification: category + title is the primary signal.
-    // Append the raw ``error_message`` first line so a misclassified
-    // novel failure is still diagnosable inline. Safe to include —
-    // the server-side ``_METRICS_REDACT_KEYS`` scrub runs on
-    // METRICS_REPORT stdout, not on the TaskRecord error_message
-    // field, so the string is already the sanitized form.
     if (msg) {
       const firstLine = msg.split(/\r?\n/, 1)[0];
       return `${cls.category}: ${cls.title} — ${firstLine}`;
     }
     return `${cls.category}: ${cls.title}`;
   }
-  // Classifier gap (UNKNOWN or no classification at all): the raw
-  // message is the only useful signal. Prefer it over the bland
-  // ``unknown: Unexpected error`` label.
   if (msg) return msg;
   if (cls) return `${cls.category}: ${cls.title}`;
   return null;
 }
 
-/** Format task events as a timeline. */
 export function formatEvents(events: TaskEvent[]): string {
   if (events.length === 0) {
     return 'No events found.';
@@ -400,7 +289,6 @@ export function formatWebhookCreated(res: CreateWebhookResponse): string {
     `Name:        ${res.name}`,
     `Created:     ${res.created_at}`,
   ];
-  // An API deployed before `webhook_url` existed does not return it.
   if (res.webhook_url) {
     lines.push(
       `URL:         ${res.webhook_url}`,
@@ -411,7 +299,6 @@ export function formatWebhookCreated(res: CreateWebhookResponse): string {
   return lines.join('\n');
 }
 
-/** Format a list of WebhookDetail as an aligned table. */
 export function formatWebhookList(webhooks: WebhookDetail[]): string {
   if (webhooks.length === 0) {
     return 'No webhooks found.';
@@ -428,7 +315,6 @@ export function formatWebhookList(webhooks: WebhookDetail[]): string {
   return formatTable(headers, rows);
 }
 
-/** Format a WebhookDetail as a key-value detail view. */
 export function formatWebhookDetail(webhook: WebhookDetail): string {
   const lines: string[] = [
     `Webhook:     ${webhook.webhook_id}`,
@@ -459,7 +345,6 @@ export function formatApiKeyCreated(res: CreateApiKeyResponse): string {
   ].join('\n');
 }
 
-/** Format a list of ApiKeyDetail as an aligned table. */
 export function formatApiKeyList(keys: ApiKeyDetail[]): string {
   if (keys.length === 0) {
     return 'No API keys found.';
@@ -478,7 +363,6 @@ export function formatApiKeyList(keys: ApiKeyDetail[]): string {
   return formatTable(headers, rows);
 }
 
-/** Format an ApiKeyDetail as a key-value detail view. */
 export function formatApiKeyDetail(key: ApiKeyDetail): string {
   const lines: string[] = [
     `Key ID:      ${key.key_id}`,
@@ -495,19 +379,13 @@ export function formatApiKeyDetail(key: ApiKeyDetail): string {
   return lines.join('\n');
 }
 
-/** Rows a `list` command returns when --limit is not given: the page size the API defaults to. */
 const DEFAULT_LIST_LIMIT = 20;
 
 /**
- * The rows a `list` command prints: its first page and the pages that follow. The API reads a
- * bounded number of rows per request, so a page can hold fewer rows than asked for, or none,
- * while more exist: follow next_token until the rows asked for are there or the list ends.
- * Each further request asks only for the rows still missing, so that the last token resumes
- * right after the last row. `maxRequests` counts the first request too: a list that never
- * ends cannot keep the command running.
- *
- * It stands here and not next to the client because the command tests replace the client's
- * module whole, and this loop is what they check.
+ * The rows a `list` command prints: its first page and the pages that follow. A page can hold
+ * fewer rows than asked for, or none, while more exist: next_token is followed until the rows
+ * asked for are there or the list ends. Each further request asks only for the rows still
+ * missing. `maxRequests` counts the first request too.
  */
 export async function followPages<T>(
   first: PaginatedResponse<T>,
@@ -515,7 +393,6 @@ export async function followPages<T>(
   fetchNext: (rows: number, nextToken: string) => Promise<PaginatedResponse<T>>,
   maxRequests = 100,
 ): Promise<PaginatedResponse<T>> {
-  // A --limit that is no positive number counts as none given.
   const wanted = limit !== undefined && limit > 0 ? limit : DEFAULT_LIST_LIMIT;
   let result = first;
   for (let request = 1; request < maxRequests && result.data.length < wanted && result.pagination.next_token; request += 1) {
@@ -525,7 +402,6 @@ export async function followPages<T>(
   return result;
 }
 
-/** Format data as JSON. */
 export function formatJson(data: unknown): string {
   return JSON.stringify(data, null, 2);
 }
@@ -534,7 +410,7 @@ export function formatJson(data: unknown): string {
  * Format a replay bundle (#515) as a human-readable summary: the correlation
  * metadata as aligned key-value lines, then a compact chronological event list.
  * Use {@link formatJson} for the machine-readable form. Absent fields render as
- * ``—`` so the operator sees "not captured" explicitly rather than a blank.
+ * ``—``.
  */
 export function formatReplay(bundle: ReplayBundle): string {
   const dash = '—';
@@ -600,7 +476,6 @@ function formatTable(headers: string[], rows: string[][]): string {
   return [headerLine, separator, ...dataLines].join('\n');
 }
 
-/** Max width of the DESCRIPTION column in `bgagent list` table output. */
 const DESCRIPTION_COLUMN_WIDTH = 40;
 
 const ELLIPSIS = '...';
@@ -610,18 +485,9 @@ function truncate(text: string, maxLen: number): string {
   return text.slice(0, maxLen - ELLIPSIS.length) + ELLIPSIS;
 }
 
-// -- status-snapshot helpers --------------------------------------------------
-
 const PLACEHOLDER = '—';
 
 function elapsedDescription(task: TaskDetail, now: number): string {
-  // Use ``started_at`` → ``completed_at`` (or ``now``) as the primary
-  // elapsed-time source. This matches what the user observed during the
-  // RUNNING phase and avoids a visible "jump back" when the task lands
-  // terminal — ``duration_s`` only covers agent compute time (excludes
-  // container startup, repo clone, etc.) so it is strictly shorter than
-  // the wall-clock interval the CLI was displaying.
-  // Fall back to ``duration_s`` only when timestamps are missing.
   const start = task.started_at ?? task.created_at;
   const startMs = Date.parse(start);
   if (Number.isNaN(startMs)) {
@@ -638,8 +504,6 @@ function elapsedDescription(task: TaskDetail, now: number): string {
 }
 
 function describeTurn(task: TaskDetail, turnEvent: TaskEvent | null): string {
-  // A finished task shows its record, because the turn event may have left the event window.
-  // A recorded 0 stands for no count. ``turns_attempted`` can exceed the limit (see ``TaskDetail``).
   const recorded = TERMINAL_STATUSES.includes(task.status) ? task.turns_completed : null;
   const currentTurn = recorded || readNumberField(turnEvent?.metadata, 'turn');
   const maxTurns = task.max_turns ?? null;
@@ -656,8 +520,6 @@ function describeMilestone(milestoneEvent: TaskEvent | null, now: number): strin
   return ago ? `${name} (${ago} ago)` : name;
 }
 
-/** Render the latest ``agent_blocked`` event for the status snapshot (#251).
- *  Returns ``null`` when there is no blocker so the caller skips the line. */
 function describeBlocker(blockerEvent: TaskEvent | null, now: number): string | null {
   if (!blockerEvent) return null;
   const kind = readStringField(blockerEvent.metadata, 'kind') ?? 'unknown_environmental';
@@ -697,7 +559,6 @@ function describeCost(task: TaskDetail, costEvent: TaskEvent | null): string {
 }
 
 function findLatest(events: readonly TaskEvent[], eventType: string): TaskEvent | null {
-  // ``events`` is newest-first; the first match is the latest one.
   for (const e of events) {
     if (e.event_type === eventType) return e;
   }
@@ -713,10 +574,6 @@ function findLatestActivity(events: readonly TaskEvent[]): TaskEvent | null {
   return null;
 }
 
-// ``TaskEvent.metadata`` is non-optional, but callers routinely pass
-// ``event?.metadata`` where ``event`` may itself be ``null`` (no matching
-// event found). The ``!meta`` guard handles that path — do not remove as
-// "dead" without also auditing every callsite.
 function readStringField(meta: Record<string, unknown> | undefined, key: string): string | null {
   if (!meta) return null;
   const v = meta[key];
@@ -729,45 +586,15 @@ function readNumberField(meta: Record<string, unknown> | undefined, key: string)
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
-/**
- * The agent's last heartbeat while its age says whether the agent is alive, else null:
- * the task is still going, the agent has beaten, and its backend keeps beating. On `ecs`
- * it does not: the agent runs the pipeline directly there, without the server that beats
- * every 45 s, and writes one heartbeat at its start. The age of that one only grows on a
- * healthy task, and the orchestrator does not go by it. One rule for the list, the detail
- * view and the status snapshot, so that the three never disagree.
- */
 function liveHeartbeat(task: Pick<TaskSummary, 'status' | 'agent_heartbeat_at' | 'compute_type'>): string | null {
   if (TERMINAL_STATUSES.includes(task.status) || task.compute_type === 'ecs') return null;
   return task.agent_heartbeat_at;
 }
 
-/**
- * Age of the agent's last heartbeat, as the detail view renders it.
- *
- * Wraps {@link relativeTime} with a placeholder, because the heartbeat's VALUE is
- * the age rather than the timestamp: the beat is written every 45 s, so anything
- * much past that is the signal an operator is looking for (it is the same field
- * the orchestrator's own hang detector reads). Unparseable input degrades to a
- * dash rather than throwing — a malformed timestamp must not take out
- * `bgagent status`.
- *
- * `now` is a required parameter here rather than defaulting to `Date.now()`, so
- * that the two exported formatters above own the one anchor each render uses and a
- * new heartbeat line cannot quietly acquire its own clock. Those exported
- * functions DO default to `Date.now()` — that is the public-API boundary, matching
- * {@link formatStatusSnapshot}, and it is what lets `commands/list.ts` and
- * `commands/status.ts` stay clock-free. The rule is "one anchor per render,
- * injectable at the edge", not "no defaults anywhere".
- */
 function heartbeatAge(isoTimestamp: string, now: number): string {
   return relativeTime(isoTimestamp, now) ?? PLACEHOLDER;
 }
 
-/**
- * Compact relative time like "42s", "3m 14s", "1h 02m". Returns null if
- * the timestamp does not parse — callers fall back to a placeholder.
- */
 function relativeTime(isoTimestamp: string, now: number): string | null {
   const t = Date.parse(isoTimestamp);
   if (Number.isNaN(t)) return null;
