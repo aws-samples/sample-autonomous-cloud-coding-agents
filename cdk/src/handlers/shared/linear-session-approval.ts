@@ -34,25 +34,31 @@ import { approvalNotificationMarkdown, type ApprovalNotification } from './appro
 import type { AgentActivityContent } from './linear-agent-session';
 import { parseLinearApprovalReply, type LinearApprovalReply } from './linear-approval-thread';
 
-/** The buttons. Their values are what the session sends back as the prompt, and what the reply parser reads. */
-export const SESSION_APPROVAL_OPTIONS: ReadonlyArray<{ readonly label: string; readonly value: string }> = [
-  { label: 'Approve', value: 'approve' },
-  { label: 'Deny', value: 'deny' },
-];
+/**
+ * An answer from the session: approve once, approve the request's rule for the rest
+ * of the task, or deny. ``requestId`` is set when the answer came from a button,
+ * which names the request it was shown with.
+ */
+export type SessionApprovalAnswer = LinearApprovalReply & { readonly wholeTask?: boolean; readonly requestId?: string };
 
-/** Shown only for a request that matched exactly one rule (see {@link sessionApprovalActivity}). */
-const APPROVE_FOR_TASK_OPTION = { label: 'Approve for this task', value: 'approve for this task' } as const;
-
-/** An answer from the session: approve once, approve the request's rule for the rest of the task, or deny. */
-export type SessionApprovalAnswer = LinearApprovalReply & { readonly wholeTask?: boolean };
+/** A button value names its request: ``approve request <id>``. Request ids are ULIDs. */
+const BUTTON_REQUEST = /^(approve|approve for this task|deny) request ([0-9A-HJKMNP-TV-Z]{26})$/i;
+const WHOLE_TASK = /^approve\s+for\s+(?:this|the)\s+(?:whole\s+)?task[.!]?$/i;
 
 /**
- * A reply that answers an approval request, or null. ``approve for this task`` (the
- * button's value, or typed) approves the request's rule for the rest of the task.
+ * A reply that answers an approval request, or null: a button's value, or a typed
+ * ``approve``, ``approve for this task`` or ``deny [reason]``.
  * @param text - the reply.
  */
 export function parseSessionApprovalAnswer(text: string): SessionApprovalAnswer | null {
-  if (/^approve\s+for\s+(?:this|the)\s+(?:whole\s+)?task[.!]?$/i.test(text.trim())) return { decision: 'approve', wholeTask: true };
+  const trimmed = text.trim();
+  const button = BUTTON_REQUEST.exec(trimmed);
+  if (button) {
+    const verb = button[1].toLowerCase();
+    return verb === 'deny' ? { decision: 'deny', requestId: button[2] }
+      : { decision: 'approve', requestId: button[2], ...(verb !== 'approve' && { wholeTask: true }) };
+  }
+  if (WHOLE_TASK.test(trimmed)) return { decision: 'approve', wholeTask: true };
   return parseLinearApprovalReply(text);
 }
 
@@ -120,15 +126,19 @@ export function waitingOnYouLine(deadline: string | undefined, now: Date = new D
 }
 
 /**
- * The buttons, as ``emitAgentActivity`` options. "Approve for this task" is offered
- * only when the request matched exactly one rule: the agent treats a rule approval
- * as covering any later request that rule is among, so approving one of several
- * matched rules would also wave through requests the other rules raise.
+ * The buttons for one request, as ``emitAgentActivity`` options. Each value names the
+ * request, so a click on an older choice cannot decide a later request. "Approve for
+ * this task" is offered only when the request matched exactly one rule: the agent
+ * treats a rule approval as covering any later request that rule is among, so
+ * approving one of several matched rules would also pass requests the others raise.
  */
-function choice(body: string, ruleIds?: readonly string[]): SessionApprovalActivity {
-  const options = ruleIds?.length === 1
-    ? [SESSION_APPROVAL_OPTIONS[0], APPROVE_FOR_TASK_OPTION, SESSION_APPROVAL_OPTIONS[1]]
-    : SESSION_APPROVAL_OPTIONS;
+function choice(body: string, requestId: string, ruleIds?: readonly string[]): SessionApprovalActivity {
+  const option = (label: string, verb: string) => ({ label, value: `${verb} request ${requestId}` });
+  const options = [
+    option('Approve', 'approve'),
+    ...(ruleIds?.length === 1 ? [option('Approve for this task', 'approve for this task')] : []),
+    option('Deny', 'deny'),
+  ];
   return { content: { type: 'elicitation', body }, signal: 'select', signalMetadata: { options } };
 }
 
@@ -144,7 +154,7 @@ export function sessionApprovalActivity(
 ): SessionApprovalActivity {
   const body = approvalNotificationMarkdown(notification);
   if (eventType === 'approval_requested') {
-    return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`, notification.ruleIds);
+    return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`, notification.requestId, notification.ruleIds);
   }
   return { content: { type: 'thought', body } };
 }
@@ -154,9 +164,11 @@ export function sessionApprovalActivity(
  * request, so the request stays the session's last activity and Linear keeps
  * showing the session as waiting for input.
  * @param lead - why it is shown again.
+ * @param requestId - the open request.
+ * @param ruleIds - the rules it matched, when known.
  */
-export function repeatedApprovalChoice(lead: string): SessionApprovalActivity {
-  return choice(`${lead}\n\nChoose **Approve** or **Deny**, or reply deny with a reason.`);
+export function repeatedApprovalChoice(lead: string, requestId: string, ruleIds?: readonly string[]): SessionApprovalActivity {
+  return choice(`${lead}\n\nChoose **Approve** or **Deny**, or reply deny with a reason.`, requestId, ruleIds);
 }
 
 /** What the decision handlers return. */

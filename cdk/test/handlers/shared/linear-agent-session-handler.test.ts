@@ -811,10 +811,11 @@ describe('channel_metadata builders', () => {
 });
 
 describe('handleAgentSessionEvent — approval requests in the session (#1066)', () => {
+  const OPEN = '01M89PC2Y1YDH7SJEVVYR0VCAX';
   const waiting = (user = 'platform-user-1') => priorTask({
     task_id: 't-1',
     status: 'AWAITING_APPROVAL',
-    awaiting_approval_request_id: 'req-1',
+    awaiting_approval_request_id: OPEN,
     user_id: user,
     linear_workspace_id: 'org-1',
     session: 'session-1',
@@ -839,7 +840,7 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
       userId: 'platform-user-1',
       taskId: 't-1',
       decisionSource: JSON.stringify(['linear_session', 'org-1', 'activity-9']),
-      body: JSON.stringify({ request_id: 'req-1', decision: 'approve' }),
+      body: JSON.stringify({ request_id: OPEN, decision: 'approve' }),
     });
     expect(submitNudgeMock).not.toHaveBeenCalled();
     expect(lastEmit()[2]).toEqual({ type: 'thought', body: 'Approved. The agent continues with this action.' });
@@ -848,7 +849,7 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
   test('a deny with a reason passes the reason on', async () => {
     waiting();
     await answer('deny use the staging config');
-    expect(JSON.parse(recordDenialMock.mock.calls[0][0].body)).toEqual({ request_id: 'req-1', decision: 'deny', reason: 'use the staging config' });
+    expect(JSON.parse(recordDenialMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'deny', reason: 'use the staging config' });
     expect(String(lastEmit()[2].body)).toContain('your reason: use the staging config');
   });
 
@@ -879,17 +880,17 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
 
   test('"Approve for this task" approves the request\'s one rule for the rest of the task', async () => {
     waiting();
-    approvalRow = { task_id: 't-1', request_id: 'req-1', matching_rule_ids: ['write_env_files'] };
+    approvalRow = { task_id: 't-1', request_id: OPEN, matching_rule_ids: ['write_env_files'] };
     await answer('approve for this task');
-    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: 'req-1', decision: 'approve', scope: 'rule:write_env_files' });
+    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'approve', scope: 'rule:write_env_files' });
     expect(String(lastEmit()[2].body)).toContain('won\'t ask again for `rule:write_env_files`');
   });
 
   test('a whole-task answer to a request that matched several rules approves this action only', async () => {
     waiting();
-    approvalRow = { task_id: 't-1', request_id: 'req-1', matching_rule_ids: ['force_push_any', 'force_push_main'] };
+    approvalRow = { task_id: 't-1', request_id: OPEN, matching_rule_ids: ['force_push_any', 'force_push_main'] };
     await answer('approve for this task');
-    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: 'req-1', decision: 'approve' });
+    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'approve' });
     expect(String(lastEmit()[2].body)).toMatch(/^Approved this action only/);
   });
 
@@ -918,6 +919,17 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     await answer('deny');
     expect(submitNudgeMock).not.toHaveBeenCalled();
     expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'thought', body: expect.stringContaining('Nothing is waiting') }));
+  });
+
+  test('a button from an earlier request decides nothing; the current request\'s button does', async () => {
+    waiting();
+    await answer('approve request 01M89PAAAAAAAAAAAAAAAAAAAA');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^That answer was for an earlier request/);
+    expect(lastEmit()[3]).toEqual(expect.objectContaining({ signal: 'select' }));
+
+    await answer(`deny request ${OPEN}`);
+    expect(JSON.parse(recordDenialMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'deny' });
   });
 
   test('a reply Linear does not hold as written decides nothing (a forged webhook)', async () => {

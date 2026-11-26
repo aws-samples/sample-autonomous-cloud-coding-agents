@@ -22,18 +22,19 @@ import {
   formatDeadline,
   parseSessionApprovalAnswer,
   repeatedApprovalChoice,
-  SESSION_APPROVAL_OPTIONS,
   sessionApprovalActivity,
   sessionDecisionNote,
   waitingOnYouLine,
 } from '../../../src/handlers/shared/linear-session-approval';
 
 const NOW = new Date('2026-11-25T21:10:00Z');
+const REQ = '01M89PC2Y1YDH7SJEVVYR0VCAX';
+const values = (a: { signalMetadata?: unknown }) => (a.signalMetadata as { options: Array<{ label: string; value: string }> }).options;
 const notice = (deadline?: string): ApprovalNotification => ({
   title: 'Approval needed',
   text: 'Approval needed\nThe agent wants to run a shell command.',
   taskId: 't-1',
-  requestId: 'r-1',
+  requestId: REQ,
   userId: 'u-1',
   marker: 'notified_linear_session_approval_requested',
   ...(deadline && { deadline }),
@@ -55,8 +56,11 @@ test('a pending request is a choice with Approve / Deny buttons and the waiting 
   const a = sessionApprovalActivity('approval_requested', notice('2026-11-25T21:40:00Z'), NOW);
   expect(a.content.type).toBe('elicitation');
   expect(a.signal).toBe('select');
-  expect(a.signalMetadata).toEqual({ options: SESSION_APPROVAL_OPTIONS });
-  expect(SESSION_APPROVAL_OPTIONS.map((o) => o.value)).toEqual(['approve', 'deny']);
+  // Each button names its request, so a late click on it cannot decide a later one.
+  expect(values(a)).toEqual([
+    { label: 'Approve', value: `approve request ${REQ}` },
+    { label: 'Deny', value: `deny request ${REQ}` },
+  ]);
   const body = (a.content as { body: string }).body;
   expect(body).toContain('The agent wants to run a shell command.');
   expect(body.endsWith('Reply by 21:40 UTC (in 30 min), or it is denied and the agent carries on without it.')).toBe(true);
@@ -71,7 +75,8 @@ test('a decision, timeout or stranded wait is a note without buttons', () => {
 });
 
 test('the repeated choice keeps the buttons', () => {
-  const a = repeatedApprovalChoice('Only the task owner can decide this request.');
+  const a = repeatedApprovalChoice('Only the task owner can decide this request.', REQ, ['write_env_files']);
+  expect(values(a).map((o) => o.label)).toEqual(['Approve', 'Approve for this task', 'Deny']);
   expect(a.content).toEqual({ type: 'elicitation', body: expect.stringMatching(/^Only the task owner can decide this request\./) });
   expect(a.signal).toBe('select');
 });
@@ -105,4 +110,11 @@ test('the note says what a whole-task approval covered', () => {
   expect(sessionDecisionNote({ decision: 'approve', wholeTask: true }, { statusCode: 202 }, 'rule:write_env_files'))
     .toBe('Approved for the rest of this task: the agent won\'t ask again for `rule:write_env_files`.');
   expect(sessionDecisionNote({ decision: 'approve', wholeTask: true }, { statusCode: 202 })).toMatch(/^Approved this action only/);
+});
+
+test('a button value carries its request; typed answers do not', () => {
+  expect(parseSessionApprovalAnswer(`approve request ${REQ}`)).toEqual({ decision: 'approve', requestId: REQ });
+  expect(parseSessionApprovalAnswer(`approve for this task request ${REQ}`)).toEqual({ decision: 'approve', requestId: REQ, wholeTask: true });
+  expect(parseSessionApprovalAnswer(`deny request ${REQ}`)).toEqual({ decision: 'deny', requestId: REQ });
+  expect(parseSessionApprovalAnswer('deny request a refund')).toEqual({ decision: 'deny', reason: 'request a refund' });
 });

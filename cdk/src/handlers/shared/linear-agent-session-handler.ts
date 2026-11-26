@@ -511,12 +511,18 @@ async function decideSessionApproval(
   accessToken: string,
 ): Promise<void> {
   const again = async (lead: string) => {
-    const activity = repeatedApprovalChoice(lead);
+    const activity = repeatedApprovalChoice(lead, requestId, await requestRuleIds(task.task_id, requestId));
     await emit(activity.content, false, activity);
   };
   const answer = parseSessionApprovalAnswer(request.directive);
   if (!answer) {
     await again('That isn\'t an answer to the open approval request, so I haven\'t passed it to the agent.');
+    return;
+  }
+  // A button names the request it was shown with; an older choice clicked late must
+  // not decide the request that is open now.
+  if (answer.requestId && answer.requestId !== requestId) {
+    await again('That answer was for an earlier request, which is no longer open, so nothing was decided.');
     return;
   }
   if (task.user_id !== platformUserId) {
@@ -539,7 +545,8 @@ async function decideSessionApproval(
   const record = answer.decision === 'approve'
     ? (await import('../approve-task.js')).recordApprovalForUser
     : (await import('../deny-task.js')).recordDenialForUser;
-  const ruleScope = answer.wholeTask ? await singleRuleScope(task.task_id, requestId) : undefined;
+  const ruleIds = answer.wholeTask ? await requestRuleIds(task.task_id, requestId) : [];
+  const ruleScope = ruleIds.length === 1 ? `rule:${ruleIds[0]}` : undefined;
   const result = await record({
     userId: platformUserId,
     taskId: task.task_id,
@@ -574,19 +581,17 @@ async function promptConfirmed(
   const echoed = prompt ? parseSessionApprovalAnswer(prompt.body) : null;
   return prompt?.sessionId === request.sessionId && prompt.authorId === request.actorId
     && echoed?.decision === answer.decision && (echoed.reason ?? '') === (answer.reason ?? '')
-    && Boolean(echoed.wholeTask) === Boolean(answer.wholeTask);
+    && Boolean(echoed.wholeTask) === Boolean(answer.wholeTask) && echoed.requestId === answer.requestId;
 }
 
-/**
- * ``rule:<id>`` when the request matched exactly one rule, else undefined (approve
- * this call only). Read consistently from the request row, never from the reply.
- */
-async function singleRuleScope(taskId: string, requestId: string): Promise<string | undefined> {
+/** The rules the request matched, read consistently from its row, never from the reply. */
+async function requestRuleIds(taskId: string, requestId: string): Promise<string[]> {
+  if (!TASK_APPROVALS_TABLE_NAME) return [];
   const { Item } = await ddb.send(new GetCommand({
     TableName: TASK_APPROVALS_TABLE_NAME, Key: { task_id: taskId, request_id: requestId }, ConsistentRead: true,
   }));
   const ids: unknown[] = Array.isArray(Item?.matching_rule_ids) ? Item.matching_rule_ids : [];
-  return ids.length === 1 && typeof ids[0] === 'string' ? `rule:${ids[0]}` : undefined;
+  return ids.filter((id): id is string => typeof id === 'string');
 }
 
 /** The prior task as read from the base table (strongly consistent). */
