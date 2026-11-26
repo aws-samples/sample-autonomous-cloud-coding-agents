@@ -57,7 +57,8 @@ export const PLATFORM_REPO_DEFAULTS = {
    * healthy stack while every task fails at turn 0 with AccessDenied.
    */
   model_id: 'global.anthropic.claude-opus-5-5',
-  max_turns: 200,
+  /** ``DEFAULT_MAX_TURNS`` of ``cdk/src/handlers/shared/validation.ts``; a test holds the two equal. */
+  max_turns: 100,
   /** ``DEFAULT_MEMORY_TOKEN_BUDGET`` of ``cdk/src/handlers/shared/memory.ts``; a test holds the two equal. */
   memory_token_budget: 2_000,
   poll_interval_ms: 30_000,

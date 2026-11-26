@@ -41,10 +41,21 @@ export interface RepoConfigRow {
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
+  readonly build_command?: string;
+  readonly lint_command?: string;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   readonly approval_gate_cap?: number;
+  readonly mcp_servers?: string[];
+  readonly cedar_policy_modules?: string[];
+  readonly skills?: string[];
 }
+
+/**
+ * The columns a writer may set or remove; the keys are RepoTable attribute names.
+ * `egress_allowlist` is not among them: the domains take effect through a deploy, not through the row.
+ */
+export type RepoSettings = Omit<RepoConfigRow, 'repo' | 'status' | 'onboarded_at' | 'updated_at' | 'egress_allowlist'>;
 
 /**
  * Thrown when a repo is absent from RepoTable (never registered via Blueprint

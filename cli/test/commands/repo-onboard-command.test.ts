@@ -43,8 +43,7 @@ describe('repo onboard/offboard commands', () => {
       return outputs;
     });
     (onboardRepo as jest.Mock).mockResolvedValue({
-      repo: 'acme/a',
-      status: 'active',
+      config: { repo: 'acme/a', status: 'active' },
     });
     (offboardRepo as jest.Mock).mockResolvedValue({
       repo: 'acme/a',
@@ -74,9 +73,11 @@ describe('repo onboard/offboard commands', () => {
 
   test('repo onboard warns when custom runtime is stored', async () => {
     (onboardRepo as jest.Mock).mockResolvedValue({
-      repo: 'acme/a',
-      status: 'active',
-      runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom',
+      config: {
+        repo: 'acme/a',
+        status: 'active',
+        runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom',
+      },
     });
 
     const cmd = makeRepoCommand();
@@ -92,10 +93,12 @@ describe('repo onboard/offboard commands', () => {
 
   test('repo onboard does not warn when the stored runtime and token are the platform outputs', async () => {
     (onboardRepo as jest.Mock).mockResolvedValue({
-      repo: 'acme/a',
-      status: 'active',
-      runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
-      github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123:secret:platform',
+      config: {
+        repo: 'acme/a',
+        status: 'active',
+        runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+        github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123:secret:platform',
+      },
     });
 
     const cmd = makeRepoCommand();
@@ -118,6 +121,24 @@ describe('repo onboard/offboard commands', () => {
     expect(payload.notes.length).toBeGreaterThan(0);
   });
 
+  test.each([
+    [undefined, 'onboarded'],
+    ['active', 'updated'],
+    ['removed', 're-activated'],
+  ])('repo onboard reports a row whose status was %s as %s', async (status, change) => {
+    (onboardRepo as jest.Mock).mockResolvedValue({
+      config: { repo: 'acme/a', status: 'active' },
+      previous: status && { repo: 'acme/a', status },
+    });
+
+    await makeRepoCommand().parseAsync(['node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1']);
+    expect(consoleSpy.mock.calls[0][0]).toBe(`Repository 'acme/a' ${change} (status: active).`);
+
+    consoleSpy.mockClear();
+    await makeRepoCommand().parseAsync(['node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--output', 'json']);
+    expect(JSON.parse(consoleSpy.mock.calls[0][0] as string).change).toBe(change);
+  });
+
   test('repo onboard rejects invalid compute type', async () => {
     const cmd = makeRepoCommand();
     await expect(cmd.parseAsync([
@@ -136,8 +157,42 @@ describe('repo onboard/offboard commands', () => {
     ]);
 
     expect((onboardRepo as jest.Mock).mock.calls[0][3]).toEqual(
-      expect.objectContaining({ computeType: 'lambda-microvm' }),
+      expect.objectContaining({ set: expect.objectContaining({ compute_type: 'lambda-microvm' }) }),
     );
+  });
+
+  test('repo onboard passes the deployment, and each flag as its RepoTable column', async () => {
+    await makeRepoCommand().parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
+      '--compute-type', 'agentcore',
+      '--runtime-arn', 'arn:runtime',
+      '--model', ' global.anthropic.claude-opus-5-5 ',
+      '--token-secret-arn', 'arn:secret',
+      '--max-turns', '50',
+      '--poll-interval', '1000',
+    ]);
+
+    expect((onboardRepo as jest.Mock).mock.calls[0][3]).toEqual({
+      deployment: { stackName: 'backgroundagent-dev', computeSubstrate: null, computeDeploymentMode: null, computeTypes: null },
+      set: {
+        compute_type: 'agentcore',
+        runtime_arn: 'arn:runtime',
+        model_id: 'global.anthropic.claude-opus-5-5',
+        github_token_secret_arn: 'arn:secret',
+        max_turns: 50,
+        poll_interval_ms: 1000,
+      },
+    });
+  });
+
+  test('repo onboard passes no value for a flag that is empty or not given', async () => {
+    await makeRepoCommand().parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
+      '--runtime-arn', '', '--model', ' ', '--token-secret-arn', '',
+    ]);
+
+    const { set } = (onboardRepo as jest.Mock).mock.calls[0][3];
+    expect(Object.values(set).filter((value) => value !== undefined)).toEqual([]);
   });
 
   test('reads BedrockGeoRegion and BedrockModelIds by their exact output names', async () => {

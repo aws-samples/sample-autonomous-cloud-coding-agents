@@ -220,6 +220,15 @@ describe('buildRepoShowLines', () => {
     expect(PLATFORM_REPO_DEFAULTS.memory_token_budget).toBe(Number(match![1].replace(/_/g, '')));
   });
 
+  test('the advertised default max turns matches the one the orchestrator applies', () => {
+    const validationTs = fs.readFileSync(
+      path.resolve(__dirname, '../../../cdk/src/handlers/shared/validation.ts'), 'utf8',
+    );
+    const match = validationTs.match(/export const DEFAULT_MAX_TURNS = (\d+);/);
+    expect(match).not.toBeNull();
+    expect(PLATFORM_REPO_DEFAULTS.max_turns).toBe(Number(match![1]));
+  });
+
   test('explains platform default github token in text output', () => {
     const display = formatRepoConfigForDisplay(
       { repo: 'awslabs/agent-plugins', status: 'active' },

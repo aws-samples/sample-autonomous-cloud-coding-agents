@@ -233,15 +233,18 @@ export function makeRepoCommand(): Command {
           }),
         });
 
-        const config = await onboardRepo(region, tableName, repoId, {
-          computeType: opts.computeType,
+        const { config, previous } = await onboardRepo(region, tableName, repoId, {
           deployment,
-          runtimeArn: opts.runtimeArn,
-          modelId,
-          githubTokenSecretArn: opts.tokenSecretArn,
-          maxTurns: opts.maxTurns,
-          pollIntervalMs: opts.pollInterval,
+          set: {
+            compute_type: opts.computeType || undefined,
+            runtime_arn: opts.runtimeArn || undefined,
+            model_id: modelId,
+            github_token_secret_arn: opts.tokenSecretArn || undefined,
+            max_turns: opts.maxTurns,
+            poll_interval_ms: opts.pollInterval,
+          },
         });
+        const change = !previous ? 'onboarded' : previous.status === 'removed' ? 're-activated' : 'updated';
         const notes = buildRepoOnboardNotes({
           config,
           platformRuntimeArn,
@@ -250,11 +253,11 @@ export function makeRepoCommand(): Command {
         });
 
         if (opts.output === 'json') {
-          console.log(JSON.stringify({ repo: redactRepoRow(config), notes }, null, 2));
+          console.log(JSON.stringify({ repo: redactRepoRow(config), change, notes }, null, 2));
           return;
         }
 
-        console.log(`Repository '${repoId}' onboarded (status: ${config.status}).`);
+        console.log(`Repository '${repoId}' ${change} (status: ${config.status}).`);
         console.log();
         for (const note of notes) {
           console.log(note);
