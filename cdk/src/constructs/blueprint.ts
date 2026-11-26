@@ -570,14 +570,19 @@ export class Blueprint extends Construct {
     return empty;
   }
 
+  /** Asset fields now empty, and an approval window no longer set: only the Blueprint writes it. */
+  private removedFields(): string[] {
+    return [...this.emptyAssetFields(), ...(this.approvalTimeoutSeconds === undefined ? ['approval_timeout_s'] : [])];
+  }
+
   private buildRemoveClause(): string {
-    const fields = this.emptyAssetFields();
+    const fields = this.removedFields();
     return fields.length > 0 ? ` REMOVE ${fields.map(f => `#${f}`).join(', ')}` : '';
   }
 
   private buildRemoveNames(): Record<string, string> {
     const names: Record<string, string> = {};
-    const fields = this.emptyAssetFields();
+    const fields = this.removedFields();
     for (const f of fields) names[`#${f}`] = f;
     return names;
   }

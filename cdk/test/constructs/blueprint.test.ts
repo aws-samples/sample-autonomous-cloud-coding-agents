@@ -578,6 +578,12 @@ describe('Blueprint construct', () => {
     expect(getCreateJoinParts(template).join('')).not.toContain('approval_timeout_s');
   });
 
+  test('a redeploy without approvalTimeoutSeconds removes the window an earlier deploy set', () => {
+    const { template } = createStack({ security: { approvalGateCap: 10 } });
+    const removeClause = /REMOVE ([^"\\]*)/.exec(getUpdateJoinParts(template).join(''))?.[1] ?? '';
+    expect(removeClause).toContain('#approval_timeout_s');
+  });
+
   test.each([10, 3601, 90.5])('rejects approvalTimeoutSeconds %p at synth', (seconds) => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
