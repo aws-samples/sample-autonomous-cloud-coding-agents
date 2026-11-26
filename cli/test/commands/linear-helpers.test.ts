@@ -235,7 +235,7 @@ describe('makeLinearCommand', () => {
     });
   });
 
-  test('setup aborts with a clear error when stack outputs are missing (covers findStackOutput)', async () => {
+  test('setup aborts with a clear error when stack outputs are missing', async () => {
     cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
     const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
     try {

@@ -155,18 +155,45 @@ export async function getStackOutput(
  * raised it, so that it cannot pass for "not deployed".
  */
 export async function findStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
+  const outputs = await outputsIfDeployed(region, stackName);
+  return outputs.find((o) => o.OutputKey === outputKey)?.OutputValue ?? null;
+}
+
+/** The outputs of a stack: none when the stack does not exist, where {@link describeStack} fails. */
+async function outputsIfDeployed(region: string, stackName: string) {
   try {
     const cfn = makeClient(CloudFormationClient, { region });
     const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
-    const outputs = result.Stacks?.[0]?.Outputs ?? [];
-    const output = outputs.find((o) => o.OutputKey === outputKey);
-    return output?.OutputValue ?? null;
+    return result.Stacks?.[0]?.Outputs ?? [];
   } catch (err) {
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
+      return []; // "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
     }
     throw err;
   }
+}
+
+/**
+ * Read the stack outputs a command cannot run without, with one DescribeStacks call.
+ *
+ * Fails with a CliError that names the outputs without a value (all of them when the stack
+ * does not exist), followed by `redeployHint`. Any other failure is rethrown as the SDK raised it.
+ */
+export async function requireStackOutputs<K extends string>(
+  region: string,
+  stackName: string,
+  keys: readonly K[],
+  redeployHint: string,
+): Promise<Record<K, string>> {
+  const outputs = await outputsIfDeployed(region, stackName);
+  const values = Object.fromEntries(keys.map(
+    (key) => [key, outputs.find((o) => o.OutputKey === key)?.OutputValue],
+  ));
+  const missing = keys.filter((key) => !values[key]);
+  if (missing.length > 0) {
+    throw new CliError(`Stack '${stackName}' is missing outputs ${missing.join(', ')}. ${redeployHint}`);
+  }
+  return values as Record<K, string>;
 }

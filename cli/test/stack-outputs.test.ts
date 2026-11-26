@@ -23,6 +23,7 @@ import {
   findStackOutput,
   getStackOutput,
   getStackOutputs,
+  requireStackOutputs,
   resolveConfigureBundleFromStack,
   resolveOperatorRegion,
 } from '../src/stack-outputs';
@@ -231,5 +232,57 @@ describe('findStackOutput', () => {
   ])('rethrows %s as it was raised, so that it does not pass for "not deployed"', async (_what, err) => {
     cfSend.mockRejectedValueOnce(err);
     await expect(findStackOutput('us-east-1', 'dev', 'LinearVaultConsentUrl')).rejects.toBe(err);
+  });
+});
+
+describe('requireStackOutputs', () => {
+  const HINT = 'Re-deploy (mise //cdk:deploy).';
+
+  beforeEach(() => {
+    cfSend.mockReset();
+  });
+
+  test('reads the outputs with one DescribeStacks call, keyed by output name', async () => {
+    mockStackWithOutputs({ SecretArn: 'arn:secret', NotAskedFor: 'value', RegistryTable: 'registry' });
+
+    const outputs = await requireStackOutputs('us-east-1', 'dev', ['RegistryTable', 'SecretArn'], HINT);
+
+    expect(outputs).toEqual({ RegistryTable: 'registry', SecretArn: 'arn:secret' });
+    expect(cfSend).toHaveBeenCalledTimes(1);
+    // Only `mise //cli:typecheck` checks the next line: a value is a string, never null.
+    const registryTable: string = outputs.RegistryTable;
+    expect(registryTable).toBe('registry');
+    const hasOnlyTheKeysAskedFor: keyof typeof outputs extends 'RegistryTable' | 'SecretArn' ? true : false = true;
+    expect(hasOnlyTheKeysAskedFor).toBe(true);
+  });
+
+  test('names the outputs without a value, absent or empty, in the order asked for, then the hint', async () => {
+    mockStackWithOutputs({ SecretArn: '', RegistryTable: 'registry' });
+
+    await expect(requireStackOutputs('us-east-1', 'dev', ['UserTable', 'RegistryTable', 'SecretArn'], HINT))
+      .rejects.toThrow(new CliError("Stack 'dev' is missing outputs UserTable, SecretArn. Re-deploy (mise //cdk:deploy)."));
+  });
+
+  test('fails on a single output without a value', async () => {
+    mockStackWithOutputs({ RegistryTable: 'registry' });
+
+    await expect(requireStackOutputs('us-east-1', 'dev', ['RegistryTable', 'SecretArn'], HINT))
+      .rejects.toThrow(new CliError("Stack 'dev' is missing outputs SecretArn. Re-deploy (mise //cdk:deploy)."));
+  });
+
+  test('names every output when the stack does not exist', async () => {
+    cfSend.mockRejectedValueOnce(
+      Object.assign(new Error('Stack with id missing does not exist'), { name: 'ValidationError' }),
+    );
+
+    await expect(requireStackOutputs('us-east-1', 'missing', ['UserTable', 'RegistryTable'], HINT))
+      .rejects.toThrow(new CliError("Stack 'missing' is missing outputs UserTable, RegistryTable. Re-deploy (mise //cdk:deploy)."));
+  });
+
+  test('rethrows any other failure as it was raised', async () => {
+    const err = Object.assign(new Error('User is not authorized'), { name: 'AccessDeniedException' });
+    cfSend.mockRejectedValueOnce(err);
+
+    await expect(requireStackOutputs('us-east-1', 'dev', ['RegistryTable'], HINT)).rejects.toBe(err);
   });
 });

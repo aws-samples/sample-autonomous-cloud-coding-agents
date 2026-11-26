@@ -64,7 +64,7 @@ import {
 } from '../linear-vault';
 import { awaitOauthCallback, CALLBACK_URL, openBrowser, randomState } from '../oauth-callback-server';
 import { promptLine, promptSecret } from '../prompt-secret';
-import { findStackOutput } from '../stack-outputs';
+import { findStackOutput, requireStackOutputs } from '../stack-outputs';
 import type { CliConfig } from '../types';
 import { makeClient, makeDocClient } from '../ua';
 
@@ -1029,7 +1029,7 @@ export function makeLinearCommand(): Command {
         'Finish a hosted consent: the authorization code shown on the consent page. Uses the PKCE '
         + 'verifier saved by the first run, so it must be the same machine and the same workspace.',
       )
-      // eslint-disable-next-line complexity -- predates the ceiling (97, down from 115 when it landed); must not grow
+      // eslint-disable-next-line complexity -- predates the ceiling (93, down from 115 when it landed); must not grow
       .action(async (slug: string, opts) => {
         assertWorkspaceSlug(slug);
         const config = loadConfig();
@@ -1037,26 +1037,15 @@ export function makeLinearCommand(): Command {
         const stackName = opts.stackName;
 
         // ─── Stack outputs ─────────────────────────────────────────────
-        const [
-          workspaceRegistryTable,
-          userMappingTable,
-          webhookSecretArn,
-        ] = await Promise.all([
-          findStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-          findStackOutput(region, stackName, 'LinearUserMappingTableName'),
-          findStackOutput(region, stackName, 'LinearWebhookSecretArn'),
-        ]);
-
-        const missing: string[] = [];
-        if (!workspaceRegistryTable) missing.push('LinearWorkspaceRegistryTableName');
-        if (!userMappingTable) missing.push('LinearUserMappingTableName');
-        if (!webhookSecretArn) missing.push('LinearWebhookSecretArn');
-        if (missing.length > 0) {
-          throw new CliError(
-            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
-            + 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).',
-          );
-        }
+        const {
+          LinearWorkspaceRegistryTableName: workspaceRegistryTable,
+          LinearUserMappingTableName: userMappingTable,
+          LinearWebhookSecretArn: webhookSecretArn,
+        } = await requireStackOutputs(region, stackName, [
+          'LinearWorkspaceRegistryTableName',
+          'LinearUserMappingTableName',
+          'LinearWebhookSecretArn',
+        ], 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).');
 
         // ─── Resolve caller identity ──────────────────────────────────
         const cognitoSub = cognitoSubFromSession();
@@ -1760,23 +1749,13 @@ export function makeLinearCommand(): Command {
         // NOT required here: add-workspace assumes the initial setup wizard
         // already installed it (one signing secret covers all workspaces
         // sharing the same Linear OAuth app + webhook receiver URL).
-        const [
-          workspaceRegistryTable,
-          userMappingTable,
-        ] = await Promise.all([
-          findStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-          findStackOutput(region, stackName, 'LinearUserMappingTableName'),
-        ]);
-
-        const missing: string[] = [];
-        if (!workspaceRegistryTable) missing.push('LinearWorkspaceRegistryTableName');
-        if (!userMappingTable) missing.push('LinearUserMappingTableName');
-        if (missing.length > 0) {
-          throw new CliError(
-            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
-            + 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).',
-          );
-        }
+        const {
+          LinearWorkspaceRegistryTableName: workspaceRegistryTable,
+          LinearUserMappingTableName: userMappingTable,
+        } = await requireStackOutputs(region, stackName, [
+          'LinearWorkspaceRegistryTableName',
+          'LinearUserMappingTableName',
+        ], 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).');
 
         // ─── Resolve caller identity ──────────────────────────────────
         const cognitoSub = cognitoSubFromSession();
@@ -2321,19 +2300,13 @@ export function makeLinearCommand(): Command {
         const region = opts.region || config.region;
         const stackName = opts.stackName;
 
-        const [workspaceRegistryTable, userMappingTable] = await Promise.all([
-          findStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-          findStackOutput(region, stackName, 'LinearUserMappingTableName'),
-        ]);
-        const missing: string[] = [];
-        if (!workspaceRegistryTable) missing.push('LinearWorkspaceRegistryTableName');
-        if (!userMappingTable) missing.push('LinearUserMappingTableName');
-        if (missing.length > 0) {
-          throw new CliError(
-            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
-            + 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).',
-          );
-        }
+        const {
+          LinearWorkspaceRegistryTableName: workspaceRegistryTable,
+          LinearUserMappingTableName: userMappingTable,
+        } = await requireStackOutputs(region, stackName, [
+          'LinearWorkspaceRegistryTableName',
+          'LinearUserMappingTableName',
+        ], 'Re-deploy with the 2.0b CDK changes (mise //cdk:deploy).');
 
         const callerCognitoSub = cognitoSubFromSession();
 
