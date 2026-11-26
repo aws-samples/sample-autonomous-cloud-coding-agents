@@ -202,6 +202,11 @@ describe('repo onboard/offboard', () => {
       approval_gate_cap: 10,
       max_budget_usd: 5,
       memory_token_budget: 4000,
+      build_command: 'npm run build',
+      lint_command: 'npm run lint',
+      mcp_servers: ['registry://mcp/one'],
+      skills: ['registry://skill/one'],
+      cedar_policy_modules: ['registry://cedar/one'],
     });
 
     await onboardRepo('us-east-1', 'RepoTable', 'acme/a');
@@ -211,13 +216,21 @@ describe('repo onboard/offboard', () => {
     expect(put.input.Item?.cedar_policies).toEqual(['policy']);
     // Blueprint-only settings have no flag here: a re-onboard must not drop them.
     expect(put.input.Item).toMatchObject({ approval_gate_cap: 10, max_budget_usd: 5, memory_token_budget: 4000 });
+    expect(put.input.Item).toMatchObject({
+      build_command: 'npm run build',
+      lint_command: 'npm run lint',
+      mcp_servers: ['registry://mcp/one'],
+      skills: ['registry://skill/one'],
+      cedar_policy_modules: ['registry://cedar/one'],
+    });
   });
 
   test('onboardRepo writes no Blueprint-only setting the existing row does not have', async () => {
     await onboardRepo('us-east-1', 'RepoTable', 'acme/a');
 
     const put = ddbSend.mock.calls[0][0] as PutCommand;
-    for (const key of ['approval_gate_cap', 'max_budget_usd', 'memory_token_budget']) {
+    for (const key of ['approval_gate_cap', 'max_budget_usd', 'memory_token_budget', 'build_command', 'lint_command',
+      'mcp_servers', 'skills', 'cedar_policy_modules']) {
       expect(put.input.Item).not.toHaveProperty(key);
     }
   });

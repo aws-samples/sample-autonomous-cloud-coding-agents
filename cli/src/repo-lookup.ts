@@ -44,6 +44,11 @@ export interface RepoConfigRow {
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   readonly approval_gate_cap?: number;
+  readonly build_command?: string;
+  readonly lint_command?: string;
+  readonly mcp_servers?: string[];
+  readonly skills?: string[];
+  readonly cedar_policy_modules?: string[];
 }
 
 /**
