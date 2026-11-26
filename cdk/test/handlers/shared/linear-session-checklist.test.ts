@@ -57,7 +57,7 @@ test('events move the checklist to their stage; others do not move it', () => {
   expect(checklistMoveForEvent('hydration_complete')).toEqual({ stage: CHECKLIST_STAGE.setup });
   expect(checklistMoveForEvent('repo_setup_complete')).toEqual({ stage: CHECKLIST_STAGE.code });
   expect(checklistMoveForEvent('agent_execution_complete')).toEqual({ stage: CHECKLIST_STAGE.pr });
-  expect(checklistMoveForEvent('pr_created', 'https://github.com/acme/web/pull/42')).toEqual({ stage: CHECKLIST_STAGE.review, pr: '#42' });
+  expect(checklistMoveForEvent('pr_created')).toEqual({ stage: CHECKLIST_STAGE.review });
   expect(checklistMoveForEvent('agent_tool_call')).toBeNull();
 });
 

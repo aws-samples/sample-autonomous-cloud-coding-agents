@@ -97,20 +97,16 @@ export function renderChecklist(kind: ChecklistKind, state: ChecklistState, endi
 }
 
 /**
- * Where an event moves the checklist, or null when it does not.
+ * The stage an event moves the checklist to, or null when it does not.
  * @param effectiveType - the event type, or a milestone's name.
- * @param prUrl - the task's pull request, for ``pr_created``.
  */
-export function checklistMoveForEvent(effectiveType: string, prUrl?: string): ChecklistState | null {
+export function checklistMoveForEvent(effectiveType: string): Omit<ChecklistState, 'pr'> | null {
   switch (effectiveType) {
     case 'admission_queued': return { stage: CHECKLIST_STAGE.understand, note: 'queued for a free slot' };
     case 'hydration_complete': return { stage: CHECKLIST_STAGE.setup };
     case 'repo_setup_complete': return { stage: CHECKLIST_STAGE.code };
     case 'agent_execution_complete': return { stage: CHECKLIST_STAGE.pr };
-    case 'pr_created': {
-      const n = prUrl?.match(/\/pull\/(\d+)/)?.[1];
-      return { stage: CHECKLIST_STAGE.review, ...(n && { pr: `#${n}` }) };
-    }
+    case 'pr_created': return { stage: CHECKLIST_STAGE.review };
     default: return null;
   }
 }

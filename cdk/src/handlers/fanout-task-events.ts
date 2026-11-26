@@ -1665,8 +1665,7 @@ async function advanceSessionChecklist(
   const kind = checklistKind(task.resolved_workflow?.id);
   if (!kind || task.linear_final_comment_event_id) return;
   const effective = effectiveEventType(event);
-  // The document client returns numbers as numbers; coerce in case an older writer stored a string.
-  const recorded = Number(task.linear_checklist_stage ?? 0);
+  const recorded = task.linear_checklist_stage ?? 0;
   let state: ChecklistState;
   let ending: ChecklistEnding | undefined;
   if (LINEAR_SESSION_TERMINAL_EVENTS.has(effective)) {
@@ -1679,9 +1678,9 @@ async function advanceSessionChecklist(
     }
   } else {
     if (TERMINAL_STATUSES.includes(task.status)) return;
-    const move = checklistMoveForEvent(effective, task.pr_url);
+    const move = checklistMoveForEvent(effective);
     if (!move) return;
-    state = { ...move, pr: move.pr ?? prLabel(task.pr_url) };
+    state = { ...move, pr: prLabel(task.pr_url) };
   }
   const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effective };
   try {
@@ -1699,11 +1698,9 @@ async function advanceSessionChecklist(
 
 /** Record a checklist stage if it is past the recorded one; false when it is not (nothing to show). */
 async function claimChecklistStage(taskId: string, stage: number): Promise<boolean> {
-  const tableName = process.env.TASK_TABLE_NAME;
-  if (!tableName) return false;
   try {
     await ddb.send(new UpdateCommand({
-      TableName: tableName,
+      TableName: process.env.TASK_TABLE_NAME,
       Key: { task_id: taskId },
       UpdateExpression: 'SET linear_checklist_stage = :s',
       ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_checklist_stage) OR linear_checklist_stage < :s)',
@@ -1770,11 +1767,9 @@ async function emitLinearSessionProgress(
 
 /** Take one of the task's persistent progress slots; false once the cap is reached. */
 async function claimProgressSlot(taskId: string): Promise<boolean> {
-  const tableName = process.env.TASK_TABLE_NAME;
-  if (!tableName) return false;
   try {
     await ddb.send(new UpdateCommand({
-      TableName: tableName,
+      TableName: process.env.TASK_TABLE_NAME,
       Key: { task_id: taskId },
       UpdateExpression: 'ADD linear_session_progress_count :one',
       ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_session_progress_count) OR linear_session_progress_count < :cap)',
@@ -2605,8 +2600,6 @@ export const handler = async (
         dropped++;
         continue;
       }
-      // Only the latest tool call of a task in this batch is shown: the session's
-      // "currently doing" line would replace the earlier ones at once anyway.
       if (supersededToolCalls.has(ev.event_id)) {
         dropped++;
         continue;

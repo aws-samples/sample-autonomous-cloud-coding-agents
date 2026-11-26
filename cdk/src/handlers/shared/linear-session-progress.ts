@@ -72,10 +72,8 @@ export const LINEAR_SESSION_PROGRESS_MILESTONES: readonly string[] = [
 const THOUGHT_MAX = 600;
 const TOOL_PARAMETER_MAX = 120;
 const BRANCH_MAX = 80;
-const UUID_VARIANTS = '89ab';
-const HEX = 16;
-/** The first 32 hex digits of a digest, grouped as a UUID's fields (the version nibble dropped). */
-const UUID_LAYOUT = /^(.{8})(.{4}).(.{3})(.)(.{3})(.{12}).*$/;
+/** A digest's hex digits as a UUID's fields, skipping the version and variant nibbles. */
+const UUID_FIELDS = /^(.{8})(.{4}).(.{3}).(.{3})(.{12})/;
 
 function clip(value: string, max: number): string {
   const flat = value.replace(/\s+/g, ' ').trim();
@@ -210,7 +208,6 @@ export function sessionProgressActivity(
  */
 export function progressActivityId(seed: string): string {
   const hex = createHash('sha256').update(`linear-session-progress:${seed}`).digest('hex');
-  // 8-4-4-4-12 hex digits, with version nibble 4 and an RFC 4122 variant nibble (8, 9, a or b).
-  return hex.replace(UUID_LAYOUT, (_all, a: string, b: string, c: string, variant: string, d: string, e: string) =>
-    `${a}-${b}-4${c}-${UUID_VARIANTS[Number.parseInt(variant, HEX) % UUID_VARIANTS.length]}${d}-${e}`);
+  const [, a, b, c, d, e] = UUID_FIELDS.exec(hex)!;
+  return `${a}-${b}-4${c}-a${d}-${e}`;
 }
