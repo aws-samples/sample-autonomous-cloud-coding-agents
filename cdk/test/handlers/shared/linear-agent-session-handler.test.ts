@@ -892,6 +892,19 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'response', body: expect.stringContaining('Nothing is waiting for your approval') }));
   });
 
+  test('a new session whose request starts with "Deny" starts the task', async () => {
+    await handleAgentSessionEvent(created({
+      agentSession: { id: 'session-1', issueId: 'issue-1', creatorId: 'linear-user-1', comment: { body: 'Deny anonymous access to /admin' } },
+    }));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a follow-up that starts with "deny" while the task runs without a request is passed to the agent', async () => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1' });
+    await handleAgentSessionEvent(prompted({ content: { body: 'deny-list the tracker domains too' } }));
+    expect(submitNudgeMock).toHaveBeenCalledWith(expect.objectContaining({ message: 'deny-list the tracker domains too' }));
+  });
+
   test('an Approve while the task runs without a request is not passed to the agent', async () => {
     priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1' });
     await handleAgentSessionEvent(prompted({ content: { body: 'deny' } }));

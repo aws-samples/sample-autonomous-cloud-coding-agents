@@ -48,6 +48,7 @@ import {
 } from './linear-channel-metadata';
 import { resolveLinearOauthToken, type ResolvedLinearToken } from './linear-oauth-resolver';
 import {
+  isBareApprovalAnswer,
   NOTHING_TO_APPROVE_MESSAGE,
   parseSessionApprovalAnswer,
   repeatedApprovalChoice,
@@ -203,7 +204,7 @@ async function respondToAgentSession(
   }
   // A late "approve" / "deny" (after its request timed out, or in the wrong session)
   // is an answer to nothing. Taken as a prompt it would start new work.
-  if (parseSessionApprovalAnswer(request.directive)) {
+  if (isBareApprovalAnswer(request.directive)) {
     await emit({ type: 'response', body: NOTHING_TO_APPROVE_MESSAGE });
     return;
   }
@@ -445,7 +446,7 @@ async function steerRunningTask(
     await decideSessionApproval(request, task, openRequest, platformUserId, emit);
     return;
   }
-  if (parseSessionApprovalAnswer(request.directive)) {
+  if (isBareApprovalAnswer(request.directive)) {
     await reply(NOTHING_TO_APPROVE_MESSAGE);
     return;
   }

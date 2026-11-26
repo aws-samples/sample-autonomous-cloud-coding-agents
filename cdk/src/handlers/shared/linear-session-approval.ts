@@ -56,6 +56,17 @@ export function parseSessionApprovalAnswer(text: string): SessionApprovalAnswer 
   return parseLinearApprovalReply(text);
 }
 
+/**
+ * An answer with nothing left to answer: a button's value, or approve / deny alone.
+ * ``deny <text>`` is not one, because with no request open it reads as an instruction
+ * ("deny anonymous access to /admin").
+ * @param text - the prompt.
+ */
+export function isBareApprovalAnswer(text: string): boolean {
+  const answer = parseSessionApprovalAnswer(text);
+  return answer !== null && !answer.reason;
+}
+
 /** One activity plus the options ``emitAgentActivity`` takes. */
 export interface SessionApprovalActivity {
   readonly content: AgentActivityContent;
