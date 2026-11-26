@@ -29,10 +29,8 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { integrationTable, webhookDedupTable } from './integration-parts';
 import { LinearIdentityVault } from './linear-identity-vault';
-import { LinearProjectMappingTable } from './linear-project-mapping-table';
-import { LinearUserMappingTable } from './linear-user-mapping-table';
-import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
 import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Default task-record retention used for TTL computation (days). */
@@ -202,16 +200,35 @@ export interface LinearIntegrationProps {
  * - Two Secrets Manager secrets (webhook signing secret + personal API token)
  */
 export class LinearIntegration extends Construct {
-  /** Linear project → repo mapping table. */
+  /**
+   * DynamoDB table mapping Linear projects to GitHub repositories.
+   *
+   * Schema: linear_project_id (PK).
+   *
+   * Fields:
+   * - repo — `owner/repo`
+   * - team_id — Linear team UUID (the project's team)
+   * - label_filter — Linear issue label that triggers a task (default `bgagent`)
+   * - status — 'active' | 'removed'
+   * - onboarded_at, updated_at — ISO timestamps
+   */
   public readonly projectMappingTable: dynamodb.Table;
 
-  /** Linear user → platform user mapping table. */
+  /**
+   * DynamoDB table for mapping Linear user identities to platform user IDs.
+   *
+   * Schema: linear_identity (PK) — composite key `{workspace_id}#{user_id}` for confirmed mappings,
+   * `pending#{code}` for in-flight link codes (with TTL).
+   *
+   * GSIs:
+   * - PlatformUserIndex (PK: platform_user_id, SK: linked_at) — list linked Linear accounts for a user
+   */
   public readonly userMappingTable: dynamodb.Table;
 
   /**
-   * Registry of Linear workspaces that have completed OAuth onboarding.
-   * Lookup `provider_name` (AgentCore credential provider) by Linear
-   * `organizationId` from the inbound webhook.
+   * DynamoDB table tracking Linear workspaces that have completed OAuth onboarding.
+   *
+   * Schema: linear_workspace_id (PK) — Linear's organization UUID.
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
@@ -236,22 +253,15 @@ export class LinearIntegration extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB tables ---
-    const projectMapping = new LinearProjectMappingTable(this, 'ProjectMappingTable', { removalPolicy });
-    const userMapping = new LinearUserMappingTable(this, 'UserMappingTable', { removalPolicy });
-    const workspaceRegistry = new LinearWorkspaceRegistryTable(this, 'WorkspaceRegistryTable', { removalPolicy });
-    this.projectMappingTable = projectMapping.table;
-    this.userMappingTable = userMapping.table;
-    this.workspaceRegistryTable = workspaceRegistry.table;
+    this.projectMappingTable = integrationTable(this, 'ProjectMappingTable', { partitionKey: 'linear_project_id', removalPolicy });
+    this.userMappingTable = integrationTable(this, 'UserMappingTable', {
+      partitionKey: 'linear_identity', ttl: true, platformUserIndex: true, removalPolicy,
+    });
+    this.workspaceRegistryTable = integrationTable(this, 'WorkspaceRegistryTable', { partitionKey: 'linear_workspace_id', removalPolicy });
 
     // Dedup table: linear webhook retries collapse to a single processor invoke
     // within the 8h TTL window. Keyed on `{data.id}#{action}#{webhookTimestamp}`.
-    this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
-      partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      timeToLiveAttribute: 'ttl',
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      removalPolicy,
-    });
+    this.webhookDedupTable = webhookDedupTable(this, removalPolicy);
 
     // --- Webhook signing secret (CDK-created placeholder, populated by `bgagent linear setup`) ---
     // Per-workspace OAuth tokens (Phase 2.0b-O2) live in `bgagent-linear-oauth-<slug>`
@@ -693,7 +703,7 @@ function agentSessionProcessorEnv(agentSessions: AgentSessionsProps | undefined)
  */
 function grantAgentSessionAccess(
   processorFn: lambda.NodejsFunction,
-  webhookDedupTable: dynamodb.ITable,
+  dedupTable: dynamodb.ITable,
   agentSessions: AgentSessionsProps | undefined,
 ): void {
   if (!agentSessions) return;
@@ -710,7 +720,7 @@ function grantAgentSessionAccess(
   // lag. PutItem only — the console-claim GetItem grant already covers the read.
   processorFn.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:PutItem'],
-    resources: [webhookDedupTable.tableArn],
+    resources: [dedupTable.tableArn],
   }));
   // Session `stop` shuts the task's compute down, like DELETE /tasks/{id}.
   // Same scoping as TaskApi's cancel Lambda, one statement per configured

@@ -28,9 +28,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { SlackChannelMappingTable } from './slack-channel-mapping-table';
-import { SlackInstallationTable } from './slack-installation-table';
-import { SlackUserMappingTable } from './slack-user-mapping-table';
+import { integrationTable } from './integration-parts';
 import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Default task-record retention used for TTL computation (days). */
@@ -102,13 +100,26 @@ export interface SlackIntegrationProps {
  * the DynamoDB-documented one-reader-per-shard limit.
  */
 export class SlackIntegration extends Construct {
-  /** The Slack installation table. */
+  /**
+   * Schema: team_id (PK) — one record per installed Slack workspace.
+   * Stores workspace metadata and a pointer to the bot token in Secrets Manager.
+   * Bot tokens are stored in Secrets Manager at `bgagent/slack/{team_id}`.
+   */
   public readonly installationTable: dynamodb.Table;
 
-  /** The Slack user mapping table. */
+  /**
+   * DynamoDB table for mapping Slack user identities to platform user IDs.
+   *
+   * Schema: slack_identity (PK) — composite key `{team_id}#{user_id}`.
+   * Also used for pending link records (with status='pending' and TTL).
+   */
   public readonly userMappingTable: dynamodb.Table;
 
-  /** The Slack channel → default-repo mapping table. */
+  /**
+   * DynamoDB table mapping Slack channels to a default GitHub repository.
+   * Schema: channel_id (PK) — composite key `{team_id}#{channel_id}`.
+   * A Slack channel id can repeat across teams.
+   */
   public readonly channelMappingTable: dynamodb.Table;
 
   /** The Slack signing secret (placeholder — user populates after creating the Slack App). */
@@ -132,12 +143,11 @@ export class SlackIntegration extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB Tables ---
-    const installationTable = new SlackInstallationTable(this, 'InstallationTable', { removalPolicy });
-    const userMappingTable = new SlackUserMappingTable(this, 'UserMappingTable', { removalPolicy });
-    const channelMappingTable = new SlackChannelMappingTable(this, 'ChannelMappingTable', { removalPolicy });
-    this.installationTable = installationTable.table;
-    this.userMappingTable = userMappingTable.table;
-    this.channelMappingTable = channelMappingTable.table;
+    this.installationTable = integrationTable(this, 'InstallationTable', { partitionKey: 'team_id', ttl: true, removalPolicy });
+    this.userMappingTable = integrationTable(this, 'UserMappingTable', {
+      partitionKey: 'slack_identity', ttl: true, platformUserIndex: true, removalPolicy,
+    });
+    this.channelMappingTable = integrationTable(this, 'ChannelMappingTable', { partitionKey: 'channel_id', removalPolicy });
 
     // --- Slack App Secrets (CDK-created placeholders) ---
     // Users populate these after creating the Slack App via the SlackAppCreateUrl output.

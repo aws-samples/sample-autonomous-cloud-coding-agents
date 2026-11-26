@@ -29,9 +29,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { JiraProjectMappingTable } from './jira-project-mapping-table';
-import { JiraUserMappingTable } from './jira-user-mapping-table';
-import { JiraWorkspaceRegistryTable } from './jira-workspace-registry-table';
+import { integrationTable, webhookDedupTable } from './integration-parts';
 import { ComponentUaAspect } from './solution-ua-aspect';
 
 /** Default task-record retention used for TTL computation (days). */
@@ -144,16 +142,60 @@ export interface JiraIntegrationProps {
  * - Webhook signing-secret placeholder (populated by `bgagent jira setup`)
  */
 export class JiraIntegration extends Construct {
-  /** Jira `{cloudId}#{projectKey}` → repo mapping table. */
+  /**
+   * DynamoDB table mapping Jira Cloud projects to GitHub repositories.
+   *
+   * Schema: jira_project_identity (PK) — composite key `{cloudId}#{projectKey}`.
+   * `cloudId` is the Atlassian tenant identifier; `projectKey` is the human
+   * project key (e.g. `ENG`).
+   *
+   * Fields:
+   * - repo — `owner/repo`
+   * - cloud_id — duplicated from the PK for filtering by tenant
+   * - project_key — duplicated from the PK
+   * - label_filter — Jira issue label that triggers a task (default `bgagent`)
+   * - status — 'active' | 'removed'
+   * - onboarded_at, updated_at — ISO timestamps
+   */
   public readonly projectMappingTable: dynamodb.Table;
 
-  /** Jira `{cloudId}#{accountId}` → platform user mapping table. */
+  /**
+   * DynamoDB table for mapping Jira user identities to platform user IDs.
+   *
+   * Schema: jira_identity (PK) — composite key `{cloudId}#{accountId}` for
+   * confirmed mappings, `pending#{code}` for in-flight link codes (with TTL).
+   * `accountId` is Atlassian's stable per-tenant user identifier returned by
+   * the OAuth identity endpoint and present on issue events.
+   *
+   * GSIs:
+   * - PlatformUserIndex (PK: platform_user_id, SK: linked_at) — list linked Jira accounts for a user
+   */
   public readonly userMappingTable: dynamodb.Table;
 
   /**
-   * Registry of Jira tenants that have completed OAuth onboarding.
-   * Look up the per-tenant `oauth_secret_arn` by `cloudId` from the inbound
-   * webhook, then fetch the OAuth/signing secret from Secrets Manager.
+   * DynamoDB table tracking Jira Cloud tenants that have completed OAuth onboarding.
+   *
+   * Schema: jira_cloud_id (PK) — Atlassian's tenant identifier (UUID), the stable
+   * key returned from `accessible-resources`.
+   *
+   * Fields:
+   * - site_url — `https://<your-domain>.atlassian.net` (display only; NOT a
+   *   valid REST base for the 3LO token, which is minted with
+   *   `audience=api.atlassian.com` and must call the
+   *   `https://api.atlassian.com/ex/jira/<cloudId>` gateway base instead)
+   * - oauth_secret_arn — full ARN of the per-tenant Secrets Manager secret
+   *   (`bgagent-jira-oauth-<cloudId>`) holding the OAuth bundle (access/refresh
+   *   tokens, client credentials, webhook signing secret, and optional Forge
+   *   app-actor proxy configuration). Created by `bgagent jira setup` and
+   *   extended by `bgagent jira app-setup`, not by CDK.
+   * - outbound_identity — `app` after the Forge identity probe succeeds.
+   * - app_actor_account_id / app_actor_display_name / app_actor_configured_at —
+   *   non-secret audit metadata for the verified Jira app account. The proxy
+   *   URL and HMAC secret remain in Secrets Manager.
+   * - installed_by_platform_user_id — Cognito sub of the admin who ran
+   *   `bgagent jira setup` (audit only; runtime callers do not need this)
+   * - installed_at, updated_at — ISO timestamps
+   * - status — 'active' | 'revoked'
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
@@ -176,23 +218,16 @@ export class JiraIntegration extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB tables ---
-    const projectMapping = new JiraProjectMappingTable(this, 'ProjectMappingTable', { removalPolicy });
-    const userMapping = new JiraUserMappingTable(this, 'UserMappingTable', { removalPolicy });
-    const workspaceRegistry = new JiraWorkspaceRegistryTable(this, 'WorkspaceRegistryTable', { removalPolicy });
-    this.projectMappingTable = projectMapping.table;
-    this.userMappingTable = userMapping.table;
-    this.workspaceRegistryTable = workspaceRegistry.table;
+    this.projectMappingTable = integrationTable(this, 'ProjectMappingTable', { partitionKey: 'jira_project_identity', removalPolicy });
+    this.userMappingTable = integrationTable(this, 'UserMappingTable', {
+      partitionKey: 'jira_identity', ttl: true, platformUserIndex: true, removalPolicy,
+    });
+    this.workspaceRegistryTable = integrationTable(this, 'WorkspaceRegistryTable', { partitionKey: 'jira_cloud_id', removalPolicy });
 
     // Dedup table: Jira webhook retries collapse to a single processor invoke
     // within the 8h TTL window. Issue events use the event timestamp; comment
     // events use the stable Jira comment ID.
-    this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
-      partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      timeToLiveAttribute: 'ttl',
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      removalPolicy,
-    });
+    this.webhookDedupTable = webhookDedupTable(this, removalPolicy);
 
     // --- Webhook signing secret (placeholder, populated by `bgagent jira setup`) ---
     // Per-tenant OAuth tokens live in `bgagent-jira-oauth-<cloudId>` secrets

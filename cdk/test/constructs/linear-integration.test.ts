@@ -58,6 +58,20 @@ describe('LinearIntegration construct', () => {
     template.resourceCountIs('AWS::DynamoDB::Table', 6);
   });
 
+  // The logical IDs of a deployed stack: under another ID or key the table is replaced and its rows are lost.
+  test.each<[string, string, string | undefined, string[]]>([
+    ['LinearIntegrationProjectMappingTableF152E008', 'linear_project_id', undefined, []],
+    ['LinearIntegrationUserMappingTable0DA89F6E', 'linear_identity', 'ttl', ['PlatformUserIndex']],
+    ['LinearIntegrationWorkspaceRegistryTableC954A5BC', 'linear_workspace_id', undefined, []],
+    ['LinearIntegrationWebhookDedupTable1162175A', 'dedup_key', 'ttl', []],
+  ])('table %s: partition key %s, TTL attribute %s, indexes %j, DeletionPolicy Delete', (logicalId, partitionKey, ttlAttribute, indexNames) => {
+    const table = template.toJSON().Resources[logicalId];
+    expect(table).toMatchObject({ Type: 'AWS::DynamoDB::Table', DeletionPolicy: 'Delete' });
+    expect(table.Properties.KeySchema).toEqual([{ AttributeName: partitionKey, KeyType: 'HASH' }]);
+    expect(table.Properties.TimeToLiveSpecification?.AttributeName).toBe(ttlAttribute);
+    expect((table.Properties.GlobalSecondaryIndexes ?? []).map((index: { IndexName: string }) => index.IndexName)).toEqual(indexNames);
+  });
+
   test('workspace registry table is keyed on linear_workspace_id', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       KeySchema: [{ AttributeName: 'linear_workspace_id', KeyType: 'HASH' }],

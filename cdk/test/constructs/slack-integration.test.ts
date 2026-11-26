@@ -57,6 +57,19 @@ describe('SlackIntegration construct', () => {
     template.resourceCountIs('AWS::DynamoDB::Table', 5);
   });
 
+  // The logical IDs of a deployed stack: under another ID or key the table is replaced and its rows are lost.
+  test.each<[string, string, string | undefined, string[]]>([
+    ['SlackIntegrationInstallationTableFEA78EC1', 'team_id', 'ttl', []],
+    ['SlackIntegrationUserMappingTable72394219', 'slack_identity', 'ttl', ['PlatformUserIndex']],
+    ['SlackIntegrationChannelMappingTable498891AF', 'channel_id', undefined, []],
+  ])('table %s: partition key %s, TTL attribute %s, indexes %j, DeletionPolicy Delete', (logicalId, partitionKey, ttlAttribute, indexNames) => {
+    const table = template.toJSON().Resources[logicalId];
+    expect(table).toMatchObject({ Type: 'AWS::DynamoDB::Table', DeletionPolicy: 'Delete' });
+    expect(table.Properties.KeySchema).toEqual([{ AttributeName: partitionKey, KeyType: 'HASH' }]);
+    expect(table.Properties.TimeToLiveSpecification?.AttributeName).toBe(ttlAttribute);
+    expect((table.Properties.GlobalSecondaryIndexes ?? []).map((index: { IndexName: string }) => index.IndexName)).toEqual(indexNames);
+  });
+
   test('command processor receives the channel-mapping table env var', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {

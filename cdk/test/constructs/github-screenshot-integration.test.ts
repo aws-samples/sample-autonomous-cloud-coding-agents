@@ -170,6 +170,7 @@ describe('GitHubScreenshotIntegration construct', () => {
       TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
     });
+    template.hasResource('AWS::DynamoDB::Table', { DeletionPolicy: 'Delete', Properties: { KeySchema: [{ AttributeName: 'dedup_key', KeyType: 'HASH' }] } });
   });
 });
 

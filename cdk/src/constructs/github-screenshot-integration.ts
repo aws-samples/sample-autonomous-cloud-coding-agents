@@ -29,6 +29,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { webhookDedupTable } from './integration-parts';
 import { ScreenshotBucket } from './screenshot-bucket';
 import { ComponentUaAspect } from './solution-ua-aspect';
 
@@ -189,13 +190,7 @@ export class GitHubScreenshotIntegration extends Construct {
     });
 
     // --- Dedup table ---
-    this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
-      partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      timeToLiveAttribute: 'ttl',
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      removalPolicy,
-    });
+    this.webhookDedupTable = webhookDedupTable(this, removalPolicy);
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const commonBundling: lambda.BundlingOptions = {

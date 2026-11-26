@@ -61,6 +61,20 @@ describe('JiraIntegration construct', () => {
     template = Template.fromStack(stack);
   });
 
+  // The logical IDs of a deployed stack: under another ID or key the table is replaced and its rows are lost.
+  test.each<[string, string, string | undefined, string[]]>([
+    ['JiraIntegrationProjectMappingTable2A2BCC03', 'jira_project_identity', undefined, []],
+    ['JiraIntegrationUserMappingTable50D682D2', 'jira_identity', 'ttl', ['PlatformUserIndex']],
+    ['JiraIntegrationWorkspaceRegistryTableFF87F094', 'jira_cloud_id', undefined, []],
+    ['JiraIntegrationWebhookDedupTable06C09AAB', 'dedup_key', 'ttl', []],
+  ])('table %s: partition key %s, TTL attribute %s, indexes %j, DeletionPolicy Delete', (logicalId, partitionKey, ttlAttribute, indexNames) => {
+    const table = template.toJSON().Resources[logicalId];
+    expect(table).toMatchObject({ Type: 'AWS::DynamoDB::Table', DeletionPolicy: 'Delete' });
+    expect(table.Properties.KeySchema).toEqual([{ AttributeName: partitionKey, KeyType: 'HASH' }]);
+    expect(table.Properties.TimeToLiveSpecification?.AttributeName).toBe(ttlAttribute);
+    expect((table.Properties.GlobalSecondaryIndexes ?? []).map((index: { IndexName: string }) => index.IndexName)).toEqual(indexNames);
+  });
+
   test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {
     template.resourceCountIs('AWS::SecretsManager::Secret', 1);
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
