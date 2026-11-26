@@ -47,7 +47,7 @@ process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 process.env.QUEUE_MAX_AGE_SECONDS = '86400';
 process.env.TASK_RETENTION_DAYS = '90';
 
-import { handler, isQueueHeartbeatDue } from '../../src/handlers/reconcile-admission-queue';
+import { handler, queueHeartbeatMark } from '../../src/handlers/reconcile-admission-queue';
 
 /** A QUEUED StatusIndex row as the DDB low-level client returns it. */
 function queuedRow(opts: {
@@ -483,13 +483,40 @@ describe('reconcile-admission-queue — #331 regression (fan-out burst)', () => 
 });
 
 describe('reconcile-admission-queue — queue heartbeat (#1066)', () => {
-  test('each 15-minute mark fires once on the 1-minute schedule', () => {
-    expect(isQueueHeartbeatDue(0)).toBe(false);
-    expect(isQueueHeartbeatDue(899)).toBe(false);
-    expect(isQueueHeartbeatDue(900)).toBe(true);
-    expect(isQueueHeartbeatDue(959)).toBe(true);
-    expect(isQueueHeartbeatDue(960)).toBe(false);
-    expect(isQueueHeartbeatDue(1800)).toBe(true);
+  test('the mark counts whole 15-minute periods queued', () => {
+    expect([0, 899, 900, 1799, 1800, 2700].map(queueHeartbeatMark)).toEqual([0, 0, 1, 1, 2, 3]);
+  });
+
+  /** A full queue for user u1 with one task queued for ``age`` seconds; ``claim`` scripts the mark's conditional write. */
+  function fullQueue(age: number, claim: () => Promise<unknown> = () => Promise.resolve({})): void {
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') return Promise.resolve({ Items: [queuedRow({ task_id: 'LONG', user_id: 'u1', created_at: isoAge(age) })] });
+      if (cmd._type === 'GetItem') return Promise.resolve({ Item: { active_count: { N: '3' } } });
+      if (cmd._type === 'UpdateItem' && cmd.input.UpdateExpression === 'SET queue_heartbeat_mark = :mark') return claim();
+      return Promise.resolve({});
+    });
+  }
+  const announced = () => sentDdbCommands('PutItem').map(c => c.input.Item).filter(i => i.event_type.S === 'admission_queued');
+
+  test('a mark is announced by the first run past it, even when runs drift past the minute after it', async () => {
+    fullQueue(961);
+    await handler();
+    expect(announced()).toHaveLength(1);
+    const claim = sentDdbCommands('UpdateItem').find(c => c.input.UpdateExpression === 'SET queue_heartbeat_mark = :mark')!;
+    expect(claim.input.ExpressionAttributeValues[':mark']).toEqual({ N: '1' });
+    expect(claim.input.ConditionExpression).toContain('#s = :queued');
+  });
+
+  test('a mark already announced (the conditional write fails) is not announced again', async () => {
+    fullQueue(1000, () => Promise.reject(Object.assign(new Error('claimed'), { name: 'ConditionalCheckFailedException' })));
+    await handler();
+    expect(announced()).toEqual([]);
+  });
+
+  test('a claim that fails for another reason sends nothing and does not fail the run', async () => {
+    fullQueue(1000, () => Promise.reject(new Error('throttled')));
+    await expect(handler()).resolves.toEqual(expect.objectContaining({ queued_seen: 1 }));
+    expect(announced()).toEqual([]);
   });
 
   test('a task still waiting past a mark gets an admission_queued event with waited_s', async () => {
