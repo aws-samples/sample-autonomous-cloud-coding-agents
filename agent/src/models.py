@@ -129,6 +129,8 @@ class TaskConfig(BaseModel):
     github_token: str = ""
     aws_region: str
     anthropic_model: str = "global.anthropic.claude-opus-5-5"
+    # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
+    # page summarization).
     # Bedrock cannot invoke Claude 4.x on demand by a bare foundation-model id:
     # this must be a cross-region inference-profile id (geo prefix).
     haiku_model: str = "global.anthropic.claude-haiku-5-5"

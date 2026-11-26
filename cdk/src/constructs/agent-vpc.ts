@@ -29,6 +29,7 @@ const DEFAULT_AGENT_VPC_AZS = 2;
 
 const MIN_AGENT_VPC_AZS = 2;
 
+// Six covers the largest current regional AZ count.
 const MAX_RESERVED_NETWORK_AZS = 6;
 
 /** Reserve unused AZ address slots without allocating subnets or other resources. */

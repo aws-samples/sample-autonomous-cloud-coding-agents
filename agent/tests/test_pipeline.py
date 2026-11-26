@@ -2429,6 +2429,8 @@ class TestInertBuildIsNotReportedAsPassed:
 
 class TestTurnsCompletedAtTheCap:
     def test_max_turns_stop_is_clamped_to_the_cap(self):
+        # The runner's count can pass the cap: the CLI may ask the model again without counting
+        # a turn. It marks the max-turns result ``is_error``, so the status is "error".
         run = _run_pipeline(
             AgentResult(
                 status="error",
@@ -2445,6 +2447,8 @@ class TestTurnsCompletedAtTheCap:
 
 class TestTurnsCompletedCountsTheAnswers:
     def test_completed_task_records_its_answers_not_the_cli_count(self):
+        # The CLI's ``num_turns`` grows with every tool result, so it can pass the cap on a
+        # task that never reached it.
         run = _run_pipeline(
             AgentResult(status="success", turns=62, num_turns=90, cost_usd=0.01),
             max_turns=80,
@@ -2997,7 +3001,7 @@ class TestWhatTheAgentStepIsGiven:
         }
 
     def test_linear_server_committed_to_the_repository_is_removed(self, agent_step, tmp_path):
-        # ADR-016: the agent must have no Linear tools.
+        # ADR-016: the agent must have no Linear tools. The CLI loads the repository's .mcp.json.
         (tmp_path / ".mcp.json").write_text(
             json.dumps(
                 {

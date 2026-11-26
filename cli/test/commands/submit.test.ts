@@ -840,6 +840,7 @@ describe('submit command', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     });
 
+    // API Gateway ends the request after 29 s; the confirmation runs on behind it.
     const gatewayTimeout = () => new ApiError(504, 'HTTP_ERROR', 'HTTP 504: Gateway Timeout', '');
     const stillPending = { task_id: 'task-1', status: 'PENDING_UPLOADS' };
     const refused = (status: string) => new ApiError(

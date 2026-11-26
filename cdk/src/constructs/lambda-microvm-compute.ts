@@ -691,6 +691,7 @@ export class LambdaMicrovmCompute extends Construct {
             resumeTimeoutInSeconds: LIFECYCLE_HOOK_TIMEOUT_SECONDS,
           },
           microvmImageHooks: {
+            // The service requires ready when runtime hooks are enabled.
             ready: HOOK_ENABLED,
             readyTimeoutInSeconds: READY_HOOK_TIMEOUT_SECONDS,
             validate: HOOK_ENABLED,
@@ -702,6 +703,8 @@ export class LambdaMicrovmCompute extends Construct {
 
       this.imageIdentifier = this.image.attrImageArn;
       this.imageArn = this.image.attrImageArn;
+      // `attrLatestActiveImageVersion` is empty on the first create: the build
+      // has not finished.
       this.imageVersion = props.managedImageVersion;
     } else if (props.externalImageIdentifier) {
       this.imageVersion = props.externalImageVersion;
@@ -898,6 +901,8 @@ export class LambdaMicrovmStack extends NestedStack {
     }
     // CDK creates bucket-cleanup providers at stack scope, outside Compute.
     Tags.of(this).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);
+    // Automatic IAM names include the generated nested-stack name and can lose
+    // their role suffix to truncation.
     const roleName = (suffix: string): string => {
       const name = `${props.deploymentName}-${suffix}`;
       if (Token.isUnresolved(name) || !/^[A-Za-z0-9+=,.@_-]{1,64}$/.test(name)) {

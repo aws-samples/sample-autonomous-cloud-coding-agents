@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 ARTIFACT_KEY_PREFIX = "artifacts"
 
+# Observed: a model that started a background ``Workflow`` (Claude CLI tool) ended its
+# final message with "Use /workflows to watch live progress."
 _DEFERRAL_MARKERS = (
     "watch live progress",
     "the workflow is now running in the background",

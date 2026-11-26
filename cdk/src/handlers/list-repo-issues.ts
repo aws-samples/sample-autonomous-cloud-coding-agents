@@ -30,9 +30,11 @@ import { isValidRepo } from './shared/validation';
 const PAGE_SIZE = 50;
 // GitHub's issues endpoint also lists pull requests and has no parameter that leaves them out; a page holds at most 100 items.
 const GITHUB_PAGE_SIZE = 100;
+// GitHub takes between one and two seconds for a page of 100.
 const GITHUB_MAX_PAGES = 3;
 const GITHUB_TIMEOUT_MS = 8_000;
 
+// GitHub allows a personal access token 5,000 calls an hour.
 const CACHE_TTL_MS = 60_000;
 const cache = new Map<string, { readonly body: ListRepoIssuesResponse; readonly expiresAt: number }>();
 
@@ -96,6 +98,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const token = await resolveGitHubToken(config.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN);
     const signal = AbortSignal.timeout(GITHUB_TIMEOUT_MS);
+    // The list is sorted by update time: an update between two reads pushes the last item of one page onto the next, where it is read again.
     const issues = new Map<number, GitHubIssue>();
     for (let page = 1; page <= GITHUB_MAX_PAGES && issues.size < PAGE_SIZE; page++) {
       const url = `https://api.github.com/repos/${repo}/issues?state=open&sort=updated&direction=desc&per_page=${GITHUB_PAGE_SIZE}&page=${page}`;

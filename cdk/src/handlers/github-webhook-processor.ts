@@ -62,6 +62,8 @@ const POST_CAPTURE_RESERVE_MS = 30_000;
 
 const MIN_CAPTURE_BUDGET_MS = 15_000;
 
+// Managed providers post `deployment_status` when their build finishes, which can be
+// before the PR for the SHA exists: 5-15s measured on Vercel, similar on Netlify and Amplify.
 const PR_LOOKUP_RETRY_DELAY_0_MS = 0;
 const PR_LOOKUP_RETRY_DELAY_1_MS = 5_000;
 const PR_LOOKUP_RETRY_DELAY_2_MS = 10_000;
@@ -438,6 +440,7 @@ interface OpenPr {
   readonly title: string;
   readonly body: string;
   readonly headRefName: string;
+  // GitHub returns `head.repo: null` for a pull request from a fork that was deleted.
   readonly headRepo: string | null;
 }
 
@@ -587,6 +590,8 @@ async function findPullRequestForSha(
       && typeof baseRepo === 'string' && baseRepo.toLowerCase() === here;
   });
   if (openPulls.length === 0) return { ok: false, kind: 'retryable', reason: 'pr_not_linked' };
+  // For a stacked PR chain commit-pulls also lists every PR stacked on top of
+  // the commit's own: their history contains the commit.
   const heads = openPulls.filter((p) => p.head?.sha === sha);
   const owner = (heads.length > 0 ? heads : openPulls).reduce((a, b) => (b.number! < a.number! ? b : a));
   const headRepo = owner.head?.repo?.full_name;
@@ -624,6 +629,7 @@ async function persistScreenshotUrl(
     return lookupFailed(new Error('GitHub named no head repository for the pull request'));
   }
   try {
+    // GitHub answers to any letter case of a repository name and reports its own.
     if (pr.headRepo.toLowerCase() !== repo.toLowerCase()) {
       throw new Error('The branch of the pull request is in another repository');
     }
@@ -679,6 +685,8 @@ function renderCommentBody(publicUrl: string, previewUrl: string): string {
   ].join('\n');
 }
 
+// Linear collapses linked-image syntax (`[![alt](img)](url)`) to a link with a
+// tiny preview; plain `![alt](url)` renders inline.
 function renderLinearCommentBody(publicUrl: string, previewUrl: string): string {
   const safePreview = encodeMarkdownUrl(previewUrl);
   return [

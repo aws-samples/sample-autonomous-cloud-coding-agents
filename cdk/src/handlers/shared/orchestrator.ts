@@ -75,6 +75,8 @@ export interface PollState {
   readonly microvmOwnershipLost?: boolean;
 }
 
+// Observed on Lambda MicroVMs: a MicroVM with a broken hook sat in `RUNNING` indefinitely with no
+// `stateReason`. `GetMicrovm` shows a VM that died, not a guest that hangs.
 function heartbeatLivenessApplies(computeType: ComputeType): boolean {
   switch (computeType) {
     case 'agentcore':
@@ -1093,6 +1095,7 @@ export async function failTask(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+  // Durable Execution retries a step that throws, and callers such as orchestrate-task rethrow after failTask.
   if (transitioned) {
     await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
     if (releaseConcurrency) {

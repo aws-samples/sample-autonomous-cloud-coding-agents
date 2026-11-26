@@ -18,6 +18,7 @@
  */
 
 import type { Severity } from './types';
+// cedar-wasm's `nodejs` build is CommonJS, and its published types expose no working ESM entry under Node Lambda.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const cedar = require('@cedar-policy/cedar-wasm/nodejs');
 

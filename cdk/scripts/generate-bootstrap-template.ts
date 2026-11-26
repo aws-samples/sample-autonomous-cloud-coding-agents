@@ -137,6 +137,8 @@ export function buildTemplate(): any {
         },
         // A JSON string, not a mapping: the CLI re-serialises a mapping with every statement key
         // and action on its own line, which puts the body over the 51,200 inline ceiling (#864).
+        // CloudFormation accepts a JSON string for a `Json`-typed property, and IAM stores it as a
+        // parsed policy document (observed).
         PolicyDocument: JSON.stringify(policyDoc),
         Description: `ABCA Bootstrap: ${policyName} permissions for CloudFormation execution role`,
       },

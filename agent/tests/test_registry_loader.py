@@ -53,6 +53,7 @@ class TestApplyMcpAssets:
         }
 
     def test_normalizes_transport_to_type(self, tmp_path):
+        # The SDK recognizes a .mcp.json entry by the discriminant key `type`.
         runtime = {
             "transport": "sse",
             "url": "https://x/sse",
@@ -495,6 +496,7 @@ class TestMcpJsonGuardKeepsGitUsable(_GitClone):
             (repo / ".mcp.json").write_text('{"mcpServers": {"docs": {"command": "docs-mcp"}}}\n')
             files.append(".mcp.json")
         if kind == "re-included":
+            # A .gitignore that re-includes the file outranks the clone's exclude file.
             (repo / ".gitignore").write_text("!.mcp.json\n")
             files.append(".gitignore")
         self._git(repo, "add", "--", *files)
@@ -551,6 +553,7 @@ class TestMcpJsonGuardKeepsGitUsable(_GitClone):
 
     @pytest.mark.parametrize("kind", ["untracked", "tracked", "re-included"])
     def test_refused_add_of_the_file_comes_without_git_advice(self, tmp_path, monkeypatch, kind):
+        # In git's own language its advice lines begin "hint:".
         monkeypatch.setenv("LC_ALL", "C")
         repo = self._clone(tmp_path, kind)
         refused = self._git(repo, "add", ".mcp.json", check=False)
@@ -571,6 +574,8 @@ class TestMcpJsonGuardKeepsGitUsable(_GitClone):
         ],
     )
     def test_git_command_works_in_the_clone(self, tmp_path, kind, dirty, command):
+        # To git an intent-to-add index entry is an uncommitted change: stash, rebase,
+        # cherry-pick, a merge that is not a fast-forward and reset --hard refuse to run.
         repo = self._clone(tmp_path, kind)
         if dirty:
             (repo / "code.txt").write_text("work in progress\n")

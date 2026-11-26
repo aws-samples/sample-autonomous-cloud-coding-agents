@@ -169,6 +169,7 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
   });
 
   test('the registry scan is PAGINATED — a revoked workspace on page 2 is still reported', async () => {
+    // A DynamoDB Scan returns at most 1 MB per call and reports no error for what is left.
     ddbSend
       .mockResolvedValueOnce({ Items: [row({ linear_workspace_id: 'ws-page1' })], LastEvaluatedKey: { k: 'next' } })
       .mockResolvedValueOnce({ Items: [row({ linear_workspace_id: 'ws-page2', status: 'revoked' })] });
@@ -243,6 +244,7 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     });
 
     test('the RECORDED subject is what gets minted under, not a derived one', async () => {
+      // The vault does not fail a mint under the wrong subject: it returns no token.
       ddbSend.mockResolvedValue({ Items: [vaultRow()] });
       const mint = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_from_vault' });
       await checkLinearWorkspaceAuth({

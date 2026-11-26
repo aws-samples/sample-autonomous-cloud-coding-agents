@@ -37,6 +37,7 @@ const NOW = Date.parse('2026-11-20T12:00:00.000Z');
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 
+// GitHub writes a time in whole seconds.
 const ago = (ms: number): string => new Date(NOW - ms).toISOString().replace('.000Z', 'Z');
 
 let fetchMock: jest.SpiedFunction<typeof fetch>;
@@ -608,6 +609,7 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
 const inOrchestration = (subIssueId: string): TaskRecord['channel_metadata'] =>
   ({ orchestration_id: 'orch_1', orchestration_sub_issue_id: subIssueId });
 
+// GitHub lets an owner name be 39 characters at most.
 const repoOfLength = (length: number): string => `${'o'.repeat(39)}/${'n'.repeat(length - 40)}`;
 
 describe('pullRequestCandidate', () => {

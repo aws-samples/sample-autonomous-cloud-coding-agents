@@ -47,6 +47,7 @@ function normalizeFileStem(input) {
   return `${cleaned.charAt(0).toUpperCase()}${cleaned.slice(1)}`;
 }
 
+/** The route Starlight serves a page at: `using/Slack-setup-guide.md` -> `/using/slack-setup-guide`. */
 function routeOf(target) {
   const slug = target.replace(/\.mdx?$/i, '').toLowerCase();
   return slug === 'index' ? '/' : `/${slug}`;

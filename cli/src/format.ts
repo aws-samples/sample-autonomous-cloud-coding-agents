@@ -159,6 +159,7 @@ export function formatStatusSnapshot(
   events: readonly TaskEvent[],
   now: number = Date.now(),
 ): string {
+  // ULIDs are lexicographically time-sortable.
   const sorted = [...events].sort((a, b) => b.event_id.localeCompare(a.event_id));
 
   const header = `Task ${task.task_id} — ${task.status} (${elapsedDescription(task, now)})`;

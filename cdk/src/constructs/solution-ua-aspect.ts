@@ -28,6 +28,7 @@ const APP_ID_MAX_LEN = 50;
 
 const UA_TOKEN_UNSAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/g;
 
+// The app-id value charset (`UA_VALUE_ESCAPE_REGEX` in the SDK) includes `#`.
 function sanitizeAppId(value: string): string {
   return value
     .split('#')

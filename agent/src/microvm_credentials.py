@@ -92,6 +92,7 @@ class ScopedCredentialBroker:
                 "AWS_SESSION_TOKEN": "",
                 "AWS_PROFILE": "",
                 "AWS_DEFAULT_PROFILE": "",
+                # Empty files suppress ~/.aws profile/SSO/process credentials.
                 "AWS_CONFIG_FILE": os.devnull,
                 "AWS_SHARED_CREDENTIALS_FILE": os.devnull,
                 "AWS_WEB_IDENTITY_TOKEN_FILE": "",

@@ -36,6 +36,7 @@ export const LINEAR_OAUTH_SCOPES = [
 
 /**
  * Linear OAuth token response shape (RFC 6749 §5.1 + Linear's extensions).
+ * Observed: Linear returns `scope` as a space-separated string for apps created after Dec 2023.
  */
 export interface LinearTokenResponse {
   readonly access_token: string;
@@ -69,7 +70,8 @@ export interface StoredLinearOauthToken {
   /** Cognito sub of the admin who ran `bgagent linear setup`. Audit only. */
   readonly installed_by_platform_user_id: string;
   /**
-   * Per-workspace Linear webhook signing secret (`lin_wh_…`).
+   * Per-workspace Linear webhook signing secret (`lin_wh_…`). Linear generates a signing
+   * secret per webhook subscription, and subscriptions are workspace-scoped.
    *
    * Optional for back-compat: tokens written before the per-workspace
    * signing flow won't have it, and the receiver falls back to the

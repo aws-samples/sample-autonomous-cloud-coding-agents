@@ -33,6 +33,7 @@ const PLATFORM = {
   bedrockGeoRegion: null,
 };
 const BLUEPRINT_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:AcmeRepoToken-XyZ123';
+// The default starts with its Bedrock geography, and no geography name holds a dot.
 const BARE_DEFAULT_MODEL = PLATFORM_REPO_DEFAULTS.model_id.slice(PLATFORM_REPO_DEFAULTS.model_id.indexOf('.') + 1);
 
 describe('formatRepoConfigForDisplay', () => {

@@ -50,9 +50,11 @@ def _sigv4_auth(region: str) -> httpx2.Auth:
         raise RuntimeError("no AWS credentials available to sign the Gateway request")
 
     class _SigV4(httpx2.Auth):
+        # SigV4 signs a hash of the body, so httpx2 must buffer it before auth.
         requires_request_body = True
 
         def auth_flow(self, request: httpx2.Request) -> Generator[httpx2.Request, httpx2.Response]:
+            # botocore's RefreshableCredentials refreshes when it is frozen.
             frozen = credentials.get_frozen_credentials()
             aws_request = AWSRequest(
                 method=request.method,

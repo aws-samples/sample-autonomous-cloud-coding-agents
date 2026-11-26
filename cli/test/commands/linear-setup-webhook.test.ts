@@ -345,6 +345,7 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       if (cmd instanceof CreateSecretCommand) return Promise.resolve({ ARN: 'arn:x' });
       return Promise.resolve({});
     });
+    // With `actor=app` the Linear token belongs to the app's bot user, not to whoever ran `setup`.
     fetchMock.mockImplementation(async () => ({
       ok: true,
       status: 200,
@@ -674,6 +675,7 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
     });
 
     test('and not a workspace whose URL key cannot be a slug, under a slug that is free', async () => {
+      // Linear has URL keys shorter than the 4 characters of the shortest slug (linear.app/n8n).
       stubSecrets(undefined);
       stubRegistry(() => Promise.resolve({ Items: [] }));
       authorize({ id: 'org-n8n', urlKey: 'n8n' });

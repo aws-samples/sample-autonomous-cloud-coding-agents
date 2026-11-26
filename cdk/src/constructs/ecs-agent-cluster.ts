@@ -346,6 +346,7 @@ export class EcsAgentCluster extends Construct {
     this.taskDefinition = makeTaskDef('TaskDef', buildCpu, buildMemory, {
       BUILD_VERIFY_TIMEOUT_S: '3600',
       JEST_MAX_WORKERS: '4',
+      // mise runs a task's `depends` in parallel, up to MISE_JOBS (default 4).
       MISE_JOBS: '1',
       // pre-commit/prek read SKIP as a comma-separated list of hook ids to skip.
       SKIP: 'monorepo-tests-pre-push',
@@ -415,6 +416,7 @@ export class EcsAgentCluster extends Construct {
         stack.formatArn({
           service: 'bedrock',
           resource: 'inference-profile',
+          // Inference-profile ARNs are regional and account-qualified for every geography, `global.` included.
           resourceName: `${bedrockGeoRegion}.${modelId}`,
           arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
         }),

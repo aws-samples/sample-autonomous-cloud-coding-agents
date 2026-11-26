@@ -279,6 +279,7 @@ describe('linear list-projects --slug', () => {
   let errSpy: jest.SpiedFunction<typeof console.error>;
 
   beforeEach(() => {
+    // A process.exitCode left set becomes the exit code of Jest.
     process.exitCode = undefined;
     smSend.mockReset().mockResolvedValue({ SecretString: JSON.stringify({ access_token: 'tok-acme' }) });
     cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
@@ -331,6 +332,7 @@ describe('linear list-projects --slug', () => {
     expect(err).toEqual([]);
   });
 
+  // Linear answers a token it refuses with HTTP 200 and an `errors` array, with no data.
   test.each([
     ['an `errors` answer', { ok: true, status: 200, body: { errors: [{ message: 'Authentication required' }] } }, 'Authentication required'],
     ['an HTTP error', { ok: false, status: 401 }, '401'],

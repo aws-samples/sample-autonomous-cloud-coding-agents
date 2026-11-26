@@ -26,6 +26,7 @@ import { handler as showHandler } from '../../src/handlers/registry-show';
 import type { RegistryClient } from '../../src/handlers/shared/registry/client';
 import { RegistryResolutionError } from '../../src/handlers/shared/registry/types';
 
+// `publish` is a standalone fn: asserting on it as a member of the object trips @typescript-eslint/unbound-method.
 const mockPublish = jest.fn();
 const mockClient: jest.Mocked<RegistryClient> = {
   publish: mockPublish,

@@ -22,6 +22,8 @@ interface SecretPattern {
   readonly regex: RegExp;
 }
 
+// MongoDB Atlas hands out "<password>". A password left inside such brackets
+// usually holds a digit or mixes case.
 const NOT_ONLY_A_PLACEHOLDER = String.raw`(?!(?:\$?(?:\{[A-Za-z_.]*\}|\{[0-9]{1,2}\}|\{\{[A-Za-z_.]*\}\})|%[sv]|%\([A-Za-z_.]+\)s|<[a-z_-]+>|<[A-Z_-]+>)@)`;
 
 const PATTERNS: readonly SecretPattern[] = [
@@ -45,6 +47,7 @@ const PATTERNS: readonly SecretPattern[] = [
   {
     name: 'GITHUB_URL_TOKEN',
     // GitHub App tokens are about 520 characters since 2026, and vary.
+    // The u flag makes {1,512} count characters, not UTF-16 units.
     regex: new RegExp(String.raw`x-access-token:${NOT_ONLY_A_PLACEHOLDER}(?:[^\s@:"']+|[^\s@"']{1,512})@`, 'gu'),
   },
   {

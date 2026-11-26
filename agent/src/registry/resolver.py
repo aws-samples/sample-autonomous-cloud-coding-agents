@@ -109,6 +109,7 @@ def satisfies(v: SemVer, c: ParsedConstraint) -> bool:
     return v.major == c.major and v.minor == c.minor
 
 
+# AgentCore stores a plain version string with no native ``^``/``~`` matching.
 def select_highest(candidates: list[str], constraint: ParsedConstraint) -> str | None:
     best: SemVer | None = None
     for raw in candidates:

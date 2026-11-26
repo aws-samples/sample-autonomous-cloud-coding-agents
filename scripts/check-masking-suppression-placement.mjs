@@ -18,6 +18,7 @@ const IGNORE_SUPPRESSIONS = '--disable-nose' + 'm';
 // The word as semgrep finds it; `u` makes `i` fold letters the way semgrep's matcher does.
 const MENTION = /(?<![a-z0-9])nose[m]\w*/giu;
 const WELL_FORMED = /^nose[m]grep: [\w.-]+ -- \S/;
+// semgrep reads a rule id in more places and spellings than the documented one, and all of them contain the id.
 const MASKING_RULE = /(?:ts|py)-silent-success-masking/g;
 
 function cannotRun(message) {
@@ -66,6 +67,8 @@ const candidates = tracked.split('\0').filter((f) => f && !f.startsWith('.semgre
 if (!candidates.some((f) => SOURCE_EXT.test(f))) cannotRun('git lists no tracked source file here. Run from the repository root.');
 
 const { found, scanned } = scan();
+// semgrep honours a suppression in workflows, Dockerfiles, shell scripts and configuration too, and picks its files
+// by more than the name. It reads a source file that holds a NUL byte and does not read through a symbolic link.
 const files = candidates.filter((f) => (!MARKDOWN.test(f) || scanned.has(f)) && lstatSync(f).isFile());
 const malformed = [];
 const unbound = [];

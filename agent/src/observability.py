@@ -55,6 +55,8 @@ def current_otel_trace_id() -> str | None:
         ctx = span.get_span_context()
         if not ctx.is_valid:
             return None
+        # The OTEL format, which CloudWatch Transaction Search takes as it is.
+        # The X-Ray console shows the same id as ``1-{8hex}-{24hex}``.
         return trace.format_trace_id(ctx.trace_id)
     except Exception as exc:
         log(

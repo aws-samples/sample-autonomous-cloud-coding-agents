@@ -79,6 +79,7 @@ describe('EcsComputeStrategy', () => {
 
       const call = mockSend.mock.calls[0][0];
       expect(call.input.cluster).toBe(CLUSTER_ARN);
+      // No revision: RunTask on a deregistered revision fails with "TaskDefinition is inactive" (ABCA-660/663).
       expect(call.input.taskDefinition).toBe('agent');
       expect(call.input.launchType).toBe('FARGATE');
       expect(call.input.clientToken).toBe('TASK001');

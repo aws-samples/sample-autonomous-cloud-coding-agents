@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+# A caller's `script 2>&1 | tee log` reports tee's exit status, not this script's.
 # shellcheck disable=SC2154 # $? inside the trap string is evaluated at trap time
 trap 'rc=$?; [[ $rc -ne 0 ]] && echo "!! package-microvm-artifact.sh FAILED (exit ${rc}) !!" >&2; exit $rc' ERR
 
@@ -149,6 +150,8 @@ ARTIFACT_CHECKSUM="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["ch
 echo "    ${ARTIFACT_INFO}"
 
 if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
+  # CloudFormation builds a new image version only when CodeArtifact.Uri changes:
+  # overwriting a fixed key signals no update.
   ARTIFACT_KEY="${ARTIFACT_BASE_KEY%.zip}-${ARTIFACT_SHA256}.zip"
 else
   ARTIFACT_KEY="${ARTIFACT_BASE_KEY}"

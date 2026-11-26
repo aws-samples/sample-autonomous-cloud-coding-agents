@@ -15,6 +15,8 @@ _KEY_PAIR = "AKIAIOSFODNN7EXAMPLE:" + "A1b2" * 10
 
 _LETTERS_AND_DIGITS = "Passw0rd" + "123"
 
+# A GitHub App installation token of the stateless format is ghs_<app id>_<JWT>:
+# three base64url parts, which may hold "-" and "_", joined by dots.
 _APP_TOKEN = (
     "gh" + "s_123456_" + ".".join(["eyJ" + "hbGciOi" * 5, "eyJ" + "pYXQi-_" * 40, "s1G-n_" * 30])
 )
@@ -223,6 +225,7 @@ class TestScanToolOutput:
         assert "ghs_secret123" not in result.redacted_content
 
     def test_detects_long_app_token_in_remote_url(self):
+        # GitHub App installation tokens are about 520 characters and vary in length.
         token = "ghs_123456_" + ".".join(["eyJ" + "a" * 200] * 3)
         result = scan_tool_output(f"x-access-token:{token}@github.com/owner/repo.git")
         assert result.redacted_content == "[REDACTED-GITHUB_URL_TOKEN]github.com/owner/repo.git"
@@ -455,6 +458,7 @@ class TestScanToolOutput:
             "password",
             "%d",
             "<pass.word>",
+            # MongoDB Atlas hands out "<password>": a real password can be left inside the brackets.
             "<" + _LETTERS_AND_DIGITS + ">",
             "{" + _LETTERS_AND_DIGITS + "}",
             "${" + _LETTERS_AND_DIGITS + "}",

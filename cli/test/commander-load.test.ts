@@ -33,6 +33,7 @@ test('plain Node loads commander with require(), as the compiled CLI does, and p
   const child = spawnSync(process.execPath, ['--eval', script], {
     cwd: CLI_ROOT,
     encoding: 'utf8',
+    // Node applies the flags of an inherited NODE_OPTIONS: one there can add a warning or hide one.
     env: { PATH: process.env.PATH },
   });
   expect({ status: child.status, stdout: child.stdout, stderr: child.stderr }).toEqual({ status: 0, stdout: 'function', stderr: '' });

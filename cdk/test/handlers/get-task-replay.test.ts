@@ -246,6 +246,7 @@ describe('get-task-replay handler', () => {
     const result = await handler(makeEvent());
     stdoutSpy.mockRestore();
 
+    // Lambda's limit applies to the proxy result as the runtime serializes it, where `body` is a string.
     expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThan(6 * 1024 * 1024);
     expect(JSON.parse(result.body).data.events_truncation.reason).toBe('max_bytes');
   });

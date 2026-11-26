@@ -25,6 +25,7 @@ import { makeClient } from '../../src/handlers/shared/ua';
 import { apiEvent } from './harness';
 
 const POLL_MS = 100;
+/** The emulator finishes a registry transition in about half a second. */
 const MAX_POLLS = 50;
 const TEST_TIMEOUT_MS = 30_000;
 

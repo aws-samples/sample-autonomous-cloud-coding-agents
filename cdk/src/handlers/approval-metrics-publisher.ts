@@ -204,6 +204,7 @@ function publish(view: StreamEventView): { emitted: number; skipped: number } {
     metadata: view.metadata,
   };
   const timestampMs = Date.parse(view.timestamp);
+  // CloudWatch silently drops an EMF line with a NaN timestamp at metric extraction.
   const safeTimestampMs = Number.isFinite(timestampMs) ? timestampMs : Date.now();
 
   if (!Number.isFinite(timestampMs)) {

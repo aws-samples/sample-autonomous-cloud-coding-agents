@@ -247,6 +247,8 @@ class TestStripLinearMcpServers:
         assert _read_mcp(str(tmp_path))["mcpServers"] == {"docs": {"command": "docs-mcp"}}
 
     def test_utf16_file_is_ignored_not_fatal(self, tmp_path):
+        # Windows PowerShell 5 writes `... > .mcp.json` as UTF-16 with a byte-order
+        # mark. The Claude CLI cannot parse that either.
         (tmp_path / ".mcp.json").write_bytes(b"\xff\xfe" + '{"mcpServers": {}}'.encode("utf-16-le"))
         assert strip_linear_mcp_servers(str(tmp_path)) == 0
 

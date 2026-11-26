@@ -22,6 +22,7 @@ import * as net from 'net';
 
 const refused = (host: string) => new RegExp(`cli tests must not open network connections, and this one tried to reach ${host}\\.`);
 const UNRESOLVED = 'outside.invalid';
+// A connection to 127.0.0.2 cannot leave the machine.
 const UNLISTED = '127.0.0.2';
 
 describe('network guard', () => {

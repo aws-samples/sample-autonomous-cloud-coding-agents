@@ -163,6 +163,8 @@ export function observabilityPolicy(): iam.PolicyDocument {
       }),
 
       new iam.PolicyStatement({
+        // CloudFormation tags the key in the CreateKey call, so an existing key
+        // always carries the `ABCA` tag by the time any of these run.
         sid: 'KMSCustomerManagedKeysLifecycle',
         effect: iam.Effect.ALLOW,
         actions: [

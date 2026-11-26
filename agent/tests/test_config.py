@@ -13,6 +13,8 @@ from config import (
 )
 from models import TaskConfig
 
+# `datetime.fromisoformat` accepts the last two, whose "Z" is not the zone suffix: parsed raw (ruff
+# FURB162's unsafe fix) the first raises TypeError in the resolver, the second is valid until 2099.
 _MALFORMED_EXPIRES_AT = ["this is not a date", "2099-01-01Z00:00:00", "2099-01-01Z00:00:00+00:00"]
 
 

@@ -96,6 +96,7 @@ export class DnsFirewall extends Construct {
     });
     baselineDomainList.applyRemovalPolicy(removalPolicy);
 
+    // CloudFormation requires a domain list to have at least one entry.
     // '.invalid' is an RFC 2606 reserved TLD that never resolves.
     const additionalDomainList = new route53resolver.CfnFirewallDomainList(this, 'AdditionalDomainList', {
       name: 'blueprint-additional',
@@ -142,6 +143,7 @@ export class DnsFirewall extends Construct {
       name: 'agent-vpc-dns-firewall',
     });
 
+    // CloudFormation does not recognise AWS::Route53Resolver::FirewallConfig in all regions.
     const firewallConfig = new cr.AwsCustomResource(this, 'FirewallConfig', {
       onCreate: {
         service: 'Route53Resolver',

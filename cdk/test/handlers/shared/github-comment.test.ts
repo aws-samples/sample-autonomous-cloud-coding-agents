@@ -504,6 +504,7 @@ describe('github-comment: sanitizeMarkdownLinkTarget (finding #12)', () => {
   });
 
   test('accepts a plain http URL unchanged', () => {
+    // Enterprise / self-hosted GitHub may serve over plain HTTP in internal networks.
     const ok = 'http://github.internal/owner/repo/pull/7';
     expect(sanitizeMarkdownLinkTarget(ok)).toBe(ok);
   });

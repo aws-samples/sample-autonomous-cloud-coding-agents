@@ -38,6 +38,7 @@ const FORMS = [
 ];
 const FORM = new RegExp(`^(?:${FORMS.join('|')})$`);
 
+// The keys gitleaks reads in a global allowlist, spelled as its documentation spells them.
 const KEYS = ['description', 'targetRules', 'condition', 'paths', 'commits', 'regexes', 'regexTarget', 'stopwords'];
 
 interface Allowlist {

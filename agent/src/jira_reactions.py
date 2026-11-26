@@ -269,6 +269,7 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
     return True
 
 
+# Jira's REST API has no lightweight reaction primitive.
 def comment_task_started(
     channel_source: str,
     channel_metadata: dict[str, str] | None,

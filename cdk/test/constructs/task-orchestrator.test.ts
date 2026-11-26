@@ -594,6 +594,7 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   const NAME_DERIVED_IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
   const EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/MicrovmExecutionRole';
   const CONNECTOR_ARN = 'arn:aws:lambda:us-east-1:123456789012:network-connector:nc-123';
+  // The Lambda-managed NO_INGRESS connector is service-owned: its account segment is the literal `aws`.
   const NO_INGRESS_ARN = 'arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:NO_INGRESS';
 
   function createMicrovmStack(config?: {

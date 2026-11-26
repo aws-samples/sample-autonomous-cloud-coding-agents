@@ -51,6 +51,7 @@ class TestTrajectoryStream:
         _TrajectoryWriter(task_id).write_policy_decision("Read", True, "permit", 0.1)
         second = _TrajectoryWriter(task_id)
 
+        # CreateLogStream answers ResourceAlreadyExistsException for a stream that exists.
         second.write_policy_decision("Edit", True, "permit", 0.1)
 
         assert second._failure_count == 0

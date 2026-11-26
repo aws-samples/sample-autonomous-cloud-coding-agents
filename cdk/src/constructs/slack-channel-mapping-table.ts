@@ -44,6 +44,7 @@ export interface SlackChannelMappingTableProps {
 /**
  * DynamoDB table mapping Slack channels to a default GitHub repository.
  * Schema: channel_id (PK) — composite key `{team_id}#{channel_id}`.
+ * A Slack channel id can repeat across teams.
  */
 export class SlackChannelMappingTable extends Construct {
   public readonly table: dynamodb.Table;

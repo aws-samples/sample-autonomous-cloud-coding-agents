@@ -85,7 +85,7 @@ describe('Slack channel adapter — the capability-gated surface', () => {
     const [, method, body] = slackFetchTsMock.mock.calls[0];
     expect(method).toBe('chat.update');
     expect(body).toMatchObject({ channel: 'C123', ts: '1700000000.005', text: 'panel v2' });
-    expect(body).not.toHaveProperty('thread_ts');
+    expect(body).not.toHaveProperty('thread_ts'); // chat.update targets a message ts, not a thread
   });
 
   test('upsertComment with no existing ref posts a fresh in-thread message', async () => {
@@ -102,6 +102,7 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('replaceCommentReaction clears only its OWN prior markers, then adds the target', async () => {
+    // Slack has no atomic reaction swap.
     await ch.replaceCommentReaction!({ commentId: '1700000000.009' }, thread, 'succeeded');
     const removes = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.remove');
     const adds = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add');

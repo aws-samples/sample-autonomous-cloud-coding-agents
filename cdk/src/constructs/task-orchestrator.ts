@@ -485,6 +485,8 @@ export class TaskOrchestrator extends Construct {
 
     if (props.microvmConfig) {
       const { imageArn } = props.microvmConfig;
+      // The Service Authorization Reference's `microvmImage` ARN ends at the image name, but the
+      // CLI and console show `<arn>:<version>` forms. An image name cannot contain `:`.
       const microvmImageResources = [imageArn, `${imageArn}:*`];
 
       this.fn.addToRolePolicy(new iam.PolicyStatement({

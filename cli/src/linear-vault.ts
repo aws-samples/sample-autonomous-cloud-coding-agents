@@ -69,6 +69,7 @@ export function linearVaultUserIdForSlug(workspaceSlug: string): string {
  * Create (or update, if it already exists) the CustomOauth2 credential provider
  * for a Linear workspace. Returns the provider name + the fixed callback URL the
  * operator must register as the Linear OAuth app's redirect_uri.
+ * Linear is not a built-in AgentCore Identity vault vendor, hence CustomOauth2.
  *
  * `created` is true only on the run that created the provider. The callback URL ends in
  * an id AgentCore mints at creation, so on that run it is not yet registered on the

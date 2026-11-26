@@ -219,13 +219,18 @@ describe('onEvent Delete', () => {
     ).rejects.toThrow('AccessDenied');
   });
 
+  // A cancelled create still gets a Delete during rollback, carrying a CFN placeholder rather than
+  // a registry id. DeleteRegistry answers a placeholder with a ValidationException.
   test.each([
+    // The CDK Provider framework answers a Delete carrying its CREATE_FAILED marker itself, without
+    // invoking the handler, so MISSING_PHYSICAL_ID is the marker that reaches it.
     ['the MISSING_PHYSICAL_ID marker', 'AWSCDK::CustomResourceProviderFramework::MISSING_PHYSICAL_ID'],
     ['a hyphenated non-id', 'AgentReg-1234'],
     ['an empty string', ''],
     ['undefined', undefined],
   ])('treats a Delete for a never-created registry (%s) as a no-op', async (_label, physicalId) => {
     routeSend({});
+    // The CDK Provider framework rejects a Delete response whose id differs from the request's.
     await expect(
       onEvent({
         RequestType: 'Delete',
@@ -569,6 +574,7 @@ describe('isComplete Delete', () => {
   });
 });
 
+// AWS refuses DeleteRegistry with a ConflictException while the registry holds a record.
 describe('Delete of a registry that holds records', () => {
   const DELETE = {
     RequestType: 'Delete' as const,
@@ -643,6 +649,7 @@ describe('Delete of a registry that holds records', () => {
     ]);
   });
 
+  // A record that is still being created or updated refuses its deletion.
   test('leaves a record that refuses deletion for the next poll', async () => {
     let creating = true;
     routeSend(registryHolding(['rec1', 'rec2'], (recordId) => {

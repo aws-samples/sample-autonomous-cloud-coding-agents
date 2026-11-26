@@ -345,6 +345,7 @@ const CHANNEL_ACCESS_HARD_FAILURES = new Set([
 ]);
 
 async function checkChannelAccess(teamId: string, channelId: string): Promise<{ ok: boolean; error?: string }> {
+  // A Slack channel id that starts with `D` is a DM.
   if (channelId.startsWith('D')) return { ok: true };
 
   const botToken = await getBotToken(teamId);

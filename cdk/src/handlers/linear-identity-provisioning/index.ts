@@ -103,6 +103,8 @@ async function upsertWorkloadIdentity(name: string, returnUrls: string[]): Promi
   }
 }
 
+// AgentCore creates and deletes a workload identity synchronously (observed),
+// so there is no `isComplete` poller.
 export async function onEvent(event: OnEventRequest): Promise<OnEventResponse> {
   const name = event.ResourceProperties.WorkloadName;
   logger.info('Linear identity provisioning event', { requestType: event.RequestType, name });
@@ -112,6 +114,7 @@ export async function onEvent(event: OnEventRequest): Promise<OnEventResponse> {
     case 'Update': {
       const returnUrls = parseReturnUrls(event.ResourceProperties.AllowedReturnUrls);
       await upsertWorkloadIdentity(name, returnUrls);
+      // CloudFormation treats an Update that returns another PhysicalResourceId as a replacement.
       return { PhysicalResourceId: name, Data: { WorkloadName: name } };
     }
     case 'Delete': {

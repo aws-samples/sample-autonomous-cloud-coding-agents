@@ -115,6 +115,8 @@ function parseRuns(line: string, links: boolean): AdfParagraph {
   };
 
   while (cursor < line.length) {
+    // External images need Atlassian media storage, so an image becomes
+    // explicit links.
     const image = links && line.slice(cursor).match(/^\[?!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)(?:\]\((https?:\/\/[^)\s]+)\))?/);
     if (image) {
       append({ text: 'Open screenshot', href: image[2] });

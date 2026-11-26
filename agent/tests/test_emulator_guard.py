@@ -32,6 +32,8 @@ REFUSED_STRAYS = [
     "AWS_SDK_UA_APP_ID",
 ]
 
+# With AI_NUMERICHOST no resolver is asked. The audit event the hook listens for is raised
+# all the same.
 _NUMERIC_ONLY = """
 import socket, sys
 
@@ -165,5 +167,7 @@ def test_a_test_that_asks_for_no_fixture_is_stopped_when_the_audit_hook_is_not_i
     proc = _run_a_test_that_asks_for_no_fixture(tmp_path, _NO_AUDIT_HOOK + _PYTEST)
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
+    # pytest reports the refusal as a line of its own. With an error the fixture did not
+    # expect it prints the conftest's source, which has the same words.
     refusal = "the loopback-only audit hook did not refuse a name lookup"
     assert f"\n{refusal}\n" in proc.stdout, proc.stdout

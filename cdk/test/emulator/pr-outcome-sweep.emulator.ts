@@ -59,6 +59,7 @@ const secrets = makeClient(SecretsManagerClient);
 const context = { getRemainingTimeInMillis: () => 5 * MINUTE_MS } as Context;
 
 const platformStamp = (ms: number): string => new Date(ms).toISOString();
+/** GitHub writes its times in whole seconds. */
 const wholeSecondStamp = (ms: number): string => platformStamp(ms).replace(/\.\d{3}Z$/, 'Z');
 
 type PullRequest = Record<string, unknown>;
@@ -399,6 +400,7 @@ describe('pull-request outcome sweep against the AWS Emulator', () => {
       changesRequested: 0,
     };
 
+    // DynamoDB: an update without a condition on the key creates the item.
     await expect(ddb.send(new UpdateCommand(firstStateUpdate(process.env.TASK_TABLE_NAME!, taskId, 'open'))))
       .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
     await expect(ddb.send(new UpdateCommand(finalStateUpdate(process.env.TASK_TABLE_NAME!, taskId, merged))))

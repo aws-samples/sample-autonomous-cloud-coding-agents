@@ -1,3 +1,5 @@
+# pytest-cov writes per-process files (`.coverage.<host>.<pid>.<random>`) and removes them as it
+# combines: a CDK asset fingerprint walk that stats one and then opens it fails with ENOENT.
 .coverage
 .coverage.*
 coverage/

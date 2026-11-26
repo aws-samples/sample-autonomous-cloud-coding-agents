@@ -20,6 +20,8 @@ EMULATOR_ACCOUNT_ID = "000000000000"
 # An IP address, not ``localhost``: with a host name the JavaScript SDK addresses
 # S3 buckets as ``<bucket>.localhost``, which the emulator's certificate does not cover.
 _LOOPBACK_EMULATOR = re.compile(r"https://127\.0\.0\.1:\d+")
+# Other AWS_* variables (profile, keys, per-service endpoint, AWS_IGNORE_CONFIGURED_ENDPOINT_URLS)
+# can make the SDK send a call somewhere other than the emulator, or sign it with real credentials.
 _EXPECTED_AWS_ENV = frozenset(
     {
         "AWS_ENDPOINT_URL",
@@ -140,6 +142,7 @@ def emulator() -> Any:
     from botocore.exceptions import BotoCoreError, ClientError
 
     endpoint = os.environ["AWS_ENDPOINT_URL"]
+    # The emulator keeps state in memory and has no reset call.
     run_id = uuid.uuid4().hex[:8]
     tables = {
         "task_table": f"abca-emu-{run_id}-TaskTable",

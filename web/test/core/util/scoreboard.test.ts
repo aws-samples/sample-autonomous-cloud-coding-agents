@@ -69,6 +69,7 @@ describe('percent', () => {
   it.each([
     [26, 37, '70%'],
     [2, 3, '67%'],
+    // 14.5 exactly: dividing first and multiplying after gives 14.499999999999998.
     [29, 200, '15%'],
     [1, 200, '1%'],
     [0, 5, '0%'],

@@ -43,9 +43,11 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
   ['src/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
   ['src/handlers/shared/a.ts', "try { run(); } catch (err) { throw new Error('failed'); }", ['preserve-caught-error']],
+  // Checks that the @stylistic forks of these two core rules leave out.
   ['src/a.ts', 'try { run(); } catch(err) { report(err); }', ['keyword-spacing']],
   ['src/a.ts', 'export const [,second] = pair;', ['comma-spacing']],
   ['src/a.ts', 'export const pattern = /\\x01/;', ['no-control-regex']],
+  // @stylistic/no-multi-spaces lets two spaces inside an import attribute pass by default.
   ['src/a.ts', "import cfg from './cfg.json' with { type: /* c */  'json' };", ['@stylistic/no-multi-spaces']],
 ];
 

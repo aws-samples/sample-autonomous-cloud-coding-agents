@@ -232,6 +232,8 @@ function ensurePdfDomGlobals(): void {
 
 async function extractPdfText(content: Buffer, filename: string): Promise<string> {
   ensurePdfDomGlobals();
+  // A `typeof import('pdf-parse').PDFParse` annotation trips the ESM-vs-CJS dual-`.d.ts` hazard under
+  // moduleResolution nodenext: the type is inferred from the value.
   let PDFParse;
   try {
     ({ PDFParse } = await import(/* webpackIgnore: true */ 'pdf-parse'));
@@ -383,6 +385,7 @@ export function readJpegDimensions(content: Buffer): { width: number; height: nu
       const width = content.readUInt16BE(offset + 7);
       return { width, height };
     }
+    // End of image or start of scan.
     if (marker === 0xd9 || marker === 0xda) {
       return undefined;
     }

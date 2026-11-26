@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+// RunMicrovm rejects a bare image name ("Malformed ARN - doesn't start with 'arn:'"); the
+// observed ARN has the colon form `microvm-image:<name>`.
 const IMAGE_IDENTIFIER = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
 const IMAGE_VERSION = '7';
 const EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMicrovmExecution';
@@ -373,6 +375,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       });
 
       const input = mockSend.mock.calls[0][0].input;
+      // All three idlePolicy fields are required when the block is present, so omission is the unambiguous disabled state.
       expect(Object.keys(input)).not.toContain('idlePolicy');
       expect('idlePolicy' in input).toBe(false);
     });
@@ -489,6 +492,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
     test('the inline/S3 branch point IS the 4096-byte service cap, with no headroom', () => {
       // The service rejects 4097 bytes ("Member must have length less than or equal to 4096"); the SDK docs say 16,384.
+      // The cap counts runHookPayload alone; the 8192-byte ECS cap also counts env vars and command.
       expect(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES).toBe(4_096);
     });
 

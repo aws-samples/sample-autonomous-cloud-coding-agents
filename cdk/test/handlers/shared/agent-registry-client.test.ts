@@ -62,6 +62,7 @@ class FakeClient {
         };
         recordVersion?: string;
       };
+      // The real SKILL validator requires SKILL.md to be Markdown frontmatter, not JSON.
       if (input.recordType === 'SKILL') {
         const md =
           input.descriptors?.agentSkillsDefinition?.additionalData?.skillMd?.data ?? '';

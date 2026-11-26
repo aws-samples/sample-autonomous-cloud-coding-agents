@@ -216,6 +216,7 @@ export class GitHubScreenshotIntegration extends Construct {
       }),
       threshold: 1,
       evaluationPeriods: ERROR_ALARM_EVALUATION_PERIODS,
+      // Unset, CloudWatch defaults datapointsToAlarm to evaluationPeriods.
       datapointsToAlarm: 1,
       alarmDescription:
         'Screenshot webhook processor Lambda errors breached threshold — deploy-preview screenshots are failing (check IAM, AgentCore Browser quota, and dependency health)',

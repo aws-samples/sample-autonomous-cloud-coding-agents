@@ -94,6 +94,7 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
         "GIT_WORK_TREE": str(tmp_path),
         "GIT_CONFIG_GLOBAL": str(user_config),
         "GIT_CONFIG_SYSTEM": str(system_config),
+        # What `git -c user.email=... commit` passes on to the hooks it runs.
         "GIT_CONFIG_PARAMETERS": "'user.email'='contributor@command-line.example'",
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "user.email",

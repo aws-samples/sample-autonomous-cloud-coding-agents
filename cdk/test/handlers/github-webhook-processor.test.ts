@@ -232,6 +232,8 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('a pull request that lives in another repository is not taken for the deployment\'s own', async () => {
+    // GitHub lists the open pull requests of a commit by the repository of their
+    // HEAD branch, so the answer includes pull requests that live in other repositories.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     const head = { ref: 'bgagent/01TASKID/tidy-up-the-footer', sha: 'abc1234', repo: OWN_REPO };
     fetchOk([
@@ -284,6 +286,8 @@ describe('github-webhook-processor handler', () => {
     ['first', true],
     ['second', false],
   ])('a second pull request from the branch of an ABCA pull request does not take its place, listed %s', async (_label, listedFirst) => {
+    // In a public repository anyone can open a pull request from an existing
+    // branch into another branch of the repository itself.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     const head = { ref: 'bgagent/01TASKID/tidy-up-the-footer', sha: 'abc1234', repo: OWN_REPO };
     const own = { number: 10, state: 'open', title: 'Tidy up the footer', body: '', head };
@@ -572,6 +576,7 @@ describe('github-webhook-processor handler', () => {
   });
 
   test('a task whose blueprint spells the repository in another letter case is this repository\'s task', async () => {
+    // GitHub reports its own spelling of a repository name and answers to any other.
     resolveGitHubTokenMock.mockResolvedValue('gh-tok');
     const asGitHubSpellsIt = { full_name: 'Owner/Repo' };
     fetchOk([{
@@ -884,6 +889,7 @@ describe('github-webhook-processor handler', () => {
 
     test.each([
       ['by its commit', { 'iter-2': 'fff0000', 'iter-1': 'abc1234' }],
+      // A fork has the commits of its parent: a task of another repository can have recorded the deployed commit.
       ['as the newest of this repository, although the other one recorded the deployed commit', { 'iter-2': 'abc1234', 'iter-1': 'eee1111' }],
     ])('an iteration of this repository is found %s when the newest iteration is another repository\'s', async (_label, headShas) => {
       reDeploy(headShas, { 'iter-2': 'globex/site' });

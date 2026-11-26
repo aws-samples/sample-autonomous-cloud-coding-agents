@@ -31,6 +31,7 @@ import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
+/** The emulator alone holds a new table in CREATING for 3 s; Jest's default is 5 s. */
 const SETUP_TIMEOUT_MS = 30_000;
 
 const TABLE_WAIT_SECONDS = 20;

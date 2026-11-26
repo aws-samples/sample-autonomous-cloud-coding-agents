@@ -131,6 +131,7 @@ describe('concurrency seats against the AWS Emulator', () => {
     await running(user);
     await complete(done);
 
+    // Durable execution re-runs a step whose result it did not record.
     await finalizeTask(done, { attempts: 1 }, user);
     await finalizeTask(done, { attempts: 1 }, user);
 

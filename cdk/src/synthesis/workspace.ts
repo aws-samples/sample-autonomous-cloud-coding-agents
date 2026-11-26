@@ -97,7 +97,7 @@ export function createOutputDirectory(root: string, output?: string, temporaryRo
     throw new Error('Census output must be outside the checkout to avoid recursive asset fingerprinting');
   }
   if (requested) {
-    mkdirSync(target);
+    mkdirSync(target); // Fails on an existing directory or symlink, dangling symlinks included.
     return target;
   }
   return mkdtempSync(path.join(parent, 'abca-census-'));

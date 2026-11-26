@@ -90,6 +90,7 @@ const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 const REGION_PATTERN = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
 const CONTEXT_PATTERN = /^([A-Za-z][\w:.-]*)=(.*)$/s;
 const BOOTSTRAP_UPDATE_TIMEOUT_S = 900;
+/** The exit code of a shell interrupt. */
 export const SETUP_CANCELLED_EXIT_CODE = 130;
 const MAX_FAILURES_SHOWN = 3;
 const MISE_TASK_FAILED = /^\[[^\]]+\] ERROR task failed$/;

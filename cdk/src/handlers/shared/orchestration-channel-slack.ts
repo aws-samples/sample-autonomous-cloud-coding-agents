@@ -36,6 +36,7 @@ const REACTION_EMOJI: Record<Reaction, string> = {
 
 const OWN_EMOJI: readonly string[] = Object.values(REACTION_EMOJI);
 
+/** A colon appears in neither a Slack channel id nor a message ts. */
 const THREAD_REF_SEPARATOR = ':';
 
 /** Build the ``issueId`` for a Slack thread. */
@@ -133,7 +134,8 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
     async replaceCommentReaction(comment, issue, reaction) {
       const ctx = await contextFor(issue);
       if (!ctx) return false;
-      // Slack has no atomic reaction swap.
+      // Slack has no atomic reaction swap. `reactions.remove` on a reaction that is not
+      // there answers `no_reaction`, which slackFetch counts as success.
       const target = REACTION_EMOJI[reaction];
       const stale: string[] = [];
       for (const emoji of OWN_EMOJI) {
@@ -195,5 +197,7 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
       }
       return this.postThreadedReply!(issue, parent, body);
     },
+
+    // transitionState / revertState: omitted — Slack has no workflow state.
   } satisfies Channel as Channel;
 }

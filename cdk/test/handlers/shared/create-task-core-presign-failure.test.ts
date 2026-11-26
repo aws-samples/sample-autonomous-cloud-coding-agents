@@ -60,6 +60,7 @@ describe('createTaskCore when presigning an upload fails', () => {
     expect(UpdateExpression).toContain('#ttl = :ttl');
     expect(values[':sca']).toBe(`FAILED#${values[':now']}`);
     expect(names['#ttl']).toBe('ttl');
+    // DynamoDB reads a TTL as epoch seconds: a value in milliseconds would never expire.
     const nowSeconds = Date.now() / 1000;
     expect(values[':ttl']).toBeGreaterThan(nowSeconds);
     expect(values[':ttl']).toBeLessThan(nowSeconds + 91 * 86_400);

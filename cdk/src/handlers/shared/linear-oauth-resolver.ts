@@ -189,6 +189,8 @@ async function askVault(
   }
   const result = await viaVault(input, workloadName);
   if (result.kind === 'token') {
+    // The vault's response carries no expiry, so a kept token can outlive
+    // Linear's acceptance of it by up to SECRET_CACHE_TTL_MS.
     vaultTokenCache.set(input.linearWorkspaceId, {
       value: result.accessToken,
       expiresAt: Date.now() + SECRET_CACHE_TTL_MS,
@@ -281,6 +283,8 @@ function defaultRevocationRecorder(
   };
 }
 
+// Linear expires a refresh token 30 days after issuance, so the stored grant of a
+// vault-managed row ends up rejected; that says nothing about the vault grant.
 function refreshRejectionRecorder(
   vaultAnswer: VaultTokenResult['kind'] | undefined,
   rowInstalledAt: string | undefined,
@@ -763,6 +767,8 @@ const MS_PER_HOUR = 3_600_000;
 const TOKEN_FP_LENGTH = 12;
 
 const TOKEN_FP_SALT = 'abca.linear.token-lineage.v1';
+// CodeQL reports this HMAC as js/insufficient-password-hash. It is a false positive: the digest
+// is a truncated fingerprint for log correlation, not a stored password hash.
 function fingerprintToken(token: string | undefined): string {
   if (!token) return 'none';
   // nosemgrep: javascript.lang.security.audit.hardcoded-hmac-key.hardcoded-hmac-key -- fixed DOMAIN-SEPARATION salt, not a key protecting anything: the digest authenticates nothing, is never compared against attacker input, and must be stable across Lambdas and invocations or fingerprints from different processes cannot be correlated — which is the whole purpose. A secret key would defeat the feature without adding a property anything relies on.
@@ -793,8 +799,8 @@ type RefreshOutcome =
 /**
  * Does this token-endpoint rejection mean the refresh token itself is dead?
  *
- * Not RFC 6749's `invalid_grant` — Linear does not send it. A dead refresh token
- * comes back as HTTP 400 with:
+ * Not RFC 6749's `invalid_grant` — Linear does not send it. Observed: a dead
+ * refresh token comes back as HTTP 400 with:
  *
  *     { "error": "invalid_request", "error_description": "Refresh token revoked" }
  *     { "error": "invalid_request", "error_description": "Invalid refresh token" }

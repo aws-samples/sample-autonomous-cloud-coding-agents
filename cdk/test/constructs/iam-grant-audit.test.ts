@@ -43,6 +43,7 @@ function fixture(addUnrelatedWildcard: boolean, concreteEnvironment: boolean) {
     workloadName: 'linear-audit', allowedReturnUrls: ['http://localhost/callback'],
   });
   const consumer = new iam.Role(stack, 'Consumer', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+  // CDK creates overflow policies during prepare and merges statements; distinct conditions prevent the merging.
   for (let index = 0; index < 60; index++) {
     consumer.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject'],

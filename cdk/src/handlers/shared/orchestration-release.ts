@@ -243,6 +243,8 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     ? `${baseKey}_${row.child_task_id}`
     : baseKey;
 
+  // A DynamoDB GSI read is eventually consistent, so createTaskCore's idempotency lookup can
+  // miss a concurrent create (docs/research/orchestration-reconciler-correctness.md).
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,

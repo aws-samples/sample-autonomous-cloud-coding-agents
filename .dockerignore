@@ -41,6 +41,8 @@ coverage/
 **/coverage/
 .pytest_cache/
 **/.pytest_cache/
+# pytest-cov writes per-process files (`.coverage.<host>.<pid>.<random>`) and deletes them as it
+# combines; the CDK asset fingerprint fails with ENOENT on a file that vanishes mid-walk.
 .coverage
 .coverage.*
 **/.coverage

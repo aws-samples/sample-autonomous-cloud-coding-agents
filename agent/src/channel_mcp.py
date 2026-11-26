@@ -36,6 +36,7 @@ def _jira_server_entry() -> dict[str, Any]:
         "type": "http",
         "url": JIRA_MCP_URL,
         "headers": {
+            # ``.mcp.json`` placeholder expansion reads ``${VAR}`` from the environment.
             "Authorization": f"Bearer ${{{JIRA_API_TOKEN_ENV}}}",
         },
     }
@@ -83,6 +84,7 @@ def _hide_edit_from_git(repo_dir: str) -> None:
     try:
         if _git("ls-files", "--error-unmatch", ".mcp.json").returncode != 0:
             return
+        # ``skip-worktree`` makes git treat the file as unchanged, also when removed.
         result = _git("update-index", "--skip-worktree", ".mcp.json")
         if result.returncode != 0:
             log(

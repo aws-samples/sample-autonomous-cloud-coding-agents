@@ -110,6 +110,8 @@ class TestFetchGitHubIssueSanitization:
         assert issue.comments[1].author == "alice"
 
 
+# GitHub lists an issue's comments oldest first, 30 to a page unless ``per_page``
+# asks for more (100 at most).
 def _github_with_comments(total: int):
     def get(url, headers=None, timeout=None):
         parts = urlsplit(url)

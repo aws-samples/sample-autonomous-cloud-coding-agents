@@ -70,6 +70,7 @@ describe('OrchestrationReconciler', () => {
   });
 
   test('filters the stream to TERMINAL statuses only (skips RUNNING/heartbeat churn)', () => {
+    // Lambda ORs the filter patterns of an event source.
     template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
       FilterCriteria: {
         Filters: Match.arrayWith([

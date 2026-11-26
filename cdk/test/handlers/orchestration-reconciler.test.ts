@@ -1768,6 +1768,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
   });
 
   test('a PARENT-routed iteration replies on the PARENT issue, not the sub-issue', async () => {
+    // Linear's commentCreate rejects a reply whose parent comment belongs to a different issue.
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
     ]);
@@ -1855,6 +1856,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
   });
 
   test('the terminal settle asks the surface to restore the outcome if it gets overwritten', async () => {
+    // The surface offers no conditional update, so a progress write can still land on top of the outcome.
     mockCascade([
       { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'task-A', child_branch_name: 'branch-A', linear_identifier: 'ENG-1' },
     ]);
@@ -2177,6 +2179,8 @@ describe('orchestration-reconciler handler — an event of a task that no longer
   });
 
   test('after the child was released again, an event of its earlier task is not applied to the new run', async () => {
+    // The index that maps a task to its row lags behind the row: for a moment
+    // after the new release it still resolves the earlier task to the row.
     const store = orchestrationStore([{ sub_issue_id: 'A', child_status: 'ready', child_task_id: 'TA' }]);
     store.before(
       (cmd) => cmd._type === 'Query' && cmd.input.IndexName === undefined,
@@ -2317,6 +2321,7 @@ describe('orchestration-reconciler handler — the issue of a failed sub-issue a
 
   test.each([
     ['exactly five minutes after the end is not late: the issue is settled', 300, [1, 1]],
+    // The stream stamps the write in whole seconds.
     ['five minutes and one second after the end is late: the issue is left alone', 301, [0, 0]],
   ])('a record written %s', async (_name, seconds, expected) => {
     childA({ child_status: 'failed' });
@@ -2327,6 +2332,7 @@ describe('orchestration-reconciler handler — the issue of a failed sub-issue a
 
   test.each([
     ['no time of its write', undefined],
+    // The stream writes a number of seconds. Some tools turn it into a date string.
     ['a date string for the time of its write', after(0)],
     ['null for the time of its write', null],
   ])('a record with completed_at and %s is judged by the row: it settles the issue when it brings the verdict and leaves it alone once the row holds it', async (_name, stamp) => {
@@ -2344,6 +2350,7 @@ describe('orchestration-reconciler handler — the issue of a failed sub-issue a
   });
 
   test('a time of its write that comes as text is read as the number of seconds it is', async () => {
+    // The example record of the Lambda guide on event filtering carries the stamp as "1678831218.0".
     childA({ child_status: 'failed' });
     const written = (seconds: number) => {
       const record = taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', completed_at: ENDED });

@@ -83,6 +83,8 @@ export class LinearIdentityVault extends Construct {
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(PROVISION_TIMEOUT_SECONDS),
       memorySize: PROVISION_MEMORY_MB,
+      // The bedrock-agentcore-control SDK is not in the Lambda runtime, so it must
+      // be bundled.
       bundling: { externalModules: [] },
       entry,
       handler: 'onEvent',
@@ -161,7 +163,8 @@ export class LinearIdentityVault extends Construct {
    * Grant a principal the data-plane permissions to mint a Linear OAuth token
    * for a user via this workload identity (3LO USER_FEDERATION).
    *
-   * `GetWorkloadAccessTokenForUserId` mints the user-bound workload token, and
+   * `GetWorkloadAccessTokenForUserId` mints the user-bound workload token
+   * (USER_FEDERATION requires a user-bound token, not a plain one), and
    * `GetResourceOauth2Token` exchanges it for the Linear access token.
    *
    * `GetWorkloadAccessTokenForUserId` authorizes against the workload-identity

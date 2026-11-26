@@ -24,6 +24,8 @@ depends = [":compile", ":typecheck", ":test", ":eslint"]
 description = "Run Jest tests"
 run = "yarn test"
 
+# ESLint looks for an eslint.config.* file from the directory of each file it lints;
+# --config applies one file to every file.
 [tasks.eslint]
 description = "Run ESLint"
 run = "../node_modules/.bin/eslint --config eslint.config.mjs --max-warnings 0 --fix src test"

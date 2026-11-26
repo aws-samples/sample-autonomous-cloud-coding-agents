@@ -84,6 +84,7 @@ export class CedarWasmLayer extends Construct {
               'rm /asset-output/package.json',
             ].join(' && '),
           ],
+          // `@cedar-policy/cedar-wasm` ships pure JS and a prebuilt wasm binary: no native build step.
           local: {
             tryBundle(outputDir: string): boolean {
               try {
@@ -106,6 +107,7 @@ export class CedarWasmLayer extends Construct {
           },
         },
       }),
+      // Lambda deprecated Node.js 20 (#889).
       compatibleRuntimes: [
         lambda.Runtime.NODEJS_22_X,
         lambda.Runtime.NODEJS_24_X,

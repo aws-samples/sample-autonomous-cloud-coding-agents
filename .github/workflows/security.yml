@@ -48,7 +48,7 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
-          version: 2026.10.25
+          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
 
       - name: Setup Node.js
@@ -127,6 +127,7 @@ jobs:
             echo "No scan ignore expires within 21 days."
           fi
 
+      # `app/github-actions` is the account that GITHUB_TOKEN writes as.
       - name: Report to the rolling issue
         if: ${{ !cancelled() }}
         env:

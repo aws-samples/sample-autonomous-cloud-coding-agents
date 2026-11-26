@@ -110,6 +110,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const matches: Record<string, unknown>[] = [];
     let scanKey: Record<string, unknown> | undefined;
     let pages = 0;
+    // DynamoDB applies a FilterExpression after it evaluates items: a `Limit`
+    // bounds the items examined, not the items matched.
     do {
       const page = await ddb.send(new ScanCommand({
         TableName: registryTable,
@@ -132,6 +134,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
       }
     } while (scanKey);
+    // A Linear workspace can give up its urlKey and another take it.
     const active = matches.filter((item) => item.status === 'active');
     const candidates = active.length > 0 ? active : matches.slice(0, 1);
     if (candidates.length === 0) {

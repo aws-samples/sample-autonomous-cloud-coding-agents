@@ -128,6 +128,9 @@ export function satisfies(v: SemVer, c: ParsedConstraint): boolean {
  * From a set of candidate versions (plain strings), pick the highest that
  * satisfies the constraint. Unparseable versions are skipped. Returns the
  * winning raw string, or null when nothing matches.
+ *
+ * AgentCore stores a plain version string with no native `^`/`~` matching, so
+ * ranking is always done here in code.
  */
 export function selectHighest(
   candidates: readonly string[],

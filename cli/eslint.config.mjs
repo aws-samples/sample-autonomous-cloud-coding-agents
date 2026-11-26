@@ -100,6 +100,7 @@ export default [
       '@stylistic/quotes': ['error', 'single', { avoidEscape: true }],
       '@stylistic/comma-dangle': ['error', 'always-multiline'],
       '@stylistic/comma-spacing': ['error', { before: false, after: true }],
+      // The plugin's default exceptions let two spaces inside an import attribute pass.
       '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false, exceptions: { Property: true, ImportAttribute: false } }],
       '@stylistic/array-bracket-spacing': ['error', 'never'],
       '@stylistic/array-bracket-newline': ['error', 'consistent'],
@@ -149,6 +150,7 @@ export default [
       'eol-last': ['error', 'always'],
       'no-duplicate-imports': ['error'],
       'no-console': ['error'],
+      // The coverage-ignore spellings that jest (v8-to-istanbul) and vitest honour.
       'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'no-restricted-syntax': ['error', NO_MD5],
       'no-useless-assignment': 'off',
@@ -257,6 +259,8 @@ export default [
       'no-console': 'off',
       // The whole list again: a later block replaces a rule's options.
       'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
+      // The compiler (rootDir) refuses only a TypeScript source outside the package, not build output or a JSON file.
+      // Yarn links the workspace packages into ../node_modules/@abca, which the first zone lets pass.
       'import-x/no-restricted-paths': ['error', {
         basePath: __dirname,
         zones: [

@@ -50,6 +50,8 @@ jest.mock('../../src/handlers/shared/registry/factory', () => {
 });
 
 describe('registry-show handler over the registry adapter', () => {
+  // ListRegistryRecords carries each record's name, so only the versions of the asset
+  // that is shown need a GetRegistryRecord.
   test('fetches the versions of the asset it shows, not the records of its neighbours', async () => {
     const res = await handler({
       pathParameters: { kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools' },

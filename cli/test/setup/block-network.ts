@@ -33,6 +33,7 @@ function tcpHost(args: unknown[]): string | undefined {
   return typeof second === 'string' && second ? second : 'localhost';
 }
 
+// http, https, http2, fetch and the AWS SDK all connect through ``net.Socket.prototype.connect``.
 // ``net`` is a core module, shared by every test file a worker runs.
 const patched = Symbol.for('bgagent.cli.test.block-network');
 const socket = net.Socket.prototype as net.Socket & { [patched]?: boolean };

@@ -68,6 +68,7 @@ export class RegistryApi extends NestedStack {
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const environment = { AGENT_REGISTRY_ID: props.agentRegistryId, ABCA_COMPONENT: 'registry-api' };
+    // The Agent Registry control-plane SDK is not in the Lambda runtime.
     const bundling: lambda.BundlingOptions = { externalModules: [] };
 
     const registryFn = (

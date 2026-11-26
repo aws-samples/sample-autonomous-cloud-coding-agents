@@ -84,7 +84,7 @@ class TestReadOnlyPermissions:
 class TestReadOnlyMissingAttributeFailsClosed:
     """Cedar skips a forbid rule whose ``when`` clause errors on a missing
     attribute: the base permit wins, and the answer is Allow with
-    ``diagnostics.errors`` set."""
+    ``diagnostics.errors`` set (contracts/cedar-parity/read-only-missing-attribute.json)."""
 
     def test_eval_tier_reraises_on_missing_read_only_attribute(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)

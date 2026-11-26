@@ -68,6 +68,8 @@ function meetsFloor(version, range) {
   return true;
 }
 
+// A yarn `resolutions` key is a package name or a path pattern that ends in one
+// (`parent/pkg`, `parent/@scope/pkg`, usually behind a leading glob).
 function pinnedPackage(key) {
   const segments = key.split('/');
   const name = segments.pop();

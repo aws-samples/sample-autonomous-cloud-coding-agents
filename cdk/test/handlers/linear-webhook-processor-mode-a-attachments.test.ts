@@ -249,6 +249,7 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
     discoverOrchestrationMock.mockResolvedValueOnce({
       kind: 'seeded', orchestrationId: 'orch_abc', childCount: 1, rootSubIssueIds: ['sub-A'], alreadyExisted: false,
     });
+    // A DynamoDB Query is eventually consistent by default: a reload right after the write can miss the stamped attachments.
     const staleSnapshot = {
       Items: [
         { sub_issue_id: '#meta', orchestration_id: 'orch_abc', parent_linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', repo: 'owner/repo', child_count: 1, platform_user_id: 'platform-user-1' },
@@ -266,6 +267,8 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
     expect(childCreate).toBeDefined();
   });
 
+  // In a versioned S3 bucket a second PUT of a key makes the earlier version noncurrent,
+  // and a noncurrent-version lifecycle rule then deletes it.
   test('a RETRIGGER of an already-seeded epic does NOT re-upload the parent attachment', async () => {
     probeLinearIssueContextMock.mockResolvedValue({
       attachmentTitles: ['spec.pdf'],

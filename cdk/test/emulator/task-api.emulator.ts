@@ -236,6 +236,7 @@ describe('task API against the AWS Emulator', () => {
     expect((await list(user, { status: 'CANCELLED', limit: '2' })).data.map((t) => t.task_id)).toEqual([first]);
   });
 
+  // A DynamoDB index cannot be queried until it is ACTIVE.
   test('#51: the list reads UserStatusIndex until UserCreatedAtIndex is ACTIVE, then lists newest first', async () => {
     let listBefore51!: typeof listTasks;
     jest.isolateModules(() => {
@@ -268,7 +269,8 @@ describe('task API against the AWS Emulator', () => {
     expect([...ids(first), ...ids(second)]).toEqual(byStatus);
 
     try {
-      // The emulator holds the index in CREATING for about 3 seconds.
+      // The emulator holds the index in CREATING for about 3 seconds, and the status
+      // only moves forward.
       await addIndex(TASKS_BEFORE_51, TaskTable.USER_CREATED_AT_INDEX);
       const whileCreating = await list(user, undefined, listBefore51);
       expect(await indexStatus()).toBe('CREATING');
@@ -283,6 +285,7 @@ describe('task API against the AWS Emulator', () => {
     }
   }, 30_000);
 
+  // On AWS, DynamoDB takes up to days to delete a row whose `ttl` has passed.
   test('#1043: pending lists the request that can still be decided, not the one whose window has passed', async () => {
     const user = newUser();
     const doc = makeDocClient();
@@ -355,6 +358,7 @@ describe('task API against the AWS Emulator', () => {
       cost_usd: '3.75',
       approval_gate_count: 2,
       pr_state: 'merged',
+      // GitHub's times are whole seconds.
       pr_closed_at: agentStamp(at(3600)),
       pr_first_review_at: agentStamp(at(2700)),
       pr_changes_requested: 1,

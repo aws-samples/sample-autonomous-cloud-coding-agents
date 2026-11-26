@@ -63,6 +63,7 @@ const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 
 const USABLE_TOKEN = /^[ -~]+$/;
 
+/** Classic, fine-grained and installation GitHub tokens hold no other character. */
 const GITHUB_TOKEN = /^[A-Za-z0-9_.-]+$/;
 
 const HOLDS_GITHUB_TOKEN = /(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}/;

@@ -111,6 +111,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true, skipped_state: raw.deployment_status?.state });
     }
 
+    // Vercel names its preview environment `Preview`. Amplify uses branch names,
+    // GitHub Actions the workflow's environment, Netlify `Deploy Preview <PR#>`.
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
     if (!normalized && raw.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
@@ -119,6 +121,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
+    // A `success` deployment_status can arrive without `environment_url` when the
+    // provider has not published the URL yet; a later status carries it.
     if (!raw.deployment_status?.environment_url) {
       return jsonResponse(200, { ok: true, skipped_no_url: true });
     }

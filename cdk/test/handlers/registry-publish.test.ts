@@ -59,6 +59,7 @@ function publish(body: Record<string, unknown>): Promise<APIGatewayProxyResult> 
 beforeEach(() => mockPublish.mockReset());
 
 describe('registry-publish handler: the coordinates must be strings', () => {
+  // RegExp.prototype.test converts its argument to a string, so ['acme'] and 5 pass a pattern check.
   test.each([
     ['namespace is an array', { namespace: ['acme'] }],
     ['name is a number', { name: 5 }],
@@ -87,6 +88,7 @@ describe('registry-publish handler: what a refused publish tells the publisher',
   });
 
   test('400 with the reason when AWS rejects the record as invalid', async () => {
+    // The wording is modelled on the example in the user guide's troubleshooting page.
     mockPublish.mockRejectedValue(new ValidationException({
       message: "Schema validation failed: content is not in compliance with schema version '2025-12-11' for descriptor type 'mcp'.",
       reason: 'FieldValidationFailed',
@@ -115,6 +117,8 @@ describe('registry-publish handler: what a refused publish tells the publisher',
 });
 
 describe('registry-publish handler: an mcp_server the agent could not load is refused', () => {
+  // In the session's MCP configuration, a header value that is not a string, or arguments
+  // that are not a list of strings, make the CLI skip the server.
   test.each([
     ['a header value is a number', { transport: 'http', url: 'https://x', headers: { 'X-Shard': 3 } }, /headers.*string values/],
     ['a header value is null', { transport: 'http', url: 'https://x', headers: { 'X-Shard': null } }, /headers.*string values/],

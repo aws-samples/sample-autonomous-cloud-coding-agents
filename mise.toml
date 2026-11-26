@@ -6,8 +6,11 @@ monorepo_root = true
 # Exact: astro 7.4.10 declares node >=22.23.4 and yarn refuses to install on less, while
 # `node = "22"` keeps any older 22.x that is already installed.
 node = "22.23.4"
+# Exact pins (#722, #540). Dependabot has no mise ecosystem, so nothing bumps them: bump by PR.
 prek = "0.5.10"
 gitleaks = "8.30.1"
+# uv must be on PATH before semgrep installs: mise's `pipx.uvx` default then installs pipx tools with
+# `uv tool install`; classic pipx breaks under mise's default `minimum_release_age` (jdx/mise#10279, #320).
 uv = "0.13.7"
 semgrep = "1.185.0"
 osv-scanner = "2.7.1"
@@ -61,6 +64,9 @@ depends = [
   "//web:typecheck",
 ]
 
+# --erasableSyntaxOnly and --verbatimModuleSyntax describe what `node --experimental-strip-types`,
+# which runs these scripts, can execute. tsc by path: the root `node_modules/.bin/tsc` link belongs
+# to whichever hoisted package claimed it.
 [tasks."check:scripts"]
 description = "Type-check the gate scripts (scripts/*.ts) with the TypeScript they import"
 run = "node node_modules/typescript/bin/tsc --noEmit --strict --noUnusedLocals --noUnusedParameters --noImplicitReturns --erasableSyntaxOnly --verbatimModuleSyntax --skipLibCheck --target es2022 --module esnext --moduleResolution bundler --types node scripts/*.ts"
@@ -89,6 +95,8 @@ run = "npm test --prefix integrations/jira-forge-app"
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
 
+# knip by path, not `yarn knip`: yarn applies the `engines` range of the root package.json to every
+# root script and refuses to start knip under an older Node.
 [tasks."check:deadcode"]
 description = "Dead-code gate (#282): knip must report nothing in the TS/JS workspaces — no unused file, dependency, export or exported type, no unlisted or unresolved import. Zero tolerance, no baseline."
 run = '''
@@ -194,6 +202,8 @@ run = "gitleaks git . --config .gitleaks.toml --staged --no-banner --redact --ve
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
+# No --quiet, here and in security:sast:range: it hides semgrep's error when the registry is
+# unreachable or a pack cannot be loaded.
 run = [
   "mkdir -p test-reports && rm -f test-reports/semgrep-sast.sarif",
   "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --sarif-output=test-reports/semgrep-sast.sarif --error .",

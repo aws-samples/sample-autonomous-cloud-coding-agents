@@ -230,6 +230,7 @@ export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = MAX_TOTAL_ATTACHMENT_SIZE_MB * 10
 const ATTACHMENT_TYPE_LIST = ['image', 'file', 'url'] as const satisfies readonly AttachmentType[];
 type _AssertAttachmentExhaustive = Exclude<AttachmentType, (typeof ATTACHMENT_TYPE_LIST)[number]> extends never ? true : never;
 const _attachmentExhaustiveCheck: _AssertAttachmentExhaustive = true;
+// `void` consumes the binding: tsconfig noUnusedLocals does not honor the `_` prefix.
 void _attachmentExhaustiveCheck;
 const VALID_ATTACHMENT_TYPES = new Set<string>(ATTACHMENT_TYPE_LIST);
 
@@ -574,6 +575,7 @@ const PRIVATE_IP_RANGES = [
     },
   },
   { prefix: '::1', mask: null },
+  // Unspecified address (could route to localhost).
   { prefix: '::', mask: (ip: string) => ip === '::' },
   { prefix: 'fc', mask: null },
   { prefix: 'fd', mask: null },

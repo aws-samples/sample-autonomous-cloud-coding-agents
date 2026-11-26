@@ -67,6 +67,8 @@ function registryIdFromArn(arn: string): string {
   return arn.includes('/') ? arn.split('/').pop()! : arn;
 }
 
+// The Agent Registry control plane accepts a bare id or a full registry ARN as
+// `registryId`. Its own bound on the id length is `{12,16}` today.
 const REGISTRY_ID_PATTERN
   = /^(arn:aws(-[^:]+)?:agent-registry:[a-z0-9-]+:[0-9]{12}:registry\/)?[a-zA-Z0-9]{12,64}$/;
 
@@ -82,6 +84,8 @@ function isRetryableDeleteError(err: unknown): boolean {
   );
 }
 
+// AWS refuses DeleteRegistry with a ConflictException while the registry holds a record.
+// A record answers ConflictException while it is being created or updated.
 async function deleteRegistryRecords(registryId: string): Promise<void> {
   const deadline = Date.now() + RECORD_DELETION_BUDGET_MS;
   let nextToken: string | undefined;
@@ -124,6 +128,8 @@ async function requestRegistryDeletion(registryId: string): Promise<DeleteAttemp
   }
 }
 
+// Provider handlers are delivered at-least-once. The CloudFormation RequestId is
+// stable per logical operation.
 function createTokenFrom(requestId: string | undefined, registryName: string): string {
   return createHash('sha256').update(`${requestId ?? ''}:${registryName}`).digest('hex').slice(0, CLIENT_TOKEN_LENGTH);
 }

@@ -73,6 +73,7 @@ describe('Bootstrap policy synth coverage', () => {
   });
 
   it('maps every custom resource type to the invoke of its provider alone', () => {
+    // The provider's Lambda makes the AWS calls under its own role.
     const customTypes = Object.keys(RESOURCE_ACTION_MAP).filter((cfnType) => cfnType.startsWith('Custom::'));
     expect(customTypes.length).toBeGreaterThan(0);
     for (const cfnType of customTypes) {

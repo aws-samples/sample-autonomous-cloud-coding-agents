@@ -738,6 +738,8 @@ class TestLoadTimeValidation:
         ],
     )
     def test_rule_reading_an_absent_context_attribute_fails_at_start(self, rule, attribute):
+        # Cedar reports a rule that reads a context attribute where it is absent as an
+        # evaluation error.
         with pytest.raises(ValueError, match=rf"soft-deny Cedar probe failed.*{attribute}"):
             PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=[rule])
 

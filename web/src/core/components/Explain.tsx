@@ -127,7 +127,10 @@ export function Explain({ title, explanation, summary, as: Target = 'div', child
 
   const icon = typeof children === 'function' && (
     <>
-      {/* The name is not the button's `ariaLabel`: Cloudscape repeats that as a `title`, a second bubble on hover. */}
+      {/*
+        The name is not the button's `ariaLabel`: Cloudscape repeats that as a `title`, a second bubble on hover.
+        It is one piece of text: Chrome joins the pieces of a hidden name with spaces.
+      */}
       <span id={`${id}-name`} hidden>{aboutLabel(title)}</span>
       {/* The handlers are on a wrapper: given a focus handler, Cloudscape's button goes on to call one of its own that is not there. */}
       <span

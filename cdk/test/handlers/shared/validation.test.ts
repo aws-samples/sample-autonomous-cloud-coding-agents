@@ -239,6 +239,7 @@ describe('isValidWebhookName', () => {
   });
 
   test('rejects a name that is not a string', () => {
+    // RegExp.test converts its argument to a string, and each of these reads as a valid name once converted.
     expect(isValidWebhookName(42)).toBe(false);
     expect(isValidWebhookName(true)).toBe(false);
     expect(isValidWebhookName(['a'])).toBe(false);
@@ -374,6 +375,7 @@ describe('pagination token encode/decode', () => {
   test('decode returns null for a token that is no cursor', () => {
     expect(decodePaginationToken('not-valid-base64!!!')).toBeNull();
     expect(decodePaginationToken('eyJ0YXNrX2lkIjoiMDFL')).toBeNull();
+    // DynamoDB takes nothing but an object for a start key.
     for (const json of ['1', '"a"', '[1]', 'null']) {
       expect(decodePaginationToken(Buffer.from(json).toString('base64'))).toBeNull();
     }
@@ -726,6 +728,8 @@ describe('validateMagicBytes', () => {
   });
 
   test('rejects a text type whose bytes are not decodable UTF-8', () => {
+    // UTF-8: 0xC3 starts a 2-byte sequence and 0x28 is no continuation byte; 0xFF never appears;
+    // a lone continuation byte (0x80, 0x81) does not decode.
     expect(validateMagicBytes(Buffer.from([0x48, 0xC3, 0x28]), 'text/plain')).toBe(false);
     expect(validateMagicBytes(Buffer.from([0xFF, 0xFE, 0x41]), 'application/json')).toBe(false);
     expect(validateMagicBytes(Buffer.from([0xff, 0xfe, 0x80, 0x81]), 'text/plain')).toBe(false);

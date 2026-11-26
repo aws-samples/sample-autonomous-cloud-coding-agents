@@ -51,6 +51,7 @@ type RepoConfigToolResult =
   };
 
 function resolveToolName(context: Context): string | undefined {
+  // The Node Lambda types expose `custom`; the wire payload has also used `Custom`.
   const clientContext = context.clientContext as unknown as {
     custom?: Record<string, unknown>;
     Custom?: Record<string, unknown>;

@@ -101,6 +101,7 @@ describe('SlackIntegration construct', () => {
   });
 
   test('construct no longer owns a TaskEventsTable stream consumer', () => {
+    // DynamoDB Streams has a practical limit of one reader per shard, and FanOutConsumer already reads this stream.
     template.resourceCountIs('AWS::Lambda::EventSourceMapping', 0);
   });
 

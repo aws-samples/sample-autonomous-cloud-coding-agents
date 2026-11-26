@@ -26,7 +26,7 @@ import {
 
 /**
  * AgentCore keys a cached grant by the WHOLE token request, `customParameters`
- * included: the same user and provider return the cached token when they
+ * included. Observed: the same user and provider return the cached token when they
  * are sent and an `authorizationUrl` ("needs consent") when they are omitted.
  */
 describe('linear_vault cache key matches contracts/constants.json', () => {

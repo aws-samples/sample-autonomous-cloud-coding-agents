@@ -37,6 +37,7 @@ const MAX_PAGE_LIMIT = 100;
 // DynamoDB applies `Limit` to the items it reads, before `FilterExpression`: a filtered page can come back short.
 const MAX_QUERY_PAGES = 10;
 
+// The GSI key attributes DynamoDB needs to resume a `UserIndex` query.
 function startKeyForRecord(record: ApiKeyRecord): Record<string, unknown> {
   return { key_id: record.key_id, user_id: record.user_id, created_at: record.created_at };
 }

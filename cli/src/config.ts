@@ -112,8 +112,8 @@ export function clearCredentials(): void {
  * written. EACCES, EPERM, EROFS: its directory takes no new file, or lets none be renamed
  * there. EBUSY, EXDEV: the file is a mount point (a single file mounted into a
  * container), or the rename would cross file systems. ENOENT: no file can be created
- * beside it. ENAMETOOLONG: its name or its path is too long to take the suffix of the
- * temporary file.
+ * beside it, as beside /dev/fd/1 on macOS, which /dev/stdout leads to. ENAMETOOLONG: its
+ * name or its path is too long to take the suffix of the temporary file.
  */
 const CANNOT_REPLACE = new Set(['EACCES', 'EPERM', 'EROFS', 'EBUSY', 'EXDEV', 'ENOENT', 'ENAMETOOLONG']);
 
@@ -135,8 +135,8 @@ const ROOT_UID = 0;
  * These rules are applied to what is found at the path before anything is written:
  * - a symbolic link, a FIFO, a socket or a directory is refused unless it belongs to the
  *   user, to root or to the owner of its directory; so is one that has a second name, a
- *   hard link. A device is written whoever it belongs to. Only the entry at the path is
- *   held to this, not what a link there leads to;
+ *   hard link. A device is written whoever it belongs to: only a privileged user can make
+ *   one. Only the entry at the path is held to this, not what a link there leads to;
  * - a regular file that cannot be replaced is written in place only if it is the user's
  *   own or the user is root, and it is made owner-only before the content goes in;
  * - where nothing was found and the file cannot be put in place by a rename, it is
@@ -185,8 +185,9 @@ export function writeSecretFile(file: string, content: string): void {
 
 /**
  * A hard link can be given to an entry of someone else's, whose owner then does not tell
- * who put it there: Linux allows that unless fs.protected_hardlinks is set. The link
- * count of a directory is not a count of names.
+ * who put it there: macOS lets a user do that with a symbolic link of root's, and Linux
+ * does unless fs.protected_hardlinks is set. The link count of a directory is not a count
+ * of names.
  */
 function refuseEntryOfAnotherUser(entry: string, stats: fs.Stats): void {
   const user = process.geteuid?.();

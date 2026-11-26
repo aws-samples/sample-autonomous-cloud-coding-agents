@@ -809,6 +809,8 @@ class PolicyEngine:
             "repo": self._repo,
             "read_only": self._read_only,
         }
+        # Cedar cannot evaluate a ``when`` clause that reads a context attribute
+        # the request does not carry, so each kind of request is probed.
         try:
             for tool_name, tool_input in (
                 ("Read", {}),

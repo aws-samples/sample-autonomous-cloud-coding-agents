@@ -237,6 +237,7 @@ process.exit(${shellcheckStatus});
       write(untracked);
       deleted.forEach((file) => fs.rmSync(path.join(repo, file)));
 
+      // mise runs an inline task with `sh -o errexit -c`.
       const result = spawnSync('sh', ['-o', 'errexit', '-c', source], { cwd: repo, env, encoding: 'utf-8' });
       const call: { args: string[]; opts: string | null } | undefined = fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf-8')) : undefined;
       return { status: result.status, stderr: result.stderr, call };

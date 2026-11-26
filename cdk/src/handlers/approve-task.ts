@@ -228,6 +228,8 @@ function classifyCancel(
   err: TransactionCanceledException,
   requestId: string,
 ): APIGatewayProxyResult {
+  // DynamoDB returns one cancellation reason per transaction item, in TransactItems order,
+  // and does not say which sub-clause of a ConditionExpression failed.
   const reasons = err.CancellationReasons ?? [];
   const approvalsReason = reasons[0]?.Code;
   const taskReason = reasons[1]?.Code;

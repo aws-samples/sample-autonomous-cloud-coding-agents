@@ -248,6 +248,7 @@ class TestSelfRecloneGuard:
         assert _is_self_reclone(cmd, "owner/repo")
 
     def test_blocks_clone_using_the_branch_short_flag(self):
+        # ``-b`` is git clone's own ``--branch`` short form and gh's ``--body``.
         assert _is_self_reclone(
             "git clone -b main https://github.com/owner/repo /w/repo", "owner/repo"
         )
@@ -1188,6 +1189,8 @@ def _failed_bash(command: str, error: str) -> dict:
 
 _LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
 _DIGITS = "0123456789"
+# The secret scan of the repository reads this file: values in the shape of credentials
+# are put together from pieces.
 _URL_VALUE = "Sup3r" + "S3cretPassw0rd" + _DIGITS
 
 _QUOTED_CREDENTIALS = [
@@ -1267,6 +1270,8 @@ class TestPostToolUseFailure:
         assert "during Bash" in blocked[0]["detail"]
         assert (last_blocker_reason() or "").startswith("BLOCKED[egress_denied]:")
 
+    # The last is the all-zero address, put together here so that the linter does not
+    # take it for a bind.
     @pytest.mark.parametrize(
         "host", ["localhost", "127.0.0.1", "127.0.0.2", "LOCALHOST", ".".join("0000")]
     )
@@ -1317,6 +1322,7 @@ class TestPostToolUseFailure:
         assert _run(callback(event, "tu-1", {})) == {}
 
     def test_max_turns_summary_is_latched_without_a_stop_hook(self):
+        # The CLI runs no Stop hook when it cuts a run off at max_turns.
         from stuck_guard import WINDOW
 
         callback = self._callback()
@@ -3255,6 +3261,8 @@ class TestRemainingMaxlifetime:
             time_module.tzset()
 
     def test_timestamp_with_milliseconds_is_parsed(self, monkeypatch):
+        # The orchestrator sends ``Date.toISOString()``, which always prints three
+        # fractional digits.
         from datetime import datetime
 
         started = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
@@ -3296,6 +3304,8 @@ class TestRemainingMaxlifetime:
 
 class TestStuckGuardHookIntegration:
     def test_post_tool_use_returns_the_steer_with_the_third_identical_failure(self, progress):
+        # The exit status of a pipeline is that of its last command, here ``tail``: this
+        # failure reaches PostToolUse.
         from stuck_guard import STEER_THRESHOLD, StuckGuard
 
         guard = StuckGuard()

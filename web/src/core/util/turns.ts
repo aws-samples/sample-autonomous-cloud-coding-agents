@@ -80,6 +80,8 @@ export function buildTurns(events: readonly TaskEvent[]): Turn[] {
     if (event.event_type === 'agent_turn') {
       const last = turns.at(-1);
       let turn = current(event.timestamp);
+      // The Claude CLI sends one answer as several messages (thinking, then text, then tool use),
+      // and the agent writes an `agent_turn` event for each.
       if (last && last.tools.length > 0) {
         turn = { number: last.number + 1, at: event.timestamp, said: null, thinking: null, tools: [] };
         turns.push(turn);

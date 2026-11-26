@@ -85,6 +85,7 @@ function readPipedLine(): Promise<string | null> {
   if (pipedLineQueue.length > 0) {
     return Promise.resolve(pipedLineQueue.shift()!.trim());
   }
+  // Node: 'end' is emitted once, when the pipe ends, also while no listener is attached.
   if (pipedEnded || process.stdin.readableEnded) {
     return Promise.resolve(null);
   }

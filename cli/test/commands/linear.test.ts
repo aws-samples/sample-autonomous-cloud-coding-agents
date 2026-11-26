@@ -70,6 +70,8 @@ describe('renderLinearAppTemplate', () => {
     expect(out).not.toMatch(/\[bot\]/);
   });
 
+  // #914: the consent page is AgentCore's `resourceOauth2ReturnUrl`, not Linear's `redirect_uri`.
+  // On the vault path Linear redirects to the AgentCore provider callback.
   const HOSTED_CONSENT = 'https://d111111abcdef8.cloudfront.net/';
   const VAULT_CALLBACK =
     'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f8804c1b';
@@ -130,6 +132,7 @@ describe('renderLinearAppTemplate', () => {
   });
 
   test('offers NO URI on a first vault run — the honest answer, not another flow\'s URI', () => {
+    // The AgentCore callback id does not exist until `setup` creates the provider.
     const block = redirectUriBlock(renderLinearAppTemplate({ hostedConsentUrl: HOSTED_CONSENT }));
     expect(block).not.toContain('http://localhost:8080/oauth/callback');
     expect(block).toMatch(/Leave empty/);
@@ -257,6 +260,7 @@ describe('renderLinearAppTemplate', () => {
   test('defers to setup in ONE line — the field is the only thing it talks about', () => {
     const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/' });
     expect(out).toMatch(/Leave empty — `bgagent linear setup <slug>` prints the URI to add, then stops\./);
+    // Linear's form accepts an empty Redirect URIs field (observed).
     expect(out).not.toMatch(/If Linear will not save an empty field/);
     const block = redirectUriBlock(out).split('\n').filter((l) => l.trim());
     expect(block).toHaveLength(2);
@@ -609,6 +613,7 @@ describe('queryLinearTeamKeys', () => {
     expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: false, error: errors });
   });
 
+  // Linear always returns the `teams` connection, empty when the workspace has no teams.
   test('fails (ok: false) when the response carries no teams connection', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,

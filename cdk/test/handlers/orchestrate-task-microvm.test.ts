@@ -410,6 +410,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     const { ctx, stepConfigs } = fakeContext();
     await handler({ task_id: 'TASK001' }, {
       ...ctx,
+      // The durable runtime retries a failed step under its default strategy.
       step: async (name: string, fn: () => Promise<unknown>, config?: unknown) => {
         try {
           return await ctx.step(name, fn, config);
@@ -676,6 +677,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
   test('a stale agent heartbeat stops the real supervisor and reclaims the MicroVM', async () => {
     runMicrovmOk();
+    // A hung guest inside a healthy VM is invisible to `GetMicrovm`.
     mockMicrovmSend.mockResolvedValue({ microvmId: MICROVM_ID, state: 'RUNNING' });
     mockReadLifecycle.mockResolvedValue({ ...lifecycle(), heartbeatAtMs: Date.now() - 300_000 });
     const looping = loopingContext();

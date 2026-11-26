@@ -23,7 +23,7 @@ A read-only workflow such as `coding/pr-review-v1` clones the repo, then reads a
 a conclusion. **It never builds.** The build def is a large over-allocation for a clone-and-read
 workload. On a stack that has not provisioned ECS at all, the workflow fails at session-start.
 
-The current code records an explicit decision against the naive fix (`orchestrator.ts:333–335`): *"do
+The current code records an explicit decision against the naive fix (`orchestrator.ts:335–337`): *"do
 NOT special-case read-only workflows to agentcore … a repo big enough to need the ECS build tier for
 building is also big enough to OOM the fixed AgentCore microVM just reading it."* That reasoning is
 about **not routing a read-only task to the wrong substrate FAMILY**, which here means an ECS repo
@@ -55,7 +55,7 @@ workflows.
 
 ### 2b. Stack wiring — `agent.ts` + `task-orchestrator.ts`
 - Pass the new ARN into the orchestrator's `ecsConfig` as `planningTaskDefinitionArn`
-  (alongside the existing `taskDefinitionArn` at `agent.ts:979`).
+  (alongside the existing `taskDefinitionArn` at `agent.ts:994`).
 - The orchestrator construct (`task-orchestrator.ts:353–357`) injects a new env var,
   `ECS_PLANNING_TASK_DEFINITION_ARN`, next to `ECS_TASK_DEFINITION_ARN`.
 
@@ -72,7 +72,7 @@ workflows.
 
 ## 3. What this does NOT change
 - **Substrate family routing is unchanged.** An ECS repo still plans on ECS, as
-  `orchestrator.ts:333` requires. An AgentCore repo still plans on AgentCore. The change decides
+  `orchestrator.ts:335` requires. An AgentCore repo still plans on AgentCore. The change decides
   which ECS task def runs the task, not which substrate.
 - **AgentCore repos are untouched.** The AgentCore project that this was verified on
   does not go near this change.
@@ -83,7 +83,7 @@ workflows.
 - It edits `ecs-agent-cluster.ts`, `agent.ts`, `task-orchestrator.ts`, and `ecs-strategy.ts`. The
   ECS-substrate workstream owns all four files and carries the context-gated `compute_type=ecs`
   deploy.
-- It resolves a tension in `orchestrator.ts:333`, which that workstream authored. That workstream
+- It resolves a tension in `orchestrator.ts:335`, which that workstream authored. That workstream
   should therefore own the change and the sizing decision.
 - Verifying it requires a `--context compute_type=ecs` deploy, which provisions the Fargate
   substrate. The dev stack is currently `ComputeSubstrate: agentcore` and has no ECS resources, so

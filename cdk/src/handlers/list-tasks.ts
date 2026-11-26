@@ -104,6 +104,7 @@ async function loadScoreboard(userId: string, range: ScoreboardRange, now: Date,
     logger.warn('Scoreboard read stopped at its page cap', { user_id: userId, range, covered_from: coveredFrom.toISOString() });
   }
   const tasks = reads.flatMap((read) => read.tasks);
+  // On GitHub a repository's name is the same name in any letter case.
   const wanted = repo?.toLowerCase();
   const counted = wanted === undefined ? tasks : tasks.filter((task) => typeof task.repo === 'string' && task.repo.toLowerCase() === wanted);
   return buildScoreboard(counted, range, now, coveredFrom);

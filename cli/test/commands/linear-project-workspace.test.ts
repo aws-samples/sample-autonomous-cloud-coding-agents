@@ -299,6 +299,7 @@ describe('findProjectOwnerWorkspace', () => {
     }
   });
 
+  // Linear answers a token it refuses with HTTP 200 and an `errors` array, with no data.
   const refusing = (...refused: string[]) => jest.fn(async (url: string, init?: RequestInit) => {
     const auth = (init?.headers as Record<string, string>).Authorization;
     return refused.includes(auth.replace('Bearer ', ''))

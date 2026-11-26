@@ -556,6 +556,8 @@ def _resolve_overall_task_status(
 
 
 def _branch_has_new_commits(repo_dir: str, default_branch: str, branch: str) -> bool:
+    # The output stays bytes: a git commit subject need not be UTF-8, and
+    # decoding one that is not would raise.
     try:
         res = subprocess.run(
             ["git", "log", f"origin/{default_branch}..origin/{branch}", "--oneline"],
@@ -631,6 +633,8 @@ def _compute_turns_completed(
     for a truthy value."""
     if not turns or max_turns <= 0:
         return turns
+    # The CLI can ask the model again without counting a turn (in CLI 2.1.319, after an
+    # answer that was refused, cut off or empty), so `turns` can pass the cap.
     return min(turns, max_turns)
 
 

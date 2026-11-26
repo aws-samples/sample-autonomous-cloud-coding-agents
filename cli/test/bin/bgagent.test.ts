@@ -39,6 +39,7 @@ describe('bgagent entry point', () => {
   const mockGetScoreboard = jest.fn();
 
   beforeEach(() => {
+    // A process.exitCode left set becomes the exit code of the Jest worker.
     process.exitCode = undefined;
     logSpy = jest.spyOn(console, 'log').mockImplementation();
     errorSpy = jest.spyOn(console, 'error').mockImplementation();

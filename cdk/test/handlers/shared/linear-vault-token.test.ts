@@ -116,6 +116,8 @@ describe('resolveLinearTokenViaVault', () => {
       resourceCredentialProviderName: 'bgagent-linear-oauth-acme',
       oauth2Flow: 'USER_FEDERATION',
       scopes: ['read', 'write', 'app:assignable', 'app:mentionable'],
+      // Observed: customParameters are part of the AgentCore vault's cache key; without them every
+      // resolve is a cache miss ("needs consent") even with a valid cached grant.
       customParameters: { actor: 'app', prompt: 'consent' },
     });
   });

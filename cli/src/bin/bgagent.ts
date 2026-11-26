@@ -122,6 +122,8 @@ if (require.main === module) {
   applyDefaultAppId();
   void run(process.argv)
     .finally(() => {
+      // Node's global ``fetch`` (undici) keeps TCP sockets alive in a connection pool, and they hold
+      // the event loop open for the pool's keep-alive timeout after the command's work is done.
       const EXIT_FLUSH_DELAY_MS = 50;
       setTimeout(() => {
         process.exit(process.exitCode ?? 0);

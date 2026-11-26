@@ -8,12 +8,16 @@ dependencies = [
     "bedrock-agentcore==1.26.0",
     # Held at 0.2.179: 0.2.180 bundles claude CLI 2.1.321, whose changelog says: "Changed
     # mods Claude writes to turn on without asking in auto and bypass modes".
+    # 0.2.179 bundles claude CLI 2.1.319, kept in lockstep with the npm CLI pin in the
+    # Dockerfile (#215).
     "claude-agent-sdk==0.2.179",
     "requests==2.34.2",
     "fastapi==0.162.4",
     "uvicorn==0.54.0",
     "aws-opentelemetry-distro==0.22.0",
     "mcp==2.3.0",
+    # The binding version is not the Cedar core version: cedarpy 4.12.2 builds on cedar-policy
+    # 4.12.0, the same core as @cedar-policy/cedar-wasm 4.12.0 pinned in cdk/package.json.
     "cedarpy==4.12.2",
     "pyyaml==6.0.3",
     "jsonschema==4.26.0",
@@ -132,7 +136,11 @@ filterwarnings = [
 addopts = "-ra"
 console_output_style = "count"
 timeout = 120
+# pytest-timeout's thread method dumped the stack but did not end a syscall-blocked test
+# (observed, ABCA-688). The signal method (SIGALRM) interrupts it in the main thread.
 timeout_method = "signal"
+# SIGALRM fires only in the main thread, so it does not end a hang in a worker thread.
+# faulthandler's C watchdog thread, immune to the GIL and blocked syscalls, dumps every stack.
 faulthandler_timeout = 300
 
 [tool.coverage.run]
@@ -145,6 +153,8 @@ fail_under = 89
 precision = 2
 show_missing = true
 skip_covered = true
+# These two lists replace coverage.py's defaults, which honour the `pragma: no cover` and
+# `pragma: no branch` comments.
 exclude_lines = ["^ *if TYPE_CHECKING:$", "^ *[.][.][.]$"]
 partial_branches = []
 

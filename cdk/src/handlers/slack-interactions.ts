@@ -90,6 +90,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     logger.error('Slack interaction handler failed', {
       error: err instanceof Error ? err.message : String(err),
     });
+    // Slack expects a 200 response within 3 seconds.
     return jsonResponse(200, {});
   }
 }

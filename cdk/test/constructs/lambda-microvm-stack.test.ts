@@ -112,6 +112,8 @@ describe.each(IMAGE_INPUTS)('LambdaMicrovmStack %s', (mode, imageInputs) => {
     child.hasResourceProperties('AWS::Lambda::NetworkConnector', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });
+    // CDK's raw cleanup-provider resources expose no TagManager that emits resource-level Tags;
+    // they inherit the stack's tags from CloudFormation.
     parent.hasResourceProperties('AWS::CloudFormation::Stack', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });

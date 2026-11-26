@@ -148,6 +148,7 @@ export function makeSlackCommand(): Command {
           process.exit(1);
         }
 
+        // Slack channel IDs start with C (public), G (private/group), or D (DM).
         if (!/^[CGD][A-Z0-9]+$/.test(channelId)) {
           console.error(`Invalid channel ID: ${channelId}. Expected a Slack channel ID like C0123ABCD.`);
           console.error('Right-click the channel in Slack → "Copy link" → the last path segment is the channel ID.');

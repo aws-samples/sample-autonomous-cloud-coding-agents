@@ -203,6 +203,8 @@ class TestPullRequestBranch:
 
     @pytest.mark.parametrize("head", ["develop", "feature/x"], ids=["default-branch", "other"])
     def test_pr_branch_is_checked_out_with_real_git(self, tmp_path, monkeypatch, head):
+        # The clone has already created and checked out the default branch, which
+        # `git checkout -b` refuses to create again.
         ran: list[str] = []
         setup = _setup_with_real_git(
             monkeypatch,
@@ -223,6 +225,7 @@ class TestPullRequestBranch:
         assert "check-pr-fork" in ran
 
     def test_pr_from_a_fork_is_refused_before_its_branch_name_is_fetched(self, monkeypatch):
+        # The head ref of a pull request from a fork names a branch of the fork.
         fake = _fake_run_cmd(stdouts={"check-pr-fork": "true\n"})
         _patch_common(monkeypatch, fake)
 
@@ -339,6 +342,7 @@ class TestDiamondBaseBranch:
 
 
 class TestStackedChildWithRealGit:
+    # A plain `git clone` brings every branch of the remote.
     PRED = "bgagent/task-pred/feat-pred"
 
     def test_child_branches_from_its_predecessor_when_the_connection_drops(
@@ -611,6 +615,8 @@ class TestBaselineDefaultTaskMissing:
 
 
 class TestFindMiseConfigs:
+    # `mise trust <repo_dir>` trusts only the root config, and `mise run` stops at the
+    # trust gate of a nested `mise.toml` that is not trusted.
     def _mk(self, root, rels):
         import os
 
@@ -709,6 +715,7 @@ class TestDetectDefaultBranch:
     def test_gh_failure_falls_back_to_the_default_branch_of_the_clone(
         self, tmp_path, monkeypatch, gh_failure
     ):
+        # `git clone` records the remote's default branch as origin/HEAD.
         clone = tmp_path / "clone"
         _git("clone", "-q", _origin(tmp_path, "trunk"), str(clone), cwd=tmp_path)
         real_run = subprocess.run
@@ -1013,6 +1020,7 @@ class _PreflightFake(FakeRunCmd):
 
 
 def _denied_403(repo_url="owner/repo", user="someone"):
+    # Observed: what GitHub answers a push without write access to a public repository.
     return (
         f"remote: Permission to {repo_url}.git denied to {user}.\n"
         f"fatal: unable to access 'https://github.com/{repo_url}.git/': "
@@ -1224,6 +1232,7 @@ class TestPushCapabilityPreflight:
         self._raises(monkeypatch, _DENIED_403, resolved_workflow={"id": "x/y-v1", "version": "1"})
 
     def test_fine_grained_token_passes_on_the_servers_verdict(self, monkeypatch):
+        # GitHub returns no X-OAuth-Scopes header for a fine-grained PAT.
         fake = _PreflightFake(preflight_rc=0)
         self._setup(monkeypatch, fake)
 
@@ -1498,6 +1507,7 @@ class TestPushPreflightRedaction:
 
 class TestPushRefusalFitsTheTaskRecord:
     def test_longest_refusal_fits(self):
+        # The longest owner and repository names GitHub allows: 39 and 100 characters.
         repo_url = f"{'o' * 39}/{'r' * 100}"
         stderr = f"remote: Permission to {repo_url}.git denied to someone. {'x' * 300}"
         refusal = repo._push_refusal(_config(repo_url=repo_url, github_token=""), stderr)
@@ -1635,6 +1645,7 @@ class TestPushPreflightAgainstRealGit:
         assert not marker.exists()
 
     def test_only_the_tasks_token_answers_for_github(self, tmp_path, monkeypatch):
+        # Git asks credential helpers in order and takes the first answer (#801).
         _, work = self._remote_and_clone(tmp_path, monkeypatch)
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()

@@ -82,6 +82,7 @@ describe('buildApp — AgentCore AZ wiring', () => {
   });
 
   it('surfaces a lookup failure as a stack-artifact ERROR (regression: annotations were dropped)', async () => {
+    // CDK never collects an annotation of the App node into a stack artifact.
     const built = await app({
       describeAzs: async () => {
         throw new Error('AccessDeniedException');

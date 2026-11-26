@@ -23,7 +23,8 @@ import * as path from 'path';
 /**
  * ``yarn tsc`` inside a workspace does not run that workspace's compiler: Yarn 1
  * also looks in the repository-root ``node_modules/.bin`` and lets that entry
- * win.
+ * win, and it links that entry to the first installed ``typescript`` in path
+ * order, so a package that nests another version takes the compiler over.
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');

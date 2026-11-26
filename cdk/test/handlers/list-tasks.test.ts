@@ -416,6 +416,7 @@ describe('list-tasks handler', () => {
 
     test.each([
       ['ACTIVE', 'UserCreatedAtIndex'],
+      // DynamoDB refuses a created_at start key on UserStatusIndex, so the real request is a 500.
       ['CREATING', 'UserStatusIndex'],
     ])('a created_at cursor follows the status check: %s reads %s', async (status, index) => {
       mockDescribeTable.mockResolvedValue(describedWith(status));
@@ -610,6 +611,7 @@ describe('list-tasks handler', () => {
     });
 
     test('reads a response without Items as a page that holds no task', async () => {
+      // The SDK types `Items` as optional.
       mockSend.mockResolvedValue({});
 
       const board = scoreboardIn(await getScoreboard());

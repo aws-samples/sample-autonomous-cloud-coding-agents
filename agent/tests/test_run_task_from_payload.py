@@ -119,6 +119,7 @@ class TestRunTaskFromPayload:
         assert set(seen).issubset(accepted)
 
     def test_max_turns_rejects_surprising_inputs(self):
+        # int() accepts a bool (int(True) == 1) and truncates a float (int(3.9) == 3).
         assert "max_turns" not in _capture({"repo_url": "r", "max_turns": True})
         assert "max_turns" not in _capture({"repo_url": "r", "max_turns": 3.9})
         assert _capture({"repo_url": "r", "max_turns": 50})["max_turns"] == 50

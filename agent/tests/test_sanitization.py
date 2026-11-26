@@ -163,6 +163,7 @@ class TestTagStrippingPassLimit:
 
 class TestTagStrippingTime:
     @pytest.mark.timeout(1)
+    # 65,536 characters is the longest body GitHub accepts.
     @pytest.mark.parametrize("size", [65_536, 262_144])
     @pytest.mark.parametrize(
         ("build", "expected"),
@@ -204,6 +205,7 @@ class TestTagStrippingTime:
         assert len(text) == size
         sanitized = sanitize_external_content(text)
         wanted = expected(text)
+        # Not ==: on a failure pytest would diff both texts.
         assert (len(sanitized), sanitized == wanted) == (len(wanted), True)
 
 

@@ -119,6 +119,7 @@ function validate(body: RegistryPublishRequest): string | null {
   if (!REGISTRY_KINDS.includes(body.kind as (typeof REGISTRY_KINDS)[number])) {
     return `unknown kind '${body.kind}' (expected one of: ${REGISTRY_KINDS.join(', ')}).`;
   }
+  // RegExp.test converts its argument to a string: a one-element array or a number would pass.
   if (typeof body.namespace !== 'string' || !NAMESPACE_RE.test(body.namespace)) {
     return 'namespace must match [a-z][a-z0-9-]*.';
   }

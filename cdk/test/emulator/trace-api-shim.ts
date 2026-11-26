@@ -40,6 +40,7 @@ const server = createServer((req, res) => {
     headers: req.headers,
     pathParameters: { task_id: decodeURIComponent(match[1]) },
     requestContext: {
+      // API Gateway's Cognito authorizer puts the verified caller in `claims.sub`.
       authorizer: typeof caller === 'string' ? { claims: { sub: caller } } : undefined,
     },
   };

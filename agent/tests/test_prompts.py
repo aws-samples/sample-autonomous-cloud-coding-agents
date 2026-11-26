@@ -73,6 +73,7 @@ class TestChannelPromptAddendum:
         assert addendum == ""
 
     def test_jira_channel_gets_no_addendum(self):
+        # The Atlassian MCP cannot load in a headless agent.
         addendum = _channel_prompt_addendum(
             _config(
                 channel_source="jira",
@@ -139,6 +140,7 @@ class TestGetSystemPrompt:
         prompt = get_system_prompt("coding/pr-review-v1")
         assert "{{" not in prompt
         assert "}}" not in prompt
+        # The example body is what the GitHub Reviews API takes: `comments` holds objects.
         example = next(line for line in prompt.splitlines() if '"comments"' in line)
         body = json.loads(example.replace("<line>", "1"))
         assert body["event"] == "COMMENT"

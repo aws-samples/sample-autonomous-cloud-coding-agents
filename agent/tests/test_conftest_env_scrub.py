@@ -16,6 +16,8 @@ def test_session_resolves_unscoped_when_scrubbed():
     assert is_scoped() is False
 
 
+# pytest sets up a module-scoped fixture before the function-scoped autouse fixtures
+# of the test that requests it.
 @pytest.fixture(scope="module")
 def _latched_blocker():
     hooks._record_blocker_reason("egress_denied", "left over from an earlier test", "github.com")

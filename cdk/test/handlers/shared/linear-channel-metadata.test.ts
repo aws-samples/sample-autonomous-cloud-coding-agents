@@ -156,6 +156,7 @@ describe('per-workspace agent-session marker', () => {
   });
 
   test('the evidence expires: a workspace that stopped delivering sessions gets its comment trigger back', async () => {
+    // Linear sends no signal when an admin turns "Agent session events" off.
     send.mockResolvedValue(seenAt(NOW - AGENT_SESSION_EVIDENCE_TTL_MS + MINUTE));
     await expect(workspaceDeliversAgentSessions(ddb, 'Registry', 'org-1', NOW)).resolves.toBe(true);
     resetSessionWorkspaceCacheForTests();

@@ -396,6 +396,7 @@ describe('linear commands on a registry that already holds a workspace', () => {
     let errSpy: jest.SpiedFunction<typeof console.error>;
 
     beforeEach(() => {
+      // A `process.exitCode` left set becomes the exit code of Jest.
       process.exitCode = undefined;
       linear.projects = [{ id: 'p-1', name: 'Roadmap', teams: { nodes: [{ name: 'Platform' }] } }];
       errors = [];

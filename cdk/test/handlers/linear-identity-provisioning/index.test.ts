@@ -65,6 +65,7 @@ describe('linear-identity-provisioning onEvent', () => {
     const call = mockSend.mock.calls[0][0] as TaggedCall;
     expect(call._type).toBe('Create');
     expect(call.input).toEqual({ name: 'abca_linear_oauth', allowedResourceOauth2ReturnUrls: urls });
+    // CloudFormation treats a changed PhysicalResourceId as a replacement.
     expect(res.PhysicalResourceId).toBe('abca_linear_oauth');
     expect(res.Data).toEqual({ WorkloadName: 'abca_linear_oauth' });
   });

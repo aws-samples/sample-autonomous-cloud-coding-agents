@@ -442,6 +442,8 @@ async function readTaskForIssue(taskId: string, request: AgentSessionRequest): P
   if (!record) return null;
   const task = record as PriorTask;
   const ownerWorkspaceId = task.channel_metadata?.linear_workspace_id;
+  // Linear issue ids are globally unique, so a task with no recorded workspace
+  // is still this issue's task.
   if (ownerWorkspaceId && ownerWorkspaceId !== request.workspaceId) {
     logger.warn('Agent-session issue\'s task belongs to another workspace — ignoring it', {
       linear_issue_id: request.issueId,

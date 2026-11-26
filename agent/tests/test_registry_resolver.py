@@ -41,6 +41,7 @@ class TestCandidatesTheTypeScriptResolverSkips:
 
 class TestNumericPrereleaseIdentifiers:
     def test_identifiers_above_two_to_the_53_are_compared_exactly(self):
+        # As doubles these two are the same value.
         candidates = ["1.0.0-9007199254740992", "1.0.0-9007199254740993"]
         assert select_highest(candidates, _constraint("^1.0.0-0")) == "1.0.0-9007199254740993"
 

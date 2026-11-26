@@ -28,6 +28,7 @@ import { Construct } from 'constructs';
 
 const PROVISION_TIMEOUT_SECONDS = 60;
 const PROVISION_MEMORY_MB = 256;
+// Registry create observed at ~70s.
 const POLL_INTERVAL_SECONDS = 10;
 const TOTAL_TIMEOUT_MINUTES = 15;
 const POLL_INTERVAL = Duration.seconds(POLL_INTERVAL_SECONDS);
@@ -52,6 +53,7 @@ export class AgentRegistry extends Construct {
     super(scope, id);
 
     const entry = path.join(__dirname, '..', 'handlers', 'registry-provisioning', 'index.ts');
+    // The Agent Registry control-plane SDK is not in the Lambda runtime.
     const bundling = { externalModules: [] as string[] };
 
     const commonFnProps = {
@@ -136,7 +138,8 @@ export class AgentRegistry extends Construct {
     });
 
     // CloudFormation names an unnamed state machine `<LogicalId>-<random>`,
-    // without the stack name.
+    // without the stack name. A nested stack's name is a token for a generated
+    // name of ~100 characters, over Step Functions' 80-character limit.
     const root = Stack.of(this).nestedStackParent ?? Stack.of(this);
     const waiter = provider.node
       .findAll()

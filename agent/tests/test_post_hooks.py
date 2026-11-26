@@ -670,6 +670,8 @@ class TestReconcileAgentBranch:
         self._git(repo, "commit", "-qam", "agent work")
         agent_commit = self._head_sha(repo)
         self._git(repo, "checkout", "-q", "main")
+        # git carries an uncommitted edit over to the other branch when the file is the
+        # same on both.
         (tmp_path / "repo" / "g.txt").write_text("base\nedited on main, never committed\n")
 
         post_hooks.reconcile_agent_branch(repo, platform)
@@ -685,6 +687,8 @@ class TestReconcileAgentBranch:
         (tmp_path / "repo" / "f.txt").write_text("base\nagent change\n")
         self._git(repo, "commit", "-qam", "agent work")
         self._git(repo, "checkout", "-q", "main")
+        # git will not switch branches over an uncommitted edit to a file that differs
+        # between them.
         (tmp_path / "repo" / "f.txt").write_text("base\nedited on main, never committed\n")
 
         moved = post_hooks.reconcile_agent_branch(repo, platform)
@@ -870,10 +874,13 @@ class TestIsVerifyCommandInert:
         assert post_hooks.is_verify_command_inert(1, log) is False
 
     def test_command_not_found_inside_a_failed_run_is_a_failed_build(self):
+        # A command the shell cannot find exits 127.
         log = "FAIL a.test.ts\nbash: line 3: foo: command not found\n1 test failed"
         assert post_hooks.is_verify_command_inert(1, log) is False
 
     def test_a_mise_warning_above_a_failed_run_is_a_failed_build(self):
+        # mise warns about a tool it does not know and runs the task all the same; this is
+        # its line.
         log = (
             "mise WARN  Failed to resolve tool version list for foo: "
             "[/repo/mise.toml] foo@1: foo not found in mise tool registry\n"
@@ -882,6 +889,7 @@ class TestIsVerifyCommandInert:
         assert post_hooks.is_verify_command_inert(1, log) is False
 
     def test_a_task_that_mise_cannot_find_is_inert(self):
+        # What mise prints, with exit 1, when a task depends on one that does not exist.
         assert post_hooks.is_verify_command_inert(1, "mise ERROR task not found: compile") is True
 
     def test_a_task_missing_from_a_repository_that_has_other_tasks_is_inert(self):

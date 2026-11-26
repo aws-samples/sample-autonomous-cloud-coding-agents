@@ -141,6 +141,7 @@ while IFS=$'\t' read -r STACK_NAME CREATION_TIME; do
     continue
   fi
 
+  # Stuck AgentCore/Lambda Hyperplane ENIs block the VPC deletion.
   SG_IDS=$(aws cloudformation list-stack-resources \
     --region "$REGION" \
     --stack-name "$STACK_NAME" \

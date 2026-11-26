@@ -374,6 +374,7 @@ describe('AgentStack', () => {
 
   test('runtime is granted the default Bedrock model set', () => {
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    // A call through an inference profile needs both ARNs granted, or Bedrock answers AccessDenied.
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('anthropic.claude-opus-4-8');
@@ -622,6 +623,7 @@ describe('AgentStack', () => {
   });
 
   test('model invocation logging does NOT send an empty largeDataDeliveryS3Config', () => {
+    // An empty `bucketName` fails client-side validation ("valid min length: 3"). The field is optional.
     const customs = template.findResources('Custom::AWS');
     const logging = Object.values(customs).find(r =>
       JSON.stringify(r.Properties?.Create).includes('putModelInvocationLoggingConfiguration'),
@@ -771,6 +773,8 @@ describe('AgentStack', () => {
     for (const id of ids) {
       expect(id).not.toContain('backgroundagentdev');
       expect(id).not.toContain('AgentRuntimeApplication');
+      // A DeliverySource is unique per (resource ARN, log type) in an account: CloudFormation creates a renamed
+      // one before it deletes the old one, the create collides, and the update rolls back.
       expect(id).toMatch(/^Runtime(Application|Usage)LogsDeliverySource[0-9A-F]{8}$/);
     }
 
@@ -989,6 +993,7 @@ describe('AgentStack', () => {
         .filter(value => value !== undefined)
         .map(value => stack.parameters[value.Ref] ?? value));
     expect(pinned.length).toBeGreaterThan(0);
+    // The guardrail's own Version attribute is DRAFT, which follows every edit instead of pinning one.
     expect(pinned).toEqual(pinned.map(() => published));
 
     const [guardrail] = Object.values(template.findResources('AWS::Bedrock::Guardrail'));
@@ -1021,6 +1026,7 @@ describe('publishGuardrailVersion (#1079)', () => {
     return ids[0];
   }
 
+  // Two syntheses in one process differ in their token numbers.
   test.each<[string, Change]>([
     ['in a second synthesis of the same tree', {}],
     ['with a construct in front of the guardrail', { inFront: true }],
@@ -1101,6 +1107,8 @@ describe('publishGuardrailVersion (#1079)', () => {
       { contextualGroundingFilters: [groundingFilter(bedrock.ContextualGroundingFilterType.GROUNDING)] },
       guardrail => guardrail.addContextualGroundingFilter(groundingFilter(bedrock.ContextualGroundingFilterType.RELEVANCE)),
     ],
+    // Words and managed word lists share a policy, as regex and PII filters do. Once the
+    // policy is rendered, the empty list of the pair is kept as well.
     [
       'gets its first word filter beside a managed word list',
       { managedWordListFilters: [{ type: bedrock.ManagedWordFilterType.PROFANITY }] },
@@ -1447,8 +1455,10 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       'lambda:SuspendMicrovm',
       'lambda:ResumeMicrovm',
     ]);
+    // Every MicroVM lifecycle action authorizes against the image resource.
     expect(lifecycle.Resource).toEqual(imageResources());
 
+    // PassNetworkConnector supports no resource-level permissions.
     const pass = statements.find(s => s.Sid === 'MicrovmPassNetworkConnector')!;
     expect(pass.Action).toBe('lambda:PassNetworkConnector');
     expect(pass.Resource).toBe('*');
@@ -1546,6 +1556,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
           compute_types: 'lambda-microvm',
           microvm_nested_stack: true,
           microvm_region_override: true,
+          // eu-central-1 has no AWS Agent Registry (ADR-024).
           enableAgentRegistry: false,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
@@ -1873,6 +1884,7 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
   });
 
   test('the workload identity name is STACK-scoped, so two stacks cannot share one', () => {
+    // AgentCore workload identity names are unique per account and Region.
     const nameFor = (id: string): string => {
       const app = new App({ context: { enableLinearIdentityVault: true } });
       const rendered = JSON.stringify(Template.fromStack(
@@ -1886,11 +1898,13 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect(first).not.toBe(second);
     expect(first).toContain('AlphaAgentStack');
     const long = nameFor('AgentStackWithAVeryLongDeliberatelyExcessiveNameForTruncation');
+    // 64 characters is the AgentCore limit for a workload identity name.
     expect(long.length).toBeLessThanOrEqual(64);
     expect(long.startsWith('abca_linear_oauth_')).toBe(true);
   });
 
   test('the workload identity name can be pinned by context, for an existing deployment', () => {
+    // A grant is bound to (workload identity, user id), so renaming the identity orphans every consent already given.
     const app = new App({
       context: { enableLinearIdentityVault: true, linearVaultWorkloadName: 'abca_linear_oauth' },
     });

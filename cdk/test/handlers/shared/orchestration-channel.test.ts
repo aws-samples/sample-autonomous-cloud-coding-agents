@@ -107,6 +107,7 @@ describe('Linear channel adapter', () => {
   });
 
   test('transitionState distinguishes running from awaiting-review by state name', async () => {
+    // Linear types both In Progress and In Review as `started`.
     await ch.transitionState!(linearIssue, 'started');
     expect(linearTransitionIssueState.mock.calls[0][2]).toBe('started');
     expect(linearTransitionIssueState.mock.calls[0][3]).toEqual(['In Progress']);
@@ -133,6 +134,7 @@ describe('Linear channel adapter', () => {
   });
 
   test('postThreadedReply carries both the issue and the parent comment', async () => {
+    // Linear rejects a reply that names only the parent comment.
     linearReplyToComment.mockResolvedValue('reply-1');
     const res = await ch.postThreadedReply!(linearIssue, { commentId: 'parent-1' }, 'done');
     expect(res).toEqual({ commentId: 'reply-1' });

@@ -165,6 +165,7 @@ def mark_consumed(task_id: str, nudge_id: str, table: Any | None = None) -> bool
 
 
 def _xml_escape(text: str) -> str:
+    # XML needs ``&apos;`` only inside a single-quoted attribute value.
     return (
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )

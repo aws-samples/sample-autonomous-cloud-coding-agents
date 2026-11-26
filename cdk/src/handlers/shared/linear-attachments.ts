@@ -45,6 +45,8 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d] as const;
 
 const MARKDOWN_LABEL_MAX_CHARS = 4096;
 
+// Node's regex engine backtracks on both the label and the URL from every `[`: measured
+// ~820 ms on 100 KB of `[](https://a` repeated, with or without a label bound.
 const SCAN_MAX_DESCRIPTION_CHARS = 65_536;
 // Linear embeds uploaded images as `![alt](url)` and uploaded files as plain
 // `[label](url)` links, and normalizes a file link's URL into the CommonMark
@@ -147,6 +149,7 @@ function collectLinearUploads(description: string | undefined): SelectedUpload[]
     const { id, filename } = deriveUploadIdentity(url, index++);
     if (seenIds.has(id)) continue;
     seenIds.add(id);
+    // Linear sets a file link's label to the upload's original filename.
     selected.push({ url, filename, id, displayName: label || filename });
   }
   return selected;
@@ -195,6 +198,7 @@ async function fetchUploadBytes(
         Accept: '*/*',
       },
       signal: controller.signal,
+      // A signed Linear upload URL serves the bytes directly, with no redirect.
       redirect: 'error',
     });
     if (resp.status === 401 || resp.status === 403) {

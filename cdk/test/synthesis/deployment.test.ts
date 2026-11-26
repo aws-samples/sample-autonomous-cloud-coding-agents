@@ -186,6 +186,8 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
     expect(count('AWS::CDK::Metadata')).toBeGreaterThan(0);
   });
 
+  // Moving a construct changes its logical ID, and CloudFormation replaces a resource
+  // whose logical ID changes.
   if (profile.name === LEGACY_CELL) {
     test('keeps the logical IDs of every state-bearing resource of pre-profile stacks', () => {
       const ids = census.templates.flatMap(template => template.inventory

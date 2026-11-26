@@ -92,6 +92,8 @@ def _resolve_linear_token_via_vault(
     user_id = recorded_user_id.strip() or f"linear-workspace-{workspace_id}"
 
     try:
+        # Client construction raises UnknownServiceError on an SDK that predates
+        # AgentCore and InvalidRegionError on a bad region.
         client = platform_client("bedrock-agentcore", region_name=region)
         wat = client.get_workload_access_token_for_user_id(
             workloadName=workload_name,

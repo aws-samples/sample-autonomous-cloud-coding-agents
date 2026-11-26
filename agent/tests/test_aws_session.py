@@ -295,7 +295,7 @@ class TestRefreshCallback:
         sts_client.assume_role.assert_called_once()
         kwargs = sts_client.assume_role.call_args.kwargs
         assert kwargs["RoleArn"] == "arn:aws:iam::111122223333:role/abca-session"
-        assert kwargs["DurationSeconds"] == 3600
+        assert kwargs["DurationSeconds"] == 3600  # AWS caps a role-chained session at 1 hour
         assert kwargs["RoleSessionName"].startswith("abca-t-abc")
         tags = {t["Key"]: t["Value"] for t in kwargs["Tags"]}
         assert tags == {"user_id": "u-1", "repo": "owner/repo", "task_id": "t-abc"}

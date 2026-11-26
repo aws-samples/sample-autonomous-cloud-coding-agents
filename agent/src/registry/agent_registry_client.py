@@ -96,6 +96,7 @@ class AgentRegistryClient:
                 raise RegistryRecordMalformedError(
                     f"SKILL.md frontmatter is not valid YAML: {exc}"
                 ) from exc
+            # An empty block (``---\n\n---``) parses to None.
             if fm is None:
                 return {}
             if not isinstance(fm, dict):

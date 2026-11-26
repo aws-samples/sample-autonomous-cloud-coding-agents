@@ -359,7 +359,8 @@ async function uploadViaPresignedPost(
   for (const [key, value] of Object.entries(instruction.upload_fields)) {
     form.append(key, value);
   }
-  // S3 POST Object ignores every form field after the file.
+  // S3 POST Object ignores every form field after the file, and takes Content-Type from
+  // the policy field, not from the multipart part.
   form.append('file', new Blob([fileData]), path.basename(filePath));
 
   const controller = new AbortController();
@@ -387,6 +388,8 @@ async function uploadViaPresignedPost(
     clearTimeout(timeout);
   }
 
+  // S3 POST Object returns 204 on success. Some error conditions return 200 with an XML
+  // error body (e.g., KMS failures).
   const text = await res.text().catch(() => '');
   if (!res.ok || (res.status === 200 && text.includes('<Error>'))) {
     throw new CliError(

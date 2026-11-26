@@ -39,6 +39,8 @@ const STACK_TEMPLATE = {
       Type: 'AWS::SecretsManager::Secret',
       Properties: {
         Description: 'GitHub personal access token for the background agent',
+        // What aws-cdk-lib synthesizes for a Secret without a value. CloudFormation generates a
+        // random password for it, not a placeholder the CLI could recognize.
         GenerateSecretString: {},
       },
     },

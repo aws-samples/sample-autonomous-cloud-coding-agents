@@ -47,6 +47,8 @@ os.environ["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
     )
 )
 
+# pytest-timeout's SIGALRM (method="signal") fires only in the main thread: it does
+# not end a deadlock in a worker thread.
 # faulthandler has a single internal timer, and pytest's ``faulthandler_timeout``
 # re-arms it at the start of every test without ``exit=True``: a session-level
 # ``faulthandler.dump_traceback_later(exit=True)`` is cancelled by the first test.
@@ -74,6 +76,8 @@ for _var in [name for name in os.environ if name.startswith("AWS_")]:
     del os.environ[_var]
 os.environ["AWS_CONFIG_FILE"] = os.devnull
 os.environ["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull
+# botocore still reads the legacy boto config for credentials: /etc/boto.cfg and
+# ~/.boto unless BOTO_CONFIG names another file.
 os.environ["BOTO_CONFIG"] = os.devnull
 os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
 
@@ -125,6 +129,7 @@ _skipped: list[str] = []
 
 def _record_skip(report):
     if report.skipped and not hasattr(report, "wasxfail"):
+        # pytest's longrepr of a skip is a (file, line, reason) tuple.
         where = report.longrepr
         detail = f"{where[0]}:{where[1]}: {where[2]}"
         _skipped.append(f"{report.nodeid} — {detail}")

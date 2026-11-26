@@ -174,6 +174,8 @@ test('keeps main\'s execution role description byte-for-byte', () => {
 });
 
 test('the execution role\'s IAM5 exception follows the policies CDK splits off for a large model list', () => {
+  // Forty ids put the Bedrock statement alone above the inline-policy limit, so CDK moves it into a
+  // managed policy during synthesis.
   const { stack } = instantiate({
     context: { bedrockModels: Array.from({ length: 40 }, (_, index) => `anthropic.claude-audit-${index}-v1:0`) },
   });
@@ -419,6 +421,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   test('exposes the image ARN as both the identifier and the IAM grant scope', () => {
     expect(built.construct.imageIdentifier).toBeDefined();
     expect(built.construct.imageIdentifier).toBe(built.construct.imageArn);
+    // With no version pinned, the service resolves the image's latest ACTIVE version.
     expect(built.construct.imageVersion).toBeUndefined();
   });
 
@@ -473,6 +476,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(JSON.stringify(role.Properties.ManagedPolicyArns))
       .toContain('service-role/AWSLambdaVPCAccessExecutionRole');
 
+    // Measured: the connector also needs these ENI, tag and private-IP actions on its operator role.
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeConnectorOperatorRole'));
     const actions = policies
@@ -596,6 +600,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       expect(statements.map((s: { Action: string }) => s.Action).sort())
         .toEqual(['sts:AssumeRole', 'sts:TagSession']);
       for (const statement of statements) {
+        // `microvms.lambda.amazonaws.com` does not exist: IAM rejects it with MalformedPolicyDocument.
         expect(statement.Principal).toEqual({ Service: 'lambda.amazonaws.com' });
       }
     }
@@ -651,6 +656,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     const actions: string[] = statements.flatMap((s: { Action: string | string[] }) =>
       Array.isArray(s.Action) ? s.Action : [s.Action]);
 
+    // CDK's grantRead renders the Get*/List* read set.
     expect(actions).toContain('s3:GetObject*');
     const s3Actions = actions.filter(a => a.startsWith('s3:'));
     expect(s3Actions).toEqual(['s3:GetObject*', 's3:GetBucket*', 's3:List*']);
@@ -734,6 +740,8 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   });
 
   test('logs:CreateLogGroup is on the BUILD role only, never the execution role', () => {
+    // Measured: build and guest lines both land in the one group CloudFormation pre-creates, and the
+    // service creates no other at run time. The service documents logs:CreateLogGroup on the build role.
     const buildActions = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole'))
       .flatMap(([, p]) => p.Properties.PolicyDocument.Statement)
@@ -918,6 +926,7 @@ describe('LambdaMicrovmCompute — image built out of band', () => {
   });
 
   test('an image version never changes the IAM scope', () => {
+    // The Service Authorization Reference's `microvmImage` ARN ends at the name; `imageVersion` is a separate RunMicrovm field.
     expect(byNameVersioned.construct.imageArn).toBe(byName.construct.imageArn);
     expect(byNameVersioned.construct.imageVersion).toBe('3');
   });

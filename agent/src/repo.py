@@ -122,7 +122,7 @@ _PUSH_PREFLIGHT_REF = "refs/heads/bgagent-push-preflight"
 # GitHub refuses the push service to a token without write access, with 403 or with
 # 404 "Repository not found".
 _PUSH_REFUSED_SIGNATURES: tuple[str, ...] = (
-    "permission to",
+    "permission to",  # remote: Permission to <owner>/<repo>.git denied to <user>.
     "write access to repository not granted",
     "the requested url returned error: 403",
     "the requested url returned error: 404",

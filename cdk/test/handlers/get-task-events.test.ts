@@ -261,6 +261,8 @@ describe('get-task-events handler', () => {
   });
 
   test('lower-case ?after is normalized to upper-case before the DDB query', async () => {
+    // DynamoDB compares strings as raw bytes and lower-case sorts after upper-case: a lower-case
+    // cursor is greater than every stored (upper-case Crockford Base32) event_id and matches no row.
     const event = makeEvent({ queryStringParameters: { after: VALID_AFTER.toLowerCase() } });
     await handler(event);
 
@@ -313,6 +315,7 @@ describe('get-task-events handler', () => {
 
   test('invalid ?after (illegal chars) returns 400 with VALIDATION_ERROR', async () => {
     mockSend.mockReset();
+    // Crockford Base32 excludes 'I'.
     const event = makeEvent({ queryStringParameters: { after: 'IIIIIIIIIIIIIIIIIIIIIIIIII' } });
     const result = await handler(event);
 

@@ -174,6 +174,7 @@ async function startIssue(event: APIGatewayProxyEvent, userId: string, requestId
     if (!labelId) {
       return errorResponse(422, ErrorCode.VALIDATION_ERROR, `Linear has no "${label}" label yet. Create it in Linear (Settings → Labels), then try again.`, requestId);
     }
+    // Linear's webhook for the label can arrive before addIssueLabel returns.
     const claimed = await writeStartClaim(ddb, DEDUP_TABLE!, { issueId: issue.id, workspaceId: mapping.linear_workspace_id, platformUserId: userId });
     if (!claimed) {
       return errorResponse(409, ErrorCode.DUPLICATE_TASK, `Someone else is starting ${issue.identifier} right now.`, requestId);

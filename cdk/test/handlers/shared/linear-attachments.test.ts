@@ -292,6 +292,7 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
   });
 
   test('types a generic octet-stream response by the .log extension in its markdown label', async () => {
+    // The uploads.linear.app URL path is a UUID with no extension.
     (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(TEXT_BYTES, 200, 'application/octet-stream'));
     const records = await downloadScreenAndStoreLinearAttachments(
       labeledDesc('output.log', 'https://uploads.linear.app/u/l/9c8b-uuid'), 10, storageCtx(),

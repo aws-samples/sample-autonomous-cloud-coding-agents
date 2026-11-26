@@ -33,14 +33,15 @@ export type RegistryStatus =
 export type StorageMode = 'native' | 'custom';
 
 /** The reverse-DNS key under which ABCA runtime config rides inside a native
- *  MCP `server.json` `_meta` block. */
+ *  MCP `server.json` `_meta` block. Measured: the block survives validation. */
 export const RUNTIME_META_KEY = 'dev.abca.runtime';
 
 /** `_meta` key carrying the authenticated publisher (Cognito sub). Written once
  *  at publish; immutable with the rest of the record. */
 export const PUBLISHER_META_KEY = 'dev.abca.publisher';
 
-/** Frontmatter key carrying the publisher inside a native SKILL record's SKILL.md. */
+/** Frontmatter key carrying the publisher inside a native SKILL record's SKILL.md:
+ *  a skill cannot hold a `_meta` block. */
 export const PUBLISHER_FM_KEY = 'x-abca-publisher';
 
 /** mcp_server: the `.mcp.json` connection config the agent merges in. */

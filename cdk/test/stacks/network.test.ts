@@ -61,6 +61,7 @@ function withoutNetworkParameters(resource: TemplateJson): TemplateJson {
   if (resource?.Type !== 'AWS::CloudFormation::Stack') return resource;
   const parameters = Object.fromEntries(Object.entries((resource.Properties.Parameters ?? {}) as Record<string, TemplateJson>)
     .filter(([, value]) => !(typeof value?.Ref === 'string' && isNetworkResource(value.Ref))));
+  // CDK addresses a nested template by its content, so `TemplateURL` differs whenever the template does.
   const { Parameters: _parameters, TemplateURL: _url, ...properties } = resource.Properties;
   return { ...resource, Properties: Object.keys(parameters).length ? { ...properties, Parameters: parameters } : properties };
 }

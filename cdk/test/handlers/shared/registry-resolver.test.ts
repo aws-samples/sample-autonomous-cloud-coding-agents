@@ -39,6 +39,7 @@ describe('registry resolver — parseVersion', () => {
     expect(parseVersion('latest')).toBeNull();
   });
   test('rejects a digit outside ASCII and a component too long to be a safe integer', () => {
+    // Python's `\d` and `int()` accept U+0662 (ARABIC-INDIC DIGIT TWO), and `int()` refuses more than 4300 digits.
     expect(parseVersion('1.1\u0662.0')).toBeNull();
     expect(parseVersion(`1.${'9'.repeat(4301)}.0`)).toBeNull();
   });

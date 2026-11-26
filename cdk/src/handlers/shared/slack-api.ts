@@ -98,6 +98,7 @@ export async function slackFetchTs(
       logger.warn('Slack API returned error', { method, error: result.error });
       return lookupFailed(new Error(`Slack API ${method} error: ${result.error ?? 'unknown'}`));
     }
+    // chat.update echoes the ts it edited; chat.postMessage returns the new one.
     if (typeof result.ts === 'string') return lookupFound(result.ts);
     logger.warn('Slack API returned ok without a ts', { method });
     return lookupFailed(new Error(`Slack API ${method} succeeded but returned no ts`));

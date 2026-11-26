@@ -118,6 +118,8 @@ describe('CLI constants parity with contracts/constants.json', () => {
 });
 
 describe('linear_vault cache-key parity', () => {
+  // AgentCore keys a cached grant by the whole token request, customParameters included: consent and
+  // every resolve must send an identical set, or the resolve is a cache miss.
   const contract = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', '..', 'contracts', 'constants.json'), 'utf8'),
   ).linear_vault as { scopes: string[]; custom_parameters: Record<string, string> };

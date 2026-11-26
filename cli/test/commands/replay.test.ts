@@ -114,6 +114,7 @@ describe('replay command', () => {
     const dir = mkdtempSync(join(tmpdir(), 'replay-test-'));
     const file = join(dir, 'bundle.json');
     try {
+      // A file that is already there keeps its mode when it is only written to.
       writeFileSync(file, 'old');
       chmodSync(file, 0o644);
       await makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', file, '--force']);

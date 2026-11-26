@@ -177,6 +177,7 @@ function wrapMicrovmError(operation: string, err: unknown): Error {
   const detail = name && name !== 'Error' && !message.includes(name)
     ? `${name}: ${message}`
     : message;
+  // SDK errors and their nested causes can contain signed URLs or request metadata.
   const safeCause = new Error(message);
   safeCause.name = name ?? 'Error';
   const requestId = microvmErrorIdentity(err).aws_request_id;
@@ -378,6 +379,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     // `RunMicrovm` does NOT default to "no ingress" — omitting the field attaches
     // the AWS-managed PUBLIC `HTTP_INGRESS` connector (live 2026-07-31).
+    // `NO_INGRESS` is the suppression mechanism, not an empty list.
     const configuredIngress = parseArnList(MICROVM_INGRESS_CONNECTOR_ARNS);
     const ingressNetworkConnectors = configuredIngress.length > 0
       ? configuredIngress
@@ -421,6 +423,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     }
 
     const { microvmId, endpoint } = result;
+    // A service endpoint URL is also returned with `NO_INGRESS`.
     if (!microvmId || !endpoint) {
       if (microvmId) {
         await this.terminateBestEffort(microvmId, 'incomplete RunMicrovm response');
@@ -521,6 +524,8 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
         ? result.stateReason
         : undefined;
     } catch (err) {
+      // The control plane eventually reaps a terminated MicroVM by design, so
+      // NotFound here means gone, not broken.
       if (err instanceof Error && err.name === 'ResourceNotFoundException') {
         logger.info('MicroVM not found on poll — treating as terminal', {
           microvm_id: microvmId,

@@ -35,6 +35,8 @@ const FIX_PEM_BEGIN = '-----' + 'BEGIN' + ' RSA PRIVATE KEY' + '-----';
 const FIX_PEM_END = '-----' + 'END' + ' RSA PRIVATE KEY' + '-----';
 const FIX_PRIVATE_KEY = `${FIX_PEM_BEGIN}\nAAAA\n${FIX_PEM_END}`;
 const FIX_GITHUB_APP_TOKEN = 'gh' + 's_' + 'A'.repeat(48);
+// A GitHub installation token of the stateless format, ghs_<app id>_<JWT>: three base64url parts,
+// which may hold "-" and "_", joined by dots.
 const FIX_GITHUB_APP_TOKEN_STATELESS = 'gh' + 's_123456_' + ['eyJ' + 'hbGciOi'.repeat(5), 'eyJ' + 'pYXQi-_'.repeat(40), 's1G-n_'.repeat(30)].join('.');
 const FIX_JWT_SIGNED = FIX_GITHUB_APP_TOKEN_STATELESS.slice(('gh' + 's_123456_').length);
 const FIX_LIKE_AN_OLDER_TOKEN = 'gh' + 'p_' + 'Zz9'.repeat(12);
@@ -134,6 +136,7 @@ describe('scanDenyReason', () => {
   });
 
   test('redacts a long GitHub App token in a git remote URL', () => {
+    // GitHub installation tokens are about 520 characters since 2026 and vary in length.
     const token = 'ghs_123456_' + Array(3).fill('eyJ' + 'a'.repeat(200)).join('.');
     expect(scanDenyReason(`x-access-token:${token}@github.com/o/r.git`)).toBe('[REDACTED-GITHUB_URL_TOKEN]github.com/o/r.git');
   });
@@ -283,6 +286,7 @@ describe('scanDenyReason', () => {
     'password',
     '%d',
     '<pass.word>',
+    // MongoDB Atlas hands out "<password>": somebody may leave the brackets around a real password.
     `<${FIX_LETTERS_AND_DIGITS}>`,
     `{${FIX_LETTERS_AND_DIGITS}}`,
     '$' + `{${FIX_LETTERS_AND_DIGITS}}`,

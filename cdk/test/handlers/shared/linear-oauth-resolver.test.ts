@@ -447,6 +447,7 @@ describe('resolveLinearOauthToken', () => {
     expect(putCalls).toHaveLength(1);
     const persisted = JSON.parse(putCalls[0][0].input.SecretString as string);
     expect(persisted.access_token).toBe('lin_oauth_new');
+    // Linear invalidates the old refresh token on rotation.
     expect(persisted.refresh_token).toBe('rt-new');
   });
 
@@ -940,6 +941,7 @@ describe('a transient Secrets Manager error is not a revocation', () => {
     expect(recorder).not.toHaveBeenCalled();
   });
 
+  // Linear expires a refresh token 30 days after issuance.
   describe('Linear rejects the refresh token of the stored fallback grant', () => {
     const expiredFallback = () => makeStoredToken({
       refresh_token: 'rt-fallback-past-30-days',
@@ -1161,6 +1163,8 @@ describe('isRefreshTokenRejection — Linear does not send invalid_grant', () =>
   });
 });
 
+// Linear records no audit entry for a revocation and returns the same error whether the token
+// ever rotated or was rejected on its first refresh.
 describe('token-lineage diagnostic logging', () => {
   const RAW_REFRESH = 'lin_refresh_SENSITIVE_should_never_be_logged';
   const fp = (token: string): string =>

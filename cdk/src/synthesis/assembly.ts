@@ -182,6 +182,7 @@ export function inspectAssembly(directory: string): AssemblyCensus {
         for (const destinationValue of Object.values(object(asset.destinations, 'asset destinations'))) {
           const destination = object(destinationValue, 'destination');
           if (typeof destination.objectKey !== 'string') throw new Error('Missing asset object key');
+          // Unstaged file assets may live outside the assembly.
           assets.push({ file: path.resolve(path.dirname(assetFile), source.path), objectKey: destination.objectKey });
         }
       }
@@ -218,6 +219,7 @@ export function inspectAssembly(directory: string): AssemblyCensus {
           const targetProperties = object(target.properties, `${dependency}/properties`);
           return [path.relative(root, childPath(dir, targetProperties.templateFile))];
         }))].sort();
+        // Different stacks can publish identical child contents under the same asset hash.
         visitTemplate(file, dependencyIds.flatMap(dependency => assetsByArtifact.get(dependency) ?? []));
       } else if (artifact.type === 'cdk:cloud-assembly') {
         visitManifest(childPath(dir, properties.directoryName));

@@ -63,6 +63,7 @@ def test_trailers_the_message_ends_with_stay_trailers(repo):
 
 
 def test_message_without_trailers_gets_a_block_of_its_own(repo):
+    # A Conventional Commits subject has the shape of a trailer. To git it is the title.
     _commit(repo, "-m", "fix: handle empty input", prompt_version="")
 
     assert _message(repo) == f"fix: handle empty input\n\n{_TASK_ID}"

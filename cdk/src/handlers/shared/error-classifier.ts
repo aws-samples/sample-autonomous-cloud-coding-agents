@@ -517,6 +517,8 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // The claude-code shim reports "claude native binary not installed" when its
+    // postinstall fell back silently and never placed the platform-native binary.
     pattern: /Exec format error.*claude|claude.*Exec format error|claude native binary not installed/i,
     classification: {
       category: ErrorCategory.COMPUTE,

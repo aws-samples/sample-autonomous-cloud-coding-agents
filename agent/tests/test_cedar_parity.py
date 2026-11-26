@@ -107,6 +107,7 @@ def test_cedarpy_matches_fixture_decision(fixture: dict) -> None:
 
     result = cedarpy.is_authorized(request, policies, entities)
 
+    # cedarpy reports "Allow" / "Deny"; cedar-wasm reports the decision in lowercase.
     observed_decision = result.decision.value.lower()
     expected_decision = fixture["expected"]["decision"]
     assert observed_decision == expected_decision, (

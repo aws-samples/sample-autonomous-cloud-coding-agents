@@ -193,6 +193,7 @@ export interface OrchestrationReleaseContext {
   readonly pre_screened_attachments?: readonly AttachmentRecord[];
 }
 
+/** A DynamoDB item is capped at 400 KB total; the meta row also holds the release context and the attachment JSON. */
 const PARENT_CONTEXT_MAX_CHARS = 4000;
 
 /** What ends a parent-context text that was cut, at seed or at release. */
@@ -234,7 +235,8 @@ const ORCH_ID_HASH_HEX_LENGTH = 32;
  * + hashed so the id is opaque and fixed-length regardless of the ref format.
  *
  * NOT tenant-scoped: the ref alone is hashed, with no credentials/workspace
- * component. The seed path REFUSES a collision it detects. See
+ * component. Linear issue ids are UUIDs, so two tenants cannot produce the
+ * same one. The seed path REFUSES a collision it detects. See
  * {@link seedOrchestration}.
  */
 export function deriveOrchestrationId(parentIssueRef: string): string {

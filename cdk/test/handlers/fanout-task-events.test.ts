@@ -707,6 +707,8 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   });
 
   test('dispatcher does NOT forward an If-Match-style ETag to upsertTaskComment (BLOCKER regression)', async () => {
+    // Observed: GitHub answers a PATCH of an issue comment that carries a conditional header with HTTP 400
+    // ("Conditional request headers are not allowed in unsafe requests unless supported by the endpoint").
     mockDdbSend
       .mockResolvedValueOnce({
         Item: {
@@ -2132,6 +2134,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
   });
 
   test('the answer comment is never read as a trigger, even when the answer spells out the mention', async () => {
+    // On a site without the Forge app, Jira attributes ABCA's comments to the user who authorized the app.
     mockGet({
       ...TASK_RECORD_JIRA,
       code_changed: false,
@@ -2237,6 +2240,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
     expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
     const text = adfText(mockPostIssueCommentAdf.mock.calls[0][2]);
     expect(text).toMatch(/^🤖 ABCA has a question before it starts\n/);
+    // ADF text does not honor newlines: each line of the question is its own paragraph.
     expect(text).toContain('Which login page do you mean?\nThe admin one or the customer one?');
     expect(text).not.toContain('Task completed');
     expect(text).not.toContain('✅');
@@ -2772,6 +2776,7 @@ describe('renderJiraFinalStatusComment', () => {
     expect(text).toContain('✅');
     expect(text).toContain('PR: https://github.com/o/r/pull/7');
     expect(paragraphs[0]).toEqual([{ text: '✅ ' }, { text: 'Task completed', strong: true }]);
+    // A bare URL in ADF text is not auto-linked.
     const urlRun = paragraphs.flat().find((r) => r.text === 'https://github.com/o/r/pull/7');
     expect(urlRun).toEqual({ text: 'https://github.com/o/r/pull/7', href: 'https://github.com/o/r/pull/7' });
     expect(renderJiraFinalStatusText({

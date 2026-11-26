@@ -118,6 +118,7 @@ beforeEach(() => {
     }
     return {};
   });
+  // MicroVM API contract: a replay with the same clientToken and the same request returns the original id.
   mockMicrovmSend.mockReset().mockImplementation(async ({ kind, input: command }) => {
     if (kind === 'terminate') return {};
     const token = command.clientToken ?? `sdk-generated-${created.size}`;

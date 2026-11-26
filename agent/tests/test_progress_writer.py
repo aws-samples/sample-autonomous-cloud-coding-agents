@@ -526,6 +526,7 @@ class TestProgressWriterFailOpenClassified:
         return _ProgressWriter("task-finding6")
 
     def test_permanent_error_does_not_trip_breaker(self, writer):
+        # DynamoDB answers an item over its 400 KB limit with ValidationException.
         table = MagicMock()
         table.put_item.side_effect = _make_client_error("ValidationException")
         writer._table = table

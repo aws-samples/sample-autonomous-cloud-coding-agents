@@ -38,8 +38,11 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
             re.IGNORECASE,
         ),
     ),
+    # GitHub token length varies across token generations.
     ("GITHUB_TOKEN", re.compile(r"(?:ghp|gho|ghs|ghu|ghr)_[a-zA-Z0-9]{36,}")),
     ("GITHUB_PAT", re.compile(r"github_pat_[a-zA-Z0-9_]{22,}")),
+    # GitHub App tokens are about 520 characters since 2026, and vary: a token
+    # (it holds no ":") has no length limit here.
     (
         "GITHUB_URL_TOKEN",
         re.compile(
@@ -67,6 +70,8 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
             r"@[^\s\"']+"
         ),
     ),
+    # GitHub App installation tokens of the stateless format that GitHub issues
+    # since 2026: ghs_<app id>_<JWT>. A JWT begins with "eyJ".
     ("GITHUB_APP_TOKEN", re.compile(r"ghs_[0-9]+_eyJ(?:[A-Za-z0-9._-]+|\[REDACTED-[A-Z_]+\])+")),
     (
         "BEARER_TOKEN",

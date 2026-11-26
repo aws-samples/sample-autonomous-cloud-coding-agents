@@ -98,6 +98,7 @@ export class OrchestrationReconciler extends Construct {
     props.taskEventsTable.grantReadWriteData(this.fn);
     props.budgetTable?.grantReadWriteData(this.fn);
 
+    // Lambda ORs the filter patterns of an event source.
     const terminalFilters = TERMINAL_STATUSES.map((s) => FilterCriteria.filter({
       dynamodb: { NewImage: { status: { S: FilterRule.isEqual(s) } } },
     }));

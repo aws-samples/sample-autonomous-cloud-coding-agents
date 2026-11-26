@@ -43,6 +43,7 @@ export function parseCommentTrigger(body: string | undefined | null): CommentTri
     return { triggered: false, instruction: '' };
   }
 
+  // `replace()` restarts a global pattern from index 0, whatever `lastIndex` `test()` left.
   return { triggered: true, instruction: body.replace(mention, ' ').trim() };
 }
 
@@ -63,6 +64,7 @@ export function isKnownAbcaComment(body: string): boolean {
     '⚠️ ABCA orchestration',
     '✅ ABCA orchestration',
   ];
+  // Jira wiki text marks bold with an asterisk, and the panel heading is bold after its emoji.
   const trimmed = body.trimStart().replace(/^(\S+ )\*/, '$1');
   return prefixes.some((prefix) => trimmed.startsWith(prefix));
 }

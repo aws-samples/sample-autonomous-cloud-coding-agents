@@ -236,6 +236,7 @@ describe('sanitizeExternalContent', () => {
     ],
   ];
 
+  // 65,536 characters is the longest body GitHub accepts.
   test.each(shapes.flatMap(([what, build, expected]) => [65_536, 262_144, 1_048_576].map((size) => [what, size, build, expected] as const)))(
     'sanitizes %s, %d characters, within a second',
     (_what, size, build, expected) => {

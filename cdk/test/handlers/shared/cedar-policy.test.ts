@@ -147,6 +147,7 @@ describe('cedar-wasm API contract — isAuthorized shape', () => {
     expect(r.type).toBe('success');
     expect(r.response).toBeDefined();
     expect(r.response.decision).toBe('deny');
+    // cedar-wasm lists the matching policy ids under `diagnostics.reason`; cedarpy names the list `diagnostics.reasons`.
     expect(r.response.diagnostics.reason).toEqual(['policy0']);
   });
 

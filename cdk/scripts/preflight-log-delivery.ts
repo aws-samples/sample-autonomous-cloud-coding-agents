@@ -241,6 +241,8 @@ function main(): number {
   }
 
   // Deliveries reference their source and destination, so they go first.
+  // When the deploy removes the old logical ids, CloudFormation treats the delete of an
+  // already-gone resource as a no-op.
   const order: DeliveryType[] = [
     'AWS::Logs::Delivery',
     'AWS::Logs::DeliverySource',

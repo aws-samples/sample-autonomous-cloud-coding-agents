@@ -23,7 +23,7 @@
  * HTTP 400 with
  * ``"Conditional request headers are not allowed in unsafe requests
  * unless supported by the endpoint"``. The ETag returned on GET is a
- * cache validator only.
+ * cache validator only. Measured in PR #52.
  */
 
 import { logger } from './logger';
@@ -35,6 +35,7 @@ const GITHUB_TIMEOUT_MS = 5_000;
 
 const USER_AGENT = 'abca-fanout/1.0';
 
+// GitHub's authenticated rate limit is 5000 requests per hour.
 const RATE_LIMIT_WARN_THRESHOLD = 500;
 
 function logRateLimitIfLow(response: Response, repo: string): void {

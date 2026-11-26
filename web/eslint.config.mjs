@@ -12,9 +12,12 @@ const TEST_MODIFIER = '/^(skip|only|todo|fails|skipIf|runIf)$/';
 const NO_DISABLED_TESTS = [
   `MemberExpression:matches([property.name=${TEST_MODIFIER}], [property.value=${TEST_MODIFIER}])`
     + `:matches(:has(Identifier.object[name=${TEST_FN}]), CallExpression > .callee)`,
+  // vitest's test context has skip(): it('name', ({ skip }) => { skip(); ... }).
   "CallExpression[callee.name='skip']",
+  // vitest takes the same modifiers as options: it('name', { skip: true }, fn).
   `CallExpression:matches([callee.name=${TEST_FN}], :has(> .callee:has(Identifier.object[name=${TEST_FN}])))`
     + ` > ObjectExpression.arguments > Property:matches([key.name=${TEST_MODIFIER}], [key.value=${TEST_MODIFIER}])`,
+  // vitest treats a test or suite without a function as a todo: it('name'), it('name', { timeout: 5 }).
   `CallExpression[callee.name=${TEST_FN}]:matches([arguments.length=1], :has(> ObjectExpression.arguments:last-child))`,
 ].map((selector) => ({
   selector,
@@ -67,10 +70,12 @@ export default defineConfig(
     plugins: { 'license-header': licenseHeader },
     rules: {
       'license-header/header': ['error', join(__dirname, 'header.js')],
+      // The coverage-ignore spellings that jest (v8-to-istanbul) and vitest honour.
       'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'eqeqeq': ['error', 'always'],
       'complexity': ['error', { max: 40 }],
       'no-console': ['error', { allow: ['warn', 'error'] }],
+      // The react-hooks preset only warns for these three.
       'react-hooks/exhaustive-deps': 'error',
       'react-hooks/incompatible-library': 'error',
       'react-hooks/unsupported-syntax': 'error',

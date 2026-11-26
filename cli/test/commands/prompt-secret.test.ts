@@ -107,6 +107,7 @@ describe('promptLine (non-TTY / piped stdin)', () => {
 
   afterEach(() => io.restore());
 
+  // When stderr is a terminal, readline echoes the piped line after the label.
   test('resolves the trimmed line', async () => {
     const answer = promptLine('Client ID');
     stdin.write('  cid-1  \n');
@@ -266,6 +267,7 @@ describe('a visible and a secret prompt on one piped input', () => {
 
   describe('after another reader of stdin (a readline that was closed)', () => {
     test('a prompt reads on from a stdin that was left paused', async () => {
+      // A listener put on a paused Node stream does not start it again.
       stdin.pause();
       stdin.write('s3cret\n');
 
@@ -276,6 +278,7 @@ describe('a visible and a secret prompt on one piped input', () => {
       ['a secret prompt answers with no value', () => promptSecret('Secret: '), 'line ""'],
       ['a visible prompt rejects', () => promptLine('Client ID'), 'error: No input provided.'],
     ])('%s when stdin was read to its end before', async (_what, prompt, expected) => {
+      // A Node stream emits 'end' once: a listener that comes later is not told.
       await closePipe(stdin);
       expect(stdin.readableEnded).toBe(true);
 

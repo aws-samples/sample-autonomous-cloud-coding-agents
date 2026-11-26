@@ -47,6 +47,7 @@ def trace_api(emulator):
         shim.wait(timeout=30)
         shim.stdout.close()
         pytest.fail(f"trace API shim did not start: {first_line!r}")
+    # A process that writes to a full stdout pipe stalls until the pipe is read.
     drain = threading.Thread(target=shim.stdout.read, daemon=True)
     drain.start()
 

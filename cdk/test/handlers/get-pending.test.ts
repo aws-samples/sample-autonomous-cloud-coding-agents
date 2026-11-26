@@ -212,6 +212,7 @@ describe('get-pending', () => {
   });
 
   test('leaves out a request whose approval window has passed', async () => {
+    // DynamoDB's TTL can take days to delete an expired row, so a row can stay PENDING past its window.
     setupPendingMocks([
       pendingRow('stale', { created_at: '2026-05-06T23:00:00Z', timeout_s: 300 }),
       pendingRow('live', { created_at: '2026-05-07T00:00:00Z', timeout_s: 300 }),

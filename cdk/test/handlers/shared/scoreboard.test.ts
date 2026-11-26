@@ -474,6 +474,7 @@ describe('taskFacts', () => {
       workflow_ref: 7,
       channel_metadata: 'linear',
       orchestration_id: 7,
+      // Date.parse reads the strings '2025' and '2026' as years.
       created_at: 2025,
       updated_at: 2026,
       queued_at: 1,

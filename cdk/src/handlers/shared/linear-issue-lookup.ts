@@ -60,6 +60,7 @@ export interface LinearIssueLocation {
   readonly workspaceSlug: string;
 }
 
+// Linear's `issueVcsBranchSearch` accepts the human-readable identifier (`ENG-42`) directly.
 const ISSUE_BY_IDENTIFIER_QUERY = `
 query IssueByIdentifier($identifier: String!) {
   issueVcsBranchSearch(branchName: $identifier) {

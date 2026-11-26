@@ -570,6 +570,7 @@ describe('pollTaskStatus', () => {
     stderr.mockRestore();
 
     expect(outcome).toMatchObject({ status: 'rejected', reason: { name: 'AccessDeniedException' } });
+    // The durable SDK does not log why an execution failed.
     expect(logged).toEqual([expect.objectContaining({
       level: 'ERROR',
       task_id: 'TASK001',

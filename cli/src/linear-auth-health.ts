@@ -110,6 +110,7 @@ const probeLinearAccessToken: LinearProbe = async (accessToken) => {
     });
     if (response.status === 401 || response.status === 403) return 'rejected';
     if (!response.ok) return 'error';
+    // Linear reports auth failures as 200 + an errors array as well as via 401.
     const body = await response.json() as { data?: { viewer?: { id?: string } } };
     return body?.data?.viewer?.id ? 'accepted' : 'rejected';
   } catch {

@@ -828,6 +828,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(issueId).toBe('sub-issue-1');
       expect(parentCommentId).toBe('comment-1');
       expect(reactToCommentMock.mock.calls).toEqual([[expect.anything(), 'comment-1', 'question']]);
+      // Linear delivers the app's own comments back as Comment webhooks.
       expect(isBotAuthoredComment(String(body))).toBe(true);
       return String(body);
     }
@@ -1038,6 +1039,8 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
     });
 
+    // ADR-018 Phase 2: where sessions open, Linear opens one for this same mention.
+    // Linear's "Agent session events" toggle is per installation, while the flag is stack-wide.
     describe('agent sessions enabled', () => {
       function workspaceSessions(seen: boolean): void {
         const base = ddbSend.getMockImplementation()!;
@@ -1626,6 +1629,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(ctx.channelMetadata.orchestration_sub_issue_id).toBe('sub-footer');
       expect(ctx.channelMetadata.orchestration_iteration).toBe('true');
       expect(ctx.channelMetadata.linear_issue_id).toBe('sub-footer');
+      // Linear rejects a threaded reply whose parent comment belongs to a different issue.
       expect(ctx.channelMetadata.trigger_comment_issue_id).toBe('PARENT-EPIC');
       expect(ctx.channelMetadata.trigger_comment_id).toBe('pc-1');
       expect(replyToCommentMock).not.toHaveBeenCalled();

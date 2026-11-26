@@ -46,8 +46,10 @@ const MS_PER_HOUR = 3600 * 1000;
  */
 export const PR_SWEEP_MAX_PULL_REQUESTS = 250;
 
+/** On GitHub a closed pull request can be reopened. */
 const MIN_CLOSED_AGE_MS = MS_PER_HOUR;
 
+/** A pull request that was just opened can be missing from GitHub's answer. */
 const MIN_FINISHED_AGE_MS = MS_PER_HOUR;
 
 /** The longest full name a repository has on GitHub: 39 characters of owner, a slash, 100 of name. */
@@ -200,6 +202,7 @@ function readAnswer(body: unknown): { read: PullRequestRead; rateLimitRemaining:
   const remaining = data?.rateLimit?.remaining;
   const rateLimitRemaining = typeof remaining === 'number' ? remaining : null;
   // GitHub answers alike for a repository that does not exist and for one the token may not see.
+  // The permission to read a pull request is the repository's: it holds for every pull request there.
   if (has('NOT_FOUND', 'repository') || has('FORBIDDEN', 'repository') || has('FORBIDDEN', 'repository.pullRequest')) {
     return { read: { kind: 'repo_not_visible' }, rateLimitRemaining };
   }

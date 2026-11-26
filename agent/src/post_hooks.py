@@ -41,6 +41,7 @@ class VerifyOutcome:
 
 SHELL_COMMAND_NOT_FOUND = 127
 
+# mise's wording for a task that does not exist depends on what else the repository defines.
 _MISE_NO_SUCH_TASK = re.compile(r"not found|no task \S+ found|unknown command")
 
 
@@ -412,6 +413,7 @@ def _gh_pr_field(repo_dir: str, branch: str, repo_url: str, field: str) -> str |
         if result.returncode == 0:
             value = result.stdout.strip() or None
         else:
+            # gh exits non-zero with "no pull requests found" when the branch has none.
             stderr_msg = result.stderr.strip()[:200] if result.stderr else "(no stderr)"
             log("POST", f"gh pr view '{branch}' (rc={result.returncode}): {stderr_msg}")
     except (OSError, subprocess.SubprocessError) as exc:

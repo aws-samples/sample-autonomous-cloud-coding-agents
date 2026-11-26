@@ -942,6 +942,7 @@ async function replyToIterationComment(
       ...(evt.errorMessage !== undefined && { errorMessage: evt.errorMessage }),
       taskId: evt.taskId,
     });
+  // Linear rejects a threaded reply whose parent comment belongs to a different issue.
   const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
   const target = issueRef(replyIssueId, workspaceId);
   const existing = evt.iterationReplyId

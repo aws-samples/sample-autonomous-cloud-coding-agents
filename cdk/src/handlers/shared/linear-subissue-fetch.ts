@@ -218,6 +218,7 @@ export async function fetchSubIssueGraph(
       ...(c.identifier !== undefined && { identifier: c.identifier }),
       ...(c.title !== undefined && { title: c.title }),
       ...(typeof c.description === 'string' && c.description.trim() !== '' && { description: c.description }),
+      // Linear can surface a relation from both directions.
       depends_on: [...new Set(blockers)],
     });
   }

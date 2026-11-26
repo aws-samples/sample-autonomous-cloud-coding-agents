@@ -125,6 +125,9 @@ const CONTEXT_TRUNCATION_NOTICE = '\n\n_(session context truncated)_';
  * human's directive (if any), then the issue heading, then ``promptContext``
  * when present, else the fetched issue description.
  *
+ * Linear's ``promptContext`` already carries the issue (identifier, title,
+ * description) with the thread and team guidance; ``prompted`` deliveries lack it.
+ *
  * Never exceeds ``MAX_TASK_DESCRIPTION_LENGTH``.
  */
 export function buildAgentSessionTaskDescription(

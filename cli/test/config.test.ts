@@ -284,6 +284,7 @@ describe('config', () => {
       expect(fs.readdirSync(tmpDir)).toEqual(['credentials.json']);
     });
 
+    // A name of 255 ASCII characters is the longest that most file systems take.
     test.each([
       ['writes a file in place', true],
       ['creates a file in place', false],
@@ -350,6 +351,7 @@ describe('config', () => {
     });
 
     test('does not write through an entry that appeared where no file was', () => {
+      // In a directory with the sticky bit the rename fails with EPERM once someone else has put an entry under the name.
       const victim = path.join(tmpDir, 'victim');
       fs.writeFileSync(victim, 'untouched');
       jest.spyOn(nodeFs, 'renameSync').mockImplementationOnce((_from, to) => {
@@ -421,6 +423,7 @@ describe('config', () => {
     });
 
     test('writes through a symbolic link whose file has no path, and makes that file owner-only', () => {
+      // On Linux /dev/stdout leads to the file that stdout is, and a file deleted while open has no path to resolve the link to.
       const elsewhere = path.join(tmpDir, 'elsewhere.json');
       fs.writeFileSync(elsewhere, '{}');
       fs.chmodSync(elsewhere, 0o644);
@@ -496,6 +499,7 @@ describe('config', () => {
       ['refuses a FIFO that has a second name', { uid: 1000, nlink: 2 }, SECOND_NAME],
     ])('%s', (_rule, reported, reason) => {
       execFileSync('mkfifo', [credentials()]);
+      // A write to a FIFO waits for a reader.
       // eslint-disable-next-line no-bitwise
       const reader = fs.openSync(credentials(), fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
       try {
@@ -526,6 +530,7 @@ describe('config', () => {
     });
 
     test('writes to a device whoever it belongs to and however many names it has', () => {
+      // Only a privileged user can make a device, and a user namespace reports an owner that it does not map as the overflow user.
       const mode = fs.statSync('/dev/null').mode;
       runAs(1000);
       report('lstatSync', '/dev/null', { uid: 3000, nlink: 2 });

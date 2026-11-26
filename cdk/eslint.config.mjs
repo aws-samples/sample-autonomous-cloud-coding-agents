@@ -32,12 +32,15 @@ import { dirname, join } from 'node:path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// ESLint skips, without a word, a file that no `files` pattern matches.
 const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}', 'scripts/**/*.{ts,tsx,mts,cts}'];
 
 const NO_MD5 = {
   selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
   message: 'Use the md5hash() function from the core library if you want md5',
 };
+// An AWS SDK client takes one config argument at most; a CDK construct such as
+// cognito.UserPoolClient takes (scope, id, props).
 const NO_NAKED_SDK_CLIENT = {
   selector: 'NewExpression[arguments.length<2]:matches('
     + '[callee.name=/^(?!AgentRegistryClient$).*Client$/], [callee.property.name=/Client$/])',
@@ -110,6 +113,7 @@ export default [
       '@stylistic/quotes': ['error', 'single', { avoidEscape: true }],
       '@stylistic/comma-dangle': ['error', 'always-multiline'],
       '@stylistic/comma-spacing': ['error', { before: false, after: true }],
+      // The plugin's default exceptions also let two spaces inside an import attribute pass.
       '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false, exceptions: { Property: true, ImportAttribute: false } }],
       '@stylistic/array-bracket-spacing': ['error', 'never'],
       '@stylistic/array-bracket-newline': ['error', 'consistent'],
@@ -162,6 +166,7 @@ export default [
       'eol-last': ['error', 'always'],
       'no-duplicate-imports': ['error'],
       'no-console': ['error'],
+      // The coverage-ignore spellings that jest (v8-to-istanbul) and vitest honour.
       'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'no-restricted-syntax': ['error', NO_MD5],
       'prefer-const': ['error', { ignoreReadBeforeAssign: true }],
@@ -250,6 +255,8 @@ export default [
       'jsdoc/require-returns-description': ['error'],
       'jsdoc/check-alignment': ['error'],
 
+      // Every void method of Template and Annotations in aws-cdk-lib/assertions;
+      // their find* and get* methods return a value.
       'jest/expect-expect': ['error', {
         assertFunctionNames: [
           'expect*',

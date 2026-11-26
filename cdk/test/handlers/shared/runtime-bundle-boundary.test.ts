@@ -35,6 +35,7 @@ describe('runtime handlers do not bundle aws-cdk-lib', () => {
 
   const CDK_MODULE = /(^|\/)node_modules\/(aws-cdk-lib|constructs)\//;
 
+  // Measured: a bundle that pulls in aws-cdk-lib is about 57 MB.
   const CDK_LEAK_BYTES = 1_000_000;
 
   function bundle(relEntry: string): { bytes: number; metafile: Metafile } {

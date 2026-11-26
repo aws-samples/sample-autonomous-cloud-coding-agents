@@ -61,6 +61,7 @@ def source_files(root: Path):
     dockerfile = root / "agent/Dockerfile"
     if dockerfile.is_symlink() or not dockerfile.is_file():
         raise ValueError("agent/Dockerfile must be a regular file")
+    # Lambda MicroVMs builds the `Dockerfile` at the zip root, with the zip root as build context.
     yield "Dockerfile", dockerfile
     for name in INPUTS:
         for path in walk(root / name):

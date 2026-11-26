@@ -81,6 +81,8 @@ export async function lookupLinearProjectMapping(
   return { kind: 'mapped', item, ownerVerified: Boolean(mappedWorkspaceId) };
 }
 
+// Only has to outlast the ``LinearIssueIndex`` GSI's propagation lag, which
+// DynamoDB normally keeps well under a second.
 const SESSION_TASK_POINTER_TTL_SECONDS = 600;
 const sessionTaskPointerKey = (issueId: string) => `agent-session-task#${issueId}`;
 

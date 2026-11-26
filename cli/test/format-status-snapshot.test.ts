@@ -171,7 +171,7 @@ describe('formatStatusSnapshot', () => {
       completed_at: '2026-04-29T15:29:50Z',
       duration_s: 164,
       cost_usd: 0.44,
-      turns_attempted: 14,
+      turns_attempted: 14, // the Claude Code CLI's own count: above the limit of 12
       turns_completed: 11,
     });
 

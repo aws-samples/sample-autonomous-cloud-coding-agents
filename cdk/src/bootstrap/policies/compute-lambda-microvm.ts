@@ -34,11 +34,14 @@ export function computeLambdaMicrovmPolicy(): iam.PolicyDocument {
         sid: 'LambdaMicrovms',
         effect: iam.Effect.ALLOW,
         actions: [
+          // The CFN resource handlers call `Get*`/`List*` for read and stabilization.
           'lambda:CreateMicrovmImage',
           'lambda:GetMicrovmImage',
           'lambda:UpdateMicrovmImage',
           'lambda:DeleteMicrovmImage',
           'lambda:ListMicrovmImages',
+          // Every snapshot build creates a new image version; CFN reads build
+          // state and deletes versions on replace/rollback.
           'lambda:GetMicrovmImageVersion',
           'lambda:UpdateMicrovmImageVersion',
           'lambda:DeleteMicrovmImageVersion',
@@ -60,11 +63,15 @@ export function computeLambdaMicrovmPolicy(): iam.PolicyDocument {
 
       // iam:PassRole for the two MicroVM roles CloudFormation hands to the
       // service, WITHOUT a service condition (ADR-021 P2r2-F9).
+      // Measured: the Lambda MicroVMs service presents no usable `iam:PassedToService`
+      // value, so a grant conditioned on it is denied with a 403 on iam:PassRole.
       new iam.PolicyStatement({
         sid: 'MicrovmPassRoles',
         effect: iam.Effect.ALLOW,
         actions: ['iam:PassRole'],
         resources: [
+          // CloudFormation truncates the logical ids (`…ComputeBuildRole…`,
+          // `…ComputeConnectorOperatorRole…`) to fit 64 characters before its random suffix.
           'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
           'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
           'arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole',

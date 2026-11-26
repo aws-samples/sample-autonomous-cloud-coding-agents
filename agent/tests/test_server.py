@@ -241,6 +241,7 @@ def test_ping_reports_healthy_when_idle(client, monkeypatch):
 
 
 def test_ping_reports_healthybusy_when_pipeline_alive(client, monkeypatch):
+    # AgentCore does not idle-evict a session whose /ping reports ``HealthyBusy``.
     monkeypatch.setattr(server, "_background_pipeline_failed", False)
 
     stop = threading.Event()
@@ -818,6 +819,7 @@ _TEST_ACCOUNT = "123456789012"
 def _platform_config_value(key: str) -> str:
     if key not in server.MICROVM_PLATFORM_CONFIG_ARN_KEYS:
         return f"value-for-{key}"
+    # IAM is global (empty region field); Secrets Manager is regional.
     if key.endswith("_role_arn"):
         return f"arn:aws:iam::{_TEST_ACCOUNT}:role/for-{key}"
     return f"arn:aws:secretsmanager:us-east-1:{_TEST_ACCOUNT}:secret:for-{key}"
@@ -863,6 +865,8 @@ class TestMicrovmReadyHook:
         assert TERMINATE_HOOK in routes
 
     def test_ready_does_not_start_a_pipeline(self, client, monkeypatch, warm_ready):
+        # The snapshot is taken right after a build hook answers, so anything it starts would be
+        # frozen into the image.
         monkeypatch.setattr(server, "run_task", MagicMock())
         client.post(READY_HOOK)
         with server._threads_lock:
@@ -876,6 +880,8 @@ class TestMicrovmReadyHook:
 
 
 class TestMicrovmReadyHookWarmUp:
+    # Measured: on a MicroVM restored from the snapshot, the first exec of the 225 MiB ``claude``
+    # binary faults its pages in from lazily-restored storage and took more than 10 s.
     def test_the_warm_up_execs_every_command_once_required_first(self, client, monkeypatch):
         calls: list[list[str]] = []
 
@@ -899,6 +905,8 @@ class TestMicrovmReadyHookWarmUp:
             assert argv[1:] == ("--version",)
 
     def test_a_required_warm_up_timeout_reports_503_not_ready(self, client, monkeypatch, capfd):
+        # 503 is the hook contract's "still initialising": the service keeps asking within the
+        # /ready budget and, if it never clears, fails the image build.
         def slow(argv, **kwargs):
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
 
@@ -1151,6 +1159,7 @@ class TestMicrovmRunHookInlinePayload:
                     {"agent_payload": {"task_id": "t-async", "repo_url": "o/r", "prompt": "x"}}
                 ),
             )
+            # The hook budget is 1-60 s and the pipeline runs for minutes.
             assert r.status_code == 200
             assert entered.wait(timeout=5.0)
             with server._threads_lock:
@@ -1193,6 +1202,7 @@ class TestMicrovmRunHookInlinePayload:
 
 
 class TestMicrovmRunHookS3Payload:
+    # The service caps ``runHookPayload`` at 4 096 bytes; a hydrated payload is larger.
     def test_fetches_the_payload_from_s3_and_starts_the_pipeline(
         self, client, monkeypatch, baked_platform_env
     ):
@@ -1342,6 +1352,8 @@ class TestMicrovmRunHookRejections:
 
 
 class TestMicrovmRunHookHeaderPosture:
+    # No AgentCore Runtime sits in front of this call, so there is no session-id header and
+    # no workload access token.
     def test_session_id_and_workload_token_resolve_empty(
         self, client, monkeypatch, baked_platform_env
     ):
@@ -1701,6 +1713,7 @@ class TestInstallPlatformConfig:
     def test_the_non_C0_splitlines_boundaries_are_a_DOCUMENTED_residual(
         self, char, label, env_guard
     ):
+        # ``str.splitlines()`` also breaks on these three, but CloudWatch splits on LF only.
         assert char not in server._PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS
         installed = server._install_platform_config(
             _platform_config(log_group_name=f"grp{char}suffix")
@@ -2192,6 +2205,8 @@ class TestMicrovmValidateHook:
     def test_makes_zero_aws_calls_even_with_a_log_group_configured(
         self, client, monkeypatch, capfd
     ):
+        # ``CreateMicrovmImage`` runs the build hooks under the build role. ``boto3.client()`` fills
+        # ``boto3.DEFAULT_SESSION`` with that role's credentials, which the snapshot would freeze.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -2288,6 +2303,7 @@ class TestMicrovmValidateHook:
     def test_the_warning_also_reaches_the_BUILD_LOG_not_just_the_response(
         self, client, monkeypatch, capfd
     ):
+        # The ``warnings`` array rides a 200 that the MicroVM service does not parse.
         for name in server._SNAPSHOT_FORBIDDEN_SECRET_ENV:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_should_not_be_baked")
@@ -2840,6 +2856,8 @@ class TestTerminateHookBodyTolerance:
         assert r.json()["microvm_id"] == ""
 
     def test_no_typed_body_model_is_left_on_the_route(self):
+        # FastAPI validates a Pydantic body model before the handler runs and answers 422 itself;
+        # it records body params in the route's dependant.
         routes: Any = server.app.routes
         route = next(r for r in routes if getattr(r, "path", None) == TERMINATE_HOOK)
         assert route.dependant.body_params == []

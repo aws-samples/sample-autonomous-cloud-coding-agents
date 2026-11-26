@@ -52,6 +52,7 @@ describe('generatePkce', () => {
     const { codeVerifier, codeChallenge } = generatePkce();
     expect(codeVerifier).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(codeChallenge).toMatch(/^[A-Za-z0-9_-]+$/);
+    // base64url-encoded SHA-256 = 43 chars (256 bits / 6 bits per char, no padding)
     expect(codeChallenge.length).toBe(43);
   });
 

@@ -108,7 +108,8 @@ const GUARDRAIL_VERSION_HASH_LENGTH = 16;
  * excluded) and of the description, so a deploy publishes a version when the guardrail
  * changed and only then. `createVersion()` of the alpha library names the version after
  * an unresolved token, whose text differs from one synthesis to the next
- * (aws/aws-cdk#38674).
+ * (aws/aws-cdk#38674). Bedrock has a quota of versions per guardrail, which a version
+ * per deploy uses up (#1079).
  *
  * Call this once the guardrail is fully configured: the properties are rendered here,
  * and the synthesis fails when they are no longer what they were at this call.
@@ -145,6 +146,7 @@ export function publishGuardrailVersion(guardrail: bedrock.Guardrail, descriptio
   return version.attrVersion;
 }
 
+/** The AgentCore maximum for a runtime session's idle timeout and for its lifetime. */
 const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 
 const API_URL_STAGE_SEGMENT_INDEX = 3;
@@ -153,6 +155,10 @@ const LINEAR_VAULT_WORKLOAD_PREFIX = 'abca_linear_oauth';
 
 const WORKLOAD_NAME_MAX_LENGTH = 64;
 
+/**
+ * AgentCore workload identity names are unique per account and Region, and a Token Vault
+ * consent is bound to (workload identity, user id): a renamed identity loses every consent.
+ */
 function linearVaultWorkloadName(stack: Stack): string {
   const override = stack.node.tryGetContext('linearVaultWorkloadName');
   if (typeof override === 'string' && override.trim()) return override.trim();
@@ -262,6 +268,8 @@ export class AgentStack extends Stack {
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
     const orchestrationTable = new OrchestrationTable(this, 'OrchestrationTable');
+    // DynamoDB rejects an in-place change of a GSI's `nonKeyAttributes`: a changed projection
+    // needs a new construct id, which replaces the table.
     const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
     const budgetTable = new BudgetTable(this, 'BudgetTable');
@@ -397,12 +405,15 @@ export class AgentStack extends Stack {
       contentFilters: [
         {
           type: bedrock.ContentFilterType.PROMPT_ATTACK,
+          // Bedrock blocks detections of MEDIUM and HIGH confidence at MEDIUM, and of LOW too at HIGH.
+          // Observed: at HIGH, ordinary imperative task descriptions and PR bodies are blocked.
           inputStrength: bedrock.ContentFilterStrength.MEDIUM,
           outputStrength: bedrock.ContentFilterStrength.NONE,
         },
       ],
     });
 
+    // `inputGuardrail.guardrailVersion` of the alpha library is the working draft.
     const inputGuardrailVersion = publishGuardrailVersion(inputGuardrail, 'Initial version');
 
     let orchestratorArnHolder: string | undefined;
@@ -512,6 +523,8 @@ export class AgentStack extends Stack {
         AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
         CLAUDE_CODE_USE_BEDROCK: '1',
         ANTHROPIC_LOG: 'debug',
+        // Bedrock rejects an on-demand call that names a Claude 4.x model by its bare id
+        // (400 "on-demand throughput isn't supported"): it takes an inference-profile id.
         ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
         ANTHROPIC_DEFAULT_HAIKU_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
         TASK_TABLE_NAME: taskTable.table.tableName,
@@ -698,6 +711,8 @@ export class AgentStack extends Stack {
         }
       },
     };
+    // CDK applies aspects in order of priority: MUTATING comes before the default priority
+    // of the cdk-nag checks, which would otherwise inspect the policy before its suppression.
     Aspects.of(this).add(overflowSuppressionAspect, { priority: AspectPriority.MUTATING });
 
     if (runtime) {
@@ -1005,6 +1020,7 @@ export class AgentStack extends Stack {
 
     agentMemory.grantReadWrite(orchestrator.fn);
 
+    // CloudFormation limits a stack to 500 resources.
     const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
 
     new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
@@ -1545,6 +1561,8 @@ export class AgentStack extends Stack {
         physicalResourceId: cr.PhysicalResourceId.of('bedrock-invocation-logging'),
         ignoreErrorCodesMatching: 'ThrottlingException|ServiceUnavailableException|InternalServerException',
       },
+      // Bedrock keeps one model invocation logging configuration per account and Region,
+      // which other stacks may use: no onDelete.
       policy: cr.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: [

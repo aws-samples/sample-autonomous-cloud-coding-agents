@@ -17,6 +17,8 @@ from shell import (
     truncate,
 )
 
+# A GitHub App installation token of the stateless format is ghs_<app id>_<JWT>, about 520
+# characters: three base64url parts, which may hold "-" and "_", joined by dots.
 _JWT = ".".join(["eyJ" + "hbGciOi" * 5, "eyJ" + "pYXQi-_" * 40, "s1G-n_" * 30])
 _APP_TOKEN = "gh" + "s_123456_" + _JWT
 
@@ -279,6 +281,7 @@ class TestRunCmdFailureLogging:
         return logs
 
     def test_stdout_is_logged_on_failure(self):
+        # jest, tsc and the mise task DAG write the failing task's error to stdout, not stderr.
         proc = self._completed(
             1,
             stdout="[//cdk:test] FAIL test/foo.test.ts\n  expected 1 got 2\n[//cdk:test] exit 1",
@@ -301,6 +304,7 @@ class TestRunCmdFailureLogging:
         assert "line 0" not in blob
 
     def test_failure_line_in_the_MIDDLE_is_surfaced(self):
+        # A parallel mise DAG interleaves its tasks' output: the failing line can sit in the middle.
         mid = "[//cdk:test] FAIL test/handlers/foo.test.ts — expected 1 got 2"
         stdout = (
             "\n".join(f"[//cdk:test] passing line {i}" for i in range(30))
@@ -314,6 +318,7 @@ class TestRunCmdFailureLogging:
         assert "coverage 29" in blob
 
     def test_coverage_threshold_failure_is_surfaced(self):
+        # jest prints its coverage table, then the threshold line, and exits 1: no ✕ or FAIL line.
         stdout = (
             "\n".join(f"file{i}.ts | 100 | 100 | 100 | 100" for i in range(40))
             + '\nJest: "global" coverage threshold for branches (82%) not met: 79%'
@@ -465,6 +470,8 @@ class TestRunCmdStreaming:
         return time.monotonic() - started, logs
 
     def test_stream_timeout_stops_the_command_and_what_it_started(self):
+        # mise keeps its tasks in process groups of their own: it can only take them down
+        # when it is asked to stop before it is killed.
         elapsed, logs = self._run_into_timeout("trap 'echo stopping; exit' TERM; sleep 30 & wait")
         assert elapsed < 10
         assert "  stopping" in logs
@@ -475,6 +482,8 @@ class TestRunCmdStreaming:
         assert elapsed < 10
 
     def test_stream_command_gets_a_process_group_but_not_a_session_of_its_own(self):
+        # mise stops managing the processes of its tasks when it is a session leader, and
+        # then leaves the other tasks of a parallel build running when one of them fails.
         code = "import os; print(os.getpgid(0) == os.getpid(), os.getsid(0) == os.getpid())"
         result, _ = self._run([sys.executable, "-c", code])
         assert result.stdout == "True False"
@@ -564,6 +573,8 @@ _PRINT_ENV = (
     "import json, os; print(json.dumps({k: v for k, v in os.environ.items()"
     " if k.startswith('OTEL_') or k in ('PYTHONPATH', 'KEPT_FOR_THE_COMMAND')}))"
 )
+# The opentelemetry-instrument wrapper injects OTEL_* variables and this PYTHONPATH entry:
+# a Python that inherits them tries to instrument itself.
 _INSTRUMENTATION = "/opt/venv/lib/opentelemetry/instrumentation/auto_instrumentation"
 
 

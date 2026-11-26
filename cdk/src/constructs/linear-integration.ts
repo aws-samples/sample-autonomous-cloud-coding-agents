@@ -553,6 +553,7 @@ function grantAgentSessionAccess(
     }));
   }
   if (stopCompute?.lambdaMicrovmImageArn) {
+    // `lambda:TerminateMicrovm` authorizes against the MicroVM image.
     processorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['lambda:TerminateMicrovm'],
       resources: [stopCompute.lambdaMicrovmImageArn, `${stopCompute.lambdaMicrovmImageArn}:*`],

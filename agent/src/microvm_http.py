@@ -48,6 +48,7 @@ async def _microvm_id(request: Request) -> str:
     microvm_id = payload.get("microvmId", "")
     if not isinstance(microvm_id, str) or microvm_id != microvm_id.strip():
         raise _InvalidBody(400)
+    # The service sends an empty id on /terminate; tolerate an absent/empty id here too.
     return microvm_id
 
 

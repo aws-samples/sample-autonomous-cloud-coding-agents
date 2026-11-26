@@ -111,6 +111,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else if (eventType === 'app_mention' && teamId) {
         await handleAppMention(payload.event, teamId);
       } else if (eventType === 'message' && teamId && payload.event.channel_type === 'im') {
+        // Slack delivers the bot's own DM messages too: answering them would loop.
         if (!payload.event.bot_id) {
           await handleAppMention(payload.event, teamId);
         }

@@ -317,6 +317,8 @@ async function saveCommentState(
     Key: { task_id: taskId },
     UpdateExpression: 'SET github_comment_id = :cid',
   };
+  // DynamoDB's UpdateItem creates the item when the key is absent: without
+  // `attribute_exists(task_id)` a TTL-evicted task returns as a row with only this field.
   if (previousCommentId === undefined) {
     await ddb.send(new UpdateCommand({
       ...base,
@@ -769,6 +771,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // Linear renders an agent session's final `response` as the thread comment itself.
   const agentSessionId = task.channel_metadata?.linear_agent_session_id;
   if (agentSessionId) {
     await dispatchToLinearAgentSession(event, task, agentSessionId, {
@@ -1012,6 +1015,7 @@ async function emitLinearSessionHeartbeat(
   if (!tableName || TERMINAL_STATUSES.includes(task.status)) return;
   const now = Date.now();
   const cutoffIso = new Date(now - LINEAR_SESSION_HEARTBEAT_INTERVAL_MS).toISOString();
+  // A failed conditional write still costs a DynamoDB write unit.
   if (task.linear_session_heartbeat_at && task.linear_session_heartbeat_at >= cutoffIso) return;
   try {
     await ddb.send(new UpdateCommand({
@@ -1207,6 +1211,7 @@ function renderJiraHoldQuestion(task: TaskRecord, event: FanOutEvent): ReadonlyA
   }
   const question = typeof task.answer_text === 'string' ? task.answer_text.trim() : '';
   return [
+    // Jira attributes this comment to the user who authorized the app.
     [{ text: '🤖 ' }, { text: 'ABCA has a question before it starts', strong: true }],
     ...parseMarkdownBlocks(question || 'Could you share a bit more detail so I build the right thing?'),
     [{ text: 'Add the details to the issue, then re-apply the trigger label to run it again.' }],
@@ -1532,7 +1537,8 @@ export async function routeEvent(
  * Returns a ``DynamoDBBatchResponse`` for the event-source-mapping's
  * ``reportBatchItemFailures: true`` setting: a record that threw, or
  * that had a dispatcher rejection, is reported by its stream sequence
- * number.
+ * number. Lambda checkpoints at the lowest one reported and retries from
+ * there: the failed record and those after it, not the ones before it.
  *
  * Lambda's nodejs24.x runtime detects any 3-arg handler as callback-style
  * and rejects it at init with ``Runtime.CallbackHandlerDeprecated``.

@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+// `Template.fromStack()` runs a full synth, which bundles every NodejsFunction via
+// esbuild.
 // `aws:cdk:bundling-stacks: []` makes synth bundle no stacks (#366). CDK reads
 // CDK_CONTEXT_JSON when an `App` is constructed. `App.loadContext` applies
 // `props.context`, then CDK_CONTEXT_JSON, then `postCliContext`, so only

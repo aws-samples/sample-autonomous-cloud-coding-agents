@@ -23,7 +23,9 @@ import * as yaml from 'js-yaml';
 
 /**
  * `LARGE_TEMPLATE_SIZE_KB * 1024` in the CDK CLI — the ceiling above which a
- * template must come from S3 rather than inline `TemplateBody`.
+ * template must come from S3 rather than inline `TemplateBody`. A fresh account
+ * has no bootstrap bucket to stage it in, so `cdk bootstrap` fails with
+ * `BootstrapStackRequired`, `--force` included.
  */
 const LARGE_TEMPLATE_SIZE_KB = 50;
 export const CFN_INLINE_TEMPLATE_LIMIT = LARGE_TEMPLATE_SIZE_KB * 1024;
@@ -41,6 +43,8 @@ const STDOUT_BUFFER_BYTES = STDOUT_BUFFER_MIB * 1024 * 1024;
  *
  * `cdk bootstrap --show-template` runs the same `toYAML` path as the real bootstrap, so
  * this measures the CLI's own output rather than a local reimplementation of it.
+ * `cdk bootstrap --template` re-serialises the parsed file with a bundled `yaml@1` and a
+ * patched fold width that it does not export, so bytes on disk are not that size (#864).
  *
  * Needs no AWS credentials and no network: `--show-template` only renders.
  */
@@ -54,6 +58,7 @@ export function cloudFormationBodySize(templatePath: string, cwd: string): numbe
         // In CI mode the CLI routes progress to *stdout* rather than stderr, so
         // "Using bootstrapping template from <path>" gets counted as part of the body.
         '--no-ci',
+        // Notices are another stdout writer, and they hit the network.
         '--no-notices',
         '--template', templatePath,
       ],
@@ -74,6 +79,7 @@ export function cloudFormationBodySize(templatePath: string, cwd: string): numbe
     );
   }
 
+  // The CLI prints the body followed by a newline.
   const body = stdout.endsWith('\n') ? stdout.slice(0, -1) : stdout;
 
   assertLooksLikeTemplate(body, templatePath);
@@ -83,6 +89,7 @@ export function cloudFormationBodySize(templatePath: string, cwd: string): numbe
   return body.length;
 }
 
+/** An empty input renders as the string `null`, which measures 5 characters. */
 function assertLooksLikeTemplate(body: string, templatePath: string): void {
   const parsed = yaml.load(body) as { Resources?: unknown; Parameters?: unknown } | null;
   const isObject = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v);

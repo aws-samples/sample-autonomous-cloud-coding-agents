@@ -148,6 +148,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
 
   applyAgentCoreAzDiagnostics(network ?? stack, azResolution);
 
+  // A second top-level stack means `cdk deploy` needs `--all` (or stack names).
   const consoleContext = app.node.tryGetContext('operatorConsole');
   const consoleEnabled = consoleContext === true || consoleContext === 'true';
   const devOrigins = String(app.node.tryGetContext('operatorConsoleDevOrigins') ?? '')

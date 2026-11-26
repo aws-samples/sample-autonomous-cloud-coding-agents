@@ -84,6 +84,8 @@ export class PrOutcomeSweep extends Construct {
       },
     });
 
+    // CDK's table grants are wider: the read and write grants add Scan and the other item writes,
+    // and each grant, `grant` with a single action too, adds `index/*` on a table that has an index.
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:Query'],
       resources: [`${props.taskTable.tableArn}/index/${TaskTable.STATUS_INDEX}`],

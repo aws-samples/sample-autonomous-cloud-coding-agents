@@ -97,6 +97,8 @@ export async function captureScreenshot(url: string, opts: { timeoutMs?: number 
 }
 
 async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number): Promise<Uint8Array> {
+  // AgentCore Browser's WSS endpoint accepts SigV4 as signed headers or as a presigned query. Observed: the `Host`
+  // header `ws` sends on the upgrade does not always match the signed one, and header auth then gets a 403.
   const signedUrl = await sigV4PresignWss(wssUrl);
   const ws = new WebSocket(signedUrl);
 
@@ -255,6 +257,7 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     await waitForEvent('Page.loadEventFired');
     await new Promise((r) => setTimeout(r, PAGE_SETTLE_WAIT_MS));
 
+    // CDP reports a 4xx/5xx document as a successful navigation and load.
     let mainDocumentStatus: number | null = null;
     if (mainDocumentFrameId !== null) {
       mainDocumentStatus = documentStatusByFrame.get(mainDocumentFrameId) ?? null;

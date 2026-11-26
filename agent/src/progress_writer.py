@@ -88,6 +88,7 @@ def format_blocker_reason(kind: str, detail: str, resource: str | None = None) -
     return reason
 
 
+# DynamoDB rejects an item above 400 KB with ValidationException.
 _PERMANENT_DDB_ERROR_CODES: frozenset[str] = frozenset(
     {
         "ValidationException",

@@ -40,6 +40,7 @@ describe('isTransientError', () => {
   });
 
   test('mid-stream socket failure via err.cause.code is transient', () => {
+    // undici "terminated" (body interrupted after headers) is not a TypeError with "fetch failed".
     const cause = new Error('read ECONNRESET') as Error & { code: string };
     cause.code = 'ECONNRESET';
     const err = new Error('terminated') as Error & { cause?: Error };

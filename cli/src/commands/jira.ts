@@ -64,6 +64,8 @@ import { makeClient, makeDocClient } from '../ua';
 
 const DEFAULT_LABEL_FILTER = 'bgagent';
 
+// Jira project keys are typically 2–10 uppercase chars, but Atlassian allows
+// longer alphanumeric keys (and digits).
 const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{1,99}$/;
 
 const BANNER_WIDTH = 72;

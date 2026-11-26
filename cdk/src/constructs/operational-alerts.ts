@@ -66,6 +66,8 @@ export class OperationalAlerts extends Construct {
       enableKeyRotation: true,
       removalPolicy,
     });
+    // CMK ARNs are UUIDs and cannot be ARN-scoped: the deploy role's
+    // KMS-lifecycle grant is conditioned on this tag.
     Tags.of(this.key).add('ABCA', 'operational-alerts');
 
     // In a KMS key policy ``Resource: '*'`` means this key only.

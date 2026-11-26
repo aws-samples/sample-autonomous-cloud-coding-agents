@@ -191,6 +191,7 @@ class TestUploadTraceToS3:
             result = upload_trace_to_s3(task_id="t-1", user_id="u-1", body=b"x")
 
         assert result == "s3://bucket/traces/u-1/t-1.jsonl.gz"
+        # With region_name=None boto3 resolves the region through its default chain.
         args, kwargs = mock_factory.call_args
         assert args[0] == "s3"
         assert kwargs.get("region_name") is None
@@ -210,6 +211,7 @@ class TestUploadTraceToS3:
     def test_none_body_raises_when_put_object_rejects(self, monkeypatch):
         monkeypatch.setenv("TRACE_ARTIFACTS_BUCKET_NAME", "my-bucket")
         mock_client = MagicMock()
+        # boto3 rejects Body=None with ParamValidationError; TypeError stands for it here.
         mock_client.put_object.side_effect = TypeError(
             "put_object() Body expected bytes-like, got NoneType"
         )

@@ -80,6 +80,8 @@ export function renderJiraFinalStatusComment(
 
   let headerRuns: AdfTextRun[];
   if (isCompleted) {
+    // Jira's wiki-text form of a comment body writes bold as an asterisk, so
+    // the marker stays outside the bold run.
     headerRuns = [{ text: '✅ ' }, { text: 'Task completed', strong: true }];
   } else if (shippedDespiteFailure) {
     const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';

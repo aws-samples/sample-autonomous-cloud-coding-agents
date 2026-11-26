@@ -14,8 +14,9 @@ import time
 def log(prefix: str, text: str):
     """Print a timestamped, redacted log line.
 
-    Emits via ``os.write(1, ...)`` rather than ``print``. Tests observing this
-    output must use ``capfd``, not ``capsys``.
+    Emits via ``os.write(1, ...)`` rather than ``print``: CodeQL's
+    cleartext-logging query models print/TextIOWrapper.write only. Tests
+    observing this output must use ``capfd``, not ``capsys``.
     """
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {prefix} {redact_secrets(text)}\n".encode("utf-8", errors="replace")
@@ -254,6 +255,8 @@ def _run_cmd_streaming(
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        # SIGTERM first: mise keeps its tasks in process groups of their own and stops
+        # them when it is asked to stop; SIGKILL cannot be passed on.
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if proc.poll() is None:
                 with contextlib.suppress(ProcessLookupError):
@@ -307,6 +310,8 @@ def run_cmd(
             if result.stderr:
                 for line in result.stderr.strip().splitlines()[:20]:
                     log("CMD", f"  {line}")
+            # jest, tsc and the mise task DAG write the failing task's error to stdout,
+            # not stderr.
             if result.stdout:
                 surfaced = _surface_failure_lines(result.stdout)
                 for line in surfaced:

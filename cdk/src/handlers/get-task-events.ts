@@ -51,7 +51,8 @@ type QueryMode = 'from_beginning' | 'next_token' | 'after' | 'desc';
  * Supports three alternative query modes (plus the default "from the beginning"):
  *
  *   - ``?after=<event_id>`` — ULID cursor. Query returns events with
- *     ``event_id > after``.
+ *     ``event_id > after``. ULIDs are lexicographically sortable by
+ *     timestamp, so string ``>`` compare is correct.
  *   - ``?next_token=<base64>`` — opaque DynamoDB ``LastEvaluatedKey``,
  *     used for normal forward pagination.
  *   - ``?desc=1`` — return the newest events first. Mutually exclusive with
@@ -99,6 +100,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
+    // DynamoDB compares strings as raw bytes and stored ``event_id``s are upper-case
+    // Crockford Base32: a lower-case cursor sorts after every one and matches no row.
     const afterValid = typeof afterRaw === 'string' && afterRaw.length === ULID_LENGTH
       ? afterRaw.toUpperCase()
       : undefined;
@@ -202,6 +205,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ...(e.trace_id && { trace_id: e.trace_id }),
     }));
 
+    // DynamoDB's ``LastEvaluatedKey`` carries no direction: a follow-up request
+    // without ``desc=1`` would scan ascending from mid-stream.
     const nextToken = desc
       ? null
       : encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);

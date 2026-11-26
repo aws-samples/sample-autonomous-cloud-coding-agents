@@ -203,6 +203,8 @@ describe('linear-feedback', () => {
     });
   });
 
+  // Observed: Linear's commentCreate requires issueId even for a threaded reply; parentId alone
+  // fails argument validation.
   describe('replyToComment — threaded reply that notifies the commenter', () => {
     test('POSTs commentCreate with BOTH issueId and parentId, returns the new reply id', async () => {
       fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true, comment: { id: 'reply-99' } } } }));
@@ -743,6 +745,7 @@ describe('linear-feedback', () => {
     });
   });
 
+  // Linear's comment update takes only an id and a body, with no version to condition on.
   describe('upsertThreadedReply repairIfOverwritten (the outcome defends itself)', () => {
     const REPLY_ID = 'reply-cmt-9';
     const BLOCK = '[![preview](https://cdn/screenshots/x.png)](https://app.vercel.app)';

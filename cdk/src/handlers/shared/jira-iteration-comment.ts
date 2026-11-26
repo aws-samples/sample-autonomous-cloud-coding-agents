@@ -32,6 +32,7 @@ import type { TaskRecord } from './types';
 
 const MAX_CONVERGENCE_ATTEMPTS = 4;
 
+/** Jira supports explicit ADF links without requiring Atlassian media storage. */
 export function jiraPreviewDocument(screenshotUrl: unknown, previewUrl: unknown): Record<string, unknown> | null {
   if (typeof screenshotUrl !== 'string' || !isAllowedScreenshotUrl(screenshotUrl)) {
     return null;

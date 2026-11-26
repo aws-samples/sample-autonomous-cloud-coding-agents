@@ -267,6 +267,7 @@ describe('get-trace-url handler', () => {
   });
 
   test('returns 404 TRACE_NOT_AVAILABLE when HEAD throws NoSuchKey', async () => {
+    // GET-style S3 operations surface a missing key as NoSuchKey.
     const err = new Error('The specified key does not exist');
     err.name = 'NoSuchKey';
     mockS3Send.mockRejectedValueOnce(err);
@@ -347,10 +348,12 @@ describe('parseS3Uri', () => {
   });
 
   test('pins behavior on double-slash keys (leading / preserved in key)', () => {
+    // S3 accepts `/object` as a key distinct from `object`.
     expect(parseS3Uri('s3://bucket//object')).toEqual({ bucket: 'bucket', key: '/object' });
   });
 
   test('pins behavior on query-string-like suffixes (treated as literal key chars)', () => {
+    // S3 object keys can legally contain `?` and `#`.
     expect(parseS3Uri('s3://bucket/traces/u/t.jsonl.gz?x=1')).toEqual({
       bucket: 'bucket',
       key: 'traces/u/t.jsonl.gz?x=1',

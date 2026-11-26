@@ -228,8 +228,13 @@ function signedWebhookRules(paths: readonly string[]): wafv2.CfnWebACL.RulePrope
         managedRuleGroupStatement: {
           vendorName: 'AWS',
           name: 'AWSManagedRulesCommonRuleSet',
+          // WAF rejects `excludedRules` alongside `ruleActionOverrides`, and an excluded
+          // rule is a count override.
           ruleActionOverrides: [
+            // Matches a body over 8 KB.
             { name: 'SizeRestrictions_BODY', actionToUse: { count: {} } },
+            // Matches the XML-like `promptContext` (`<issue identifier=…>`) of a Linear
+            // agent session opened by an @-mention (#1063).
             { name: 'CrossSiteScripting_BODY', actionToUse: { count: {} } },
           ],
           scopeDownStatement: anyOf(paths.map(webhookPath => uriPathMatch('EXACTLY', webhookPath))),
@@ -366,6 +371,8 @@ export class TaskApi extends Construct {
         metricName: 'TaskApiWebAcl',
         sampledRequestsEnabled: true,
       },
+      // WAF keeps every header of a sampled request for three hours (wafv2:GetSampledRequests).
+      // The protected header names match in any letter case.
       dataProtectionConfig: {
         dataProtections: [{
           action: 'SUBSTITUTION',
@@ -381,6 +388,7 @@ export class TaskApi extends Construct {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
+              // API Gateway bounds the payload at 10 MB.
               excludedRules: [{ name: 'SizeRestrictions_BODY' }],
               scopeDownStatement: uriPathMatch('STARTS_WITH', '/v1/tasks'),
             },
@@ -766,6 +774,7 @@ export class TaskApi extends Construct {
       });
 
       props.taskTable.grantReadData(getTraceUrlFn);
+      // ``s3:GetObject`` also covers ``s3:HeadObject``.
       getTraceUrlFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['s3:GetObject'],
         resources: [`${traceBucket.bucketArn}/*`],

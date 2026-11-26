@@ -166,6 +166,7 @@ describe('preflight-bootstrap', () => {
     expect(run.stderr).toMatch(/Compute-ECS/);
   });
 
+  // In CDK a context argument wins over `cdk.json`, and of two arguments the later one.
   test('takes the compute backends from the last context argument, over an earlier one and over cdk.json', () => {
     const run = preflight(CURRENT, {
       args: ['-c', 'compute_types=agentcore,ecs', '-c', 'compute_types=agentcore'],

@@ -27,6 +27,7 @@ jobs:
   build:
     permissions:
       contents: read
+    # The job default is 360 minutes; the merge queue gives up on an entry after 60.
     timeout-minutes: 45
     runs-on: >-
       ${{
@@ -39,6 +40,8 @@ jobs:
             && 'ubuntu-latest-4-cores')
         || 'ubuntu-latest'
       }}
+    # The ruleset of `main` requires the check named `build (agentcore)`: the one-value matrix
+    # gives the job that name.
     strategy:
       matrix:
         compute_type: [agentcore]
@@ -72,7 +75,7 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
-          version: 2026.10.25
+          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -200,6 +203,8 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: cdk/coverage/lcov.info,cli/coverage/lcov.info,agent/coverage/lcov.info
+          # Without disable_search the uploader also sends every file that looks like coverage,
+          # e.g. contracts/coverage-thresholds.json.
           disable_search: true
           fail_ci_if_error: false
       - name: Find mutations

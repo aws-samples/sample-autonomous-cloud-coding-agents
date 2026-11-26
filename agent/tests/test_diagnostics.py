@@ -70,6 +70,8 @@ def test_sdk_smoke_passes_when_the_model_answers(monkeypatch, capsys):
 
 
 def test_sdk_smoke_fails_when_the_model_call_is_rejected(monkeypatch, capsys):
+    # The CLI does not raise: it hands the refusal over as an assistant message and
+    # ends the run with a result of subtype "success" that is marked is_error.
     status = _sdk_smoke(
         monkeypatch,
         SystemMessage(subtype="init", data={}),

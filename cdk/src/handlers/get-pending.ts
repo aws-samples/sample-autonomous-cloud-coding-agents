@@ -109,6 +109,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         Limit: PENDING_LIST_LIMIT,
         ExclusiveStartKey: startKey,
       }));
+      // DynamoDB's TTL can take days to delete an expired row, so `PENDING`
+      // rows whose window has passed are still read here.
       live.push(...(page.Items ?? []).filter((row) => !windowHasPassed(row, nowEpoch)));
       startKey = page.LastEvaluatedKey;
       pages += 1;

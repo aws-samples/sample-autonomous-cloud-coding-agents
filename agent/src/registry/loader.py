@@ -56,6 +56,8 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
             f"{server_key}: unknown mcp_server transport {transport!r} "
             f"(expected http, sse, or stdio)"
         )
+    # The Claude Code CLI skips an entry when a field of its transport has another shape, and
+    # the session starts without the server. It does not read a field of the other transport.
     for field, shape in shapes.items():
         if field in runtime and not _has_shape(runtime[field], shape):
             raise RegistryAssetLoadError(

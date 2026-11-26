@@ -2,6 +2,7 @@
 # a fourth component, e.g. 1.0.385.1, that the package file names do not carry).
 ARG AWS_EMULATOR_VERSION=1.0.610
 
+# AWS publishes no prebuilt image of the emulator, so this installs the signed Linux package.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:158a9044f9dc0777f098b76c8b54346f6ed4560b9a6a416dec7a5ba3bc483af4 AS base
 
 FROM base AS verified

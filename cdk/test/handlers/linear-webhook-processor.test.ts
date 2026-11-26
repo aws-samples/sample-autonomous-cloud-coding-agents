@@ -209,6 +209,7 @@ describe('linear-webhook-processor handler', () => {
     expect(String(message)).toMatch(/isn't onboarded|onboard/i);
   });
 
+  // A Linear workspace webhook fires workspace-wide: issues in teams that were never onboarded arrive too.
   test('an UNRELATED team\'s own label on an unmapped project stays SILENT (no nudge spam)', async () => {
     ddbSend.mockResolvedValueOnce({ Item: undefined });
     const payload = issue();
@@ -540,6 +541,7 @@ describe('linear-webhook-processor handler', () => {
       expect(message).toContain('re-apply the trigger label');
     });
 
+    // Lambda retries an async invoke after a timeout or a crash, with the same event.
     test('an idempotent replay (createTaskCore 200) is not reported as a failure', async () => {
       ddbSend
         .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
@@ -698,6 +700,7 @@ describe('linear-webhook-processor handler', () => {
       expect(reqBody.attachments).toBeUndefined();
     });
 
+    // ADR-016: an `uploads.linear.app` file can only be fetched with the workspace's OAuth token.
     test('public-CDN markdown images still become URL attachments (uploads.linear.app handled separately)', async () => {
       const payload = issue();
       const data = payload.data as Record<string, unknown>;

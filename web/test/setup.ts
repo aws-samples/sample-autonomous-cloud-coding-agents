@@ -22,6 +22,7 @@ import { cleanup, configure } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { resetMockData, server } from './helpers/server';
 
+// findBy*/waitFor give up after 1 s by default.
 configure({ asyncUtilTimeout: 5_000 });
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));

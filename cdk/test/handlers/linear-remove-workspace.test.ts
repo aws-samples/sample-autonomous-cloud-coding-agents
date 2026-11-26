@@ -44,6 +44,7 @@ const ADMIN = 'cognito-admin-sub';
 
 const REMOVABLE_ROW = '#status = :active OR (#status = :revoked AND (attribute_not_exists(revoked_reason) OR revoked_reason <> :reason))';
 
+// DynamoDB evaluates AND before OR: without the parentheses the `installed_at` clause binds to the revoked half only.
 const SAME_INSTALLATION = `(${REMOVABLE_ROW}) AND installed_at = :installed`;
 const NO_INSTALLATION_RECORDED = `(${REMOVABLE_ROW}) AND attribute_not_exists(installed_at)`;
 
@@ -357,6 +358,7 @@ describe('linear-remove-workspace handler', () => {
     expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Update' || c._type === 'Delete')).toHaveLength(0);
   });
 
+  // A Linear workspace can give up its urlKey and another can take it, so one slug can name a revoked row and an active one.
   test.each([
     ['on the same scan page', undefined],
     ['on a later scan page', 1],
@@ -579,6 +581,7 @@ describe('linear-remove-workspace handler', () => {
     const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
     expect(result.statusCode).toBe(200);
     expect(smSend).toHaveBeenCalledTimes(1);
+    // Secrets Manager accepts the name of a secret as `SecretId`.
     expect(smSend.mock.calls[0][0].input).toEqual({
       SecretId: 'bgagent-linear-oauth-acme',
       ForceDeleteWithoutRecovery: true,

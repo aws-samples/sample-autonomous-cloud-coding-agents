@@ -326,6 +326,8 @@ describe('Bootstrap template', () => {
       expect(yaml.load(compact)).toEqual(yaml.load(expanded));
     });
 
+    // CloudFormation accepts a JSON string or a mapping for this `Json`-typed property.
+    // A string scalar survives the CLI's re-serialisation on one line.
     it('emits every PolicyDocument as a JSON string that parses to a policy document', () => {
       const abcaPolicies = Object.keys(template.Resources as Record<string, any>)
         .filter((id) => id.startsWith('IaCRoleABCA'));

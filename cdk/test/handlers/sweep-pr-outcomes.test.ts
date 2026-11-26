@@ -56,6 +56,7 @@ const SECOND_MS = 1000;
 const HOUR_MS = 3600 * SECOND_MS;
 const DAY_MS = 24 * HOUR_MS;
 
+// GitHub writes a time in whole seconds, without the milliseconds.
 const ago = (ms: number): string => new Date(NOW - ms).toISOString().replace('.000Z', 'Z');
 
 const EVENT = { 'source': 'aws.events', 'detail-type': 'Scheduled Event' };
@@ -240,6 +241,7 @@ describe('the candidates', () => {
     const secondKey = { task_id: 'task-800', status: 'COMPLETED', created_at: '2026-11-17T08:00:00.000Z' };
     table(
       { Items: [task(12)], ScannedCount: 400, LastEvaluatedKey: firstKey },
+      // A DynamoDB page whose records the filter all removed still has a next page.
       { Items: [], ScannedCount: 400, LastEvaluatedKey: secondKey },
       { Items: [task(13)], ScannedCount: 12 },
     );
@@ -308,6 +310,7 @@ describe('the token', () => {
   test('is the platform token, taken once from the secret the environment names, and sent to GitHub as a bearer', async () => {
     candidates(task(12), task(13));
     github({ 12: found(12), 13: found(13) });
+    // A secret stored from a file can hold a byte-order mark in front of the token and a line end after it.
     resolveGitHubTokenMock.mockResolvedValue(`${String.fromCharCode(0xfeff)}${TOKEN}\n`);
 
     await handler(EVENT, context);
@@ -348,6 +351,7 @@ describe('the token', () => {
     ]);
   });
 
+  // `fetch` refuses the last three as a header, before any request.
   test.each([
     ['is empty but for white space', ' \n'],
     ['holds a second line', `${TOKEN}\nsecond-line`],

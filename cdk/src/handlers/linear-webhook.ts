@@ -203,6 +203,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const issueId = dataId;
 
     // Linear's `webhookId` identifies the webhook configuration: it is the same on every delivery.
+    // `webhookTimestamp` (UNIX ms) is unique per delivery, and Linear reuses it when it retries that delivery.
     const dedupKey = `${issueId}#${action}#${payload.webhookTimestamp}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {

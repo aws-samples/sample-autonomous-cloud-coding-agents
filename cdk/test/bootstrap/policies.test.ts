@@ -37,6 +37,7 @@ describe('infrastructurePolicy', () => {
   });
 
   it('is under 6144 characters when serialized', () => {
+    // IAM's size limit for a managed policy.
     expect(rendered.length).toBeLessThan(6144);
   });
 
@@ -503,6 +504,8 @@ describe('computeLambdaMicrovmPolicy', () => {
     }
 
     it('carries NO iam:PassedToService condition — the service presents no usable value', () => {
+      // Observed: under an `iam:PassedToService` allowlist, CloudFormation's
+      // CreateMicrovmImage fails with a 403 on iam:PassRole (Service: LambdaMicrovms).
       expect(passRoleStatement().Condition).toBeUndefined();
     });
 
@@ -581,6 +584,7 @@ describe('computeLambdaMicrovmPolicy', () => {
 
     expect(allActions).toContain('lambda:CreateMicrovmImage');
     expect(allActions).toContain('lambda:CreateNetworkConnector');
+    // The documented dependent action of CreateMicrovmImage.
     expect(allActions).toContain('lambda:PassNetworkConnector');
   });
 

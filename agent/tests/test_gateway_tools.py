@@ -517,6 +517,7 @@ class TestThroughTheSdk:
         server = gw.build_gateway_server()
 
         async def _call_tool():
+            # ``mode="legacy"`` is the handshake the SDK's bridge performs.
             async with Client(server["instance"], mode="legacy") as client:
                 return await client.call_tool("repo_config", arguments)
 

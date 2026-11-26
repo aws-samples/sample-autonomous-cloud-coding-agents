@@ -3,6 +3,8 @@ ARG GH_VERSION=2.103.3
 ARG GH_SHA256_AMD64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
 ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
 
+# Each digest is a multi-platform index, so `--platform=$TARGETPLATFORM` still
+# selects the right architecture.
 FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.6@sha256:d4de1845114f6d73e90e15f7642885f74f3ca93074491038a2b9c43e4b897f21 AS mise
 
 FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
@@ -53,6 +55,10 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 # CVE-2026-114613, GHSA-6v7p-g79w-8964); pip 26.3 vendors the fixed releases.
 RUN python -m pip install --no-cache-dir --root-user-action=ignore pip==26.3
 
+# The SDK and the on-PATH CLI must agree on the control protocol: the pin is the CLI
+# that claude-agent-sdk bundles (agent/pyproject.toml).
+# CLI builds older than 2.1.280 reject the Claude 5.5 models ("does not support
+# this model", #953).
 # claude-code@2.1.x ships an error-shim at bin/claude.exe that its postinstall
 # (install.cjs) replaces with the platform-native ELF binary. That postinstall
 # can silently fall back (leaving the shim in place) — the shim then dies at
@@ -65,6 +71,8 @@ RUN npm install -g npm@latest && \
     node "${CLAUDE_NPM_ROOT}/install.cjs" && \
     claude --version
 
+# Dependabot's docker updates have only ever changed the FROM lines of this file (observed):
+# bump this line by hand, to the `uv` version of mise.toml and agent/mise.toml.
 COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /usr/local/bin/uv
 
 COPY agent/pyproject.toml agent/uv.lock /app/

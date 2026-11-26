@@ -310,6 +310,7 @@ function assertSlugFreeFor(
     return;
   }
   if (organization.urlKey && organization.urlKey !== slug) {
+    // Linear has three-character urlKeys, which SLUG_RE rejects.
     if (priorRow || SLUG_RE.test(organization.urlKey)) {
       throw new CliError(
         `Slug '${slug}' does not match Linear's urlKey '${organization.urlKey}' for the authorized `
@@ -321,6 +322,7 @@ function assertSlugFreeFor(
     }
     return;
   }
+  // In Linear a workspace can give its urlKey up and another take it.
   if (priorRow && priorRow.revoked_reason !== 'admin_removed') {
     throw new CliError(
       `Slug '${slug}' is registered to another Linear workspace (${String(priorRow.linear_workspace_id)}), `
@@ -408,6 +410,9 @@ export async function upsertOauthSecret(
  * Find an OAuth credential pair (client_id + client_secret) reusable for a
  * new workspace install. Returns the values from the FIRST `active` row in
  * the workspace registry, by reading that row's per-workspace SM secret.
+ *
+ * One Linear OAuth app can authorize many workspaces: Linear scopes consent
+ * per workspace, but the app's client_id/client_secret are workspace-independent.
  *
  * Returns null when there's no existing active workspace, signalling that
  * the operator should run `bgagent linear setup` first.
@@ -519,6 +524,7 @@ export async function listOnboardedWorkspaceSlugs(args: {
   do {
     const listed = await args.sm.send(new ListSecretsCommand({
       Filters: [{ Key: 'name', Values: [LINEAR_OAUTH_SECRET_PREFIX] }],
+      // ListSecrets returns at most 100 secrets per page.
       MaxResults: 100,
       NextToken: nextToken,
     }));

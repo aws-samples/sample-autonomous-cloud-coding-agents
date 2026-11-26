@@ -108,6 +108,8 @@ describe('auth', () => {
     });
 
     test('maps NotAuthorizedException to an expired-temp-password hint (no secret leaked)', async () => {
+      // Cognito answers a temporary password past its default 7-day validity with a bare NotAuthorizedException.
+      // `invite-user` calls AdminCreateUser, which rejects an existing account (#238 review N7).
       mockSend.mockRejectedValue(
         Object.assign(new Error('Incorrect username or password.'), { name: 'NotAuthorizedException' }),
       );

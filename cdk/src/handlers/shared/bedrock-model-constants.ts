@@ -33,6 +33,7 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   // Bedrock refuses the bare ID of these two for on-demand invocation: only an inference profile is invocable (#953).
   'anthropic.claude-opus-5-5',
   DEFAULT_HAIKU_MODEL_ID,
+  // No Sonnet 5.5: Bedrock has no `jp.` inference profile for it.
 ];
 
 /**

@@ -40,6 +40,8 @@ const CLIP_REASON_VALUES = new Set<string>([
  * Values of the ``rule_id`` dimension, in order of precedence: an event that
  * several of these rules matched counts under the one that stands first here.
  * Any other rule id counts as ``other``, an empty list as ``none``.
+ *
+ * CloudWatch bills every distinct dimension value as a custom metric of its own (~$0.30/month).
  */
 export const RULE_ID_ALLOWLIST = new Set<string>([
   'force_push_main',

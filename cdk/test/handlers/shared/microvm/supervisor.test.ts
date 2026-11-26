@@ -392,6 +392,8 @@ test('an intended long sleep stays asleep and does not fail heartbeat liveness',
 });
 
 test('a guest that declined the suspend is woken although the intent matches the gate', async () => {
+  // The service freezes the VM even when the guest answered 200 declined and
+  // recorded no checkpoint (#904 review).
   intent('suspend');
   strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
   mockCheckpoint.mockResolvedValue('missing');

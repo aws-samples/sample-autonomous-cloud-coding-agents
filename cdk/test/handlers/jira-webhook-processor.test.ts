@@ -668,6 +668,8 @@ describe('jira-webhook-processor handler', () => {
       const refusal = reportIssueFailureMock.mock.calls[0][2] as string;
       expect(refusal).toContain('`@bgagent retry`');
 
+      // Jira attributes a comment written with the OAuth token to the person who
+      // granted it, not to an app, so the refusal comes back as a human's comment.
       const echo = comment();
       (echo.comment as Record<string, unknown>).id = 'comment-2';
       (echo.comment as Record<string, unknown>).body = refusal;
@@ -1366,6 +1368,8 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('extracts an external ADF media node embedded in the description', async () => {
+      // Jira embeds images as ADF `media` nodes, not markdown image text. A `file`
+      // media node carries an attachment id and no URL.
       const payload = issue();
       (payload.issue as { fields: Record<string, unknown> }).fields.description = {
         type: 'doc',

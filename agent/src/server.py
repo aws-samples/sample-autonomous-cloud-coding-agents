@@ -47,6 +47,7 @@ from shell import redact_secrets
 
 
 def _emit_stdout_line(stamped: str) -> None:
+    # CodeQL's cleartext-logging query models ``print`` and ``TextIOWrapper.write`` only.
     line = (stamped + "\n").encode("utf-8", errors="replace")
     try:
         while line:
@@ -65,6 +66,8 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     if not log_group:
         return
 
+    # AgentCore's health check hits the container within ~1 s of boot: a synchronous
+    # boto3 call here would keep uvicorn from answering ``GET /ping`` in time.
     _t = threading.Thread(
         target=_debug_cw_write_blocking,
         args=(log_group, task_id, stamped),
@@ -89,6 +92,7 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     stamped = f"[server/warn] {msg}"
     _emit_stdout_line(stamped)
 
+    # AgentCore does not forward container stdout to the APPLICATION_LOGS group.
     log_group = os.environ.get("LOG_GROUP_NAME")
     if not log_group:
         return
@@ -212,6 +216,8 @@ app = FastAPI(title="Background Agent", version="1.0.0", lifespan=lifespan)
 
 
 def _extract_workload_access_token(request: Request) -> str:
+    # ``WorkloadAccessToken`` is the documented header (``ACCESS_TOKEN_HEADER`` in the SDK's
+    # ``runtime.models``); AgentCore also sends the undocumented ``x-amzn-...-runtime-...`` one.
     return (
         request.headers.get("WorkloadAccessToken")
         or request.headers.get("x-amzn-bedrock-agentcore-runtime-workload-accesstoken")
@@ -322,7 +328,8 @@ def _run_task_background(
     lifecycle = register_task(task_id, microvm_id) if microvm_id else None
     if lifecycle is not None:
         # Sockets idle across a long suspend can be dropped silently (VPC
-        # endpoint/NAT idle timeout is 350 s).
+        # endpoint/NAT idle timeout is 350 s). Claude Code waits 300 s for response
+        # headers by default; streamed bodies keep their own idle watchdog.
         os.environ.setdefault("API_TIMEOUT_MS", "120000")
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
@@ -655,6 +662,8 @@ MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY: str = _PLATFORM_CONFIG_CONTRACT["acc
 _PLATFORM_CONFIG_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _PLATFORM_CONFIG_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
+# A NUL makes ``os.environ[...] = value`` raise ``ValueError``; ``\x1b`` starts an ANSI escape
+# sequence; ``\x0b``, ``\x0c`` and ``\x1c``-``\x1e`` are ``str.splitlines()`` boundaries.
 _PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS = frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
 
 
@@ -985,6 +994,8 @@ def _resolve_microvm_run_payload(run_hook_payload: str) -> tuple[dict, Any]:
     )
 
 
+# Measured: on a MicroVM restored from the snapshot, the first exec of ``claude`` (a 225 MiB
+# static ELF) faults its pages in from lazily-restored storage and took more than 10 s.
 _READY_WARMUP_REQUIRED: tuple[str, ...] = ("claude", "--version")
 
 _READY_WARMUP_OPTIONAL: tuple[tuple[str, ...], ...] = (
@@ -1165,6 +1176,7 @@ def microvm_validate():
         body["missing_routes"] = missing_routes
 
     if baked_secrets:
+        # The MicroVM service does not parse the hook's response body.
         _build_hook_log(
             "/validate hook WARNING: secret-bearing env var(s) present in the "
             f"snapshot: {baked_secrets}. ADR-021 sub-decision 3 forbids baking "

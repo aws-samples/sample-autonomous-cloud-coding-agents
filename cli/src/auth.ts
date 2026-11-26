@@ -72,6 +72,7 @@ export async function login(
       },
     }));
   } catch (err) {
+    // Cognito answers an expired temporary password with the same bare NotAuthorizedException as a wrong one.
     if (err instanceof Error && err.name === 'NotAuthorizedException') {
       throw new CliError(
         'Login failed: incorrect password, or your temporary password expired. '

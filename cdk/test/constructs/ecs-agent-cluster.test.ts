@@ -552,6 +552,8 @@ describe('EcsAgentCluster construct', () => {
   });
 
   test('build def caps build parallelism to prevent OOM (K14 / ABCA-691)', () => {
+    // The CDK assertions matcher matches one arrayWith with several objectLike entries unreliably,
+    // so each variable gets its own hasResourceProperties call.
     const envHas = (name: string, value: string) =>
       baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
         ContainerDefinitions: Match.arrayWith([

@@ -174,6 +174,8 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.infra_failed is True
 
     def test_bare_sigkill_137_no_stderr_signature_is_INFRA_not_inert(self, monkeypatch):
+        # Observed: the cgroup OOM killer sends SIGKILL and writes "Killed process" to the
+        # kernel log, not to the build's stderr. The build exits 137 with no OOM string.
         mise_and_notfound = (
             "[//agent:test] tests/test_attachments.py ...\n"
             "[//cdk:test] Linear project is not found — skipping\n"

@@ -273,6 +273,7 @@ export class TaskDashboard extends Construct {
         logGroupNames: [logGroup.logGroupName],
         queryLines: [
           'filter @message like "METRICS_REPORT"',
+          // [tf][a-z]+, not true|false: AWS's Logs Insights `parse` examples show no `|` (untried).
           'parse @message /"build_passed":\\s*(?<bp_raw>[tf][a-z]+)/',
           'filter ispresent(bp_raw)',
           'stats sum(bp_raw = "true") / count(*) * 100 as build_pass_rate_pct by bin(1h)',

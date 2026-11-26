@@ -202,6 +202,9 @@ export async function verifyLinearRequest(
  * Verify a Linear webhook request against the **per-workspace** signing
  * secret stored alongside the workspace's OAuth token bundle.
  *
+ * Linear generates a signing secret per webhook subscription, and subscriptions are
+ * workspace-scoped, so a stack-wide secret cannot verify events from multiple workspaces.
+ *
  * Returns:
  * - `'verified'` — signature matches the per-workspace secret. Caller
  *   trusts the body.

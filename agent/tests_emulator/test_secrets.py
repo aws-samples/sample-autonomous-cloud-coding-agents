@@ -34,6 +34,8 @@ def create_secret(emulator):
 @pytest.fixture
 def token_env(agent_env, monkeypatch):
     """Both resolvers cache the token in ``os.environ``; undo that after the test."""
+    # pytest only reverts a direct ``os.environ[...]`` assignment for a variable
+    # that ``monkeypatch`` already owns.
     monkeypatch.setenv("GITHUB_TOKEN", "")
     monkeypatch.setenv("LINEAR_API_TOKEN", "")
     monkeypatch.delenv("LINEAR_VAULT_ENABLED", raising=False)

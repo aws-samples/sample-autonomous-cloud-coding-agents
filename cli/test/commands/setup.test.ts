@@ -747,6 +747,7 @@ describe('brand-new accounts', () => {
     }
   });
 
+  // The mise that mise.toml requires (min_version) runs `//cdk:*` tasks without experimental mode.
   test('leaves MISE_EXPERIMENTAL unset', async () => {
     const saved = process.env.MISE_EXPERIMENTAL;
     delete process.env.MISE_EXPERIMENTAL;

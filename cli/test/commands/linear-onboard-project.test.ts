@@ -125,6 +125,7 @@ describe('linear onboard-project command', () => {
   });
 
   test('writes nothing when no onboarded workspace can see the project', async () => {
+    // Linear answers HTTP 200 with `project: null` for a project that is not one of the workspace's.
     fetchSpy.mockImplementation(async () => linearAnswers({ organization: { id: ORG_ACME }, project: null }));
 
     await expect(run(PROJECT, '--repo', 'acme/widgets')).rejects.toThrow('process.exit:1');

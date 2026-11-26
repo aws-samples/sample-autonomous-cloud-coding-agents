@@ -246,6 +246,7 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${PYPROJECT} [tool.pytest.ini_options] addopts: `, `does not match ${CONTRACT} pytest.agent.addopts: "-ra"`);
     });
 
+    // pytest 9 reads [tool.pytest] itself when [tool.pytest.ini_options] is empty.
     test('the pytest settings moved to the table that pytest 9 reads natively', () => {
       expectDrift((root) => {
         edit(root, PYPROJECT, text => `${text.replace('[tool.pytest.ini_options]', '[tool.pytest]')}\n[tool.pytest.ini_options]\n`);
@@ -285,6 +286,7 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${AGENT_MISE} tasks.test.run coverage flags`, '"--cov-config=pyproject.toml"');
     });
 
+    // The order of reading is in pytest 9.1 findpaths.py and coverage 7.15 config.py.
     test('config files that would be read before pyproject.toml, each of the eight names', () => {
       const names = ['pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini'];
       expectDrift((root) => {
@@ -403,6 +405,7 @@ describe('check-coverage-thresholds-sync', () => {
   });
 
   describe('config files that a launcher reads on top of a pinned manifest', () => {
+    // What mise 2026.10 reads next to a mise.toml, and the rc files that yarn 1.22 and npm read next to a pinned script.
     const MISE = [
       '.mise.toml', 'mise.local.toml', '.mise.local.toml', '.miserc.toml', '.miserc.local.toml', 'mise', '.mise',
       '.config/mise.toml', '.config/mise.local.toml', '.config/miserc.toml', '.config/mise',

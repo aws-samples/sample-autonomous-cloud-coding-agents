@@ -22,6 +22,7 @@ from telemetry import _TrajectoryWriter
 def _screened_text(value: Any) -> str:
     if isinstance(value, str):
         return _screened(value)
+    # ``str()`` of a dict or a list escapes the quotes, tabs and newlines inside its strings.
     return scan_tool_output(str(_map_strings(value, _screened))).redacted_content
 
 
@@ -95,6 +96,8 @@ def _setup_agent_env(config: TaskConfig) -> None:
     os.environ["GH_TOKEN"] = config.github_token
 
     _setup_bedrock_cost_attribution(config)
+    # At any ANTHROPIC_LOG level the CLI fills the 64 KB stderr pipe faster than the
+    # SDK's ``stderr`` callback drains it, and the blocked write deadlocks the CLI.
     os.environ.pop("ANTHROPIC_LOG", None)
     os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = config.haiku_model
 
@@ -173,6 +176,8 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
 # ``permission_mode``, and ``bypassPermissions`` allows it. ``disallowed_tools``
 # removes a tool from the model's context. The sub-agent spawner is ``Task`` or
 # ``Agent``, depending on the CLI version.
+# The tools listed start, resume, watch or schedule work that runs in the background
+# or later. Background Bash is a ``run_in_background`` parameter of Bash, not a tool name.
 _DISALLOWED_TOOLS = [
     "Workflow",
     "Task",

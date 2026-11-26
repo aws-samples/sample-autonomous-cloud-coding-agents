@@ -80,13 +80,18 @@ function pdfWithPages(pageTexts: string[]): Buffer {
 
 function screenInChild(pdf: Buffer): unknown {
   const stdout = execFileSync(process.execPath, ['-'], {
+    // pdf-parse and the AWS SDK resolve from here: Node resolves a script read from stdin from the working directory.
     cwd: CDK_ROOT,
     input: BUNDLE,
+    // Not an argument: the error of a failed execFileSync starts with the child's command line.
     env: { ...process.env, PDF_BASE64: pdf.toString('base64') },
     encoding: 'utf-8',
+    // With no stdio given, execFileSync writes the child's stderr to the parent's; piped, the error of a failed child carries it.
     stdio: 'pipe',
+    // Jest cannot interrupt a synchronous call, so its test timeout does not end a child that never exits.
     timeout: 30_000,
   });
+  // pdfjs prints its notices on stdout: the outcome is the last line.
   return JSON.parse(stdout.trimEnd().split('\n').at(-1) ?? '');
 }
 

@@ -439,6 +439,8 @@ class TestSetupAgentEnv:
         )
 
     def test_model_catalog_is_switched_off(self, monkeypatch):
+        # Claude Code 2.1.311 and later fetch model settings on Bedrock from
+        # downloads.claude.ai unless this variable says "off".
         import os
 
         monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
@@ -449,6 +451,8 @@ class TestSetupAgentEnv:
         assert os.environ["CLAUDE_CODE_MODEL_CATALOG"] == "off"
 
     def test_instrumentation_variables_are_removed_from_the_process(self, monkeypatch):
+        # What opentelemetry-instrument puts into os.environ makes every Python that inherits
+        # it (the CLI's Bash tool starts the repository's own) try to instrument itself.
         import os
 
         for name in (
@@ -490,6 +494,8 @@ class TestSetupAgentEnv:
 
 class TestClaudeCliVersionProbe:
     def test_the_version_probe_bound_is_loose_enough_for_a_cold_start(self):
+        # Measured on lambda-microvm: the first exec of the 225 MiB static ``claude`` binary
+        # on a restored snapshot faults every page in, and ``--version`` took over 10 s.
         assert _CLAUDE_VERSION_PROBE_TIMEOUT_S >= 60
 
     def test_the_probe_passes_that_timeout_to_the_version_call_only(self, monkeypatch):
@@ -831,6 +837,8 @@ def _turns_of(write: MagicMock) -> list[int]:
 
 
 class TestTurnCount:
+    # The CLI's ``num_turns`` grows with every tool result, so an answer that calls
+    # two tools adds two.
     def test_messages_of_one_answer_are_one_turn(self, monkeypatch):
         trajectory = MagicMock()
         run = _run_agent(
@@ -1021,6 +1029,8 @@ class TestToolResultsAreRecorded:
         assert _trace(trajectory)[1]["content"] == "x" * 2000 + "... [truncated, 5000 chars total]"
 
     def test_credentials_in_a_result_are_replaced_before_it_is_recorded(self, monkeypatch, capfd):
+        # Not every result passes the PostToolUse hook (that of a failed command does
+        # not), and the CLI does not take every rewrite the hook returns.
         output = (
             f"remote: https://x-access-token:{_GIT_URL_TOKEN}@github.com/o/r\n"
             f"AWS_ACCESS_KEY_ID={_AWS_KEY_ID}\n"

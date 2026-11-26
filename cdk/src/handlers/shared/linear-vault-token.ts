@@ -33,7 +33,7 @@ export const LINEAR_VAULT_SCOPES = ['read', 'write', 'app:assignable', 'app:ment
 /**
  * Extra authorize-URL parameters for Linear's agent install.
  *
- * AgentCore keys a cached grant by the
+ * Observed: AgentCore keys a cached grant by the
  * full token-request shape, `customParameters` included: the same
  * user + provider returns the cached `accessToken` when these are passed and an
  * `authorizationUrl` ("needs consent") when they are omitted. So the runtime
@@ -92,6 +92,7 @@ export async function resolveLinearTokenViaVault(
 
   try {
     const client = input.client ?? makeClient(BedrockAgentCoreClient, { region });
+    // USER_FEDERATION requires a user-bound workload token, not a plain one.
     const wat = await client.send(
       new GetWorkloadAccessTokenForUserIdCommand({
         workloadName: workloadIdentityName,

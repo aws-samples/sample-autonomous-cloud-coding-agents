@@ -57,6 +57,8 @@ interface JiraWebhookEnvelope {
 }
 
 interface JiraEnvelopeWithCloud extends JiraWebhookEnvelope {
+  // Atlassian does not always send `cloudId` at the top level: older delivery
+  // payloads omit it, and self-hosted webhook configurations do not carry it.
   readonly cloudId?: string;
 }
 

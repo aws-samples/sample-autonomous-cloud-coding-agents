@@ -25,6 +25,8 @@ echo "Project: $PROJECT_NAME"
 # Left to discover configuration per directory, ruff would let a ruff.toml or
 # [tool.ruff] added below agent/ replace the rules, the ignores and the banned-api
 # table for that directory. --config applies agent/pyproject.toml to every file.
+# A plain `ruff check` or `ruff format` by hand does discover such a file, and ruff's cache
+# then hands the results it stored for the files beside it to the tasks (observed): --no-cache.
 #
 # A plain `uv run` re-locks when pyproject.toml is ahead of uv.lock: the check would
 # rewrite the lockfile and still pass. With --locked it fails instead.

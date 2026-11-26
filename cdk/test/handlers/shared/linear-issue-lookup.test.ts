@@ -194,6 +194,7 @@ describe('findLinearIssueByIdentifier', () => {
     registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] });
     linearHas({ 'ws-acme': 'issue-acme' });
 
+    // Linear's `issueVcsBranchSearch` is fuzzy: asked for ENG-70 it may answer with ENG-7.
     await expect(findLinearIssueByIdentifier('ENG-70', REGISTRY)).resolves.toEqual(LOOKUP_ABSENT);
   });
 

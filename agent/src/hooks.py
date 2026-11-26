@@ -56,6 +56,8 @@ class _ApprovalDeadline:
         return cls(wall_deadline, time.monotonic() + remaining)
 
     def remaining_s(self) -> float:
+        # UTC counts elapsed time even if the guest's monotonic clock freezes; the
+        # monotonic cap stops a backward UTC correction from extending the window.
         return max(
             0.0,
             min(self.monotonic_deadline - time.monotonic(), self.wall_deadline - time.time()),
@@ -84,9 +86,13 @@ def _tool_input_preview(tool_input: dict) -> str:
 
 
 _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # curl / libcurl, git-over-https
     re.compile(r"[Cc]ould not resolve host:?\s+(?P<host>[A-Za-z0-9._-]+)"),
     re.compile(r"[Ff]ailed to connect to\s+(?P<host>[A-Za-z0-9._-]+)"),
+    # Node (npm/yarn), python (requests/urllib), getaddrinfo
     re.compile(r"getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\s+(?P<host>[A-Za-z0-9._-]+)"),
+    # requests/urllib3: the class path ``urllib3.connection.HTTPSConnection`` precedes the
+    # real host in the message.
     re.compile(r"HTTPS?ConnectionPool\(host='(?P<host>[A-Za-z0-9._-]+)'"),
     re.compile(r"Failed to resolve '(?P<host>[A-Za-z0-9._-]+)'"),
     re.compile(
@@ -96,6 +102,7 @@ _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+# 0.0.0.0 is the address that a dev server prints as the one it listens on.
 _LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNORECASE)
 
 _NETWORK_TOOLS = frozenset(("Bash", "WebFetch"))
@@ -199,6 +206,7 @@ _CLOSED_TEXT_RE = re.compile(
     re.VERBOSE,
 )
 
+# ``-b`` is ``--body`` for ``gh pr create`` and ``--branch`` for ``git clone``.
 _FREE_TEXT_ARG_RE = re.compile(
     r"(?:^|\s)(?:-m|--message|--body|--body-file|-b|--title|-t|-F|--field|--raw-field)\b",
     re.IGNORECASE,
@@ -922,6 +930,7 @@ _try_progress_consecutive_failures: dict[str, int] = {}
 
 
 def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
+    # ``is True``: a ``MagicMock`` returns a truthy auto-mock attribute for any access.
     if getattr(progress, "_disabled", False) is True:
         log("WARN", f"progress {method_name!r} skipped: circuit breaker open")
         return
@@ -1090,6 +1099,7 @@ def _observe_tool_result(
             if host
             else "An outbound connection was blocked"
         ) + f" during {tool_name}."
+        # In the pinned CLI a fetch that cannot connect fails.
         if (
             host
             and not _LOOPBACK_HOST_RE.fullmatch(host)
@@ -1158,6 +1168,7 @@ def _fail_closed_output(tool_name: Any, tool_response: Any, marker: str) -> Any:
     if name.startswith("mcp__"):
         # The result of an MCP tool is a list of content blocks, and the Messages
         # API refuses a request that holds a block whose "type" is no block type.
+        # The CLI takes the marker alone.
         return marker
     if name == "Read" and isinstance(tool_response, dict) and tool_response.get("type") != "text":
         # The blocks of an image, a PDF or a notebook do not take blanked data.
@@ -1515,7 +1526,8 @@ def build_hook_matchers(
         return SyncHookJSONOutput(**result)
 
     # Without an explicit timeout the CLI cancels a hook callback that is still
-    # waiting for an approval.
+    # waiting for an approval. A frozen MicroVM's CLI timer does not advance while
+    # suspended.
     callback_window_s = SHARED_CONSTANTS["approval_timeout_s"]["max"]
     return {
         "PreToolUse": [

@@ -38,6 +38,6 @@ export default function isolateEnvironment(): void {
     if (/^(AWS|BGAGENT)_/.test(name)) delete process.env[name];
   }
   process.env.HOME = home;
-  process.env.USERPROFILE = home;
-  process.env.AWS_EC2_METADATA_DISABLED = 'true';
+  process.env.USERPROFILE = home; // os.homedir() reads this one on Windows
+  process.env.AWS_EC2_METADATA_DISABLED = 'true'; // the SDK would otherwise take credentials from an EC2 instance role
 }

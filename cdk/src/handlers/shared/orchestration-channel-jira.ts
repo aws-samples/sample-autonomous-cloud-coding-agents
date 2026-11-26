@@ -72,5 +72,7 @@ export function makeJiraChannel(registryTableName: string): Channel {
         options,
       );
     },
+
+    // The reaction methods are omitted: Jira has no reaction API.
   };
 }

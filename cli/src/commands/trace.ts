@@ -33,6 +33,8 @@ function isAbortError(err: unknown): boolean {
 }
 
 function isZlibError(err: unknown): boolean {
+  // Jest's module isolation can load `Error` from a different realm, where
+  // `instanceof Error` is false for a valid error object.
   if (err === null || typeof err !== 'object') return false;
   const e = err as { code?: unknown; message?: unknown };
   if (typeof e.code === 'string' && e.code.startsWith('Z_')) return true;
@@ -115,6 +117,7 @@ export function makeTraceCommand(): Command {
           throw new CliError('S3 response had no body.');
         }
 
+        // `fromWeb` typing in Node's types expects a WHATWG stream; the fetch response body matches.
         const nodeReadable = Readable.fromWeb(s3Response.body as unknown as WebReadableStream);
 
         if (opts.output) {

@@ -52,6 +52,8 @@ def main():
 
     for m in meta:
         n = m.get("child_count", {}).get("N", "?")
+        # CodeQL's py/clear-text-logging-sensitive-data flags the prints below: it taints the
+        # whole stdin-derived meta dict. False positive: they print ids and a yes/no flag.
         has_oauth = "yes" if "linear_oauth_secret_arn" in m else "no"
         issue = renamed(m, "parent_issue_ref", "parent_linear_issue_id")
         print(f"  PARENT  issue={issue}  repo={s(m, 'repo')}  children={n}")

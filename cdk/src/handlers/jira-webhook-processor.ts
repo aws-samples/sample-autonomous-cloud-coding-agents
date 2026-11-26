@@ -235,6 +235,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
     }
   } else {
+    // Webhooks registered in the Jira settings UI carry no `cloudId` in the body.
     cloudId = payload.cloudId
       ?? (await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE));
   }
@@ -1488,6 +1489,7 @@ async function getActiveProjectMapping(
     Key: { jira_project_identity: projectIdentity },
     ConsistentRead: true,
   }));
+  // Jira admin-console webhooks fire for every project of the site.
   if (!mapping.Item || mapping.Item.status !== 'active') {
     logger.info('Jira project is not onboarded or is removed — skipping silently', {
       jira_project_identity: projectIdentity,

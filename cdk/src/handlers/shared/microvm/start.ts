@@ -41,6 +41,7 @@ export interface MicrovmStartClaim {
   readonly closed: boolean;
 }
 
+// AWS does not document how long RunMicrovm retains a client token; this is a local retry limit.
 export const MICROVM_START_REPLAY_WINDOW_MS = 120_000;
 
 const ddb = makeDocClient();

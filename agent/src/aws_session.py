@@ -184,6 +184,7 @@ def get_session() -> Any:
         if role_arn:
             try:
                 session = _build_scoped_session(role_arn)
+                # Left to botocore, the role is assumed on the first signed request.
                 session.get_credentials().get_frozen_credentials()
                 _session = session
                 _scoped = True

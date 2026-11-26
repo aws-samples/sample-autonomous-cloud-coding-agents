@@ -337,6 +337,7 @@ async function hydrateChildrenOwnAttachments(
   return stampedByChild;
 }
 
+// A DynamoDB Query is eventually consistent by default: a reload right after the write can miss the stamped attachments.
 function patchChildOwnAttachments(
   snapshot: NonNullable<Awaited<ReturnType<typeof loadOrchestration>>>,
   stampedByChild: Map<string, PassedAttachmentRecord[]>,
@@ -576,6 +577,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
+  // A Linear workspace webhook fires on every issue change in every team of the workspace, onboarded or not.
   if (!shouldTrigger(payload, labelFilter)) {
     const abcaLabelJustAdded = labelJustPresent(payload, looksLikeAbcaTriggerLabel);
     if (abcaLabelJustAdded && (!projectId || !mappingItem)) {
@@ -716,6 +718,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   if (ORCHESTRATION_TABLE && resolvedAccessToken) {
     const graphSource = linearGraphSource(resolvedAccessToken, issue.id);
     const graphResult = await graphSource();
+    // S3 versioning makes each PUT a new version: a re-upload turns the version pinned at the first seed
+    // noncurrent, and the bucket's lifecycle expires noncurrent versions.
     const alreadySeeded = graphResult.kind === 'ok'
       ? Boolean(await loadOrchestration(ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issue.id)))
       : false;
@@ -2409,6 +2413,7 @@ function isLinearUploadsUrl(url: string): boolean {
   }
 }
 
+// Linear's "Agent session events" toggle is per app installation: a workspace can have it off while the stack-wide flag is on.
 async function mentionYieldsToAgentSession(workspaceId: string): Promise<boolean> {
   if (!isLinearAgentSessionsEnabled() || !WORKSPACE_REGISTRY_TABLE) return false;
   return workspaceDeliversAgentSessions(ddb, WORKSPACE_REGISTRY_TABLE, workspaceId);

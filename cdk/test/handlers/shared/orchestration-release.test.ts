@@ -103,6 +103,8 @@ describe('releaseChild — idempotency key is accepted by the REAL validator', (
     });
     const d = createTaskCore.mock.calls[0][0].task_description as string;
     const preamble = d.slice(0, d.indexOf('Epic:'));
+    // Observed: the Bedrock guardrail flags second-person commands in this preamble as
+    // PROMPT_ATTACK at MEDIUM confidence.
     expect(preamble).not.toMatch(/\buse it exactly\b/i);
     expect(preamble).not.toMatch(/\bdo not invent\b/i);
     expect(preamble).not.toMatch(/\byou must\b/i);
@@ -246,6 +248,7 @@ describe('releaseChild — the shared context gives way to the description limit
   });
 
   test('a cut does not leave half of a character behind', async () => {
+    // An emoji is two code units: of two neighbouring lengths, one cuts between them.
     for (const ownLength of [6000, 6001]) {
       const d = await taskDescription('c'.repeat(ownLength), { title: EPIC.title, description: '😀'.repeat(2000) });
       expect(d).not.toMatch(/\p{Surrogate}/u);
