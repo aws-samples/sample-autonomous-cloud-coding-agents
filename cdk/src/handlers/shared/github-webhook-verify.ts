@@ -17,13 +17,7 @@
  *  SOFTWARE.
  */
 
-import * as crypto from 'crypto';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { isUsableHmacSecret } from './hmac-secret';
-import { logger } from './logger';
-import { makeClient } from './ua';
-
-const sm = makeClient(SecretsManagerClient);
+import { cachedSecrets, hmacSha256Equals, verifyWithRefetch } from './webhook-hmac';
 
 /**
  * In-memory secret cache (5-minute TTL). Same pattern as `linear-verify.ts`
@@ -31,9 +25,11 @@ const sm = makeClient(SecretsManagerClient);
  * round-trip on every webhook keeps the receiver well under GitHub's 10s
  * timeout. After rotation, the verifier transparently re-fetches once.
  */
-const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MINUTES = 5;
-const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
+const secretCache = cachedSecrets({
+  empty: 'GitHub webhook secret is empty — refusing to use for HMAC',
+  notFound: 'GitHub webhook secret not found',
+  fetchFailed: 'Failed to fetch GitHub webhook secret',
+});
 
 /**
  * Fetch a GitHub webhook secret from Secrets Manager with caching.
@@ -41,52 +37,10 @@ const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
  * @param forceRefresh - bypass cache and re-fetch.
  * @returns the secret string, or null if not found.
  */
-export async function getGitHubWebhookSecret(secretId: string, forceRefresh = false): Promise<string | null> {
-  const now = Date.now();
-  if (!forceRefresh) {
-    const cached = secretCache.get(secretId);
-    if (cached && cached.expiresAt > now) {
-      return cached.secret;
-    }
-  }
-
-  try {
-    const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    // Treat empty / whitespace-only SecretString as null. If an operator
-    // ever wrote `""` out of band, `crypto.createHmac('sha256', '')` would
-    // happily run and an attacker who computes `HMAC('', body)` would pass.
-    // The default CDK Secret resource generates a random value so this
-    // isn't reachable on the default config — but matching the
-    // fail-closed-on-risk tenet is cheap. (theagenticguy PR-241 review B2.)
-    const value = result.SecretString;
-    if (!isUsableHmacSecret(value)) {
-      logger.error('GitHub webhook secret is empty — refusing to use for HMAC', {
-        secret_id: secretId,
-      });
-      secretCache.delete(secretId);
-      return null;
-    }
-    secretCache.set(secretId, { secret: value, expiresAt: now + CACHE_TTL_MS });
-    return value;
-  } catch (err) {
-    const errorName = (err as Error)?.name;
-    if (errorName === 'ResourceNotFoundException') {
-      logger.error('GitHub webhook secret not found', { secret_id: secretId });
-      secretCache.delete(secretId);
-      return null; // missing webhook secret means "cannot verify"; ResourceNotFound is an expected config state
-    }
-    logger.error('Failed to fetch GitHub webhook secret', {
-      secret_id: secretId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
-  }
-}
+export const getGitHubWebhookSecret = secretCache.get;
 
 /** Drop a cached webhook secret — used on suspected rotation. */
-export function invalidateGitHubWebhookSecretCache(secretId: string): void {
-  secretCache.delete(secretId);
-}
+export const invalidateGitHubWebhookSecretCache = secretCache.invalidate;
 
 /**
  * Verify a GitHub webhook signature.
@@ -104,27 +58,10 @@ export function invalidateGitHubWebhookSecretCache(secretId: string): void {
  * @returns true if the signature matches.
  */
 export function verifyGitHubSignature(webhookSecret: string, header: string, body: string): boolean {
-  // Defense-in-depth: getGitHubWebhookSecret already filters empty
-  // secrets, but if a future caller wires a different secret source we
-  // still want HMAC('') rejected. (theagenticguy PR-241 review B2.)
-  if (!isUsableHmacSecret(webhookSecret)) {
-    return false;
-  }
   if (!header.startsWith('sha256=')) {
     return false;
   }
-  const provided = header.slice('sha256='.length);
-  const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
-  } catch (err) {
-    logger.warn('GitHub signature comparison failed', {
-      error: err instanceof Error ? err.message : String(err),
-      expected_length: expected.length,
-      provided_length: provided.length,
-    });
-    return false;
-  }
+  return hmacSha256Equals('GitHub', webhookSecret, body, header.slice('sha256='.length));
 }
 
 /**
@@ -133,14 +70,5 @@ export function verifyGitHubSignature(webhookSecret: string, header: string, bod
  * silently reject post-rotation deliveries for up to 5 minutes.
  */
 export async function verifyGitHubRequest(secretId: string, header: string, body: string): Promise<boolean> {
-  const cached = await getGitHubWebhookSecret(secretId);
-  if (cached && verifyGitHubSignature(cached, header, body)) {
-    return true;
-  }
-
-  invalidateGitHubWebhookSecretCache(secretId);
-  const fresh = await getGitHubWebhookSecret(secretId, true);
-  if (!fresh) return false;
-  if (fresh === cached) return false;
-  return verifyGitHubSignature(fresh, header, body);
+  return verifyWithRefetch(secretCache, secretId, (secret) => verifyGitHubSignature(secret, header, body));
 }

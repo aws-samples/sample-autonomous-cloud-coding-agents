@@ -17,19 +17,19 @@
  *  SOFTWARE.
  */
 
-import * as crypto from 'crypto';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { isUsableHmacSecret } from './hmac-secret';
+import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { getOauthSecretStrict, getRegistryRowStrict } from './jira-oauth-resolver';
-import { logger } from './logger';
 import { makeClient, makeDocClient } from './ua';
+import { cachedSecrets, hmacSha256Equals, verifyWithRefetch } from './webhook-hmac';
 
 const sm = makeClient(SecretsManagerClient);
 const ddb = makeDocClient();
 
-const secretCache = new Map<string, { secret: string; expiresAt: number }>();
-const CACHE_TTL_MINUTES = 5;
-const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
+const secretCache = cachedSecrets({
+  empty: 'Jira webhook secret is empty — refusing to use for HMAC',
+  notFound: 'Jira secret not found in Secrets Manager',
+  fetchFailed: 'Failed to fetch Jira secret from Secrets Manager',
+});
 
 /**
  * Maximum age of a Jira webhook event timestamp (ms) before it is rejected.
@@ -57,46 +57,9 @@ export const CLOCK_SKEW_ALLOWANCE_MS = CLOCK_SKEW_ALLOWANCE_MINUTES * 60 * 1000;
 /**
  * Fetch a secret from Secrets Manager with in-memory caching.
  */
-export async function getJiraSecret(secretId: string, forceRefresh = false): Promise<string | null> {
-  const now = Date.now();
-  if (!forceRefresh) {
-    const cached = secretCache.get(secretId);
-    if (cached && cached.expiresAt > now) {
-      return cached.secret;
-    }
-  }
+export const getJiraSecret = secretCache.get;
 
-  try {
-    const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    // Treat empty / whitespace-only SecretString as null — an empty secret
-    // must never be used for HMAC, or HMAC('', body) becomes forgeable.
-    if (!isUsableHmacSecret(result.SecretString)) {
-      logger.error('Jira webhook secret is empty — refusing to use for HMAC', {
-        secret_id: secretId,
-      });
-      secretCache.delete(secretId);
-      return null;
-    }
-    secretCache.set(secretId, { secret: result.SecretString, expiresAt: now + CACHE_TTL_MS });
-    return result.SecretString;
-  } catch (err) {
-    const errorName = (err as Error)?.name;
-    if (errorName === 'ResourceNotFoundException') {
-      logger.error('Jira secret not found in Secrets Manager', { secret_id: secretId });
-      secretCache.delete(secretId);
-      return null; // missing Jira signing secret means "cannot verify"; ResourceNotFound is expected before setup
-    }
-    logger.error('Failed to fetch Jira secret from Secrets Manager', {
-      secret_id: secretId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
-  }
-}
-
-export function invalidateJiraSecretCache(secretId: string): void {
-  secretCache.delete(secretId);
-}
+export const invalidateJiraSecretCache = secretCache.invalidate;
 
 /**
  * Verify a Jira generic-webhook signature.
@@ -112,29 +75,11 @@ export function verifyJiraSignature(
   signature: string,
   body: string,
 ): boolean {
-  // Defense-in-depth: getJiraSecret already filters empty secrets, but
-  // callers like verifyJiraRequestForTenant pass secrets from other sources
-  // (per-tenant OAuth bundles where the operator pastes the signing secret
-  // by hand) — HMAC('') must always be rejected or an attacker can forge
-  // signatures against a misconfigured empty/whitespace secret.
-  if (!isUsableHmacSecret(webhookSecret)) {
-    return false;
-  }
   // Strip the algorithm prefix Atlassian (and most webhook providers using
   // X-Hub-Signature) prepend. Be tolerant of operators who paste just the
   // hex digest.
   const provided = signature.startsWith('sha256=') ? signature.slice('sha256='.length) : signature;
-  const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
-  } catch (err) {
-    logger.warn('Jira signature comparison failed', {
-      error: err instanceof Error ? err.message : String(err),
-      expected_length: expected.length,
-      provided_length: provided.length,
-    });
-    return false;
-  }
+  return hmacSha256Equals('Jira', webhookSecret, body, provided);
 }
 
 /**
@@ -165,16 +110,7 @@ export async function verifyJiraRequest(
   signature: string,
   body: string,
 ): Promise<boolean> {
-  const cached = await getJiraSecret(secretId);
-  if (cached && verifyJiraSignature(cached, signature, body)) {
-    return true;
-  }
-
-  invalidateJiraSecretCache(secretId);
-  const fresh = await getJiraSecret(secretId, true);
-  if (!fresh) return false;
-  if (fresh === cached) return false;
-  return verifyJiraSignature(fresh, signature, body);
+  return verifyWithRefetch(secretCache, secretId, (secret) => verifyJiraSignature(secret, signature, body));
 }
 
 /**

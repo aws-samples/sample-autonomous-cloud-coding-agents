@@ -17,19 +17,22 @@
  *  SOFTWARE.
  */
 
-import * as crypto from 'crypto';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './linear-oauth-resolver';
 import { logger } from './logger';
 import { makeClient, makeDocClient } from './ua';
+import { cachedSecrets, hmacSha256Equals, verifyWithRefetch } from './webhook-hmac';
 
 const sm = makeClient(SecretsManagerClient);
 const ddb = makeDocClient();
 
-// In-memory secret cache with 5-minute TTL (same pattern as slack-verify.ts).
-const secretCache = new Map<string, { secret: string; expiresAt: number }>();
+const secretCache = cachedSecrets({
+  empty: 'Linear webhook secret is empty — refusing to use for HMAC',
+  notFound: 'Linear secret not found in Secrets Manager',
+  fetchFailed: 'Failed to fetch Linear secret from Secrets Manager',
+});
+
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
@@ -108,51 +111,14 @@ export function _resetActiveWorkspaceCountCache(): void {
  * @param forceRefresh - bypass the cache and re-fetch from Secrets Manager.
  * @returns the secret string, or null if not found.
  */
-export async function getLinearSecret(secretId: string, forceRefresh = false): Promise<string | null> {
-  const now = Date.now();
-  if (!forceRefresh) {
-    const cached = secretCache.get(secretId);
-    if (cached && cached.expiresAt > now) {
-      return cached.secret;
-    }
-  }
-
-  try {
-    const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    // Treat empty / whitespace-only SecretString as null — an empty secret
-    // must never be used for HMAC, or HMAC('', body) becomes forgeable.
-    if (!isUsableHmacSecret(result.SecretString)) {
-      logger.error('Linear webhook secret is empty — refusing to use for HMAC', {
-        secret_id: secretId,
-      });
-      secretCache.delete(secretId);
-      return null;
-    }
-    secretCache.set(secretId, { secret: result.SecretString, expiresAt: now + CACHE_TTL_MS });
-    return result.SecretString;
-  } catch (err) {
-    const errorName = (err as Error)?.name;
-    if (errorName === 'ResourceNotFoundException') {
-      logger.error('Linear secret not found in Secrets Manager', { secret_id: secretId });
-      secretCache.delete(secretId);
-      return null; // missing Linear signing secret means "cannot verify"; ResourceNotFound is expected before setup
-    }
-    logger.error('Failed to fetch Linear secret from Secrets Manager', {
-      secret_id: secretId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
-  }
-}
+export const getLinearSecret = secretCache.get;
 
 /**
  * Explicitly drop a cached secret. Called when rotation is suspected —
  * e.g. signature verification fails with an otherwise valid-looking request.
  * @param secretId - the Secrets Manager secret ID or ARN to evict.
  */
-export function invalidateLinearSecretCache(secretId: string): void {
-  secretCache.delete(secretId);
-}
+export const invalidateLinearSecretCache = secretCache.invalidate;
 
 /**
  * Verify a Linear webhook signature.
@@ -171,25 +137,7 @@ export function verifyLinearSignature(
   signature: string,
   body: string,
 ): boolean {
-  // Defense-in-depth: getLinearSecret already filters empty secrets, but
-  // callers like verifyLinearRequestForWorkspace pass secrets from other
-  // sources (per-workspace OAuth bundles) — HMAC('') must always be
-  // rejected or an attacker can forge signatures against a misconfigured
-  // empty secret.
-  if (!isUsableHmacSecret(webhookSecret)) {
-    return false;
-  }
-  const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-  } catch (err) {
-    logger.warn('Linear signature comparison failed', {
-      error: err instanceof Error ? err.message : String(err),
-      expected_length: expected.length,
-      provided_length: signature.length,
-    });
-    return false;
-  }
+  return hmacSha256Equals('Linear', webhookSecret, body, signature);
 }
 
 /**
@@ -221,16 +169,7 @@ export async function verifyLinearRequest(
   signature: string,
   body: string,
 ): Promise<boolean> {
-  const cached = await getLinearSecret(secretId);
-  if (cached && verifyLinearSignature(cached, signature, body)) {
-    return true;
-  }
-
-  invalidateLinearSecretCache(secretId);
-  const fresh = await getLinearSecret(secretId, true);
-  if (!fresh) return false;
-  if (fresh === cached) return false;
-  return verifyLinearSignature(fresh, signature, body);
+  return verifyWithRefetch(secretCache, secretId, (secret) => verifyLinearSignature(secret, signature, body));
 }
 
 /**
