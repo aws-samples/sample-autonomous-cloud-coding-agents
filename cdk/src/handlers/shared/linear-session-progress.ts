@@ -91,19 +91,23 @@ function parseDetails(details: unknown): Record<string, string> {
 }
 
 /**
- * One field of a tool-input preview. The agent writes the input dict's Python repr
- * (`{'file_path': '...'}`), cut at a fixed length, so the field's string value is read
- * directly, in either quote style, rather than parsed.
+ * A `'key': 'value'` pair of a tool-input preview: the agent writes the input dict's
+ * Python repr (`{'file_path': '...'}`), cut at a fixed length. Key and value quote
+ * independently, because repr switches a value to double quotes when it holds a
+ * single quote. A match consumes its whole value, so text inside a value is never
+ * read as a key.
  */
+const INPUT_FIELD = /['"](\w+)['"]\s*:\s*(['"])((?:(?!\2)[^\\]|\\.)*)/g;
+
+/** The first non-empty string value among `keys`, in that order of preference. */
 function inputField(preview: unknown, keys: readonly string[]): string | undefined {
   if (typeof preview !== 'string' || preview.length === 0) return undefined;
-  for (const k of keys) {
-    // Key and value quote independently: repr switches a value to double quotes when
-    // it contains a single quote.
-    const m = preview.match(new RegExp(`['"]${k}['"]\\s*:\\s*(['"])((?:(?!\\1)[^\\\\]|\\\\.)*)`));
-    if (m?.[2]) return m[2].replace(/\\(['"])/g, '$1').replace(/\\n/g, ' ');
+  const values = new Map<string, string>();
+  for (const [, key, , value] of preview.matchAll(INPUT_FIELD)) {
+    if (value && !values.has(key)) values.set(key, value);
   }
-  return undefined;
+  const value = keys.map((k) => values.get(k)).find((v) => v !== undefined);
+  return value?.replace(/\\(['"])/g, '$1').replace(/\\n/g, ' ');
 }
 
 const WORKSPACE_PREFIX = /\/workspace\/[^/\s'"]+\/?/g;
