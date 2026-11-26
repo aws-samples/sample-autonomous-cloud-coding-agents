@@ -871,6 +871,7 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(422);
     expect(JSON.parse(result.body).error.code).toBe('REPO_NOT_ONBOARDED');
+    expect(JSON.parse(result.body).error.message).toBe("Repository 'org/repo' is not onboarded. Register it with 'bgagent repo onboard' or a Blueprint before submitting tasks.");
   });
 
   test('creates task successfully when repo is onboarded', async () => {

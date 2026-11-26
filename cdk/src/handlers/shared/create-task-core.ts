@@ -203,7 +203,7 @@ export async function createTaskCore(
   if (body.repo) {
     const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
     if (!onboarded) {
-      return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`, requestId);
+      return errorResponse(422, ErrorCode.REPO_NOT_ONBOARDED, `Repository '${body.repo}' is not onboarded. Register it with 'bgagent repo onboard' or a Blueprint before submitting tasks.`, requestId);
     }
     const blueprintCap = repoConfig?.approval_gate_cap;
     if (blueprintCap !== undefined) {

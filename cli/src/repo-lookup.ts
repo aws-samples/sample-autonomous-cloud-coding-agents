@@ -68,7 +68,7 @@ export class RepoNotOnboardedError extends CliError {
 
   constructor(repo: string) {
     super(
-      `Repository '${repo}' is not onboarded. Register it with a Blueprint before querying repo config.`,
+      `Repository '${repo}' is not onboarded. Register it with 'bgagent repo onboard ${repo}' or a Blueprint.`,
     );
     this.name = 'RepoNotOnboardedError';
     this.repo = repo;
