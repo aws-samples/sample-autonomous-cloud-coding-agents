@@ -97,6 +97,8 @@ describe('slack-commands handler', () => {
     const result = await handler(makeEvent(body, ts));
     expect(result.statusCode).toBe(200);
     expect(lambdaSend).toHaveBeenCalledTimes(1);
+    const forwarded = JSON.parse(new TextDecoder().decode(lambdaSend.mock.calls[0][0].input.Payload));
+    expect(forwarded).toMatchObject({ source: 'slash', text: 'link', user_id: 'U1', team_id: 'T1', response_url: 'https://example.com' });
     const payload = JSON.parse(result.body);
     expect(payload.text).toContain('link');
   });

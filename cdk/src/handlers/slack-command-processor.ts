@@ -68,20 +68,6 @@ export interface MentionEvent extends BasePayload {
 /** Discriminated union of the inbound events the processor accepts. */
 export type CommandProcessorEvent = SlashCommandEvent | MentionEvent;
 
-/**
- * Legacy shape — the slash-command acknowledger (`slack-commands.ts`) forwards
- * payloads without a `source` field. Normalize those into SlashCommandEvent so
- * the handler body only has to reason about the discriminated union.
- */
-type RawEvent = CommandProcessorEvent | SlackCommandPayload;
-
-function normalizeEvent(event: RawEvent): CommandProcessorEvent {
-  if ('source' in event && event.source) {
-    return event;
-  }
-  return { ...event, source: 'slash' };
-}
-
 const ddb = makeDocClient();
 
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
@@ -104,8 +90,7 @@ const RESPONSE_URL_LOG_PREFIX_LEN = 80;
  * Posts results back to Slack via `response_url` (slash commands) or
  * `chat.postMessage` (@mentions).
  */
-export async function handler(raw: RawEvent): Promise<void> {
-  const event = normalizeEvent(raw);
+export async function handler(event: CommandProcessorEvent): Promise<void> {
   const text = (event.text ?? '').trim();
   const parts = text.split(/\s+/);
   const subcommand = parts[0]?.toLowerCase() ?? '';
@@ -128,18 +113,6 @@ export async function handler(raw: RawEvent): Promise<void> {
         break;
       case 'link':
         await handleLink(event, reply);
-        break;
-      case 'help':
-        await reply(
-          '*Using Shoof*\n\n'
-          + '*Submit a task:* Mention `@Shoof` in any channel:\n'
-          + '> `@Shoof fix the login bug in org/repo#42`\n'
-          + '> `@Shoof update the README in org/repo`\n\n'
-          + '*Private submissions:* DM Shoof directly.\n\n'
-          + '*Cancel a task:* Use the Cancel button in the thread.\n\n'
-          + '*Link your account:* `/bgagent link` — one-time setup.\n\n'
-          + 'Reactions on your message show progress: :eyes: → :hourglass_flowing_sand: → :white_check_mark:',
-        );
         break;
       default:
         await reply('Use `@Shoof` to submit tasks, or `/bgagent link` to link your account.\nTry `/bgagent help` for more info.');
