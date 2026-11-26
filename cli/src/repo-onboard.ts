@@ -121,7 +121,11 @@ export async function onboardRepo(
   }
   if (existing?.egress_allowlist?.length) item.egress_allowlist = existing.egress_allowlist;
   if (existing?.cedar_policies?.length) item.cedar_policies = existing.cedar_policies;
-  for (const key of ['approval_gate_cap', 'max_budget_usd', 'memory_token_budget'] as const) {
+  // Blueprint-only settings have no flag here: carry every one of them forward.
+  for (const key of [
+    'approval_gate_cap', 'max_budget_usd', 'memory_token_budget',
+    'build_command', 'lint_command', 'mcp_servers', 'skills', 'cedar_policy_modules',
+  ] as const) {
     if (existing?.[key] !== undefined) item[key] = existing[key];
   }
 
