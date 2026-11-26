@@ -67,6 +67,15 @@ cdk.out/
 cdk.context.json
 /assets/
 
+# Output of the integ runner, which #1084 removed together with the integ test.
+# Nothing writes these two directories any more. A checkout that ran the test
+# may still have them: the snapshot holds a copy of every Lambda handler asset,
+# about 100 MB. These lines keep `git add .` from staging them there, and
+# `rm -rf cdk/test/integ` removes them. Only the runner's own directory names
+# are ignored, so that a new file in cdk/test/integ still shows up.
+/cdk/test/integ/*.snapshot/
+/cdk/test/integ/cdk-integ.out.*/
+
 # ──────────────────────────────────────────────
 # Build outputs (compiled TS → JS)
 # ──────────────────────────────────────────────
