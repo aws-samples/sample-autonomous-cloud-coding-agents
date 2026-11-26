@@ -5,6 +5,7 @@
   ],
   "ignoreBinaries": [
     "mise",
+    "mkfifo",
     "semgrep"
   ],
   "ignoreExportsUsedInFile": {
