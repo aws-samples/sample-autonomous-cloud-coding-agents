@@ -240,6 +240,35 @@ export function validateMaxBudgetUsd(value: unknown): number | null | undefined 
 }
 
 /**
+ * Bound a repository's stored max_turns or max_budget_usd to the range the API enforces per task.
+ * Zero or less counts as not set; a value that is not a number passes unchanged.
+ * @param column - the RepoTable attribute the value was read from.
+ * @param value - the stored value.
+ * @param log - receives a warning when the value is dropped or clamped.
+ * @returns the bounded value, or undefined when the platform default applies.
+ */
+export function boundRepoLimit(
+  column: 'max_turns' | 'max_budget_usd',
+  value: number | undefined,
+  log: { warn(message: string, meta?: Record<string, unknown>): void },
+): number | undefined {
+  if (typeof value !== 'number') return value;
+  const [candidate, min, max] = column === 'max_turns'
+    ? [Math.floor(value), MIN_MAX_TURNS, MAX_MAX_TURNS]
+    : [value, MAX_BUDGET_USD_MIN, MAX_BUDGET_USD_MAX];
+  // Not `candidate <= 0`: NaN belongs here too.
+  if (!(candidate > 0)) {
+    log.warn(`${column} is not a positive number; the platform default applies`, { original: value });
+    return undefined;
+  }
+  const clamped = Math.min(Math.max(candidate, min), max);
+  if (clamped !== value) {
+    log.warn(`${column} clamped to safe range`, { original: value, clamped, min, max });
+  }
+  return clamped;
+}
+
+/**
  * Validate a task_description length.
  * @param description - the task description to validate.
  * @returns true if within the allowed length, false if too long.

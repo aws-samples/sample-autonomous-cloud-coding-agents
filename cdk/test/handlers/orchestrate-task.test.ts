@@ -980,6 +980,22 @@ describe('loadBlueprintConfig', () => {
     expect(config.poll_interval_ms).toBeUndefined();
   });
 
+  test.each([
+    [{ max_turns: 0, max_budget_usd: 250 }, undefined, 100],
+    [{ max_turns: 1000, max_budget_usd: 0 }, 500, undefined],
+  ])('bounds the stored limits %j', async (limits, maxTurns, maxBudgetUsd) => {
+    mockLoadRepoConfig.mockResolvedValueOnce({
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      ...limits,
+    });
+    const config = await loadBlueprintConfig(baseTask as any);
+    expect(config.max_turns).toBe(maxTurns);
+    expect(config.max_budget_usd).toBe(maxBudgetUsd);
+  });
+
   test('passes cedar_policies from repo config', async () => {
     const policies = ['forbid (principal, action, resource) when { resource == Agent::Tool::"Bash" };'];
     mockLoadRepoConfig.mockResolvedValueOnce({
