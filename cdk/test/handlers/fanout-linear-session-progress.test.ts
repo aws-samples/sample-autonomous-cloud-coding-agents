@@ -227,7 +227,7 @@ test('a task that ends with a pull request completes the checklist, says what is
   const final = mockEmitAgentActivity.mock.calls.at(-1)?.[2] as { type: string; body: string };
   expect(final.type).toBe('response');
   expect(final.body).toMatch(/_Your turn: review the pull request\. Reply here if it needs changes\._$/);
-  expect(mockTransitionIssueState).toHaveBeenCalledWith(expect.anything(), 'issue-1', 'started', ['In Review']);
+  expect(mockTransitionIssueState).toHaveBeenCalledWith(expect.anything(), 'issue-1', 'started', ['In Review'], false, true);
 });
 
 test('a failed task cancels what was left, offers a retry, and leaves the issue where it is', async () => {

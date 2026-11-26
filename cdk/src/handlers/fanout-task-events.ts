@@ -1721,7 +1721,7 @@ async function moveSessionIssueToReview(task: TaskRecord, ctx: LinearFeedbackCon
   const issueId = task.channel_metadata?.linear_issue_id;
   if (!issueId) return;
   try {
-    await transitionIssueState(ctx, issueId, 'started', ['In Review']);
+    await transitionIssueState(ctx, issueId, 'started', ['In Review'], false, true);
   } catch (err) {
     logger.warn('[fanout/linear-session] could not move the issue to In Review (best effort)', {
       task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
