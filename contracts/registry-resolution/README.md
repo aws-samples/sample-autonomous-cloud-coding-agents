@@ -23,8 +23,7 @@ lockstep — this second corpus is how we catch a ranking drift before deploy.
 
 Both parsers implement the identical grammar in different languages; this corpus
 is how we catch drift before deploy — the same mechanism
-[`contracts/cedar-parity/`](../cedar-parity/README.md) uses for the two Cedar
-engines and [`contracts/workflow-validation/`](../workflow-validation/README.md)
+[`contracts/workflow-validation/`](../workflow-validation/README.md)
 anticipates for the publish-path validator.
 
 ## Why this lives in `contracts/`

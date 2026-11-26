@@ -159,9 +159,11 @@ Fix the Blueprint, redeploy, resubmit.
 
 ## Testing policies before shipping
 
-Every repo blueprint is covered by **cross-engine parity fixtures** in [`contracts/cedar-parity/`](../../contracts/cedar-parity/). Before shipping a non-trivial rule change, drop a golden-file fixture that pins the expected `(decision, matching_rule_ids)` for a representative `(policies, input)` pair. Both the Python `cedarpy` engine and the TypeScript `@cedar-policy/cedar-wasm` engine run it — divergence fails CI. See the directory's README for the fixture schema.
+The agent's `PolicyEngine` is the only engine that loads and evaluates rules, so test your rules with it:
 
-For unit coverage of your own rules without the cross-engine guarantee, add a case to [`agent/tests/test_policy.py`](../../agent/tests/test_policy.py) using `PolicyEngine.evaluate_tool_use(...)`.
+- Keep each `security.cedarPolicies` entry in a file and pass that file's text to the Blueprint (for example with `fs.readFileSync`), so that what is tested is what is deployed.
+- Add a case beside [`agent/tests/test_blueprint_cedar_routing.py`](../../agent/tests/test_blueprint_cedar_routing.py), which loads this guide's own example. Construct `PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_policies=[...])` with the same text and assert on `evaluate_tool_use(...)`. If the rules cannot be loaded, construction raises the error a task would report at start.
+- Registry modules attached to the repository share the 64 KB budget and the rule-id space with the Blueprint's entries. They are not part of such a test unless their text is added to the list.
 
 ## Where to look next
 

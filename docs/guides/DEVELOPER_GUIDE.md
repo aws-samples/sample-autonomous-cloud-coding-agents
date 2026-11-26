@@ -126,7 +126,7 @@ The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `g
 
 A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
 
-See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
+See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, and multi-match rules.
 
 ### Other options
 

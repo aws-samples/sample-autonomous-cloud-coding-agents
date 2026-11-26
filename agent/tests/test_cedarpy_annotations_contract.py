@@ -9,17 +9,20 @@ engine relies on — ``@rule_id``, ``@tier``, ``@approval_timeout_s``,
 If cedarpy's annotation surface ever changes shape (renamed key, dropped
 values, typed coercion), this test flips red BEFORE the engine's
 annotation-merging logic starts returning subtly-wrong answers.
-
-Parity with the TypeScript side is tested separately in
-``test_cedar_parity.py`` against the shared ``contracts/cedar-parity/``
-fixtures; this module validates only the agent-side API shape.
 """
 
 import json
+import re
+from pathlib import Path
 
 # Hard import (not importorskip): this module pins what the engine relies on in
 # cedarpy. Without cedarpy it must fail the run, not drop out of it.
 import cedarpy
+
+# A cedarpy bump is made by hand, in a change of its own: run this module,
+# test_policy_builtin_rules.py and test_policy_three_outcome.py against the new
+# version, then change the version here and in pyproject.toml.
+_PINNED_CEDARPY = "4.12.2"
 
 _ANNOTATED_POLICY = (
     '@tier("soft") '
@@ -154,3 +157,11 @@ class TestMultiMatchDiagnostics:
         assert len(r.diagnostics.reasons) == 2, (
             f"expected 2 matching policies, got {r.diagnostics.reasons}"
         )
+
+
+def test_pyproject_requires_exactly_the_pinned_cedarpy():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    requirements = re.findall(
+        r"""["']cedarpy(?![\w-])([^"']*)["']""", pyproject.read_text(encoding="utf-8")
+    )
+    assert [re.sub(r"\s", "", spec) for spec in requirements] == [f"=={_PINNED_CEDARPY}"]

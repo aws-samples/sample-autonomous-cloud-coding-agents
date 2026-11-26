@@ -21,8 +21,7 @@ a file synthesis does not read.
 
 Neither `cdk/` nor `cli/` owns the profile format: it is an agreement between
 them, kept where both test suites reach it.
-[`contracts/cedar-parity/`](../cedar-parity/README.md) and
-[`contracts/registry-resolution/`](../registry-resolution/README.md) work the
+[`contracts/registry-resolution/`](../registry-resolution/README.md) works the
 same way.
 
 ## Consumers
