@@ -57,17 +57,8 @@ import {
   resetLinearHeartbeatMemoForTests,
   routeEvent,
   type FanOutEvent,
-  type TaskNotificationsConfig,
 } from '../../src/handlers/fanout-task-events';
 import { SESSION_STOP_CANCELLED_VIA } from '../../src/handlers/shared/linear-agent-session-event';
-
-/** Route to the Linear dispatcher only, so the other channels stay out of the assertions. */
-const LINEAR_ONLY: TaskNotificationsConfig = {
-  slack: { enabled: false },
-  github: { enabled: false },
-  jira: { enabled: false },
-  email: { enabled: false },
-} as TaskNotificationsConfig;
 
 const SESSION_TASK = {
   task_id: 't-sess',
@@ -121,7 +112,7 @@ test('the flag subscribes the Linear channel to per-turn events', () => {
 
 test('pr_created attaches the PR to the session and announces it, post-once', async () => {
   mockTask({ ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7', pr_number: 7 });
-  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }));
 
   expect(outcome.infraRejections).toEqual([]);
   expect(mockAddAgentSessionExternalUrl).toHaveBeenCalledWith('lin_tok', 'session-1', {
@@ -141,7 +132,7 @@ test('pr_created attaches the PR to the session and announces it, post-once', as
 
 test('pr_created after a stop stays quiet (the final status carries the link)', async () => {
   mockTask({ ...SESSION_TASK, status: 'CANCELLED', pr_url: 'https://github.com/acme/web/pull/7' });
-  await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }));
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
   expect(mockAddAgentSessionExternalUrl).not.toHaveBeenCalled();
 });
@@ -151,7 +142,7 @@ test('a retried pr_created does not attach the PR link a second time', async () 
   mockTask({
     ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7', linear_session_pr_link_event_id: 'e-first',
   });
-  await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }));
   expect(mockAddAgentSessionExternalUrl).not.toHaveBeenCalled();
   expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
 });
@@ -159,7 +150,7 @@ test('a retried pr_created does not attach the PR link a second time', async () 
 test('a transient PR-link failure is retried before the activity is announced', async () => {
   mockTask({ ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7' });
   mockAddAgentSessionExternalUrl.mockResolvedValue({ ok: false, retryable: true });
-  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }));
   expect(outcome.infraRejections).toEqual(['linear']);
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
   expect(updates()).toEqual([]);
@@ -168,14 +159,14 @@ test('a transient PR-link failure is retried before the activity is announced', 
 test('a permanent PR-link failure still announces the pull request', async () => {
   mockTask({ ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7' });
   mockAddAgentSessionExternalUrl.mockResolvedValue({ ok: false, retryable: false });
-  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }));
   expect(outcome.infraRejections).toEqual([]);
   expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
 });
 
 test('pr_created is skipped once its marker is set', async () => {
   mockTask({ ...SESSION_TASK, pr_url: 'https://github.com/acme/web/pull/7', linear_pr_comment_event_id: 'e-old' });
-  await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }), LINEAR_ONLY);
+  await routeEvent(ev('agent_milestone', { milestone: 'pr_created' }));
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 });
 
@@ -188,7 +179,7 @@ test.each([
   ['task_stranded', { status: 'FAILED' }, 'error'],
 ])('%s (%j) emits a final %s activity with the status body', async (eventType, fields, expectedType) => {
   mockTask({ ...SESSION_TASK, ...fields });
-  await routeEvent(ev(eventType), LINEAR_ONLY);
+  await routeEvent(ev(eventType));
 
   expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
   const [, sessionId, content] = mockEmitAgentActivity.mock.calls[0];
@@ -201,26 +192,26 @@ test.each([
 
 test('a final activity already emitted is not repeated', async () => {
   mockTask({ ...SESSION_TASK, status: 'COMPLETED', linear_final_comment_event_id: 'e-old' });
-  await routeEvent(ev('task_completed'), LINEAR_ONLY);
+  await routeEvent(ev('task_completed'));
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 });
 
 test('a cancel that came from the session stop signal is not confirmed twice', async () => {
   mockTask({ ...SESSION_TASK, status: 'CANCELLED' });
-  await routeEvent(ev('task_cancelled', { cancelled_via: SESSION_STOP_CANCELLED_VIA }), LINEAR_ONLY);
+  await routeEvent(ev('task_cancelled', { cancelled_via: SESSION_STOP_CANCELLED_VIA }));
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 });
 
 test('a session stop closes the session: its cancel stamps the post-once marker', async () => {
   mockTask({ ...SESSION_TASK, status: 'CANCELLED' });
-  await routeEvent(ev('task_cancelled', { cancelled_via: SESSION_STOP_CANCELLED_VIA }), LINEAR_ONLY);
+  await routeEvent(ev('task_cancelled', { cancelled_via: SESSION_STOP_CANCELLED_VIA }));
   expect(updates().map((u) => u.UpdateExpression)).toEqual(['SET linear_final_comment_event_id = :eid']);
 
   // ...so a later terminal event for the same task (reconciler task_failed /
   // task_stranded, a second task_cancelled) posts nothing under "Stopped."
   for (const later of ['task_failed', 'task_stranded', 'task_cancelled']) {
     mockTask({ ...SESSION_TASK, status: 'CANCELLED', linear_final_comment_event_id: 'e-task_cancelled' });
-    await routeEvent(ev(later), LINEAR_ONLY);
+    await routeEvent(ev(later));
   }
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 });
@@ -228,7 +219,7 @@ test('a session stop closes the session: its cancel stamps the post-once marker'
 test('a retryable emit failure rejects for a batch retry and persists no marker', async () => {
   mockTask({ ...SESSION_TASK, status: 'COMPLETED' });
   mockEmitAgentActivity.mockResolvedValue({ ok: false, retryable: true });
-  const outcome = await routeEvent(ev('task_completed'), LINEAR_ONLY);
+  const outcome = await routeEvent(ev('task_completed'));
   expect(outcome.infraRejections).toEqual(['linear']);
   expect(updates()).toEqual([]);
 });
@@ -236,7 +227,7 @@ test('a retryable emit failure rejects for a batch retry and persists no marker'
 test('a terminal emit failure is logged, not retried', async () => {
   mockTask({ ...SESSION_TASK, status: 'COMPLETED' });
   mockEmitAgentActivity.mockResolvedValue({ ok: false, retryable: false });
-  const outcome = await routeEvent(ev('task_completed'), LINEAR_ONLY);
+  const outcome = await routeEvent(ev('task_completed'));
   expect(outcome.infraRejections).toEqual([]);
   expect(updates()).toEqual([]);
 });
@@ -244,14 +235,14 @@ test('a terminal emit failure is logged, not retried', async () => {
 test('no token: skips without emitting', async () => {
   mockTask({ ...SESSION_TASK, status: 'COMPLETED' });
   mockResolveToken.mockResolvedValue(null);
-  await routeEvent(ev('task_completed'), LINEAR_ONLY);
+  await routeEvent(ev('task_completed'));
   expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 });
 
 describe('keep-alive heartbeat', () => {
   test('claims the window, then emits an ephemeral thought', async () => {
     mockTask(SESSION_TASK);
-    await routeEvent(ev('agent_turn', { turn: 4 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 4 }));
 
     const [claim] = updates();
     expect(claim.UpdateExpression).toBe('SET linear_session_heartbeat_at = :now');
@@ -263,7 +254,7 @@ describe('keep-alive heartbeat', () => {
 
   test('a recent heartbeat on the loaded record skips the write entirely', async () => {
     mockTask({ ...SESSION_TASK, linear_session_heartbeat_at: new Date().toISOString() });
-    await routeEvent(ev('agent_turn', { turn: 5 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 5 }));
     expect(updates()).toEqual([]);
     expect(mockEmitAgentActivity).not.toHaveBeenCalled();
   });
@@ -271,67 +262,67 @@ describe('keep-alive heartbeat', () => {
   test('a lost claim (window not elapsed) emits nothing', async () => {
     const ccf = Object.assign(new Error('cc'), { name: 'ConditionalCheckFailedException' });
     mockTask(SESSION_TASK, ccf);
-    await routeEvent(ev('agent_turn', { turn: 5 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 5 }));
     expect(mockEmitAgentActivity).not.toHaveBeenCalled();
   });
 
   test('a heartbeat failure never rejects the record', async () => {
     mockTask(SESSION_TASK, new Error('throttled'));
-    const outcome = await routeEvent(ev('agent_turn', { turn: 5 }), LINEAR_ONLY);
+    const outcome = await routeEvent(ev('agent_turn', { turn: 5 }));
     expect(outcome.infraRejections).toEqual([]);
     mockTask(SESSION_TASK);
     mockEmitAgentActivity.mockResolvedValue({ ok: false, retryable: true });
-    expect((await routeEvent(ev('agent_turn', { turn: 6 }), LINEAR_ONLY)).infraRejections).toEqual([]);
+    expect((await routeEvent(ev('agent_turn', { turn: 6 }))).infraRejections).toEqual([]);
   });
 
   test('turns inside the keep-alive window cost no task read', async () => {
     mockTask(SESSION_TASK);
-    await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 1 }));
     expect(gets()).toHaveLength(1);
 
-    for (const turn of [2, 3, 4]) await routeEvent(ev('agent_turn', { turn }), LINEAR_ONLY);
+    for (const turn of [2, 3, 4]) await routeEvent(ev('agent_turn', { turn }));
     expect(gets()).toHaveLength(1);
     expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
   });
 
   test('a task that is not a session task is read once, then its turns are free', async () => {
     mockTask({ ...SESSION_TASK, channel_source: 'slack', channel_metadata: {} });
-    for (const turn of [1, 2, 3]) await routeEvent(ev('agent_turn', { turn }), LINEAR_ONLY);
+    for (const turn of [1, 2, 3]) await routeEvent(ev('agent_turn', { turn }));
     expect(gets()).toHaveLength(1);
   });
 
   test('a missed task read does not switch the task\'s keep-alive off', async () => {
     // First turn: the row is not readable yet (or the read missed).
     mockDdbSend.mockReset().mockResolvedValue({});
-    await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 1 }));
     expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 
     // Next turn the row is there: it must be read, and the session kept alive.
     mockTask(SESSION_TASK);
-    await routeEvent(ev('agent_turn', { turn: 2 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 2 }));
     expect(gets()).toHaveLength(1);
     expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
   });
 
   test('the memo only skips heartbeats: a terminal event still reads the task and posts', async () => {
     mockTask(SESSION_TASK);
-    await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 1 }));
     mockEmitAgentActivity.mockClear();
     mockTask({ ...SESSION_TASK, status: 'COMPLETED' });
-    await routeEvent(ev('task_completed'), LINEAR_ONLY);
+    await routeEvent(ev('task_completed'));
     expect(mockEmitAgentActivity).toHaveBeenCalledTimes(1);
   });
 
   test('no heartbeat once the task is terminal', async () => {
     mockTask({ ...SESSION_TASK, status: 'COMPLETED' });
-    await routeEvent(ev('agent_turn', { turn: 9 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 9 }));
     expect(updates()).toEqual([]);
     expect(mockEmitAgentActivity).not.toHaveBeenCalled();
   });
 
   test('non-session Linear tasks ignore per-turn events', async () => {
     mockTask({ ...SESSION_TASK, channel_metadata: { linear_issue_id: 'issue-1', linear_workspace_id: 'org-1' } });
-    await routeEvent(ev('agent_turn', { turn: 1 }), LINEAR_ONLY);
+    await routeEvent(ev('agent_turn', { turn: 1 }));
     expect(updates()).toEqual([]);
     expect(mockEmitAgentActivity).not.toHaveBeenCalled();
     expect(mockPostIssueComment).not.toHaveBeenCalled();

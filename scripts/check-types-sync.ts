@@ -140,9 +140,6 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // own API, consumed by web/, never by the CLI; mirrored in web/src/core/api/types.ts):
   'RepoIssueSummary',
   'ListRepoIssuesResponse',
-  // Server-side helper / internal contracts:
-  'TaskNotificationsConfig',
-  'ChannelConfig',
   // Server-side bound constants — sourced from contracts/constants.json
   // (S9). Cross-language drift is enforced by scripts/check-constants-sync.ts.
   'APPROVAL_GATE_CAP_MIN',

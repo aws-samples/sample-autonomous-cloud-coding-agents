@@ -294,15 +294,6 @@ export interface TaskRecord {
   readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
   /**
-   * Optional per-task override for the FanOutConsumer's channel filters
-   * (design §6.5). When present, the router uses these settings instead
-   * of the per-channel defaults. Chunk I introduced the type and the
-   * resolution path; Chunk K adds a submit-time API parameter and the
-   * DDB read that populates this field — until then it is always
-   * ``undefined`` at runtime and every task inherits the defaults.
-   */
-  readonly notifications?: TaskNotificationsConfig;
-  /**
    * ID of the single GitHub issue comment the fan-out plane maintains
    * for this task (design §6.4 — edit-in-place). Written by the
    * GitHub dispatcher on the first delivery; read on subsequent
@@ -461,31 +452,6 @@ export interface TaskRecord {
   readonly pr_first_review_at?: string;
   /** Reviews by such people that requested changes, counted when the final state was recorded. */
   readonly pr_changes_requested?: number;
-}
-
-/** Per-channel override for one notification channel. See
- *  ``handlers/fanout-task-events.ts::resolveChannelFilter`` for the
- *  resolution semantics — explicit ``events`` REPLACE the channel
- *  default; a ``"default"`` token inside ``events`` expands to the
- *  default set. */
-export interface ChannelConfig {
-  /** If false, the channel is opted-out and no events dispatch. */
-  readonly enabled?: boolean;
-  /** Override the subscribed event types. ``["default"]`` resolves to
-   *  the channel default; an explicit list replaces defaults entirely. */
-  readonly events?: readonly string[];
-}
-
-/** Per-task notification overrides (design §6.5). Single source of truth;
- *  imported by both ``TaskRecord`` (producer side) and
- *  ``fanout-task-events.ts`` (consumer side) so a Chunk K schema change
- *  lands in one place and both sides pick it up at compile time. */
-export interface TaskNotificationsConfig {
-  readonly slack?: ChannelConfig;
-  readonly email?: ChannelConfig;
-  readonly github?: ChannelConfig;
-  readonly linear?: ChannelConfig;
-  readonly jira?: ChannelConfig;
 }
 
 /**
