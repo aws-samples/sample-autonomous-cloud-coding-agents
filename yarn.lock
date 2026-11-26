@@ -290,14 +290,6 @@
   resolved "https://registry.yarnpkg.com/@aws-cdk/aws-bedrock-alpha/-/aws-bedrock-alpha-2.276.0-alpha.0.tgz#2701fed40aa71b74b1dd4beae97be9d4593ca246"
   integrity sha512-gHN1O99uDLreNuuts+AOfcbFCkrOIQ2Bepiw+TIc+XfhRboIJeSekz15fCneW+Z6zR3VJmGEF7WqvweVWv4VQA==
 
-"@aws-cdk/aws-service-spec@0.1.226":
-  version "0.1.226"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/aws-service-spec/-/aws-service-spec-0.1.226.tgz#aa278ab9d3458d64b4fbe033636d73f4d2f5b78c"
-  integrity sha512-eMDNq9Qsl9yyus/JMBQBK7i0XfIW2QzvHIaFMhiVQrUyboXDbyIw4qSuNwHPY6vbISTyM8aWoP8C0WajjL6DZw==
-  dependencies:
-    "@aws-cdk/service-spec-types" "^0.0.292"
-    "@cdklabs/tskb" "^0.0.4"
-
 "@aws-cdk/cloud-assembly-api@^2.5.0":
   version "2.5.0"
   resolved "https://registry.yarnpkg.com/@aws-cdk/cloud-assembly-api/-/cloud-assembly-api-2.5.0.tgz#f63e0059da1ac948d9ab34b2b8c2f582c90c9030"
@@ -314,25 +306,6 @@
   dependencies:
     jsonschema "^1.5.0"
     semver "^7.8.5"
-
-"@aws-cdk/integ-runner@2.206.1":
-  version "2.206.1"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/integ-runner/-/integ-runner-2.206.1.tgz#856ed9b8552ed907a5c7a23b03989a20c417a5be"
-  integrity sha512-PiPvSb3JDOZvvZDOq+oQu3DBmRMH3EVf/XYTeKL0TEfGyK1QyqjR+7pZTthUQH1SgcUtuY9c2yWxVjlCIfu6xg==
-  dependencies:
-    "@aws-cdk/aws-service-spec" "0.1.226"
-
-"@aws-cdk/integ-tests-alpha@2.276.0-alpha.0":
-  version "2.276.0-alpha.0"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/integ-tests-alpha/-/integ-tests-alpha-2.276.0-alpha.0.tgz#021da765800fd6d2eeaa069aa534865db43c8ebb"
-  integrity sha512-ODPIiv1rGQJEcbRjZMptIFELSYtbAsMBo0aVu3aePEiZiP1WFqTxVeLbEaJsE7+Z1JYygDLD266V+OR0Mubr9w==
-
-"@aws-cdk/service-spec-types@^0.0.292":
-  version "0.0.292"
-  resolved "https://registry.yarnpkg.com/@aws-cdk/service-spec-types/-/service-spec-types-0.0.292.tgz#c09182584618874fe254d64af63827252d1ae776"
-  integrity sha512-ZFLPDRSqCKPx9wk4wH5HWJ18DRYLsUOXgUJxkvGvSnsUZzFaNwIfrZ2jz/xrXddyGYDEZnt0Zxkc5VfsKjST9Q==
-  dependencies:
-    "@cdklabs/tskb" "^0.0.4"
 
 "@aws-crypto/sha256-js@^5.2.0":
   version "5.2.0"
@@ -1357,11 +1330,6 @@
     "@typescript-eslint/utils" "^8.72.1"
     fs-extra "^11.4.1"
     typescript "^5.9.3"
-
-"@cdklabs/tskb@^0.0.4":
-  version "0.0.4"
-  resolved "https://registry.yarnpkg.com/@cdklabs/tskb/-/tskb-0.0.4.tgz#6d7af32427ef947dddcb6f1f1d76d75924e33323"
-  integrity sha512-NFx1X0l7p5DyHtLLEyNeh1hPN4UN9hTkZkzFs/Mp+kFk7dpdINGmGVpCfRDjJ2DrcNSNENUmT+w8g73TvmBbTw==
 
 "@cedar-policy/cedar-wasm@4.12.0":
   version "4.12.0"

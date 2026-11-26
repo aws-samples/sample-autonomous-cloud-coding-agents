@@ -426,6 +426,7 @@ describe('non-interactive operation', () => {
     await setup({ features: 'none', deploy: false }, deps({ interactive: false }));
     expect(profileOnDisk()).toEqual(MINIMAL_DEPLOYMENT_FEATURES);
     expect(runs).toEqual([]);
+    expect(text()).toContain('Commit it so every deploy of this stack uses the same features.');
   });
 
   test('--no-deploy that removes stateful features needs --accept-data-loss', async () => {

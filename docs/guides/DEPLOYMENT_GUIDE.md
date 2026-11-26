@@ -25,7 +25,7 @@ Without `compute_types`, legacy `compute_type=ecs` or `compute_type=lambda-micro
 
 `networkTopology=inline` is the default. Use `networkTopology=split` for a new environment to put the VPC, subnets, endpoints, flow logs and DNS firewall in `${stackName}-network`. The application stack retains its name, data stores, compute resources and shared Task API. It depends on network exports, so CDK deploys the network first. The complete VPC/subnet/security-group export set stays present across compute-backend changes. Keep the same topology context on subsequent synth, diff and deploy commands.
 
-Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
+Every synthesis, local or in the CI build, enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
 The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. With the approval, maintenance and MicroVM subsystems in nested stacks, every sampled combination fits inline (the widest is all three backends with every option, on two zones with the default model allowlist); split reduces the application template further. The budget guard never changes topology automatically. The [offline census](./DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
 
@@ -40,7 +40,7 @@ Replace the compute list as needed and supply image settings for MicroVM. Persis
 
 **Existing inline-to-split migration is deferred.** Do not flip `networkTopology` on an existing inline deployment. An ordinary deploy creates a new VPC and removes old resources; identical logical IDs in different stacks do not preserve physical identity. Keep the existing topology until a separately reviewed migration has established resource-type eligibility, source retention and cleanup behavior, an ownership mapping, physical-ID/data preservation, and rollback on a populated disposable deployment. The `cdk refactor --unstable=refactor` criterion in #852 remains open; it is not waived or satisfied by synthesis tests.
 
-This change does not install broad retention, change the Blueprint provider, create an ownership ledger, or replace the guardrail versioning scheme. Those prerequisites belong in separate releases. CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](../decisions/ADR-023-cloudformation-stack-boundaries.md#deferred-migration-work).
+This change does not install broad retention, change the Blueprint provider or create an ownership ledger. Those prerequisites belong in separate releases. The guardrail versioning scheme, once listed with them, was replaced separately ([#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079)). CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](../decisions/ADR-023-cloudformation-stack-boundaries.md#deferred-migration-work).
 
 Stacks used to test earlier revisions with `blueprintProvisioning=prepare|adopt|managed` or the broad retention aspect require a separate recovery plan before adopting this narrowed version. Returning those stacks directly to the original Blueprint provider can overwrite or soft-delete repository rows. Synthesis rejects the removed `blueprintProvisioning` and `guardrailVersionMigration` context keys instead of silently ignoring them; removing those keys does not make an experimental stack safe to update. Preserve its deployed templates, repository data and ledger inventory; the removed experimental modes are not an upgrade path supported by this release.
 
@@ -165,7 +165,7 @@ Before it runs `cdk deploy`, `mise //cdk:deploy` compares the outputs of the `CD
 
 `mise //cdk:preflight` runs the same check on its own. It is read-only. It needs the AWS CLI on `PATH` and no permission beyond `cloudformation:DescribeStacks`. Arguments after `--` are those of the deploy (`--profile`, `--region`, `-c compute_types=...`), plus `--json` for CI.
 
-The compute backends the preflight checks are those of the `compute_types` (or `compute_type`) context, from `-c` arguments and `cdk/cdk.json`. A backend that only the `compute` list of a [deployment profile](#profile-file-and-precedence) selects is not checked. A bare `cdk deploy` and the GitHub Actions pipeline do not run the preflight.
+The compute backends the preflight checks are those of the `compute_types` (or `compute_type`) context, from `-c` arguments and `cdk/cdk.json`. A backend that only the `compute` list of a [deployment profile](#profile-file-and-precedence) selects is not checked. A bare `cdk deploy` does not run the preflight.
 
 | Result | When | What to do |
 |---|---|---|
@@ -236,11 +236,11 @@ The wizard works in this order:
    - Your confirmation replaces CDK's own IAM approval prompt; the change summary says how many IAM roles and policies are included.
    - On success it configures the CLI from the stack outputs and prints next steps, in the same command form you launched setup with. A new installation lists storing a GitHub token, creating a user, signing in and onboarding a repository. Any Slack, Linear or Jira feature added by this run lists its own setup command. If the CLI was previously signed in to another stack's user pool, the cached tokens are removed; run `bgagent login` again. On failure it names the failed component and CloudFormation's reason, and keeps your selection so you can rerun.
 
-`--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` or CI deploy applies the removal with no wizard in the loop.
+`--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` applies the removal with no wizard in the loop.
 
-Commit `abca.deployment.json`. Each additional deployment from the same checkout gets its own `abca.deployment.<stackName>.json`, so deploying one never changes another's features. Synthesis uses only the file matching `-c stackName=…`: the default stack `backgroundagent-dev` uses `abca.deployment.json`, and any other stack without its own file keeps the legacy topology rather than inheriting the default stack's features.
+Commit `abca.deployment.json`. Each additional deployment from the same checkout gets its own `abca.deployment.<stackName>.json`, so deploying one never changes another's features. Synthesis uses only the file matching `-c stackName=…`: the default stack `backgroundagent-dev` uses `abca.deployment.json`, and any other stack without its own file keeps the legacy topology rather than inheriting the default stack's features. Every synthesis reads the profile, including `mise //cdk:synth`, `mise //cdk:deploy` and the CI build.
 
-Deployments in one account share only the CDK bootstrap, with one exception: Bedrock model-invocation logging is an account-wide setting, configured by whichever deployment was deployed last. Every synthesis reads it, including `mise //cdk:synth`, `mise //cdk:deploy` and the CI build, so local and pipeline deployments match.
+Deployments in one account share only the CDK bootstrap, with one exception: Bedrock model-invocation logging is an account-wide setting, configured by whichever deployment was deployed last.
 
 ### Profile file and precedence
 
@@ -279,7 +279,7 @@ CLI commands for an omitted feature (for example `bgagent slack setup`) fail wit
 
 ### Regional availability
 
-`contracts/deployment-capabilities.json` records the services each capability needs, the Regions that support it, and the source and date of the last verification. Its `compute` section lists the compute backends in the same way; Lambda MicroVMs is the only Region-limited one. `source` and `lastVerified` describe core and the features only: the Lambda MicroVMs Regions come from the launch list of [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md#regional-availability-enforcement) (2026-06-22). CDK synthesis enforces the catalog for a concrete Region, so a CI or manual deploy fails before CloudFormation runs, not only in the wizard. Environment-agnostic synthesis is not checked.
+`contracts/deployment-capabilities.json` records the services each capability needs, the Regions that support it, and the source and date of the last verification. Its `compute` section lists the compute backends in the same way; Lambda MicroVMs is the only Region-limited one. `source` and `lastVerified` describe core and the features only: the Lambda MicroVMs Regions come from the launch list of [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md#regional-availability-enforcement) (2026-06-22). CDK synthesis enforces the catalog for a concrete Region, so a deploy made without the wizard also fails before CloudFormation runs. Environment-agnostic synthesis is not checked.
 
 A Region listed in the catalog has the required services; the list says nothing more. It includes `us-gov-west-1` for the core platform, but ABCA's least-privilege bootstrap, which `bgagent setup` installs when the account and Region have no `CDKToolkit` stack, covers the commercial `aws` partition only and cannot deploy ABCA in another one. See [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md#using-these-policies).
 
@@ -434,44 +434,19 @@ At public US East (N. Virginia) first-tier list rates verified in August 2026, t
 
 ## Reference
 
-## CI/CD pipeline (`deploy.yml`)
+## Continuous integration
 
-The repository includes a two-stage CI/CD pipeline:
+No workflow of this repository deploys ABCA or uses an AWS account. A deployment is made from a checkout, with your own credentials: run [`bgagent setup`](#choosing-features-with-bgagent-setup), or `mise //cdk:deploy` on an account you have [bootstrapped](#bootstrap-with-least-privilege).
 
-### Stage 1: Build (`build.yml`)
+Three workflows check the code of every pull request and merge-queue entry:
 
-Triggers on every pull request and merge-queue entry, and on manual dispatch. Runs `mise run build` (what it covers is listed under [Pull request](../../CONTRIBUTING.md#5-pull-request) in CONTRIBUTING.md) and uploads the synthesized `cdk.out/` together with a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
+| Workflow | What it runs | Required to merge |
+|----------|--------------|-------------------|
+| `build` | `mise run build`; [Pull request](../../CONTRIBUTING.md#5-pull-request) in CONTRIBUTING.md lists what it covers. Its CDK synthesis runs without credentials, and the output is not deployed | Yes |
+| `security-pr` | The secret, static-analysis (Semgrep), dependency and workflow scans, and a build of the agent image when a file that defines it changed | Yes |
+| `emulator` | The integration tests: ABCA's real handler, CLI and agent code against the AWS Emulator in a container, with no AWS account. [scripts/aws-emulator/README.md](../../scripts/aws-emulator/README.md) says where a green run can be trusted | No |
 
-### Stage 2: Deploy (`deploy.yml`)
-
-Triggers via `workflow_run` when `build.yml` completes successfully. The pipeline:
-
-1. **Skips fork PRs** — `head_repository.full_name == github.repository` prevents forks from entering the deploy flow. This is a security measure: an untrusted fork could modify `build.yml` to produce a deploy-intent artifact, which would otherwise prompt maintainers for approval unnecessarily.
-2. **Downloads `deploy-intent.json`** from the triggering build run.
-3. **Resolves targets** — Determines which compute types to deploy:
-   - `intent: "-"` → no-op (most PRs)
-   - `intent: "labels"` → reads PR labels against an allowlist
-   - `intent: "<type>"` → deploys the specified type (e.g., `agentcore`)
-4. **Requires approval** — The `deploy` job uses a GitHub Environment with required reviewers. Approvals are logged and the self-review rule prevents unilateral deploys.
-5. **Deploys via OIDC** — Assumes an IAM role via GitHub OIDC federation (no long-lived credentials). The role is scoped to the `cdk deploy` action with least-privilege policies per [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md).
-
-### Security controls
-
-| Control | Purpose |
-|---------|---------|
-| Fork exclusion (`head_repository` check) | Prevents fork PRs from triggering deploy approval prompts |
-| Environment approval | Human gate before any deploy reaches AWS |
-| OIDC federation | No stored AWS credentials; tokens are request-scoped |
-| Compute type allowlist | Only pre-approved types can be deployed |
-| Non-cancellable concurrency | Deploy can't be interrupted mid-flight |
-
-### For administrators
-
-- **Enable deploys**: Set the `deploy` Environment in repo settings with required reviewers.
-- **Configure OIDC**: Set `AWS_ROLE_TO_ASSUME` secret and `AWS_REGION` variable.
-- **Allowlist compute types**: Edit `ALLOWED_COMPUTE_TYPES` in `deploy.yml`.
-- **Deploy via PR label**: Add the `deploy:<type>` label to a PR (e.g., `deploy:agentcore`).
-- **Delete a leftover integ assertion stack**: An integ run (`integ.yml`) names its assertion stack after the run, `int-<sha>-<run>-assert`. It does not delete a stack named `TaskApiSmokeDefaultTestDeployAssert413BE3D6`, which is the assertion stack of every run whose checkout is from before that name (#400). If one is left, delete it while no integ run is in progress, in the account and Region of those runs, with `aws cloudformation delete-stack --stack-name TaskApiSmokeDefaultTestDeployAssert413BE3D6`.
+These checks do not show that a deployment works: only a deployment exercises IAM permissions, CloudFormation and the AgentCore runtime.
 
 ## Known deployment issues
 
@@ -516,9 +491,7 @@ STACK_NAME=<stack> mise //cdk:preflight:log-delivery -- --check-only
 
 **Resolution:** None needed if you deploy with `mise //cdk:deploy`. The preflight is the first command of that task, so it detects the legacy resources on the live stack and applies the one-time migration — deleting exactly those resources, scoped to that stack, in the same account and region as the deploy, because the task forwards its own arguments to it.
 
-**The GitHub Actions pipeline does not migrate automatically.** Its deploy job calls `cdk deploy` directly and so inherits none of that task's steps. What it does do is *report*: the read-only **diff** job runs the preflight with `--check-only` and writes the result into the job summary, so a stack needing migration is visible in the run summary before the approval gate rather than discovered as a rollback afterwards. Migrate it with `STACK_NAME=<stack> mise //cdk:deploy`, or the manual sequence below, then re-run the pipeline.
-
-A bare `cdk deploy` (no mise, no pipeline) does **not** run the preflight. On that path, or after the rollback above, run the check command shown under *Affects* and then follow the manual steps in [Observability — AgentCore log delivery](../design/OBSERVABILITY.md#agentcore-log-delivery).
+A bare `cdk deploy` (no mise) does **not** run the preflight. On that path, or after the rollback above, run the check command shown under *Affects* and then follow the manual steps in [Observability — AgentCore log delivery](../design/OBSERVABILITY.md#agentcore-log-delivery).
 
 ### Task list keeps its old order while a new index is built (#51)
 
@@ -548,6 +521,56 @@ The first deploy of a version that sets `InstallLatestAwsSdk` to `false` changes
 
 In that call, `ModelInvocationLogging` writes the stack's log group and role to the Bedrock model-invocation logging configuration of the account and Region, which replaces a configuration that another deployment or a manual change put there. `DnsFirewall/FirewallConfig` sets the DNS Firewall of the VPC to fail open. A Blueprint's `RepoConfigCR` writes its repository record, as on every deploy.
 
+### Deploys stop once the input guardrail reaches its version quota (#1079)
+
+**Affects:** a stack deployed from a version between [#904](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/904) and the fix of [#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079). Nearly every deploy of such a version published a new version of the input guardrail and kept the one before it, also when the guardrail had not changed. Before the first deploy with the fix, count the guardrail's versions with the first two commands under **Resolution**: that deploy publishes one more version, and on a guardrail that is already at its quota it fails and the stack rolls back.
+
+**Symptom:** the deploy fails on the guardrail version and the stack rolls back to `UPDATE_ROLLBACK_COMPLETE`. Nearly every later deploy fails in the same way until old versions are deleted.
+
+```
+CREATE_FAILED  AWS::Bedrock::GuardrailVersion  InputGuardrail/GuardrailVersion-...
+Resource handler returned message: "You have exceeded the service quota limit for ..."
+```
+
+**Root cause:** the logical ID of the version came from a value that differs from one synthesis to the next, so CloudFormation replaced the version on nearly every deploy. Since #904 it keeps the replaced version, because a retained version of the orchestrator function can still name it. Bedrock allows 20 versions per guardrail, and the quota cannot be raised (*Versions per guardrail* in the [Amazon Bedrock service quotas](https://docs.aws.amazon.com/general/latest/gr/bedrock.html#limits_bedrock)). The stack this was seen on had 19 numbered versions and its `DRAFT`.
+
+**Resolution:** with the fix, the logical ID contains a hash of the guardrail's configuration. A deploy publishes a version only when that configuration changed, and still keeps the one before it. Two things remain to do by hand:
+
+- The first deploy with the fix publishes one more version, because the logical ID changes one last time. A guardrail at its quota needs the cleanup below before that deploy.
+- The versions that earlier deploys left behind stay, and count against the quota, until they are deleted. So does each version that a later change of the guardrail replaces, and the version of a deploy that publishes one and then rolls back: an execution started during that deploy can still name it.
+
+Find the guardrail, whose name is `task-input-guardrail-<stack-name>` cut off after 50 characters, and list its versions:
+
+```bash
+aws bedrock list-guardrails \
+  --query "guardrails[?name=='task-input-guardrail-<stack-name>'].id" --output text
+aws bedrock list-guardrails --guardrail-identifier <guardrail-id> \
+  --query 'guardrails[].[version,createdAt]' --output text
+```
+
+List the versions that are in use. Each row is a function configuration that names this guardrail in `GUARDRAIL_ID`, with the guardrail version it names in `GUARDRAIL_VERSION`:
+
+```bash
+aws lambda list-functions --function-version ALL \
+  --query "Functions[?Environment.Variables.GUARDRAIL_ID=='<guardrail-id>'].[FunctionName,Version,Environment.Variables.GUARDRAIL_VERSION]" \
+  --output table
+```
+
+Keep the guardrail version of the rows whose function version is `$LATEST`: the stack runs on it. The rows with a numbered function version are the published versions of the orchestrator function, which the stack retains as well. A durable execution ends on the function version it started on, so also keep the guardrail version of each published version that still has an unfinished execution. The ARN of an execution names its function version. The loop passes one status per call, as the Lambda API reference requires:
+
+```bash
+for state in RUNNING PAUSING PAUSED; do
+  aws lambda list-durable-executions-by-function --function-name <orchestrator-function-name> \
+    --statuses "$state" --query 'DurableExecutions[].DurableExecutionArn'
+done
+```
+
+Delete every other numbered version. Always pass `--guardrail-version`: without it, the command deletes the guardrail and all of its versions.
+
+```bash
+aws bedrock delete-guardrail --guardrail-identifier <guardrail-id> --guardrail-version <n>
+```
+
 ### AgentCore unsupported Availability Zones
 
 **Affects:** Fresh deploys in accounts whose default Availability Zones don't line up with the zones AgentCore supports for the region.
@@ -561,23 +584,14 @@ In that call, `ModelInvocationLogging` writes the stack's log group and role to 
 | Path | Auto-pinned? | What you must do |
 |------|--------------|------------------|
 | Local `cdk deploy` / `mise //cdk:deploy` (credentials resolve at synth) | Yes — for regions in the built-in map | Nothing, unless synth reports an `[AgentCore AZs]` error |
-| CI/CD (`build.yml` → `deploy.yml`) | **No** — the assembly is synthesized credential-less | Set the `AGENTCORE_AVAILABILITY_ZONES` repo/environment variable (below) |
+| A pre-built assembly (`cdk deploy --app cdk.out`) that was synthesized without credentials | **No** — synth has no account to read the zone mapping from | Set the context override (below) where the assembly is synthesized |
 | Any region absent from the built-in map | No | Set the context override (below) |
 
 **Auto-pin (local deploys).** With a concrete account and region, synth confirms the credentials belong to that account (`sts:GetCallerIdentity`), reads the account's zone name-to-ID mapping (`ec2:DescribeAvailabilityZones`), and pins the VPC to the first two AZ *names* — sorted, so the pin is stable across synths — whose zone IDs are AgentCore-supported. Two zones matches `AgentVpc`'s default `maxAzs`, so enabling this does not widen an already-working topology.
 
 If auto-pin is attempted and cannot finish — lookup denied or throttled, credentials pointing at a different account, or fewer than two supported zones — synth **fails** with an `[AgentCore AZs]` error rather than quietly falling back. That is deliberate: a silent fallback produces a template that looks pinned but is not, which is the failure this section exists to prevent. Fix the cause or set the override.
 
-**CI/CD deploys are not auto-pinned.** Auto-pin needs a bound account at synth time and the pipeline has none: `build.yml` synthesizes `cdk.out` without credentials (env-agnostic) and `deploy.yml` deploys that pre-built assembly (`--app cdk/cdk.out`). Two consequences worth being explicit about:
-
-- Passing `-c 'agentcore:availabilityZones=...'` to `cdk deploy` **has no effect on the pipeline path** — the template is already synthesized by then. Context only matters at synth.
-- `cdk/cdk.context.json` is **not** a durable place to set this: it is gitignored, and `build.yml` regenerates the whole file.
-
-Instead, set the repo (or environment) variable **`AGENTCORE_AVAILABILITY_ZONES`** to a JSON array of zone names. `build.yml`'s "Generate CDK context" step folds it into the context that the uploaded assembly is synthesized with, and an unset variable simply leaves the stack unpinned (synth logs an `[AgentCore AZs]` warning):
-
-```
-AGENTCORE_AVAILABILITY_ZONES = ["us-east-1b","us-east-1c"]
-```
+**An assembly synthesized without credentials is not auto-pinned.** Auto-pin needs a bound account at synth time. A synth without credentials (env-agnostic) has none: it leaves the stack unpinned and logs an `[AgentCore AZs]` warning. That is the case when one step synthesizes `cdk.out` without credentials and a later one deploys it with `cdk deploy --app cdk.out`. Set the override where the assembly is synthesized: passing `-c 'agentcore:availabilityZones=...'` to that `cdk deploy` **has no effect**, because the template is already synthesized by then.
 
 **Choosing the values.**
 
@@ -587,7 +601,7 @@ AGENTCORE_AVAILABILITY_ZONES = ["us-east-1b","us-east-1c"]
      --query 'AvailabilityZones[].[ZoneName,ZoneId]' --output text
    ```
 2. Pick at least two zone **names** (column 1) whose **zone IDs** (column 2) appear in the AgentCore-supported set for that region.
-3. Set the value — the pipeline variable above, or for a local synth either `cdk/cdk.json` `context`:
+3. Set the value — either in `cdk/cdk.json` `context`:
    ```json
    { "context": { "agentcore:availabilityZones": ["us-east-1b", "us-east-1c"] } }
    ```

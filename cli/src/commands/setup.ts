@@ -738,7 +738,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   }
 
   if (!deploying) {
-    // The next deploy (local or CI) applies the removal without this wizard's diff.
+    // The next `mise //cdk:deploy` applies the removal without this wizard's diff.
     const stateful = removed.filter(feature => CAPABILITY_CATALOG.features[feature].stateful);
     if (stateful.length > 0) {
       ui.line();
@@ -748,7 +748,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     const file = writeDeploymentProfile(repoRoot, chosen, stackName);
     ui.line();
     ui.line(`  ${style.green('✓')} Saved ${path.relative(deps.cwd, file) || file}`);
-    ui.line(`  ${style.dim(`Commit it so local and CI deploys use the same features. Deploy later with \`${cli} setup\`.`)}`);
+    ui.line(`  ${style.dim(`Commit it so every deploy of this stack uses the same features. Deploy later with \`${cli} setup\`.`)}`);
     return;
   }
 
@@ -831,7 +831,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   }
 
   // 9. Prepare the account, then persist and deploy the same profile through mise/CDK, then configure the CLI.
-  // The profile is written only once the account is ready, so a failed preparation leaves nothing for CI to apply.
+  // The profile is written only once the account is ready, so a failed preparation leaves nothing for a later deploy to apply.
   ui.line();
   for (const step of preparation.steps) {
     const label = step === 'computeTypes' ? `Allowing ${computeLabel(compute)} in the CDK bootstrap` : 'Preparing your AWS account (CDK bootstrap)';

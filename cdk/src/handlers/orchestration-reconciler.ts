@@ -535,8 +535,121 @@ async function reloadIterationScreenshot(taskId?: string): Promise<{ screenshotU
   }
 }
 
-/** Apply one terminal child's reconcile plan. */
-async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
+/**
+ * How long after its task ended a write on the task record still moves a failed child's
+ * issue back (step 1b of `reconcileTerminalChild`). A finished task record is written again
+ * for as long as it lives, and every write arrives here with the terminal status. The stream
+ * carries the new image only, so the write that ended the task cannot be told from a later
+ * one by its content: the time between the task's end and the write separates them. After
+ * the window a person may have taken the issue over, and the surface cannot tell their
+ * running state from the agent's (#1073). Inside it the step runs for every record that
+ * carries both times, on purpose. Nothing retries a failed surface call, so the next
+ * record is the retry: the orchestrator's ttl stamp, one poll after a terminal write it
+ * did not make itself (30 s by default; `poll_interval_ms` can make it as long as this
+ * window), or a redelivery. After the window the next record is the retry only of a try
+ * that the child's row records as not landed (step 1b).
+ */
+const SETTLE_WINDOW_MINUTES = 5;
+
+/**
+ * The time of a record's write in epoch milliseconds: the stream's stamp, a number of
+ * seconds, also when it comes as its text. NaN when the record carries none, or anything
+ * else.
+ */
+function writeTimeMs(record: DynamoDBRecord): number {
+  const stamp: unknown = record.dynamodb?.ApproximateCreationDateTime;
+  if (typeof stamp === 'number') return stamp * 1000;
+  return typeof stamp === 'string' && /^\d+(\.\d+)?$/.test(stamp) ? Number(stamp) * 1000 : NaN;
+}
+
+/**
+ * Whether a record comes too late for step 1b of `reconcileTerminalChild`.
+ *
+ * A record that carries both times is late when it was written longer after
+ * `completed_at` than the settle window. The stream stamps a record with the time of its
+ * write, in seconds, so a delivery that comes late, or again, decides as the first one
+ * would have. `updated_at` is not read in place of `completed_at`: a later write that
+ * moved it would pass for the write that ended the task.
+ *
+ * A record that lacks either time, or carries one that is not a time, is late once the
+ * child's row holds the verdict (`verdictOnRow`): it is not the record that brought the
+ * verdict there. (`finishTimeMs` in shared/scoreboard.ts names the writers that set no
+ * `completed_at` until #1048; the stream's stamp is not a required member of a record.)
+ * For such records the step runs for the one that brings the verdict and, when that try
+ * did not land, for the next one, not for every record of the first five minutes. Their
+ * issue is therefore not settled when the sweep (`reconcile-stranded-orchestrations.ts`)
+ * recorded the verdict first, or when the delivery that recorded it died before the step.
+ */
+function writtenLongAfterTaskEnded(record: DynamoDBRecord, verdictOnRow: boolean): boolean {
+  const endedAtMs = Date.parse(record.dynamodb?.NewImage?.completed_at?.S ?? '');
+  const writtenAtMs = writeTimeMs(record);
+  if (Number.isNaN(endedAtMs) || Number.isNaN(writtenAtMs)) return verdictOnRow;
+  return writtenAtMs - endedAtMs > SETTLE_WINDOW_MINUTES * 60 * 1000;
+}
+
+/**
+ * Log the record that step 1b of `reconcileTerminalChild` leaves out as late, with its two
+ * times (null for one the record does not carry, and for a stamp that is not a number of
+ * seconds). A warning when the record is the one that brought the verdict to the row: its
+ * task's finish time is long before its write, with a slow clock for example. No earlier
+ * record settled the issue then: it stays as the agent left it, which can contradict the
+ * graph.
+ */
+function logLateRecord(
+  record: DynamoDBRecord,
+  ids: { orchestration_id: string; sub_issue_id: string; task_id: string },
+  broughtVerdict: boolean,
+): void {
+  const writtenAt = new Date(writeTimeMs(record));
+  logger[broughtVerdict ? 'warn' : 'info']('Reconciler left the issue of a failed child alone: a late write on its task record', {
+    ...ids,
+    completed_at: record.dynamodb?.NewImage?.completed_at?.S ?? null,
+    written_at: Number.isNaN(writtenAt.getTime()) ? null : writtenAt.toISOString(),
+    brought_verdict: broughtVerdict,
+  });
+}
+
+/**
+ * Record on a child's row that the settle of its task is owed (see step 1b of
+ * `reconcileTerminalChild`), or that it no longer is.
+ *
+ * Both writes are conditional. The mark is set only while the row still names the task:
+ * after a new release the row belongs to another task. It is removed only while it names
+ * the task. `updated_at` is left alone, as `refreshUnstartedText` leaves it: the sweep and
+ * the retry's once-only key compare it. Best-effort, never throws. A mark that could not
+ * be set is the state before the mark existed: no record after the window tries again.
+ * One that could not be removed stays, and the next late record tries once more.
+ */
+async function recordUnsettled(
+  ids: { orchestration_id: string; sub_issue_id: string; task_id: string },
+  owed: boolean,
+): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: ORCHESTRATION_TABLE,
+      Key: { orchestration_id: ids.orchestration_id, sub_issue_id: ids.sub_issue_id },
+      UpdateExpression: owed ? 'SET unsettled_task_id = :tid' : 'REMOVE unsettled_task_id',
+      ConditionExpression: owed ? 'child_task_id = :tid' : 'unsettled_task_id = :tid',
+      ExpressionAttributeValues: { ':tid': ids.task_id },
+    }));
+    if (owed) {
+      logger.warn('Settle of a failed child did not land: owed to the next record of its task', ids);
+    } else {
+      logger.info('Settle of a failed child is no longer owed', ids);
+    }
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return; // released again, or the mark is not this task's
+    logger.warn('Could not record whether the settle of a failed child is owed (non-fatal)', {
+      ...ids, owed, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Apply one terminal child's reconcile plan. `record` is the stream record the event was
+ * read from: step 1b reads its times ({@link writtenLongAfterTaskEnded}).
+ */
+async function reconcileTerminalChild(evt: TerminalTaskEvent, record: DynamoDBRecord): Promise<void> {
   const orchestrationId = evt.orchestrationId!;
 
   const subIssueId = await resolveSubIssueId(evt.taskId);
@@ -640,49 +753,117 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //     reads awaiting-review with a PR link — a visible contradiction. The
   //     reconciler holds the authoritative verdict, so when a terminal child did
   //     NOT succeed we pull its issue back out of any bot-set running state.
-  //     `revertState` is tightly guarded per surface (only demotes an issue still
-  //     in a bot-set running state — never a human-advanced done/canceled or a
+  //     `revertState` is tightly guarded per surface (only demotes an issue in a
+  //     running state — never a human-advanced done/canceled or a
   //     human-pulled-back one) and idempotent on replay. The ❌ reaction + the
   //     failure reason on the panel convey "it failed"; a reply re-runs it (the
   //     retry re-drives the state not-started → running). Skip the integration
-  //     node (synthetic id, no real issue), and a stale event (the issue shows
-  //     what a later run did). Best-effort; never throws.
+  //     node (synthetic id, no real issue) and a stale event (the issue shows
+  //     what a later run did), owed or not. Skip a record that comes too late
+  //     (see `writtenLongAfterTaskEnded`) unless the settle is owed. Best-effort;
+  //     never throws.
+  //
+  //     Owed: a try that was not late and did not land leaves the task's id on
+  //     the child's row (`unsettled_task_id`, written by `recordUnsettled`), and
+  //     the next record of that task tries again, however late it was written.
+  //     A try did not land when one of its calls threw or the reaction call
+  //     answered false. The Linear adapter does not throw when the tracker fails
+  //     every request or a token cannot be resolved: both calls answer false
+  //     then, and so does the reaction call when a marker stays that it could
+  //     not remove. It answers true when only its read of the reactions failed
+  //     and the failure marker could be added: that try counts as landed, with
+  //     the agent's marker left beside the new one. The answer of the state call
+  //     is not read for this: it is false also when there was nothing to move,
+  //     so a state call that failed alone is not owed.
+  //
+  //     A late try is the last one, whatever it did: neither a false answer nor
+  //     a throw tells a failure that will pass from one that no retry cures, and
+  //     a mark that stayed would repeat the step on every later write (#1073).
+  //     A warning says so when that try did not land. A try that does not leave
+  //     the settle owed removes the mark that it read.
+  //
+  //     A late record can still try although nothing is owed, or a second time.
+  //     The mark is read with the rows, before step 1, by a query that is not
+  //     strongly consistent. A mark that was set moments before can be missing
+  //     from them: a try that lands then leaves it on the row, and unless a
+  //     later record inside the window removes it, the first late record tries.
+  //     A mark that was removed moments before can still be in them: that record
+  //     tries once more. So does the next late record after a mark that could
+  //     not be removed (see `recordUnsettled`).
+  //
+  //     What a late try costs: it repeats both calls, also when one of them had
+  //     landed and when no retry can remove the marker that stayed, and by then
+  //     a person may have taken the issue over: it is moved back out of their
+  //     running state. Nothing triggers a late try but a later write on the task
+  //     record, the preview screenshot of a later push for example: the settle
+  //     of a task that is not written again stays owed.
   const settleChannel = channelForMeta(snapshot.meta);
   if (settleChannel && !plan.terminalSucceeded && !stale && !isIntegrationNode(subIssueId)) {
     const channel = settleChannel;
-    const childRef = issueRef(subIssueId, snapshot.meta.credentials_ref);
-    try {
-      const reverted = (await channel.revertState?.(childRef)) ?? false;
-      // Also settle the child's ISSUE reaction to ❌. The agent reacts ✅ on its
-      // OWN verdict (agent-success + regression-only build gate — a build that was
-      // already red before the agent isn't counted as the agent's regression, so
-      // it posts ✅ and "Task completed"). The orchestration gate is stricter
-      // (build_passed===false ⇒ failed, absolute), so a child can legitimately end
-      // agent-✅ but graph-failed — leaving a ✅ reaction that contradicts the
-      // failed node (observed in practice: PR opened, agent ✅, build red).
-      // Replacing the reaction clears only the bot's own status markers and adds
-      // ❌ — a human's reaction is never touched, and it's idempotent on replay.
-      // This makes the reaction agree with the reverted state + the panel's ❌
-      // row. (The stale "✅ Task completed" comment is left as history — the
-      // surface won't let us edit another actor's comment; the reaction + state +
-      // panel are the authoritative signals, and a reply re-runs the child.)
-      const reactionSwapped = (await channel.replaceIssueReaction?.(childRef, 'failed')) ?? false;
-      if (reverted || reactionSwapped) {
-        logger.info('Reconciler settled a failed child to match the graph (state + reaction)', {
+    const ids = { orchestration_id: orchestrationId, sub_issue_id: subIssueId, task_id: evt.taskId };
+    // The row as this delivery read it, before step 1 wrote to it.
+    const rowAsRead = snapshot.children.find((c) => c.sub_issue_id === subIssueId);
+    const broughtVerdict = rowAsRead?.child_status !== 'failed';
+    const owed = rowAsRead?.unsettled_task_id === evt.taskId;
+    const late = writtenLongAfterTaskEnded(record, !broughtVerdict);
+    if (late && !owed) {
+      // No line for a surface that has neither call (Jira): the step does nothing
+      // there for any record, so a late one is not left out of anything.
+      if (channel.revertState || channel.replaceIssueReaction) logLateRecord(record, ids, broughtVerdict);
+    } else {
+      const childRef = issueRef(subIssueId, snapshot.meta.credentials_ref);
+      // What the state call answered, null until it has. The try has landed when
+      // both calls have answered and the reaction call did not answer false.
+      let reverted: boolean | null = null;
+      let landed = false;
+      try {
+        reverted = (await channel.revertState?.(childRef)) ?? false;
+        // Also settle the child's ISSUE reaction to ❌. The agent reacts ✅ on its
+        // OWN verdict (agent-success + regression-only build gate — a build that was
+        // already red before the agent isn't counted as the agent's regression, so
+        // it posts ✅ and "Task completed"). The orchestration gate is stricter
+        // (build_passed===false ⇒ failed, absolute), so a child can legitimately end
+        // agent-✅ but graph-failed — leaving a ✅ reaction that contradicts the
+        // failed node (observed in practice: PR opened, agent ✅, build red).
+        // Replacing the reaction clears the status markers and adds ❌. Markers are
+        // matched by emoji alone, so the swap also tries to delete a person's own
+        // reaction with one of them; it's idempotent on replay.
+        // This makes the reaction agree with the reverted state + the panel's ❌
+        // row. (The stale "✅ Task completed" comment is left as history — the
+        // surface won't let us edit another actor's comment; the reaction + state +
+        // panel are the authoritative signals, and a reply re-runs the child.)
+        const reactionSwapped = await channel.replaceIssueReaction?.(childRef, 'failed');
+        if (reverted || reactionSwapped) {
+          logger.info('Reconciler settled a failed child to match the graph (state + reaction)', {
+            orchestration_id: orchestrationId,
+            sub_issue_id: subIssueId,
+            task_status: outcome.status,
+            build_passed: outcome.build_passed,
+            state_reverted: reverted,
+            reaction_swapped: reactionSwapped ?? false,
+          });
+        }
+        landed = reactionSwapped !== false;
+      } catch (err) {
+        logger.warn('Failed to reconcile failed child Linear state/reaction (non-fatal)', {
           orchestration_id: orchestrationId,
           sub_issue_id: subIssueId,
-          task_status: outcome.status,
-          build_passed: outcome.build_passed,
-          state_reverted: reverted,
-          reaction_swapped: reactionSwapped,
+          error: err instanceof Error ? err.message : String(err),
         });
       }
-    } catch (err) {
-      logger.warn('Failed to reconcile failed child Linear state/reaction (non-fatal)', {
-        orchestration_id: orchestrationId,
-        sub_issue_id: subIssueId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      // Whether this try leaves the settle owed: it did not land, and it was not
+      // late. A late try was the last one.
+      let unsettled = false;
+      if (!landed) {
+        unsettled = !late;
+        if (late) {
+          logger.warn('Settle of a failed child did not land on its last try: its issue can contradict the graph', {
+            ...ids,
+            state_reverted: reverted,
+          });
+        }
+      }
+      if (unsettled !== owed) await recordUnsettled(ids, unsettled);
     }
   }
 
@@ -1651,7 +1832,7 @@ export async function handler(event: DynamoDBStreamEvent): Promise<DynamoDBBatch
         if (evt.cascadeSubIssueId) {
           await cascadeRestack(evt);
         } else {
-          await reconcileTerminalChild(evt);
+          await reconcileTerminalChild(evt, record);
         }
         processed += 1;
       }

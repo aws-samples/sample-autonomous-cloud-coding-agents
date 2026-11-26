@@ -82,9 +82,9 @@ describe('buildApp — AgentCore AZ wiring', () => {
     expect(new Set(azs)).toEqual(new Set(['us-east-1a', 'us-east-1b']));
   });
 
-  it('pins from the context override on the env-agnostic (pipeline) path', async () => {
-    // The assembly deploy.yml ships is synthesized without credentials, so the
-    // override is the only mechanism available there.
+  it('pins from the context override on the env-agnostic path', async () => {
+    // An assembly synthesized without credentials has no account to read the
+    // zone mapping from, so the override is the only mechanism available there.
     const built = await buildApp({
       account: undefined,
       region: undefined,

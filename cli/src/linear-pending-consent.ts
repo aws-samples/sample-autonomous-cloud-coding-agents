@@ -87,8 +87,11 @@ export function savePendingConsent(pending: PendingConsent): void {
 
 /**
  * Load and CONSUME the pending consent for a slug. The file is deleted whether or
- * not it turns out to be usable, so a verifier is never left on disk after one
- * attempt and cannot be replayed.
+ * not it turns out to be usable, so the verifier in it gets one attempt and cannot
+ * be replayed from it. Only this file is deleted: a process killed in
+ * `savePendingConsent` between the write and the rename leaves the verifier it was
+ * saving in a temporary file beside this one, owner-only, and nothing removes that
+ * copy (see `writeSecretFile`).
  */
 export function takePendingConsent(slug: string): PendingConsent {
   const p = pendingPath(slug);

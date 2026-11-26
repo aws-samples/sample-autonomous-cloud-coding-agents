@@ -17,7 +17,10 @@
  *  SOFTWARE.
  */
 
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
+  type PathLike, type Stats, type StatSyncOptions,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ApiClient } from '../../src/api-client';
@@ -128,6 +131,34 @@ describe('replay command', () => {
     await makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', '/dev/null', '--force']);
     expect(errSpy).toHaveBeenCalledWith('Wrote replay bundle to /dev/null');
     expect(statSync('/dev/null').mode).toBe(mode);
+  });
+
+  test('--output refuses a symbolic link that another user planted, and writes nothing through it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'replay-test-'));
+    const link = join(dir, 'bundle.json');
+    const elsewhere = join(dir, 'elsewhere.json');
+    // A link that leads nowhere does not count as an existing file: no --force is needed.
+    symlinkSync(elsewhere, link);
+    // Only root can change the owner of a link, so the test changes what lstat reports:
+    // an owner who is neither the user, nor root, nor the owner of the directory.
+    const nodeFs = jest.requireActual<typeof import('node:fs')>('node:fs');
+    const lstat = nodeFs.lstatSync;
+    const stranger = statSync(dir).uid + 1;
+    const reported = jest.spyOn(nodeFs, 'lstatSync').mockImplementation(((file: PathLike, options?: StatSyncOptions) => {
+      const stats = lstat(file, options) as Stats | undefined;
+      if (stats && file === link) stats.uid = stranger;
+      return stats;
+    }) as typeof lstatSync);
+    try {
+      await expect(
+        makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', link]),
+      ).rejects.toThrow(`Refusing to write to ${link}: the symbolic link there belongs to another user.`);
+      expect(existsSync(elsewhere)).toBe(false);
+      expect(errSpy).not.toHaveBeenCalled();
+    } finally {
+      reported.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('refuses to overwrite an existing --output file without --force', async () => {

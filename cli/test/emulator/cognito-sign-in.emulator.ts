@@ -212,12 +212,12 @@ describe('bgagent sign-in against an AWS Emulator', () => {
     expect(fs.statSync(credentialsFile()).mode % 0o1000).toBe(0o600);
     const claims = idTokenClaims(cached!.id_token);
     expect(claims).toMatchObject({ email, token_use: 'id', aud: loadConfig().client_id });
-    // For a pool that a stack creates, the emulator names its own endpoint as
-    // the issuer, where AWS names
-    // https://cognito-idp.<region>.amazonaws.com/<pool id> (upstream:
-    // aws/aws-emulator issues/things-that-do-not-work/
-    // 20261115T035031Z-cognito-identity-cognito-idp-the-cognito-id-token.md).
-    expect(claims.iss).toBe(`${process.env.AWS_ENDPOINT_URL}/${loadConfig().user_pool_id}`);
+    // The emulator names an issuer host in the loopback zone, on its own port,
+    // where AWS names https://cognito-idp.<region>.amazonaws.com/<pool id>
+    // (upstream: aws/aws-emulator issues/things-that-do-not-work/
+    // 20261124T203931Z-apigateway-cognito-idp-lambda-the-cognito-id-token--r2.md).
+    const emulatorPort = new URL(String(process.env.AWS_ENDPOINT_URL)).port;
+    expect(claims.iss).toBe(`https://cognito-idp.${REGION}.localhost:${emulatorPort}/${loadConfig().user_pool_id}`);
     await expect(getAuthToken()).resolves.toBe(cached!.id_token);
 
     saveCredentials({ ...cached!, token_expiry: new Date(0).toISOString() });

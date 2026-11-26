@@ -291,21 +291,11 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     const [beforeVersionId, beforeVersion] = versionOf(inline.application);
     const [afterVersionId, afterVersion] = versionOf(split.application);
     expect(withoutMetadata(afterVersion)).toEqual(withoutMetadata(beforeVersion));
-    // The existing alpha Guardrail hashes unresolved tokens, so its version ID
-    // (and the orchestrator version consuming it) can change between syntheses.
-    // Compare their definitions before mapping only these immutable version IDs.
-    // The census stability check reports the real churn without normalization.
-    const guardrailVersion = (template: TemplateJson): [string, TemplateJson] => {
-      const versions = Object.entries(template.Resources as Record<string, TemplateJson>)
-        .filter(([, resource]) => resource.Type === 'AWS::Bedrock::GuardrailVersion');
-      expect(versions).toHaveLength(1);
-      return versions[0];
-    };
-    const [beforeGuardrailId, beforeGuardrail] = guardrailVersion(inline.application);
-    const [afterGuardrailId, afterGuardrail] = guardrailVersion(split.application);
-    expect(withoutMetadata(afterGuardrail)).toEqual(withoutMetadata(beforeGuardrail));
-    const versionIds = new Map([[afterVersionId, beforeVersionId], [afterGuardrailId, beforeGuardrailId]]);
-    const originalId = (id: string): string => versionIds.get(id) ?? id;
+    // The ECS orchestrator's environment names the private subnets: by reference
+    // inline, by import in the split topology. The logical ID of its version hashes
+    // that, so map this one immutable version ID there. On the other backends, and
+    // for the guardrail version on every backend, both templates must have the same ID.
+    const originalId = (id: string): string => compute === 'ecs' && id === afterVersionId ? beforeVersionId : id;
     function normalize(value: any): any {
       if (Array.isArray(value)) return value.map(normalize);
       if (value && typeof value === 'object') {

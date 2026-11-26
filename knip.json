@@ -5,6 +5,7 @@
   ],
   "ignoreBinaries": [
     "mise",
+    "mkfifo",
     "semgrep"
   ],
   "ignoreExportsUsedInFile": {
@@ -17,7 +18,7 @@
     },
     "cdk": {
       "entry": [
-        "src/{main,handlers/*}.ts!", "scripts/*.ts", "test/integ/integ.*.ts",
+        "src/{main,handlers/*}.ts!", "scripts/*.ts",
         "jest.emulator.config.js", "test/emulator/*.emulator.ts", "test/emulator/trace-api-shim.ts"
       ],
       "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"]

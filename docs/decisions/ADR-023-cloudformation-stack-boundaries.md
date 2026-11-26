@@ -2,7 +2,7 @@
 
 **Status:** proposed
 **Date:** 2026-09-21
-**Last-updated:** 2026-11-21
+**Last-updated:** 2026-11-24
 **Issue:** [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852)
 
 Per the [ADR lifecycle](./README.md#lifecycle), this decision remains proposed while its implementing PR is in review and becomes accepted when that PR merges. This record does not approve or waive the existing-stack migration criteria in #852.
@@ -27,7 +27,7 @@ Live review of an earlier #912 revision found that broad retention blocks failed
 
 The 122-profile product covers all single-backend/service/image combinations in both topologies, supplemental alert/fork/consent options, explicit three-AZ pins, expanded model grants, every multi-backend set at default and widest settings, and legacy additive selectors. The expanded-model profiles add synthetic model IDs to the platform defaults, enough for CDK to split the policy of the SessionRole and of each backend's compute role into overflow policies; they do not assert live model availability. The audit exceptions of each of those roles follow its generated overflow policies: the SessionRole's remain scoped to tenant object prefixes and literal model grants, and a compute role's overflow policies carry the exception of its base policy. A profile marked over budget must fail at the production 490-resource ceiling for the application stack; an unrelated error or unexpected success fails the gate. Since the scheduled-maintenance and MicroVM subsystems moved into nested stacks, no sampled profile is over budget. Real CDK metadata is included. The census records per-template measurements and source provenance with bundling and asset staging disabled; it does not measure a deployed stack.
 
-Network tests compare moved logical IDs and service properties, the complete export interface, application data resources and lifecycle policies, shared API routes and permissions, attribution and one-way dependencies. Their comparisons control the clock and account for the existing alpha guardrail and orchestrator version IDs. The independent-process `--check-stability` diagnostic keeps timestamps, IDs and asset hashes intact and reports existing churn; passing budget checks does not imply deterministic synthesis.
+Network tests compare moved logical IDs and service properties, the complete export interface, application data resources and lifecycle policies, shared API routes and permissions, attribution and one-way dependencies. Their comparisons control the clock and account for the orchestrator version ID on ECS, which differs between the topologies with the subnet references in the function's environment. The independent-process `--check-stability` diagnostic keeps timestamps, IDs and asset hashes intact and reports existing churn; passing budget checks does not imply deterministic synthesis.
 
 `networkReservedAzs` preserves unused address slots when removing trailing AZs. Tests verify that the target application can use the old network, release the removed export, and keep every remaining subnet's properties. The [application-first procedure](../guides/DEPLOYMENT_GUIDE.md#reducing-azs-in-an-existing-split-network) is separate from moving an inline network into another stack. Physical-ID preservation and rollback in AWS still require live verification.
 
@@ -39,7 +39,7 @@ The following remain under #852 and need separate review and releases before a s
 - **Blueprint downgrade protection:** refuse an unsafe return from managed ownership to the legacy writer even when a context flag is omitted. Prove `max_turns`, `compute_type`, `onboarded_at` and other CLI overrides survive updates and rollback. A green deployment must not hide row replacement or tombstoning.
 - **Ownership release and re-onboarding:** adoption must have a defined release path. Removing a repository must not block legitimate re-onboarding for the tombstone TTL. Test retries, owner changes and out-of-order callbacks.
 - **Ledger lifecycle and bootstrap coverage:** establish a bounded cleanup/recovery plan for PITR-enabled ownership tables across mode changes, failures and destroy. Any future `Custom::BlueprintRepoConfig` must be represented in the bootstrap resource-action map and its coverage tests before it ships.
-- **Guardrail and image normalization:** review stable version binding and Docker build-context changes separately from network ownership. They are not prerequisites for reporting truthful census differences.
+- **Image normalization:** review Docker build-context changes separately from network ownership. They are not prerequisites for reporting truthful census differences. The stable version binding of the guardrail, deferred with them, shipped separately ([#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079)).
 - **Populated migration rehearsal:** verify refactor/import eligibility for each moved type and provider, preserve physical IDs and data, test networking and API behavior, and execute rollback. Retention must be installed on source resources before a transfer; an ordinary topology flag change is not a move. The criterion remains open, without an author-only waiver.
 
 The [teardown guidance](../guides/DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentcore-network-interfaces) covers the separately observed AgentCore ENI cleanup delay, which also occurs on `main`.
@@ -62,3 +62,4 @@ The [teardown guidance](../guides/DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentc
 ## Changelog
 
 - 2026-11-21 — The validation scope also covers the overflow policies of each backend's compute role, which carry the audit exception of the role's base policy (#916). The expanded-model profiles add enough synthetic model IDs for CDK to split the policy of the SessionRole and of each compute role (decision unchanged).
+- 2026-11-24 — The version of the input guardrail now has a logical ID that contains a hash of the guardrail's configuration (#1079): the stable version binding that decision 5 left as it was and that the deferred work listed for a separate review. The network tests no longer account for that ID, and account for the orchestrator version ID on ECS only; the deferred item now names the image alone (decision unchanged).

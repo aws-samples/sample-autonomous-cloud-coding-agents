@@ -13,8 +13,7 @@
         "scripts/generate-bootstrap-template.ts"
       ],
       "coveragePathIgnorePatterns": [
-        "/node_modules/",
-        "<rootDir>/test/integ/"
+        "/node_modules/"
       ],
       "coverageThreshold": {
         "global": {
@@ -25,8 +24,7 @@
         }
       },
       "testPathIgnorePatterns": [
-        "/node_modules/",
-        "<rootDir>/test/integ/"
+        "/node_modules/"
       ]
     },
     "cli": {

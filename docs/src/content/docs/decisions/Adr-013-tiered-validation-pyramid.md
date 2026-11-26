@@ -4,14 +4,14 @@ title: "ADR-013: Tiered validation pyramid for agentic-first development"
 
 **Status:** proposed
 **Date:** 2026-05-19
-**Last-updated:** 2026-11-21
+**Last-updated:** 2026-11-24
 
 ## Context
 
 The current validation architecture has two operational tiers:
 
 - **Pre-commit hooks** — formatting, secrets scan, and the lint and drift checks of the staged files
-- **Remote CI** (5–20 min) — full build, test, synth, security scans, deploy verification
+- **Remote CI** (5–20 min) — full build, test, synth, security scans, deploy verification (CI no longer deploys; see the note under Tier 3)
 
 The gap between these tiers is significant. When an agent (or human) makes a change that passes pre-commit but fails in CI, the feedback loop is:
 
@@ -35,7 +35,7 @@ The root cause: there is no **Tier 2** — a local, fast, high-fidelity validati
 |------|------|-----------------|-----|
 | Pre-commit (Tier 0) | No fixed budget: by what is staged (measured times under Tier 0 below) | Formatting, secrets, lint and drift checks of the staged files | None — works well |
 | mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Wired as a pre-push gate (prek `pre-push` hooks run tests + security); the `mise run build` superset is available on demand |
-| Remote CI (Tier 3) | 5–20 min | Full matrix, security, E2E, deploy | Authoritative but slow |
+| Remote CI (Tier 3) | 5–20 min | The full build (lint, type checks, tests, synth, docs) and the security scans; the Tier 2a tests as an advisory check | Authoritative but slow. Makes no AWS call: nothing is deployed or verified in a real account |
 | **Local integration (Tier 2)** | About half a minute for phase 2a, on a laptop | Phase 2a only: how real handler, CLI and agent code behaves against emulated DynamoDB, S3, Secrets Manager, Cognito, STS and CloudWatch Logs | Phase 2a is an advisory check, not a required one; phases 2b–2d do not exist |
 
 ### Agentic-first motivation
@@ -135,21 +135,9 @@ Progressive build-out:
 - Documentation mutation check (fail if Starlight mirrors are stale)
 - The Tier 0 file checks (whitespace, end of file, conflict markers, YAML/JSON syntax) over all tracked files (`mise run check:hygiene`, part of `mise run build`) and shellcheck over every shell script (`mise run check:shell`, also part of `mise run build`): a commit made without the hooks skips Tier 0
 
-Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
+Status: **Implemented** (GitHub Actions), except the items that need an AWS account (see the note below). This remains the authoritative gate for merge.
 
-> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the reused `deploy` environment's admin-approval gate so it never assumes the deploy role unattended, and posts an `integ-smoke` status that is not required: the ruleset for `main` requires only `build (agentcore)` and `Secrets, deps, and workflow scan`, so the status informs reviewers and does not block merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
-
-#### Residual risk acceptance — fork PR integ execution
-
-The deployed E2E gate runs **fork-authored test code** (`cdk/test/integ/**`) against the shared AWS account. This is intentional: a fork `pull_request` job gets no secrets/OIDC, so the `workflow_run` trigger is the only way to give fork PRs the same deploy-verify coverage that branch PRs get. The accepted risk is that fork code executes with the shared `GitHub` deploy role (reused from `deploy.yml`), which is capable of CloudFormation operations in the shared account.
-
-Mitigations layered against that risk:
-
-- **Two human gates before fork code runs.** The `resolve` job requires a maintainer-applied `safe-to-test` label on fork PRs, and the `integ` job requires explicit approval of the `deploy` GitHub environment (required reviewers: `coding-agents-admin` / `coding-agents-maintainers`, self-review prevented). The approver MUST review `cdk/test/integ/**` changes before approving.
-- **Environment reuse over a dedicated role.** Phase 0 reuses `deploy.yml`'s existing `deploy` environment and `GitHub` deploy role rather than provisioning a separate least-privilege role — the environment and its OIDC trust are already configured, so no account-side IAM change is needed to go live. The tradeoff is that integ (including approved fork code) runs with the full deploy role; the human gates above and forced teardown below are the compensating controls. Scoping a dedicated least-privilege integ role remains an option a maintainer can adopt later if the blast radius is judged too wide.
-- **Status-only tokens and forced teardown.** Each job gets minimal `permissions`; the report path only posts commit statuses, and teardown runs `if: always()` with a fail-loud `wait` so a stranded stack surfaces rather than leaking billable resources.
-
-Residual risk after these mitigations (a malicious fork PR that passes maintainer review and operates strictly within the scoped stacks) is **accepted** for Phase 0.
+> **Nothing is deployed to AWS from CI.** No workflow uses an AWS account, so the items of this list that need one (CDK diff against deployed stack, multi-account deployment verification, E2E tests against real AWS services) do not run in CI. The ruleset for `main` requires `build (agentcore)` and `Secrets, deps, and workflow scan`; the `emulator` workflow runs the Tier 2a tests beside them as an advisory check. No automated test of a deployed stack exists: the Phase 0 smoke of deployed runtime E2E (issue #236, `mise //cdk:integ`: a trimmed Task API stack deployed to a real account, asserted and torn down) was removed with the workflow that ran it. A deployed stack is checked by hand only: the live acceptance of the Lambda MicroVM backend (`scripts/microvm-acceptance.sh`) and `bgagent platform doctor`. Deployed runtime E2E, from Phase 0 on, is a follow-up.
 
 ### Enforcement model
 
@@ -242,3 +230,4 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - 2026-11-15 — Phase 2a is implemented, on the AWS Emulator instead of LocalStack, as an advisory check (`mise run test:integration` and the `emulator` workflow). Replaced the estimate that it would eliminate "60%+ of CI-only failures" with what was measured, added the graduation criteria this ADR asks for, and stated that phase 2c needs a real AWS account because the emulator cannot show a missing permission (decision otherwise unchanged).
 - 2026-11-20 — Tier 0 also runs the type check of cdk, cli and web when one of their TypeScript files is staged (#260). The build runs the same checks and stays the gate (decision unchanged).
 - 2026-11-21 — Tier 0 also runs shellcheck when a shell script is staged (#278). The build and the security suite run the same check over every shell script (decision unchanged).
+- 2026-11-24 — The `deploy` and `integ` workflows were removed as unused; the Tier 2a tests are the integration check that CI runs. CI now makes no AWS call: Tier 3 no longer deploys, compares against a deployed stack or tests in a real account. The manual task `mise //cdk:integ` and its smoke test went with the `integ` workflow: nothing ran it any more, and no run of it in CI had completed since the workflow's call of it was repaired (#1048). Removed the section "Residual risk acceptance — fork PR integ execution": the risk it accepted, fork-authored test code running with the deploy role, ended with the `integ` workflow (decision unchanged).
