@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
   type GitHubDeploymentStatusPayload,
@@ -29,10 +26,7 @@ import {
 } from './shared/github-deployment-status';
 import { verifyGitHubRequest } from './shared/github-webhook-verify';
 import { logger } from './shared/logger';
-import { makeClient, makeDocClient } from './shared/ua';
-
-const ddb = makeDocClient();
-const lambdaClient = makeClient(LambdaClient);
+import { dedupAndDispatch, jsonResponse } from './shared/webhook-dispatch';
 
 const WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.GITHUB_WEBHOOK_DEDUP_TABLE_NAME!;
@@ -64,7 +58,7 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  * supplies those in its successful preview check's details_url and head_sha.
  * Both feed the same capture, persistence, and channel delivery pipeline.
  */
-// eslint-disable-next-line complexity -- predates the ceiling (49 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (43, down from 49 when it landed); must not grow
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
     if (!event.body) {
@@ -171,72 +165,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // while distinct status transitions stay distinct. The amplify# namespace
     // keeps check-run IDs independent of deployment/status IDs.
     const dedupKey = `${eventType === 'check_run' ? 'amplify#' : ''}${payload.repoFullName}#${payload.deploymentId}#${payload.statusId}`;
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    try {
-      await ddb.send(new PutCommand({
-        TableName: DEDUP_TABLE_NAME,
-        Item: {
-          dedup_key: dedupKey,
-          created_at: new Date().toISOString(),
-          ttl: nowSeconds + DEDUP_TTL_SECONDS,
-        },
-        ConditionExpression: 'attribute_not_exists(dedup_key)',
-      }));
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        logger.info('GitHub webhook dedup hit — skipping reprocess', {
-          dedup_key: dedupKey,
-        });
-        return jsonResponse(200, { ok: true, deduped: true });
-      }
-      throw err;
-    }
-
     const processorEvent: ProcessorEvent = {
       raw_body: normalized ? JSON.stringify(normalized.payload) : event.body,
       ...(normalized && { validated_pr_number: normalized.prNumber }),
     };
-    try {
-      await lambdaClient.send(new InvokeCommand({
-        FunctionName: PROCESSOR_FUNCTION_NAME,
-        InvocationType: 'Event',
-        Payload: new TextEncoder().encode(JSON.stringify(processorEvent)),
-      }));
-    } catch (invokeErr) {
-      logger.error('Failed to invoke GitHub webhook processor', {
-        error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
-        repo: payload.repoFullName,
-        deployment_id: payload.deploymentId,
-        status_id: payload.statusId,
-      });
-      // Roll the dedup row back so GitHub's retry can try dispatch again.
-      try {
-        await ddb.send(new DeleteCommand({
-          TableName: DEDUP_TABLE_NAME,
-          Key: { dedup_key: dedupKey },
-        }));
-      } catch (cleanupErr) {
-        logger.warn('Failed to roll back GitHub webhook dedup row after invoke failure', {
-          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-          dedup_key: dedupKey,
-        });
-      }
-      return jsonResponse(500, { error: 'Dispatch failed' });
-    }
-
-    return jsonResponse(200, { ok: true });
+    return await dedupAndDispatch({
+      label: 'GitHub',
+      dedupTableName: DEDUP_TABLE_NAME,
+      dedupKey,
+      ttlSeconds: DEDUP_TTL_SECONDS,
+      processorFunctionName: PROCESSOR_FUNCTION_NAME,
+      payload: processorEvent,
+      logFields: { repo: payload.repoFullName, deployment_id: payload.deploymentId, status_id: payload.statusId },
+    });
   } catch (err) {
     logger.error('GitHub webhook handler failed', {
       error: err instanceof Error ? err.message : String(err),
     });
     return jsonResponse(500, { error: 'Internal server error' });
   }
-}
-
-function jsonResponse(statusCode: number, body: Record<string, unknown>): APIGatewayProxyResult {
-  return {
-    statusCode,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  };
 }

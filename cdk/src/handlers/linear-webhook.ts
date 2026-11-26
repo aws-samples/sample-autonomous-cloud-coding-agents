@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { AGENT_SESSION_EVENT_TYPE, isHandledAgentSessionAction, isLinearAgentSessionsEnabled } from './shared/linear-agent-session-event';
 import {
@@ -29,10 +26,7 @@ import {
   verifyLinearRequestForWorkspace,
 } from './shared/linear-verify';
 import { logger } from './shared/logger';
-import { makeClient, makeDocClient } from './shared/ua';
-
-const ddb = makeDocClient();
-const lambdaClient = makeClient(LambdaClient);
+import { dedupAndDispatch, jsonResponse } from './shared/webhook-dispatch';
 
 const WEBHOOK_SECRET_ARN = process.env.LINEAR_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME!;
@@ -285,77 +279,22 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // events do not. A missing timestamp would have already failed the replay
     // check above, so treat its presence as a precondition.
     const dedupKey = `${issueId}#${action}#${payload.webhookTimestamp}`;
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    try {
-      await ddb.send(new PutCommand({
-        TableName: DEDUP_TABLE_NAME,
-        Item: {
-          dedup_key: dedupKey,
-          created_at: new Date().toISOString(),
-          ttl: nowSeconds + DEDUP_TTL_SECONDS,
-        },
-        ConditionExpression: 'attribute_not_exists(dedup_key)',
-      }));
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        logger.info('Linear webhook dedup hit — skipping reprocess', {
-          dedup_key: dedupKey,
-          webhook_id: payload.webhookId,
-        });
-        return jsonResponse(200, { ok: true, deduped: true });
-      }
-      throw err;
-    }
-
-    // Async-invoke the processor with the raw body so it can re-parse safely.
-    try {
-      await lambdaClient.send(new InvokeCommand({
-        FunctionName: PROCESSOR_FUNCTION_NAME,
-        InvocationType: 'Event',
-        // The verified context travels with the body. Without it the processor cannot
-        // tell a delivery whose tenant the signature attested from one whose tenant is
-        // only claimed, and it routes from that claim.
-        Payload: new TextEncoder().encode(JSON.stringify({
-          raw_body: event.body,
-          verified_via_stack_wide: verifiedViaStackWide,
-        })),
-      }));
-    } catch (invokeErr) {
-      logger.error('Failed to invoke Linear webhook processor', {
-        error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
-        issue_id: issueId,
-        action,
-      });
-      // Roll back the dedup row so Linear's next retry (+1m / +1h / +6h) can
-      // try dispatch again. Without this, all retries would hit the dedup TTL
-      // (8h) and silently drop the task forever.
-      try {
-        await ddb.send(new DeleteCommand({
-          TableName: DEDUP_TABLE_NAME,
-          Key: { dedup_key: dedupKey },
-        }));
-      } catch (cleanupErr) {
-        logger.warn('Failed to roll back Linear webhook dedup row after invoke failure', {
-          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-          dedup_key: dedupKey,
-        });
-      }
-      return jsonResponse(500, { error: 'Dispatch failed' });
-    }
-
-    return jsonResponse(200, { ok: true });
+    return await dedupAndDispatch({
+      label: 'Linear',
+      dedupTableName: DEDUP_TABLE_NAME,
+      dedupKey,
+      ttlSeconds: DEDUP_TTL_SECONDS,
+      processorFunctionName: PROCESSOR_FUNCTION_NAME,
+      // The verified context travels with the body. Without it the processor cannot
+      // tell a delivery whose tenant the signature attested from one whose tenant is
+      // only claimed, and it routes from that claim.
+      payload: { raw_body: event.body, verified_via_stack_wide: verifiedViaStackWide },
+      logFields: { issue_id: issueId, action, webhook_id: payload.webhookId },
+    });
   } catch (err) {
     logger.error('Linear webhook handler failed', {
       error: err instanceof Error ? err.message : String(err),
     });
     return jsonResponse(500, { error: 'Internal server error' });
   }
-}
-
-function jsonResponse(statusCode: number, body: Record<string, unknown>): APIGatewayProxyResult {
-  return {
-    statusCode,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  };
 }
