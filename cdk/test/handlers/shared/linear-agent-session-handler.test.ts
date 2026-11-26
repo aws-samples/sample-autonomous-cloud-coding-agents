@@ -42,6 +42,7 @@ jest.mock('../../../src/handlers/shared/linear-oauth-resolver', () => ({
 const emitAgentActivityMock = jest.fn();
 const fetchAgentSessionIssueMock = jest.fn();
 const fetchSessionPromptActivityMock = jest.fn();
+const fetchSessionActivityShownMock = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-agent-session', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/linear-agent-session');
   return {
@@ -49,6 +50,7 @@ jest.mock('../../../src/handlers/shared/linear-agent-session', () => {
     emitAgentActivity: (...args: unknown[]) => emitAgentActivityMock(...args),
     fetchAgentSessionIssue: (...args: unknown[]) => fetchAgentSessionIssueMock(...args),
     fetchSessionPromptActivity: (...args: unknown[]) => fetchSessionPromptActivityMock(...args),
+    fetchSessionActivityShown: (...args: unknown[]) => fetchSessionActivityShownMock(...args),
   };
 });
 
@@ -834,6 +836,8 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
   };
 
   beforeEach(() => {
+    // Linear recorded the open request's choice at 10:01; answers are written at 10:05.
+    fetchSessionActivityShownMock.mockResolvedValue({ sessionId: 'session-1', createdAt: '2026-11-26T10:01:00.000Z' });
     recordApprovalMock.mockResolvedValue({ statusCode: 202 });
     recordDenialMock.mockResolvedValue({ statusCode: 202 });
   });
@@ -961,13 +965,24 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(recordApprovalMock).not.toHaveBeenCalled();
   });
 
-  test('an answer written before the open request was created decides nothing (a delayed retry)', async () => {
+  test('an answer Linear recorded before the open request\'s choice decides nothing (a delayed retry)', async () => {
     waiting();
     fetchSessionPromptActivityMock.mockResolvedValue({
-      sessionId: 'session-1', authorId: 'linear-user-1', body: 'approve', createdAt: '2026-11-26T09:58:00.000Z',
+      sessionId: 'session-1', authorId: 'linear-user-1', body: 'approve', createdAt: '2026-11-26T10:00:59.999Z',
     });
     await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
     expect(recordApprovalMock).not.toHaveBeenCalled();
-    expect(String(lastEmit()[2].body)).toMatch(/^That answer was written before this request opened/);
+    expect(String(lastEmit()[2].body)).toMatch(/^That answer was written before this request was shown here/);
+    expect(fetchSessionActivityShownMock).toHaveBeenCalledWith('lin_tok', 'org-1', expect.stringMatching(/^[0-9a-f-]{36}$/));
+  });
+
+  test.each([
+    ['not posted yet', null],
+    ['posted in another session', { sessionId: 'other-session', createdAt: '2026-11-26T10:01:00.000Z' }],
+  ])('a choice %s cannot be answered here', async (_label, shown) => {
+    waiting();
+    fetchSessionActivityShownMock.mockResolvedValue(shown);
+    await answer('approve');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
   });
 });

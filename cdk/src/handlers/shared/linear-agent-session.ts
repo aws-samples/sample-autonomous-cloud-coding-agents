@@ -220,6 +220,33 @@ export async function fetchSessionPromptActivity(
   return { sessionId, authorId: author.id, body: activity.content.body ?? '', createdAt: activity.createdAt ?? '' };
 }
 
+const SESSION_ACTIVITY_QUERY = `
+query SessionActivityShown($id: String!) {
+  organization { id }
+  agentActivity(id: $id) { createdAt agentSession { id } }
+}`;
+
+/**
+ * When Linear recorded one of this app's activities, and in which session; null when
+ * it does not exist. Throws when Linear cannot answer, so the caller retries.
+ */
+export async function fetchSessionActivityShown(
+  accessToken: string,
+  workspaceId: string,
+  activityId: string,
+): Promise<{ readonly sessionId: string; readonly createdAt: string } | null> {
+  const result = await graphqlData(accessToken, SESSION_ACTIVITY_QUERY, { id: activityId });
+  if (!result.ok) throw new Error('Linear session activity lookup unavailable');
+  const data = result.value as {
+    organization?: { id?: string };
+    agentActivity?: { createdAt?: string; agentSession?: { id?: string } | null } | null;
+  };
+  if (data.organization?.id !== workspaceId) throw new Error('Linear session activity lookup workspace mismatch');
+  const sessionId = data.agentActivity?.agentSession?.id;
+  const createdAt = data.agentActivity?.createdAt;
+  return sessionId && createdAt ? { sessionId, createdAt } : null;
+}
+
 /** Separator + heading that introduces Linear's `promptContext` in the description. */
 const SESSION_CONTEXT_PREFIX = '\n\n## Linear session context\n\n';
 const CONTEXT_TRUNCATION_NOTICE = '\n\n_(session context truncated)_';

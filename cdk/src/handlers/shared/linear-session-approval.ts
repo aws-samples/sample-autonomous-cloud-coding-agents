@@ -33,6 +33,7 @@
 import { approvalNotificationMarkdown, type ApprovalNotification } from './approval-notifications';
 import type { AgentActivityContent } from './linear-agent-session';
 import { parseLinearApprovalReply, type LinearApprovalReply } from './linear-approval-thread';
+import { progressActivityId } from './linear-session-progress';
 
 /**
  * An answer from the session: approve once, approve the request's rule for the rest
@@ -71,6 +72,17 @@ export function parseSessionApprovalAnswer(text: string): SessionApprovalAnswer 
 export function isBareApprovalAnswer(text: string): boolean {
   const answer = parseSessionApprovalAnswer(text);
   return answer !== null && !answer.reason;
+}
+
+/**
+ * The session activity id of an approval notice: derived from the event and the
+ * request, so a retried notice is the same activity and the reply handler can read
+ * back when a request's choice was shown.
+ * @param eventType - the approval event (``approval_requested`` for the choice).
+ * @param requestId - the request.
+ */
+export function sessionApprovalNoticeId(eventType: string, requestId: string): string {
+  return progressActivityId(`notified_linear_session_${eventType}#${requestId}`);
 }
 
 /** One activity plus the options ``emitAgentActivity`` takes. */

@@ -86,7 +86,7 @@ import {
   type LinearFeedbackContext,
   type LinearPostResult,
 } from './shared/linear-feedback';
-import { sessionApprovalActivity } from './shared/linear-session-approval';
+import { sessionApprovalActivity, sessionApprovalNoticeId } from './shared/linear-session-approval';
 import {
   checklistKind,
   checklistMoveForEvent,
@@ -1759,7 +1759,7 @@ async function dispatchSessionApproval(
   if (!token) return;
   const activity = sessionApprovalActivity(effective, notification);
   const result = await emitAgentActivity(token, agentSessionId, activity.content, {
-    id: progressActivityId(`${notification.marker}#${notification.requestId}`),
+    id: sessionApprovalNoticeId(effective, notification.requestId),
     ...(activity.signal && { signal: activity.signal, signalMetadata: activity.signalMetadata }),
   });
   if (!result.ok) {

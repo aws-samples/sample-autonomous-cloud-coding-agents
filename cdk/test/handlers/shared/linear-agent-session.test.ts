@@ -27,6 +27,7 @@ import {
   buildAgentSessionTaskDescription,
   emitAgentActivity,
   fetchAgentSessionIssue,
+  fetchSessionActivityShown,
   fetchSessionPromptActivity,
 } from '../../../src/handlers/shared/linear-agent-session';
 import {
@@ -316,6 +317,17 @@ describe('GraphQL helpers', () => {
     ])('an activity by %s is not consent', async (_label, activity) => {
       fetchMock.mockResolvedValueOnce(reply(activity));
       await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toBeNull();
+    });
+
+    test('fetchSessionActivityShown reads when Linear recorded an activity, and in which session', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        data: { organization: { id: 'org-1' }, agentActivity: { createdAt: '2026-11-26T10:01:00.000Z', agentSession: { id: 's-1' } } },
+      }));
+      await expect(fetchSessionActivityShown('tok', 'org-1', 'n-1')).resolves.toEqual({ sessionId: 's-1', createdAt: '2026-11-26T10:01:00.000Z' });
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { organization: { id: 'org-1' }, agentActivity: null } }));
+      await expect(fetchSessionActivityShown('tok', 'org-1', 'n-1')).resolves.toBeNull();
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+      await expect(fetchSessionActivityShown('tok', 'org-1', 'n-1')).rejects.toThrow('unavailable');
     });
 
     test('another workspace, or Linear failing, throws so the delivery retries', async () => {
