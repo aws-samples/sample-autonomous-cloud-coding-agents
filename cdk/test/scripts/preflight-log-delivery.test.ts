@@ -136,10 +136,10 @@ function runPreflight(opts: {
   // Context files come from the scratch root via ABCA_PREFLIGHT_CONTEXT_DIR, NOT the real
   // `cdk/` directory. Two reasons, both learned the hard way:
   //
-  //  - whether a real `cdk.context.json` exists is an ENVIRONMENT fact. Locally it usually
-  //    does not; CI's `build.yml` writes `{"stackName":"pr<N>-<compute>"}` into it before
-  //    the test job. Reading it made every test expecting the DEFAULT stack resolve to the
-  //    pipeline's stack — green locally, two failures in CI.
+  //  - whether a real `cdk.context.json` exists, and what it holds, is an ENVIRONMENT fact:
+  //    the CDK CLI keeps its lookups there, and a `stackName` can be set in it. Reading it
+  //    made every test expecting the DEFAULT stack resolve to that stack — green on a
+  //    checkout without the file, two failures on one that had it.
   //  - the real file is CDK's lookup cache, shared with every suite jest runs in PARALLEL.
   //    Writing or deleting it from here raced the stack-synth tests: 73 failures, from a
   //    cached availability-zone lookup disappearing mid-synth.
@@ -389,12 +389,11 @@ describe('preflight-log-delivery', () => {
     expect(r.stderr).toContain('no physical id');
   });
 
-  test('resolves the stack from cdk.context.json — the file the CI pipeline writes', () => {
+  test('resolves the stack from cdk.context.json, which `cdk deploy` reads too', () => {
     // Mutation-caught gap: removing `cdk.context.json` from the resolution chain left the
-    // whole suite green. It is the load-bearing source in CI — `build.yml` writes
-    // `stackName` there for every pipeline stack (`pr<N>-<compute>`), and this repo's
-    // `cdk.json` has NO `context` block at all, so reading only `cdk.json` meant the
-    // pipeline resolved to the default and would have inspected the wrong stack.
+    // whole suite green. `cdk deploy` takes `stackName` from that file as well, and this
+    // repo's `cdk.json` sets none, so reading only `cdk.json` meant that a deploy whose
+    // stack is named there resolved to the default here and inspected the wrong stack.
     const r = runPreflight({
       listResponse: LIBRARY_IDS,
       cdkContext: { stackName: 'pr705-agentcore' },

@@ -138,7 +138,7 @@ build (agentcore)  (needs: build-shard)      # single required context; always r
                                              # fails if any shard failed
 ```
 
-- The matrix job (`build-shard`) runs `jest --shard=${{ matrix.shard }}/N` and uploads its `cdk.out` / coverage artifacts.
+- The matrix job (`build-shard`) runs `jest --shard=${{ matrix.shard }}/N` and uploads its coverage artifact.
 - The aggregate job keeps the `compute_type: [agentcore]` matrix so it emits the required **`build (agentcore)`** context (one stable name regardless of shard count). Its gate must use GitHub's documented pattern: **`if: ${{ always() }}` on the job, with the pass/fail decision moved into a step.** `contains()` is **not** one of GitHub's four status-check functions (`success()`, `always()`, `cancelled()`, `failure()`), so a bare `if: ${{ contains(needs.*.result, 'failure') }}` silently becomes `success() && contains(needs.*.result, 'failure')` — a contradiction that **never runs on either outcome**, admitting failing shards once it is the required context:
 
   ```yaml
@@ -160,7 +160,6 @@ build (agentcore)  (needs: build-shard)      # single required context; always r
 ### Open design questions for the implementer
 
 - **Synth + non-test tasks:** `//cli:*`, `//docs:build`, `//agent:quality` finish early (~74–83s) and are easy to keep off the critical path. **`//cdk:synth:quiet` is different** — at +142s it is the *next binding constraint* (see [How the time is spent](#how-the-time-is-spent)), so wherever it runs (aggregate job, a dedicated job, or shard 1) it, not the sharded suite, sets the new floor. Decide its placement deliberately and measure against ~142s, not the suite.
-- **Artifact strategy:** the deploy pipeline consumes `cdk-agentcore-out`. Sharding test execution should not change synth output; ensure exactly one job still produces the deploy artifact.
 - **Shard balance:** `--shard` partitions by file count, not by runtime. A few heavy suites (full `App` + cdk-nag synth) can skew one shard. If imbalance is material, consider ordering/grouping heavy suites or a runtime-aware splitter; measure first.
 
 ## Measurement protocol

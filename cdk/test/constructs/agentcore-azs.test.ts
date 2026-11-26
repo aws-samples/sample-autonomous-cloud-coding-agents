@@ -280,9 +280,9 @@ describe('resolveAgentCoreAzs', () => {
     expect(resolveCallerAccount).not.toHaveBeenCalled();
   });
 
-  it('honors the override BEFORE the env-agnostic guard (the CI/CD path)', async () => {
+  it('honors the override BEFORE the env-agnostic guard', async () => {
     // Reordering these two checks would silently disable the only pinning
-    // mechanism the pipeline artifact has.
+    // mechanism an assembly synthesized without credentials has.
     const result = await resolveAgentCoreAzs({
       node: nodeWithContext({ [AGENTCORE_AZS_CONTEXT_KEY]: ['us-east-1b', 'us-east-1c'] }),
       account: undefined,

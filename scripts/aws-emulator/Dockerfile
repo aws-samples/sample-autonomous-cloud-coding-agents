@@ -12,7 +12,7 @@
 # from this line, and CI builds this same file. Bump it here and nowhere else.
 # Use the three-part version from https://github.com/aws/aws-emulator/releases (versions.json lists
 # a fourth component, e.g. 1.0.385.1, that the package file names do not carry).
-ARG AWS_EMULATOR_VERSION=1.0.523
+ARG AWS_EMULATOR_VERSION=1.0.610
 
 # Pinned by digest like every other external image in this repository (see agent/Dockerfile).
 # The digest is a multi-platform index (linux/amd64 + linux/arm64). To bump:

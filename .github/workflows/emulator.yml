@@ -8,8 +8,8 @@ name: emulator
 # job name ("Emulator integration tests") to the ruleset; it already runs on merge_group,
 # which a required check must do or the merge queue deadlocks (#327).
 #
-# Kept out of build.yml on purpose: deploy.yml and integ.yml start from `workflow_run` on
-# build and need its conclusion to be `success`.
+# A workflow of its own and not a step of the build job, on purpose: that job is the required
+# check `build (agentcore)`, and a red run of this advisory tier must not turn it red.
 on:
   pull_request: {}
   merge_group: {}

@@ -1,6 +1,6 @@
 # AWS Emulator for local and CI tests
 
-**Status:** adopted as an advisory check. This is the investigation as it was handed over on 2026-11-15: unless a sentence says otherwise, it describes the proof of concept (then uncommitted, in a worktree of this branch) and `main` (`c8fcdb08`) as they stood that day. What was decided and done afterwards is in [Outcome](#outcome). The rules for tests in the tier and the list of known differences from AWS are maintained in [`scripts/aws-emulator/README.md`](../../scripts/aws-emulator/README.md), not here.
+**Status:** adopted as an advisory check. This is the investigation as it was handed over on 2026-11-15: unless a sentence says otherwise, it describes the proof of concept (then uncommitted, in a worktree of this branch) and `main` (`c8fcdb08`) as they stood that day. What was decided and done afterwards is in [Outcome](#outcome). Pull request #1084 (2026-11-25) removed `deploy.yml`, `integ.yml`, the `mise //cdk:integ` task and the test that task ran (`cdk/test/integ/`): what this document says about them, about the real-AWS integ smoke and about its `integ-smoke` check describes the earlier state. The rules for tests in the tier and the list of known differences from AWS are maintained in [`scripts/aws-emulator/README.md`](../../scripts/aws-emulator/README.md), not here.
 **Date:** 2026-11-15
 **Emulator version examined:** 1.0.385 (`aws/aws-emulator`, commit `813af48`)
 
@@ -41,7 +41,7 @@ The main things that pull request adds to the proof of concept described in the 
 | A session role that cannot be assumed does not abort the task | Fixed: the role is assumed when the session is first built, so the task stops before any work. The price is that an STS failure at task start that outlasts the SDK's retries now fails the task. When the role can never be assumed the user still reads "Agent session lost", because the agent has no credentials to record the reason |
 | The trajectory writer never retries stream creation | Fixed |
 | #51: list order and the empty filtered page | Fixed: a new index `UserCreatedAtIndex` on the task table, read until the page is full. The next deployment creates and backfills the index; on an existing stack the handler asks DynamoDB for the status of the new index and reads the old one, in its old order, until that status is `ACTIVE` (see "Known deployment issues" in the deployment guide) |
-| `integ.yml` is blocked by its own concurrency group | Fixed on `main`: #1035 moved the group from the workflow to the `integ` job, and #1047 keyed it by pull request, so that runs of different pull requests no longer cancel each other (#1046). `integ.yml` and ADR-013 now also say that `integ-smoke` is not a required check. Whether `integ-smoke` becomes required is a ruleset setting and is open |
+| `integ.yml` is blocked by its own concurrency group | Fixed on `main`: #1035 moved the group from the workflow to the `integ` job, and #1047 keyed it by pull request, so that runs of different pull requests no longer cancel each other (#1046). `integ.yml` and ADR-013 now also say that `integ-smoke` is not a required check. Whether `integ-smoke` becomes required is a ruleset setting and is open. (#1084 has since removed `integ.yml` and the check with it: see the note at the top) |
 | `upgrade-main` has failed since 2026-08-19 | Not a defect of a tracked file: the token in the repository secret `AUTOMATION_GITHUB_TOKEN` stopped being accepted. Open; it needs a new token |
 | The Slack cancel button writes less than `cancel-task` | Fixed: it writes `completed_at` and `status_created_at` |
 | `task_cancelled` is recorded twice | Left: both writers are needed and every consumer tolerates the repeat |
@@ -57,7 +57,7 @@ Found while fixing, and not listed further down:
 | The confirm-uploads Lambda never receives the per-user cap, and admits against a fallback of 3 where the stack sets 10 | Fixed. Until open PR #1009, a confirmed attachment task still holds two seats, so the limit met on that path stays below the cap |
 | The presign-failure path of `create-task` fails a task without `completed_at`, a matching `status_created_at` or a `ttl` | Fixed |
 | `bgagent ops concurrency` prints a default limit of 3 where the stack deploys 10, and six documents said 3 or "3-5" | Fixed. The user guide and the API contract also said that a task over the limit fails; since #441 it is queued, and they now say so. Four more documents named the event that #441 removed (`admission_rejected`), and two examples showed a task failed at the limit; they are corrected too |
-| The `integ` job's command has been unrunnable since #567: it passes `cdk deploy` arguments to `integ-runner`, which exits 1 | Fixed: the job runs `mise //cdk:integ` with nothing after it, and a unit test fails when the workflow passes the task an argument. The job has not run with the fix: it needs the `deploy` approval, and until this merges an approved run still uses `main`'s copy of the workflow |
+| The `integ` job's command has been unrunnable since #567: it passes `cdk deploy` arguments to `integ-runner`, which exits 1 | Fixed: the job runs `mise //cdk:integ` with nothing after it, and a unit test fails when the workflow passes the task an argument. The job has not run with the fix: it needs the `deploy` approval, and until this merges an approved run still uses `main`'s copy of the workflow. (#1084 has since removed the job, the task and that unit test: see the note at the top) |
 | `auto-approve` cannot approve the pull requests `upgrade-main` opens, because one token does both | Open |
 | `upgrade-main.yml` reports a patch that `git apply` refuses as "Empty patch. Skipping.", and the run ends green | Open |
 | `GET /v1/pending` lists an approval request whose window has passed until DynamoDB deletes the row | Fixed (#1043): the list leaves the request out and reads on past such rows |
@@ -263,7 +263,7 @@ If #1035 merges first, each slice of the rollout carries its own `knip.json` ent
 
 ### CI
 
-A separate workflow, not a job in `build.yml`: `deploy.yml` and `integ.yml` start from `workflow_run` on `build` and need its conclusion to be `success`, so an advisory failure there would stop both. The workflow in [Appendix A](#appendix-a-workflow) uses no secret and `contents: read` only, so it runs unchanged for fork pull requests. It adds no finding to the repository's own `zizmor` gate and passes `actionlint`.
+A separate workflow, not a job in `build.yml`: `deploy.yml` and `integ.yml` start from `workflow_run` on `build` and need its conclusion to be `success`, so an advisory failure there would stop both. (#1084 has since removed both; the header of `emulator.yml` gives the reason that holds now.) The workflow in [Appendix A](#appendix-a-workflow) uses no secret and `contents: read` only, so it runs unchanged for fork pull requests. It adds no finding to the repository's own `zizmor` gate and passes `actionlint`.
 
 It has not run on GitHub, and the three suites have run on macOS only. On Linux, an earlier version of the wrapper was exercised as an unprivileged user against a Linux Docker daemon on arm64 (`up` with the image copied in, a signed STS call through `run`, `down`), and the `linux/amd64` image was built and started under emulation on a Mac. Still to run on Linux: the image build through `emulator.sh up`, the wrapper as it is now, and jest and pytest under the loopback guards. The first run on a GitHub-hosted runner covers all of these.
 
@@ -286,7 +286,7 @@ Pinning is not optional. The user guide says passing fidelity tests do not regre
 | Hand-written DynamoDB fakes | Replace later, after measuring what they contribute to the coverage thresholds |
 | Issue #61 | `agent/tests_emulator/test_trace_round_trip.py` meets its end-to-end and under-10-seconds criteria. Its opt-in marker criterion is met differently (a separate directory and run, not a marker) and its README criterion is not met |
 | ADR-013 | Replace the LocalStack wording with the emulator; replace the "60%+" sentence with the measured statement in [What it is worth](#what-it-is-worth); add the graduation criteria below; state that Tier 2c (the ephemeral stack deploy, which the ADR expects to catch IAM gaps) stays on real AWS |
-| Real-AWS integ smoke | Keep as the authority for IAM, deployment and API Gateway wiring, and unblock it; the emulator tier does not stand in for it |
+| Real-AWS integ smoke | Keep as the authority for IAM, deployment and API Gateway wiring, and unblock it; the emulator tier does not stand in for it. (Not what happened: #1084 removed it, see the note at the top. No test in the repository deploys to AWS now) |
 
 ## Deploying to the emulator
 
@@ -378,14 +378,14 @@ Decided on 2026-11-15 (see [Outcome](#outcome)): 1 (yes), 2 (a red check that is
 4. Do known-defect witnesses (`test.failing`) ship, or only passing tests? A `test.failing` passes on any throw, so each has to be run once as a plain test; the alternative is a test that asserts today's wrong value and fails when it is fixed. The repository already ships one such witness (`cdk/test/integration/orchestration-e2e.test.ts:402-412`).
 5. Keep the five agent tests that expect an emulator-evaluated denial, knowing they can break with an emulator release?
 6. Directory names: `test/emulator` and `tests_emulator` (what the tests need) or `integration` (what ADR-013 and issue #61 call the tier). `cdk/test/integration` already holds fake-backed tests that run in the unit tier.
-7. `integ.yml`: unblock it (open #400 proposes relaxing the same concurrency group), and should `integ-smoke` be a required check? `integ.yml` and ADR-013 call it required; the ruleset does not list it.
+7. `integ.yml`: unblock it (open #400 proposes relaxing the same concurrency group), and should `integ-smoke` be a required check? `integ.yml` and ADR-013 call it required; the ruleset does not list it. (Settled another way: #1084 removed `integ.yml`, see the note at the top.)
 8. Which of the defects marked "None" to file, and in what order. The #51 fix and the status writers are one design, and the approval-sweep fix has to land in whichever writer is current when #1013 merges.
 9. The issues the tier needs before any branch (ADR-003): one per slice. #61 is open and not labeled `approved`.
 10. Which upstream reports to file (Appendix B).
 
 ## Appendix A: workflow
 
-`.github/workflows/emulator.yml`. The committed file is this block, byte for byte.
+`.github/workflows/emulator.yml`. The committed file is this block, byte for byte. (No longer: an action pin has moved since, and #1084 replaced the last paragraph of the header comment, the one that names `deploy.yml` and `integ.yml`, when it removed those two workflows.)
 
 ```yaml
 name: emulator

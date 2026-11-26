@@ -125,6 +125,16 @@ export interface OrchestrationChildRow {
    * normal case (a released child's reason comes from its task record).
    */
   readonly failure_reason?: string;
+  /**
+   * The task whose failed verdict the reconciler could not put on the child's
+   * issue: its try to move the issue back and to replace its reaction did not
+   * land. The next record of that task tries again, also when it is written
+   * long after the task ended. Step 1b of ``reconcileTerminalChild`` says when
+   * a try counts as landed and when the mark is removed. Keyed by the task, so
+   * a mark that an earlier run of the child left means nothing for its next
+   * task, and a release does not remove it.
+   */
+  readonly unsettled_task_id?: string;
   readonly created_at: string;
   readonly updated_at: string;
   /** TTL epoch (seconds) for eventual cleanup. */

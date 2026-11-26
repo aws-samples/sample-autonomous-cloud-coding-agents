@@ -50,8 +50,6 @@
     "ws": "^8.22.2"
   },
   "devDependencies": {
-    "@aws-cdk/integ-runner": "2.206.1",
-    "@aws-cdk/integ-tests-alpha": "2.276.0-alpha.0",
     "@cdklabs/eslint-plugin": "^2",
     "@eslint/js": "10.0.1",
     "@stylistic/eslint-plugin": "^5",
@@ -112,12 +110,10 @@
       }
     },
     "coveragePathIgnorePatterns": [
-      "/node_modules/",
-      "<rootDir>/test/integ/"
+      "/node_modules/"
     ],
     "testPathIgnorePatterns": [
-      "/node_modules/",
-      "<rootDir>/test/integ/"
+      "/node_modules/"
     ],
     "watchPathIgnorePatterns": [
       "/node_modules/"

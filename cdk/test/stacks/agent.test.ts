@@ -18,9 +18,13 @@
  */
 
 import * as fs from 'fs';
+import { createHash } from 'node:crypto';
 import * as path from 'path';
-import { App, AspectPriority, Aspects, NestedStack } from 'aws-cdk-lib';
+import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
+import { App, AspectPriority, Aspects, NestedStack, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { CfnGuardrail } from 'aws-cdk-lib/aws-bedrock';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import {
   BEDROCK_GEO_REGION_CONTEXT_KEY,
   DEFAULT_BEDROCK_GEO_REGION,
@@ -28,7 +32,7 @@ import {
 } from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
-import { AgentStack } from '../../src/stacks/agent';
+import { AgentStack, publishGuardrailVersion } from '../../src/stacks/agent';
 
 describe('AgentStack', () => {
   let template: Template;
@@ -556,8 +560,9 @@ describe('AgentStack', () => {
    *
    * (The full 25k-line template was also diffed pre/post out-of-band and is
    * identical modulo CDK's own local synth non-determinism — asset hashes,
-   * custom-resource timestamps, the InputGuardrail version logical id — which
-   * differ between two synths of the SAME tree and so cannot be asserted here.
+   * custom-resource timestamps and, at the time, the InputGuardrail version
+   * logical id (stable since #1079) — which differ between two synths of the
+   * SAME tree and so cannot be asserted here.
    * The Bedrock resources are the change's entire blast radius.)
    */
   test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
@@ -1255,6 +1260,228 @@ describe('AgentStack', () => {
     // The default deploy ships the topic with no confirmed target;
     // operators subscribe Slack / PagerDuty / email themselves.
     template.resourceCountIs('AWS::SNS::Subscription', 0);
+  });
+
+  test('every GUARDRAIL_VERSION is the one published version of the input guardrail, which is retained (#1079)', () => {
+    const versions = template.findResources('AWS::Bedrock::GuardrailVersion');
+    expect(Object.values(versions)).toEqual([expect.objectContaining({ DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' })]);
+    const published = { 'Fn::GetAtt': [Object.keys(versions)[0], 'Version'] };
+    // A nested template would name the version by a stack parameter: read the value the root passes.
+    const pinned = [{ template, parameters: {} as Record<string, unknown> }, ...nestedStacks].flatMap(stack =>
+      Object.values(stack.template.findResources('AWS::Lambda::Function'))
+        .map(fn => fn.Properties.Environment?.Variables?.GUARDRAIL_VERSION)
+        .filter(value => value !== undefined)
+        .map(value => stack.parameters[value.Ref] ?? value));
+    expect(pinned.length).toBeGreaterThan(0);
+    // The guardrail's own Version attribute is DRAFT, which follows every edit instead of pinning one.
+    expect(pinned).toEqual(pinned.map(() => published));
+
+    // The version is named after the guardrail as CloudFormation receives it. The tests of
+    // publishGuardrailVersion() cover a guardrail that is changed after its version was
+    // published; this pins the name itself.
+    const [guardrail] = Object.values(template.findResources('AWS::Bedrock::Guardrail'));
+    const { Tags: _tags, ...properties } = guardrail.Properties;
+    const [[versionId, version]] = Object.entries(versions);
+    const hash = createHash('sha256').update(JSON.stringify([properties, version.Properties.Description])).digest('hex');
+    // The whole id: the guardrail's construct id, the hash, and the eight characters the CDK appends.
+    expect(versionId).toMatch(new RegExp(`^InputGuardrailVersion${hash.slice(0, 16)}[0-9A-F]{8}$`));
+  });
+});
+
+describe('publishGuardrailVersion (#1079)', () => {
+  interface Change { inFront?: boolean; tag?: boolean; inputStrength?: bedrock.ContentFilterStrength; description?: string }
+
+  // TEST-CONVENTION EXEMPTION (cdk/AGENTS.md "synth once in beforeAll"): each case
+  // compares two syntheses, and the stack holds one guardrail.
+  /** Logical id of the version published for a guardrail in a new stack. */
+  function versionId(change: Change = {}): string {
+    const stack = new Stack(new App(), 'Stack');
+    if (change.inFront) new sqs.Queue(stack, 'InFront');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', {
+      guardrailName: 'input',
+      contentFilters: [{
+        type: bedrock.ContentFilterType.PROMPT_ATTACK,
+        inputStrength: change.inputStrength ?? bedrock.ContentFilterStrength.MEDIUM,
+        outputStrength: bedrock.ContentFilterStrength.NONE,
+      }],
+    });
+    // Tags.of() would set the tag at synthesis, after the version got its name: set it on the resource now.
+    if (change.tag) guardrail.node.children.find(child => child instanceof CfnGuardrail)!.cdkTagManager.setTag('github:sha', 'abc');
+    publishGuardrailVersion(guardrail, change.description ?? 'Initial version');
+    const ids = Object.keys(Template.fromStack(stack).findResources('AWS::Bedrock::GuardrailVersion'));
+    expect(ids).toHaveLength(1);
+    return ids[0];
+  }
+
+  // Two syntheses in one process differ in their token numbers, as two deploys do.
+  test.each<[string, Change]>([
+    ['in a second synthesis of the same tree', {}],
+    ['with a construct in front of the guardrail', { inFront: true }],
+    ['with a tag on the guardrail', { tag: true }],
+  ])('names the version the same %s', (_case, change) => {
+    expect(versionId(change)).toBe(versionId());
+  });
+
+  test.each<[string, Change]>([
+    ['the configuration of the guardrail', { inputStrength: bedrock.ContentFilterStrength.HIGH }],
+    ['the description of the version', { description: 'Second version' }],
+  ])('names the version anew when %s changes', (_case, change) => {
+    expect(versionId(change)).not.toBe(versionId());
+  });
+
+  test('fails the synthesis when the guardrail changes after its version was published', () => {
+    const stack = new Stack(new App(), 'Stack');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', { guardrailName: 'input' });
+    publishGuardrailVersion(guardrail, 'Initial version');
+    guardrail.addContentFilter({
+      type: bedrock.ContentFilterType.PROMPT_ATTACK,
+      inputStrength: bedrock.ContentFilterStrength.MEDIUM,
+      outputStrength: bedrock.ContentFilterStrength.NONE,
+    });
+    expect(() => Template.fromStack(stack)).toThrow('it was changed after publishGuardrailVersion()');
+  });
+
+  const contentFilter = (type: bedrock.ContentFilterType): bedrock.ContentFilter => ({
+    type,
+    inputStrength: bedrock.ContentFilterStrength.MEDIUM,
+    outputStrength: bedrock.ContentFilterStrength.NONE,
+  });
+  const topic = (name: string) => bedrock.Topic.custom({ name, definition: `Advice on ${name}.`, examples: [`What should I do about ${name}?`] });
+  const piiFilter = (type: bedrock.PIIType): bedrock.PIIFilter => ({ type, action: bedrock.GuardrailAction.BLOCK });
+  const regexFilter = (name: string): bedrock.RegexFilter => ({ name, pattern: `${name}-[0-9]+`, action: bedrock.GuardrailAction.BLOCK });
+  const groundingFilter = (type: bedrock.ContextualGroundingFilterType): bedrock.ContextualGroundingFilter => ({ type, threshold: 0.5 });
+  const guardrailProfile = (geography: string) => `arn:aws:bedrock:us-east-1:123456789012:guardrail-profile/${geography}.guardrail.v1:0`;
+
+  // The alpha construct keeps its first rendering of a policy that is not empty, and the
+  // function renders the guardrail at the call. Of the changes below, only the first two
+  // still show in the rendered properties after that: the function finds the others in the
+  // members that the construct renders those properties from.
+  test.each<[string, Omit<bedrock.GuardrailProps, 'guardrailName'>, (guardrail: bedrock.Guardrail) => unknown]>([
+    [
+      'has a property of its resource overridden',
+      {},
+      guardrail => guardrail.node.children.find(child => child instanceof CfnGuardrail)!.addPropertyOverride('BlockedInputMessaging', 'No.'),
+    ],
+    [
+      'gets a second content filter',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => guardrail.addContentFilter(contentFilter(bedrock.ContentFilterType.HATE)),
+    ],
+    [
+      'gets a second denied topic',
+      { deniedTopics: [topic('investments')] },
+      guardrail => guardrail.addDeniedTopicFilter(topic('medication')),
+    ],
+    [
+      'gets a second PII filter',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => guardrail.addPIIFilter(piiFilter(bedrock.GeneralPIIType.EMAIL)),
+    ],
+    [
+      'gets a second regex filter',
+      { regexFilters: [regexFilter('ticket')] },
+      guardrail => guardrail.addRegexFilter(regexFilter('invoice')),
+    ],
+    [
+      'gets a second word filter',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => guardrail.addWordFilter({ text: 'second' }),
+    ],
+    [
+      // The library has one managed word list, and accepts it twice.
+      'gets a second managed word list',
+      { managedWordListFilters: [{ type: bedrock.ManagedWordFilterType.PROFANITY }] },
+      guardrail => guardrail.addManagedWordListFilter({ type: bedrock.ManagedWordFilterType.PROFANITY }),
+    ],
+    [
+      'gets a second contextual grounding filter',
+      { contextualGroundingFilters: [groundingFilter(bedrock.ContextualGroundingFilterType.GROUNDING)] },
+      guardrail => guardrail.addContextualGroundingFilter(groundingFilter(bedrock.ContextualGroundingFilterType.RELEVANCE)),
+    ],
+    // Words and managed word lists share a policy, as regex and PII filters do. Once the
+    // policy is rendered, the empty list of the pair is kept as well.
+    [
+      'gets its first word filter beside a managed word list',
+      { managedWordListFilters: [{ type: bedrock.ManagedWordFilterType.PROFANITY }] },
+      guardrail => guardrail.addWordFilter({ text: 'first' }),
+    ],
+    [
+      'gets its first managed word list beside a word filter',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => guardrail.addManagedWordListFilter({ type: bedrock.ManagedWordFilterType.PROFANITY }),
+    ],
+    [
+      'gets its first regex filter beside a PII filter',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => guardrail.addRegexFilter(regexFilter('ticket')),
+    ],
+    [
+      'gets its first PII filter beside a regex filter',
+      { regexFilters: [regexFilter('ticket')] },
+      guardrail => guardrail.addPIIFilter(piiFilter(bedrock.GeneralPIIType.ADDRESS)),
+    ],
+    // No method of the construct makes the changes below: they are written to the object
+    // that the caller passed in, or to a member that TypeScript declares readonly.
+    [
+      'has one of its filters changed in place',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => Object.assign(guardrail.wordFilters[0], { text: 'other' }),
+    ],
+    [
+      'has the type of its PII filter changed in place',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => Object.assign(guardrail.piiFilters[0], { type: bedrock.GeneralPIIType.EMAIL }),
+    ],
+    [
+      'has its cross-Region profile changed in place',
+      { crossRegionConfig: { guardrailProfileArn: guardrailProfile('us') } },
+      guardrail => Object.assign(guardrail.crossRegionConfig!, { guardrailProfileArn: guardrailProfile('eu') }),
+    ],
+    [
+      'has its list of content filters replaced',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => Object.assign(guardrail, { contentFilters: [contentFilter(bedrock.ContentFilterType.HATE)] }),
+    ],
+    [
+      'has the tier of its content filters changed',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => Object.assign(guardrail, { contentFiltersTierConfig: bedrock.TierConfig.STANDARD }),
+    ],
+    [
+      'has the tier of its denied topics changed',
+      { deniedTopics: [topic('investments')] },
+      guardrail => Object.assign(guardrail, { topicsTierConfig: bedrock.TierConfig.STANDARD }),
+    ],
+  ])('fails the synthesis when the guardrail %s after its version was published', (_case, configured, change) => {
+    const stack = new Stack(new App(), 'Stack');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', { guardrailName: 'input', ...configured });
+    publishGuardrailVersion(guardrail, 'Initial version');
+    change(guardrail);
+    expect(() => Template.fromStack(stack)).toThrow('it was changed after publishGuardrailVersion()');
+  });
+
+  // The function compares the ten members that the alpha library renders the guardrail's
+  // properties from. A later version of the library that renders from one more can keep its
+  // first rendering of that one as well, and no test above would fail. This one fails when
+  // the new member is a list, or is read by a `generateCfn...` method as these ten are: name
+  // it in `sources` of the function, give it a row in the table above, and add it here.
+  test('knows the members that the alpha construct renders the properties from', () => {
+    const guardrail = new bedrock.Guardrail(new Stack(new App(), 'Stack'), 'InputGuardrail', { guardrailName: 'input' });
+    const members = new Set<string>();
+    // What its `generateCfn...` methods read. The exported class is the one that its decorator
+    // returns, so the methods are further up. In their text, `this.generateCfn...` is a call
+    // of another of them, and no member.
+    for (let proto = Object.getPrototypeOf(guardrail); proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+      for (const method of Object.getOwnPropertyNames(proto).filter(name => name.startsWith('generateCfn'))) {
+        for (const [, member] of String(proto[method]).matchAll(/\bthis\.(?!generateCfn)(\w+)/g)) members.add(member);
+      }
+    }
+    // And every list that the construct holds, whichever way a later version renders it.
+    for (const [member, value] of Object.entries(guardrail)) if (Array.isArray(value)) members.add(member);
+    expect([...members].sort()).toEqual([
+      'contentFilters', 'contentFiltersTierConfig', 'contextualGroundingFilters', 'crossRegionConfig', 'deniedTopics',
+      'managedWordListFilters', 'piiFilters', 'regexFilters', 'topicsTierConfig', 'wordFilters',
+    ]);
   });
 });
 
