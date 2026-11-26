@@ -32,7 +32,6 @@ concurrency:
 jobs:
   build:
     permissions:
-      actions: write # upload-artifact when self-mutation is detected
       contents: read
     # A hung build must not hold a runner for the 360-minute default. The longest
     # of 194 recorded jobs took 27 minutes (on one jest worker), and the merge
