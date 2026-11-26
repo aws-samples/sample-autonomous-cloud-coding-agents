@@ -161,27 +161,30 @@ describe('repo onboard/offboard commands', () => {
     );
   });
 
-  test('repo onboard passes the deployment, and each flag as its RepoTable column', async () => {
-    await makeRepoCommand().parseAsync([
-      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
-      '--compute-type', 'agentcore',
-      '--runtime-arn', 'arn:runtime',
-      '--model', ' global.anthropic.claude-opus-5-5 ',
-      '--token-secret-arn', 'arn:secret',
-      '--max-turns', '50',
-      '--poll-interval', '1000',
-    ]);
+  test.each([
+    [['--compute-type', ' ecs '], { compute_type: 'ecs' }, []],
+    [['--runtime-arn', ' arn:runtime '], { runtime_arn: 'arn:runtime' }, []],
+    [['--model', ' global.anthropic.claude-opus-5-5 '], { model_id: 'global.anthropic.claude-opus-5-5' }, []],
+    [['--token-secret-arn', ' arn:secret '], { github_token_secret_arn: 'arn:secret' }, []],
+    [['--max-turns', '1'], { max_turns: 1 }, []],
+    [['--max-turns', '500'], { max_turns: 500 }, []],
+    [['--poll-interval', '0'], { poll_interval_ms: 0 }, []],
+    [
+      ['--compute-type', 'agentcore', '--runtime-arn', 'arn:runtime', '--token-secret-arn', 'arn:secret', '--max-turns', '50', '--poll-interval', '1000'],
+      { compute_type: 'agentcore', runtime_arn: 'arn:runtime', github_token_secret_arn: 'arn:secret', max_turns: 50, poll_interval_ms: 1000 },
+      [],
+    ],
+    // A column without a flag can still be removed.
+    [['--unset', 'mcp_servers', '--unset', 'cedar_policies'], {}, ['mcp_servers', 'cedar_policies']],
+    // onboardRepo refuses a column that is both set and unset; the command passes both on.
+    [['--unset', 'model_id', '--model', 'global.anthropic.claude-opus-5-5'], { model_id: 'global.anthropic.claude-opus-5-5' }, ['model_id']],
+  ])('repo onboard %j passes the deployment, set %j and unset %j', async (flags, set, unset) => {
+    await makeRepoCommand().parseAsync(['node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', ...flags]);
 
-    expect((onboardRepo as jest.Mock).mock.calls[0][3]).toEqual({
+    expect((onboardRepo as jest.Mock).mock.calls[0][3]).toStrictEqual({
       deployment: { stackName: 'backgroundagent-dev', computeSubstrate: null, computeDeploymentMode: null, computeTypes: null },
-      set: {
-        compute_type: 'agentcore',
-        runtime_arn: 'arn:runtime',
-        model_id: 'global.anthropic.claude-opus-5-5',
-        github_token_secret_arn: 'arn:secret',
-        max_turns: 50,
-        poll_interval_ms: 1000,
-      },
+      set,
+      unset,
     });
   });
 
@@ -193,6 +196,49 @@ describe('repo onboard/offboard commands', () => {
 
     const { set } = (onboardRepo as jest.Mock).mock.calls[0][3];
     expect(Object.values(set).filter((value) => value !== undefined)).toEqual([]);
+  });
+
+  const COMPUTE_TYPE_REFUSAL = "--compute-type must be 'agentcore', 'ecs', or 'lambda-microvm'.";
+  const MAX_TURNS_REFUSAL = '--max-turns must be an integer between 1 and 500 (use --unset max_turns for the platform default).';
+  const POLL_INTERVAL_REFUSAL = '--poll-interval must be a whole number of milliseconds.';
+  const COLUMNS = 'compute_type, runtime_arn, model_id, github_token_secret_arn, max_turns, poll_interval_ms, max_budget_usd, '
+    + 'memory_token_budget, approval_gate_cap, build_command, lint_command, system_prompt_overrides, cedar_policies, mcp_servers, '
+    + 'cedar_policy_modules, skills';
+
+  test.each([
+    ['--compute-type', '', COMPUTE_TYPE_REFUSAL],
+    ['--compute-type', ' ', COMPUTE_TYPE_REFUSAL],
+    ['--max-turns', '0', MAX_TURNS_REFUSAL],
+    ['--max-turns', '501', MAX_TURNS_REFUSAL],
+    ['--max-turns', '12abc', MAX_TURNS_REFUSAL],
+    ['--max-turns', '0x10', MAX_TURNS_REFUSAL],
+    ['--max-turns', '1e2', MAX_TURNS_REFUSAL],
+    ['--max-turns', '+5', MAX_TURNS_REFUSAL],
+    ['--max-turns', '1.5', MAX_TURNS_REFUSAL],
+    ['--max-turns', '', MAX_TURNS_REFUSAL],
+    ['--max-turns', ' 50 ', MAX_TURNS_REFUSAL],
+    ['--poll-interval', '12abc', POLL_INTERVAL_REFUSAL],
+    ['--poll-interval', '-1', POLL_INTERVAL_REFUSAL],
+    ['--poll-interval', '9007199254740993', POLL_INTERVAL_REFUSAL],
+    ['--unset', 'nope', `--unset 'nope' is not a per-repo setting. Valid names: ${COLUMNS}.`],
+    ['--unset', 'toString', "--unset 'toString' is not a per-repo setting."],
+  ])('repo onboard refuses %s %p before it reads the stack', async (flag, value, message) => {
+    await expect(makeRepoCommand().parseAsync(['node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', flag, value]))
+      .rejects.toThrow(message);
+
+    expect(getStackOutputs).not.toHaveBeenCalled();
+    expect(onboardRepo).not.toHaveBeenCalled();
+  });
+
+  test('repo onboard --help names the six setting flags and every column that --unset accepts', () => {
+    const help = makeRepoCommand().commands.find((command) => command.name() === 'onboard')?.helpInformation();
+
+    for (const name of [
+      '--compute-type <type>', '--runtime-arn <arn>', '--model <model-id>', '--token-secret-arn <arn>', '--max-turns <n>',
+      '--poll-interval <ms>', '--unset <column>', ...COLUMNS.split(', '),
+    ]) {
+      expect(help).toContain(name);
+    }
   });
 
   test('reads BedrockGeoRegion and BedrockModelIds by their exact output names', async () => {

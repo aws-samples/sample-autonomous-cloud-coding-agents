@@ -272,6 +272,35 @@ describe('buildRepoShowLines', () => {
       .toBe('1 policy/policies (per-blueprint override)');
   });
 
+  test('shows each stored setting that has no platform default, and no setting twice', () => {
+    const stored = {
+      max_turns: 50,
+      build_command: 'npm run build',
+      system_prompt_overrides: 'Prefer small commits.',
+      mcp_servers: ['registry://mcp_server/acme/a@^1.0.0', 'registry://mcp_server/acme/b@^2.0.0'],
+      egress_allowlist: ['example.com'],
+    };
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', ...stored, skills: [], github_token_secret_arn: BLUEPRINT_ARN },
+      PLATFORM,
+    );
+    const lines = buildRepoShowLines(display);
+    const text = (key: string) => lines.find((l) => l.key === key)?.text;
+
+    expect(display.blueprint_overrides).toEqual({
+      ...stored,
+      github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:****-XyZ123',
+    });
+    expect(text('build_command')).toBe('npm run build (per-blueprint override)');
+    expect(text('system_prompt_overrides')).toBe('Prefer small commits. (per-blueprint override)');
+    expect(text('mcp_servers'))
+      .toBe('registry://mcp_server/acme/a@^1.0.0, registry://mcp_server/acme/b@^2.0.0 (per-blueprint override)');
+    expect(text('egress_allowlist')).toBe('example.com (per-blueprint override)');
+    expect(text('skills')).toBeUndefined();
+    const keys = lines.map((l) => l.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
   test('warns when platform stack output is missing', () => {
     const display = formatRepoConfigForDisplay(
       { repo: 'awslabs/agent-plugins', status: 'active' },

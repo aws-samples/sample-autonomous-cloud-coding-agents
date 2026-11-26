@@ -27,6 +27,7 @@ import type { GithubTokenSecretSource } from './github-token';
 import { geoPrefixOf } from './model-id';
 import { redactSecretArn } from './operator-context';
 import { RepoConfigRow } from './repo-lookup';
+import { REPO_SETTINGS } from './repo-settings';
 
 export type FieldSource = 'blueprint' | 'platform';
 
@@ -143,11 +144,7 @@ export function formatRepoConfigForDisplay(
   fieldSources.github_token_secret_arn = usesBlueprintToken ? 'blueprint' : 'platform';
 
   const blueprintOverrides: Record<string, unknown> = {};
-  for (const key of [
-    'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd', 'memory_token_budget',
-    'poll_interval_ms', 'approval_gate_cap', 'system_prompt_overrides',
-    'egress_allowlist', 'cedar_policies', 'github_token_secret_arn',
-  ] as const) {
+  for (const key of [...Object.keys(REPO_SETTINGS), 'egress_allowlist'] as (keyof RepoConfigRow)[]) {
     const value = config[key];
     if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0)) {
       // `repo show` (text and JSON) must never echo a raw secret ARN — redact
@@ -262,25 +259,12 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
     lines.push({ key: 'configuration_error', text: display.configuration_error });
   }
 
-  if (typeof display.blueprint_overrides.system_prompt_overrides === 'string') {
-    lines.push({
-      key: 'system_prompt_overrides',
-      text: `${display.blueprint_overrides.system_prompt_overrides} (per-blueprint override)`,
-    });
-  }
-  const egress = display.blueprint_overrides.egress_allowlist;
-  if (Array.isArray(egress) && egress.length > 0) {
-    lines.push({
-      key: 'egress_allowlist',
-      text: `${egress.join(', ')} (per-blueprint override)`,
-    });
-  }
-  const cedar = display.blueprint_overrides.cedar_policies;
-  if (Array.isArray(cedar) && cedar.length > 0) {
-    lines.push({
-      key: 'cedar_policies',
-      text: `${cedar.length} policy/policies (per-blueprint override)`,
-    });
+  // The other settings have no platform default: each gets a line only when the row holds it.
+  for (const [key, value] of Object.entries(display.blueprint_overrides)) {
+    if (key === 'github_token_secret_arn' || lines.some((line) => line.key === key)) continue;
+    const text = !Array.isArray(value) ? String(value)
+      : key === 'cedar_policies' ? `${value.length} policy/policies` : value.join(', ');
+    lines.push({ key, text: `${text} (per-blueprint override)` });
   }
 
   lines.push({
