@@ -1538,6 +1538,7 @@ describe('jira-webhook-processor handler', () => {
       bedrockSendMock.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
 
       await handler(eventWith(issue()));
+      expect(bedrockSendMock.mock.calls[0][0].input.content[0].text.text).toContain('SSN 123-45-6789');
 
       expect(createTaskCoreMock).toHaveBeenCalled();
       expect(reportIssueFailureMock).not.toHaveBeenCalled();

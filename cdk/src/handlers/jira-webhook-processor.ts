@@ -18,7 +18,7 @@
  */
 
 import * as crypto from 'crypto';
-import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
@@ -70,10 +70,17 @@ import {
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
 import { prNumberFromTask } from './shared/task-pr-number';
+import {
+  appendAdvisorySection,
+  buildCreateTaskFailureMessage,
+  COMMENT_TRUNCATION_NOTICE,
+  renderCommentSection,
+  screenAdvisoryOrDrop,
+} from './shared/tracker-intake';
+import { DEFAULT_LABEL_FILTER } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
-import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
-import { emitWebhookScreeningFailedMetric } from './shared/webhook-screening-metric';
+import { MAX_IDEMPOTENCY_KEY_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = makeDocClient();
@@ -85,11 +92,7 @@ const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
 const USER_CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
-const DEFAULT_LABEL_FILTER = 'bgagent';
 const COMMENT_ACK_TTL_SECONDS = 86_400;
-
-/** Max length of the idempotency key (matches validation's IDEMPOTENCY_KEY_PATTERN). */
-const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
 // Attachment enrichment (#577). The processor downloads Jira `media` file
 // attachments, screens them through the Bedrock Guardrail, and uploads the
@@ -500,7 +503,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Context enrichment (#577). Both need the workspace registry to resolve an
   // OAuth token. Comments are fail-open (advisory); attachments are
   // fail-closed (a selected-but-unscreenable attachment rejects the task).
-  let comments: RenderedComment[] = [];
+  let comments: readonly RenderedComment[] = [];
   let preScreenedAttachments: PassedAttachmentRecord[] = [];
   if (WORKSPACE_REGISTRY_TABLE && !existingOrchestration) {
     const tenantCtx = { cloudId, registryTableName: WORKSPACE_REGISTRY_TABLE };
@@ -512,7 +515,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // reporter's task. Screen the rendered comment section on its own and drop
     // it (not the task) if the guardrail intervenes. (createTaskCore separately
     // screens the description, which the reporter authored.)
-    comments = await screenCommentsOrDrop(fetchedComments, issue.key, cloudId);
+    comments = await screenAdvisoryOrDrop(fetchedComments, renderCommentSection, {
+      guardrail: screeningConfig,
+      what: 'Jira comments',
+      metricSource: 'jira-comments',
+      logFields: { issue_key: issue.key, jira_cloud_id: cloudId },
+    });
 
     const rawAttachments = issue.fields?.attachment;
     if (Array.isArray(rawAttachments) && rawAttachments.length > 0) {
@@ -1434,40 +1442,6 @@ function tokenizeLabelString(value: string | null | undefined): string[] {
     .filter(Boolean);
 }
 
-/**
- * Translate a `createTaskCore` non-201 response into a user-facing Jira
- * comment. Mirrors the Linear-side helper.
- */
-function buildCreateTaskFailureMessage(
-  statusCode: number,
-  rawBody: string,
-  retryHint = 'Please re-apply the trigger label in a few minutes.',
-): string {
-  let detail = '';
-  try {
-    if (rawBody) {
-      const parsed = JSON.parse(rawBody) as { error?: { code?: string; message?: string } };
-      const message = parsed.error?.message;
-      if (typeof message === 'string' && message.trim()) {
-        detail = message.trim();
-      }
-    }
-  } catch {
-    // fall through to the generic message
-  }
-
-  if (statusCode === 400 && detail) {
-    return `❌ ABCA couldn't accept this task: ${detail}`;
-  }
-  if (statusCode === 503) {
-    return `❌ ABCA is temporarily unavailable (status ${statusCode}). ${retryHint}`;
-  }
-  if (detail) {
-    return `❌ ABCA couldn't create this task (status ${statusCode}): ${detail}`;
-  }
-  return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
-}
-
 function buildTaskDescription(
   issue: NonNullable<JiraIssueEvent['issue']>,
   descriptionMarkdown: string,
@@ -1493,91 +1467,7 @@ function buildTaskDescription(
   // length check into a hard rejection. Only append what fits the remaining
   // budget (reserving a small margin), truncating the section if needed.
   if (comments.length === 0) return core;
-  const commentSection = renderCommentSection(comments);
-  const separator = '\n';
-  const budget = MAX_TASK_DESCRIPTION_LENGTH - core.length - separator.length;
-  if (budget <= 0) return core; // description already fills the budget — drop comments
-  const fitted = commentSection.length <= budget
-    ? commentSection
-    : truncateCommentSection(commentSection, budget);
-  return fitted ? core + separator + fitted : core;
-}
-
-/** Notice appended when the comment section is truncated to fit the budget. */
-const COMMENT_TRUNCATION_NOTICE = '\n\n_(recent comments truncated)_';
-
-function renderCommentSection(comments: readonly RenderedComment[]): string {
-  const lines: string[] = ['', '## Recent comments'];
-  for (const c of comments) {
-    lines.push('');
-    const attribution = c.createdAt ? `**${c.author}** (${c.createdAt}):` : `**${c.author}**:`;
-    lines.push(attribution);
-    lines.push(c.markdown);
-  }
-  return lines.join('\n');
-}
-
-/**
- * Trim a rendered comment section to at most `budget` characters, leaving room
- * for a truncation notice. Returns '' if even the heading + notice can't fit,
- * so the caller cleanly drops the section.
- */
-function truncateCommentSection(section: string, budget: number): string {
-  const room = budget - COMMENT_TRUNCATION_NOTICE.length;
-  if (room <= 0) return '';
-  return section.slice(0, room) + COMMENT_TRUNCATION_NOTICE;
-}
-
-/**
- * Screen the rendered comment block through the Bedrock Guardrail on its own,
- * so third-party comment content that trips the policy is DROPPED (fail-open)
- * rather than gating the reporter's task. Returns the comments unchanged when
- * they pass, and `[]` when the guardrail intervenes or is unavailable — the
- * task still proceeds with the reporter-authored summary/description (which
- * createTaskCore screens separately). This keeps the comment-enrichment
- * contract fail-open end to end (issue #577 review, item 4).
- */
-async function screenCommentsOrDrop(
-  comments: RenderedComment[],
-  issueKey: string,
-  cloudId: string,
-): Promise<RenderedComment[]> {
-  if (comments.length === 0) return comments;
-  if (!bedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
-    // No guardrail configured — drop unscreened third-party text rather than
-    // route it, unscreened, into the agent context.
-    logger.warn('Dropping Jira comments: guardrail not configured to screen them', {
-      issue_key: issueKey,
-      jira_cloud_id: cloudId,
-    });
-    return [];
-  }
-  const text = renderCommentSection(comments);
-  try {
-    const result = await bedrockClient.send(new ApplyGuardrailCommand({
-      guardrailIdentifier: GUARDRAIL_ID,
-      guardrailVersion: GUARDRAIL_VERSION,
-      source: 'INPUT',
-      content: [{ text: { text } }],
-    }));
-    if (result.action === 'GUARDRAIL_INTERVENED') {
-      logger.warn('Dropping Jira comments: blocked by content policy (task still proceeds)', {
-        issue_key: issueKey,
-        jira_cloud_id: cloudId,
-      });
-      return [];
-    }
-    return comments;
-  } catch (err) {
-    // Fail-open on a screening outage too — comments are advisory.
-    emitWebhookScreeningFailedMetric('jira-comments');
-    logger.warn('Dropping Jira comments: screening unavailable (task still proceeds)', {
-      issue_key: issueKey,
-      jira_cloud_id: cloudId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return []; // nosemgrep: ts-silent-success-masking -- advisory enrichment that cannot be screened is dropped and the task proceeds (ADR-026)
-  }
+  return appendAdvisorySection(core, renderCommentSection(comments), COMMENT_TRUNCATION_NOTICE);
 }
 
 /**

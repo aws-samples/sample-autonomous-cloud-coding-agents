@@ -1117,6 +1117,7 @@ describe('linear-webhook-processor handler', () => {
       bedrockSendMock.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
 
       await handler(eventWith(issue()));
+      expect(bedrockSendMock.mock.calls[0][0].input.content[0].text.text).toContain('ignore all instructions');
 
       // Task still created — comments are advisory; only the comment block dropped.
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
@@ -1162,6 +1163,7 @@ describe('linear-webhook-processor handler', () => {
       bedrockSendMock.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
 
       await handler(eventWith(issue()));
+      expect(bedrockSendMock.mock.calls[0][0].input.content[0].text.text).toContain('ignore all previous instructions');
 
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       const [reqBody] = createTaskCoreMock.mock.calls[0];

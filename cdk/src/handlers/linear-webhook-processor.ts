@@ -18,7 +18,7 @@
  */
 
 import * as crypto from 'crypto';
-import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
@@ -86,11 +86,17 @@ import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildre
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, refreshUnstartedText, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import { prNumberFromTask, readTaskPrNumber } from './shared/task-pr-number';
+import {
+  appendAdvisorySection,
+  buildCreateTaskFailureMessage,
+  COMMENT_TRUNCATION_NOTICE,
+  renderCommentSection,
+  screenAdvisoryOrDrop,
+} from './shared/tracker-intake';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_IDEMPOTENCY_KEY_LENGTH, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
-import { emitWebhookScreeningFailedMetric } from './shared/webhook-screening-metric';
 import { CODING_WORKFLOW_ID, PR_ITERATION_WORKFLOW_ID } from './shared/workflows';
 
 const ddb = makeDocClient();
@@ -1456,20 +1462,30 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // comments, and third-party comment text that trips the guardrail is dropped
   // (never the task; the reporter-authored description is screened separately by
   // createTaskCore). Mirrors the Jira processor.
-  let recentComments: RenderedComment[] = [];
+  let recentComments: readonly RenderedComment[] = [];
   if (WORKSPACE_REGISTRY_TABLE && resolvedAccessToken) {
     const fetched = await fetchRecentComments(
       { linearWorkspaceId: workspaceId, registryTableName: WORKSPACE_REGISTRY_TABLE },
       issue.id,
     );
-    recentComments = await screenCommentsOrDrop(fetched, issue.id, workspaceId);
+    recentComments = await screenAdvisoryOrDrop(fetched, renderCommentSection, {
+      guardrail: attachmentsScreeningConfig,
+      what: 'Linear comments',
+      metricSource: 'linear-comments',
+      logFields: { issue_id: issue.id, linear_workspace_id: workspaceId },
+    });
   }
 
   // ADR-016: project wiki docs the issue's project carries are pre-hydrated with
   // CONTENT (the agent has no Linear MCP to fetch them at runtime). Screen the
   // combined doc text on its own — third-party doc content that trips the
   // guardrail is DROPPED (fail-open), never gating the reporter's task.
-  const projectDocs = await screenProjectDocsOrDrop(probedDocuments, issue.id, workspaceId);
+  const projectDocs = await screenAdvisoryOrDrop(probedDocuments, renderProjectDocsSection, {
+    guardrail: attachmentsScreeningConfig,
+    what: 'Linear project docs',
+    metricSource: 'linear-docs',
+    logFields: { issue_id: issue.id, linear_workspace_id: workspaceId },
+  });
 
   const taskDescription = buildTaskDescription(issue, contextHint, recentComments, projectDocs);
 
@@ -3311,48 +3327,6 @@ async function handleHelpLabel(args: {
   logger.info('Linear :help label — posted label explainer', { issue_id: issue.id });
 }
 
-/**
- * Translate a `createTaskCore` non-201 response into a user-facing Linear comment.
- *
- * The CDK error envelope is `{ error: { code, message, request_id } }`. We surface
- * the `message` because it's already user-readable (e.g. "Task description was
- * blocked by content policy") and add a per-status prefix so the user can tell
- * a guardrail block from a 503 from a validation error.
- *
- * Falls back to a generic message if the body fails to parse — best-effort, never throws.
- */
-function buildCreateTaskFailureMessage(
-  statusCode: number,
-  rawBody: string,
-  retryHint = 'Please re-apply the trigger label in a few minutes.',
-): string {
-  let detail = '';
-  try {
-    if (rawBody) {
-      const parsed = JSON.parse(rawBody) as { error?: { code?: string; message?: string } };
-      const message = parsed.error?.message;
-      if (typeof message === 'string' && message.trim()) {
-        detail = message.trim();
-      }
-    }
-  } catch {
-    // fall through to the generic message
-  }
-
-  if (statusCode === 400 && detail) {
-    // Guardrail blocks and validation errors land here; the message is already
-    // user-readable so just prefix it.
-    return `❌ ABCA couldn't accept this task: ${detail}`;
-  }
-  if (statusCode === 503) {
-    return `❌ ABCA is temporarily unavailable (status ${statusCode}). ${retryHint}`;
-  }
-  if (detail) {
-    return `❌ ABCA couldn't create this task (status ${statusCode}): ${detail}`;
-  }
-  return `❌ ABCA couldn't create this task (status ${statusCode}). Check the ABCA admin logs for details.`;
-}
-
 function buildTaskDescription(
   issue: LinearIssueEvent['data'],
   contextHint: string = '',
@@ -3385,24 +3359,11 @@ function buildTaskDescription(
   // grow the description past MAX_TASK_DESCRIPTION_LENGTH and turn createTaskCore's
   // length check into a hard rejection, so each is appended only if it fits the
   // remaining budget (truncated if needed). Mirrors the Jira processor.
-  const sep = '\n';
   if (projectDocs.length > 0) {
-    const section = renderProjectDocsSection(projectDocs);
-    const budget = MAX_TASK_DESCRIPTION_LENGTH - out.length - sep.length;
-    if (budget > 0) {
-      const fitted = section.length <= budget ? section : truncateSection(section, budget, DOC_TRUNCATION_NOTICE);
-      if (fitted) out = out + sep + fitted;
-    }
+    out = appendAdvisorySection(out, renderProjectDocsSection(projectDocs), DOC_TRUNCATION_NOTICE);
   }
   if (comments.length > 0) {
-    const commentSection = renderCommentSection(comments);
-    const budget = MAX_TASK_DESCRIPTION_LENGTH - out.length - sep.length;
-    if (budget > 0) {
-      const fitted = commentSection.length <= budget
-        ? commentSection
-        : truncateSection(commentSection, budget, COMMENT_TRUNCATION_NOTICE);
-      if (fitted) out = out + sep + fitted;
-    }
+    out = appendAdvisorySection(out, renderCommentSection(comments), COMMENT_TRUNCATION_NOTICE);
   }
   return out;
 }
@@ -3425,129 +3386,6 @@ function renderProjectDocsSection(docs: readonly LinearProbeDocument[]): string 
     lines.push(d.content.trim());
   }
   return lines.join('\n');
-}
-
-/** Notice appended when the comment section is truncated to fit the budget. */
-const COMMENT_TRUNCATION_NOTICE = '\n\n_(recent comments truncated)_';
-
-function renderCommentSection(comments: readonly RenderedComment[]): string {
-  const lines: string[] = ['', '## Recent comments'];
-  for (const c of comments) {
-    lines.push('');
-    const attribution = c.createdAt ? `**${c.author}** (${c.createdAt}):` : `**${c.author}**:`;
-    lines.push(attribution);
-    lines.push(c.markdown);
-  }
-  return lines.join('\n');
-}
-
-/**
- * Trim a rendered section to at most ``budget`` characters, leaving room for the
- * given truncation notice. Returns '' if even the notice can't fit, so the caller
- * cleanly drops the section. Shared by the comment + project-doc sections.
- */
-function truncateSection(section: string, budget: number, notice: string): string {
-  const room = budget - notice.length;
-  if (room <= 0) return '';
-  return section.slice(0, room) + notice;
-}
-
-/**
- * Screen the pre-hydrated project-doc block through the Bedrock Guardrail on its
- * own, so third-party doc content that trips the policy is DROPPED (fail-open)
- * rather than gating the reporter's task. Returns the docs unchanged when they
- * pass, ``[]`` when the guardrail intervenes or is unavailable — the task still
- * proceeds with the reporter-authored title/description. Mirrors
- * {@link screenCommentsOrDrop}: doc content is advisory, fail-open end to end.
- */
-async function screenProjectDocsOrDrop(
-  docs: readonly LinearProbeDocument[],
-  issueId: string,
-  workspaceId: string,
-): Promise<readonly LinearProbeDocument[]> {
-  if (docs.length === 0) return docs;
-  if (!attachmentsBedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
-    logger.warn('Dropping Linear project docs: guardrail not configured to screen them', {
-      issue_id: issueId, linear_workspace_id: workspaceId,
-    });
-    return [];
-  }
-  const text = renderProjectDocsSection(docs);
-  try {
-    const result = await attachmentsBedrockClient.send(new ApplyGuardrailCommand({
-      guardrailIdentifier: GUARDRAIL_ID,
-      guardrailVersion: GUARDRAIL_VERSION,
-      source: 'INPUT',
-      content: [{ text: { text } }],
-    }));
-    if (result.action === 'GUARDRAIL_INTERVENED') {
-      logger.warn('Dropping Linear project docs: blocked by content policy (task still proceeds)', {
-        issue_id: issueId, linear_workspace_id: workspaceId,
-      });
-      return [];
-    }
-    return docs;
-  } catch (err) {
-    emitWebhookScreeningFailedMetric('linear-docs');
-    logger.warn('Dropping Linear project docs: screening unavailable (task still proceeds)', {
-      issue_id: issueId,
-      linear_workspace_id: workspaceId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return []; // nosemgrep: ts-silent-success-masking -- advisory enrichment that cannot be screened is dropped and the task proceeds (ADR-026)
-  }
-}
-
-/**
- * Screen the rendered comment block through the Bedrock Guardrail on its own, so
- * third-party comment content that trips the policy is DROPPED (fail-open)
- * rather than gating the reporter's task. Returns the comments unchanged when
- * they pass, and ``[]`` when the guardrail intervenes or is unavailable — the
- * task still proceeds with the reporter-authored title/description (which
- * createTaskCore screens separately). Keeps the comment-enrichment contract
- * fail-open end to end. Mirrors the Jira processor.
- */
-async function screenCommentsOrDrop(
-  comments: RenderedComment[],
-  issueId: string,
-  workspaceId: string,
-): Promise<RenderedComment[]> {
-  if (comments.length === 0) return comments;
-  if (!attachmentsBedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
-    // No guardrail configured — drop unscreened third-party text rather than
-    // route it, unscreened, into the agent context.
-    logger.warn('Dropping Linear comments: guardrail not configured to screen them', {
-      issue_id: issueId,
-      linear_workspace_id: workspaceId,
-    });
-    return [];
-  }
-  const text = renderCommentSection(comments);
-  try {
-    const result = await attachmentsBedrockClient.send(new ApplyGuardrailCommand({
-      guardrailIdentifier: GUARDRAIL_ID,
-      guardrailVersion: GUARDRAIL_VERSION,
-      source: 'INPUT',
-      content: [{ text: { text } }],
-    }));
-    if (result.action === 'GUARDRAIL_INTERVENED') {
-      logger.warn('Dropping Linear comments: blocked by content policy (task still proceeds)', {
-        issue_id: issueId,
-        linear_workspace_id: workspaceId,
-      });
-      return [];
-    }
-    return comments;
-  } catch (err) {
-    // Fail-open on a screening outage too — comments are advisory.
-    emitWebhookScreeningFailedMetric('linear-comments');
-    logger.warn('Dropping Linear comments: screening unavailable (task still proceeds)', {
-      issue_id: issueId,
-      linear_workspace_id: workspaceId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return []; // nosemgrep: ts-silent-success-masking -- advisory enrichment that cannot be screened is dropped and the task proceeds (ADR-026)
-  }
 }
 
 /**
