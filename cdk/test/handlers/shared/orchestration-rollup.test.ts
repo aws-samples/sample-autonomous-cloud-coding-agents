@@ -17,24 +17,12 @@
  *  SOFTWARE.
  */
 
-const slackFetchMock = jest.fn();
-const slackFetchTsMock = jest.fn();
-jest.mock('../../../src/handlers/shared/slack-api', () => ({
-  slackFetch: (...a: unknown[]) => slackFetchMock(...a),
-  slackFetchTs: (...a: unknown[]) => slackFetchTsMock(...a),
-}));
-jest.mock('../../../src/handlers/shared/slack-verify', () => ({
-  SLACK_SECRET_PREFIX: 'bgagent/slack/',
-  getSlackSecret: async () => 'xoxb-token',
-}));
-
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
 import { LOOKUP_ABSENT, isLookupFailure, lookupFound } from '../../../src/handlers/shared/lookup-result';
 import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { channelForSource, registerChannelFactory } from '../../../src/handlers/shared/orchestration-channel-factory';
-import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
 import {
   renderEpicPanel,
   buildPanelRows,
@@ -82,8 +70,6 @@ const row = (sub: string, status: string): OrchestrationChildRow => ({
 
 describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
   beforeEach(() => {
-    slackFetchMock.mockReset().mockResolvedValue(true);
-    slackFetchTsMock.mockReset().mockResolvedValue(lookupFound('1700000000.002'));
     channel = makeFakeChannel();
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
@@ -146,40 +132,13 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
     expect(channel.replaceIssueReaction).not.toHaveBeenCalled();
   });
 
-  test('the REAL Slack adapter drives the epic panel, with its omitted ops skipped', async () => {
-    // The engine claim under test: an unmodified rollup drives a genuinely
-    // different surface. Slack omits transitionState/revertState (no workflow
-    // state), so the capability guards must skip them and still deliver the
-    // panel — proving the abstraction on a real adapter, not a fake.
-    const slack = makeSlackChannel();
-    const id = await upsertEpicPanel({
-      channel: slack,
-      parent: { issueId: slackThreadRef('C1', '1700000000.001'), credentialsRef: 'T1' },
-      children: [row('a', 'succeeded')],
-      inProgress: false,
-      mirrorParentState: true, // asks for a state mirror Slack cannot do
-    });
-    // The panel landed...
-    expect(id).toEqual(lookupFound('1700000000.002'));
-    expect(slackFetchTsMock).toHaveBeenCalled();
-    // ...the ✅ marker went on the thread root...
-    const adds = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add');
-    expect((adds[0][2] as { name: string }).name).toBe('white_check_mark');
-    // ...and NOTHING attempted a state transition (there is no such Slack method).
-    const methods = [
-      ...slackFetchMock.mock.calls.map((c) => c[1]),
-      ...slackFetchTsMock.mock.calls.map((c) => c[1]),
-    ];
-    expect(methods.every((m) => typeof m === 'string' && m.startsWith('chat.') || String(m).startsWith('reactions.'))).toBe(true);
-  });
-
   test('a DOWNSTREAM surface the core never imports drives the panel end to end', async () => {
     // The extensibility claim, exercised rather than asserted about: this surface
     // exists only in this test, is resolved through the same registry lookup the
     // reconciler uses, and reaches the engine with no edit to the interface, the
-    // lookup, or the rollup. Slack proves the interface fits a non-tracker, but it
-    // ships in-tree — so it cannot show that nothing in the core has to know.
+    // lookup, or the rollup. It has reactions and no workflow state.
     const posted: Array<{ issue: string; body: string }> = [];
+    const replaceIssueReaction = jest.fn<Promise<boolean>, unknown[]>().mockResolvedValue(true);
     const unregister = registerChannelFactory('acme-tracker', (registryTable) => ({
       kind: 'acme-tracker',
       postComment: async () => null,
@@ -191,9 +150,8 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
         return { commentId: 'acme-panel-1' };
       },
       reportFailure: async () => undefined,
-      // Reactions supported; workflow state deliberately NOT — a third capability
-      // shape, different from both Linear (all of it) and Slack (none of it).
-      replaceIssueReaction: async () => true,
+      // No transitionState: the engine skips the transition it is asked for.
+      replaceIssueReaction,
     }));
     try {
       const channelFromRegistry = channelForSource('acme-tracker', { 'acme-tracker': 'AcmeRegistry' });
@@ -212,6 +170,8 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
       expect(posted[0].issue).toBe('acme-epic-1');
       // The panel body is the engine's own rendering — the surface supplied none of it.
       expect(posted[0].body).toContain('ABCA orchestration complete');
+      // The marker is applied although there is no workflow state to move.
+      expect(replaceIssueReaction).toHaveBeenCalledWith({ issueId: 'acme-epic-1', credentialsRef: 'acme-tenant-1' }, 'succeeded');
     } finally {
       unregister();
     }
