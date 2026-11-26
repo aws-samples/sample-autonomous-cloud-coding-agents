@@ -7,15 +7,15 @@ short summary below.
 **Three outcomes** (§2, §6.2). Each ``evaluate_tool_use`` call walks up to
 two Cedar evaluations interleaved with in-process caches:
 
-    1. Hard-deny Cedar eval (agent/policies/hard_deny.cedar + blueprint hard).
-       Absolute; no --pre-approve scope or blueprint disable can bypass.
+    1. Hard-deny Cedar eval (agent/policies/hard_deny.cedar + operator hard rules).
+       Absolute; no --pre-approve scope can bypass.
     2. Approval allowlist fast-path (tool_type, tool_group, bash_pattern,
        write_path, all_session scopes). Skips human prompt for pre-approved
        patterns.
     2.5 Recent-decision cache: same (tool_name, input_sha256) within 60s of a
         DENIED/TIMED_OUT outcome auto-denies. Session-scoped, cleared on
         container restart (§12.8).
-    3. Soft-deny Cedar eval (agent/policies/soft_deny.cedar + blueprint soft).
+    3. Soft-deny Cedar eval (agent/policies/soft_deny.cedar + operator soft rules).
        Match → REQUIRE_APPROVAL with merged annotations; rule-scope allowlist
        match → ALLOW; no match → fall through to step 4.
     4. Default ALLOW.
@@ -559,50 +559,35 @@ def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_Parse
     return rules
 
 
-def _route_operator_policies(
-    cedarpy_module, extra_policies: list[str], blueprint_policies: list[str]
-) -> tuple[list[str], list[str]]:
+def _route_operator_policies(cedarpy_module, entries: list[str]) -> tuple[list[str], list[str]]:
     """Keep each entry intact. Only entries without a tier or rule ID get a generated ID."""
     hard: list[str] = []
     soft: list[str] = []
     legacy_count = 0
-    for field_name, entries in (
-        ("extra_policies", extra_policies),
-        ("cedar_policies", blueprint_policies),
-    ):
-        for idx, text in enumerate(entries):
-            source = f"{field_name}[{idx}]"
-            try:
-                parsed = _parse_policy_set(cedarpy_module, text)
-            except ValueError as exc:
-                raise ValueError(f"{source}: {exc}") from exc
-            templates = parsed.get("templates", {}).values()
-            if templates and field_name == "cedar_policies":
-                raise ValueError(
-                    f"{source} contains an unbound Cedar template; use a static policy"
-                )
-            bodies = (*parsed.get("staticPolicies", {}).values(), *templates)
-            if not bodies:
-                raise ValueError(f"{source} must contain a Cedar policy")
-            annotations = [body.get("annotations", {}) for body in bodies]
-            tiers = {ann.get("tier") for ann in annotations}
-            if tiers == {None} and all("rule_id" not in ann for ann in annotations):
-                soft.append(f'@tier("soft")\n@rule_id("legacy_extra_{legacy_count}")\n{text}')
-                legacy_count += 1
-            elif field_name == "extra_policies":
-                raise ValueError(
-                    f"{source} already declares @tier or @rule_id; use blueprint_policies"
-                )
-            elif tiers == {"hard"}:
-                hard.append(text)
-            elif tiers == {"soft"}:
-                soft.append(text)
-            elif {"hard", "soft"} <= tiers:
-                raise ValueError(
-                    f"{source} declares both hard and soft tiers; use separate entries"
-                )
-            else:
-                raise ValueError(f'{source}: declare the tier ("hard" or "soft") on each rule')
+    for idx, text in enumerate(entries):
+        source = f"cedar_policies[{idx}]"
+        try:
+            parsed = _parse_policy_set(cedarpy_module, text)
+        except ValueError as exc:
+            raise ValueError(f"{source}: {exc}") from exc
+        if parsed.get("templates"):
+            raise ValueError(f"{source} contains an unbound Cedar template; use a static policy")
+        bodies = parsed.get("staticPolicies", {}).values()
+        if not bodies:
+            raise ValueError(f"{source} must contain a Cedar policy")
+        annotations = [body.get("annotations", {}) for body in bodies]
+        tiers = {ann.get("tier") for ann in annotations}
+        if tiers == {None} and all("rule_id" not in ann for ann in annotations):
+            soft.append(f'@tier("soft")\n@rule_id("legacy_extra_{legacy_count}")\n{text}')
+            legacy_count += 1
+        elif tiers == {"hard"}:
+            hard.append(text)
+        elif tiers == {"soft"}:
+            soft.append(text)
+        elif {"hard", "soft"} <= tiers:
+            raise ValueError(f"{source} declares both hard and soft tiers; use separate entries")
+        else:
+            raise ValueError(f'{source}: declare the tier ("hard" or "soft") on each rule')
     return hard, soft
 
 
@@ -739,12 +724,12 @@ class PolicyEngine:
     """Evaluate tool-use requests against Cedar policies with three outcomes.
 
     Construction loads the built-in hard_deny + soft_deny policy files,
-    concatenates any blueprint-provided rules (subject to 64 KB cap and
-    disable-list validation), probes a test authorization to catch syntax
-    errors early, and seeds the approval allowlist from ``initial_approvals``.
+    concatenates any blueprint-provided rules (subject to 64 KB cap),
+    probes a test authorization to catch syntax errors early, and seeds
+    the approval allowlist from ``initial_approvals``.
 
     Each ``blueprint_policies`` entry declares its tier in Cedar. Unannotated
-    entries and legacy ``extra_policies`` get generated soft rule IDs.
+    entries get generated soft rule IDs.
     """
 
     def __init__(
@@ -753,11 +738,7 @@ class PolicyEngine:
         repo: str,
         *,
         read_only: bool = False,
-        extra_policies: list[str] | None = None,
         blueprint_policies: list[str] | None = None,
-        blueprint_hard_policies: str | None = None,
-        blueprint_soft_policies: str | None = None,
-        blueprint_disable: list[str] | None = None,
         initial_approvals: list[str] | None = None,
         approval_gate_cap: int = DEFAULT_APPROVAL_GATE_CAP,
         initial_approval_gate_count: int = 0,
@@ -835,26 +816,16 @@ class PolicyEngine:
             raise RuntimeError(str(exc)) from exc
 
         # Cap all operator-authored bytes before asking Cedar to parse any of them.
-        operator_bytes = sum(
-            len(text.encode("utf-8"))
-            for text in (
-                blueprint_hard_policies or "",
-                blueprint_soft_policies or "",
-                *(extra_policies or []),
-                *(blueprint_policies or []),
-            )
-        )
+        operator_bytes = sum(len(text.encode("utf-8")) for text in blueprint_policies or [])
         if operator_bytes > POLICIES_MAX_BYTES:
             raise ValueError(
                 f"cedar_policies exceeds {POLICIES_MAX_BYTES // 1024} KB cap "
                 f"({operator_bytes} bytes)"
             )
 
-        hard, soft = _route_operator_policies(
-            self._cedarpy, extra_policies or [], blueprint_policies or []
-        )
-        hard_text = "\n".join(filter(None, [builtin_hard, blueprint_hard_policies, *hard]))
-        soft_text = "\n".join(filter(None, [builtin_soft, blueprint_soft_policies, *soft]))
+        hard, soft = _route_operator_policies(self._cedarpy, blueprint_policies or [])
+        hard_text = "\n".join([builtin_hard, *hard])
+        soft_text = "\n".join([builtin_soft, *soft])
 
         # Parse + validate annotations on each tier.
         try:
@@ -866,32 +837,11 @@ class PolicyEngine:
 
         try:
             self._soft_rules = _parse_policy_annotations(self._cedarpy, soft_text)
-            # Legacy extra_policies synthetic rules get generic "legacy_extra_N"
-            # @rule_id values; those are accepted by the validator.
+            # Unannotated entries get generic "legacy_extra_N" @rule_id values;
+            # those are accepted by the validator.
             _validate_tier(self._soft_rules, "soft", "soft_deny")
         except ValueError as exc:
             raise ValueError(f"soft-deny policy validation failed: {exc}") from exc
-
-        # blueprint_disable: reject any entry that names a built-in hard-deny
-        # rule (finding #9, §5.1). Built-in hard rule IDs come from the
-        # original builtin_hard text, NOT the concatenated hard_text.
-        builtin_hard_rule_ids = {
-            r.rule_id
-            for r in _parse_policy_annotations(self._cedarpy, builtin_hard)
-            if r.rule_id and r.tier == "hard"
-        }
-        for disable_id in blueprint_disable or []:
-            if disable_id in builtin_hard_rule_ids:
-                raise ValueError(
-                    f"blueprint disable[{disable_id!r}]: cannot disable built-in "
-                    f"hard-deny rule; hard-deny is absolute (§5.1, §12.5)"
-                )
-        # Disabled soft rules are filtered at evaluate_tool_use time: if a
-        # soft-deny eval's matching rule_ids are ALL in the disable set,
-        # the match is treated as no-match (fall through to ALLOW). If some
-        # are disabled but others match, the surviving rule_ids drive the
-        # REQUIRE_APPROVAL outcome. See evaluate_tool_use Step 3.
-        self._disabled_rule_ids: set[str] = set(blueprint_disable or [])
 
         # Rule-ID uniqueness ACROSS tiers. The reserved ``base_permit`` ID
         # is expected to appear in both tiers (each tier needs its own
@@ -1190,25 +1140,21 @@ class PolicyEngine:
                 tier_name="soft",
             )
             if soft_decision and soft_decision[0] == "deny":
-                all_matching_ids = _matching_rule_ids(
+                matching_ids = _matching_rule_ids(
                     self._soft_rules, soft_decision[1], tier_name="soft"
                 )
-                # Filter out blueprint-disabled rules (§5.1 `disable:` list).
-                # If ALL matches are disabled, the soft-deny hit is neutralized
-                # and we fall through to default ALLOW. If some are disabled
-                # but others remain, the surviving rules drive REQUIRE_APPROVAL.
-                active_ids = [rid for rid in all_matching_ids if rid not in self._disabled_rule_ids]
-                if not active_ids:
-                    # Every matching rule was disabled by the blueprint.
-                    return PolicyDecision.allow(
-                        reason="permitted (all matching soft-deny rules disabled by blueprint)",
+                if not matching_ids:
+                    # Cedar denied and named no rule the engine parsed.
+                    return PolicyDecision.deny(
+                        reason="fail-closed: soft_deny_without_rule",
                         duration_ms=(time.monotonic() - start) * 1000,
+                        fail_closed=True,
                     )
                 # Rule-scope allowlist check AFTER the eval: rule_ids are
                 # only known once Cedar reports which policies matched.
-                if any(rid in self._allowlist.rule_ids for rid in active_ids):
+                if any(rid in self._allowlist.rule_ids for rid in matching_ids):
                     return PolicyDecision.allow(
-                        reason=f"Allowlist rule: {', '.join(active_ids)}",
+                        reason=f"Allowlist rule: {', '.join(matching_ids)}",
                         duration_ms=(time.monotonic() - start) * 1000,
                     )
 
@@ -1217,7 +1163,7 @@ class PolicyEngine:
                 # this tool, fast-deny without a new approval gate.
                 # Catches semantic retries the input-hash cache misses
                 # (e.g. force-push to a different branch name).
-                rule_hit = self._cache.get_rule_decision(tool_name, active_ids)
+                rule_hit = self._cache.get_rule_decision(tool_name, matching_ids)
                 if rule_hit is not None:
                     matched_rule_id, cached = rule_hit
                     return PolicyDecision(
@@ -1237,16 +1183,9 @@ class PolicyEngine:
                             "original_decision_ts": cached.original_decision_ts,
                         },
                     )
-                # Rebuild the policy-id list for annotation merging, keeping
-                # only the policy IDs whose rule_id survived the disable filter.
-                active_policy_ids = [
-                    pid
-                    for pid in soft_decision[1]
-                    if _rule_id_for_policy(self._soft_rules, pid) not in self._disabled_rule_ids
-                ]
                 merged_ids, timeout_s, severity = _merge_annotations(
                     self._soft_rules,
-                    active_policy_ids,
+                    soft_decision[1],
                     self._task_default_timeout_s,
                 )
                 return PolicyDecision.require_approval(
@@ -1372,11 +1311,3 @@ def _matching_rule_ids(
             continue
         resolved.append(by_id[pid].rule_id or pid)
     return resolved
-
-
-def _rule_id_for_policy(rules: list[_ParsedRule], policy_id: str) -> str | None:
-    """Return the @rule_id annotation for a given positional policy ID."""
-    for rule in rules:
-        if rule.policy_id == policy_id:
-            return rule.rule_id
-    return None

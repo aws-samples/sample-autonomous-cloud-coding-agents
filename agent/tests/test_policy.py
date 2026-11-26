@@ -233,7 +233,7 @@ class TestExtraPolicies:
                 'resource == Agent::Tool::"WebFetch");'
             )
         ]
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=extra)
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_policies=extra)
         result = engine.evaluate_tool_use("WebFetch", {})
         assert result.allowed is False
 

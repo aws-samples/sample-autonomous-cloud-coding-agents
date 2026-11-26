@@ -2033,7 +2033,7 @@ def engine_with_soft_gate():
     return PolicyEngine(
         task_type="new_task",
         repo="owner/repo",
-        blueprint_soft_policies=blueprint_soft,
+        blueprint_policies=[blueprint_soft],
     )
 
 
@@ -2415,7 +2415,7 @@ class TestApprovedPath:
             'when { context.command like "*foo*" };'
         )
         engine = PolicyEngine(
-            task_type="new_task", repo="owner/repo", blueprint_soft_policies=soft_rules
+            task_type="new_task", repo="owner/repo", blueprint_policies=[soft_rules]
         )
         _fast_poll(monkeypatch)
         _prime_approval(
@@ -3278,7 +3278,7 @@ class TestTimeoutCapping:
         engine = PolicyEngine(
             task_type="new_task",
             repo="owner/repo",
-            blueprint_soft_policies=blueprint_soft,
+            blueprint_policies=[blueprint_soft],
             task_default_timeout_s=300,
         )
         _prime_approval(
@@ -3560,7 +3560,7 @@ class TestPermissionDecisionReasonSanitization:
             for rule_id in ("a" * 150, "b" * 150)
         )
         engine = PolicyEngine(
-            task_type="new_task", repo="owner/repo", blueprint_soft_policies=soft_rules
+            task_type="new_task", repo="owner/repo", blueprint_policies=[soft_rules]
         )
         reason = self._denied_reason(
             fake_task_state, progress, engine, monkeypatch, "build makefile first"

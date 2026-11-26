@@ -172,11 +172,13 @@ def test_explicit_rule_deadline_survives_a_no_deadline_task_default():
     engine = PolicyEngine(
         task_type="new_task",
         repo="owner/repo",
-        blueprint_soft_policies=(
-            '@tier("soft") @rule_id("explicit") @approval_timeout_s("120") '
-            'forbid (principal, action == Agent::Action::"execute_bash", resource) '
-            'when { context.command like "*explicit-tool*" };'
-        ),
+        blueprint_policies=[
+            (
+                '@tier("soft") @rule_id("explicit") @approval_timeout_s("120") '
+                'forbid (principal, action == Agent::Action::"execute_bash", resource) '
+                'when { context.command like "*explicit-tool*" };'
+            )
+        ],
     )
     decision = engine.evaluate_tool_use("Bash", {"command": "explicit-tool"})
     assert decision.timeout_s == 120
