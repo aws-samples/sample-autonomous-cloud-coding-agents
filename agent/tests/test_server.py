@@ -1770,14 +1770,11 @@ class TestMicrovmRunHookHeaderPosture:
             ),
         )
         assert started.wait(timeout=5.0)
-        # run_task never receives the token/session (they are consumed by
-        # _run_task_background), so assert via the extractor instead.
         fake_request: Any = _FakeRequest()
         params = server._extract_invocation_params(
             {"task_id": "t-hdr", "repo_url": "o/r", "prompt": "x"}, fake_request
         )
         assert params["session_id"] == ""
-        assert params["workload_access_token"] == ""
 
 
 class TestInvocationParamContract:

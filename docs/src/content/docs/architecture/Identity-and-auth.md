@@ -19,7 +19,7 @@ ABCA today carries its own inbound identity (Amazon Cognito for the CLI and REST
 
 ## ABCA today
 
-The current implementation uses ABCA's own Cognito and HMAC inbound authentication, not AgentCore's inbound authorizers. Outbound credentials are selected by per-integration Secrets Manager resolvers. The AgentCore workload-access-token path is wired through the whole pipeline but stays dormant.
+The current implementation uses ABCA's own Cognito and HMAC inbound authentication, not AgentCore's inbound authorizers. Outbound credentials are selected by per-integration Secrets Manager resolvers. The AgentCore workload-access-token path is wired on the orchestrator's side but stays dormant.
 
 | Integration | Inbound | Outbound credential | File | Scope |
 |---|---|---|---|---|
@@ -30,7 +30,7 @@ The current implementation uses ABCA's own Cognito and HMAC inbound authenticati
 | Linear | n/a | Per-workspace OAuth token (`actor=app`), DDB registry keyed by `linearWorkspaceId` → Secrets Manager, Lambda resolver refreshes within 60s of expiry | `cdk/src/handlers/shared/linear-oauth-resolver.ts` (594 LOC) + `agent/src/config.py:resolve_linear_api_token()` | per-workspace, not per-user |
 | Jira (PR #302, issue #642) | n/a | Per-tenant bundle: OAuth 3LO for inbound reads/human lookup; HMAC-signed Forge proxy for app-authored writes; 3LO write fallback only before Forge migration | `cdk/src/handlers/shared/jira-oauth-resolver.ts`, `cdk/src/handlers/shared/jira-app-actor.ts`, `agent/src/jira_reactions.py` | per-tenant |
 
-**The dormant AgentCore path.** ABCA runs on AgentCore Runtime and the workload-access-token (WAT) propagation path is wired through the whole pipeline but unused. The orchestrator sets `runtimeUserId` on `InvokeAgentRuntimeCommand` (`agentcore-strategy.ts:56`), holds `InvokeAgentRuntimeForUser` (`task-orchestrator.ts:288-289`), and the agent reads the `WorkloadAccessToken` header and re-injects it across the pipeline thread (`server.py:283-310, 387-413`). `bedrock-agentcore` stays in `agent/pyproject.toml` as a vestigial dependency. ADR-016 resumes this path; it does not build from scratch.
+**The dormant AgentCore path.** ABCA runs on AgentCore Runtime and the workload-access-token (WAT) propagation path is wired on the orchestrator's side but unused. The orchestrator sets `runtimeUserId` on `InvokeAgentRuntimeCommand` (`agentcore-strategy.ts`) and holds `InvokeAgentRuntimeForUser` (`task-orchestrator.ts`). The agent does not read the `WorkloadAccessToken` header and does not depend on the `bedrock-agentcore` package: where it needs a workload token, it mints its own through boto3 (`agent/src/config.py`), as the Phase-1 implementation notes of ADR-016 record. ADR-016 resumes this path; it does not build from scratch.
 
 > The `agent/src/config.py` comment records why the path is dormant: *"Phase 2.0a (parked) used AgentCore Identity. Phase 2.0b-O2 reads Secrets Manager directly because AgentCore Identity's USER_FEDERATION flow has an open service-side bug."* OBO reached GA in April 2026 across 14 regions, so the post-GA re-validation in ADR-016 Phase 0 is the gate that reopens this path.
 
