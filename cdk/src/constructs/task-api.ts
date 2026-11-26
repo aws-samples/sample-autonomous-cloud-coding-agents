@@ -252,8 +252,8 @@ export interface TaskApiProps {
   readonly lambdaMicrovmImageArn?: string;
 
   /**
-   * S3 bucket for task attachments. When provided, the create-task Lambda
-   * gets PutObject/DeleteObject grants and the bucket name as env var.
+   * S3 bucket for task attachments. When provided, the task-creation Lambdas
+   * (API and webhook) get PutObject/DeleteObject grants and the bucket name as env var.
    */
   readonly attachmentsBucket?: s3.IBucket;
 
@@ -367,6 +367,13 @@ function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths:
   });
 }
 
+/** Inline attachments: store the screened file, remove it when task creation fails after the upload. */
+function grantInlineAttachmentStorage(fn: lambda.NodejsFunction, bucket?: s3.IBucket): void {
+  if (!bucket) return;
+  bucket.grantPut(fn);
+  bucket.grantDelete(fn);
+}
+
 /**
  * CDK construct that creates the Task API — an API Gateway REST API backed by
  * Cognito User Pool authentication and Lambda handler integrations.
@@ -414,7 +421,7 @@ export class TaskApi extends Construct {
    */
   public readonly webhookXssCountedAlarm?: cloudwatch.Alarm;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (55; 53 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (54; 53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -856,11 +863,7 @@ export class TaskApi extends Construct {
       }));
     }
 
-    // Grant create-task Lambda put/delete on attachments bucket for inline upload + cleanup
-    if (props.attachmentsBucket) {
-      props.attachmentsBucket.grantPut(createTaskFn);
-      props.attachmentsBucket.grantDelete(createTaskFn);
-    }
+    grantInlineAttachmentStorage(createTaskFn, props.attachmentsBucket);
 
     // --- Confirm-uploads Lambda (presigned upload flow) ---
     let confirmUploadsFn: lambda.NodejsFunction | undefined;
@@ -1396,6 +1399,8 @@ export class TaskApi extends Construct {
           ],
         }));
       }
+
+      grantInlineAttachmentStorage(webhookCreateTaskFn, props.attachmentsBucket);
 
       // Secrets Manager grants — prefix-scoped
       const secretArnPrefix = Stack.of(this).formatArn({

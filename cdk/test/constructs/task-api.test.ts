@@ -52,7 +52,7 @@ function createStack(overrides?: Partial<TaskApiProps>, withUploads = false): { 
   return { stack, template };
 }
 
-function createStackWithWebhooks(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
+function createStackWithWebhooks(overrides?: Partial<TaskApiProps>, withAttachments = false): { stack: Stack; template: Template } {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
 
@@ -73,6 +73,7 @@ function createStackWithWebhooks(overrides?: Partial<TaskApiProps>): { stack: St
     taskTable,
     taskEventsTable,
     webhookTable,
+    ...(withAttachments && { attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket') }),
     ...overrides,
   });
 
@@ -645,9 +646,11 @@ describe('TaskApi construct', () => {
 
 describe('TaskApi construct with webhooks', () => {
   let template: Template;
+  let attachmentsTemplate: Template;
 
   beforeAll(() => {
     template = createStackWithWebhooks().template;
+    attachmentsTemplate = createStackWithWebhooks(undefined, true).template;
   });
 
   test('creates webhook API resources', () => {
@@ -726,6 +729,30 @@ describe('TaskApi construct with webhooks', () => {
         ]),
       },
     });
+  });
+
+  type Statement = { Action: string | string[]; Resource: unknown };
+  /** The S3 statements in the policy of a function's role. */
+  function s3Statements(stackTemplate: Template, functionName: string): Statement[] {
+    const policies = Object.entries(stackTemplate.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith(`TaskApi${functionName}ServiceRoleDefaultPolicy`));
+    expect(policies).toHaveLength(1);
+    return (policies[0][1].Properties.PolicyDocument.Statement as Statement[])
+      .filter(statement => JSON.stringify(statement.Action).includes('"s3:'));
+  }
+
+  test.each(['CreateTaskFn', 'WebhookCreateTaskFn'])('%s may store and delete inline attachments, on objects of the bucket only', name => {
+    const statements = s3Statements(attachmentsTemplate, name);
+    const actions = statements.flatMap(statement => statement.Action);
+    expect(actions).toEqual(expect.arrayContaining(['s3:PutObject', 's3:DeleteObject*']));
+    expect(actions.filter(action => !/^s3:(PutObject|Abort|DeleteObject)/.test(action))).toEqual([]);
+    for (const statement of statements) {
+      expect(statement.Resource).toEqual({ 'Fn::Join': ['', [{ 'Fn::GetAtt': [expect.stringMatching(/^AttachmentsBucket/), 'Arn'] }, '/*']] });
+    }
+  });
+
+  test.each(['CreateTaskFn', 'WebhookCreateTaskFn'])('%s gets no S3 grant without an attachments bucket', name => {
+    expect(s3Statements(template, name)).toEqual([]);
   });
 });
 
