@@ -17,123 +17,17 @@
  *  SOFTWARE.
  */
 
-import { GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
-import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { ulid } from 'ulid';
-import { extractUserId } from './shared/gateway';
-import { logger } from './shared/logger';
-import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import { makeDocClient } from './shared/ua';
-import { parseBody } from './shared/validation';
+import { makeLinkHandler } from './shared/account-link';
 
-const ddb = makeDocClient();
-
-const USER_MAPPING_TABLE = process.env.JIRA_USER_MAPPING_TABLE_NAME!;
-
-interface LinkRequest {
-  readonly code: string;
-  /** Preview-only: return what would be linked without writing. */
-  readonly dry_run?: boolean;
-}
-
-/**
- * POST /v1/jira/link — Complete Jira account linking, or preview it.
- *
- * Called from the CLI (`bgagent jira link <code>`) with a Cognito JWT.
- * Looks up the pending link record. With `dry_run: true`, returns the
- * Jira identity attached to the code without writing — the CLI uses
- * this to render a "you're about to link X" preview before the user
- * confirms. Without `dry_run`, writes the mapping and deletes the
- * pending record.
- */
-export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
-  const requestId = ulid();
-
-  try {
-    const userId = extractUserId(event);
-    if (!userId) {
-      return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Authentication required.', requestId);
-    }
-
-    const body = parseBody<LinkRequest>(event.body ?? null);
-    if (typeof body?.code !== 'string' || !body.code) {
-      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must include a "code" field.', requestId);
-    }
-
-    // Codes from `bgagent jira invite-user` are case-sensitive (kebab-case
-    // with a lowercase hex suffix); don't uppercase the incoming value.
-    const code = body.code.trim();
-
-    const pending = await ddb.send(new GetCommand({
-      TableName: USER_MAPPING_TABLE,
-      Key: { jira_identity: `pending#${code}` },
-      ConsistentRead: true,
-    }));
-
-    // DynamoDB TTL deletes lazily, so an expired code can still be in the table.
-    if (!pending.Item || pending.Item.status !== 'pending'
-      || typeof pending.Item.ttl !== 'number' || pending.Item.ttl < Math.floor(Date.now() / 1000)) {
-      return errorResponse(404, ErrorCode.VALIDATION_ERROR, 'Invalid or expired link code.', requestId);
-    }
-
-    const cloudId = pending.Item.jira_cloud_id as string;
-    const siteUrl = (pending.Item.jira_site_url as string | undefined) ?? '';
-    const jiraAccountId = pending.Item.jira_account_id as string;
-    const jiraUserName = (pending.Item.jira_user_name as string | undefined) ?? '';
-    const jiraUserEmail = (pending.Item.jira_user_email as string | undefined) ?? '';
-
-    // Dry-run preview: return identity without writing.
-    if (body.dry_run === true) {
-      return successResponse(200, {
-        dry_run: true,
-        jira_cloud_id: cloudId,
-        jira_site_url: siteUrl,
-        jira_account_id: jiraAccountId,
-        jira_user_name: jiraUserName,
-        jira_user_email: jiraUserEmail,
-      }, requestId);
-    }
-
-    const now = new Date().toISOString();
-
-    await ddb.send(new PutCommand({
-      TableName: USER_MAPPING_TABLE,
-      Item: {
-        jira_identity: `${cloudId}#${jiraAccountId}`,
-        platform_user_id: userId,
-        jira_cloud_id: cloudId,
-        jira_account_id: jiraAccountId,
-        linked_at: now,
-        status: 'active',
-        link_method: 'cli',
-      },
-    }));
-
-    await ddb.send(new DeleteCommand({
-      TableName: USER_MAPPING_TABLE,
-      Key: { jira_identity: `pending#${code}` },
-    }));
-
-    logger.info('Jira account linked', {
-      platform_user_id: userId,
-      jira_cloud_id: cloudId,
-      jira_account_id: jiraAccountId,
-    });
-
-    return successResponse(200, {
-      message: 'Jira account linked successfully.',
-      jira_cloud_id: cloudId,
-      jira_site_url: siteUrl,
-      jira_account_id: jiraAccountId,
-      jira_user_name: jiraUserName,
-      jira_user_email: jiraUserEmail,
-      linked_at: now,
-    }, requestId);
-  } catch (err) {
-    logger.error('Jira link handler failed', {
-      error: err instanceof Error ? err.message : String(err),
-      request_id: requestId,
-    });
-    return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
-  }
-}
+export const handler = makeLinkHandler({
+  surface: 'Jira',
+  tableName: process.env.JIRA_USER_MAPPING_TABLE_NAME!,
+  identityAttr: 'jira_identity',
+  tenantAttr: 'jira_cloud_id',
+  userAttr: 'jira_account_id',
+  responseAttrs: ['jira_cloud_id', 'jira_site_url', 'jira_account_id', 'jira_user_name', 'jira_user_email'],
+  mappingExtras: { status: 'active', link_method: 'cli' },
+  dryRun: true,
+  // Codes from `bgagent jira invite-user` are lower-case and case-sensitive.
+  upperCaseCode: false,
+});
