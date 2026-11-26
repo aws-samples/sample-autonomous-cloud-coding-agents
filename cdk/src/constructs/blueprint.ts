@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { Annotations, Duration, Token } from 'aws-cdk-lib';
+import { Duration, Token } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
@@ -256,84 +256,26 @@ export interface BlueprintProps {
  * a full custom resource Lambda would be needed.
  */
 export class Blueprint extends Construct {
-  /**
-   * Domains from the networking.egressAllowlist prop, exposed for aggregation
-   * into the platform-wide DNS Firewall allowlist.
-   */
-  public readonly egressAllowlist: readonly string[];
-
-  /**
-   * Cedar policies from the security.cedarPolicies prop, exposed for inspection.
-   */
-  public readonly cedarPolicies: readonly string[];
-
-  /**
-   * Cedar HITL: per-task approval-gate cap from the security.approvalGateCap
-   * prop, exposed for inspection. Undefined when the blueprint did not
-   * configure an override — the submit path then falls back to the
-   * platform default of 50.
-   */
-  public readonly approvalGateCap?: number;
-
-  /**
-   * Per-repo cost budget in USD from the agent.maxBudgetUsd prop (#748),
-   * exposed for inspection. Undefined when the blueprint did not configure
-   * one — there is no platform default, so unset means unlimited.
-   */
-  public readonly maxBudgetUsd?: number;
-
-  /**
-   * Per-repo memory token budget from the agent.memoryTokenBudget prop (#447),
-   * exposed for inspection. Undefined when the blueprint did not configure one.
-   */
-  public readonly memoryTokenBudget?: number;
-
-  /**
-   * Registry ``registry://`` refs for MCP servers (#246), exposed for inspection.
-   */
-  public readonly mcpServerRefs: readonly string[];
-
-  /** Registry ``registry://`` refs for Cedar policy modules (#246). */
-  public readonly cedarPolicyModuleRefs: readonly string[];
-
-  /** Registry ``registry://`` refs for skills (#246). */
-  public readonly skillRefs: readonly string[];
-
   constructor(scope: Construct, id: string, props: BlueprintProps) {
     super(scope, id);
 
-    this.egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
-    this.cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
-    this.approvalGateCap = props.security?.approvalGateCap;
+    const egressAllowlist = [...(props.networking?.egressAllowlist ?? [])];
+    const cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
+    const approvalGateCap = props.security?.approvalGateCap;
     const { maxBudgetUsd, memoryTokenBudget } = props.agent ?? {};
-    this.maxBudgetUsd = maxBudgetUsd;
-    this.memoryTokenBudget = memoryTokenBudget;
-    this.mcpServerRefs = [...(props.assets?.mcpServers ?? [])];
-    this.cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
-    this.skillRefs = [...(props.assets?.skills ?? [])];
-
-    // Chunk 7c: emit a synth-time info annotation when the blueprint did
-    // not configure an override so operators see a signal that this repo
-    // will rely on the platform-default cap (50). Without this, the only
-    // way to notice the default was in effect was to inspect the TaskRecord
-    // at runtime — the default is a silent fallback at the handler layer.
-    if (this.approvalGateCap === undefined) {
-      Annotations.of(this).addInfo(
-        `security.approvalGateCap not configured for '${props.repo}'; `
-        + 'submit-time resolution will fall back to the platform default of 50. '
-        + 'Set security.approvalGateCap on the Blueprint to override.',
-      );
-    }
+    const mcpServerRefs = [...(props.assets?.mcpServers ?? [])];
+    const cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
+    const skillRefs = [...(props.assets?.skills ?? [])];
 
     // Validate repo format at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));
-    this.node.addValidation(new DomainFormatValidation(this.egressAllowlist));
-    this.node.addValidation(new ApprovalGateCapValidation(this.approvalGateCap));
-    this.node.addValidation(new MaxBudgetUsdValidation(this.maxBudgetUsd));
-    this.node.addValidation(new MemoryTokenBudgetValidation(this.memoryTokenBudget));
-    this.node.addValidation(new RegistryRefValidation('assets.mcpServers', this.mcpServerRefs, 'mcp_server'));
-    this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs, 'cedar_policy_module'));
-    this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs, 'skill'));
+    this.node.addValidation(new DomainFormatValidation(egressAllowlist));
+    this.node.addValidation(new ApprovalGateCapValidation(approvalGateCap));
+    this.node.addValidation(new MaxBudgetUsdValidation(maxBudgetUsd));
+    this.node.addValidation(new MemoryTokenBudgetValidation(memoryTokenBudget));
+    this.node.addValidation(new RegistryRefValidation('assets.mcpServers', mcpServerRefs, 'mcp_server'));
+    this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', cedarPolicyModuleRefs, 'cedar_policy_module'));
+    this.node.addValidation(new RegistryRefValidation('assets.skills', skillRefs, 'skill'));
 
     const now = new Date().toISOString();
 
@@ -359,11 +301,11 @@ export class Blueprint extends Construct {
     if (props.agent?.maxTurns !== undefined) {
       overrides.max_turns = { N: String(props.agent.maxTurns) };
     }
-    if (this.maxBudgetUsd !== undefined) {
-      overrides.max_budget_usd = { N: String(this.maxBudgetUsd) };
+    if (maxBudgetUsd !== undefined) {
+      overrides.max_budget_usd = { N: String(maxBudgetUsd) };
     }
-    if (this.memoryTokenBudget !== undefined) {
-      overrides.memory_token_budget = { N: String(this.memoryTokenBudget) };
+    if (memoryTokenBudget !== undefined) {
+      overrides.memory_token_budget = { N: String(memoryTokenBudget) };
     }
     if (props.agent?.systemPromptOverrides) {
       overrides.system_prompt_overrides = { S: props.agent.systemPromptOverrides };
@@ -380,23 +322,23 @@ export class Blueprint extends Construct {
     if (props.pipeline?.lintCommand) {
       overrides.lint_command = { S: props.pipeline.lintCommand };
     }
-    if (this.egressAllowlist.length > 0) {
-      overrides.egress_allowlist = { L: this.egressAllowlist.map(d => ({ S: d })) };
+    if (egressAllowlist.length > 0) {
+      overrides.egress_allowlist = { L: egressAllowlist.map(d => ({ S: d })) };
     }
-    if (this.cedarPolicies.length > 0) {
-      overrides.cedar_policies = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    if (cedarPolicies.length > 0) {
+      overrides.cedar_policies = { L: cedarPolicies.map(p => ({ S: p })) };
     }
-    if (this.approvalGateCap !== undefined) {
-      overrides.approval_gate_cap = { N: String(this.approvalGateCap) };
+    if (approvalGateCap !== undefined) {
+      overrides.approval_gate_cap = { N: String(approvalGateCap) };
     }
-    if (this.mcpServerRefs.length > 0) {
-      overrides.mcp_servers = { L: this.mcpServerRefs.map(r => ({ S: r })) };
+    if (mcpServerRefs.length > 0) {
+      overrides.mcp_servers = { L: mcpServerRefs.map(r => ({ S: r })) };
     }
-    if (this.cedarPolicyModuleRefs.length > 0) {
-      overrides.cedar_policy_modules = { L: this.cedarPolicyModuleRefs.map(r => ({ S: r })) };
+    if (cedarPolicyModuleRefs.length > 0) {
+      overrides.cedar_policy_modules = { L: cedarPolicyModuleRefs.map(r => ({ S: r })) };
     }
-    if (this.skillRefs.length > 0) {
-      overrides.skills = { L: this.skillRefs.map(r => ({ S: r })) };
+    if (skillRefs.length > 0) {
+      overrides.skills = { L: skillRefs.map(r => ({ S: r })) };
     }
 
     const declared = Object.keys(overrides);

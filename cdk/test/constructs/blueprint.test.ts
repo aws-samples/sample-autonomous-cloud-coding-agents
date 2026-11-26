@@ -18,7 +18,7 @@
  */
 
 import { App, Lazy, Stack } from 'aws-cdk-lib';
-import { Annotations, Template, Match } from 'aws-cdk-lib/assertions';
+import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Blueprint, type BlueprintProps } from '../../src/constructs/blueprint';
 import { MAX_BUDGET_USD_MAX, MAX_BUDGET_USD_MIN } from '../../src/handlers/shared/types';
@@ -175,37 +175,6 @@ describe('Blueprint construct', () => {
     expect(serialized).not.toContain('max_budget_usd');
   });
 
-  test('exposes maxBudgetUsd as a public property when configured', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-      agent: { maxBudgetUsd: 12.5 },
-    });
-
-    expect(blueprint.maxBudgetUsd).toBe(12.5);
-  });
-
-  test('maxBudgetUsd public property is undefined when absent', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-    });
-
-    expect(blueprint.maxBudgetUsd).toBeUndefined();
-  });
-
   test('maps agent memory token budget prop', () => {
     const { template } = createStack({
       agent: { memoryTokenBudget: 4000 },
@@ -219,24 +188,6 @@ describe('Blueprint construct', () => {
       agent: { maxBudgetUsd: 5 },
     });
     expect(getUpdateJoinParts(template).join('')).not.toContain('memory_token_budget');
-  });
-
-  test('exposes memoryTokenBudget as a public property, undefined when absent', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const configured = new Blueprint(stack, 'Configured', {
-      repo: 'org/configured',
-      repoTable,
-      agent: { memoryTokenBudget: 4000 },
-    });
-    const absent = new Blueprint(stack, 'Absent', { repo: 'org/absent', repoTable });
-
-    expect(configured.memoryTokenBudget).toBe(4000);
-    expect(absent.memoryTokenBudget).toBeUndefined();
   });
 
   test('maps system prompt overrides prop', () => {
@@ -299,68 +250,6 @@ describe('Blueprint construct', () => {
     const parts = getUpdateJoinParts(template);
     const serialized = parts.join('');
     expect(serialized).not.toContain('egress_allowlist');
-  });
-
-  test('exposes egressAllowlist as public property', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-      networking: { egressAllowlist: ['example.com'] },
-    });
-
-    expect(blueprint.egressAllowlist).toEqual(['example.com']);
-  });
-
-  test('egressAllowlist defaults to empty array', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-    });
-
-    expect(blueprint.egressAllowlist).toEqual([]);
-  });
-
-  test('exposes cedarPolicies as public property', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-      security: { cedarPolicies: ['permit (principal, action, resource);'] },
-    });
-
-    expect(blueprint.cedarPolicies).toEqual(['permit (principal, action, resource);']);
-  });
-
-  test('cedarPolicies defaults to empty array', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-    });
-
-    expect(blueprint.cedarPolicies).toEqual([]);
   });
 
   test('maps security cedar policies to DynamoDB list', () => {
@@ -494,37 +383,6 @@ describe('Blueprint construct', () => {
   });
 
   // --- Chunk 7b: security.approvalGateCap ---------------------------------
-
-  test('exposes approvalGateCap as public property when configured', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-      security: { approvalGateCap: 100 },
-    });
-
-    expect(blueprint.approvalGateCap).toBe(100);
-  });
-
-  test('approvalGateCap defaults to undefined when absent', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    const blueprint = new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-    });
-
-    expect(blueprint.approvalGateCap).toBeUndefined();
-  });
 
   test('maps approval gate cap prop', () => {
     const { template } = createStack({
@@ -734,48 +592,6 @@ describe('Blueprint construct', () => {
       security: { approvalGateCap: 500 },
     });
     expect(() => Template.fromStack(stackMax)).not.toThrow();
-  });
-
-  // --- Chunk 7c: synth-time info annotation when cap is omitted ----------
-
-  test('emits info annotation when approvalGateCap is not configured', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-    });
-
-    const annotations = Annotations.fromStack(stack);
-    annotations.hasInfo(
-      '/TestStack/Blueprint',
-      Match.stringLikeRegexp("security.approvalGateCap not configured for 'org/my-repo'"),
-    );
-  });
-
-  test('does NOT emit info annotation when approvalGateCap is configured', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-
-    new Blueprint(stack, 'Blueprint', {
-      repo: 'org/my-repo',
-      repoTable,
-      security: { approvalGateCap: 75 },
-    });
-
-    const annotations = Annotations.fromStack(stack);
-    const infos = annotations.findInfo(
-      '/TestStack/Blueprint',
-      Match.stringLikeRegexp('approvalGateCap not configured'),
-    );
-    expect(infos).toHaveLength(0);
   });
 
   test('a Blueprint with no override activates the row, keeps onboarded_at and removes ttl and the asset lists', () => {
