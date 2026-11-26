@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Bounded service-owned MicroVM pause/wake routes; no public ingress is added."""
-
 from __future__ import annotations
 
 import asyncio
@@ -50,8 +48,6 @@ async def _microvm_id(request: Request) -> str:
     microvm_id = payload.get("microvmId", "")
     if not isinstance(microvm_id, str) or microvm_id != microvm_id.strip():
         raise _InvalidBody(400)
-    # The service sends an empty id on /terminate; tolerate an absent/empty id
-    # here too, using only the local /run registration. A supplied id must match.
     return microvm_id
 
 
@@ -65,8 +61,7 @@ async def _transition(request: Request, action: Literal["suspend", "resume"]) ->
         except asyncio.CancelledError as exc:
             diagnostics.finish(None, "MICROVM_LIFECYCLE_CANCELLED", exc)
             raise
-        # A frozen VM retains this connection and its idle timer. Close it with
-        # the response so the next hook uses a fresh connection after restoration.
+        # A frozen VM retains this connection and its idle timer.
         response.headers["Connection"] = "close"
         diagnostics.finish(
             response.status_code, json.loads(bytes(response.body)).get("code", "acknowledged")
@@ -75,15 +70,7 @@ async def _transition(request: Request, action: Literal["suspend", "resume"]) ->
 
 
 def _declined_suspend(code: str) -> JSONResponse | None:
-    """Answer an unsafe suspend with 200 while a guest still has work to protect.
-
-    The service terminates the MicroVM when a suspend hook returns any non-200
-    status (verified live: "Suspend lifecycle hook returned HTTP status 409").
-    Declining keeps the barrier open: the VM freezes with its memory intact, the
-    task can no longer sleep, and the supervisor wakes it outside a valid gate.
-    Without a registered task, or once the barrier is permanently closed, there
-    is nothing to protect and the non-200 answer lets the service retire it.
-    """
+    """The service terminates the MicroVM when a suspend hook returns any non-200 status."""
     lifecycle = get_registered_context()
     if lifecycle is None or lifecycle.barrier_unrecoverable():
         return None
@@ -105,8 +92,6 @@ async def _handle_transition(
         status, code = 503, "MICROVM_LIFECYCLE_TIMEOUT"
         content = {"code": code}
     except Exception as exc:
-        # Neither service-hook responses nor logs may echo AWS exception details.
-        # A failed/uncertain wake stays behind the controller's closed barrier.
         status, code = 503, "MICROVM_LIFECYCLE_FAILED"
         content = {"code": code, "error_type": type(exc).__name__}
     if action == "suspend" and (declined := _declined_suspend(code)) is not None:
@@ -136,8 +121,6 @@ async def _attempt_transition(
                     refresh_and_reconcile_after_resume, budget_s=remaining
                 )
         if park is None:
-            # A declined suspend never closed the barrier: the guest's work
-            # simply continues, so there is nothing to refresh or release.
             return JSONResponse(
                 content={
                     "status": "not-suspended",

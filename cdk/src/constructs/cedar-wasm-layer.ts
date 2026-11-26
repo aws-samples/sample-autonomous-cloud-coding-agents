@@ -26,38 +26,24 @@ import { Construct } from 'constructs';
 
 /**
  * Pinned Cedar-wasm version — kept in sync with the top-level
- * ``cdk/package.json`` entry. Mismatch would let the agent-side
- * ``cedarpy`` engine and the Lambda-side ``cedar-wasm`` engine drift,
- * defeating the parity contract (design decision #23, §15.6).
- *
- * Reading this from a constant (rather than the caller passing it)
- * lets the tests assert we ship the right version without duplicating
- * the number across files.
+ * ``cdk/package.json`` entry.
  */
 export const CEDAR_WASM_VERSION = '4.12.0';
 
 /**
  * Minimum memory the Lambda attaching this layer should be configured
- * with. Cedar-wasm needs ≥512 MB headroom (§15.2 task 10 note); callers
- * wiring this layer onto a Lambda should cross-check their function's
- * memorySize against this constant.
+ * with. Cedar-wasm needs ≥512 MB headroom (§15.2 task 10 note).
  */
 export const CEDAR_WASM_MIN_LAMBDA_MEMORY_MB = 512;
 
-/**
- * Properties for CedarWasmLayer construct.
- */
 export interface CedarWasmLayerProps {
-  /**
-   * Layer description. Defaults to a design-linked description so
-   * ``aws lambda get-layer-version`` output is self-documenting.
-   */
+  /** Layer description. Defaults to one naming the pinned cedar-wasm version. */
   readonly description?: string;
 }
 
 /**
  * Lambda layer bundling `@cedar-policy/cedar-wasm` for the REST-side
- * policy handlers (Chunk 5: ApproveTaskFn / DenyTaskFn / GetPoliciesFn /
+ * policy handlers (ApproveTaskFn / DenyTaskFn / GetPoliciesFn /
  * CreateTaskFn).
  *
  * Layout produced:
@@ -70,41 +56,17 @@ export interface CedarWasmLayerProps {
  * ```
  *
  * Lambdas attaching this layer ``require('@cedar-policy/cedar-wasm/nodejs')``
- * and load the wasm module transparently. The wasm binary is ~4 MB; a
- * shared layer keeps each individual function package small so cold
- * starts stay fast.
+ * and load the wasm module transparently.
  *
- * Bundling uses ``npm install`` against a minimal ``package.json`` that
- * pins the exact ``CEDAR_WASM_VERSION``. The source-side ``cdk/package.json``
- * is the canonical pin; this construct re-declares the version string in
- * a layer-local manifest to keep bundling hermetic (no reliance on yarn
- * workspace resolution).
- *
- * Compatible runtimes are Node.js 22 and 24. Node.js 20 is left out on
- * purpose (#889): Lambda deprecated it on 2026-04-30 and no function of
- * this stack runs on it. The list must name the runtime of every
+ * Compatible runtimes are Node.js 22 and 24. The list must name the runtime of every
  * function that attaches the layer, or CDK fails the synth.
- *
- * See §15.2 task 10 and §15.6.
  */
 export class CedarWasmLayer extends Construct {
-  /**
-   * The underlying Lambda layer. Attach to functions via
-   * ``fn.addLayers(cedarWasmLayer.layer)``.
-   */
   public readonly layer: lambda.LayerVersion;
 
   constructor(scope: Construct, id: string, props: CedarWasmLayerProps = {}) {
     super(scope, id);
 
-    // Bundling source: a small directory with a package.json that pins
-    // cedar-wasm at CEDAR_WASM_VERSION. The bundling command does
-    // `npm install --omit=dev` and lands the result under /opt/nodejs.
-    //
-    // Using an inline source directory (rather than depending on
-    // cdk/package.json being resolved at bundle time) keeps this layer
-    // fully hermetic: a stale `cdk/node_modules/` cannot leak into the
-    // layer build.
     const layerSourceDir = path.join(__dirname, '..', '..', 'layers', 'cedar-wasm');
 
     this.layer = new lambda.LayerVersion(this, 'Layer', {
@@ -122,11 +84,6 @@ export class CedarWasmLayer extends Construct {
               'rm /asset-output/package.json',
             ].join(' && '),
           ],
-          // Fall back to a local-npm bundle when Docker is unavailable
-          // (e.g. `cdk synth` in CI runners that lack Docker). The
-          // local hook mirrors the Docker commands using the host's
-          // npm, which is acceptable here because the layer only ships
-          // pure JS + a prebuilt wasm binary — no native build step.
           local: {
             tryBundle(outputDir: string): boolean {
               try {

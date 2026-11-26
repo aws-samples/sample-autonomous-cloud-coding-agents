@@ -1,11 +1,3 @@
-"""Semver constraint matching + highest-version selection (#246).
-
-Mirrors ``cdk/src/handlers/shared/registry/resolver.ts`` — AgentCore stores a plain
-version string with no native ``^``/``~`` matching, so both the orchestrator (TS)
-and the agent (Python) rank in code, and must agree. The parity corpus
-(``contracts/registry-resolution/``) covers the shared cases.
-"""
-
 from __future__ import annotations
 
 import re
@@ -20,8 +12,6 @@ if TYPE_CHECKING:
 # the same reason as there: ``\d`` is 0-9 in JS and any Unicode digit in Python.
 _SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z", re.ASCII)
 
-# JS ``Number.MAX_SAFE_INTEGER`` (2**53 - 1); mirrors registry/ref.py._MAX_SAFE_INT.
-# Kept local rather than imported to avoid a runtime import cycle with ref.py.
 _MAX_SAFE_INT = 9007199254740991
 
 
@@ -39,13 +29,10 @@ def parse_version(raw: str) -> SemVer | None:
     if not m:
         return None
     major, minor, patch, pre = m.groups()
-    # As in ref.parse_constraint: more digits than _MAX_SAFE_INT is above it, and
-    # int() raises ValueError for more than 4300 digits.
+    # Checked on the text: int() raises ValueError for more than 4300 digits.
     if max(len(major), len(minor), len(patch)) > len(str(_MAX_SAFE_INT)):
         return None
     major_i, minor_i, patch_i = int(major), int(minor), int(patch)
-    # Match ref.parse_constraint / resolver.ts: reject components the TS parser
-    # would round past MAX_SAFE_INTEGER so a candidate version ranks identically.
     if max(major_i, minor_i, patch_i) > _MAX_SAFE_INT:
         return None
     return SemVer(
@@ -61,7 +48,7 @@ def _compare_prerelease(a: tuple[str, ...], b: tuple[str, ...]) -> int:
     if not a and not b:
         return 0
     if not a:
-        return 1  # release outranks prerelease
+        return 1
     if not b:
         return -1
     for ai, bi in zip(a, b, strict=False):
@@ -69,7 +56,7 @@ def _compare_prerelease(a: tuple[str, ...], b: tuple[str, ...]) -> int:
             continue
         an, bn = ai.isdigit(), bi.isdigit()
         if an and bn:
-            # As strings, like the TypeScript resolver: int() refuses more than 4300 digits.
+            # As strings: int() refuses more than 4300 digits.
             x, y = ai.lstrip("0"), bi.lstrip("0")
             return len(x) - len(y) or (x > y) - (x < y)
         if an:
@@ -104,14 +91,11 @@ def satisfies(v: SemVer, c: ParsedConstraint) -> bool:
     )
 
     if c.op == "exact":
-        # The version as written: 1.0.0-rc.01 compares equal to 1.0.0-rc.1 and is not it.
         return v.raw == c.raw
 
     if compare_versions(v, constraint_core) < 0:
         return False
 
-    # Exclude prereleases from range matches unless the constraint pins the same
-    # core version and is itself a prerelease.
     if v.prerelease and not (_core_equals(v, c) and constraint_core.prerelease):
         return False
 
@@ -122,7 +106,6 @@ def satisfies(v: SemVer, c: ParsedConstraint) -> bool:
             return v.major == 0 and v.minor == c.minor
         return v.major == 0 and v.minor == 0 and v.patch == c.patch
 
-    # tilde: same major.minor
     return v.major == c.major and v.minor == c.minor
 
 

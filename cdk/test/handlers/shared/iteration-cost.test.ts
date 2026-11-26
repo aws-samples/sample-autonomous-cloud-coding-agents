@@ -33,7 +33,6 @@ const call = (over: Partial<Parameters<typeof sumIterationCostForIssue>[0]> = {}
     ddb, taskTableName: 'Tasks', linearIssueId: 'issue-1', thisTaskId: 'task-this', ...over,
   });
 
-/** A Query page listing task ids, optionally with a continuation key. */
 const page = (ids: string[], last?: Record<string, unknown>) => ({
   Items: ids.map((task_id) => ({ task_id })),
   ...(last && { LastEvaluatedKey: last }),
@@ -49,16 +48,13 @@ describe('sumIterationCostForIssue', () => {
   test('sums prior tasks plus this task, and reports a COMPLETE total', async () => {
     send
       .mockResolvedValueOnce(page(['task-a', 'task-this']))
-      .mockResolvedValueOnce({ Item: { cost_usd: 1.5 } }); // task-a
+      .mockResolvedValueOnce({ Item: { cost_usd: 1.5 } });
 
     await expect(call({ thisCost: 0.25 })).resolves.toEqual({ total: 1.75, partial: false });
-    // this task's cost comes from the argument, so no GetItem is spent on it
     expect(send.mock.calls.filter(([c]) => !isQuery(c))).toHaveLength(1);
   });
 
   test('FOLLOWS the Query pagination cursor — a total must not stop at one 1 MB page', async () => {
-    // The pre-refactor version summed a single page as though it were everything,
-    // so past the page boundary the user saw a silently short total.
     send
       .mockResolvedValueOnce(page(['task-a'], { task_id: 'task-a' }))
       .mockResolvedValueOnce(page(['task-b']))
@@ -70,8 +66,6 @@ describe('sumIterationCostForIssue', () => {
   });
 
   test('a string cost_usd is parsed, not concatenated or turned into NaN', async () => {
-    // One of the two pre-refactor copies added a stringified cost without a finite
-    // check, which poisoned the whole total to NaN.
     send
       .mockResolvedValueOnce(page(['task-a']))
       .mockResolvedValueOnce({ Item: { cost_usd: '2.5' } });
@@ -89,10 +83,6 @@ describe('sumIterationCostForIssue', () => {
   });
 
   test('the row cap BOUNDS the GetItem fan-out and reports PARTIAL, even within one page', async () => {
-    // A single Query page can hold far more than the cap: the projection is
-    // task_id alone, so ~1 MB is a great many rows. Stopping pagination is not
-    // enough — the cap must also trim the id list the reads iterate, or a
-    // pathological issue still fans out over the whole page inside one invocation.
     send
       .mockResolvedValueOnce(page(Array.from({ length: 900 }, (_, i) => `t${i}`)))
       .mockResolvedValue({ Item: { cost_usd: 1 } });
@@ -112,7 +102,6 @@ describe('sumIterationCostForIssue', () => {
     const res = await call();
     expect(res.partial).toBe(true);
     expect(res.total).toBe(500);
-    // stops after the page that crosses the cap — a third Query is never issued
     expect(send.mock.calls.filter(([c]) => isQuery(c))).toHaveLength(2);
   });
 

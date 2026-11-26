@@ -114,39 +114,14 @@ export async function run(argv: string[]): Promise<void> {
       } else {
         console.error('An unexpected error occurred.');
       }
-      // CliError carries a per-failure-class exit code (e.g. 2 for
-      // wait-timeout) so scripts can branch on it; everything else is 1.
       process.exitCode = err instanceof CliError ? err.exitCode : 1;
     });
 }
 
-// Execute the CLI only when run directly. Importing this module (e.g.
-// from a test harness or a wrapper) must not parse the importer's
-// ``process.argv`` nor schedule a ``process.exit`` on the importer's
-// event loop. Keeping the side-effect behind ``require.main === module``
-// preserves both properties without forcing callers to mock the
-// program object. Commands under ``cli/src/commands/*`` already export
-// ``makeXxxCommand()`` factories for direct invocation in tests.
 if (require.main === module) {
-  // Default the SDK solution-attribution app-id for this process (#319) before
-  // any AWS SDK client is constructed. Only sets it when unset, so an operator
-  // exporting AWS_SDK_UA_APP_ID='' (or any value) keeps full control.
   applyDefaultAppId();
   void run(process.argv)
     .finally(() => {
-      // Node's global ``fetch`` (undici) keeps TCP sockets alive in a
-      // connection pool by default. After a long-running command like
-      // ``bgagent watch`` finishes its logical work, those sockets keep
-      // the event loop open for the pool's idle timeout, leaving the
-      // process hanging long past task terminal. We set ``exitCode``
-      // (so the natural drain path uses it) and schedule a deferred
-      // ``process.exit`` as a fallback: an ``unref``'d 50 ms timer
-      // gives async ``stderr`` / ``stdout`` flushes and ``on('exit')``
-      // handlers a chance to complete, while still guaranteeing a
-      // bounded exit time instead of the pool's multi-second
-      // keep-alive timeout. Observed in Scenarios 6 and 7-extended
-      // deploy validation where ``bgagent watch`` had to be ``pkill``-ed
-      // after the task reached COMPLETED.
       const EXIT_FLUSH_DELAY_MS = 50;
       setTimeout(() => {
         process.exit(process.exitCode ?? 0);

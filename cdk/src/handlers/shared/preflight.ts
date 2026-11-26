@@ -17,16 +17,9 @@
  *  SOFTWARE.
  */
 
-// Admission / pre-invoke checks before orchestration. See docs/design/ORCHESTRATOR.md (admission control).
-// Tests: cdk/test/handlers/shared/preflight.test.ts
-
 import { resolveGitHubToken, MissingSecretError, SecretUnreadableError } from './context-hydration';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export const PreflightFailureReason = {
   GITHUB_UNREACHABLE: 'GITHUB_UNREACHABLE',
@@ -35,9 +28,6 @@ export const PreflightFailureReason = {
   RUNTIME_UNAVAILABLE: 'RUNTIME_UNAVAILABLE',
   PR_NOT_FOUND_OR_CLOSED: 'PR_NOT_FOUND_OR_CLOSED',
   PR_FROM_FORK: 'PR_FROM_FORK',
-  // #251: token-secret blockers are misconfiguration, not GitHub being
-  // unreachable — an accurate reason so tooling keyed on failureReason routes
-  // operators to the secret/IAM fix rather than a network red herring.
   GITHUB_TOKEN_SECRET_MISSING: 'GITHUB_TOKEN_SECRET_MISSING',
   GITHUB_TOKEN_SECRET_UNREADABLE: 'GITHUB_TOKEN_SECRET_UNREADABLE',
 } as const;
@@ -60,19 +50,11 @@ export interface PreflightResult {
   readonly failureDetail?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const GITHUB_API_TIMEOUT_MS = 5_000;
 
-/** GitHub GraphQL `viewerPermission` values that allow pushing branches (new_task / pr_iteration). */
 const CONTENTS_WRITE_LEVELS = new Set(['WRITE', 'MAINTAIN', 'ADMIN']);
 
-/**
- * Minimum `viewerPermission` for pr_review (issue/PR comments without Contents write).
- * See GitHub collaborator roles; TRIAGE can manage PRs without push.
- */
+/** GitHub collaborator roles: TRIAGE can manage PRs without push. */
 const PR_REVIEW_INTERACTION_LEVELS = new Set(['TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']);
 
 function splitRepo(repo: string): { owner: string; name: string } | undefined {
@@ -83,11 +65,6 @@ function splitRepo(repo: string): { owner: string; name: string } | undefined {
   return { owner: repo.slice(0, idx), name: repo.slice(idx + 1) };
 }
 
-/**
- * The token's permission on the repository, or undefined when GitHub reports none.
- * A lookup that fails (network error, timeout, 5xx, 429) throws: the caller reads
- * undefined as "no permission", and a failed lookup says nothing about the token.
- */
 async function fetchViewerPermission(repo: string, token: string): Promise<string | undefined> {
   const parts = splitRepo(repo);
   if (!parts) {
@@ -116,10 +93,6 @@ async function fetchViewerPermission(repo: string, token: string): Promise<strin
   const perm = body.data?.repository?.viewerPermission;
   return perm ?? undefined;
 }
-
-// ---------------------------------------------------------------------------
-// Internal check functions
-// ---------------------------------------------------------------------------
 
 async function checkGitHubReachability(token: string): Promise<PreflightCheckResult> {
   const start = Date.now();
@@ -170,7 +143,7 @@ async function checkRepoAccess(repo: string, token: string, readOnly: boolean): 
     if (!resp.ok) {
       // GitHub answers 403 to a rate-limited token too, with x-ratelimit-remaining: 0
       // (primary limit) or a retry-after header (secondary limit), while /rate_limit
-      // keeps answering 200. That clears by itself and says nothing about access.
+      // keeps answering 200.
       const rateLimited = resp.status === 403
         && (resp.headers.get('x-ratelimit-remaining') === '0' || resp.headers.has('retry-after'));
       if ((resp.status === 404 || resp.status === 403) && !rateLimited) {
@@ -253,7 +226,7 @@ async function checkRepoAccess(repo: string, token: string, readOnly: boolean): 
   }
 }
 
-/** `head` or `base` of a pull request as GitHub returns it. `repo` is null once the fork is deleted. */
+/** GitHub returns `repo` as null once the fork is deleted. */
 interface PullRequestSide {
   readonly repo?: { readonly full_name?: unknown } | null;
 }
@@ -273,7 +246,6 @@ async function checkPrAccessible(repo: string, prNumber: number, token: string):
       return {
         check: 'pr_accessible',
         passed: false,
-        // Only a 404 or a 403 says something about the pull request.
         reason: resp.status === 404 || resp.status === 403
           ? PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED
           : PreflightFailureReason.GITHUB_UNREACHABLE,
@@ -292,11 +264,6 @@ async function checkPrAccessible(repo: string, prNumber: number, token: string):
         durationMs,
       };
     }
-    // The agent fetches the branch of the pull request by its name from this
-    // repository, and an iteration pushes to it there. The branch of a pull
-    // request from a fork is in the fork: GitHub then names another head
-    // repository than the base, or none once the fork is deleted. A branch of
-    // the same name in this repository is another branch.
     const headRepo = (pr.head as PullRequestSide | undefined)?.repo?.full_name;
     const baseRepo = (pr.base as PullRequestSide | undefined)?.repo?.full_name;
     if (typeof headRepo !== 'string' || headRepo !== baseRepo) {
@@ -327,10 +294,7 @@ async function checkRuntimeAvailability(): Promise<PreflightCheckResult> {
   return { check: 'runtime_availability', passed: true, durationMs: Date.now() - start };
 }
 
-/** Order for surfacing the most actionable failure when multiple checks fail. */
 const PREFLIGHT_FAILURE_PRIORITY: readonly PreflightFailureReasonType[] = [
-  // Token-secret misconfiguration is the most actionable + specific — surface
-  // it ahead of the generic unreachable reason (#251).
   PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING,
   PreflightFailureReason.GITHUB_TOKEN_SECRET_UNREADABLE,
   PreflightFailureReason.GITHUB_UNREACHABLE,
@@ -351,10 +315,6 @@ function pickPrimaryPreflightFailure(failedChecks: PreflightCheckResult[]): Pref
   return failedChecks[0];
 }
 
-// ---------------------------------------------------------------------------
-// Main pre-flight check runner
-// ---------------------------------------------------------------------------
-
 export async function runPreflightChecks(
   repo: string | undefined,
   blueprintConfig: BlueprintConfig,
@@ -364,16 +324,10 @@ export async function runPreflightChecks(
 ): Promise<PreflightResult> {
   const checks: PreflightCheckResult[] = [];
 
-  // Repo-less workflows (requires_repo:false) have no repo to pre-flight —
-  // short-circuit to passed. The seam exists from Phase 1 so the Phase-3
-  // repo-optional refactor flips behavior, not structure.
   if (!requiresRepo) {
     return { passed: true, checks };
   }
 
-  // Past this point requiresRepo is true, so a repo-bound task always carries
-  // a repo (enforced at admission in create-task-core). Narrow for the checks
-  // below, which are repo-specific.
   if (!repo) {
     return {
       passed: false,
@@ -384,18 +338,12 @@ export async function runPreflightChecks(
   }
 
   if (blueprintConfig.github_token_secret_arn) {
-    // Resolve token — fail immediately if token resolution fails
     let token: string;
     const tokenStart = Date.now();
     try {
       token = await resolveGitHubToken(blueprintConfig.github_token_secret_arn);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      // #251: distinguish token-secret misconfiguration from GitHub being
-      // unreachable. resolveGitHubToken throws MissingSecretError (absent/empty)
-      // or SecretUnreadableError (AccessDenied/throttling); anything else stays
-      // GITHUB_UNREACHABLE. The canonical BLOCKED[...] detail still drives
-      // classifyError; this only corrects the failureReason label.
       const reason = err instanceof MissingSecretError
         ? PreflightFailureReason.GITHUB_TOKEN_SECRET_MISSING
         : err instanceof SecretUnreadableError
@@ -417,8 +365,6 @@ export async function runPreflightChecks(
       };
     }
 
-    // Run reachability + repo access checks in parallel
-
     const results = await Promise.allSettled([
       checkGitHubReachability(token),
       checkRepoAccess(repo, token, readOnly),
@@ -429,7 +375,6 @@ export async function runPreflightChecks(
       if (result.status === 'fulfilled') {
         checks.push(result.value);
       } else {
-        // Defensive: inner check functions catch internally, but handle unexpected rejections fail-closed
         const errorDetail = result.reason instanceof Error ? result.reason.message : String(result.reason);
         logger.error('Pre-flight check promise rejected unexpectedly', { repo, error: errorDetail });
         checks.push({
@@ -445,12 +390,10 @@ export async function runPreflightChecks(
     logger.warn('No GitHub token configured — skipping GitHub pre-flight checks', { repo });
   }
 
-  // Runtime check (behind feature flag — read at call time so tests can toggle)
   if (process.env.PREFLIGHT_CHECK_RUNTIME === 'true') {
     checks.push(await checkRuntimeAvailability());
   }
 
-  // Aggregate: passed only if all checks passed
   const failedChecks = checks.filter(c => !c.passed);
   if (failedChecks.length === 0) {
     return { passed: true, checks };

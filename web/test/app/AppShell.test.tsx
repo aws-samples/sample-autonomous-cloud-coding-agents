@@ -54,8 +54,6 @@ describe('AppShell', () => {
   it('keeps a click on the console title inside the app', async () => {
     const { router } = renderRoute('/tasks');
     await screen.findByRole('heading', { name: 'Tasks', level: 1 });
-    // The title is a link to "/": a click the app does not take over makes the browser load
-    // the whole console again.
     const title = screen.getByRole('link', { name: 'ABCA Operator Console' });
     const click = createEvent.click(title);
     fireEvent(title, click);

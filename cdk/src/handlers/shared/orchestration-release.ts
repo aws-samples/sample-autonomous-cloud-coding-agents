@@ -17,30 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Child-task release for orchestration.
- *
- * The single path that turns an orchestration child row into a running
- * ABCA task. Used in two places:
- *   - seed time (the webhook processor / discovery): release the root
- *     children (layer 0) so the graph starts.
- *   - reconcile time (the TaskTable-stream reconciler): release children
- *     whose predecessors just all succeeded.
- *
- * Each release:
- *   1. createTaskCore(...) with channelSource 'linear' + orchestration
- *      metadata, idempotency-keyed on ``orchestration_id#sub_issue_id``
- *      so a duplicate stream event / webhook replay never double-creates.
- *   2. on 201, conditionally flip the row child_status blocked|ready →
- *      released and stamp child_task_id (the GSI then resolves the
- *      task back to its row on the child's terminal event).
- *
- * The conditional update (``child_status IN (blocked, ready)``) is the
- * second idempotency guard: if two reconcile invocations race the same
- * release, only one wins the status flip; createTaskCore's own
- * idempotency key means the loser doesn't create a second task either.
- */
-
 import {
   type DynamoDBDocumentClient,
   GetCommand,
@@ -61,26 +37,11 @@ import type { AttachmentRecord, ChannelSource } from './types';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './validation';
 import { CODING_WORKFLOW_ID } from './workflows';
 
-/**
- * The trigger channel an orchestration runs under. Defaults to ``'linear'``
- * everywhere (the only wired trigger today + back-compat for meta rows
- * seeded before the field existed). Part of the trigger-agnostic seam.
- */
 const DEFAULT_ORCHESTRATION_CHANNEL: ChannelSource = 'linear';
 
 /**
- * Read a user's free concurrency budget (``cap - active_count``) so a
- * release pass throttles to it instead of over-releasing children that admission
- * control would then hard-fail. Best-effort: on any read error returns the full
- * ``cap`` (degrade to today's release-all behavior rather than stall the
- * orchestration — admission control is still the backstop). Never negative.
- *
- * NOTE this is an INSTANTANEOUS snapshot — between this read and the child task's
- * own admission attempt, other tasks may start. That race is fine: admission
- * control remains the hard ceiling; throttling here just keeps the common case
- * (a wide fan-out releasing into an empty/quiet user) from mass-failing. A child
- * that still loses a tighter race is left ``ready`` and retried (it is not over the
- * cap-as-guillotine path because the throttle keeps the batch small).
+ * Read a user's free concurrency budget (``cap - active_count``).
+ * Best-effort: on any read error returns the full ``cap``. Never negative.
  */
 export async function readConcurrencyBudget(
   ddb: DynamoDBDocumentClient,
@@ -108,12 +69,10 @@ export async function readConcurrencyBudget(
 export interface ReleaseChildParams {
   readonly ddb: DynamoDBDocumentClient;
   readonly tableName: string;
-  /** The orchestration child row to release. */
   readonly row: OrchestrationChildRow;
   /** Platform user the child task is attributed to (parent's submitter). */
   readonly platformUserId: string;
-  /** Linear OAuth secret ARN + slug for the agent's outbound Linear GraphQL
-   *  (reactions/state via linear_reactions.py — there is no Linear MCP). */
+  /** Linear OAuth secret ARN + slug for the agent's outbound Linear GraphQL. */
   readonly linearOauthSecretArn?: string;
   readonly linearWorkspaceSlug?: string;
   /** Vault credential-provider name for vault-onboarded workspaces (RFC #249
@@ -130,111 +89,46 @@ export interface ReleaseChildParams {
    * linear children.
    */
   readonly mergeBranches?: readonly string[];
-  /** Injected createTaskCore (real handler in prod, mock in tests). */
   readonly createTaskCore: typeof CreateTaskCoreFn;
   /**
    * Parent-issue attachments (screened + stored once at seed time), inherited by
-   * every child so the coding agent sees the parent's attached spec.
-   * Passed to createTaskCore's preScreenedAttachments seam. The PARENT owns these
-   * S3 objects — a child failure must NOT delete them (createTaskCore only rolls
-   * back its own inline uploads, of which children have none).
+   * every child. The PARENT owns these S3 objects — a child failure must NOT
+   * delete them.
    */
   readonly preScreenedAttachments?: readonly AttachmentRecord[];
-  /**
-   * The parent epic's title/body, inherited by every child so PARALLEL siblings
-   * work from one shared statement of names and shapes.
-   *
-   * Without it each child sees only its own sub-issue text and invents its own
-   * contract. That is not hypothetical: an API child and a UI child of the same
-   * epic shipped `kyoto`/`checkIn` against `wander-kyoto`/`startDate`, each passed
-   * its own tests, merged without conflict, and produced a broken flow. The
-   * agreement existed only in the parent, which neither could see.
-   */
+  /** The parent epic's title/body, inherited by every child. */
   readonly parentContext?: {
     readonly title?: string;
     readonly description?: string;
   };
-  /** ISO timestamp (injected for testability). */
+  /** ISO timestamp. */
   readonly now: string;
-  /**
-   * Trigger channel the child task is created under. Defaults to ``'linear'``.
-   * Threaded from the orchestration's release context so a non-Linear trigger
-   * attributes its children to the right plane. Part of the trigger-agnostic seam.
-   */
+  /** Trigger channel the child task is created under. Defaults to ``'linear'``. */
   readonly channelSource?: ChannelSource;
 }
 
 export type ReleaseChildResult =
   | { readonly kind: 'released'; readonly taskId: string }
   | { readonly kind: 'create_failed'; readonly statusCode: number; readonly body: string }
-  // The create failed DETERMINISTICALLY (a 4xx that
-  // will fail identically on every retry — e.g. a guardrail/content-policy block
-  // or a validation error), so the child was marked terminally ``failed`` rather
-  // than rolled back to ``ready``. Distinct from ``create_failed`` (transient,
-  // stays ``ready`` for the next sweep) so the caller settles the epic
-  // finished-with-failures instead of re-attempting a doomed create forever.
   | { readonly kind: 'create_failed_terminal'; readonly statusCode: number; readonly body: string; readonly failureReason: string }
   | { readonly kind: 'already_released' }
   | { readonly kind: 'error'; readonly message: string };
 
-/**
- * A {@link ReleaseChildResult} tagged with the child it came from, returned by
- * {@link releaseReadyChildren} so a caller can correlate a result back to a row
- * (e.g. patch a terminally-failed child into the in-memory view before settling).
- */
+/** A {@link ReleaseChildResult} tagged with the child it came from. */
 export type ReleaseChildReadyResult = ReleaseChildResult & { readonly subIssueId: string };
 
-// The status codes createTaskCore ACTUALLY returns on a non-success (verified
-// against create-task-core.ts, not assumed from HTTP-code lore): 400
-// VALIDATION_ERROR (incl. the guardrail block), 409 DUPLICATE_TASK (idempotent
-// replay), 422 REPO_NOT_ONBOARDED, 429 BUDGET_EXCEEDED, 500/503 server/service
-// errors. There is no 403/404/408 path here.
-const HTTP_CONFLICT = 409; // idempotent replay — a task already exists for this key
+const HTTP_CONFLICT = 409;
 const HTTP_CLIENT_ERROR_MIN = 400;
 const HTTP_SERVER_ERROR_MIN = 500;
 
-/**
- * Is a create-task failure DETERMINISTIC (won't succeed on a bare retry — it
- * needs someone to change something first) vs TRANSIENT (a later sweep could
- * succeed on its own)? This decides terminal-fail (settle the epic) vs
- * rollback-to-``ready`` (let the scheduled sweep retry). Getting it wrong in the
- * rollback direction is an INFINITE silent strand: the stranded-orchestration
- * sweep re-releases a ``ready`` child forever and never terminally-fails it.
- *
- * Against the codes createTaskCore actually emits:
- *  - 400 (validation / guardrail block) and 422 (repo not onboarded) →
- *    DETERMINISTIC. Neither self-heals; the user must edit/reword the sub-issue
- *    or onboard the repo, THEN re-run via ``@bgagent retry``. Rolling back would
- *    loop the sweep forever.
- *  - 429 (monthly budget exhausted) → DETERMINISTIC for this release attempt.
- *    An operator must adjust/disable the budget or wait for the next UTC month,
- *    then re-run via ``@bgagent retry``.
- *  - 409 (duplicate/idempotent replay) → NOT a real failure: a task already
- *    exists for this key, so treat like a transient (roll back; a re-release
- *    idempotent-replays to 200 and finalizes). Never terminal.
- *  - 5xx (server/service) → TRANSIENT; a later sweep can succeed on its own.
- */
 function isDeterministicCreateFailure(statusCode: number): boolean {
   if (statusCode === HTTP_CONFLICT) return false;
   return statusCode >= HTTP_CLIENT_ERROR_MIN && statusCode < HTTP_SERVER_ERROR_MIN;
 }
 
-const HTTP_UNPROCESSABLE = 422; // REPO_NOT_ONBOARDED
-const HTTP_TOO_MANY_REQUESTS = 429; // BUDGET_EXCEEDED
+const HTTP_UNPROCESSABLE = 422;
+const HTTP_TOO_MANY_REQUESTS = 429;
 
-/**
- * A short, user-facing reason for a deterministic create failure, shown as
- * the child's panel ❌ sub-line (the child never got a task, so there's no
- * error_message to read). Keys on the STATUS CODE first (reliable + owned by
- * this layer) so the message can't silently degrade when an upstream reword
- * changes the body prose; the body substring is only a refinement to name the
- * guardrail case specifically (a 400 is either a guardrail block or a plain
- * validation error, and the code alone doesn't tell them apart). Every reason
- * ends with the same next step — fix the cause, then ``@bgagent retry``. That
- * holds when the cause is the sub-issue's own text too: the retry comment reads
- * the sub-issue again before the child is started from its row, as a re-applied
- * trigger label does (``refreshUnstartedText``).
- */
 function deterministicFailureReason(statusCode: number, body: string): string {
   const retry = 'then reply `@bgagent retry` on the epic to re-run.';
   if (statusCode === HTTP_UNPROCESSABLE) {
@@ -243,31 +137,12 @@ function deterministicFailureReason(statusCode: number, body: string): string {
   if (statusCode === HTTP_TOO_MANY_REQUESTS) {
     return `Couldn't start — a monthly budget is exhausted. Adjust the budget or wait for the next UTC month, ${retry}`;
   }
-  // 400: distinguish a guardrail/content-policy block (rewordable) from other validation.
   if (/content policy|guardrail/i.test(body || '')) {
     return `Blocked by content policy — reword this sub-issue, ${retry}`;
   }
   return `Couldn't start (validation error) — edit this sub-issue, ${retry}`;
 }
 
-/**
- * The shared-context block prepended to every child's task description.
- *
- * Delimited and explicitly labelled so the agent can tell the epic-wide agreement
- * from its OWN task, and told plainly that siblings are working in parallel from
- * this same text — which is the part that makes it act on it rather than treat it
- * as background. Names and shapes stated here are to be used verbatim rather than
- * re-invented, because a sibling has already been told the same thing.
- *
- * Empty when the epic has no context (an older row, or a bare parent) so a child
- * prompt is never padded with an empty heading.
- *
- * ``room`` is what the task description has left for the block once the child's
- * own text is in. The block is advisory, and a description over the limit is
- * refused as a fault of the sub-issue, so the block is what gives way: the
- * epic's body is cut to what fits, with the mark of a cut; without room for any
- * of it the title stays; without room for that there is no block.
- */
 function parentContextBlock(
   parentContext: { readonly title?: string; readonly description?: string } | undefined,
   room: number,
@@ -275,14 +150,8 @@ function parentContextBlock(
   const title = parentContext?.title?.trim() ?? '';
   const description = parentContext?.description?.trim() ?? '';
   if (!title && !description) return '';
-  // DESCRIPTIVE, not imperative — deliberately, and verified against the live
-  // guardrail. An instruction-shaped preamble ("use it exactly", "do not invent")
-  // stacks with the epic's own imperatives and the whole task description trips the
-  // PROMPT_ATTACK filter at MEDIUM confidence, which fails the child at admission
-  // with "blocked by content policy". Reproduced: the imperative wording blocks, this
-  // wording passes, with the same epic text after it. So the constraint is conveyed
-  // by stating what the siblings are already doing and what disagreeing with them
-  // would mean — which the model acts on just as well and the screen accepts.
+  // DESCRIPTIVE, not imperative: an instruction-shaped preamble makes the whole
+  // task description trip the guardrail's PROMPT_ATTACK filter.
   const block = (body: string) => [
     '--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---',
     'Several sub-issues of this epic are being built in parallel, and each was given',
@@ -296,29 +165,21 @@ function parentContextBlock(
   const whole = block(description);
   if (whole.length <= room) return whole;
   const keep = description.length - (whole.length - room) - PARENT_CONTEXT_TRUNCATED.length;
-  // Cut, then freed of half a character and of white space at the cut.
   const kept = keep > 0 ? description.slice(0, keep).replace(/\p{Surrogate}$/u, '').trimEnd() : '';
   if (kept) return block(`${kept}${PARENT_CONTEXT_TRUNCATED}`);
   return title && block('').length <= room ? block('') : '';
 }
 
-/** Build the child task description: the epic's shared context, then the child's own text. */
 function buildChildDescription(
   row: OrchestrationChildRow,
   parentContext?: { readonly title?: string; readonly description?: string },
 ): string {
   const own = childOwnText(row);
-  // 2: the blank line between the block and the child's own text.
   const shared = parentContextBlock(parentContext, MAX_TASK_DESCRIPTION_LENGTH - own.length - 2);
   return [shared, own].filter(Boolean).join('\n\n') || `Orchestration child ${row.sub_issue_id}`;
 }
 
-/** What the child itself is asked to do, without the epic's shared context. */
 function childOwnText(row: OrchestrationChildRow): string {
-  // The synthetic integration node has no real sub-issue / feature
-  // work — its job is to merge all leaf branches (already merged into its
-  // branch by repo.py's predecessor-merge) into one combined result. Give
-  // the agent a merge-focused instruction rather than a feature prompt.
   if (isIntegrationNode(row.sub_issue_id)) {
     return [
       'Integrate the completed sub-issue branches into one combined result.',
@@ -339,12 +200,6 @@ function childOwnText(row: OrchestrationChildRow): string {
   } else if (row.display_id) {
     parts.push(row.display_id);
   }
-  // Include the planner's scope below the title when it adds detail. The
-  // reviewer approved a plan that may name a concrete deliverable (a filename, a
-  // route); the coding agent must SEE it or it builds a title-only guess and the
-  // plan's promise breaks (observed in practice: the plan said dashboard.html,
-  // the agent shipped team-dashboard.html → 404). Skip when the description just
-  // echoes the title.
   const desc = (row.description ?? '').trim();
   if (desc && desc !== row.title) parts.push(desc);
   return parts.join('\n\n');
@@ -359,32 +214,15 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   const { ddb, tableName, row, platformUserId, baseBranch, createTaskCore, now } = params;
   const channelSource = params.channelSource ?? DEFAULT_ORCHESTRATION_CHANNEL;
 
-  // Surface-NEUTRAL keys: every released child carries these whatever seeded it.
-  // The reconciler maps a terminal task back to its row via the orchestration
-  // pair, so it must not depend on any one surface's metadata.
   const channelMetadata: Record<string, string> = {
-    // Adapter-owned values are the base. Engine-owned identity below wins on
-    // collision so an adapter cannot detach a task from its persisted row.
     ...(row.channel_metadata ?? {}),
     orchestration_id: row.orchestration_id,
     orchestration_sub_issue_id: row.sub_issue_id,
   };
 
-  // Surface-SPECIFIC keys, only for the surface that actually seeded this
-  // orchestration. Stamping them unconditionally would hand a non-Linear child a
-  // set of Linear ids naming rows in a workspace it has nothing to do with —
-  // harmless only because every consumer happens to check ``channel_source``
-  // first, which is a coincidence to rely on rather than a contract.
   if (channelSource === 'linear') {
     channelMetadata.linear_workspace_id = row.credentials_ref;
-    // Provenance only — nothing reads this back today, but it's been on every
-    // released child since the executor shipped, so it stays rather than being
-    // quietly dropped as part of a naming change.
     channelMetadata.parent_linear_issue_id = row.parent_issue_ref;
-    // Only set linear_issue_id (the agent's reaction/comment target) for a REAL
-    // sub-issue. A synthetic integration node has no issue behind it — passing
-    // its id would make the agent's reaction call 4xx. Omitting it lets the
-    // agent skip reactions cleanly.
     if (!isIntegrationNode(row.sub_issue_id)) {
       channelMetadata.linear_issue_id = row.sub_issue_id;
     }
@@ -392,62 +230,19 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
     if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
     if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;
-    // RFC #249 Phase 1: pass the vault provider name to sub-issue children so
-    // the agent-side resolver can mint via the vault (linear_workspace_id is
-    // already stamped above from row.credentials_ref). Absent ⇒ SM path.
     if (params.linearProviderName) channelMetadata.linear_provider_name = params.linearProviderName;
     if (params.linearVaultUserId) channelMetadata.linear_vault_user_id = params.linearVaultUserId;
   }
-  // Stacked base branch + (diamond) predecessor merge-list. The
-  // orchestrator reads these to set the agent payload's base_branch +
-  // merge_branches. Absent for roots (agent branches off main as today).
   if (params.baseBranch) channelMetadata.orchestration_base_branch = params.baseBranch;
   if (params.mergeBranches && params.mergeBranches.length > 0) {
     channelMetadata.orchestration_merge_branches = JSON.stringify(params.mergeBranches);
   }
 
-  // Deterministic idempotency key: same child never creates two tasks.
-  // Separator is '_' (NOT '#') because createTaskCore validates the key
-  // against /^[a-zA-Z0-9_-]{1,128}$/ — a '#' is rejected with a 400 and
-  // the child silently never starts. orchestration_id (orch_<32hex>) +
-  // '_' + sub_issue_id (a UUID, all hyphens) stays within 128 chars and
-  // inside the allowed charset.
-  //
-  // RETRY REPLAY FIX: salt the key with the prior
-  // child_task_id WHENEVER the row already carries one, whoever releases it. A
-  // child being (re-)released while it still has a
-  // child_task_id inherently means that prior task is TERMINAL (a live child is
-  // in 'released', never back in blocked/ready), so replaying it under the same
-  // key would return the OLD failed task (200) and nothing runs. This bit a
-  // dependency chain A→B while only the epic retry salted: it releases A (layer
-  // 0), but B is reset to blocked and later released by the reconciler → the
-  // unsalted key replayed B's dead task. Salting on the id's PRESENCE fixes both
-  // the immediate layer and the downstream cascade. The prior id (a ULID, 26
-  // alnum chars) keeps the key inside the charset; orch_<32> + _ + <uuid 36> +
-  // _ + <ulid 26> ≈ 100 chars, under the 128 cap. A first release (no prior id)
-  // is unchanged. Redelivery-safe: same prior id → same key → one new task.
   const baseKey = `${row.orchestration_id}_${row.sub_issue_id}`;
   const idempotencyKey = row.child_task_id
     ? `${baseKey}_${row.child_task_id}`
     : baseKey;
 
-  // EXACTLY-ONCE FIX: flip-then-create. The prior design
-  // was create-then-flip — createTaskCore ran FIRST (irreversible: mints a task
-  // + fire-and-forget invokes the orchestrator), and only afterward a conditional
-  // row flip "deduped". But createTaskCore's own idempotency is an
-  // eventually-consistent GSI read-then-write, so two concurrent releasers (the
-  // live TaskTable-stream reconciler AND the scheduled stranded sweep) could BOTH
-  // pass the in-memory status check, BOTH createTaskCore before either flip
-  // committed, and BOTH miss the other's not-yet-propagated write → two ECS
-  // agents + two PRs for one sub-issue. (Analysed in
-  // ``docs/research/orchestration-reconciler-correctness.md``.)
-  //
-  // Now we ATOMICALLY CLAIM the row (blocked|ready → releasing) BEFORE creating
-  // the task. Only the invocation that wins this conditional Update proceeds to
-  // createTaskCore; a racing releaser gets ConditionalCheckFailed and returns
-  // already_released WITHOUT creating a task — the claim is the single
-  // serialization point, now correctly ahead of the irreversible create. Do this
-  // FIRST so a losing releaser bails before doing any attachment work below.
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
@@ -477,17 +272,6 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
   }
 
-  // Attachments a feature child receives: the PARENT epic's spec (inherited via
-  // release_context) PLUS this sub-issue's OWN attachments (a mockup
-  // attached to just this piece, hydrated at seed onto the child row). Merge both,
-  // de-duped by attachment_id (a file both on the epic and the sub-issue isn't
-  // passed twice). Integration nodes are a pure branch merge — they need neither.
-  //
-  // OWN attachments are listed FIRST so that, when the merged set would exceed the
-  // per-task cap, the child's own files (most relevant to THIS piece) survive and
-  // the shared epic spec is what gets trimmed. Capped at MAX_ATTACHMENTS_PER_TASK
-  // with a loud log (never a silent truncation) — each source is independently
-  // ≤10, so the merge can only overflow a pathological many-file epic+child.
   const inheritedAttachments = params.preScreenedAttachments ?? [];
   const ownAttachments = row.pre_screened_attachments ?? [];
   const dedupedAttachments: AttachmentRecord[] = [];
@@ -499,11 +283,6 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   }
   const mergedAttachments = dedupedAttachments.slice(0, MAX_ATTACHMENTS_PER_TASK);
   if (dedupedAttachments.length > MAX_ATTACHMENTS_PER_TASK) {
-    // BACKSTOP only: the webhook processor caps a child's OWN attachments against
-    // the inherited count at stamp time AND posts a user-visible note there.
-    // Reaching here means the merged set still overflowed (e.g. the
-    // epic's own attachment set is large) — keep own-first ordering and log; this
-    // is not the primary user-facing path, so a warn is the right level.
     logger.warn('Child attachment set over the per-task cap at release — trimming (parent-spec files dropped first; user already notified at stamp time)', {
       orchestration_id: row.orchestration_id,
       sub_issue_id: row.sub_issue_id,
@@ -521,16 +300,6 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       {
         repo: row.repo,
         task_description: buildChildDescription(row, params.parentContext),
-        // Pin the disciplined coding workflow, as every other channel does at its
-        // own call site. Without it a repo-bound child falls back to the
-        // repo-OPTIONAL default/agent-v1, whose setup skips the stacked-base and
-        // predecessor-merge path entirely.
-        //
-        // A chain survives that by luck — its child needs no merge, so the agent
-        // works from the base it was given. A DIAMOND does not: the integration
-        // node was handed two predecessor branches to merge, got a clean default
-        // branch instead, and the agent hand-wrote an approximation of one arm.
-        // The result looked plausible and silently dropped the other arm's work.
         workflow_ref: CODING_WORKFLOW_ID,
       },
       {
@@ -538,14 +307,10 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
         channelSource,
         channelMetadata,
         idempotencyKey,
-        // Parent spec + this child's own attachments. Integration nodes are a pure
-        // merge of already-built branches, so they don't need the spec — only real
-        // feature children do. Records reference existing S3 objects (read-only).
         ...(mergedAttachments.length > 0
           && !isIntegrationNode(row.sub_issue_id)
           && { preScreenedAttachments: mergedAttachments }),
       },
-      // requestId — reuse the idempotency key for trace correlation.
       idempotencyKey,
     );
   } catch (err) {
@@ -554,23 +319,11 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       sub_issue_id: row.sub_issue_id,
       error: err instanceof Error ? err.message : String(err),
     });
-    // We won the claim (row is now 'releasing') but createTaskCore threw — roll
-    // the claim BACK to 'ready' so a later reconcile/sweep can retry the release,
-    // instead of leaving the child stuck in the transient 'releasing' state
-    // forever. Conditional on still being 'releasing' (don't clobber a concurrent
-    // transition). Best-effort — a failed rollback still gets swept by the
-    // stranded-orchestration reconciler.
     await rollbackClaim(ddb, tableName, row, now);
     return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
   }
 
-  // 201 = created; 200 = idempotent replay (task already existed). Both
-  // mean "a task exists for this child" — treat alike.
   if (result.statusCode !== 201 && result.statusCode !== 200) {
-    // Log the RESPONSE BODY, not just the status — a bare "status:400"
-    // forces log-archaeology to find the cause (e.g. a rejected
-    // idempotency key, an un-onboarded repo, a guardrail block). The
-    // body carries the user-readable error message and code.
     logger.warn('Orchestration child task creation returned non-success', {
       orchestration_id: row.orchestration_id,
       sub_issue_id: row.sub_issue_id,
@@ -579,42 +332,17 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
       response_body: result.body,
       idempotency_key: idempotencyKey,
     });
-    // Split deterministic from transient failures.
-    // A deterministic 4xx (guardrail/content-policy block, validation error)
-    // fails identically on every retry — rolling back to 'ready' strands the
-    // child in an infinite silent re-attempt loop (10-min sweep forever, no
-    // terminal state, no ❌, epic stuck 👀). Mark it terminally 'failed' so the
-    // reconcile settles the epic finished-with-failures and the child gets a ❌
-    // + a reason (posted by the caller's terminal path). Only TRANSIENT failures
-    // (5xx) roll back to 'ready' for a later retry.
     if (isDeterministicCreateFailure(result.statusCode)) {
       const failureReason = deterministicFailureReason(result.statusCode, result.body);
       await failClaimTerminal(ddb, tableName, row, now, failureReason);
       return { kind: 'create_failed_terminal', statusCode: result.statusCode, body: result.body, failureReason };
     }
-    // Claim won but the create failed transiently (5xx) — roll the
-    // claim back to 'ready' so the next reconcile/sweep retries it, rather than
-    // stranding the child in 'releasing'. Note 422 (repo not onboarded) is NOT
-    // here: it is deterministic and handled above, since a repo doesn't onboard
-    // itself and retrying would strand the child silently forever.
     await rollbackClaim(ddb, tableName, row, now);
     return { kind: 'create_failed', statusCode: result.statusCode, body: result.body };
   }
 
   const { taskId, branchName } = extractTaskIdAndBranch(result.body);
 
-  // Finalize the claim: flip 'releasing' → 'released' and stamp the task id +
-  // branch. We already hold the claim (won the conditional above), so this is
-  // conditional only on still being 'releasing' — defensive against a concurrent
-  // cancel/skip that legitimately moved the row on (in which case we do NOT
-  // overwrite it; the created task's own terminal event reconciles).
-  //
-  // Persist the child's branch_name so a DEPENDENT child's release can
-  // stack on / merge it (selectBaseBranch reads predecessor branch names).
-  //
-  // Drop the reason of an earlier start that was refused: from here on the
-  // row's outcome is this task's, and the panel shows a row's own reason before
-  // its task's.
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
@@ -633,9 +361,6 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     }));
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
-      // The row moved off 'releasing' between our claim and finalize (a cancel
-      // or skip landed). The task was created (idempotency-keyed), so its own
-      // terminal event will reconcile — we just don't clobber the new state.
       logger.info('Orchestration child left releasing state before finalize (concurrent transition)', {
         orchestration_id: row.orchestration_id,
         sub_issue_id: row.sub_issue_id,
@@ -662,13 +387,11 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
 
 /**
  * Release a batch of child rows (the ``ready`` ones), using a shared
- * release context (from the meta row). Used both at seed time (release
- * roots) and by the reconciler (release newly-unblocked dependents).
+ * release context (from the meta row).
  *
  * Each child is released independently; one failure does not abort the
- * rest (a transient create failure for child A shouldn't strand B). The
- * caller logs/handles per-child results — a ``create_failed`` row stays
- * ``ready`` and is retried on the next reconcile pass.
+ * rest. A ``create_failed`` row stays ``ready`` and is retried on the next
+ * reconcile pass.
  */
 export async function releaseReadyChildren(
   ddb: DynamoDBDocumentClient,
@@ -680,9 +403,7 @@ export async function releaseReadyChildren(
   /**
    * The FULL child set (not just the releasable subset), so a
    * child's base branch can be derived from its predecessors' persisted
-   * ``child_branch_name``. Defaults to ``rows`` for back-compat with
-   * callers that pass the full set as ``rows`` and release roots (roots
-   * have no predecessors, so selection degrades to off-main).
+   * ``child_branch_name``. Defaults to ``rows``.
    */
   allChildren?: readonly OrchestrationChildRow[],
   /** Repo default branch for roots + diamond bases. Defaults to 'main'. */
@@ -691,8 +412,7 @@ export async function releaseReadyChildren(
    * Max children to actually release this pass — the user's free
    * concurrency budget (``cap - active_count``). When set, only this many
    * ``ready`` children are released; the rest are LEFT ``ready`` (a no-op,
-   * not a failure) for a later reconcile pass to pick up as slots free.
-   * ``undefined`` = release all (back-compat; callers that don't throttle).
+   * not a failure). ``undefined`` = release all.
    * A value ``<= 0`` releases nothing this pass.
    */
   maxToRelease?: number,
@@ -701,10 +421,6 @@ export async function releaseReadyChildren(
   const branchOf = new Map(
     all.filter((c) => c.child_branch_name).map((c) => [c.sub_issue_id, c.child_branch_name as string]),
   );
-  // Throttle to the available budget. Sort by sub_issue_id for a
-  // deterministic, fair release order across passes. Releasing fewer than
-  // are ready is intentional — the leftovers stay ``ready`` and the next
-  // reconcile (sibling completion) or the scheduled sweep releases them.
   const ready = rows.filter((r) => r.child_status === 'ready');
   const releasable = maxToRelease === undefined
     ? ready
@@ -718,7 +434,6 @@ export async function releaseReadyChildren(
   }
   const results: ReleaseChildReadyResult[] = [];
   for (const row of releasable) {
-    // Derive the base from this child's predecessors' persisted branches.
     const selection = selectBaseBranch({
       predecessors: row.depends_on.map((sub) => ({
         sub_issue_id: sub,
@@ -746,38 +461,25 @@ export async function releaseReadyChildren(
       ...(releaseContext.linear_project_id !== undefined && {
         linearProjectId: releaseContext.linear_project_id,
       }),
-      // Trigger-agnostic: carry the orchestration's channel onto the
-      // child. ``releaseChild`` defaults to 'linear' when absent.
       ...(releaseContext.channel_source !== undefined && {
         channelSource: releaseContext.channel_source as ChannelSource,
       }),
-      // Every child inherits the parent's screened attachments.
       ...(releaseContext.pre_screened_attachments !== undefined && {
         preScreenedAttachments: releaseContext.pre_screened_attachments,
       }),
-      // …and the epic's own words, so siblings released in the SAME batch (the
-      // parallel case) are working from one shared contract rather than each
-      // inferring its own from its sub-issue title.
       ...(releaseContext.parent_context !== undefined && {
         parentContext: releaseContext.parent_context,
       }),
-      // Root → 'main' base, no merges (omit so today's off-main behavior
-      // is unchanged). Linear → predecessor branch. Diamond → main + merges.
       ...(selection.shape !== 'root' && { baseBranch: selection.base_branch }),
       ...(selection.merge_branches.length > 0 && { mergeBranches: selection.merge_branches }),
       createTaskCore,
       now,
     });
-    // Correlate the result to its child so callers can patch their in-memory
-    // view: a terminally-failed child must be reflected in the settle that
-    // runs right after this release, since no later stream event will re-drive
-    // the reconciler for a child that never became a task.
     results.push({ ...childResult, subIssueId: row.sub_issue_id });
   }
   return results;
 }
 
-/** Pull task_id + branch_name out of a createTaskCore success body (best-effort). */
 function extractTaskIdAndBranch(body: string): { taskId: string; branchName: string } {
   try {
     const parsed = JSON.parse(body) as {
@@ -794,14 +496,6 @@ function extractTaskIdAndBranch(body: string): { taskId: string; branchName: str
   }
 }
 
-/**
- * Roll a claimed-but-not-created child back from the transient 'releasing' state
- * to 'ready' so a later reconcile/sweep can retry the release. Conditional on the
- * row still being 'releasing' (never clobber a concurrent transition). Best-effort:
- * if the rollback itself fails, the stranded-orchestration sweep still recovers a
- * child left in 'releasing' (it is treated as an in-flight release with no task id).
- * Preserves child_task_id so the retry-replay salt still applies on the next try.
- */
 async function rollbackClaim(
   ddb: DynamoDBDocumentClient,
   tableName: string,
@@ -817,7 +511,7 @@ async function rollbackClaim(
       ExpressionAttributeValues: { ':ready': 'ready', ':releasing': 'releasing', ':now': now },
     }));
   } catch (err) {
-    if (isConditionalCheckFailed(err)) return; // already moved on — fine
+    if (isConditionalCheckFailed(err)) return;
     logger.warn('Failed to roll back orchestration child claim (sweep will recover)', {
       orchestration_id: row.orchestration_id,
       sub_issue_id: row.sub_issue_id,
@@ -826,15 +520,6 @@ async function rollbackClaim(
   }
 }
 
-/**
- * Flip a claimed ('releasing') child to terminal 'failed' after a
- * DETERMINISTIC create failure (guardrail/validation) so it does NOT re-attempt
- * forever. Mirrors {@link rollbackClaim} but targets 'failed' instead of 'ready'
- * — the reconcile/sweep then settles the epic finished-with-failures and posts
- * the child's ❌. Conditional on still being 'releasing' (don't clobber a
- * concurrent cancel/skip). Best-effort: a failed write is swept by the
- * stranded-orchestration reconciler (which will see a 'releasing' row aged out).
- */
 async function failClaimTerminal(
   ddb: DynamoDBDocumentClient,
   tableName: string,
@@ -860,7 +545,7 @@ async function failClaimTerminal(
       sub_issue_id: row.sub_issue_id,
     });
   } catch (err) {
-    if (isConditionalCheckFailed(err)) return; // already moved on — fine
+    if (isConditionalCheckFailed(err)) return;
     logger.warn('Failed to mark orchestration child terminally failed (sweep will recover)', {
       orchestration_id: row.orchestration_id,
       sub_issue_id: row.sub_issue_id,
@@ -882,23 +567,6 @@ function isConditionalCheckFailed(err: unknown): boolean {
  * Persist the transitive skips caused by a child that failed DETERMINISTICALLY at
  * release time, and return the child view patched with the failure + skips.
  *
- * A guardrail/validation rejection means the child never became a task, so no task
- * event will ever wake the reconciler for it. ``releaseReadyChildren`` already
- * wrote ``child_status='failed'`` + ``failure_reason`` for the node itself, but a
- * mid-graph failure must ALSO transitively skip its dependents — exactly as a
- * task-level failure does — or those dependents stay ``blocked`` forever and the
- * epic never reaches all-terminal.
- *
- * Both release call sites need this, which is why it lives here rather than in one
- * handler: the reconciler releases children as predecessors succeed, and the
- * SEED path releases the roots. A guardrail rejection on a root at seed time used
- * to leave the epic at "🔄 N/M" with no settle until the 10-minute stranded sweep
- * swept it up, because only the reconciler had this step (observed in practice).
- *
- * Reuses {@link computeReconcilePlan} — the same BFS over reverse dependencies the
- * task-failure path uses — so a guardrail failure and a task failure skip
- * dependents identically.
- *
  * Idempotent: each skip write is guarded on ``child_status IN (blocked, ready)``,
  * so it never stamps a released/running sibling terminal.
  *
@@ -919,8 +587,6 @@ export async function applyTerminalCreateFailures(
   }
   if (failedReasons.size === 0) return children;
 
-  // Accumulate into one status map so a diamond whose two failed roots feed a
-  // shared leaf skips that leaf once.
   const statusById = new Map<string, ChildStatus>(children.map((c) => [c.sub_issue_id, c.child_status]));
   for (const failedId of failedReasons.keys()) {
     const plan = computeReconcilePlan(
@@ -930,8 +596,6 @@ export async function applyTerminalCreateFailures(
     for (const u of plan.statusUpdates) statusById.set(u.sub_issue_id, u.child_status);
   }
 
-  // Persist ONLY the skips — the failed nodes themselves were already written
-  // (with their failure_reason) by the release path.
   for (const [subIssueId, status] of statusById) {
     if (status !== 'skipped' || children.find((c) => c.sub_issue_id === subIssueId)?.child_status === 'skipped') {
       continue;
@@ -945,7 +609,7 @@ export async function applyTerminalCreateFailures(
         ExpressionAttributeValues: { ':s': 'skipped', ':blocked': 'blocked', ':ready': 'ready', ':now': now },
       }));
     } catch (err) {
-      if (isConditionalCheckFailed(err)) continue; // already moved on — fine
+      if (isConditionalCheckFailed(err)) continue;
       throw err;
     }
   }

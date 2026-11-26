@@ -1,22 +1,8 @@
-"""Pydantic models for a workflow file.
-
-These mirror ``agent/workflows/schema/workflow.schema.json`` (the canonical
-*shape* contract — see WORKFLOWS.md §"Single source of truth and validator
-parity"). The JSON Schema validates shape and the schema-expressible
-conditionals; these models give the runtime a typed, attribute-access view of
-an already-shape-validated file. Cross-field rules that the schema cannot
-express (the numbered rules in WORKFLOWS.md §"Validation rules") live in the
-single cross-field validator, not here — these models stay deliberately thin so
-there is exactly one place those rules are enforced.
-"""
-
 from __future__ import annotations
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
-# --- enums kept as Literals to mirror the JSON Schema's string enums 1:1 ---
 
 Domain = Literal["coding", "knowledge", "hybrid"]
 Tier = Literal["standard", "elevated", "read-only"]
@@ -38,16 +24,10 @@ StepKind = Literal[
 OnFailure = Literal["fail", "continue", "skip_remaining"]
 EnsurePrStrategy = Literal["create", "push_resolve", "resolve"]
 VerifyGate = Literal["strict", "regression_only", "informational"]
-# deliver_artifact target: an open string naming a registered deliverer
-# (workflow.deliverers / DELIVERERS), not a closed enum — a new delivery method
-# is a registered deliverer, not a model/schema change (ADR-014 addendum
-# 2026-06-08). First-party names: s3, comment, s3_and_comment.
 DeliverTarget = str
 TerminalOutcome = Literal["pr_url", "review_posted", "artifact", "comment"]
 ConvergenceMode = Literal["test_gated", "artifact_delivered", "human_approved", "review_submitted"]
 ConvergenceSensor = Literal["verify_build", "verify_lint"]
-# These are observable signals, unlike artifact-oriented TerminalOutcome values.
-# Mode/outcome coupling is enforced by the loader's JSON Schema pass.
 ConvergenceTerminalOutcome = Literal[
     "pr_opened", "review_published", "artifact_delivered", "human_approved"
 ]
@@ -83,11 +63,8 @@ class ModelPreference(BaseModel):
 class AgentConfig(BaseModel):
     """Everything that shapes the Claude Agent SDK session for this task type.
 
-    Asset kinds mirror the #246 registry vocabulary. ``tier`` and
-    ``allowed_tools`` are interpreted by the runner in Phases 1-3; the
-    registry-resolved kinds (``skills``/``plugins``/``subagents``/
-    ``prompt_fragments`` and ``registry://`` refs) are declared now but ignored
-    by the runner until #246 lands.
+    ``skills``, ``plugins``, ``subagents`` and ``prompt_fragments`` are declared
+    but not read by the runner (#246).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -97,7 +74,6 @@ class AgentConfig(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     mcp_servers: list[str] = Field(default_factory=list)
     cedar_policy_modules: list[str] = Field(default_factory=list)
-    # Registry-resolved (Phase 4, #246) — declared, not yet interpreted.
     skills: list[str] = Field(default_factory=list)
     plugins: list[str] = Field(default_factory=list)
     subagents: list[str] = Field(default_factory=list)
@@ -114,16 +90,13 @@ class RepoConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    # No default here: "absent" is meaningful (cross-field rule 7 requires
-    # provider to be absent when requires_repo:false). The runner applies the
-    # github default only when a repo is actually in play.
     provider: VcsProvider | None = None
     discover: bool = True
     ignore: list[RepoIgnore] = Field(default_factory=list)
 
 
 class RequiredInputs(BaseModel):
-    """Submit-time validation contract (replaces scattered required-input checks)."""
+    """Submit-time validation contract."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -134,8 +107,7 @@ class RequiredInputs(BaseModel):
 class Step(BaseModel):
     """One ordered pipeline phase the step runner interprets.
 
-    ``extra='allow'`` mirrors the schema's ``additionalProperties: true`` on
-    steps so kind-specific fields beyond the common ones below round-trip.
+    Kind-specific fields beyond the ones below are accepted and kept.
     """
 
     model_config = ConfigDict(frozen=True, extra="allow")
@@ -143,7 +115,6 @@ class Step(BaseModel):
     kind: StepKind
     name: str | None = None
     on_failure: OnFailure = "fail"
-    # kind-specific (validated by enum where present):
     strategy: EnsurePrStrategy | None = None
     gate: VerifyGate | None = None
     target: DeliverTarget | None = None
@@ -169,9 +140,8 @@ class ConvergenceEarlyExit(BaseModel):
 class Convergence(BaseModel):
     """How a harness decides that this workflow is complete.
 
-    The v1 contract is declarative metadata for conformance tooling. Runtime
-    success inference continues to use the existing step and terminal-outcome
-    behavior until a later version explicitly adopts this contract.
+    Declarative metadata for conformance tooling: runtime success inference
+    does not read it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -213,7 +183,6 @@ class Workflow(BaseModel):
     domain: Domain
     description: str | None = None
     guidance: str | None = None
-    # requires_repo defaults from domain when omitted (see resolved_requires_repo).
     requires_repo: bool | None = None
     read_only: bool = False
     prompt: Prompt
@@ -222,8 +191,6 @@ class Workflow(BaseModel):
     repo_config: RepoConfig | None = None
     required_inputs: RequiredInputs | None = None
     steps: list[Step]
-    # Reserved: the schema allows the key and pins it to empty, and nothing
-    # reads it. Post-agent gates are steps.
     post_hooks: list[str] = Field(default_factory=list, max_length=0)
     terminal_outcomes: TerminalOutcomes
     convergence: Convergence | None = None
@@ -245,11 +212,7 @@ class Workflow(BaseModel):
 
     @property
     def ensure_pr_strategy(self) -> EnsurePrStrategy:
-        """The strategy of the workflow's ``ensure_pr`` step: ``create`` when it has none.
-
-        The pipeline's post-hooks and the push preflight in ``repo.setup_repo`` both
-        read it: ``resolve`` only looks up an existing PR, so it never pushes.
-        """
+        """The strategy of the workflow's ``ensure_pr`` step: ``create`` when it has none."""
         return next(
             (s.strategy for s in self.steps if s.kind == "ensure_pr" and s.strategy),
             "create",
@@ -257,13 +220,5 @@ class Workflow(BaseModel):
 
     @property
     def delivers_repo_artifact(self) -> bool:
-        """A repository-bound workflow whose terminal outcome is a document, not a PR.
-
-        It clones the repository for context, skips the build and PR post-hooks and
-        delivers the agent's result as an artifact, so it never pushes. Both
-        conditions matter: ``default/agent-v1`` declares ``primary: artifact`` but
-        ``requires_repo: false``, and run with a repository it still opens a PR.
-        Uses ``resolved_requires_repo``, as ``build_config`` does: a ``coding``
-        workflow may leave ``requires_repo`` out, and the raw field is then None.
-        """
+        """A repository-bound workflow whose terminal outcome is a document, not a PR."""
         return self.terminal_outcomes.primary == "artifact" and self.resolved_requires_repo

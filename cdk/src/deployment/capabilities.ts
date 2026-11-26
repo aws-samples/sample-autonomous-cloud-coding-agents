@@ -33,7 +33,7 @@ export interface Capability {
 export interface FeatureCapability extends Capability {
   readonly description: string;
   readonly maturity: 'stable' | 'experimental';
-  /** Approximate root-stack resources; checked against synthesis by the census tests. */
+  /** Approximate root-stack resources. */
   readonly approximateResources: number;
   /** Disabling deletes data (tables, secrets, registry records). */
   readonly stateful: boolean;
@@ -44,15 +44,11 @@ export interface CapabilityCatalog {
   readonly lastVerified: string;
   readonly source: string;
   readonly core: Capability;
-  /**
-   * Every compute backend; only a Region-limited one lists `regions`. The Lambda MicroVMs
-   * construct enforces its entry (`handlers/shared/microvm-regions.ts`), not this module.
-   */
+  /** Every compute backend; only a Region-limited one lists `regions`. */
   readonly compute: Readonly<Record<ComputeBackend, Capability>>;
   readonly features: Readonly<Record<DeploymentFeature, FeatureCapability>>;
 }
 
-/** Single source shared with the CLI mirror (`cli/src/deployment-capabilities.ts`). */
 export const CAPABILITY_CATALOG = catalog as CapabilityCatalog;
 
 function supports(capability: Capability, region: string): boolean {
@@ -78,9 +74,8 @@ export function capabilityViolations(
 }
 
 /**
- * Fail synthesis for an unsupported concrete Region instead of a late,
- * opaque CloudFormation error. Environment-agnostic synthesis cannot know the
- * Region and is left to the deploy-time service checks.
+ * Fail synthesis for an unsupported concrete Region. Environment-agnostic
+ * synthesis cannot know the Region and is left to the deploy-time service checks.
  */
 export function assertCapabilitiesAvailable(features: DeploymentFeatures, region: string | undefined): void {
   if (region === undefined || Token.isUnresolved(region)) return;

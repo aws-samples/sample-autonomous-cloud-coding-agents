@@ -18,17 +18,9 @@
  */
 
 /**
- * Names shared by the construct layer, which creates the buckets and tables, and the
- * Lambda runtime code that reads and writes them: S3 object-key prefixes and DynamoDB
- * index names. Deliberately dependency-free: no `aws-cdk-lib`, no `constructs`, no
- * imports at all.
- *
- * They live here rather than next to the construct that owns the bucket or table
- * because a handler that imports a construct module bundles all of `aws-cdk-lib`
- * into its Lambda artifact: esbuild cannot tree-shake a module whose top level
- * requires the library. Importing these three names from their construct modules
- * put the library (2,740 files, 56.5 MB) into 11 handler bundles. Constructs
- * import from here; never the reverse.
+ * No imports: a handler that imports a construct module bundles all of `aws-cdk-lib`
+ * into its Lambda artifact, as esbuild cannot tree-shake a module whose top level
+ * requires the library.
  */
 
 /** S3 key prefix for all attachments. Layout: attachments/<user_id>/<task_id>/<attachment_id>/<filename> */
@@ -36,7 +28,7 @@ export const ATTACHMENT_OBJECT_KEY_PREFIX = 'attachments/';
 
 /**
  * S3 key prefix for all trace artifacts. Layout:
- * ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1). The per-user segment is
+ * ``traces/<user_id>/<task_id>.jsonl.gz``. The per-user segment is
  * what ``get-trace-url`` authorizes a presigned read against.
  */
 export const TRACE_OBJECT_KEY_PREFIX = 'traces/';

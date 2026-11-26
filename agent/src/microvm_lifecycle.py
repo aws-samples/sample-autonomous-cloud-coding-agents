@@ -1,19 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Guest-side pause barrier for ADR-021.
-
-This controller does not call AWS or decide approvals. The server owns one
-controller per running MicroVM task; tool hooks register work and the *original*
-approval deadline. HTTP lifecycle handlers supply the durable checkpoint and
-credential-refresh operations; this controller owns permission to release work.
-
-Returning from a suspend callback is not proof that AWS actually froze the VM.
-Once acknowledged, the barrier opens only after a successful resume callback.
-There is deliberately no timer that releases coding after an ambiguous suspend:
-the supervisor must wake or terminate within its bounded recovery window.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -32,10 +19,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-# ---------------------------------------------------------------------------
-# Bounded, payload-free lifecycle diagnostics shared with callback threads
-# ---------------------------------------------------------------------------
 
 _ACTIVE: ContextVar[HookDiagnostics | None] = ContextVar("microvm_hook_diagnostics", default=None)
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -63,8 +46,8 @@ def _error_identity(error: BaseException | None) -> dict[str, str]:
 class HookDiagnostics:
     """One HTTP invocation; copied thread contexts retain this same correlation id.
 
-    Logging cannot authorize a transition. Callback threads may outlive a timeout;
-    their subsequent records are marked late, never a successful HTTP acknowledgment.
+    Callback threads may outlive a timeout; their subsequent records are marked
+    late, never a successful HTTP acknowledgment.
     """
 
     def __init__(self, action: str, snapshot: Callable[[], dict[str, Any]]) -> None:
@@ -77,8 +60,6 @@ class HookDiagnostics:
         self._lock = threading.Lock()
 
     def emit(self, event: str, **fields: Any) -> None:
-        # Snapshot only safe local facts. Never include request bodies, SDK messages,
-        # approval records, tool arguments, credentials, or exception tracebacks.
         try:
             snapshot = self._snapshot()
             safe = {
@@ -100,13 +81,9 @@ class HookDiagnostics:
                     "late": self._closed,
                     **fields,
                 }
-                # Concurrent hooks and their callback threads must not interleave
-                # the JSON and newline writes of these records.
                 with _OUTPUT_LOCK:
                     print(json.dumps(record), flush=True)
         except Exception:  # noqa: S110 — failure in the logging sink cannot safely log to itself.
-            # Diagnostics are best effort; a broken stdout must not change the
-            # response or bypass the controller's generation/barrier checks.
             pass
 
     def stage(self, name: str) -> None:
@@ -158,11 +135,6 @@ def lifecycle_stage(name: str):
             diagnostics.emit("microvm_hook_stage_finished", callback_stage=name)
 
 
-# ---------------------------------------------------------------------------
-# Approval barrier and suspend/resume controller
-# ---------------------------------------------------------------------------
-
-
 class ApprovalDeadline(Protocol):
     def remaining_s(self) -> float: ...
 
@@ -172,7 +144,7 @@ class LifecycleUnavailable(RuntimeError):
 
 
 def reseed_random() -> None:
-    """Give each run/wake fresh application PRNG state; secrets still use OS RNG."""
+    """Give each run/wake fresh application PRNG state."""
     random.seed(os.urandom(32))
 
 
@@ -199,7 +171,6 @@ class ApprovalPark:
 class MicrovmLifecycle:
     """Synchronize tool execution, approval exit, and bounded lifecycle work.
 
-    Locks protect only local state; never hold one across an await or AWS call.
     Timed-out callbacks can finish in a worker thread, but only this controller
     can commit a transition, and its generation check rejects late completion.
     """
@@ -247,8 +218,6 @@ class MicrovmLifecycle:
             }
 
     async def wait_until_open(self) -> None:
-        # A thread-safe local predicate works across the server and pipeline's
-        # separate event loops. No AWS calls or new approval timeout are needed.
         while True:
             with self._lock:
                 if self._check_open():
@@ -262,8 +231,6 @@ class MicrovmLifecycle:
                 if not self._check_open():
                     continue
                 if not tool_use_id or tool_use_id in self._tools:
-                    # Preserve existing tool behavior, but unknown/duplicate
-                    # identities cannot prove that every parallel tool stopped.
                     self._suspend_ineligible = True
                 else:
                     self._tools.add(tool_use_id)
@@ -300,10 +267,7 @@ class MicrovmLifecycle:
                 self.task_id, self.microvm_id, request_id, tool_use_id, deadline, record
             )
             self._park = park
-            # A new gate cannot acknowledge a wake using the previous gate's
-            # cached result. Its own suspend must establish a fresh safe point.
             self._last_resume_park = None
-            # Local "parked" keeps this worker alive at a safe tool boundary.
             self._phase = "parked"
             return park
 
@@ -325,13 +289,10 @@ class MicrovmLifecycle:
         """Drain synchronous progress and heartbeat work before suspension.
 
         Best-effort writers must explicitly report missing/failed acknowledgments
-        with progress_write_failed(). A later successful event cannot recover a
-        dropped earlier event, so that failure remains latched for the task.
+        with progress_write_failed(). That failure remains latched for the task.
         """
         with self._lock:
             if not self._check_open():
-                # Do not silently write with pre-wake credentials. The progress
-                # writer catches this like its existing best-effort failures.
                 raise LifecycleUnavailable("Guest activity is paused")
             self._activities += 1
         try:
@@ -383,8 +344,6 @@ class MicrovmLifecycle:
                 and not self._progress_failed
                 and park.deadline.remaining_s() > 0
             ):
-                # An already-acknowledged HTTP retry neither checkpoints again
-                # nor opens the barrier. Expired/unsafe retries remain closed.
                 return park
             if (
                 park is None
@@ -421,8 +380,6 @@ class MicrovmLifecycle:
                 self._phase = "suspend-ready"
             return park
         except BaseException:
-            # An unacknowledged checkpoint never authorizes a freeze. In-flight
-            # progress may finish later; new suspension stays off after failure.
             with self._lock:
                 if self._generation == generation and self._phase == "suspending":
                     self._phase = "parked"
@@ -435,21 +392,16 @@ class MicrovmLifecycle:
     ) -> ApprovalPark | None:
         """Release the original wait only after credentials and state are safe.
 
-        Callback ownership is intentionally narrow: refresh credentials and read
-        the existing gate, without deciding it, changing its deadline, or calling
-        leave_approval. Timeout/cancellation closes the barrier permanently; a
-        late thread must not release coding. The supervisor owns termination.
+        Callback ownership is narrow: refresh credentials and read the existing
+        gate, without deciding it, changing its deadline, or calling
+        leave_approval. Timeout/cancellation closes the barrier permanently.
 
-        Returns None when no suspend was acknowledged: a declined suspend left the
-        barrier open, so the service froze a guest that never stopped its work and
-        waking it needs no refresh or reconciliation.
+        Returns None when no suspend was acknowledged.
         """
         end = self._budget(budget_s)
         with self._lock:
             park = self._park
             if self._phase in {"active", "parked"}:
-                # A duplicate wake acknowledgment cannot renew the approval
-                # timeout or re-run credential refresh on an executing task.
                 return self._last_resume_park
             if self._phase != "suspend-ready" or park is None:
                 raise LifecycleUnavailable("No acknowledged suspend to resume")
@@ -463,8 +415,6 @@ class MicrovmLifecycle:
             with self._lock:
                 self._assert_transition(generation, "resuming")
                 self._phase = "parked"
-                # One sleep per approval gate. A duplicate suspend must not
-                # race the newly released decision loop.
                 self._slept_request_id = park.request_id
                 self._last_resume_park = park
             return park
@@ -515,7 +465,6 @@ def get_context(task_id: str | None) -> MicrovmLifecycle | None:
         return _contexts.get(task_id or "")
 
 
-#: ``compute_type`` of tasks this module coordinates.
 LAMBDA_MICROVM = "lambda-microvm"
 
 

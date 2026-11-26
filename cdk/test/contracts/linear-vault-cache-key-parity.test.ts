@@ -26,16 +26,8 @@ import {
 
 /**
  * AgentCore keys a cached grant by the WHOLE token request, `customParameters`
- * included — live-proven: the same user and provider return the cached token when they
+ * included: the same user and provider return the cached token when they
  * are sent and an `authorizationUrl` ("needs consent") when they are omitted.
- *
- * Four copies of that key exist: this resolver's, the CLI's two, and the agent's. A
- * one-token divergence between any two makes every resolve a cache miss, which since
- * #812 is reported as `consent-required` — and can latch a healthy workspace `revoked`.
- * Four "keep in sync" comments cannot enforce that; `contracts/constants.json` can.
- *
- * The agent side is enforced differently: `check:constants-sync` forbids `config.py`
- * from re-declaring these as literals at all, so it must read the contract.
  */
 describe('linear_vault cache key matches contracts/constants.json', () => {
   const contract = (JSON.parse(
@@ -51,7 +43,6 @@ describe('linear_vault cache key matches contracts/constants.json', () => {
   });
 
   test('the contract is not vacuous', () => {
-    // A parity test over an empty contract passes while enforcing nothing.
     expect(contract.scopes.length).toBeGreaterThan(0);
     expect(Object.keys(contract.custom_parameters).length).toBeGreaterThan(0);
   });

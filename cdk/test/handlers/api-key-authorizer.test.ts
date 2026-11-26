@@ -91,9 +91,7 @@ describe('api-key-authorizer — API key path', () => {
     expect(result.context?.scopes).toBe('webhooks:manage');
   });
 
-  // API Gateway REST does not normalize header names (an edge-optimized API
-  // capitalizes them, a Regional one passes them on as sent), and a client's
-  // HTTP library may respell what its author typed (`X-Api-Key`).
+  // API Gateway REST does not normalize header names.
   test.each(['x-api-key', 'X-Api-Key', 'X-API-KEY'])('reads the header case-insensitively (%s)', async (name) => {
     const result = await handler(makeEvent({ [name]: RAW_KEY }));
     expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
@@ -170,7 +168,6 @@ describe('api-key-authorizer — API key path', () => {
   });
 
   test('logs each allowed use of a key: the key, its owner and the method', async () => {
-    // After a key leaks, this line is what tells an operator what it was used for.
     const stdout = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
     await handler(makeEvent({ 'X-API-Key': RAW_KEY }));
     const lines = stdout.mock.calls.map(([line]) => String(line));
@@ -183,7 +180,6 @@ describe('api-key-authorizer — API key path', () => {
       user_id: 'cognito+user-abc',
       method_arn: METHOD_ARN,
     });
-    // The secret part of the key is never written.
     expect(lines.join('')).not.toContain(SECRET);
   });
 });

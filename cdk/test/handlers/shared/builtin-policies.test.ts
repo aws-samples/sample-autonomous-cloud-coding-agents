@@ -33,9 +33,6 @@ describe('builtin-policies — drift guard', () => {
       path.join(AGENT_POLICIES_DIR, 'hard_deny.cedar'),
       'utf-8',
     );
-    // The embedded text must match the agent-side file exactly. If a
-    // rule is added / removed / re-annotated on one side, update both
-    // in the same PR; this test is the tripwire.
     expect(BUILTIN_HARD_DENY_POLICIES).toBe(agentFile);
   });
 
@@ -52,9 +49,6 @@ describe('builtin-policies — parseable by shared/cedar-policy', () => {
   test('hard-deny set parses with the expected rule_ids', () => {
     const rules = parseRules(BUILTIN_HARD_DENY_POLICIES);
     const ruleIds = rules.map((r) => r.rule_id);
-    // `base_permit` has no @tier annotation so it's filtered from
-    // parseRules — the parser requires @tier + @rule_id on every
-    // entry. The hard-deny rules that survive:
     expect(ruleIds).toEqual(
       expect.arrayContaining([
         'read_only_forbid_write',

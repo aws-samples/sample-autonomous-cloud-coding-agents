@@ -24,7 +24,7 @@ import Tooltip from '@cloudscape-design/components/tooltip';
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type PointerEvent, type ReactNode } from 'react';
 import { aboutLabel } from '../util/format';
 
-/** What a metric, or a part of a graph, says about itself. It is data kept beside the label it explains. */
+/** What a metric, or a part of a graph, says about itself. */
 export interface Explanation {
   /** One sentence a newcomer understands: what is counted. */
   readonly what: string;
@@ -34,18 +34,14 @@ export interface Explanation {
   readonly how: string;
 }
 
-/** The three questions every bubble answers, in this order and under these labels. */
 const QUESTIONS: readonly (readonly [keyof Explanation, string])[] = [
   ['what', 'What it is'],
   ['why', 'Why it matters'],
   ['how', "How it's computed"],
 ];
 
-/** A pointer on its way across the page opens nothing. */
 const OPEN_AFTER_MS = 250;
-/** Time to cross the gap between a target and its bubble, so that the bubble's text can be reached and selected. */
 const CLOSE_AFTER_MS = 120;
-/** Sent on the document by a bubble that opens: the others close, so there is one at a time. */
 const OPENED = 'abca-explain-opened';
 
 /**
@@ -74,7 +70,6 @@ export function Explain({ title, explanation, summary, as: Target = 'div', child
   const target = useRef<HTMLDivElement & HTMLSpanElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const hovered = useRef(false);
-  /** The wait for the pointer to rest is running: its next move starts it again. */
   const resting = useRef(false);
   const focused = useRef(false);
   const openAtPress = useRef<boolean | null>(null);
@@ -95,28 +90,24 @@ export function Explain({ title, explanation, summary, as: Target = 'div', child
 
   useEffect(() => {
     if (!open) return undefined;
-    // Sent before this bubble listens, so it closes the others and not itself.
     document.dispatchEvent(new Event(OPENED));
     const closeForAnother = () => setOpen(false);
     document.addEventListener(OPENED, closeForAnother);
     const element = target.current;
     return () => {
       document.removeEventListener(OPENED, closeForAnother);
-      // A bubble that closes under the pointer sends no leave: only a pointer on the target itself is still here.
+      // A bubble that closes under the pointer sends no leave.
       hovered.current &&= Boolean(element?.matches(':hover'));
     };
   }, [open]);
 
   const hover = (over: boolean, event: PointerEvent) => {
-    // A finger does not hover: it opens the bubble from the "i". A pointer that is already here starts the wait
-    // again only while it has not rested: the bubble opens when the pointer stops, and once a visit.
     if (event.pointerType === 'touch' || (over === hovered.current && !(over && resting.current))) return;
     hovered.current = over;
     if (over) {
       show(true, OPEN_AFTER_MS);
       resting.current = true;
     } else if (focused.current) {
-      // The focus holds the bubble as the pointer does: it stays until both have left.
       clearTimeout(timer.current);
     } else {
       show(false, CLOSE_AFTER_MS);
@@ -127,7 +118,6 @@ export function Explain({ title, explanation, summary, as: Target = 'div', child
       focused.current = true;
       show(true);
     },
-    // A press on the bubble's text takes the focus away while the pointer is still on the bubble.
     onBlur: () => {
       focused.current = false;
       if (!hovered.current) show(false);
@@ -137,19 +127,14 @@ export function Explain({ title, explanation, summary, as: Target = 'div', child
 
   const icon = typeof children === 'function' && (
     <>
-      {/*
-        The name is not the button's `ariaLabel`: Cloudscape repeats that as a `title`, a second bubble on hover.
-        It is one piece of text: Chrome joins the pieces of a hidden name with spaces.
-      */}
+      {/* The name is not the button's `ariaLabel`: Cloudscape repeats that as a `title`, a second bubble on hover. */}
       <span id={`${id}-name`} hidden>{aboutLabel(title)}</span>
       {/* The handlers are on a wrapper: given a focus handler, Cloudscape's button goes on to call one of its own that is not there. */}
       <span
         {...focus}
-        // A press takes the focus, which opens the bubble, before the click that toggles it.
         onPointerDown={() => {
           openAtPress.current = open && (focused.current || !hovered.current);
         }}
-        // A press of the pointer that ended in no click (released elsewhere) does not decide a later press of a key.
         onKeyDown={() => {
           openAtPress.current = null;
         }}
@@ -177,11 +162,6 @@ export function Explain({ title, explanation, summary, as: Target = 'div', child
       onPointerMove={(event) => hover(true, event)}
       onPointerLeave={(event) => hover(false, event)}
     >
-      {/*
-        What describes the "i", or the target that takes the focus, whether or not the bubble is open: each
-        question before its answer, so that a listener hears where one ends, and no title, which is the name
-        already. One piece of text, as the name is.
-      */}
       <span id={description} hidden>{QUESTIONS.map(([question, label]) => `${label}: ${explanation[question]}`).join(' ')}</span>
       {typeof children === 'function' ? children(icon) : children}
       {open && (

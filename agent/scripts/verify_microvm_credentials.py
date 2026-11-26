@@ -42,11 +42,7 @@ class ProbeState(TypedDict):
 
 
 def pinned_versions() -> tuple[str, str]:
-    """The verified SDK from the contract and the CLI the image installs, never literals.
-
-    The Dockerfile pins the CLI in lockstep with the SDK (#215). Read lazily:
-    the SDK continuation probe also runs this module in its child process.
-    """
+    """The verified SDK from the contract and the CLI the image installs, never literals."""
     agent = Path(__file__).resolve().parents[1]
     contract = json.loads((agent.parent / "contracts/constants.json").read_text())
     cli = re.search(
@@ -129,7 +125,6 @@ AGENT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def bundled_cli_version() -> str:
-    """Version string of the Claude CLI bundled with the installed SDK."""
     import claude_agent_sdk
 
     cli = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
@@ -357,7 +352,6 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
 
 
 def verify(result: dict) -> None:
-    """Positive controls prevent a broken fake endpoint from proving safety."""
     model = [
         request
         for request in result["requests"]
@@ -409,8 +403,6 @@ def main() -> int:
     args = parser.parse_args()
     if args.mode == "ambient" and not args.ambient_fallback:
         parser.error("ambient positive control requires --ambient-fallback")
-    # This process exists only for the probe. Do not inherit operator credentials
-    # or auth/telemetry settings into the real CLI. HOME is never reassigned.
     for key in tuple(os.environ):
         if key.startswith(("AWS_", "ANTHROPIC_", "CLAUDE_", "OTEL_", "BEDROCK_")):
             del os.environ[key]

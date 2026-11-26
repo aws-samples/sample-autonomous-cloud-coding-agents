@@ -33,9 +33,6 @@ export { computeLambdaMicrovmPolicy } from './compute-lambda-microvm';
 export { infrastructurePolicy } from './infrastructure';
 export { observabilityPolicy } from './observability';
 
-/**
- * Returns all bootstrap IAM PolicyDocuments as an array.
- */
 export function allPolicies(): iam.PolicyDocument[] {
   return [
     infrastructurePolicy(),

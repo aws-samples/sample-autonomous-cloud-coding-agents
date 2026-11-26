@@ -17,23 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * The CLI's real sign-in path against an AWS Emulator
- * (https://github.com/aws/aws-emulator) instead of a mocked SDK (ADR-013
- * Tier 2a).
- *
- * Nothing here is mocked. `bgagent configure --stack-name` reads a real
- * CloudFormation stack's outputs, and `login` / `getAuthToken` /
- * `changePassword` talk to the Cognito user pool that stack created, so the
- * assertions are about what the service answers (JWT claims, error names, the
- * pool's password policy) rather than about what a mock was told to return.
- *
- * Named `*.emulator.ts`, which the unit configuration does not match. It runs
- * only through `jest.emulator.config.js` (`mise run test:integration`), which
- * refuses to start unless the AWS environment is the emulator's and the
- * emulator answers.
- */
-
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -52,7 +35,6 @@ import { makeClient } from '../../src/ua';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const SETUP_TIMEOUT_MS = 30_000;
-/** Shorter than the hook, so a stack that never settles reports itself instead of a bare hook timeout. */
 const STACK_WAIT_MS = 20_000;
 const POLL_INTERVAL_MS = 50;
 
@@ -60,12 +42,6 @@ const TEMP_PASSWORD = 'T3mp$trongPass!';
 const PASSWORD = 'N3w$trongPass!';
 const NEXT_PASSWORD = 'An0ther$trongPass!';
 
-/**
- * The two resources the sign-in path needs, shaped like the ones
- * `cdk/src/constructs/task-api.ts` synthesizes (email as the username, the
- * 12-character policy, password + refresh auth flows, no client secret), with
- * the outputs `bgagent configure --stack-name` reads.
- */
 const STACK_TEMPLATE = {
   AWSTemplateFormatVersion: '2010-09-09',
   Resources: {
@@ -102,7 +78,6 @@ const STACK_TEMPLATE = {
   },
 };
 
-/** Claims of an ID token; the signature is not checked (the CLI never checks it either). */
 function idTokenClaims(idToken: string): Record<string, unknown> {
   const [, payload] = idToken.split('.');
   return JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Record<string, unknown>;
@@ -125,7 +100,6 @@ describe('bgagent sign-in against an AWS Emulator', () => {
   let configDir: string;
   let userCount = 0;
 
-  /** A fresh user in FORCE_CHANGE_PASSWORD, as `bgagent admin invite-user` leaves it. */
   async function invitedUser(): Promise<string> {
     userCount += 1;
     const email = `user-${userCount}@example.com`;
@@ -133,7 +107,6 @@ describe('bgagent sign-in against an AWS Emulator', () => {
     return email;
   }
 
-  /** A fresh user with a permanent password, as `bgagent admin reset-password` leaves it. */
   async function confirmedUser(): Promise<string> {
     const email = await invitedUser();
     await adminResetPassword(await resolveCognitoAdminContext({ region: REGION, stackName }), email, PASSWORD);
@@ -141,8 +114,6 @@ describe('bgagent sign-in against an AWS Emulator', () => {
   }
 
   beforeAll(async () => {
-    // First, before any CLI code runs: the CLI keeps its config and tokens under
-    // ~/.bgagent, and this suite must never read or replace the developer's own.
     configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-emulator-'));
     process.env.BGAGENT_CONFIG_DIR = configDir;
 
@@ -167,7 +138,6 @@ describe('bgagent sign-in against an AWS Emulator', () => {
     await cloudFormation?.send(new DeleteStackCommand({ StackName: stackName }));
   }, SETUP_TIMEOUT_MS);
 
-  /** Token cache inside the suite's own directory (never derived from the CLI's default). */
   const credentialsFile = (): string => path.join(configDir, 'credentials.json');
 
   beforeEach(() => {
@@ -233,7 +203,6 @@ describe('bgagent sign-in against an AWS Emulator', () => {
     await login(email, PASSWORD);
 
     await expect(changePassword('Wr0ng$trongPass!', NEXT_PASSWORD)).rejects.toThrow('Current password is incorrect.');
-    // The CLI's own prefix; what follows is the service's wording, which is not asserted.
     await expect(changePassword(PASSWORD, 'weak')).rejects.toThrow(/^New password rejected: /);
     await changePassword(PASSWORD, NEXT_PASSWORD);
 

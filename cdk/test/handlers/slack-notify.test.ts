@@ -17,12 +17,6 @@
  *  SOFTWARE.
  */
 
-// Issue #64: SlackNotifyFn migrated off the direct DynamoDB Streams
-// event-source mapping onto FanOutConsumer as a per-channel dispatcher.
-// The tests here cover ``dispatchSlackEvent`` directly — the unit of
-// behaviour the fan-out router invokes. End-to-end coverage through the
-// router lives in ``fanout-task-events.test.ts``.
-
 const ddbSend = jest.fn();
 const ddbClient = { send: ddbSend };
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -73,9 +67,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('skips non-slack tasks without touching Slack', async () => {
-    // A Slack-subscribed event on a non-Slack task must still short-
-    // circuit cheaply — one DDB Get, no dedup write, no API call.
-    // This is the ``channel_source === 'slack'`` gate.
     ddbSend.mockResolvedValueOnce({
       Item: { task_id: 't1', channel_source: 'api', channel_metadata: {} },
     });
@@ -87,8 +78,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('dedup write only runs after channel_source is confirmed slack', async () => {
-    // Order matters: we must not write the dedup marker on a task we
-    // are about to skip.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -98,7 +87,7 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}); // UpdateCommand for dedup
+      .mockResolvedValueOnce({});
 
     await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
@@ -124,18 +113,15 @@ describe('dispatchSlackEvent', () => {
   });
 
   test.each([
-    // Channel + message shape.
     'channel_not_found',
     'not_in_channel',
     'is_archived',
     'message_not_found',
-    // Auth.
     'not_authed',
     'invalid_auth',
     'token_revoked',
     'token_expired',
     'account_inactive',
-    // Permission / scope (PR #79 review #8).
     'no_permission',
     'missing_scope',
     'restricted_action',
@@ -143,17 +129,12 @@ describe('dispatchSlackEvent', () => {
     'team_access_not_granted',
     'posting_to_general_channel_denied',
     'as_user_not_supported',
-    // Payload shape.
     'invalid_blocks',
     'invalid_blocks_format',
     'invalid_arguments',
     'msg_too_long',
     'too_many_attachments',
   ])('throws a tagged SlackApiError on terminal Slack code %s (router swallows)', async (slackErrorCode) => {
-    // Pre-PR-#79-review the set was narrower; permission/scope
-    // codes (ekm_access_denied, missing_scope, etc.) used to be
-    // classified retryable and would burn 3 retries before DLQ on
-    // a misconfiguration that no retry can fix.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',
@@ -177,13 +158,8 @@ describe('dispatchSlackEvent', () => {
     'internal_error',
     'fatal_error',
     'request_timeout',
-    'unknown_method', // anything not in TERMINAL_SLACK_API_ERRORS counts as retryable
+    'unknown_method',
   ])('throws a plain Error (NOT SlackApiError) on retryable code %s', async (slackErrorCode) => {
-    // Post-issue-#64-review Cat 3 fix: retryable Slack errors must
-    // propagate as plain Error so the router classifies them as
-    // infra rejections and Lambda replays the record. Without this
-    // split, a transient ratelimited or service_unavailable would
-    // get permanently dropped under the SlackApiError swallow.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',
@@ -209,11 +185,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('logs Retry-After header on rate-limited Slack responses (PR #79 review #4)', async () => {
-    // Slack returns the Retry-After header (in seconds) on
-    // ``ratelimited`` so callers know when to retry. Surfacing it in
-    // the warn log means operators reading CloudWatch can see the
-    // expected recovery time instead of guessing from sustained warn
-    // rate.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',
@@ -246,9 +217,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('rethrows infra errors so the router records a dispatcher-rejected warn', async () => {
-    // DDB throttling and Secrets Manager outages must surface to the
-    // router — Promise.allSettled records them as rejections and batch
-    // telemetry reflects that the record didn't dispatch.
     ddbSend.mockRejectedValueOnce(
       Object.assign(new Error('throttle'), { name: 'ProvisionedThroughputExceededException' }),
     );
@@ -259,17 +227,12 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('throws when TASK_TABLE_NAME env var is missing (PR #79 review #3)', async () => {
-    // Pre-fix: missing env returned silently, so the router counted
-    // Slack as "dispatched" and a broken stack quietly dropped every
-    // Slack notification. Post-fix: throw so the rejection lands in
-    // ``infraRejections`` and Lambda retries / DLQs.
     const original = process.env.TASK_TABLE_NAME;
     delete process.env.TASK_TABLE_NAME;
     try {
       await expect(
         dispatchSlackEvent(mkEvent('t1', 'task_created'), ddb),
       ).rejects.toThrow(/TASK_TABLE_NAME env var not set/);
-      // No DDB call attempted — the env-var guard fires first.
       expect(ddbSend).not.toHaveBeenCalled();
     } finally {
       process.env.TASK_TABLE_NAME = original;
@@ -277,17 +240,11 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('ignores event types not in the Slack render set', async () => {
-    // Defence-in-depth: even if the fanout filter drifts and sends us
-    // an event the renderer doesn't know how to format, we must
-    // short-circuit without touching DDB or Slack.
     await dispatchSlackEvent(mkEvent('t1', 'agent_heartbeat'), ddb);
     expect(ddbSend).not.toHaveBeenCalled();
   });
 
   test('uses pre-parsed metadata without a JSON re-parse', async () => {
-    // The fan-out router hands us a parsed metadata map — the
-    // dispatcher must not insist on the old ``metadata: { S: ... }``
-    // JSON string shape.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -310,16 +267,7 @@ describe('dispatchSlackEvent', () => {
     expect(postBody.text).toContain('org/repo');
   });
 
-  // ---------------------------------------------------------------------
-  // PR #79 test gap #31 — conditional UpdateItem race + dup-delete
-  // ---------------------------------------------------------------------
-
   test('task_created persist ConditionalCheckFailed → posts duplicate then deletes it', async () => {
-    // Race: a sibling retry already wrote ``slack_created_msg_ts``.
-    // Our POST landed in Slack first, the conditional UpdateItem
-    // failed, and we must clean up the duplicate root message via
-    // ``chat.delete``. Without this, the channel accumulates ghost
-    // task_created posts on every retry-after-success-write race.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -332,15 +280,9 @@ describe('dispatchSlackEvent', () => {
       .mockRejectedValueOnce(
         Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
       );
-    // Default fetchMock returns ok=true with ts; fine for the post +
-    // best-effort reaction calls. The chat.delete call uses the same
-    // default which is also ``ok: true`` — perfect for the success path.
 
     await dispatchSlackEvent(mkEvent('t1', 'task_created'), ddb);
 
-    // Find the chat.delete invocation by URL — the duplicate cleanup
-    // is the load-bearing assertion. Reaction add/remove calls fall
-    // through to the default mock and don't carry test signal here.
     const deleteCall = fetchMock.mock.calls.find(
       ([url]) => url === 'https://slack.com/api/chat.delete',
     );
@@ -350,11 +292,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('session_started persist ConditionalCheckFailed → posts duplicate then deletes it', async () => {
-    // Same race as task_created but for session_started; uses
-    // ``slack_session_msg_ts`` as the conditional attribute. Without
-    // delete, terminal cleanup would orphan the duplicate session
-    // message (terminal cleanup deletes a single session_msg_ts, not
-    // the duplicate that was never persisted).
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -363,7 +300,7 @@ describe('dispatchSlackEvent', () => {
           channel_metadata: {
             slack_team_id: 'T1',
             slack_channel_id: 'C1',
-            slack_thread_ts: '999.000', // session_started threads under task_created
+            slack_thread_ts: '999.000',
           },
           repo: 'org/repo',
         },
@@ -383,14 +320,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('dup-delete failure emits fanout.slack.dup_delete_failed with error_id (PR #79 review #6)', async () => {
-    // The conditional persist hit a sibling retry; we tried to delete
-    // the duplicate Slack message but ``chat.delete`` failed. The
-    // duplicate is now permanent in the thread — operators need a
-    // dedicated alarmable signal so they can detect ghost-message
-    // accumulation. We override the default mock for chat.delete
-    // specifically by URL-routing the fetch implementation rather
-    // than relying on call-order, so reactions can fall through to
-    // the default without consuming our scripted responses.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -410,7 +339,6 @@ describe('dispatchSlackEvent', () => {
           json: () => Promise.resolve({ ok: false, error: 'cant_delete_message' }),
         };
       }
-      // Default: chat.postMessage / reactions.* succeed.
       return {
         ok: true,
         headers: { get: () => null },
@@ -436,11 +364,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('chat.delete returning message_not_found is treated as success (no dup_delete_failed)', async () => {
-    // ``message_not_found`` means the duplicate already got cleaned
-    // up by something else (e.g. a previous retry's delete). The
-    // dup_delete_failed alarm must NOT fire on this benign case, or
-    // operators will see false positives whenever the race resolves
-    // cleanly.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -481,17 +404,7 @@ describe('dispatchSlackEvent', () => {
     }
   });
 
-  // -------------------------------------------------------------------
-  // PR #79 test gap #33 — agent_error dedup (review finding #4)
-  // -------------------------------------------------------------------
-
   test('agent_error claims its own dedup attribute (slack_dispatched_agent_error)', async () => {
-    // Pre-PR-#79 review #4 fix: agent_error had no dedup, so a
-    // sibling-channel-failure retry could double-page operators.
-    // Post-fix: agent_error writes ``channel_metadata.slack_dispatched_agent_error``
-    // via a conditional UpdateItem before posting. This test pins
-    // the *attribute name* in the UpdateExpression so a future
-    // refactor that renames the attribute breaks loudly here.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -501,11 +414,10 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}); // dedup UpdateItem succeeds
+      .mockResolvedValueOnce({});
 
     await dispatchSlackEvent(mkEvent('t1', 'agent_error'), ddb);
 
-    // Second DDB call is the dedup UpdateItem — pin its shape.
     const updateInput = ddbSend.mock.calls[1][0]._type === 'Update'
       ? ddbSend.mock.calls[1][0].input
       : null;
@@ -517,12 +429,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('agent_error retry hits the dedup guard and skips the post (sibling-channel-failure scenario)', async () => {
-    // The actual scenario PR #79 review #4 is about: GitHub fails on
-    // the first run, the record retries, and the Slack agent_error
-    // dispatcher fires AGAIN. Without the per-event-type dedup, we
-    // would post a duplicate :rotating_light: line. With it, the
-    // ConditionalCheckFailedException short-circuits before
-    // chat.postMessage is ever called.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -531,7 +437,7 @@ describe('dispatchSlackEvent', () => {
           channel_metadata: {
             slack_team_id: 'T1',
             slack_channel_id: 'C1',
-            slack_dispatched_agent_error: true, // already posted on the first try
+            slack_dispatched_agent_error: true,
           },
           repo: 'org/repo',
         },
@@ -542,17 +448,10 @@ describe('dispatchSlackEvent', () => {
 
     await dispatchSlackEvent(mkEvent('t1', 'agent_error'), ddb);
 
-    // No fetch — the dedup guard short-circuited.
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test('terminal dedup attribute is per-class (any first terminal claims; subsequent terminals dedup)', async () => {
-    // Defense-in-depth for the SLACK_DEDUP_ATTRIBUTE map: a
-    // ``task_completed`` followed by a sibling-failure-retry's
-    // ``task_failed`` (e.g. orchestrator wrote both because of a
-    // late-arriving failure) must dedup against the same
-    // ``slack_notified_terminal`` slot. Otherwise a flaky retry
-    // could post both a ✅ and an ❌ for the same task.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -561,7 +460,7 @@ describe('dispatchSlackEvent', () => {
           channel_metadata: {
             slack_team_id: 'T1',
             slack_channel_id: 'C1',
-            slack_notified_terminal: true, // task_completed already posted
+            slack_notified_terminal: true,
           },
           repo: 'org/repo',
         },
@@ -570,20 +469,12 @@ describe('dispatchSlackEvent', () => {
         Object.assign(new Error('cond fail'), { name: 'ConditionalCheckFailedException' }),
       );
 
-    // Simulate an orchestrator-emitted task_failed arriving after
-    // task_completed already claimed the terminal slot.
     await dispatchSlackEvent(mkEvent('t1', 'task_failed'), ddb);
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test('agent_error and terminals use distinct dedup slots (do not collide)', async () => {
-    // An agent_error followed by a task_completed must both be
-    // delivered — they live in different slots
-    // (slack_dispatched_agent_error vs slack_notified_terminal).
-    // This test pins the separation so a future refactor can't
-    // accidentally collapse them and silently drop terminals after
-    // an agent_error.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -592,18 +483,15 @@ describe('dispatchSlackEvent', () => {
           channel_metadata: {
             slack_team_id: 'T1',
             slack_channel_id: 'C1',
-            slack_dispatched_agent_error: true, // agent_error already posted
-            // slack_notified_terminal is NOT set
+            slack_dispatched_agent_error: true,
           },
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}); // terminal dedup UpdateItem succeeds
+      .mockResolvedValueOnce({});
 
     await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
-    // Reaches chat.postMessage — the agent_error slot did not
-    // shadow the terminal slot.
     expect(fetchMock).toHaveBeenCalled();
     const postCall = fetchMock.mock.calls.find(
       ([url]) => url === 'https://slack.com/api/chat.postMessage',
@@ -611,16 +499,7 @@ describe('dispatchSlackEvent', () => {
     expect(postCall).toBeDefined();
   });
 
-  // -------------------------------------------------------------------
-  // PR #79 test gap #35 — task_stranded through terminal dedup
-  // -------------------------------------------------------------------
-
   test('task_stranded posts and writes the terminal dedup marker on first arrival', async () => {
-    // task_stranded is one of the 5 terminals that share
-    // ``slack_notified_terminal``. The reconciler emits
-    // task_stranded + task_failed back-to-back when a heartbeat
-    // expires (handlers/reconcile-stranded-tasks.ts:170+); whichever
-    // arrives first claims the slot and posts a Slack message.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -630,21 +509,19 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}); // dedup UpdateItem succeeds
+      .mockResolvedValueOnce({});
 
     await dispatchSlackEvent(
       mkEvent('t1', 'task_stranded', { code: 'STRANDED_NO_HEARTBEAT', prior_status: 'RUNNING' }),
       ddb,
     );
 
-    // Dedup wrote against the shared terminal slot.
     const updateInput = ddbSend.mock.calls[1][0]._type === 'Update'
       ? ddbSend.mock.calls[1][0].input
       : null;
     expect(updateInput).toBeTruthy();
     expect(updateInput.UpdateExpression).toContain('slack_notified_terminal');
 
-    // chat.postMessage fired with the stranded warning.
     const postCall = fetchMock.mock.calls.find(
       ([url]) => url === 'https://slack.com/api/chat.postMessage',
     );
@@ -654,20 +531,8 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('terminal cleanup re-reads TaskRecord so it sees msg_ts attrs persisted on earlier stream batches (orphan-message fix)', async () => {
-    // Fast-task orphan scenario observed live during PR #79 review:
-    //   1. task_created stream batch posts the rocket message and
-    //      writes ``slack_created_msg_ts``.
-    //   2. task_completed stream batch runs ~30s later. Its initial
-    //      GetItem races the prior UpdateItem and sees stale
-    //      channel_metadata WITHOUT slack_created_msg_ts.
-    //   3. Without the re-read, the terminal cleanup branch sees
-    //      ``channelMeta.slack_created_msg_ts === undefined`` and
-    //      silently skips. The rocket message stays in the thread.
-    // Fix: a fresh GetItem inside the terminal-cleanup branch
-    // (after the dedup UpdateItem has linearized our view) sees the
-    // newly-written attribute and triggers the chat.delete.
     ddbSend
-      .mockResolvedValueOnce({ // dispatch-entry GetItem — STALE (no msg_ts)
+      .mockResolvedValueOnce({
         Item: {
           task_id: 't1',
           channel_source: 'slack',
@@ -675,15 +540,15 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}) // dedup UpdateItem succeeds
-      .mockResolvedValueOnce({ // terminal cleanup re-read — FRESH
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
         Item: {
           task_id: 't1',
           channel_source: 'slack',
           channel_metadata: {
             slack_team_id: 'T1',
             slack_channel_id: 'C1',
-            slack_created_msg_ts: '1234.0001', // landed via the prior batch
+            slack_created_msg_ts: '1234.0001',
           },
           repo: 'org/repo',
         },
@@ -691,7 +556,6 @@ describe('dispatchSlackEvent', () => {
 
     await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
-    // The chat.delete fires against the freshly-read msg_ts.
     const deleteCall = fetchMock.mock.calls.find(
       ([url]) => url === 'https://slack.com/api/chat.delete',
     );
@@ -701,11 +565,8 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('terminal cleanup falls back to dispatch-entry snapshot when re-read fails', async () => {
-    // Defense-in-depth: a transient DDB failure on the re-read GetItem
-    // must NOT break terminal delivery. Falls back to the snapshot we
-    // already had, logs a warn, and continues.
     ddbSend
-      .mockResolvedValueOnce({ // dispatch-entry GetItem — has msg_ts
+      .mockResolvedValueOnce({
         Item: {
           task_id: 't1',
           channel_source: 'slack',
@@ -717,15 +578,14 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}) // dedup
-      .mockRejectedValueOnce(new Error('throttled')); // re-read fails
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('throttled'));
 
     const loggerModule = await import('../../src/handlers/shared/logger');
     const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => undefined);
     try {
       await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
-      // Cleanup still ran with the original snapshot's msg_ts.
       const deleteCall = fetchMock.mock.calls.find(
         ([url]) => url === 'https://slack.com/api/chat.delete',
       );
@@ -733,7 +593,6 @@ describe('dispatchSlackEvent', () => {
       const deleteBody = JSON.parse((deleteCall![1] as { body: string }).body);
       expect(deleteBody.ts).toBe('9999.0001');
 
-      // The fallback was observable.
       const fallbackWarn = warnSpy.mock.calls.find(
         c => (c[1] as Record<string, unknown> | undefined)?.event === 'fanout.slack.cleanup_reread_failed',
       );
@@ -744,12 +603,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('task_stranded after a sibling task_failed dedups (no double-page on the reconciler twin)', async () => {
-    // Real-world scenario: the reconciler writes BOTH task_stranded
-    // and task_failed for a heartbeat-expired task (one for the
-    // operator signal, one to drive the FAILED status transition).
-    // If both fan out to Slack, the slot must dedup the second
-    // arrival so operators see exactly one alert per stranded task,
-    // not a paired ``Task stranded`` + ``Task failed`` storm.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -758,7 +611,7 @@ describe('dispatchSlackEvent', () => {
           channel_metadata: {
             slack_team_id: 'T1',
             slack_channel_id: 'C1',
-            slack_notified_terminal: true, // task_failed already claimed
+            slack_notified_terminal: true,
           },
           repo: 'org/repo',
         },
@@ -772,16 +625,7 @@ describe('dispatchSlackEvent', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // -------------------------------------------------------------------
-  // Dedup claim vs. the retry the dispatcher itself asks for
-  // -------------------------------------------------------------------
-
   test('the retry of a terminal event whose post was rate-limited posts the message', async () => {
-    // A retryable failure makes the router deliver the record again. The
-    // claim written before the failed post must not make that retry look
-    // like a duplicate: it carries the task's only final message. All
-    // three deliveries below run against one task row that keeps its
-    // dedup marker between calls.
     const channelMetadata: Record<string, unknown> = { slack_team_id: 'T1', slack_channel_id: 'C1' };
     ddbSend.mockImplementation(async (cmd: { _type: string; input: { UpdateExpression: string } }) => {
       if (cmd._type === 'Get') {
@@ -808,13 +652,11 @@ describe('dispatchSlackEvent', () => {
     ).rejects.toThrow(/ratelimited/);
     await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
-    // The rate-limited attempt and the retry that delivered.
     const posts = fetchMock.mock.calls.filter(
       ([url]) => url === 'https://slack.com/api/chat.postMessage',
     );
     expect(posts).toHaveLength(2);
 
-    // Once the message is out, a further delivery is a duplicate again.
     fetchMock.mockClear();
     await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -836,8 +678,8 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}) // dedup claim
-      .mockResolvedValueOnce({}); // release of the claim
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
     fetchMock.mockImplementationOnce(failingFetch);
 
     let caught: unknown;
@@ -846,7 +688,6 @@ describe('dispatchSlackEvent', () => {
     } catch (err) {
       caught = err;
     }
-    // A plain Error: the router flags the record for retry.
     expect(caught).toBeInstanceOf(Error);
     expect(caught).not.toBeInstanceOf(SlackApiError);
 
@@ -857,9 +698,6 @@ describe('dispatchSlackEvent', () => {
   });
 
   test('a terminal Slack error keeps the dedup claim (no retry is coming)', async () => {
-    // ``channel_not_found`` is swallowed by the router, so the record is
-    // not delivered again. Giving the claim back would let a replay
-    // caused by another channel repeat a post that cannot succeed.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -869,7 +707,7 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}); // dedup claim
+      .mockResolvedValueOnce({});
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ ok: false, error: 'channel_not_found' }),
@@ -879,19 +717,14 @@ describe('dispatchSlackEvent', () => {
       dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb),
     ).rejects.toBeInstanceOf(SlackApiError);
 
-    // Get + claim, and nothing after them.
     expect(ddbSend).toHaveBeenCalledTimes(2);
   });
 
   test('a bot-token read that fails leaves no dedup claim behind', async () => {
-    // Secrets Manager throttling is retried by the router like a failed
-    // post. Nothing was posted, so nothing may be claimed.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',
         channel_source: 'slack',
-        // A workspace of its own: the token must not come from the
-        // dispatcher's five-minute secret cache.
         channel_metadata: { slack_team_id: 'T_THROTTLED', slack_channel_id: 'C1' },
         repo: 'org/repo',
       },
@@ -904,17 +737,11 @@ describe('dispatchSlackEvent', () => {
       dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb),
     ).rejects.toThrow('Rate exceeded');
 
-    // Only the task read: no claim was written.
     expect(ddbSend).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test('a workspace whose bot token is scheduled for deletion is skipped, not retried', async () => {
-    // The workspace removed the app while its task was still running. The
-    // token secret is in its recovery window, where Secrets Manager refuses
-    // the read with InvalidRequestException. No retry can post there: the
-    // record must be skipped like one of a workspace without a token, not
-    // rejected until it reaches the dead-letter queue.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',
@@ -930,15 +757,11 @@ describe('dispatchSlackEvent', () => {
 
     await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
 
-    // Only the task read: nothing claimed, nothing posted.
     expect(ddbSend).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test('a claim that cannot be given back is logged and does not hide the post failure', async () => {
-    // The release is best-effort. If it fails the retry will be skipped
-    // as a duplicate, so operators need a signal of their own; the
-    // router must still see the original failure.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -948,8 +771,8 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}) // dedup claim
-      .mockRejectedValueOnce(new Error('ddb throttle')); // release of the claim
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('ddb throttle'));
     fetchMock.mockResolvedValueOnce({
       ok: true,
       headers: { get: () => null },
@@ -974,15 +797,8 @@ describe('dispatchSlackEvent', () => {
     }
   });
 
-  // -------------------------------------------------------------------
-  // Which message carries the reactions
-  // -------------------------------------------------------------------
-
   test.each([
-    // A mention written as a reply inside a thread: the thread's first
-    // message belongs to somebody else, and to other tasks of the thread.
     ['the mention itself when the task records it', { slack_thread_ts: '100.0001', slack_message_ts: '200.0002' }, '200.0002'],
-    // A task created before the attribute existed.
     ['the thread root when the task records no message of its own', { slack_thread_ts: '100.0001' }, '100.0001'],
   ])('reactions go on %s, the post into the thread', async (_target, timestamps, reactionTs) => {
     ddbSend
@@ -994,7 +810,7 @@ describe('dispatchSlackEvent', () => {
           repo: 'org/repo',
         },
       })
-      .mockResolvedValueOnce({}); // persist of the session message ts
+      .mockResolvedValueOnce({});
 
     await dispatchSlackEvent(mkEvent('t1', 'session_started'), ddb);
 
@@ -1006,20 +822,10 @@ describe('dispatchSlackEvent', () => {
     expect(bodies('reactions.add')).toEqual([{ channel: 'C1', timestamp: reactionTs, name: 'hourglass_flowing_sand' }]);
   });
 
-  // -------------------------------------------------------------------
-  // Replay of a lifecycle record whose message is already recorded
-  // -------------------------------------------------------------------
-
   test.each([
     ['task_created', 'slack_created_msg_ts'],
     ['session_started', 'slack_session_msg_ts'],
   ])('a replayed %s does not post again when %s is already recorded', async (eventType, postedAttr) => {
-    // The stream delivers the record again (an earlier record of its
-    // batch failed). The task row read at entry already holds the ts of
-    // the message this event produced: posting a second one only to
-    // delete it again notifies the user twice, and the reaction update
-    // would put the hourglass back on a task that may have finished in
-    // the meantime.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',

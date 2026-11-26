@@ -28,16 +28,12 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { TaskTable } from './task-table';
 
-/** Sweep Lambda timeout (minutes) — bounded reply edits, well under a sweep interval. */
 const SWEEP_TIMEOUT_MINUTES = 2;
 
-/** Default heartbeat sweep interval (minutes). Short enough that a long run shows liveness quickly. */
 const DEFAULT_SCHEDULE_MINUTES = 2;
 
-/** Sweep Lambda memory (MB). */
 const SWEEP_MEMORY_MB = 256;
 
-/** Properties for the IterationHeartbeat construct. */
 export interface IterationHeartbeatProps {
   /** TaskTable (has the StatusIndex GSI the sweep queries for RUNNING tasks). */
   readonly taskTable: dynamodb.ITable;
@@ -53,12 +49,11 @@ export interface IterationHeartbeatProps {
  *
  * A scheduled Lambda that finds RUNNING comment-triggered iteration tasks and
  * EDITS the existing maturing Linear/Jira comment in place to show liveness ("🔄
- * Working — updating PR #N… _8m elapsed_"), so a long run isn't a silent black
- * box between 👀 and the terminal ✅/❌ (observed in practice as a 22-min silence).
+ * Working — updating PR #N… _8m elapsed_").
  *
- * The construct owns only the Lambda + schedule + TaskTable read. Surface
+ * The construct owns only the Lambda + schedule + TaskTable grants. Surface
  * registry environments and OAuth grants are wired by the stack after
- * instantiation, since they belong to their integration constructs.
+ * instantiation.
  */
 export class IterationHeartbeat extends Construct {
   public readonly fn: lambda.NodejsFunction;
@@ -84,8 +79,6 @@ export class IterationHeartbeat extends Construct {
       },
     });
 
-    // Read running tasks and persist the Jira comment body for convergence with
-    // preview and terminal writers. The task lifecycle status is never changed.
     props.taskTable.grantReadData(this.fn);
     props.taskTable.grant(this.fn, 'dynamodb:UpdateItem');
 

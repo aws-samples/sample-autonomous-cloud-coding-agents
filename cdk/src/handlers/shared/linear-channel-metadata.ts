@@ -22,17 +22,6 @@ import { logger } from './logger';
 
 /**
  * The vault fields a task needs so the AGENT can mint its own Linear token.
- *
- * Every channel_metadata builder must spread this. A builder that omits it hands the
- * agent no provider, so it falls back to a Secrets-Manager token a vault-managed
- * workspace does not have: no reactions and no state transitions, on work that
- * otherwise succeeded.
- *
- * Three checks guard it, because they fail for different reasons. Two source-level ones
- * (in the processor test files) catch a builder nobody exercised — one keys off the
- * object-literal form, the other off the assignment form, so a builder that writes onto
- * an existing object is covered too (#879). The behavioural one asserts the fields
- * actually reach `channel_metadata`.
  */
 export function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
   return {
@@ -44,7 +33,7 @@ export function vaultMetadata(resolved: { providerName?: string; vaultUserId?: s
 /**
  * Resolve a Linear user to the linked ABCA platform user. ``null`` when the
  * user has no mapping or the link is still pending — the caller must refuse to
- * act, since an unlinked Linear actor cannot be attributed or billed.
+ * act.
  */
 export async function lookupLinearPlatformUser(
   ddb: DynamoDBDocumentClient,
@@ -62,17 +51,11 @@ export async function lookupLinearPlatformUser(
 
 /**
  * Outcome of resolving a Linear project to its ABCA repo mapping for a delivery
- * from ``workspaceId``. One helper for every Linear entry point (label trigger,
- * agent session) so they admit exactly the same issues.
+ * from ``workspaceId``.
  *
  *  - ``mapped`` — an active mapping. ``ownerVerified`` is ``false`` for a row
- *    written before the owning workspace was recorded: allowed for now (rejecting
- *    it would break working installs on deploy; ``bgagent linear onboard-project``
- *    records the owner and ``bgagent platform doctor`` reports what is left).
- *  - ``foreign`` — the mapping belongs to ANOTHER workspace. The mapping table is
- *    keyed on the project id alone and that id arrives in the request body, so
- *    without this check naming another workspace's project would steer a task at
- *    that workspace's repository.
+ *    written before the owning workspace was recorded.
+ *  - ``foreign`` — the mapping belongs to ANOTHER workspace.
  *  - ``none`` — no project, no row, or the row is not active.
  */
 export type LinearProjectMapping =
@@ -98,27 +81,17 @@ export async function lookupLinearProjectMapping(
   return { kind: 'mapped', item, ownerVerified: Boolean(mappedWorkspaceId) };
 }
 
-/**
- * How long a session → task pointer lives. It only has to outlast the
- * ``LinearIssueIndex`` GSI's propagation lag (normally well under a second);
- * ten minutes leaves room for a throttled index.
- */
 const SESSION_TASK_POINTER_TTL_SECONDS = 600;
 const sessionTaskPointerKey = (issueId: string) => `agent-session-task#${issueId}`;
 
 /**
  * Record, in the webhook dedup table, the task an agent session started for
- * ``issueId``. Read back strongly consistently by
- * {@link readSessionTaskPointer}, it lets a ``prompted`` / ``stop`` delivery
- * that arrives before the eventually-consistent ``LinearIssueIndex`` GSI has
- * caught up still find the task — instead of starting a second one beside it
- * or answering "nothing was running".
+ * ``issueId``, for {@link readSessionTaskPointer}.
  *
  * Callers write it only for a task that EXISTS (a create that returned 201, or
- * the task an idempotent replay resolved to). A pointer to an id that was
- * never created would hide the real task from exactly the lookups it serves.
+ * the task an idempotent replay resolved to).
  *
- * Best-effort: a failed write only reopens that sub-second window.
+ * Best-effort: a failed write is logged, never thrown.
  */
 export async function writeSessionTaskPointer(
   ddb: DynamoDBDocumentClient,
@@ -165,23 +138,14 @@ export async function readSessionTaskPointer(
  * How long one delivered ``AgentSessionEvent`` counts as evidence that a
  * workspace's installation still has "Agent session events" on. Linear tells
  * us nothing when an admin turns the toggle off, so the evidence has to
- * expire: a marker that lasted forever would keep the comment trigger yielding
- * to sessions that no longer open, and every mention would be lost in silence.
- *
- * The cost of expiry falls on a workspace that is simply quiet for longer than
- * this: its next mention is answered by the comment trigger as well as the
- * session. That is visible and corrects itself on that same mention; a lost
- * mention is neither.
+ * expire.
  */
 const AGENT_SESSION_EVIDENCE_TTL_DAYS = 14;
 export const AGENT_SESSION_EVIDENCE_TTL_MS = AGENT_SESSION_EVIDENCE_TTL_DAYS * 24 * 60 * 60 * 1000;
-/** Refresh the marker at most this often per workspace: one write a day keeps it far inside the TTL. */
 const AGENT_SESSION_MARKER_REFRESH_MS = 24 * 60 * 60 * 1000;
-/** How long a container trusts its own last look at a workspace's marker. */
 const AGENT_SESSION_CACHE_MINUTES = 5;
 const AGENT_SESSION_CACHE_MS = AGENT_SESSION_CACHE_MINUTES * 60 * 1000;
 
-/** Per container: when each workspace's marker was last seen fresh (epoch ms of the check). */
 const sessionWorkspacesSeen = new Map<string, number>();
 
 function cachedAsDelivering(workspaceId: string, nowMs: number): boolean {
@@ -191,15 +155,10 @@ function cachedAsDelivering(workspaceId: string, nowMs: number): boolean {
 
 /**
  * Note on the workspace's registry row that it delivered an
- * ``AgentSessionEvent``. The deployment flag is stack-wide, but Linear's "Agent
- * session events" toggle is per app installation: this timestamp is the
- * per-workspace evidence that sessions really open there, and
- * {@link workspaceDeliversAgentSessions} keys the comment trigger's yield on it
- * while it is fresh.
+ * ``AgentSessionEvent``; {@link workspaceDeliversAgentSessions} reads it.
  *
- * Refreshed, not write-once: the write goes through when the marker is absent
- * or older than a day, so an active workspace costs one write a day. Never
- * throws — it must not delay or fail the delivery it rides on.
+ * The write goes through only when the marker is absent or older than a day.
+ * Never throws.
  */
 export async function recordWorkspaceAgentSession(
   ddb: DynamoDBDocumentClient,
@@ -223,7 +182,6 @@ export async function recordWorkspaceAgentSession(
     sessionWorkspacesSeen.set(workspaceId, nowMs);
   } catch (err) {
     if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-      // Already marked within the last day (or no registry row to mark).
       sessionWorkspacesSeen.set(workspaceId, nowMs);
       return;
     }
@@ -238,8 +196,7 @@ export async function recordWorkspaceAgentSession(
  * Whether this workspace delivered an ``AgentSessionEvent`` recently enough to
  * trust that its app installation still has "Agent session events" on, so an
  * @-mention opens a session. ``false`` (no marker, an expired one, or a read
- * failure) keeps the comment trigger answering, which is the safe side: a
- * mention is never left unanswered.
+ * failure) keeps the comment trigger answering.
  */
 export async function workspaceDeliversAgentSessions(
   ddb: DynamoDBDocumentClient,
@@ -264,12 +221,10 @@ export async function workspaceDeliversAgentSessions(
       linear_workspace_id: workspaceId,
       error: err instanceof Error ? err.message : String(err),
     });
-    // False keeps the comment trigger answering — the outcome that never drops a mention.
     return false;
   }
 }
 
-/** Test seam: forget which workspaces this container has seen deliver sessions. */
 export function resetSessionWorkspaceCacheForTests(): void {
   sessionWorkspacesSeen.clear();
 }

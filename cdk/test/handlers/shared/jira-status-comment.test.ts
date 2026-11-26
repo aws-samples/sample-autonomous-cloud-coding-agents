@@ -26,9 +26,6 @@ import {
   type JiraFinalStatusInput,
 } from '../../../src/handlers/shared/jira-status-comment';
 
-// The formatter's other cases are in fanout-task-events.test.ts, which stubs
-// the ADF serializer. These go through the real one: they assert the document
-// Jira receives.
 const COMPLETED: JiraFinalStatusInput = {
   eventType: 'task_completed',
   prUrl: null,
@@ -40,7 +37,6 @@ const COMPLETED: JiraFinalStatusInput = {
   errorTitle: null,
 };
 
-/** The agent's answer as it writes one: Markdown, with a fenced block. */
 const ANSWER = [
   'The retry is in `worker.ts`, **not** in the queue:',
   '',
@@ -57,8 +53,6 @@ describe('renderJiraFinalStatusComment: the answer of the agent', () => {
     const doc = buildAdfDocument(renderJiraFinalStatusComment({ ...COMPLETED, answerText: ANSWER }));
 
     expect(doc.content).toEqual([
-      // The header stays first: the webhook processor knows ABCA's own
-      // comments by it.
       {
         type: 'paragraph',
         content: [
@@ -77,13 +71,10 @@ describe('renderJiraFinalStatusComment: the answer of the agent', () => {
         ],
       },
       { type: 'paragraph', content: [] },
-      // One block, line breaks and indentation as written, the fences and the
-      // language gone.
       {
         type: 'codeBlock',
         content: [{ type: 'text', text: 'for (const job of jobs) {\n  await queue.retry(job);\n}' }],
       },
-      // The link stays as typed: see the next test.
       { type: 'paragraph', content: [{ type: 'text', text: 'See [the runbook](https://example.com/runbook).' }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'cost: $0.50 • turns: 3 / 100 • duration: 1m' }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'task t', marks: [{ type: 'em' }] }] },
@@ -102,7 +93,6 @@ describe('renderJiraFinalStatusComment: the answer of the agent', () => {
     }));
     const content = doc.content as Array<{ content: Array<{ marks?: Array<{ type: string }> }> }>;
 
-    // Between the header and the metrics, the pull request and the footer.
     expect(content.slice(1, -3)).toEqual([
       { type: 'paragraph', content: [{ type: 'text', text: '[Open live preview](https://example.org/x)' }] },
       { type: 'paragraph', content: [{ type: 'text', text: '![x](https://example.org/y.png)' }] },
@@ -114,7 +104,6 @@ describe('renderJiraFinalStatusComment: the answer of the agent', () => {
         ],
       },
     ]);
-    // The one link of the comment is ABCA's own, to the pull request.
     expect(content.flatMap((node) => node.content).filter((run) => run.marks?.some((mark) => mark.type === 'link')))
       .toEqual([{
         type: 'text',
@@ -147,8 +136,6 @@ describe('jiraIterationFrame', () => {
   });
 
   test('the reason is the title the error classifier gives a task that its build gate failed', () => {
-    // The message the agent stores for that task (agent/src/pipeline.py). The
-    // two outcomes are the same red build, so they read the same.
     const gated = classifyError("Task did not succeed (agent_status='success', build_ok=False)");
     expect(jiraIterationFrame('task_completed', false, null).errorTitle).toBe(gated?.title);
   });

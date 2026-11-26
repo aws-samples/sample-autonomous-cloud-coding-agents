@@ -21,17 +21,9 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * GSI name for the `user_id-status-index`. Exported so handlers that
- * issue Query calls against the GSI reference the same identifier the
- * table was built with — renaming the GSI would break `bgagent pending`
- * without a loud failure.
- */
+/** Name of the GSI on `user_id` (PK) + `status` (SK). */
 export const USER_STATUS_INDEX_NAME = 'user_id-status-index';
 
-/**
- * Properties for TaskApprovalsTable construct.
- */
 export interface TaskApprovalsTableProps {
   /**
    * Optional table name override.
@@ -40,10 +32,7 @@ export interface TaskApprovalsTableProps {
   readonly tableName?: string;
 
   /**
-   * Removal policy for the table. The design (§10.1) recommends RETAIN
-   * in production to preserve the audit trail; we default to DESTROY to
-   * match the rest of the sample and keep teardowns cheap. Override per
-   * environment.
+   * Removal policy for the table.
    * @default RemovalPolicy.DESTROY
    */
   readonly removalPolicy?: RemovalPolicy;
@@ -56,39 +45,14 @@ export interface TaskApprovalsTableProps {
 }
 
 /**
- * DynamoDB table for Cedar-HITL approval gates (design §10.1).
+ * DynamoDB table for Cedar-HITL approval gates, one row per gate.
  *
  * Schema: `task_id` (PK, ULID matching TaskTable) + `request_id` (SK,
- * ULID minted by the agent). Each row represents one human-in-the-loop
- * approval gate; the agent writes PENDING, the ApproveTaskFn /
- * DenyTaskFn Lambdas (Chunk 5) update to APPROVED / DENIED, and the
- * reconciler sweeps STRANDED rows.
- *
- * A GSI (`user_id-status-index`) supports the `bgagent pending` access
- * pattern — `user_id = :caller AND status = :pending` — without
- * requiring a full-table Scan. The GSI ships in v1 because under
- * `watch -n1`-style polling the Scan alternative would exhaust DDB
- * burst capacity per-user (§10.1 finding #8).
- *
- * Streams are intentionally OFF (§11.2). TaskApprovalsTable is working
- * state; the audit trail lives on TaskEventsTable which already has
- * streams wired into the fan-out Lambda. Enabling streams here would
- * create duplicate fan-out paths.
- *
- * TTL is sized by the agent as `created_at_epoch + timeout_s + 120s`
- * so rows never expire during the decision window (§10.1).
+ * ULID minted by the agent).
  */
 export class TaskApprovalsTable extends Construct {
-  /**
-   * The underlying DynamoDB table. Use this to grant access or read the
-   * table name.
-   */
   public readonly table: dynamodb.Table;
 
-  /**
-   * Name of the `user_id-status-index` GSI — callers that Query the GSI
-   * should read this rather than hard-coding the string.
-   */
   public readonly userStatusIndexName: string = USER_STATUS_INDEX_NAME;
 
   constructor(scope: Construct, id: string, props: TaskApprovalsTableProps = {}) {
@@ -109,17 +73,9 @@ export class TaskApprovalsTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
-      // NO DynamoDB stream — §11.2. TaskEventsTable is the audit fan-out
-      // path; this table holds working state only.
       removalPolicy: props.removalPolicy ?? RemovalPolicy.DESTROY,
     });
 
-    // GSI for GET /v1/pending — user_id PK + status SK (§10.1).
-    //
-    // Projection is INCLUDE with exactly the non-key attributes the
-    // pending-list endpoint needs: keeps per-write cost small while
-    // keeping the list response small enough to render in the CLI
-    // without additional GetItem round-trips.
     this.table.addGlobalSecondaryIndex({
       indexName: USER_STATUS_INDEX_NAME,
       partitionKey: {
@@ -140,19 +96,8 @@ export class TaskApprovalsTable extends Construct {
         'reason',
         'created_at',
         'timeout_s',
-        // Cedar HITL: surface which rule(s) fired on the gate in the
-        // pending-list response so `bgagent pending` can show _why_
-        // without a second read against the base table. Projected
-        // because the handler reads rows through this GSI.
-        //
-        // ARCHITECTURAL NOTE: DynamoDB rejects in-place updates to
-        // ``nonKeyAttributes`` on an existing GSI. Any future field
-        // that needs to appear on the pending view must be decided
-        // here at design time — adding one post-hoc requires a
-        // destructive migration (delete + recreate the table, or
-        // create a parallel GSI under a new name with shadow
-        // backfill). Chunks that extend TaskApprovalsTable should
-        // audit this list before shipping.
+        // DynamoDB rejects in-place updates to ``nonKeyAttributes`` on an
+        // existing GSI.
         'matching_rule_ids',
       ],
     });

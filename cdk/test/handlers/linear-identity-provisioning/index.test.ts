@@ -17,18 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Unit tests for the Linear identity vault provisioning handler (#809). The
- * handler creates/updates/deletes the AgentCore workload identity that backs
- * the Linear OAuth token vault. These lock in the non-obvious branches:
- * conflict-on-create falls back to update (idempotent redeploy), the return-URL
- * allowlist is parsed from the JSON-encoded CFN property, and delete tolerates
- * an already-absent identity.
- */
-
-// Command classes are tagged so the mock `send` can dispatch on constructor.
-// Exception classes must be real (throwable) classes because the handler
-// branches on `instanceof`.
 const mockSend = jest.fn();
 
 class ConflictException extends Error {
@@ -77,15 +65,14 @@ describe('linear-identity-provisioning onEvent', () => {
     const call = mockSend.mock.calls[0][0] as TaggedCall;
     expect(call._type).toBe('Create');
     expect(call.input).toEqual({ name: 'abca_linear_oauth', allowedResourceOauth2ReturnUrls: urls });
-    // Stable natural id so a no-op update is not treated as a replacement.
     expect(res.PhysicalResourceId).toBe('abca_linear_oauth');
     expect(res.Data).toEqual({ WorkloadName: 'abca_linear_oauth' });
   });
 
   test('Create falling into ConflictException updates the existing identity in place', async () => {
     mockSend
-      .mockRejectedValueOnce(new ConflictException()) // Create
-      .mockResolvedValueOnce({}); // Update
+      .mockRejectedValueOnce(new ConflictException())
+      .mockResolvedValueOnce({});
     await onEvent({
       RequestType: 'Create',
       ResourceProperties: { WorkloadName: 'abca_linear_oauth', AllowedReturnUrls: JSON.stringify(['http://localhost:8080/oauth/callback']) },
@@ -98,10 +85,7 @@ describe('linear-identity-provisioning onEvent', () => {
   });
 
   test('Create on the REAL duplicate error (ValidationException "already exists") updates in place', async () => {
-    // Regression: AgentCore reports a duplicate workload-identity name as a
-    // ValidationException, not a ConflictException (verified live). Without
-    // handling it, the SECOND deploy fails — CloudFormation sends an Update, the
-    // handler re-issues Create, and the unhandled error rolls the stack back.
+    // AgentCore reports a duplicate workload-identity name as a ValidationException, not a ConflictException.
     const dup = Object.assign(
       new Error("WorkloadIdentity with name 'abca_linear_oauth' already exists."),
       { name: 'ValidationException' },
@@ -144,11 +128,6 @@ describe('linear-identity-provisioning onEvent', () => {
   });
 
   describe('an unusable AllowedReturnUrls fails the resource instead of emptying the allowlist', () => {
-    // It previously degraded to `[]`, which is the worst available outcome: the identity
-    // is provisioned — or on an Update, REWRITTEN — with no permitted consent-callback
-    // URL, so every consent afterwards fails the allowlist while the stack reports a
-    // clean deploy. Nothing downstream can tell that apart from "the operator asked for
-    // no URLs", so the failure has to surface here.
     test.each([
       ['malformed JSON', 'not-json{', /not valid JSON/],
       ['a JSON scalar', '"just-a-string"', /not a JSON array of strings/],
@@ -165,8 +144,6 @@ describe('linear-identity-provisioning onEvent', () => {
           },
         }),
       ).rejects.toThrow(expected);
-      // And nothing was sent: refusing after the call would already have clobbered a
-      // live allowlist on the Update path.
       expect(mockSend).not.toHaveBeenCalled();
     });
 

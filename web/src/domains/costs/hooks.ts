@@ -21,7 +21,6 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { useApi } from '../../app/providers/api/ApiProvider';
 
-/** Enough history for a month of costs without unbounded paging. */
 const MAX_PAGES = 5;
 const PAGE_SIZE = 100;
 const REFRESH_MS = 60_000;

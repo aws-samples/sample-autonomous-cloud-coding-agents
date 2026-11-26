@@ -43,16 +43,10 @@ describe('GitHubScreenshotIntegration construct', () => {
   });
 
   test('creates the async-invoke DLQ with 14-day retention and SSL enforcement', () => {
-    // The processor handler swallows its own errors, so an init-time
-    // crash (missing env at cold start, bundling defect) would vanish
-    // after Lambda's built-in async retries without this queue. Pin its
-    // existence and retention so a refactor can't silently drop the
-    // backstop.
     template.resourceCountIs('AWS::SQS::Queue', 1);
     template.hasResourceProperties('AWS::SQS::Queue', {
-      MessageRetentionPeriod: 14 * 24 * 60 * 60, // 14 days
+      MessageRetentionPeriod: 14 * 24 * 60 * 60,
     });
-    // enforceSSL renders as a deny-insecure-transport queue policy.
     template.hasResourceProperties('AWS::SQS::QueuePolicy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -67,15 +61,6 @@ describe('GitHubScreenshotIntegration construct', () => {
   });
 
   test('alarms on the first record landing in the processor DLQ', () => {
-    // The processor handler swallows its own errors, so only init-time
-    // crashes reach the queue — each one means the screenshot pipeline is
-    // silently down. Without the alarm the queue is "for operator
-    // inspection" that no operator is ever told to make.
-    //
-    // Two alarms total: this DLQ-depth alarm (a record LANDED) and the
-    // Lambda-Errors alarm below (invocations are FAILING, before Lambda's
-    // async retries have exhausted onto the DLQ). They are complementary,
-    // not redundant — see the next test.
     template.resourceCountIs('AWS::CloudWatch::Alarm', 2);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       MetricName: 'ApproximateNumberOfMessagesVisible',
@@ -97,30 +82,14 @@ describe('GitHubScreenshotIntegration construct', () => {
   });
 
   test('alarms on the processor Lambda Errors metric (>=1 in 5min, 2 eval periods)', () => {
-    // #284 AC: an alarm on the processor's Errors metric. This is DISTINCT
-    // from the DLQ-depth alarm above — the DLQ-depth alarm only fires once
-    // a failure has survived Lambda's async retry ladder and LANDED on the
-    // queue, whereas an Errors alarm fires as soon as invocations start
-    // failing, catching a systemic break (IAM regression, AgentCore quota
-    // exhaustion, dependency outage) at the first faulting invocation.
-    // Mirrors `task-orchestrator.ts` OrchestratorErrorAlarm's idiom.
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       MetricName: 'Errors',
       Namespace: 'AWS/Lambda',
-      // metricErrors() defaults to Sum — the correct statistic for an
-      // error COUNT (vs Average/Maximum). Pin it so a future edit that
-      // swaps the statistic can't silently change the alarm's semantics.
       Statistic: 'Sum',
       Period: 300,
       Threshold: 1,
-      // >= 1, not > 1. Relies on a CDK default otherwise, and
-      // GreaterThanThreshold would silently require TWO errors to fire.
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',
       EvaluationPeriods: 2,
-      // 1-of-2, not 2-of-2. Unset, DatapointsToAlarm defaults to
-      // EvaluationPeriods, and a single-event crash would never alarm
-      // (its Errors datapoints land in one period; NOT_BREACHING fills
-      // the neighbour). Pinned so that regression is caught here.
       DatapointsToAlarm: 1,
       TreatMissingData: 'notBreaching',
       Dimensions: Match.arrayWith([
@@ -135,9 +104,6 @@ describe('GitHubScreenshotIntegration construct', () => {
   });
 
   test('wires the DLQ as the processor Lambda async-invoke dead-letter target', () => {
-    // The queue existing is not enough — it must be bound to the
-    // processor function's DeadLetterConfig or failed async invokes
-    // still evaporate.
     template.hasResourceProperties('AWS::Lambda::Function', {
       Handler: 'index.handler',
       Timeout: 120,
@@ -152,8 +118,6 @@ describe('GitHubScreenshotIntegration construct', () => {
   });
 
   test('creates receiver and processor Lambdas plus the POST /github/webhook route', () => {
-    // Receiver (10s) + processor (120s); the bucket may add its own
-    // CDK-internal functions, so assert presence rather than count.
     template.hasResourceProperties('AWS::Lambda::Function', { Timeout: 10 });
     template.hasResourceProperties('AWS::Lambda::Function', { Timeout: 120 });
     template.hasResourceProperties('AWS::ApiGateway::Resource', { PathPart: 'github' });
@@ -181,8 +145,6 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
     const stack = new Stack(app, 'TaskTableStack');
     const api = new apigw.RestApi(stack, 'TestApi');
     const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubToken');
-    // A table carrying the LinearIssueIndex GSI the processor must Query to
-    // find the iteration's maturing reply (to append the `· [preview]` link).
     const taskTable = new dynamodb.Table(stack, 'TaskTable', {
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
     });
@@ -192,19 +154,12 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
     });
 
-    // The Linear index Query is part of Linear wiring (ADR-024), so the
-    // processor needs a Linear registry for the grant to exist.
     const linearWorkspaceRegistryTable = dynamodb.Table.fromTableName(stack, 'LinearRegistry', 'LinearRegistry');
     new GitHubScreenshotIntegration(stack, 'Screenshot', { api, githubTokenSecret, taskTable, linearWorkspaceRegistryTable });
     template = Template.fromStack(stack);
   });
 
   test('grants dynamodb:Query scoped to the LinearIssueIndex GSI (not a blanket read)', () => {
-    // REGRESSION: the preview-link append (findIterationReplyId) Queries
-    // LinearIssueIndex, but grantWriteData covers only UpdateItem — without an
-    // explicit Query grant the processor hit AccessDenied at runtime and
-    // silently logged "no reply id found" (unit-mocked ddb never caught it).
-    // Pin a Query statement whose resource ARN names the index.
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -223,13 +178,6 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
   });
 
   test('grants dynamodb:GetItem on the TaskTable base ARN (head_sha attribution read)', () => {
-    // REGRESSION: findIterationReplyId Queries the GSI (granted above) then
-    // GetItems each candidate's head_sha on the BASE table to attribute a
-    // deploy to the right iteration when several iterations overlap. The
-    // Query GSI grant does NOT cover GetItem on the base table, so the read
-    // threw AccessDenied, was swallowed non-fatally, and the preview was posted
-    // to the PR but never appended to the Linear iteration reply. Pin a GetItem
-    // statement whose resource ARN is the base table (no index/ suffix).
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([

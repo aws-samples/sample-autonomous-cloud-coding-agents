@@ -23,9 +23,6 @@ import { CloudFormationClient } from '@aws-sdk/client-cloudformation';
 import { CognitoIdentityProviderClient, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { abcaUserAgent, applyDefaultAppId, APP_ID_ENV, makeClient, makeDocClient, sanitizeUaValue, SOLUTION_ID } from '../src/ua';
 
-// Shared with cdk/test/handlers/shared/ua.test.ts and agent/tests/test_ua.py: the
-// three UA modules must agree on the solution id and on what the sanitiser lets
-// through.
 const uaVectors = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', '..', 'contracts', 'ua-vectors.json'), 'utf-8'),
 ) as { solution_id: string; sanitize: { input: string; expected: string; note: string }[] };
@@ -98,8 +95,6 @@ describe('wire-capture: emitted User-Agent header', () => {
     });
 
     try {
-      // Drives the middleware stack; the stub captures the header before the
-      // (invalid) response triggers a deserialization error we ignore.
       await client.send(new ListUsersCommand({ UserPoolId: 'x' }));
     } catch {
       // stub body is not a valid protocol response — we only want the header

@@ -3,12 +3,6 @@ title = "sample-autonomous-cloud-coding-agents"
 [extend]
 useDefault = true
 
-# cdk/test/scripts/gitleaks-config.test.ts reads this file as text and fails on
-# a line in another TOML form. Write a new entry like the ones below.
-#
-# The scan of the history reads a file under the path it had in each commit:
-# when a listed file moves, add its new path and keep the old one.
-
 [[allowlists]]
 description = "PEM-shaped fixtures for output_scanner / hook tests (not real keys)."
 targetRules = ["private-key"]
@@ -27,11 +21,6 @@ paths = [
 stopwords = ["test-signing-secret-abc123"]
 
 [[allowlists]]
-# Test idempotency-key fixture in orchestration tests (not a real credential).
-# Suppressed by stopword rather than a .gitleaksignore commit-SHA fingerprint:
-# the finding lives in history and SHA fingerprints break whenever history is
-# rewritten (rebases / dep-bump merges), which is exactly how #530's baseline
-# regressed. A stopword is SHA-independent. See #537 (regression of #530).
 description = "Test idempotency-key fixture 'orch_abc_SUB-1' (not a real credential)."
 condition = "AND"
 targetRules = ["generic-api-key"]
@@ -40,16 +29,11 @@ paths = [
 ]
 stopwords = ["orch_abc_SUB-1"]
 
-# Catch bare 12-digit AWS account IDs. The default ruleset does not flag these,
-# which is how a real account ID reached a committed comment in the #236 integ
-# work. RE2 (Go) has no lookarounds, so the non-digit neighbours are captured in
-# non-capturing groups; the account ID itself is group 1.
+# RE2 has no lookarounds: the non-digit neighbours are in non-capturing groups, the account ID is group 1.
 [[rules]]
 id = "aws-account-id"
 description = "AWS account ID (12-digit, bare or in ARN/role context)"
 regex = '''(?:^|[^0-9])([0-9]{12})(?:[^0-9]|$)'''
-# Report/redact capture group 1 (the bare 12-digit ID) rather than the whole
-# match, which would include the non-digit delimiter neighbours.
 secretGroup = 1
 keywords = [
     "account",
@@ -83,21 +67,6 @@ paths = [
 # exempts the whole line from every rule, not only from this one.
 
 [[rules.allowlists]]
-# Retired fixture value from PR #733 (#645). On that branch
-# `agent/tests/test_server.py` used `999988887777` as the "foreign account" in
-# the ARN-pinning tests; the merged code uses the AWS-published placeholder
-# `111122223333`. #733 was squash-merged, so no commit on main carries the old
-# value in that file, and the file is not exempt.
-#
-# What main's history does carry is a comment in `.gitleaksignore` that quotes
-# the value (#733), and the history scan reads every commit. The value is
-# therefore allowed in that one file only. `999988887777` is NOT an
-# AWS-published placeholder (unlike the four in the block above): allowed
-# repo-wide, a real account that happens to match would never be flagged.
-#
-# `condition = "AND"` is what confines it. Without a condition gitleaks ORs
-# `regexes` and `paths`: the value would be allowed in every file, and every
-# 12-digit run would be allowed in the listed file.
 description = "Retired foreign-account fixture value from #645, quoted in .gitleaksignore history."
 condition = "AND"
 regexes = [
@@ -107,14 +76,7 @@ paths = [
     '''^\.gitleaksignore$''',
 ]
 
-# False positives where a 12-digit run is NOT an AWS account ID. Each block
-# below exempts one shape in one place (`condition = "AND"`: the line or value
-# AND the path must match), so a real account ID in the same files is reported.
-
 [[rules.allowlists]]
-# GitHub Action commit-SHA pins contain digit runs (e.g. jdx/mise-action
-# `…981980618f…` matches `629881980618`). Only `uses:` lines pinned by a
-# 40-character SHA are exempt.
 description = "Workflow files: 12-digit runs inside action commit-SHA pins."
 condition = "AND"
 regexTarget = "line"
@@ -126,17 +88,12 @@ paths = [
 ]
 
 [[rules.allowlists]]
-# threat-composer artifacts use v4 UUIDs whose final node can be all digits
-# (e.g. `f30d02f6-9750-46ad-b710-398303478932`) and embed base64 images. These
-# generated files contain no real account IDs; the exemption stays path-wide.
 description = "threat-composer artifacts: UUIDs and embedded base64 images."
 paths = [
     '''^\.threat-composer/.*\.json$''',
 ]
 
 [[rules.allowlists]]
-# CDK tests use UUID fixtures whose final node is all digits (e.g. the RFC-4122
-# example `…-446655440000`). Only lines that carry such a UUID are exempt.
 description = "CDK tests: UUID fixtures whose final node is all digits."
 condition = "AND"
 regexTarget = "line"
@@ -148,10 +105,6 @@ paths = [
 ]
 
 [[rules.allowlists]]
-# Two fixture values that CDK tests already use and that the path-wide exemption
-# used to cover: an all-nines stand-in account and a 12-digit GitHub deployment
-# id. Exempt by exact value in CDK tests only; new tests should use one of the
-# AWS-published placeholders listed at the top of this rule.
 description = "CDK tests: all-nines account fixture and a GitHub deployment id fixture."
 condition = "AND"
 regexes = [

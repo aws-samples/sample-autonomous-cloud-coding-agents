@@ -37,10 +37,6 @@ const ddb = makeDocClient();
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 const POLICIES_RATE_LIMIT_PER_MINUTE = Number(process.env.POLICIES_RATE_LIMIT_PER_MINUTE ?? '30');
 
-// In-Lambda cache keyed by repo; 5 minutes. Keeps repeated `bgagent
-// policies list` calls snappy without re-parsing the policy set every
-// time (the repo row is still read: it is the onboarding gate). Cold
-// starts throw the cache away.
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 interface CacheEntry {
@@ -57,12 +53,9 @@ const cache = new Map<string, CacheEntry>();
  * rendered as a `{rule_id, category, severity?, approval_timeout_s?,
  * summary}` envelope.
  *
- * Rate-limited 30/min/user — generous for UX (`bgagent policies list`
- * is an interactive lookup) but bounded so a runaway script cannot
- * hammer the shared Cedar parser.
+ * Rate-limited 30/min/user by default.
  *
- * `repo_id` is URL-decoded from the path parameter (`owner%2Frepo`
- * encoding is common in CLI UX).
+ * `repo_id` is URL-decoded from the path parameter.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
@@ -79,9 +72,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     const repoId = decodeURIComponent(rawRepoId);
 
-    // Rate-limit. Uses a synthetic row on the approvals table keyed on
-    // `RATE#<user_id>#POLICIES` to avoid colliding with the approve /
-    // pending counters.
     if (TASK_APPROVALS_TABLE_NAME) {
       const nowEpoch = Math.floor(Date.now() / 1000);
       const minuteBucket = formatMinuteBucket(new Date());
@@ -115,21 +105,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       }
     }
 
-    // Onboarding gate — same shape as ``POST /tasks`` (see
-    // ``create-task-core.ts``). Originally this
-    // endpoint was lenient (loaded RepoConfig best-effort, fell
-    // through to built-ins on miss) on the theory that the built-in
-    // policy set is public and there was no info-leak concern. E2E
-    // testing surfaced the UX cost: users typo-ing a repo name get a
-    // 200 response with full built-ins and mistake it for proof the
-    // repo is onboarded. Behavior now matches the task-submit path —
-    // 422 REPO_NOT_ONBOARDED for any repo without an active
-    // RepoConfig row. The built-in set is still discoverable via any
-    // onboarded repo (e.g. ``scoropeza/agent-plugins``).
-    //
-    // The same read returns the Blueprint's policies. When it fails,
-    // the request ends in the catch below (500) and nothing is cached:
-    // a listing without the repository's own rules is never served.
     const { onboarded, config } = await lookupRepo(repoId);
     if (!onboarded) {
       return errorResponse(
@@ -140,11 +115,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    // Cache check. Per-repo TTL of 5 min (IMPL-note — does not include
-    // user_id because the policy set is not user-specific). Cache
-    // lookup happens AFTER the onboarding gate so a miss on
-    // ``does-not-exist/foo`` doesn't pollute the cache with a
-    // lookalike-to-a-real-repo response.
     const cached = cache.get(repoId);
     if (cached && cached.expiresAt > Date.now()) {
       return successResponse(200, cached.response, requestId);
@@ -153,7 +123,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     let rules;
     try {
       rules = parseRules(concatPolicies(BUILTIN_HARD_DENY_POLICIES, BUILTIN_SOFT_DENY_POLICIES));
-      // Approval requests use these same IDs, counting only legacy entries.
       let legacyCount = 0;
       const nextLegacyRuleId = () => `legacy_extra_${legacyCount++}`;
       for (const entry of config?.cedar_policies ?? []) {
@@ -215,7 +184,6 @@ function toSummary(rule: ReturnType<typeof parseRules>[number]): PolicyRuleSumma
   return out as PolicyRuleSummary;
 }
 
-/** Test-only cache reset — exposed for unit tests. */
 export function _resetCacheForTests(): void {
   cache.clear();
 }

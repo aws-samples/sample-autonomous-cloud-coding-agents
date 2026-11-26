@@ -54,20 +54,12 @@ jest.mock('../../src/handlers/shared/jira-task-by-issue', () => {
   };
 });
 
-// The processor screens the folded comment section via the Bedrock Guardrail
-// (fail-open on intervention). Mock the client so it passes by default; the
-// comment-block-dropped test overrides it to GUARDRAIL_INTERVENED.
 const bedrockSendMock = jest.fn();
 jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
   BedrockRuntimeClient: jest.fn(() => ({ send: bedrockSendMock })),
   ApplyGuardrailCommand: jest.fn((input: unknown) => ({ _type: 'ApplyGuardrail', input })),
 }));
 
-// #577 context enrichment. The download/comment helpers are unit-tested in
-// jira-attachments.test.ts; here we mock them to test the processor wiring
-// (folding comments into the description, fail-closed attachment rejection)
-// without real REST/S3. `JiraAttachmentError` is kept real so the processor's
-// `instanceof` reject branch is exercised.
 const fetchRecentHumanCommentsMock = jest.fn();
 const downloadJiraAttachmentsMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-attachments', () => {
@@ -83,9 +75,6 @@ process.env.JIRA_PROJECT_MAPPING_TABLE_NAME = 'JiraProjects';
 process.env.JIRA_USER_MAPPING_TABLE_NAME = 'JiraUsers';
 process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
 process.env.TASK_TABLE_NAME = 'Tasks';
-// Attachment enrichment needs a bucket + guardrail configured (#577); with
-// these set the processor initializes S3/Bedrock clients (cheap, no network at
-// construction) and screens attachments through the mocked helper.
 process.env.ATTACHMENTS_BUCKET_NAME = 'attachments-bucket';
 process.env.GUARDRAIL_ID = 'gr-1';
 process.env.GUARDRAIL_VERSION = '1';
@@ -127,8 +116,6 @@ function failRegistryReads(items: Record<string, Record<string, unknown>>): void
   });
 }
 
-/** Build a minimal `jira:issue_created` payload with the trigger label
- *  already applied. Tests override per-case via `overrides`. */
 function issue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     webhookEvent: 'jira:issue_created',
@@ -139,8 +126,6 @@ function issue(overrides: Record<string, unknown> = {}): Record<string, unknown>
       key: 'ENG-42',
       fields: {
         summary: 'Fix the login bug',
-        // ADF doc with one paragraph — the processor's walker should
-        // produce 'Users cannot log in.' as the markdown rendering.
         description: {
           type: 'doc',
           version: 1,
@@ -198,8 +183,6 @@ describe('jira-webhook-processor handler', () => {
     postIssueCommentMock.mockReset();
     postIssueCommentMock.mockResolvedValue('ack-comment-1');
     resolveJiraOauthTokenMock.mockReset();
-    // Default: tenant IS resolvable. Drop-path tests override per-case
-    // with `.mockResolvedValueOnce(null)`.
     resolveJiraOauthTokenMock.mockResolvedValue({
       accessToken: 'jira_at',
       scope: 'read:jira-work write:jira-work',
@@ -215,12 +198,10 @@ describe('jira-webhook-processor handler', () => {
     });
     resolveTaskByJiraIssueMock.mockReset();
     resolveTaskByJiraIssueMock.mockResolvedValue(null);
-    // Default (#577): no comments, no attachments. Per-case tests override.
     fetchRecentHumanCommentsMock.mockReset();
     fetchRecentHumanCommentsMock.mockResolvedValue([]);
     downloadJiraAttachmentsMock.mockReset();
     downloadJiraAttachmentsMock.mockResolvedValue([]);
-    // Default: comment guardrail screening passes (no intervention).
     bedrockSendMock.mockReset();
     bedrockSendMock.mockResolvedValue({ action: 'NONE' });
   });
@@ -340,9 +321,6 @@ describe('jira-webhook-processor handler', () => {
         UpdateExpression: 'SET channel_metadata.iteration_reply_comment_id = :comment_id',
         ExpressionAttributeValues: { ':comment_id': 'ack-comment-1' },
       });
-      // Comment triggers validate the active project mapping, then attribute
-      // the task to the linked comment author. The additional write stores the
-      // maturing acknowledgement id.
       const gets = ddbSend.mock.calls
         .map(([command]) => command)
         .filter((command) => command?._type === 'Get');
@@ -570,8 +548,6 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('an iteration takes the status names the project mapping has now, not those of the earlier task', async () => {
-      // The earlier task was created while the mapping said Doing / Code Review.
-      // Since then the start status was renamed and the review override removed.
       resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
       mockCommentDdb(undefined, {
         repo: 'org/repo',
@@ -608,8 +584,6 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('an orchestrated child iteration keeps the status names recorded with its orchestration', async () => {
-      // The reconciler moves the child's issue by the names on the orchestration
-      // row, which are the ones the child's earlier task carries.
       resolveTaskByJiraIssueMock.mockResolvedValueOnce({
         ...priorTask,
         channel_metadata: {
@@ -694,8 +668,6 @@ describe('jira-webhook-processor handler', () => {
       const refusal = reportIssueFailureMock.mock.calls[0][2] as string;
       expect(refusal).toContain('`@bgagent retry`');
 
-      // A site that still writes with the OAuth token gets the refusal back as
-      // a new comment by the person who ran setup, not by an app.
       const echo = comment();
       (echo.comment as Record<string, unknown>).id = 'comment-2';
       (echo.comment as Record<string, unknown>).body = refusal;
@@ -821,19 +793,15 @@ describe('jira-webhook-processor handler', () => {
   test('drops event when cloudId is missing and registry has no active tenant', async () => {
     const payload = issue();
     delete payload.cloudId;
-    // Sole-tenant fallback scans the registry; an empty registry can't
-    // resolve a tenant, so the event is dropped.
     ddbSend.mockResolvedValueOnce({ Items: [] });
     await handler(eventWith(payload));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
-    // No feedback either — without cloudId we can't resolve tokens to post.
     expect(reportIssueFailureMock).not.toHaveBeenCalled();
   });
 
   test('drops event when cloudId is missing and registry has multiple active tenants (ambiguous)', async () => {
     const payload = issue();
     delete payload.cloudId;
-    // Two active tenants → fallback refuses to guess (would risk mis-routing).
     ddbSend.mockResolvedValueOnce({
       Items: [
         { jira_cloud_id: 'cloud-1', status: 'active' },
@@ -848,26 +816,16 @@ describe('jira-webhook-processor handler', () => {
   test('recovers cloudId from sole active tenant when payload omits it (Settings-UI webhook)', async () => {
     const payload = issue();
     delete payload.cloudId;
-    // Registry scan returns exactly one active tenant → use it. Then the
-    // normal flow proceeds: project mapping (active) + user mapping resolve,
-    // and a task is created.
     ddbSend
-      .mockResolvedValueOnce({ Items: [{ jira_cloud_id: 'cloud-1', status: 'active' }] }) // Scan
-      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } }) // project mapping
-      .mockResolvedValueOnce({ Item: { platform_user_id: 'user-1', status: 'active' } }); // user mapping
+      .mockResolvedValueOnce({ Items: [{ jira_cloud_id: 'cloud-1', status: 'active' }] })
+      .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } })
+      .mockResolvedValueOnce({ Item: { platform_user_id: 'user-1', status: 'active' } });
     createTaskCoreMock.mockResolvedValue({ task_id: 'T1' });
     await handler(eventWith(payload));
     expect(createTaskCoreMock).toHaveBeenCalled();
     expect(ddbSend.mock.calls[0][0].input.ConsistentRead).toBe(true);
   });
 
-  // ─── Stack-wide-verified deliveries: cloudId is not trusted from the body ──
-  //
-  // A delivery verified against the stack-wide fallback secret proves nothing
-  // about which tenant sent it (the secret is not bound to a cloudId). The
-  // processor must ignore the body `cloudId` and bind to the sole active
-  // tenant, dropping when that's ambiguous — otherwise a holder of the
-  // stack-wide secret could steer a webhook at any tenant's mappings.
   describe('stack-wide-verified delivery does not trust body cloudId', () => {
     function stackWideEvent(payload: Record<string, unknown>): {
       raw_body: string;
@@ -877,19 +835,15 @@ describe('jira-webhook-processor handler', () => {
     }
 
     test('binds to the sole active tenant, ignoring a different body cloudId', async () => {
-      // Body claims `cloud-evil`, but the sole active tenant is `cloud-1`.
-      // Routing must use `cloud-1` (the project mapping is keyed on it).
       const payload = issue({ cloudId: 'cloud-evil' });
       ddbSend
-        .mockResolvedValueOnce({ Items: [{ jira_cloud_id: 'cloud-1', status: 'active' }] }) // Scan
-        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } }) // project mapping
-        .mockResolvedValueOnce({ Item: { platform_user_id: 'user-1', status: 'active' } }); // user mapping
+        .mockResolvedValueOnce({ Items: [{ jira_cloud_id: 'cloud-1', status: 'active' }] })
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active', label_filter: 'bgagent' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'user-1', status: 'active' } });
       createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
 
       await handler(stackWideEvent(payload));
 
-      // Project mapping was looked up with the SOLE-TENANT cloudId, not the
-      // attacker-supplied one.
       const projectGet = ddbSend.mock.calls[1][0];
       expect(projectGet.input.Key.jira_project_identity).toBe('cloud-1#ENG');
       const [, ctx] = createTaskCoreMock.mock.calls[0];
@@ -958,8 +912,6 @@ describe('jira-webhook-processor handler', () => {
     ddbSend.mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } });
     const payload = issue({
       webhookEvent: 'jira:issue_updated',
-      // `bgagent` was already there; user added another label. The diff
-      // should NOT trigger.
       changelog: {
         items: [{ field: 'labels', fromString: 'bgagent other', toString: 'bgagent other extra' }],
       },
@@ -1010,8 +962,6 @@ describe('jira-webhook-processor handler', () => {
     expect(reqBody.repo).toBe('org/repo');
     expect(reqBody.task_description).toContain('ENG-42: Fix the login bug');
     expect(reqBody.task_description).toContain('Users cannot log in.');
-    // Must pin the coding workflow — an absent workflow_ref falls through the
-    // resolution ladder to default/agent-v1, which never opens a PR (#546).
     expect(reqBody.workflow_ref).toBe('coding/new-task-v1');
     expect(ctx.userId).toBe('cognito-user-1');
     expect(ctx.channelSource).toBe('jira');
@@ -1064,9 +1014,6 @@ describe('jira-webhook-processor handler', () => {
   });
 
   test('uses composite project mapping key {cloudId}#{projectKey}', async () => {
-    // Two tenants can have the same project key — the composite key
-    // disambiguates them. Belt-and-braces test that the lookup uses the
-    // right key shape.
     ddbSend
       .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
       .mockResolvedValueOnce({ Item: { platform_user_id: 'u1', status: 'active' } });
@@ -1094,8 +1041,6 @@ describe('jira-webhook-processor handler', () => {
   });
 
   test('fires when label diff comes via fieldId instead of field', async () => {
-    // Some Atlassian payloads use fieldId rather than field; the trigger
-    // logic accepts either as long as the labels diff is present.
     ddbSend
       .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
       .mockResolvedValueOnce({ Item: { platform_user_id: 'u1', status: 'active' } });
@@ -1147,9 +1092,6 @@ describe('jira-webhook-processor handler', () => {
     await handler(eventWith(issue()));
 
     expect(createTaskCoreMock).not.toHaveBeenCalled();
-    // A dead grant on a site that writes as the Forge app can still be told.
-    // An unregistered or inactive site, or one with an unreadable secret, gives
-    // reportIssueFailure no identity to write with, so nothing is posted there.
     expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
     expect(reportIssueFailureMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -1318,8 +1260,6 @@ describe('jira-webhook-processor handler', () => {
     });
   });
 
-  // ─── ADF → markdown conversion ──────────────────────────────────────────────
-
   describe('ADF description rendering', () => {
     beforeEach(() => {
       ddbSend
@@ -1383,8 +1323,6 @@ describe('jira-webhook-processor handler', () => {
     });
   });
 
-  // ─── Image URL extraction from rendered description ─────────────────────────
-
   describe('image URL attachment extraction', () => {
     beforeEach(() => {
       ddbSend
@@ -1428,10 +1366,6 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('extracts an external ADF media node embedded in the description', async () => {
-      // Real Jira issues embed images as `media` nodes, not markdown image
-      // text. The walker must render an `external` media node to markdown so
-      // it surfaces as an attachment. (`file`-type media reference an
-      // attachment id that needs a Jira API round-trip, so they're skipped.)
       const payload = issue();
       (payload.issue as { fields: Record<string, unknown> }).fields.description = {
         type: 'doc',
@@ -1450,7 +1384,6 @@ describe('jira-webhook-processor handler', () => {
           {
             type: 'mediaSingle',
             content: [
-              // file-type media: attachment id, no direct URL — must be skipped.
               { type: 'media', attrs: { type: 'file', id: 'att-123' } },
             ],
           },
@@ -1464,8 +1397,6 @@ describe('jira-webhook-processor handler', () => {
       expect(reqBody.attachments[0]).toEqual({ type: 'url', url: 'https://cdn.example.com/mockup.png' });
     });
   });
-
-  // ─── #577: recent comments folded into the task context ─────────────────────
 
   describe('recent comments in task context', () => {
     beforeEach(() => {
@@ -1488,7 +1419,6 @@ describe('jira-webhook-processor handler', () => {
       expect(reqBody.task_description).toContain('**Ada** (2026-07-01T00:00:00Z):');
       expect(reqBody.task_description).toContain('Use the attached log.');
       expect(reqBody.task_description).toContain('**Grace** (2026-07-02T00:00:00Z):');
-      // Oldest-first: Ada's comment appears before Grace's.
       expect(reqBody.task_description.indexOf('Ada')).toBeLessThan(reqBody.task_description.indexOf('Grace'));
     });
 
@@ -1502,8 +1432,6 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('comment fetch failure is fail-open: task still created, no failure comment', async () => {
-      // The helper itself is fail-open (returns []), but assert the processor
-      // does not gate on it even if it somehow rejects.
       fetchRecentHumanCommentsMock.mockResolvedValueOnce([]);
 
       await handler(eventWith(issue()));
@@ -1513,9 +1441,6 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('a huge comment thread is truncated, keeping task_description within the 10k limit (fail-open)', async () => {
-      // A single very long comment would otherwise push the description past
-      // MAX_TASK_DESCRIPTION_LENGTH and cause createTaskCore to 400 — turning
-      // advisory comments into a hard gate. The processor must truncate instead.
       fetchRecentHumanCommentsMock.mockResolvedValueOnce([
         { author: 'Ada', createdAt: '2026-07-01T00:00:00Z', markdown: 'x'.repeat(50_000) },
       ]);
@@ -1529,9 +1454,6 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('a policy-tripping comment is DROPPED (fail-open) — task still created without it', async () => {
-      // Third-party comment content that trips the guardrail must not fail the
-      // reporter's task (#577 review item 4). The comment section is dropped;
-      // the task is still created from the reporter-authored description.
       fetchRecentHumanCommentsMock.mockResolvedValueOnce([
         { author: 'Mallory', createdAt: '2026-07-01T00:00:00Z', markdown: 'SSN 123-45-6789' },
       ]);
@@ -1584,7 +1506,6 @@ describe('jira-webhook-processor handler', () => {
     });
 
     test('idempotent replay (createTaskCore 200) is not a failure and posts no ❌ comment', async () => {
-      // Override the beforeEach 201 with a 200 replay.
       createTaskCoreMock.mockReset();
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
       fetchRecentHumanCommentsMock.mockResolvedValueOnce([]);
@@ -1594,8 +1515,6 @@ describe('jira-webhook-processor handler', () => {
       expect(reportIssueFailureMock).not.toHaveBeenCalled();
     });
   });
-
-  // ─── #577: Jira media attachments (fetch → screen → pre-screened records) ───
 
   describe('Jira media attachment enrichment', () => {
     const passedRecord = {
@@ -1631,7 +1550,6 @@ describe('jira-webhook-processor handler', () => {
       const [, ctx] = createTaskCoreMock.mock.calls[0];
       expect(ctx.preScreenedAttachments).toHaveLength(1);
       expect(ctx.preScreenedAttachments[0].screening.status).toBe('passed');
-      // taskId is minted in the processor and threaded through so S3 keys match.
       expect(ctx.taskId).toBeDefined();
     });
 
@@ -1643,7 +1561,6 @@ describe('jira-webhook-processor handler', () => {
       downloadJiraAttachmentsMock.mockResolvedValueOnce([]);
 
       const payload = issueWithAttachment();
-      // Two embedded image URLs consume two slots.
       (payload.issue as { fields: Record<string, unknown> }).fields.description =
         '![a](https://cdn.example.com/a.png) ![b](https://cdn.example.com/b.png)';
 
@@ -1672,8 +1589,6 @@ describe('jira-webhook-processor handler', () => {
     test('fail-closed: attachments present but screening unconfigured rejects the task', async () => {
       const savedBucket = process.env.ATTACHMENTS_BUCKET_NAME;
       const savedGuardrail = process.env.GUARDRAIL_ID;
-      // The processor reads screening config at module load, so simulate the
-      // unconfigured state by re-importing with the env cleared.
       jest.resetModules();
       delete process.env.ATTACHMENTS_BUCKET_NAME;
       delete process.env.GUARDRAIL_ID;

@@ -1,28 +1,15 @@
-"""Unit tests for sanitization.py: the order of its steps, what a pass of its tag
-patterns removes, the limit on those passes and their running time.
-
-The tests of each pattern are in test_prompts.py (TestSanitizeMemoryContent).
-cdk/test/handlers/shared/sanitization.test.ts holds the same cases for the
-TypeScript implementation. It has one size more in the time tests and not the
-case of TestLetterOnlyPythonFolds.
-"""
-
 import pytest
 
 from sanitization import sanitize_external_content
 
-# What stands for the rest of a text whose tags are not gone at the limit on passes.
 NESTED_TAGS_MARKER = "[SANITIZED_NESTED_TAGS]"
 
 
 def _repeated(unit: str, size: int) -> str:
-    """*unit* repeated and cut to exactly *size* characters."""
     return (unit * (size // len(unit) + 1))[:size]
 
 
 class TestInvisibleCharactersHideNothing:
-    """Characters the sanitizer removes must not shield a pattern from it."""
-
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
@@ -61,14 +48,10 @@ class TestInvisibleCharactersHideNothing:
     def test_pattern_is_neutralized_in_one_pass(self, text, expected):
         once = sanitize_external_content(text)
         assert once == expected
-        # models.py validates text that is already sanitized and relies on
-        # that being a no-op.
         assert sanitize_external_content(once) == once
 
 
 class TestTagStrippingPass:
-    """What a pass of the two tag patterns removes, and what it leaves for the next."""
-
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
@@ -123,8 +106,6 @@ class TestTagStrippingPass:
         assert sanitize_external_content(text) == expected
 
 
-# A Linear or Jira task description is one text of several authors: the title, the
-# description and the recent comments of other people, sanitized as a whole.
 _TASK_DESCRIPTION = (
     "ENG-12: Fix the login redirect\n"
     "\n"
@@ -142,15 +123,6 @@ _LATER_COMMENT = "\n\n**Bob** (2026-11-17T11:00:00.000Z):\nAlso check /logout."
 
 
 class TestTagStrippingPassLimit:
-    """Each pass completes one more tag of these texts.
-
-    A text that the 20th pass no longer changes is stripped as an unlimited loop
-    would strip it. One that it still changes is given up: a tag that only a later
-    pass completes would otherwise stay in it. Every tag starts at a "<", so what
-    stands before the first "<" that is left can change no more: that part is kept,
-    and the marker stands for the rest.
-    """
-
     @pytest.mark.parametrize(
         ("opener", "closer"),
         [
@@ -168,9 +140,6 @@ class TestTagStrippingPassLimit:
         assert sanitize_external_content(nested(21)) == f"before {NESTED_TAGS_MARKER}"
 
     def test_cuts_at_a_lt_that_starts_no_tag_when_the_text_behind_it_reaches_the_limit(self):
-        # No pattern takes "< 2" for a tag. But a "<" that starts no tag now can start
-        # one after a removal (the first of "<<b>a>" does), so nothing from the first
-        # "<" on is final.
         built = "<" * 21 + "a>" * 21
         assert sanitize_external_content(f"if 1 < 2 then {built}") == f"if 1 {NESTED_TAGS_MARKER}"
 
@@ -184,31 +153,15 @@ class TestTagStrippingPassLimit:
         ],
     )
     def test_keeps_a_task_description_up_to_the_text_that_reaches_the_limit(self, built):
-        # A comment that reaches the limit must not take the text in front of it away.
         text = _TASK_DESCRIPTION + built + _LATER_COMMENT
         assert sanitize_external_content(text) == _TASK_DESCRIPTION + NESTED_TAGS_MARKER
 
     def test_text_that_ends_with_the_marker_stays_as_it_is(self):
-        # models.py validates text that is already sanitized.
         for sanitized in (NESTED_TAGS_MARKER, f"before {NESTED_TAGS_MARKER}"):
             assert sanitize_external_content(sanitized) == sanitized
 
 
 class TestTagStrippingTime:
-    """The longest body GitHub accepts (65,536 characters) and four times that, in the
-    shapes whose time grew with the square or the cube of the length.
-
-    It is proportional to the length: milliseconds for these, against a bound of one
-    second. pytest-timeout stops the test at the bound and fails it: a sanitizer that
-    is slow again must not hold the suite for minutes.
-
-    The TypeScript file has one size more, 1,048,576 characters: V8 is quick on the
-    openers without closing tag, and only at that size is a sanitizer that looks for a
-    closing tag at every opener far over the bound there. Here it is far over it at
-    262,144 characters, and the largest size would take this implementation up to 0.2
-    seconds, too close to the bound on a busy machine.
-    """
-
     @pytest.mark.timeout(1)
     @pytest.mark.parametrize("size", [65_536, 262_144])
     @pytest.mark.parametrize(
@@ -251,17 +204,11 @@ class TestTagStrippingTime:
         assert len(text) == size
         sanitized = sanitize_external_content(text)
         wanted = expected(text)
-        # Lengths and one comparison, not ==: a failure would have pytest diff both texts.
         assert (len(sanitized), sanitized == wanted) == (len(wanted), True)
 
 
 class TestLetterOnlyPythonFolds:
-    """Python's re lets LATIN SMALL LETTER LONG S stand for "s" in a tag name.
-
-    JavaScript's does not, so the TypeScript tests have no such case. A closing tag is
-    compared with its opener letter by letter, and there a long s equals a long s only:
-    the two spellings are two names, each with closing tags of its own.
-    """
+    """Python's re lets LATIN SMALL LETTER LONG S stand for "s" in a tag name."""
 
     def test_spellings_that_differ_in_the_folded_letter_are_closed_separately(self):
         long_s_script = "\N{LATIN SMALL LETTER LONG S}cript"

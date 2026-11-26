@@ -26,7 +26,6 @@ const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const REPO_STATUSES = ['active', 'removed'] as const;
 export type RepoStatus = (typeof REPO_STATUSES)[number];
 
-/** RepoTable row shape used by operator CLI and github set-token. */
 export interface RepoConfigRow {
   readonly repo: string;
   readonly status: RepoStatus;
@@ -48,9 +47,7 @@ export interface RepoConfigRow {
 
 /**
  * Thrown when a repo is absent from RepoTable (never registered via Blueprint
- * or operator onboard). Distinguished from infrastructure failures (table
- * missing, AccessDenied, throttling) so callers can safely treat only this as
- * "start from scratch" — see {@link onboardRepo}.
+ * or operator onboard).
  */
 export class RepoNotOnboardedError extends CliError {
   readonly repo: string;
@@ -73,9 +70,7 @@ export function assertRepoFormat(repo: string): void {
 
 /**
  * Narrow a raw DynamoDB item to {@link RepoConfigRow}, validating the fields the
- * CLI branches on. RepoTable is written by CDK-controlled writers, but a schema
- * drift or hand-edited row should fail loudly here rather than flow through the
- * type system as a valid config.
+ * CLI branches on.
  */
 export function parseRepoConfigRow(item: Record<string, unknown>): RepoConfigRow {
   const repo = item.repo;
@@ -113,7 +108,6 @@ export async function loadRepoConfig(
   return parseRepoConfigRow(result.Item);
 }
 
-/** Load an active RepoConfig row from RepoTable. */
 export async function loadActiveRepoConfig(
   region: string,
   tableName: string,
@@ -128,7 +122,6 @@ export async function loadActiveRepoConfig(
   return config;
 }
 
-/** Scan RepoTable and return all repo configs. */
 export async function listRepoConfigs(
   region: string,
   tableName: string,

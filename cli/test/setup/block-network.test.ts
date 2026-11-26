@@ -20,15 +20,6 @@
 import * as http from 'http';
 import * as net from 'net';
 
-/**
- * What ``test/setup/block-network.ts`` guarantees to every test file.
- *
- * If the first group fails, the ``jest.setupFiles`` entry in package.json no
- * longer loads that module: restore it. The targets are chosen so that these
- * tests send nothing even then: a name that is resolved by a ``lookup`` which
- * fails, and 127.0.0.2, which the guard does not allow and which cannot leave
- * the machine.
- */
 const refused = (host: string) => new RegExp(`cli tests must not open network connections, and this one tried to reach ${host}\\.`);
 const UNRESOLVED = 'outside.invalid';
 const UNLISTED = '127.0.0.2';
@@ -38,7 +29,6 @@ describe('network guard', () => {
     const lookup = jest.fn<void, Parameters<net.LookupFunction>>((_hostname, _options, callback) => {
       callback(new Error('no name resolution in tests'), '', 4);
     });
-    /** Swallow the asynchronous error the attempt ends in when the guard is missing. */
     const quiet = (emitter: { on(event: 'error', listener: () => void): unknown }): void => {
       emitter.on('error', () => undefined);
     };

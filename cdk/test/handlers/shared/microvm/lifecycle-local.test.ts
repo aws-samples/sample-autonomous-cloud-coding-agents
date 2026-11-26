@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-/** Opt-in DynamoDB Local: loopback endpoint and dummy credentials only. */
 import { randomUUID } from 'node:crypto';
 import { CreateTableCommand, DeleteTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -89,7 +88,6 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
           ...(name === approvals ? [{ AttributeName: 'request_id', KeyType: 'RANGE' as const }] : [])],
       }));
     }
-    // The task events table's key schema: task_id + ULID event_id.
     await raw.send(new CreateTableCommand({
       TableName: events,
       BillingMode: 'PAY_PER_REQUEST',
@@ -100,7 +98,6 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
 
   test('finds the checkpoint item the guest writes, for its generation only', async () => {
     const taskId = `checkpoint-${randomUUID()}`;
-    // The item `progress_writer.write_microvm_checkpoint` writes, then later events.
     await admin.send(new PutCommand({
       TableName: events,
       Item: {

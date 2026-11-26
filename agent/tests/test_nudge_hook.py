@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Integration tests for the Stop-hook-based nudge injection path."""
-
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +21,6 @@ def _run(coro):
 def _reset():
     nudge_reader._reset_cache_for_tests()
     hooks_mod._reset_injected_nudges_for_tests()
-    # Restore the default registry after each test.
     original = list(hooks_mod.between_turns_hooks)
     yield
     hooks_mod.between_turns_hooks[:] = original
@@ -52,7 +49,6 @@ class TestNudgeBetweenTurnsHook:
         assert len(result) == 1
         assert "<user_nudge" in result[0]
         assert "please prioritise error handling" in result[0]
-        # mark_consumed should have been called once.
         table.update_item.assert_called_once()
 
     def test_no_pending_nudges_returns_empty(self):
@@ -73,8 +69,6 @@ class TestNudgeBetweenTurnsHook:
         assert hooks_mod._nudge_between_turns_hook({"task_id": "t-1"}) == []
 
     def test_nudge_injection_emits_milestone_on_progress(self):
-        """When nudges are injected, ``nudge_acknowledged`` milestone fires on the
-        progress writer so the durable event stream shows a visible marker."""
         table = MagicMock()
         table.query.return_value = {
             "Items": [
@@ -105,14 +99,6 @@ class TestNudgeBetweenTurnsHook:
         assert "focus on error handling" in kwargs["details"]
 
     def test_nudge_ack_milestone_fires_before_injection_list_returns(self):
-        """Regression for AD-5 combined-turn ack: the ``nudge_acknowledged``
-        milestone MUST be written before the hook returns the injection list.
-
-        The durable event stream is how the CLI / fan-out dispatchers learn
-        the nudge reached the agent.  If the SDK crashes between the hook's
-        return and the next turn firing, the ack still has to be on the
-        event table so operators don't think the nudge was lost.
-        """
         table = MagicMock()
         table.query.return_value = {
             "Items": [
@@ -130,9 +116,6 @@ class TestNudgeBetweenTurnsHook:
 
         call_order: list[str] = []
         progress = MagicMock()
-        # ``write_agent_milestone`` is a sync boto3 call in production; if a
-        # future refactor makes it fire-and-forget, this test needs to grow
-        # a flush barrier to keep the invariant guarded.
         progress.write_agent_milestone.side_effect = lambda **kw: call_order.append("milestone")
 
         result = hooks_mod._nudge_between_turns_hook(
@@ -141,21 +124,12 @@ class TestNudgeBetweenTurnsHook:
                 "progress": progress,
             }
         )
-        # Append after the hook returns so return-time is recorded relative
-        # to the synchronous side_effect.
         call_order.append("return")
 
-        # The milestone call must have landed BEFORE the return.
         assert call_order == ["milestone", "return"]
         assert len(result) == 1
 
     def test_nudge_ack_skipped_when_no_progress_in_ctx(self):
-        """When ``ctx`` has no progress writer (e.g. hook invoked outside
-        ``stop_hook``), the ack is skipped but injection still proceeds.
-
-        Before this chunk the skip was silent; now it emits a DEBUG log so
-        operators running with ``--trace`` can see ack delivery gaps.
-        """
         table = MagicMock()
         table.query.return_value = {
             "Items": [
@@ -171,15 +145,10 @@ class TestNudgeBetweenTurnsHook:
         table.update_item.return_value = {}
         nudge_reader._TABLE_CACHE = table
 
-        # ctx without "progress" key
         result = hooks_mod._nudge_between_turns_hook({"task_id": "t-1"})
-        # Injection still happens — AD-5 prefers steering the agent over
-        # blocking on an ack delivery gap.
         assert len(result) == 1
 
     def test_nudge_ack_skipped_when_progress_writer_circuit_breaker_open(self):
-        """When the progress writer's circuit breaker is tripped, the ack is
-        skipped (with a WARN) but injection still proceeds."""
         table = MagicMock()
         table.query.return_value = {
             "Items": [
@@ -196,7 +165,7 @@ class TestNudgeBetweenTurnsHook:
         nudge_reader._TABLE_CACHE = table
 
         progress = MagicMock()
-        progress._disabled = True  # circuit breaker open
+        progress._disabled = True
 
         result = hooks_mod._nudge_between_turns_hook(
             {
@@ -205,15 +174,10 @@ class TestNudgeBetweenTurnsHook:
             }
         )
 
-        # write_agent_milestone MUST NOT be called when the breaker is open
-        # — emitting would violate the circuit-breaker contract and risk
-        # tipping the writer further into a bad state.
         progress.write_agent_milestone.assert_not_called()
-        # Injection still happens.
         assert len(result) == 1
 
     def test_nudge_milestone_emit_is_best_effort_on_progress_failure(self):
-        """Milestone emission errors must not break injection."""
         table = MagicMock()
         table.query.return_value = {
             "Items": [
@@ -235,12 +199,10 @@ class TestNudgeBetweenTurnsHook:
             "task_id": "t-1",
             "progress": progress,
         }
-        # Injection must still succeed even if milestone write raises.
         result = hooks_mod._nudge_between_turns_hook(ctx)
         assert len(result) == 1
 
     def test_no_pending_no_milestone_emitted(self):
-        """Don't spam milestones when there's nothing to inject."""
         table = MagicMock()
         table.query.return_value = {"Items": []}
         nudge_reader._TABLE_CACHE = table
@@ -254,9 +216,7 @@ class TestNudgeBetweenTurnsHook:
         progress.write_agent_milestone.assert_not_called()
 
     def test_already_consumed_nudge_not_reinjected(self):
-        """A second read_pending call (post-consume) returns [] and hook returns []."""
         table = MagicMock()
-        # First call: one pending nudge.  Second call: table is now empty.
         table.query.side_effect = [
             {
                 "Items": [
@@ -319,9 +279,6 @@ class TestStopHook:
         assert "three" in result["reason"]
 
     def test_registry_default_contains_cancel_then_nudge(self):
-        # Freshly-imported registry: cancel runs FIRST so it short-circuits
-        # nudge injection on cancelled tasks; nudge runs AFTER it for running
-        # tasks.
         import importlib
 
         importlib.reload(hooks_mod)
@@ -333,13 +290,8 @@ class TestStopHook:
 
 
 class TestInProcessDedup:
-    """Process-lifetime dedup guards against mark_consumed failures."""
-
     def test_already_injected_nudge_not_reinjected_even_if_mark_consumed_failed(self):
-        """If mark_consumed persistently fails, read_pending keeps returning
-        the same row, but the in-process dedup set prevents re-injection."""
         table = MagicMock()
-        # Both reads return the SAME pending row (mark_consumed is failing).
         pending_row = {
             "task_id": "t-1",
             "nudge_id": "01ABC",
@@ -348,15 +300,12 @@ class TestInProcessDedup:
             "consumed": False,
         }
         table.query.return_value = {"Items": [pending_row]}
-        # Simulate mark_consumed failing repeatedly.
         table.update_item.side_effect = Exception("DDB throttled")
         nudge_reader._TABLE_CACHE = table
 
         first = hooks_mod._nudge_between_turns_hook({"task_id": "t-1"})
         assert len(first) == 1
 
-        # Second call: same row still returned by read_pending, but dedup
-        # set suppresses re-injection.
         second = hooks_mod._nudge_between_turns_hook({"task_id": "t-1"})
         assert second == []
 
@@ -398,7 +347,6 @@ class TestInProcessDedup:
 
     def test_different_tasks_do_not_share_dedup(self):
         table = MagicMock()
-        # Same nudge_id "01A" appears for both tasks — each should still inject.
         table.query.side_effect = [
             {
                 "Items": [
@@ -433,8 +381,6 @@ class TestInProcessDedup:
 
 
 class TestStopHookThreading:
-    """Fix 2: sync hooks must run off the asyncio loop via ``to_thread``."""
-
     def test_sync_hook_is_run_in_a_thread(self):
         main_thread_id = threading.get_ident()
         captured: dict[str, int] = {}
@@ -446,26 +392,18 @@ class TestStopHookThreading:
         hooks_mod.between_turns_hooks[:] = [sync_hook]
         result = _run(hooks_mod.stop_hook({}, None, {}, task_id="t-1"))
         assert result["decision"] == "block"
-        # The sync hook must have executed on a worker thread, not the
-        # asyncio event-loop thread that test_main is driving.
         assert captured["tid"] != main_thread_id
 
 
 class TestStopWrapperTaskIdLogging:
-    """Fix 5: Stop wrapper crashes must include task_id at ERROR severity."""
-
     def test_stop_wrapper_crash_logs_task_id_at_error(self, monkeypatch):
         logs: list[tuple[str, str]] = []
 
         def fake_log(prefix: str, text: str) -> None:
             logs.append((prefix, text))
 
-        # Patch the ``log`` name imported into hooks_mod.
         monkeypatch.setattr(hooks_mod, "log", fake_log)
 
-        # Make stop_hook raise — the _stop wrapper should catch, log, and
-        # return an empty output.  We rebuild matchers to get a fresh _stop
-        # closure bound to a distinct task_id.
         async def broken_stop_hook(*_a, **_k):
             raise RuntimeError("boom")
 
@@ -479,10 +417,8 @@ class TestStopWrapperTaskIdLogging:
         stop_matcher = matchers["Stop"][0]
         stop_callback = stop_matcher.hooks[0]
 
-        # Invoke the wrapped callback.
         _run(stop_callback({}, None, {}))
 
-        # Find the ERROR log entry and assert it mentions task_id.
         error_entries = [(p, t) for (p, t) in logs if p == "ERROR"]
         assert len(error_entries) >= 1
         assert any("task-XYZ" in t for (_p, t) in error_entries)

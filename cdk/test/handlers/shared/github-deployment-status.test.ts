@@ -22,8 +22,6 @@ import {
   validateDeploymentStatusPayload,
 } from '../../../src/handlers/shared/github-deployment-status';
 
-// The payload interface is deeply `readonly`, so each case constructs a
-// fresh literal from parts rather than mutating a shared fixture.
 function build(parts: {
   status?: { id?: number; state?: string; environment_url?: string };
   deployment?: { id?: number; sha?: string; environment?: string };
@@ -56,8 +54,6 @@ describe('validateDeploymentStatusPayload', () => {
   });
 
   test('non-success states still validate (state filtering is the caller’s job)', () => {
-    // The validator only checks presence/type, not the value — the
-    // receiver applies the `success` filter separately before calling.
     const raw = build({ ...FULL, status: { ...FULL.status, state: 'failure' } });
     expect(validateDeploymentStatusPayload(raw)?.state).toBe('failure');
   });
@@ -67,7 +63,6 @@ describe('validateDeploymentStatusPayload', () => {
     expect(validateDeploymentStatusPayload(raw)?.statusId).toBe(0);
   });
 
-  // Each case drops or empties exactly one required field; all reject.
   const rejects: Array<[string, GitHubDeploymentStatusPayload]> = [
     ['missing state', build({ ...FULL, status: { id: 99, environment_url: 'https://x' } })],
     ['empty state', build({ ...FULL, status: { ...FULL.status, state: '' } })],
@@ -84,8 +79,6 @@ describe('validateDeploymentStatusPayload', () => {
     ['absent deployment_status object', build({ deployment: FULL.deployment, repository: FULL.repository })],
     ['absent deployment object', build({ status: FULL.status, repository: FULL.repository })],
     ['absent repository object', build({ status: FULL.status, deployment: FULL.deployment })],
-    // Shape (not just presence) checks — repoFullName/sha are interpolated
-    // into the GitHub API URL and S3 key downstream.
     ['malformed repoFullName (no slash)', build({ ...FULL, repository: { full_name: 'just-a-name' } })],
     ['malformed repoFullName (path traversal)', build({ ...FULL, repository: { full_name: 'owner/repo/../x' } })],
     ['non-hex sha', build({ ...FULL, deployment: { ...FULL.deployment, sha: 'not-a-sha!' } })],

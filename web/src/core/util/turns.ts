@@ -20,17 +20,6 @@
 import type { TaskEvent } from '../api/types';
 import { isCutOff, parseToolInput } from './tool-input';
 
-/**
- * Groups the agent's events into turns, the unit `max_turns` counts.
- *
- * In a turn the model answers once: it may think, say something, and ask for
- * tools; the tools' results go back to it in the next turn. The agent writes
- * one `agent_turn` event per message, and a single answer arrives as several
- * messages (thinking, then text, then tool use), so a new turn starts at the
- * first message after one that asked for tools. Counted this way, a finished
- * task's turns match the `turns_completed` the platform reports.
- */
-
 export interface ToolStep {
   /** The `agent_tool_call` event id. */
   readonly id: string;
@@ -92,7 +81,6 @@ export function buildTurns(events: readonly TaskEvent[]): Turn[] {
       const last = turns.at(-1);
       let turn = current(event.timestamp);
       if (last && last.tools.length > 0) {
-        // The answer before asked for tools, so this message starts the next turn.
         turn = { number: last.number + 1, at: event.timestamp, said: null, thinking: null, tools: [] };
         turns.push(turn);
       }
@@ -116,8 +104,6 @@ export function buildTurns(events: readonly TaskEvent[]): Turn[] {
       });
     } else if (event.event_type === 'agent_tool_result') {
       const tool = str(meta, 'tool_name');
-      // Results come back in call order, right after their turn: pair each with the
-      // oldest unanswered call of the same tool in the latest turn that has one.
       const matches = (s: Draft['tools'][number]) => s.output === null && (!tool || s.tool === tool);
       const open = [...turns].reverse().find((t) => t.tools.some(matches))?.tools.find(matches);
       if (!open) continue;

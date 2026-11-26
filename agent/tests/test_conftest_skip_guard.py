@@ -1,12 +1,3 @@
-"""Regression guard for the CI skip guard in ``conftest.py``.
-
-This suite has no skipped test, so nothing in an ordinary run shows that the
-guard works, or that it still understands the reports pytest hands it. These
-tests run pytest on a throwaway module that skips in every way pytest offers,
-with ``conftest.py`` loaded as it is for the real suite, and check the exit
-status and what the run says.
-"""
-
 import os
 import re
 import subprocess
@@ -77,9 +68,9 @@ def _run_pytest(tmp_path: Path, *, ci: str | None) -> subprocess.CompletedProces
             "-m",
             "pytest",
             "-c",
-            "pyproject.toml",  # the suite's own settings, so `src` is importable
+            "pyproject.toml",
             "-p",
-            "tests.conftest",  # the guard under test, for files outside tests/
+            "tests.conftest",
             "-p",
             "no:cacheprovider",
             str(tmp_path),
@@ -100,17 +91,13 @@ def test_a_skip_fails_the_run_in_ci_and_is_named(tmp_path):
     assert "1 passed, 4 skipped, 2 xfailed" in out, out + proc.stderr
     assert proc.returncode == 1, "every test passed or was skipped, yet the run must fail in CI"
     assert "Skip guard" in out
-    # Each skip is listed with where it is and why, so that it can be acted on.
     where_and_why = r"test_skipping\.py:\d+: Skipped: skipped by a marker"
     assert re.search(rf"test_skipping\.py::test_marker — .*{where_and_why}", out), out
     assert "test_skipping.py::test_inside — " in out
-    # Listing a skip must not need the working directory: the test may have deleted it.
     assert "test_skipping.py::test_inside_a_deleted_directory — " in out
     assert "test_skipped_module.py — " in out
     assert "could not import 'a_module_that_is_not_installed'" in out
-    # An expected failure is an expectation, not a skip (and a stale one already fails) ...
     assert "test_expected_failure — " not in out
-    # ... unless pytest is told not to run it: that test can never be found stale.
     assert "test_skipping.py::test_expected_failure_never_run — [NOTRUN] " in out
 
 

@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for WebhookTable construct.
- */
 export interface WebhookTableProps {
   /**
    * Optional table name override.
@@ -59,9 +56,6 @@ export class WebhookTable extends Construct {
    */
   public static readonly USER_INDEX = 'UserIndex';
 
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: WebhookTableProps = {}) {

@@ -20,14 +20,6 @@
 import type { ChannelSource, TaskSummary } from '../api/types';
 import type { Explanation } from '../components/Explain';
 
-/**
- * Cost rollups for the Costs page, computed from task summaries.
- *
- * A task's spend is counted on the UTC day it finished, so a day's bar shows money
- * spent that day. A task records its cost when it finishes: one that has not finished
- * adds nothing to the spend, and is placed by its latest change for the count of tasks.
- */
-
 export type CostRange = 'this-month' | '7d' | '30d';
 export type CostGrouping = 'repo' | 'outcome' | 'source' | 'total';
 
@@ -44,7 +36,7 @@ export const COST_GROUPINGS: Readonly<Record<CostGrouping, string>> = {
   total: 'Total',
 };
 
-/** At most this many named series; the rest fold into "Other" (never a generated 9th hue). */
+/** At most this many named series; the rest fold into "Other". */
 export const MAX_SERIES = 5;
 export const OTHER = 'Other';
 
@@ -62,7 +54,6 @@ function utcDay(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-/** The instant a task counts at: when it finished, or its latest change while it has not. */
 function spendAt(task: Pick<TaskSummary, 'completed_at' | 'updated_at'>): string {
   return task.completed_at ?? task.updated_at;
 }
@@ -115,7 +106,6 @@ function groupOf(task: TaskSummary, grouping: CostGrouping): string {
 
 const cost = (task: TaskSummary) => task.cost_usd ?? 0;
 
-/** Spend that bought nothing: tasks that failed, timed out or were cancelled. */
 function isUnproductive(task: TaskSummary): boolean {
   return task.status === 'FAILED' || task.status === 'TIMED_OUT' || task.status === 'CANCELLED';
 }

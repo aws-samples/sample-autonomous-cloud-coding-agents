@@ -35,15 +35,8 @@ const templatePath = join(__dirname, '..', '..', 'bootstrap', 'bootstrap-templat
 
 const template: any = yaml.load(readFileSync(templatePath, 'utf-8'));
 
-/** Spawning the CDK CLI is slow on cold or egress-restricted runners, well past Jest's
- *  5 s default. Explicit so a slow runner reports a timeout rather than a mystery. */
 const CLI_TIMEOUT_MS = 30_000;
 
-/**
- * ABCA policy documents are emitted as minified JSON strings (#864), so a test that
- * wants at the statements has to parse first. Scoped to our own policies: the default
- * CDK template also ships `CdkBoostrapPermissionsBoundaryPolicy`, which stays a mapping.
- */
 function abcaPolicyDocument(logicalId: string): any {
   const doc = template.Resources[logicalId].Properties.PolicyDocument;
   expect(typeof doc).toBe('string');
@@ -65,7 +58,7 @@ describe('Bootstrap template', () => {
     });
 
     // #701: the CDK CLI compares the default above with the `BootstrapVariant` parameter of
-    // the account's CDKToolkit stack: see the comment above the bootstrap task in cdk/mise.toml.
+    // the account's CDKToolkit stack.
     it('replaces a bootstrap of another variant, because the bootstrap task passes --force', () => {
       const command = readFileSync(join(__dirname, '..', '..', 'mise.toml'), 'utf-8')
         .split('\n')
@@ -84,8 +77,6 @@ describe('Bootstrap template', () => {
       const condition = template.Conditions.IncludeComputeLambdaMicrovms;
       expect(condition).toBeDefined();
       expect(condition['Fn::Not']).toBeDefined();
-      // Split on the WHOLE `lambda-microvm` token: splitting on a `lambda`
-      // prefix would also fire for any future `lambda*` backend name.
       expect(JSON.stringify(condition)).toContain('lambda-microvm');
     });
   });
@@ -121,12 +112,8 @@ describe('Bootstrap template', () => {
     });
 
     it('IaCRoleABCAComputeLambdaMicrovms carries the unconditioned MicrovmPassRoles statement', () => {
-      // ADR-021 P2r2-F9, asserted on the artifact operators actually deploy rather
-      // than only on the TypeScript source: CloudFormation cannot pass the MicroVM
-      // build role while an `iam:PassedToService` condition is in force, so the
-      // CDK-managed image path depends on this statement reaching the YAML with no
-      // Condition key. It lives in the CONDITIONAL per-backend policy, so an
-      // agentcore-only bootstrap never gains the unconditioned pass at all.
+      // ADR-021 P2r2-F9: CloudFormation cannot pass the MicroVM build role while an
+      // `iam:PassedToService` condition is in force.
       const statements = abcaPolicyDocument('IaCRoleABCAComputeLambdaMicrovms')
         .Statement as Array<{
         Sid: string;
@@ -196,11 +183,9 @@ describe('Bootstrap template', () => {
         template.Resources.CloudFormationExecutionRole.Properties.ManagedPolicyArns;
       expect(managed).toBeDefined();
 
-      // Should be an Fn::If with HasCloudFormationExecutionPolicies
       expect(managed['Fn::If']).toBeDefined();
       expect(managed['Fn::If'][0]).toBe('HasCloudFormationExecutionPolicies');
 
-      // The fallback (index 2) should be an array referencing our policies
       const fallback = managed['Fn::If'][2];
       expect(Array.isArray(fallback)).toBe(true);
       expect(fallback).toContainEqual({ Ref: 'IaCRoleABCAInfrastructure' });
@@ -208,7 +193,6 @@ describe('Bootstrap template', () => {
       expect(fallback).toContainEqual({ Ref: 'IaCRoleABCAObservability' });
       expect(fallback).toContainEqual({ Ref: 'IaCRoleABCAComputeAgentcore' });
 
-      // ECS should be conditional
       const ecsEntry = fallback.find(
 
         (item: any) => item['Fn::If'] && item['Fn::If'][0] === 'IncludeComputeEcs',
@@ -217,7 +201,6 @@ describe('Bootstrap template', () => {
       expect(ecsEntry['Fn::If'][1]).toEqual({ Ref: 'IaCRoleABCAComputeEcs' });
       expect(ecsEntry['Fn::If'][2]).toEqual({ Ref: 'AWS::NoValue' });
 
-      // ...and so should Lambda MicroVMs (ADR-021).
       const microvmEntry = fallback.find(
 
         (item: any) => item['Fn::If'] && item['Fn::If'][0] === 'IncludeComputeLambdaMicrovms',
@@ -251,14 +234,11 @@ describe('Bootstrap template', () => {
       const value = template.Outputs.BootstrapPolicySet.Value;
       expect(value['Fn::Join']).toBeDefined();
 
-      // Should contain the core policy names
       const items = value['Fn::Join'][1];
       expect(items).toContain('Infrastructure');
       expect(items).toContain('Application');
       expect(items).toContain('Observability');
       expect(items).toContain('Compute-Agentcore');
-
-      // ECS should be conditional
 
       const conditionalItems = items.filter((item: any) => item['Fn::If']);
       expect(conditionalItems.map((item: any) => item['Fn::If'][0])).toEqual([
@@ -320,27 +300,10 @@ describe('Bootstrap template', () => {
   });
 
   // #864: `cdk bootstrap --template <file>` does NOT send the bytes on disk. It parses
-  // the file, discards its formatting, and re-serialises the parsed object with the
-  // CLI's own writer before deciding inline-vs-S3:
-  //
-  //   const templateJson = toYAML(overrideTemplate ?? stack.template);
-  //   if (templateJson.length <= LARGE_TEMPLATE_SIZE_KB * 1024) ...
-  //
-  // Over the limit the CLI must stage in S3, which is impossible while bootstrapping a
-  // fresh account (that bucket is what bootstrap creates), so it fails outright with
-  // `BootstrapStackRequired` — `--force` included. These tests therefore measure the
-  // CLI's serialisation of the committed artifact, which is the quantity that gates
-  // bootstrap. An earlier revision of this guard measured on-disk bytes and passed at
-  // 39,896 while the body CloudFormation received was 53,369.
+  // the file and re-serialises the parsed object with the CLI's own writer before
+  // deciding inline-vs-S3. Over the limit it fails with `BootstrapStackRequired` on a
+  // fresh account, `--force` included.
   describe('Inline-template size limit', () => {
-    // Measured by invoking the CDK CLI on the committed artifact, so the assertion is the
-    // CLI's own number rather than a local reimplementation of its serialiser. An earlier
-    // revision of this guard read on-disk bytes, passed at 39,896, and shipped a template
-    // whose body was 53,369 — over the ceiling and unable to bootstrap a fresh account.
-    //
-    // One invocation, not three. Formatting invariance is asserted below by comparing
-    // *parsed* templates, which is both exact and free: the CLI's size is a function of
-    // the parsed object, so two files that parse identically cannot differ on the wire.
     const cdkRoot = join(__dirname, '..', '..');
     let bodySize: number;
 
@@ -356,28 +319,13 @@ describe('Bootstrap template', () => {
       expect(bodySize).toBeLessThanOrEqual(TEMPLATE_SIZE_BUDGET);
     });
 
-    // Reformatting the committed YAML cannot move the gated size, because the CLI parses
-    // the file and discards its layout. Locking that in stops a future contributor
-    // "fixing" a budget failure by reflowing the artifact — which is exactly what #864's
-    // first attempted fix did, shrinking the file 14 KB with zero movement on the wire.
-    //
-    // Asserted on parsed equality rather than by measuring both files through the CLI.
-    // That is stronger (exact, no tolerance) and avoids two more subprocesses: the CLI
-    // derives its size from the parsed object, so identical parses give identical bodies
-    // by construction.
     it('cannot buy headroom by reformatting, because the CLI measures the parsed template', () => {
       const compact = yaml.dump(template, { lineWidth: -1, noRefs: true, flowLevel: 4 });
       const expanded = yaml.dump(template, { lineWidth: -1, noRefs: true });
-      // Thousands of characters apart on disk...
       expect(expanded.length - compact.length).toBeGreaterThan(1_000);
-      // ...yet the same template, so the same body reaches CloudFormation.
       expect(yaml.load(compact)).toEqual(yaml.load(expanded));
     });
 
-    // Each PolicyDocument is emitted as a minified JSON string rather than a nested
-    // mapping: a string scalar survives the CLI's re-serialisation on one line, which is
-    // what brings the body under the ceiling. CloudFormation accepts either shape for
-    // this `Json`-typed property and IAM stores the string parsed.
     it('emits every PolicyDocument as a JSON string that parses to a policy document', () => {
       const abcaPolicies = Object.keys(template.Resources as Record<string, any>)
         .filter((id) => id.startsWith('IaCRoleABCA'));
@@ -391,8 +339,6 @@ describe('Bootstrap template', () => {
     });
   });
 
-  // The generator's budget check had no test: the only way to exercise it was to make the
-  // real template too big. Extracting the comparison makes the boundaries assertable.
   describe('Budget check', () => {
     it('passes exactly at the budget', () => {
       const v = checkTemplateBudget(TEMPLATE_SIZE_BUDGET);
@@ -414,8 +360,6 @@ describe('Bootstrap template', () => {
       expect(v.overHardLimit).toBe(true);
     });
 
-    // The pre-fix state, kept as a regression marker: 53,369 was the real body size that
-    // shipped past the ceiling while an on-disk guard reported 39,896 and passed.
     it('rejects the body size that #864 shipped', () => {
       const v = checkTemplateBudget(53_369);
       expect(v.withinBudget).toBe(false);
@@ -423,10 +367,6 @@ describe('Bootstrap template', () => {
     });
   });
 
-  // Replaces an earlier round-trip assertion that compared a dump of the committed file
-  // against a load of that dump — i.e. `load(dump(x)) === x`, true for any object, and
-  // blind to the artifact drifting from its generator. Comparing against an
-  // independently built template is the check that actually has teeth.
   describe('Artifact matches the generator', () => {
     it('committed template deep-equals a freshly built one', () => {
       expect(template).toEqual(buildTemplate());

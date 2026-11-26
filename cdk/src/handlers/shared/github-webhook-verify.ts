@@ -25,12 +25,6 @@ import { makeClient } from './ua';
 
 const sm = makeClient(SecretsManagerClient);
 
-/**
- * In-memory secret cache (5-minute TTL). Same pattern as `linear-verify.ts`
- * — webhook secrets rotate infrequently, and skipping a Secrets Manager
- * round-trip on every webhook keeps the receiver well under GitHub's 10s
- * timeout. After rotation, the verifier transparently re-fetches once.
- */
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
@@ -52,12 +46,6 @@ export async function getGitHubWebhookSecret(secretId: string, forceRefresh = fa
 
   try {
     const result = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-    // Treat empty / whitespace-only SecretString as null. If an operator
-    // ever wrote `""` out of band, `crypto.createHmac('sha256', '')` would
-    // happily run and an attacker who computes `HMAC('', body)` would pass.
-    // The default CDK Secret resource generates a random value so this
-    // isn't reachable on the default config — but matching the
-    // fail-closed-on-risk tenet is cheap. (theagenticguy PR-241 review B2.)
     const value = result.SecretString;
     if (!isUsableHmacSecret(value)) {
       logger.error('GitHub webhook secret is empty — refusing to use for HMAC', {
@@ -73,7 +61,7 @@ export async function getGitHubWebhookSecret(secretId: string, forceRefresh = fa
     if (errorName === 'ResourceNotFoundException') {
       logger.error('GitHub webhook secret not found', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null; // missing webhook secret means "cannot verify"; ResourceNotFound is an expected config state
+      return null;
     }
     logger.error('Failed to fetch GitHub webhook secret', {
       secret_id: secretId,
@@ -83,7 +71,6 @@ export async function getGitHubWebhookSecret(secretId: string, forceRefresh = fa
   }
 }
 
-/** Drop a cached webhook secret — used on suspected rotation. */
 export function invalidateGitHubWebhookSecretCache(secretId: string): void {
   secretCache.delete(secretId);
 }
@@ -95,8 +82,6 @@ export function invalidateGitHubWebhookSecretCache(secretId: string): void {
  * with the literal `sha256=` and delivered in the `X-Hub-Signature-256`
  * header (per
  * https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries).
- * The legacy `X-Hub-Signature` (SHA1) header is not validated — GitHub
- * always sends both, but SHA256 is the secure one.
  *
  * @param webhookSecret - the per-webhook signing secret.
  * @param header - the `X-Hub-Signature-256` header value (with `sha256=` prefix).
@@ -104,9 +89,6 @@ export function invalidateGitHubWebhookSecretCache(secretId: string): void {
  * @returns true if the signature matches.
  */
 export function verifyGitHubSignature(webhookSecret: string, header: string, body: string): boolean {
-  // Defense-in-depth: getGitHubWebhookSecret already filters empty
-  // secrets, but if a future caller wires a different secret source we
-  // still want HMAC('') rejected. (theagenticguy PR-241 review B2.)
   if (!isUsableHmacSecret(webhookSecret)) {
     return false;
   }
@@ -128,9 +110,8 @@ export function verifyGitHubSignature(webhookSecret: string, header: string, bod
 }
 
 /**
- * Verify a GitHub webhook request, with one transparent re-fetch on
- * cache miss. Same UX as `verifyLinearRequest` so warm Lambdas don't
- * silently reject post-rotation deliveries for up to 5 minutes.
+ * Verify a GitHub webhook request, re-fetching the secret once when the
+ * cached one does not verify.
  */
 export async function verifyGitHubRequest(secretId: string, header: string, body: string): Promise<boolean> {
   const cached = await getGitHubWebhookSecret(secretId);

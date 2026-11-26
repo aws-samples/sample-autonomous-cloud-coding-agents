@@ -140,9 +140,7 @@ describe('isDegeneratePattern', () => {
   });
 
   test('wildcard ratio > 50% is degenerate', () => {
-    // 3 wildcards in 5 chars (60%) → degenerate.
     expect(isDegeneratePattern('a**?b')).toBe(true);
-    // 2 wildcards in 5 chars (40%) → not degenerate.
     expect(isDegeneratePattern('a*b*c')).toBe(false);
   });
 

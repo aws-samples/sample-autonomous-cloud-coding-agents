@@ -36,10 +36,6 @@ describe('generateInviteCode', () => {
   });
 
   test('rejects biased bytes (>=248) and tops up from the next batch', () => {
-    // First batch is all-rejected (255 >= 248 rejection ceiling for a
-    // 31-char alphabet); the second batch is all-zero → every char is
-    // the alphabet's first character. Exercises both the `continue`
-    // rejection branch and the top-up loop.
     const spy = jest.spyOn(globalThis.crypto, 'getRandomValues')
       .mockImplementationOnce((arr) => {
         (arr as Uint8Array).fill(255);
@@ -52,7 +48,6 @@ describe('generateInviteCode', () => {
     try {
       const code = generateInviteCode();
       expect(code).toBe(`link-${INVITE_CODE_ALPHABET[0].repeat(8)}`);
-      // At least two draws: the rejected batch + the top-up batch.
       expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2);
     } finally {
       spy.mockRestore();
@@ -60,10 +55,6 @@ describe('generateInviteCode', () => {
   });
 
   test('distribution is not skewed toward the front of the alphabet', () => {
-    // With modulo bias, indices 0-7 would be over-represented. Draw a
-    // large sample and assert the front-eighth of the alphabet is not
-    // meaningfully more frequent than a uniform expectation. This is a
-    // smoke check, not a rigorous statistical test.
     const counts = new Array(INVITE_CODE_ALPHABET.length).fill(0);
     const SAMPLES = 5000;
     for (let i = 0; i < SAMPLES; i++) {
@@ -73,7 +64,6 @@ describe('generateInviteCode', () => {
     }
     const total = SAMPLES * 8;
     const expectedPerChar = total / INVITE_CODE_ALPHABET.length;
-    // No character should deviate more than 25% from uniform expectation.
     for (const count of counts) {
       expect(count).toBeGreaterThan(expectedPerChar * 0.75);
       expect(count).toBeLessThan(expectedPerChar * 1.25);

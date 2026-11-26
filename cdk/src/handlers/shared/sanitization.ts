@@ -17,56 +17,26 @@
  *  SOFTWARE.
  */
 
-// ---------------------------------------------------------------------------
-// Content sanitization for external/untrusted inputs
-// ---------------------------------------------------------------------------
-
-/**
- * The opener of an HTML tag whose content should be stripped entirely (tag + inner text):
- * the name and everything up to the next ">".
- */
 const DANGEROUS_OPENER = /<(script|style|iframe|object|embed|form|input)[^>]*>/gi;
 
-/** A dangerous opener and everything up to the first closing tag of its name. Sticky: tried at one opener. */
 const DANGEROUS_PAIR = /<(script|style|iframe|object|embed|form|input)[^>]*>[\s\S]*?<\/\1>/iy;
 
-/** Remaining HTML tags — strip tag but preserve inner text. */
 const HTML_TAGS = /<\/?[a-z][^>]*>/gi;
 
-/** Instruction-like prefixes at the start of a line (case-insensitive). */
 const INSTRUCTION_PREFIXES = /^(SYSTEM|ASSISTANT|Human)\s*:/gim;
 
-/** Phrases commonly used in prompt injection attempts (case-insensitive). */
 const INJECTION_PHRASES = /(?:ignore previous instructions|disregard (?:above|previous|all)|new instructions\s*:)/gi;
 
-/** ASCII control characters except tab (0x09), LF (0x0A), CR (0x0D). */
 // eslint-disable-next-line no-control-regex -- the sanitizer strips control characters, so its pattern names them
 const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
 
-/** Unicode bidirectional formatting characters and misplaced BOM. */
 const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 const MISPLACED_BOM = /(?!^)\uFEFF/g;
 
-/**
- * How many passes stripUntilStable makes over one text. Ordinary text is stable after two
- * (the second finds nothing); only tags nested as fragments, so that each pass completes
- * the next one, need more.
- */
 const MAX_STRIP_PASSES = 20;
 
-/**
- * What stands for the part of a text that stripUntilStable gives up; the steps after the
- * tag stripping leave it as it is. The same in agent/src/sanitization.py.
- */
 const NESTED_TAGS_MARKER = '[SANITIZED_NESTED_TAGS]';
 
-/**
- * One pass over the dangerous tags of `text`: every opener goes, with everything up to the
- * first closing tag of its name when one follows, and alone when none does. That is one
- * global replace of "DANGEROUS_PAIR, or else DANGEROUS_OPENER", in time proportional to the
- * length: a search for a closing tag that fails has read to the end of the text and would
- * fail again for every later opener of the same name, so it is made once per name.
- */
 function stripDangerousTags(text: string): string {
   const unclosed = new Set<string>();
   const kept: string[] = [];
@@ -92,36 +62,17 @@ function stripDangerousTags(text: string): string {
 }
 
 /**
- * Apply a tag-stripping pass repeatedly until the string stops changing.
- *
- * A single pass can be bypassed by nesting fragments
- * (e.g. "<scrip<script></script>t>" reassembles after inner tag removal).
- *
- * The work is proportional to the length of the text:
- * - A pass sees the text up to its last ">" only. Every tag ends with a ">", so nothing
- *   behind the last one is a tag, and a pattern would read that rest once per "<" in it.
- * - The passes are limited. A text that the last of MAX_STRIP_PASSES still changes is
- *   given up: a tag that only a later pass completes would otherwise stay in it. Every
- *   tag starts at a "<", so what stands before the first "<" that is left can change no
- *   more: that part is kept and NESTED_TAGS_MARKER stands for the rest; a text with no
- *   "<" left is complete. A "<" that starts no tag is no exception: it can start one
- *   after a removal, as the first of "<<b>a>" does.
- *
- * `strip` is one pass over the dangerous tags; without it a pass removes the remaining
- * HTML tags. That replace is written out in the loop, not handed in as a function, so
- * that its result is seen to be the text of the next replace: static analysis (CodeQL,
- * js/incomplete-multi-character-sanitization) reports a tag-removing replace that it
- * cannot see repeated. A pass only removes text.
+ * The HTML_TAGS replace is written out in the loop, not handed in as a function: CodeQL
+ * (js/incomplete-multi-character-sanitization) reports a tag-removing replace that it
+ * cannot see repeated.
  */
 function stripUntilStable(s: string, strip?: (text: string) => string): string {
-  // The text is head + tail, and tail holds no ">".
   let head = s;
   let tail = '';
   for (let pass = 0; pass < MAX_STRIP_PASSES; pass++) {
     const end = head.lastIndexOf('>') + 1;
     tail = head.slice(end) + tail;
     const stripped = strip ? strip(head.slice(0, end)) : head.slice(0, end).replace(HTML_TAGS, '');
-    // Nothing was removed: the same length is the same text.
     if (stripped.length === end) return stripped + tail;
     head = stripped;
   }
@@ -134,35 +85,23 @@ function stripUntilStable(s: string, strip?: (text: string) => string): string {
  * Sanitize external content before it enters the agent's context.
  *
  * Neutralizes rather than blocks — suspicious patterns are replaced with
- * bracketed markers so content is still visible to the LLM (for legitimate
- * discussion of prompts/instructions) but structurally defanged.
+ * bracketed markers.
  *
  * The exception is a text whose tags are not gone after MAX_STRIP_PASSES passes: it
- * is cut at its first "<" (see stripUntilStable).
- *
- * Applied to: GitHub issue bodies, PR bodies, review comments, memory records.
- * NOT applied to: task IDs, repo names, or other platform-controlled fields.
+ * is cut at its first "<".
  */
 export function sanitizeExternalContent(text: string): string {
   if (!text) return text || '';
 
-  // Steps 1 and 2 go first: removed last, an invisible character inside a
-  // tag, a prefix or a phrase would hide it from steps 3 to 5.
-
-  // 1. Strip control characters (keep tab, LF, CR)
   let sanitized = text.replace(CONTROL_CHARS, '');
 
-  // 2. Strip Unicode bidirectional overrides and misplaced BOM
   sanitized = sanitized.replace(BIDI_CHARS, '');
   sanitized = sanitized.replace(MISPLACED_BOM, '');
 
-  // 3. Strip dangerous HTML tags with their content
   sanitized = stripUntilStable(sanitized, stripDangerousTags);
 
-  // 4. Strip remaining HTML tags (preserve inner text)
   sanitized = stripUntilStable(sanitized);
 
-  // 5. Neutralize embedded instruction patterns
   sanitized = sanitized.replace(INSTRUCTION_PREFIXES, '[SANITIZED_PREFIX] $1:');
   sanitized = sanitized.replace(INJECTION_PHRASES, '[SANITIZED_INSTRUCTION]');
 

@@ -1,14 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""``_ProgressWriter`` against a real DynamoDB API (the emulator's).
-
-``tests/test_progress_writer.py`` drives the writer with a MagicMock table and
-hand-built ``ClientError``s. Here the same code talks to DynamoDB semantics: the
-item has to survive the SDK's type marshalling and the service's validation, and
-the errors the circuit breaker classifies are the ones the service really sends.
-"""
-
 from __future__ import annotations
 
 import time
@@ -20,12 +12,6 @@ from progress_writer import _TTL_SECONDS, _ProgressWriter
 
 
 def _events(emulator, task_id: str) -> list[dict]:
-    """All events for a task, oldest first.
-
-    Ordered by the microsecond ``timestamp`` rather than by the table's sort key:
-    ``event_id`` only orders events to the millisecond, so two written within one
-    millisecond can come back from DynamoDB in either order.
-    """
     response = emulator.table(emulator.task_events_table).query(
         KeyConditionExpression=Key("task_id").eq(task_id), ConsistentRead=True
     )
@@ -55,8 +41,6 @@ class TestProgressEventsReachDynamoDB:
             "milestone": "clone_complete",
             "details": "Repository cloned",
         }
-        # Empty strings and nested lists are stored as given; numbers come back as
-        # DynamoDB numbers (the writer converts floats to Decimal for the SDK).
         assert turn["metadata"]["thinking_preview"] == ""
         assert turn["metadata"]["tool_calls_count"] == 2
         assert cost["metadata"]["cost_usd"] == Decimal("0.1234")
@@ -67,8 +51,6 @@ class TestProgressEventsReachDynamoDB:
             assert event["repo"] == "owner/repo"
             assert len(event["event_id"]) == 26
             assert abs(int(event["ttl"]) - (time.time() + _TTL_SECONDS)) < 60
-        # The sort key's time prefix follows emission order, which is what lets
-        # `bgagent watch` page through the table by event_id.
         time_prefixes = [event["event_id"][:10] for event in events]
         assert time_prefixes == sorted(time_prefixes)
 
@@ -91,7 +73,6 @@ class TestProgressEventsReachDynamoDB:
 
         tool_call, milestone = _events(agent_env, task_id)
         assert tool_call["metadata"]["tool_name"] == "Bash"
-        # trace=True raises the preview cap from 200 chars to 4 KB.
         assert milestone["metadata"]["details"] == "x" * 4096 + "..."
 
 
@@ -120,7 +101,6 @@ class TestProgressWriterOnRealServiceErrors:
         writer.write_agent_milestone("first", "")
         writer.write_agent_milestone("second", "")
 
-        # One line for the first write; the second never reaches DynamoDB.
         out = capsys.readouterr().out
         assert out.count("disabling progress writer") == 1
         assert "ResourceNotFoundException" in out

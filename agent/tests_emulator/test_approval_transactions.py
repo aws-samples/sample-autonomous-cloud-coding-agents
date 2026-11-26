@@ -1,15 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""The approval-gate writes in ``task_state.py`` against real DynamoDB semantics.
-
-``tests/test_task_state.py`` hands these functions a MagicMock client, because (as
-``_get_ddb_client`` notes) moto did not fully emulate ``TransactWriteItems`` with
-conditions across two tables. Here the transactions run: the conditions are
-evaluated by the service, a cancelled transaction really leaves nothing behind,
-and the cancellation reasons are the ones the SDK reports.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -28,14 +19,12 @@ def _task(task_id: str) -> dict:
 
 @pytest.fixture
 def running_task(agent_env, task_id) -> str:
-    """A task the orchestrator created and the agent already marked RUNNING."""
     agent_env.table(agent_env.task_table).put_item(Item={"task_id": task_id, "status": "RUNNING"})
     return task_id
 
 
 @pytest.fixture
 def pending_request(running_task) -> str:
-    """An approval the agent is waiting on for ``running_task``."""
     request_id = _generate_ulid()
     task_state.transact_write_approval_request(
         running_task, request_id, approval_row(running_task, request_id)
@@ -54,9 +43,7 @@ class TestApprovalRequest:
         task = _task(running_task)
         assert task["status"] == "AWAITING_APPROVAL"
         assert task["awaiting_approval_request_id"] == request_id
-        # The stranded-approval sweep ages the task from this timestamp.
         assert task["status_created_at"].startswith("AWAITING_APPROVAL#")
-        # updated_at moves with the status, to the same moment.
         assert task["status_created_at"] == "AWAITING_APPROVAL#" + task["updated_at"]
 
     def test_cancelled_task_gets_no_approval_row(self, agent_env, running_task):
@@ -70,7 +57,6 @@ class TestApprovalRequest:
                 running_task, request_id, approval_row(running_task, request_id)
             )
 
-        # The Put passed its own condition and was still undone with the Update.
         codes = [reason["Code"] for reason in raised.value.cancellation_reasons]
         assert codes == ["None", "ConditionalCheckFailed"]
         assert task_state.get_approval_row(running_task, request_id) is None
@@ -88,8 +74,6 @@ class TestApprovalRequest:
 
 class TestResumeAndTimeout:
     def test_resume_returns_the_task_to_running(self, running_task, pending_request, monkeypatch):
-        # The clock is held for the resume: the approval request stamped updated_at
-        # moments earlier, so only a held clock shows that the resume moves it.
         monkeypatch.setattr(task_state, "_now_iso", lambda: "2031-01-01T00:00:00Z")
 
         task_state.transact_resume_from_approval(running_task, pending_request)
@@ -98,7 +82,6 @@ class TestResumeAndTimeout:
         assert task["status"] == "RUNNING"
         assert "awaiting_approval_request_id" not in task
         assert task["status_created_at"].startswith("RUNNING#")
-        # updated_at moves with the status.
         assert task["updated_at"] == "2031-01-01T00:00:00Z"
 
     def test_resume_for_a_different_request_is_refused(self, running_task, pending_request):

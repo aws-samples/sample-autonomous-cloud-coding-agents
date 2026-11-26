@@ -23,12 +23,6 @@ import { buildTurns, stepsById, type ToolStep } from './turns';
 
 export { previewField } from './tool-input';
 
-/**
- * Turns raw task events into short, plain-English lines ("Edited src/app.ts").
- * Bookkeeping events (turn counters, cost ticks, setup internals) return null:
- * they stay in the full log but never reach the activity feed.
- */
-
 export type ActivityKind = 'action' | 'said' | 'step' | 'message' | 'problem';
 
 export interface ActivityLine {
@@ -47,7 +41,6 @@ function str(meta: Record<string, unknown>, key: string): string | null {
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
 }
 
-/** How a pull request ended, in the words of its line in the activity. */
 const PULL_REQUEST_ENDS = {
   merged: 'Pull request merged on GitHub',
   closed: 'Pull request closed on GitHub without merging',
@@ -56,7 +49,6 @@ const PULL_REQUEST_ENDS = {
 /**
  * How the task's pull request ended, when the event is the one ABCA writes once its hourly
  * read of GitHub has recorded that; null for any other event and for a state it does not know.
- * The task the API returns does not carry it, so the activity and the page's banner both read it here.
  */
 export function pullRequestEnd(event: TaskEvent): keyof typeof PULL_REQUEST_ENDS | null {
   const state = event.event_type === 'pr_outcome_recorded' ? event.metadata?.pr_state : null;
@@ -154,8 +146,6 @@ function milestone(meta: Record<string, unknown>): Pick<ActivityLine, 'text' | '
       if (area === 'working') return { kind: 'step', text: 'Started on the change' };
       if (area === 'checking') return { kind: 'step', text: 'Checking that it builds and the tests pass' };
       if (area === 'pull-request') {
-        // By the name of the step: a task without a repository delivers its result (`deliver`), and
-        // an iteration, a review or a restack ends on a pull request that exists (`resolve_pr`).
         if (/deliver/i.test(key)) return { kind: 'step', text: 'Delivering the result' };
         if (/resolve/i.test(key)) return { kind: 'step', text: 'Finishing up on the pull request' };
         return { kind: 'step', text: 'Opening a pull request' };
@@ -200,8 +190,6 @@ export function describeEvent(event: TaskEvent, repo?: string | null, step?: Too
     case 'agent_blocked':
       return { ...base, kind: 'problem', text: str(meta, 'remediation_hint') ?? 'It got stuck and could not continue' };
     case 'pr_outcome_recorded': {
-      // The line carries GitHub's time for the merge or the close. The event's own is the time of the read,
-      // minutes to days later: it stands in when the metadata holds nothing that reads as a time.
       const end = pullRequestEnd(event);
       const closedAt = str(meta, 'pr_closed_at');
       const at = closedAt !== null && !Number.isNaN(Date.parse(closedAt)) ? closedAt : event.timestamp;

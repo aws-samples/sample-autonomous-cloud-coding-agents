@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Unit tests for nudge_reader."""
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -21,15 +19,9 @@ from nudge_reader import (
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    """Reset module-level caches between tests."""
     _reset_cache_for_tests()
     yield
     _reset_cache_for_tests()
-
-
-# ---------------------------------------------------------------------------
-# read_pending
-# ---------------------------------------------------------------------------
 
 
 class TestReadPending:
@@ -40,7 +32,6 @@ class TestReadPending:
 
     def test_returns_items_sorted_by_nudge_id_ascending(self):
         table = MagicMock()
-        # Return in reverse order — reader must sort ASC.
         table.query.return_value = {
             "Items": [
                 {
@@ -72,7 +63,6 @@ class TestReadPending:
 
     def test_returns_empty_when_env_var_unset(self, monkeypatch):
         monkeypatch.delenv("NUDGES_TABLE_NAME", raising=False)
-        # Passing table=None forces _get_table() which should return None.
         assert read_pending("t1") == []
 
     def test_returns_empty_on_ddb_error(self):
@@ -85,7 +75,7 @@ class TestReadPending:
         table.query.return_value = {
             "Items": [
                 {"nudge_id": "01A", "message": "ok", "created_at": "t"},
-                {"message": "no id — dropped"},  # no nudge_id
+                {"message": "no id — dropped"},
             ]
         }
         result = read_pending("t1", table=table)
@@ -98,12 +88,10 @@ class TestReadPending:
         read_pending("task-xyz", table=table)
         table.query.assert_called_once()
         _, kwargs = table.query.call_args
-        # KeyConditionExpression and FilterExpression must be present.
         assert "KeyConditionExpression" in kwargs
         assert "FilterExpression" in kwargs
 
     def test_paginates_when_last_evaluated_key_is_returned(self):
-        """Two-page response: first page has LastEvaluatedKey, second does not."""
         table = MagicMock()
         table.query.side_effect = [
             {
@@ -132,16 +120,9 @@ class TestReadPending:
         ]
         result = read_pending("t1", table=table)
         assert [n["nudge_id"] for n in result] == ["01A", "01B"]
-        # Must have queried twice.
         assert table.query.call_count == 2
-        # Second call must pass ExclusiveStartKey from the first response.
         second_kwargs = table.query.call_args_list[1].kwargs
         assert second_kwargs["ExclusiveStartKey"] == {"task_id": "t1", "nudge_id": "01A"}
-
-
-# ---------------------------------------------------------------------------
-# mark_consumed
-# ---------------------------------------------------------------------------
 
 
 class TestMarkConsumed:
@@ -153,17 +134,12 @@ class TestMarkConsumed:
         _, kwargs = table.update_item.call_args
         assert kwargs["Key"] == {"task_id": "t1", "nudge_id": "01A"}
         assert "ConditionExpression" in kwargs
-        # ``consumed`` is a DDB reserved keyword — must be aliased via
-        # ExpressionAttributeNames, otherwise DDB rejects the whole update
-        # with ``ValidationException: reserved keyword: consumed``.
+        # ``consumed`` is a DynamoDB reserved word: unaliased, the update is rejected.
         assert "ExpressionAttributeNames" in kwargs
         names = kwargs["ExpressionAttributeNames"]
         assert "consumed" in names.values(), f"Expected 'consumed' to be aliased; got {names!r}"
-        # The raw attribute name must NOT appear in the update/condition
-        # expressions (DDB will reject it).
         update_expr = kwargs["UpdateExpression"]
         cond_expr = kwargs["ConditionExpression"]
-        # Allow "consumed_at" but not bare "consumed" followed by space/=.
         import re
 
         bare_consumed = re.compile(r"\bconsumed\b(?!_at)")
@@ -186,7 +162,6 @@ class TestMarkConsumed:
         assert mark_consumed("t1", "01A") is False
 
     def test_already_consumed_returns_false_via_client_error(self, capfd):
-        """boto3 ClientError path — ``response['Error']['Code']`` carries the code."""
         from botocore.exceptions import ClientError
 
         table = MagicMock()
@@ -195,15 +170,9 @@ class TestMarkConsumed:
             "UpdateItem",
         )
         assert mark_consumed("t1", "01A", table=table) is False
-        # Losing the race for a nudge is expected, so it is not logged as a warning.
         logged = capfd.readouterr().out
         assert "DEBUG Nudge 01A already consumed" in logged
         assert "WARN" not in logged
-
-
-# ---------------------------------------------------------------------------
-# format_as_user_message
-# ---------------------------------------------------------------------------
 
 
 class TestFormatAsUserMessage:
@@ -237,7 +206,6 @@ class TestFormatAsUserMessage:
         assert "one" in out and "two" in out
 
     def test_xml_special_chars_escaped_in_body(self):
-        """A malicious nudge must not be able to forge a closing tag."""
         out = format_as_user_message(
             [
                 {
@@ -247,9 +215,7 @@ class TestFormatAsUserMessage:
                 }
             ]
         )
-        # The raw closing tag in the body must be escaped.
         body_close_count = out.count("</user_nudge>")
-        # Exactly one real closing tag — the one we emit.
         assert body_close_count == 1
         assert "&lt;/user_nudge&gt;" in out
         assert "&lt;system&gt;" in out
@@ -265,22 +231,11 @@ class TestFormatAsUserMessage:
             ]
         )
         assert "&quot;" in out
-        # Attribute value should not contain an unescaped double-quote that
-        # would end the attribute early.
         assert 'nudge_id="01" onclick="' not in out
-
-
-# ---------------------------------------------------------------------------
-# _xml_escape unit
-# ---------------------------------------------------------------------------
 
 
 class TestXmlEscape:
     def test_escapes_four_predefined_entities(self):
-        # We escape `& < > "` — apostrophe is not escaped because our
-        # attributes are always double-quoted and unescaped `'` keeps
-        # pasted text readable in logs (e.g. don't → don't, not
-        # don&apos;t).
         assert _xml_escape('&<>"') == "&amp;&lt;&gt;&quot;"
 
     def test_apostrophe_is_not_escaped(self):
@@ -290,21 +245,13 @@ class TestXmlEscape:
         assert _xml_escape("hello world") == "hello world"
 
     def test_ampersand_escaped_first(self):
-        # Verifies ordering so we don't double-escape.
         assert _xml_escape("<") == "&lt;"
         assert _xml_escape("&lt;") == "&amp;lt;"
-
-
-# ---------------------------------------------------------------------------
-# _get_table caching
-# ---------------------------------------------------------------------------
 
 
 class TestGetTable:
     def test_unset_env_var_warns_once(self, monkeypatch, capsys):
         monkeypatch.delenv("NUDGES_TABLE_NAME", raising=False)
-        # Call multiple times.
         assert nudge_reader._get_table() is None
         assert nudge_reader._get_table() is None
-        # Flag should be set after first call.
         assert nudge_reader._TABLE_NAME_WARNED is True

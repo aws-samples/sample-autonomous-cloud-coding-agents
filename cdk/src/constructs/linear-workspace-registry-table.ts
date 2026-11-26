@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for LinearWorkspaceRegistryTable construct.
- */
 export interface LinearWorkspaceRegistryTableProps {
   /**
    * Optional table name override.
@@ -48,28 +45,8 @@ export interface LinearWorkspaceRegistryTableProps {
  * DynamoDB table tracking Linear workspaces that have completed OAuth onboarding.
  *
  * Schema: linear_workspace_id (PK) — Linear's organization UUID.
- *
- * Fields:
- * - workspace_slug — Linear `urlKey`, used to derive the AgentCore credential
- *   provider name (`linear-oauth-<slug>`) and shown in CLI output
- * - provider_name — full AgentCore credential provider name, the lookup key
- *   for resolving the workspace's OAuth token via AgentCore Identity
- * - installed_by_platform_user_id — Cognito sub of the admin who ran
- *   `bgagent linear setup` (audit only; runtime callers do not need this)
- * - installed_at, updated_at — ISO timestamps
- * - status — 'active' | 'revoked'
- *
- * The webhook processor and orchestrator look up `provider_name` here from
- * the inbound webhook's `organizationId`, then call AgentCore Identity with
- * `userId='linear-workspace-<organizationId>'` to retrieve the workspace's
- * OAuth token. Token sharing is intentional — one bgagent[bot] identity
- * per workspace, used for all members' triggered tasks (matches the v1
- * personal-API-key semantics).
  */
 export class LinearWorkspaceRegistryTable extends Construct {
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: LinearWorkspaceRegistryTableProps = {}) {

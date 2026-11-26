@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-// Semver constraint matching + highest-version selection for the agent asset
-// registry (#246). AgentCore stores a plain version STRING with no native `^`/`~`
-// matching, so ranking is always done here in code (this is substrate-agnostic
-// ABCA logic — it does not import the AWS SDK).
-
 import type { ParsedConstraint } from './ref';
 
 export interface SemVer {
@@ -42,8 +37,6 @@ export function parseVersion(raw: string): SemVer | null {
   const major = Number(m[1]);
   const minor = Number(m[2]);
   const patch = Number(m[3]);
-  // Match parseConstraint: reject components `Number()` would round past
-  // MAX_SAFE_INTEGER, so a candidate version compares identically in TS and Py.
   if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
     return null;
   }
@@ -60,15 +53,11 @@ function isNumeric(s: string): boolean {
   return /^\d+$/.test(s);
 }
 
-/**
- * Compare two prerelease identifier lists per semver §11: a release (empty list)
- * outranks any prerelease; numeric identifiers compare numerically; identifiers
- * are compared field by field; a longer list wins when all shared fields tie.
- */
+/** Prerelease precedence per semver §11. */
 function comparePrerelease(a: readonly string[], b: readonly string[]): number {
   if (a.length === 0 && b.length === 0) return 0;
-  if (a.length === 0) return 1; // a is a release → higher
-  if (b.length === 0) return -1; // b is a release → higher
+  if (a.length === 0) return 1;
+  if (b.length === 0) return -1;
   const len = Math.min(a.length, b.length);
   for (let i = 0; i < len; i++) {
     const ai = a[i];
@@ -76,10 +65,8 @@ function comparePrerelease(a: readonly string[], b: readonly string[]): number {
     if (ai === bi) continue;
     const an = isNumeric(ai);
     const bn = isNumeric(bi);
-    // BigInt, not Number: above 2^53 two different identifiers are the same double and
-    // would tie here, where the Python resolver (exact integers) tells them apart.
     if (an && bn) return Number(BigInt(ai) - BigInt(bi));
-    if (an) return -1; // numeric identifiers have lower precedence than alphanumeric
+    if (an) return -1;
     if (bn) return 1;
     return ai < bi ? -1 : 1;
   }
@@ -119,28 +106,21 @@ export function satisfies(v: SemVer, c: ParsedConstraint): boolean {
   };
 
   if (c.op === 'exact') {
-    // The version as written: 1.0.0-rc.01 compares equal to 1.0.0-rc.1 and is not it.
     return v.raw === c.raw;
   }
 
-  // Range ops: v must be >= the constraint's core.
   if (compareVersions(v, constraintCore) < 0) return false;
 
-  // Exclude prereleases from range matches unless the constraint pins the same
-  // core version and is itself a prerelease.
   if (v.prerelease.length > 0) {
     if (!(coreEquals(v, c) && constraintCore.prerelease.length > 0)) return false;
   }
 
   if (c.op === 'caret') {
     if (c.major > 0) return v.major === c.major;
-    // ^0.x.y → same major.minor (npm behavior for 0.x)
     if (c.minor > 0) return v.major === 0 && v.minor === c.minor;
-    // ^0.0.z → exact patch
     return v.major === 0 && v.minor === 0 && v.patch === c.patch;
   }
 
-  // tilde: same major.minor
   return v.major === c.major && v.minor === c.minor;
 }
 

@@ -34,8 +34,6 @@ describe.each(configurations)('managed MicroVM security checks (vault=$enableLin
     const app = await buildApp({
       account: '123456789012',
       region: 'us-west-2',
-      // A concrete region verifies even explicit AZ overrides. Keep this
-      // template-security test independent of credentials and live EC2.
       describeAzs: async () => [
         { zoneName: 'us-west-2a', zoneId: 'usw2-az1' },
         { zoneName: 'us-west-2b', zoneId: 'usw2-az2' },
@@ -57,8 +55,6 @@ describe.each(configurations)('managed MicroVM security checks (vault=$enableLin
     const orchestrator = stack.node.findChild('TaskOrchestrator') as TaskOrchestrator;
     if (enableLinearIdentityVault) {
       const reconciler = stack.node.findChild('OrchestrationReconciler') as OrchestrationReconciler;
-      // Bundled policies can overflow at different boundaries from unit-test
-      // policies. Exercise the documented exceptions on both owning roles.
       for (const role of [orchestrator.fn.role, reconciler.fn.role]) {
         new ManagedPolicy(role as Role, 'OverflowPolicyVaultProbe', {
           statements: [
@@ -75,8 +71,6 @@ describe.each(configurations)('managed MicroVM security checks (vault=$enableLin
       }
     }
     if (extraWildcard) {
-      // Model a future overflow document without relying on the policy
-      // splitter placing an extra statement in a particular document.
       new ManagedPolicy(orchestrator.fn.role as Role, 'OverflowPolicy999', {
         statements: [new PolicyStatement({
           actions: ['ssm:GetParameter'],
@@ -84,8 +78,7 @@ describe.each(configurations)('managed MicroVM security checks (vault=$enableLin
         })],
       });
     }
-    // The real entry point installs cdk-nag. The CLI fails on these assembly
-    // annotations even though in-process synth itself does not throw.
+    // `app.synth()` does not throw on error annotations; the CDK CLI fails on them.
     const artifact = app.synth().getStackByName('backgroundagent-dev');
     errors = artifact.messages.filter(message => message.level === 'error')
       .map(message => String(message.entry.data));

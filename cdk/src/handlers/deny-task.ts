@@ -45,23 +45,13 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
 /**
  * POST /v1/tasks/{task_id}/deny — User denies a pending approval.
  *
- * Same atomic cross-table pattern as `approve-task.ts`. The key
- * differences:
- *
  *   - `reason` (optional) runs through `scanDenyReason` BEFORE
  *     persistence so secrets (AWS keys, GitHub PATs, private keys)
- *     are never stored or read by the agent (design §7.2, §12.6).
+ *     are never stored or read by the agent.
  *   - Sanitized reason is truncated to `DENY_REASON_MAX_LENGTH`
  *     characters.
  *   - Response is 202 with `{task_id, request_id, status: DENIED,
  *     decided_at}`.
- *
- * The agent reads the sanitized reason on its next
- * `get_approval_row` poll and injects it via
- * `_denial_between_turns_hook` (see agent/src/hooks.py::
- * _denial_between_turns_hook).
- * @param event - API Gateway proxy event.
- * @returns API Gateway proxy result.
  */
 export async function handler(
   event: APIGatewayProxyEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>,
@@ -70,13 +60,11 @@ export async function handler(
   const requestId = ulid();
 
   try {
-    // 1. Auth
     const callerUserId = extractUserId(event);
     if (!callerUserId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
-    // 2. Path + body
     const taskId = event.pathParameters?.task_id;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
@@ -97,20 +85,10 @@ export async function handler(
       );
     }
     const { request_id, reason: rawReason } = parsed;
-    // The body is parsed JSON: the scan below reads the reason as text.
     if (rawReason != null && typeof rawReason !== 'string') {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid reason. Must be a string.', requestId);
     }
 
-    // Sanitize + truncate the reason BEFORE any further processing.
-    // The agent and audit event will both see the scanned form; the
-    // raw text is never persisted anywhere. The scan is given at most
-    // ten times the stored length: it can take time quadratic in its
-    // input, and it runs before the rate limit. The margin is for
-    // redactions, which shorten the text. The stored reason is that of
-    // scanning everything unless redactions take up more than nine
-    // tenths of the scanned part; only then can it hold the start of a
-    // secret that the bound cut in two.
     const sanitizedReason = rawReason
       ? scanDenyReason(rawReason.slice(0, 10 * DENY_REASON_MAX_LENGTH)).slice(0, DENY_REASON_MAX_LENGTH)
       : '';
@@ -118,9 +96,6 @@ export async function handler(
     const nowIso = new Date().toISOString();
     const nowEpoch = Math.floor(Date.now() / 1000);
 
-    // 3. Per-user per-minute rate limit. Shares the counter namespace
-    // with approve — hitting APPROVE_RATE_LIMIT_PER_MINUTE total
-    // approve+deny actions trips the limit on both endpoints.
     const minuteBucket = formatMinuteBucket(new Date());
     try {
       await ddb.send(new UpdateCommand({
@@ -154,7 +129,6 @@ export async function handler(
       throw err;
     }
 
-    // 4. Cross-table atomic transition (§7.2).
     try {
       await ddb.send(new TransactWriteCommand({
         TransactItems: [
@@ -202,8 +176,6 @@ export async function handler(
       throw err;
     }
 
-    // Audit + optional MicroVM wake are best-effort after commit (shared with
-    // approve); neither can turn an accepted human decision into an HTTP failure.
     await recordDecisionPostCommit({
       ddb,
       eventsTableName: EVENTS_TABLE_NAME!,

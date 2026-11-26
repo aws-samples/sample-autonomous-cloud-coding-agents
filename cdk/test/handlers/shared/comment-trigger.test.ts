@@ -62,13 +62,11 @@ describe('parseCommentTrigger', () => {
       .toEqual({ triggered: true, instruction: 'The tests fail on CI, please fix them' });
     expect(parseCommentTrigger('@bgagent... any update?'))
       .toEqual({ triggered: true, instruction: 'any update?' });
-    // Alone it is a bare mention: an empty instruction, not the instruction ".".
     expect(parseCommentTrigger('@bgagent.')).toEqual({ triggered: true, instruction: '' });
   });
 
   test('keeps a code block of a Jira comment as the reviewer wrote it', () => {
     const code = 'steps:\n  - name: build\n    run: make';
-    // What the processor parses: the comment's ADF body, converted to markdown.
     const body = extractDescriptionMarkdown({
       type: 'doc',
       content: [
@@ -106,13 +104,10 @@ describe('parseCommentTrigger', () => {
     ['finished with failures', false, 'failed'],
     ['complete', false, 'succeeded'],
   ])('does not trigger on the orchestration panel when it is %s', (_state, inProgress, childStatus) => {
-    // A row repeats the sub-issue's title, so the panel can carry the mention
-    // in every state; the failed one also has it in its retry hint.
     const panel = renderEpicPanel({
       rows: [{ sub_issue_id: 'ENG-2', title: 'Teach @bgagent a new trick', child_status: childStatus }],
       inProgress,
     });
-    // What ABCA posts, as the processor reads it back from the comment's ADF body.
     const readBack = extractDescriptionMarkdown(buildAdfDocument(panel.split('\n').map(parseMarkdownRuns)));
 
     expect(readBack).toContain('@bgagent');
@@ -120,7 +115,6 @@ describe('parseCommentTrigger', () => {
   });
 
   test('does not trigger on a panel whose bold heading arrives as wiki text', () => {
-    // Bold is an asterisk there, between the emoji and the words.
     const body = '⚠️ *ABCA orchestration finished with failures*\n\n'
       + '↻ *To retry:* reply {{@bgagent retry}} on this epic';
 

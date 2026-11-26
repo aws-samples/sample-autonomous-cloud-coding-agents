@@ -1,5 +1,3 @@
-"""Unit tests for output_scanner.py — secret/PII detection and redaction."""
-
 import json
 from pathlib import Path
 
@@ -7,35 +5,22 @@ import pytest
 
 from output_scanner import ScanResult, scan_tool_output
 
-# Shared with cdk/test/handlers/shared/deny-reason-scanner.test.ts: the scanner
-# of deny reasons has to give the same text for a URL with a user and a password.
 _VECTORS = json.loads(
     (Path(__file__).resolve().parents[2] / "contracts" / "secret-scan-vectors.json").read_text(
         encoding="utf-8"
     )
 )["vectors"]
 
-# An AWS access key id, a colon and a secret access key that holds no slash.
 _KEY_PAIR = "AKIAIOSFODNN7EXAMPLE:" + "A1b2" * 10
 
-# A password with letters and digits, as somebody may leave it inside the
-# brackets of a placeholder. Assembled, like the token below, so that this file
-# holds no credential-shaped literal.
 _LETTERS_AND_DIGITS = "Passw0rd" + "123"
 
-# A GitHub App installation token of the stateless format, ghs_<app id>_<JWT>:
-# three base64url parts, which may hold "-" and "_", joined by dots. Assembled
-# here so that this file holds no token-shaped literal.
 _APP_TOKEN = (
     "gh" + "s_123456_" + ".".join(["eyJ" + "hbGciOi" * 5, "eyJ" + "pYXQi-_" * 40, "s1G-n_" * 30])
 )
 
-# The JWT of that token alone: what stands behind "Bearer" need not be a
-# GitHub token.
 _JWT = _APP_TOKEN.removeprefix("gh" + "s_123456_")
 
-# What the pattern for the older GitHub tokens takes for one of them: a prefix
-# and 36 letters and digits. A signature can hold such a run by chance.
 _LIKE_AN_OLDER_TOKEN = "gh" + "p_" + "Zz9" * 12
 
 
@@ -47,8 +32,6 @@ class TestScanResultDefaults:
 
 
 class TestScanToolOutput:
-    # ---- AWS keys ----
-
     def test_detects_aws_access_key(self):
         content = "key=AKIAIOSFODNN7EXAMPLE"
         result = scan_tool_output(content)
@@ -58,8 +41,6 @@ class TestScanToolOutput:
         assert "[REDACTED-AWS_KEY]" in result.redacted_content
 
     def test_detects_temporary_aws_access_key(self):
-        # Key ids of temporary credentials (STS), the kind the agent itself
-        # runs with, start with ASIA.
         content = "AWS_ACCESS_KEY_ID=ASIAIOSFODNN7EXAMPLE"
         result = scan_tool_output(content)
         assert result.findings == ["AWS_KEY detected"]
@@ -79,9 +60,6 @@ class TestScanToolOutput:
         assert "AWS_SECRET detected" in result.findings
 
     def test_detects_aws_key_pair_in_a_url(self):
-        # s3a://<key id>:<secret>@bucket. Nearly half of all secret keys hold a
-        # "/". The pair is replaced first, and the URL that is left, with the
-        # marker of the pair for a user, is replaced as a whole.
         content = "s3a://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@bucket/path"
         result = scan_tool_output(content)
         assert result.findings == ["AWS_KEY detected", "CONNECTION_STRING detected"]
@@ -116,9 +94,6 @@ class TestScanToolOutput:
         ],
     )
     def test_url_with_an_aws_key_id_as_user_is_replaced_as_a_whole(self, url):
-        # AWS_KEY runs first and leaves scheme://[REDACTED-AWS_KEY]...@host, which
-        # is no user:password@host any more. The rest of the URL (the rest of a
-        # password, a secret in the query) must not stay readable for that.
         assert scan_tool_output(url).redacted_content == "[REDACTED-CONNECTION_STRING]"
 
     def test_longer_run_after_an_aws_key_id_is_not_its_secret(self):
@@ -126,8 +101,6 @@ class TestScanToolOutput:
         content = "AKIAIOSFODNN7EXAMPLE:" + "a" * 41
         result = scan_tool_output(content)
         assert result.redacted_content == "[REDACTED-AWS_KEY]:" + "a" * 41
-
-    # ---- GitHub tokens ----
 
     def test_detects_ghp_token(self):
         content = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
@@ -157,8 +130,6 @@ class TestScanToolOutput:
         assert "[REDACTED-GITHUB_PAT]" in result.redacted_content
 
     def test_detects_token_longer_than_36_chars(self):
-        # Token lengths vary across generations; the pattern must not be
-        # anchored to exactly 36 chars.
         content = "token: ghs_" + "A" * 48
         result = scan_tool_output(content)
         assert result.has_sensitive_content is True
@@ -187,9 +158,6 @@ class TestScanToolOutput:
         ],
     )
     def test_detects_stateless_app_installation_token(self, content, redacted):
-        # Every new installation token has this format since 2026. The pattern
-        # for the older ones wants 36 letters or digits after "ghs_" and stops
-        # at the underscore after the app id.
         result = scan_tool_output(content)
         assert result.findings == ["GITHUB_APP_TOKEN detected"]
         assert result.redacted_content == redacted
@@ -211,10 +179,6 @@ class TestScanToolOutput:
         ],
     )
     def test_stateless_app_token_is_replaced_whole_past_an_inner_marker(self, token, behind):
-        # The signature of such a token is random text and can hold a run
-        # that an earlier pattern takes for a secret of its own and replaces
-        # by its marker, inside the token. The rest behind that marker
-        # belongs to the token as well.
         result = scan_tool_output(f"GITHUB_TOKEN={token}{behind}")
         assert result.redacted_content == f"GITHUB_TOKEN=[REDACTED-GITHUB_APP_TOKEN]{behind}"
 
@@ -238,8 +202,6 @@ class TestScanToolOutput:
     def test_stateless_app_token_leaves_the_other_patterns_their_match(
         self, content, redacted, finding
     ):
-        # The pattern runs behind the older ones: what one of them replaced
-        # together with such a token before it existed is replaced as before.
         result = scan_tool_output(content)
         assert result.findings == [finding]
         assert result.redacted_content == redacted
@@ -254,7 +216,6 @@ class TestScanToolOutput:
         assert result.redacted_content == content
 
     def test_detects_token_in_remote_url(self):
-        # `git remote -v` style output with x-access-token credentials.
         content = "origin  https://x-access-token:ghs_secret123@github.com/owner/repo.git (push)"
         result = scan_tool_output(content)
         assert result.has_sensitive_content is True
@@ -262,31 +223,21 @@ class TestScanToolOutput:
         assert "ghs_secret123" not in result.redacted_content
 
     def test_detects_long_app_token_in_remote_url(self):
-        # GitHub App installation tokens (ghs_<app id>_<JWT>) are about 520
-        # characters since 2026 and vary in length: a token has no length limit.
         token = "ghs_123456_" + ".".join(["eyJ" + "a" * 200] * 3)
         result = scan_tool_output(f"x-access-token:{token}@github.com/owner/repo.git")
         assert result.redacted_content == "[REDACTED-GITHUB_URL_TOKEN]github.com/owner/repo.git"
 
     def test_text_with_a_colon_is_a_remote_url_token_up_to_512_characters(self):
-        # A token holds no ":". Other text before the "@" is still replaced, but
-        # only up to 512 characters: unlimited, a text that repeats
-        # "x-access-token:" is scanned from each one to the end (quadratic).
         at_the_limit = "x-access-token:a:" + "a" * 510 + "@"
         assert scan_tool_output(at_the_limit).redacted_content == "[REDACTED-GITHUB_URL_TOKEN]"
         over_the_limit = "x-access-token:a:" + "a" * 511 + "@"
         assert scan_tool_output(over_the_limit).redacted_content == over_the_limit
 
-    # ---- Slack tokens ----
-
     def test_detects_slack_token(self):
-        # Assembled here so that this file holds no token-shaped literal.
         token = "xo" + "xb-" + "1234567890-abcdefghijklmno"
         result = scan_tool_output(f"SLACK_BOT_TOKEN={token}")
         assert result.findings == ["SLACK_TOKEN detected"]
         assert result.redacted_content == "SLACK_BOT_TOKEN=[REDACTED-SLACK_TOKEN]"
-
-    # ---- Private keys ----
 
     def test_detects_rsa_private_key(self):
         content = (
@@ -325,8 +276,6 @@ class TestScanToolOutput:
         result = scan_tool_output(content)
         assert result.has_sensitive_content is True
         assert "PRIVATE_KEY detected" in result.findings
-
-    # ---- Bearer tokens ----
 
     def test_detects_bearer_token(self):
         content = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc.xyz"
@@ -369,9 +318,6 @@ class TestScanToolOutput:
         ],
     )
     def test_bearer_token_is_replaced_whole_past_an_inner_marker(self, token):
-        # A bearer token ends in random text as well (the signature of a JWT).
-        # Where that holds a run an earlier pattern replaces, the Bearer
-        # pattern stops at the marker; the rest behind it belongs to the token.
         result = scan_tool_output(f"Authorization: Bearer {token}")
         assert result.redacted_content == "Authorization: [REDACTED-BEARER_TOKEN]"
 
@@ -396,14 +342,8 @@ class TestScanToolOutput:
         assert scan_tool_output(content).redacted_content == redacted
 
     def test_rest_of_a_bearer_token_leaves_the_other_patterns_their_match(self):
-        # The entry for the rest of a bearer token runs last. Directly behind
-        # the Bearer pattern it would take the marker of the key id, and the
-        # pattern for connection strings needs that marker to replace this URL
-        # as a whole: the password would stay.
         content = "s3://Bearer " + "x" * 24 + "-AKIAIOSFODNN7EXAMPLE:pa/ss@host"
         assert scan_tool_output(content).redacted_content == "[REDACTED-CONNECTION_STRING]"
-
-    # ---- Connection strings ----
 
     def test_detects_connection_string(self):
         content = "DATABASE_URL=postgres://admin:s3cretP4ss@db.example.com:5432/mydb"
@@ -425,7 +365,6 @@ class TestScanToolOutput:
         assert result.redacted_content == "EMAIL_URL=[REDACTED-CONNECTION_STRING]"
 
     def test_detects_connection_string_with_a_slash_in_the_password(self):
-        # Base64 text holds "/", and so does many a generated password.
         content = "postgres://admin:abc/def+ghiJKL@db.internal:5432/app"
         result = scan_tool_output(content)
         assert result.findings == ["CONNECTION_STRING detected"]
@@ -434,8 +373,6 @@ class TestScanToolOutput:
     @pytest.mark.parametrize("vector", _VECTORS, ids=lambda vector: vector["note"])
     def test_url_vectors_shared_with_the_scanner_of_deny_reasons(self, vector):
         assert scan_tool_output(vector["input"]).redacted_content == vector["expected"]
-
-    # ---- URL templates: a placeholder where the password would stand ----
 
     @pytest.mark.parametrize(
         "content",
@@ -448,21 +385,16 @@ class TestScanToolOutput:
             "sqlalchemy.url = postgresql://%(DB_USER)s:%(DB_PASS)s@%(DB_HOST)s/app",
             "run: git clone https://x-access-token:${{secrets.GITHUB_TOKEN}}@github.com/o/r.git",
             'push = f"git push https://x-access-token:{token}@github.com/o/r"',
-            # empty and positional braces, capitals, a dotted name in two cases
             'let url = format!("postgres://{}:{}@{}:5432/app", user, pw, host);',
             'url = "postgres://{0}:{1}@{2}/app".format(user, pw, host)',
             "MONGO_URI=mongodb+srv://<USERNAME>:<YOUR_PASSWORD>@cluster0.example.net/app",
             'url = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}/app"',
-            # doubled braces without "$", a dash inside <...>, %v
             "url: redis://default:{{redis_password}}@{{redis_host}}:6379",
             "mongodb+srv://<db-user>:<your-password>@cluster0.example.net",
             'dsn := fmt.Sprintf("postgres://%v:%v@%v/app", user, pass, host)',
         ],
     )
     def test_url_template_with_a_placeholder_password_is_left_as_it_is(self, content):
-        # Source code and documentation, not a credential. The agent reads
-        # files through this scanner: a marker in place of such a line keeps
-        # it from editing the line and can end up in what it writes.
         result = scan_tool_output(content)
         assert result.findings == []
         assert result.redacted_content == content
@@ -508,7 +440,6 @@ class TestScanToolOutput:
     @pytest.mark.parametrize(
         "password",
         [
-            # only begins or ends with a placeholder
             "{x}real",
             "${A}b3",
             "%sabc",
@@ -517,7 +448,6 @@ class TestScanToolOutput:
             "%(x)sy",
             "real{x}",
             "{a}{b}",
-            # forms that are not taken: a real password can look like them
             "$DB_PASSWORD",
             "${DB_PASSWORD:-postgres}",
             "${DB_PASSWORD-postgres}",
@@ -525,9 +455,6 @@ class TestScanToolOutput:
             "password",
             "%d",
             "<pass.word>",
-            # a password that somebody left the brackets of a placeholder around
-            # (MongoDB Atlas hands out "<password>"): it holds a digit, or it
-            # mixes small letters and capitals inside <...>
             "<" + _LETTERS_AND_DIGITS + ">",
             "{" + _LETTERS_AND_DIGITS + "}",
             "${" + _LETTERS_AND_DIGITS + "}",
@@ -543,12 +470,10 @@ class TestScanToolOutput:
         assert scan_tool_output(git_url).redacted_content == redacted
 
     def test_placeholder_password_after_an_aws_key_id_is_no_template(self):
-        # The key id is real and is replaced: the URL goes as a whole, as before.
         content = "https://AKIAIOSFODNN7EXAMPLE:{secret}@files.example.com/x"
         assert scan_tool_output(content).redacted_content == "[REDACTED-CONNECTION_STRING]"
 
     def test_connection_string_no_catastrophic_backtracking(self):
-        """Protocol-name cap prevents pathological regex time."""
         import time
 
         content = "a" * 50 + "://" + "b" * 10000 + ":c@d"
@@ -559,19 +484,12 @@ class TestScanToolOutput:
 
     @pytest.mark.parametrize("unit", ["x://", "x://y:1/"])
     def test_connection_string_scan_time_grows_with_the_length_only(self, unit):
-        # Every "x://" is a start of the pattern, and behind "y:1/" the port
-        # rule looks ahead as well. The bound on a password with "/" and ":"
-        # and the stop of that look-ahead at a ":" keep the scan linear: under
-        # 0.1 s for these 100,000 characters, against 5 s and more without
-        # either.
         import time
 
         content = unit * (100_000 // len(unit))
         start = time.monotonic()
         scan_tool_output(content)
         assert time.monotonic() - start < 2
-
-    # ---- Multiple findings ----
 
     def test_detects_multiple_secrets(self):
         content = (
@@ -584,14 +502,10 @@ class TestScanToolOutput:
         assert "AKIAIOSFODNN7EXAMPLE" not in result.redacted_content
         assert "ghp_" not in result.redacted_content
 
-    # ---- Surrounding content preserved ----
-
     def test_preserves_surrounding_content(self):
         content = "before AKIAIOSFODNN7EXAMPLE after"
         result = scan_tool_output(content)
         assert result.redacted_content == "before [REDACTED-AWS_KEY] after"
-
-    # ---- Clean content (no false positives) ----
 
     def test_clean_code_output(self):
         content = "def hello():\n    return 'world'\n"
@@ -622,8 +536,6 @@ class TestScanToolOutput:
         assert result.has_sensitive_content is False
 
     def test_clean_url_followed_by_an_email_address(self):
-        # A colon and an "@" somewhere after a URL do not make it a
-        # user:password@host URL.
         content = "See https://example.com/docs\nAuthor: User <user@example.com>\n"
         result = scan_tool_output(content)
         assert result.has_sensitive_content is False
@@ -634,8 +546,6 @@ class TestScanToolOutput:
         result = scan_tool_output(content)
         assert result.has_sensitive_content is False
         assert result.redacted_content == content
-
-    # ---- Edge cases ----
 
     def test_empty_string(self):
         result = scan_tool_output("")
@@ -649,13 +559,11 @@ class TestScanToolOutput:
         assert result.redacted_content == ""
 
     def test_non_string_converted(self):
-        # Caller is expected to convert, but scan_tool_output handles str only
         result = scan_tool_output(str({"key": "AKIAIOSFODNN7EXAMPLE"}))
         assert result.has_sensitive_content is True
         assert "AWS_KEY detected" in result.findings
 
     def test_large_output(self):
-        # Should not hang or error on large output
         content = "a" * 1_000_000
         result = scan_tool_output(content)
         assert result.has_sensitive_content is False

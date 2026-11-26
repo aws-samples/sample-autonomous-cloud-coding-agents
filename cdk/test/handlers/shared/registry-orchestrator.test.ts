@@ -17,21 +17,10 @@
  *  SOFTWARE.
  */
 
-/**
- * E2E-ish coverage of the orchestrator registry resolve-step (#246, PR 2):
- * given a Blueprint's ``mcp_servers`` refs, ``resolveRegistryAssets`` resolves
- * each via the RegistryClient and is fail-closed on a bad ref / resolution
- * failure. This is the seam the full task path calls before assembling the
- * agent payload; the payload/stamping wiring around it is exercised here by
- * asserting the returned bundle shape the orchestrator threads through.
- */
-
 import { resolveRegistryAssets } from '../../../src/handlers/shared/orchestrator';
 import { RegistryResolutionError, type ResolvedAsset } from '../../../src/handlers/shared/registry/types';
 import type { BlueprintConfig } from '../../../src/handlers/shared/repo-config';
 
-// Standalone mock fn (not a method on an object) so `.not.toHaveBeenCalled()`
-// doesn't trip @typescript-eslint/unbound-method — matches the repo pattern.
 const mockResolve = jest.fn();
 jest.mock('../../../src/handlers/shared/registry/factory', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/registry/factory');

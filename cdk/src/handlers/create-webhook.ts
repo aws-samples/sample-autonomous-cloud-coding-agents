@@ -34,12 +34,11 @@ const sm = makeClient(SecretsManagerClient);
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 const SECRET_PREFIX = 'bgagent/webhook/';
 
-/** Webhook HMAC secret entropy (bytes; 256-bit). */
 const WEBHOOK_SECRET_BYTES = 32;
 
 /**
- * Assumes that the public path starts with the stage name. It does on the default execute-api
- * endpoint, the only one the stacks create. Behind a custom domain name it depends on the mapping.
+ * The public path starts with the stage name on the default execute-api endpoint. Behind a
+ * custom domain name it depends on the mapping.
  */
 function webhookTasksUrl(event: APIGatewayProxyEvent): string {
   const host = getHeader(event.headers, 'Host');
@@ -73,14 +72,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    // Built before anything is created, so a request it cannot be built from leaves nothing behind.
     const webhookUrl = webhookTasksUrl(event);
 
     const webhookId = ulid();
     const secret = crypto.randomBytes(WEBHOOK_SECRET_BYTES).toString('hex');
     const now = new Date().toISOString();
 
-    // 1. Create secret in Secrets Manager (tags inline to avoid separate TagResource IAM action)
     const secretName = `${SECRET_PREFIX}${webhookId}`;
     await sm.send(new CreateSecretCommand({
       Name: secretName,
@@ -92,7 +89,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ],
     }));
 
-    // 2. Write webhook record to DynamoDB (rollback secret on failure)
     const record: WebhookRecord = {
       webhook_id: webhookId,
       user_id: userId,
@@ -133,7 +129,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     logger.info('Webhook created', {
       webhook_id: webhookId,
       user_id: userId,
-      // Set by the unified authorizer when an API key made the request; absent for a Cognito token.
       key_id: event.requestContext.authorizer?.keyId,
       request_id: requestId,
     });

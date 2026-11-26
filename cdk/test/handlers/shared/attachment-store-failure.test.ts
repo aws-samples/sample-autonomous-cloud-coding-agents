@@ -17,17 +17,11 @@
  *  SOFTWARE.
  */
 
-// The Linear and the Jira download refuse an attachment with an error class of
-// their own. The webhook processors catch that class, fail the task and post
-// its text on the issue; any other error is not answered there. These tests
-// hold the last step, the store in S3, to that contract in both modules.
-
 const screenImageMock = jest.fn();
 jest.mock('../../../src/handlers/shared/attachment-screening', () => ({
   ...jest.requireActual('../../../src/handlers/shared/attachment-screening'),
   screenImage: (...args: unknown[]) => screenImageMock(...args),
 }));
-// The Linear download resolves the host of the upload before it connects.
 jest.mock('dns/promises', () => ({
   lookup: () => Promise.resolve([{ address: '203.0.113.7', family: 4 }]),
 }));
@@ -47,7 +41,6 @@ import { logger } from '../../../src/handlers/shared/logger';
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
 
-/** A fetch Response-like object whose body streams the image once. */
 function imageResponse(): Response {
   let sent = false;
   return {
@@ -110,7 +103,6 @@ test.each([
     ),
   ],
 ])('%s: an attachment that S3 refuses to store is refused with the error the processor answers, and the S3 error stays in the log', async (_tracker, AttachmentError, download) => {
-  // PutObject denied. The SDK's text names the role and the account.
   const sdkText = 'User: arn:aws:sts::123456789012:assumed-role/Stack-WebhookProcessorRole/fn is not authorized to perform: s3:PutObject';
   s3Send.mockRejectedValueOnce(Object.assign(new Error(sdkText), { name: 'AccessDenied' }));
   const logged = jest.spyOn(logger, 'error').mockImplementation(() => undefined);

@@ -91,8 +91,6 @@ describe('AdmissionQueuePickup construct', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
-          // Matches the peer orchestration reconcilers so the md/ segment
-          // rides every outbound AWS call this handler makes.
           ABCA_COMPONENT: 'orchestr',
         }),
       },
@@ -117,8 +115,6 @@ describe('AdmissionQueuePickup construct', () => {
   test('concurrency table access is read-only (admissionControl stays the single counter writer)', () => {
     const template = createStack();
     const policies = template.findResources('AWS::IAM::Policy');
-    // Collect every statement that touches the concurrency table and
-    // assert none of them include write actions.
     const statements = Object.values(policies).flatMap(
       (p: any) => p.Properties.PolicyDocument.Statement as any[],
     );

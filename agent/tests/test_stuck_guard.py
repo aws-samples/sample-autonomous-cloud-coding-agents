@@ -1,5 +1,3 @@
-"""Tests for the stuck/runaway guard."""
-
 from __future__ import annotations
 
 from stuck_guard import (
@@ -30,7 +28,6 @@ class TestFailureDetection:
         assert _looks_failed("done (exit 0)") is False
 
     def test_unrecognized_output_is_not_failure(self):
-        # Conservative: unknown response must not be punished as a failure.
         assert _looks_failed("here is the file content you asked for") is False
 
     def test_empty_is_not_failure(self):
@@ -54,7 +51,6 @@ class TestSignature:
         assert a == b
 
     def test_a_tool_without_command_or_path_keys_on_its_whole_input(self):
-        # WebFetch, Grep, Glob and MCP tools have neither key.
         a = _signature("WebFetch", {"url": "https://a.example", "prompt": "summarise"})
         b = _signature("WebFetch", {"url": "https://b.example", "prompt": "summarise"})
         assert a != b
@@ -62,9 +58,6 @@ class TestSignature:
 
 
 class TestOutcomeGivenByTheCaller:
-    """The hook that knows how a call ended says so; the text is read only
-    where it does not know."""
-
     SCRIPT = "#!/bin/bash\nif ! command -v yarn; then\n  exit 1\nfi\n"
 
     def test_a_call_given_as_completed_is_no_failure_whatever_its_output_says(self):
@@ -105,7 +98,6 @@ class TestStuckGuardLifecycle:
         action = g.evaluate()
         assert action.kind == "steer"
         assert "STOP retrying" in action.message
-        # the offending command is previewed
         assert "mise //cdk:test" in action.message.lower()
 
     def test_steers_at_most_once_per_signature(self):
@@ -113,36 +105,27 @@ class TestStuckGuardLifecycle:
         for _ in range(STEER_THRESHOLD):
             g.record_tool_result("Bash", CMD, OOM)
         assert g.evaluate().kind == "steer"
-        # same signature keeps failing identically → still only ONE steer, never
-        # escalates to a kill (advisory-only by design — no bail).
         for _ in range(10):
             g.record_tool_result("Bash", CMD, OOM)
         assert g.evaluate().kind == "none"
 
     def test_never_bails_advisory_only(self):
-        # Even on a persistent identical-failure spin, the guard NEVER returns
-        # 'bail' — it only ever steers (once). The max_turns cap is the real
-        # runaway backstop; a false positive here must cost at most one nudge.
         g = StuckGuard()
         for _ in range(20):
             g.record_tool_result("Bash", CMD, OOM)
-        # The only non-'none' action this guard can ever produce is 'steer'.
         assert g.evaluate().kind in ("none", "steer")
-        # And specifically it is not 'bail'.
         assert g.evaluate().kind != "bail"
 
     def test_success_resets_the_streak(self):
         g = StuckGuard()
         for _ in range(STEER_THRESHOLD - 1):
             g.record_tool_result("Bash", CMD, OOM)
-        g.record_tool_result("Bash", CMD, OK)  # fixed it
+        g.record_tool_result("Bash", CMD, OK)
         assert g.evaluate().kind == "none"
-        # one more failure is a fresh streak, not at threshold
         g.record_tool_result("Bash", CMD, OOM)
         assert g.evaluate().kind == "none"
 
     def test_different_failing_commands_do_not_aggregate(self):
-        # Two distinct commands each failing once → no trip (not the SAME loop).
         g = StuckGuard()
         g.record_tool_result("Bash", {"command": "a"}, OOM)
         g.record_tool_result("Bash", {"command": "b"}, OOM)
@@ -150,8 +133,6 @@ class TestStuckGuardLifecycle:
         assert g.evaluate().kind == "none"
 
     def test_same_failure_for_different_inputs_of_one_tool_is_not_one_command(self):
-        # Three pages that fail the same way are three operations, not "the
-        # same operation" run three times.
         g = StuckGuard()
         for host in ("a", "b", "c"):
             g.record_tool_result(
@@ -160,38 +141,28 @@ class TestStuckGuardLifecycle:
         assert g.evaluate().kind == "none"
 
     def test_healthy_varied_work_never_trips(self):
-        # A large task: many different succeeding calls → never stuck.
         g = StuckGuard()
         for i in range(50):
             g.record_tool_result("Bash", {"command": f"step-{i}"}, OK)
         assert g.evaluate().kind == "none"
 
     def test_iterating_agent_same_command_DIFFERENT_failures_never_steers(self):
-        # False-positive guard: the agent re-runs the SAME test command as
-        # it fixes failures one by one — each run fails on a DIFFERENT test.
-        # That's progress, not a loop. The streak resets on each new output, so
-        # it never even reaches the (advisory) steer threshold.
         g = StuckGuard()
         cmd = {"command": "mise //cdk:test"}
         for i in range(STEER_THRESHOLD + 6):
-            # A different failing test each run → different output → distinct streak.
             resp = f"FAIL test/file_{i}.test.ts:{i * 7} — expected {i} got {i + 1}\nexit code 1"
             g.record_tool_result("Bash", cmd, resp)
         action = g.evaluate()
         assert action.kind == "none", f"iterating agent should get no action, got {action.kind}"
 
     def test_same_command_IDENTICAL_failure_steers(self):
-        # The genuine spin: same command, byte-identical failure output every
-        # time → reaches the steer threshold and emits the one advisory nudge.
         g = StuckGuard()
         cmd = {"command": "mise //cdk:test"}
         for _ in range(STEER_THRESHOLD):
-            g.record_tool_result("Bash", cmd, OOM)  # identical output each run
+            g.record_tool_result("Bash", cmd, OOM)
         assert g.evaluate().kind == "steer"
 
     def test_interleaved_success_on_OTHER_sig_does_not_clear_the_loop(self):
-        # The real loop (cmd A) keeps failing; occasional unrelated success (cmd B)
-        # must NOT mask it.
         g = StuckGuard()
         g.record_tool_result("Bash", {"command": "loop"}, OOM)
         g.record_tool_result("Bash", {"command": "other"}, OK)
@@ -203,9 +174,6 @@ class TestStuckGuardLifecycle:
         assert "loop" in action.message.lower()
 
 
-# DIFFERENT command each turn (distinct signatures, so no per-signature streak
-# grows) but the SAME recurring error — exactly the 662 push-auth thrash: the
-# agent retried the push every which way, each getting 'invalid credentials'.
 _ERR = "remote: invalid credentials\nfatal: exit 128"
 _PUSH_FAILS = [
     ({"command": "git push origin HEAD"}, _ERR),
@@ -218,11 +186,6 @@ _PUSH_FAILS = [
 
 
 class TestWindowSpin:
-    """The loop-of-VARIATIONS the per-signature streak can't see — the
-    agent tries a different command each turn toward the same failing goal (a git
-    push that keeps failing on 'invalid credentials'). No single signature reaches
-    STEER_THRESHOLD, but the trailing window is failure-dominated."""
-
     def test_window_steers_on_loop_of_distinct_failing_commands(self):
         g = StuckGuard()
         for cmd, out in _PUSH_FAILS:
@@ -237,7 +200,6 @@ class TestWindowSpin:
         for cmd, out in _PUSH_FAILS:
             g.record_tool_result("Bash", cmd, out)
         assert g.evaluate().kind == "steer"
-        # A subsequent failing turn must not re-steer the window.
         g.record_tool_result("Bash", {"command": "git push again"}, _ERR)
         assert g.evaluate().kind == "none"
 
@@ -247,15 +209,12 @@ class TestWindowSpin:
             g.record_tool_result("Bash", cmd, out)
         summary = g.recent_failure_summary()
         assert summary is not None
-        # Neutral observation only — names WHAT repeated, makes no causal claim.
         assert "last tool calls repeated" in summary
-        assert "spinning" not in summary  # must not editorialize
-        assert "git push --force-with-lease" in summary  # most recent failing command
-        assert "invalid credentials" in summary  # the recurring error detail
+        assert "spinning" not in summary
+        assert "git push --force-with-lease" in summary
+        assert "invalid credentials" in summary
 
     def test_no_summary_when_window_is_mostly_successful(self):
-        # A productive agent (varied commands, mostly succeeding) must yield no
-        # summary — so its max_turns reason stays unchanged.
         g = StuckGuard()
         for i in range(6):
             g.record_tool_result("Bash", {"command": f"step {i}"}, OK)
@@ -263,22 +222,17 @@ class TestWindowSpin:
         assert g.evaluate().kind == "none"
 
     def test_healthy_iteration_below_window_threshold_no_steer(self):
-        # 4/6 failing is below WINDOW_FAIL_THRESHOLD(5) — a normal fix-iterate loop
-        # (some fail, some pass) must NOT trip the window steer.
         g = StuckGuard()
-        outcomes = [OOM, OK, OOM, OK, OOM, OOM]  # 4 fails / 6
+        outcomes = [OOM, OK, OOM, OK, OOM, OOM]
         for i, out in enumerate(outcomes):
             g.record_tool_result("Bash", {"command": f"cmd {i}"}, out)
         assert g.evaluate().kind == "none"
         assert g.recent_failure_summary() is None
 
     def test_window_steers_at_exactly_the_threshold(self):
-        # Boundary: exactly WINDOW_FAIL_THRESHOLD (5) same-fingerprint failures
-        # in a FULL window of WINDOW (6) — the `>=` edge where an off-by-one would
-        # hide. One OK dilutes the window to 5/6 fails, still == the threshold.
-        assert WINDOW == 6 and WINDOW_FAIL_THRESHOLD == 5  # pin the constants
+        assert WINDOW == 6 and WINDOW_FAIL_THRESHOLD == 5
         g = StuckGuard()
-        outcomes = [OK, _ERR, _ERR, _ERR, _ERR, _ERR]  # 5 same-fp fails / full 6
+        outcomes = [OK, _ERR, _ERR, _ERR, _ERR, _ERR]
         for i, out in enumerate(outcomes):
             g.record_tool_result("Bash", {"command": f"push {i}"}, out)
         action = g.evaluate()
@@ -287,11 +241,8 @@ class TestWindowSpin:
         assert g.recent_failure_summary() is not None
 
     def test_no_steer_when_window_not_yet_full(self):
-        # Boundary: WINDOW_FAIL_THRESHOLD failures but the window has fewer than
-        # WINDOW entries — _dominant_window_failure requires a FULL window, so 5
-        # identical failures in a length-5 history must NOT steer yet.
         g = StuckGuard()
-        for i in range(WINDOW_FAIL_THRESHOLD):  # 5 fails, window not yet at 6
+        for i in range(WINDOW_FAIL_THRESHOLD):
             g.record_tool_result("Bash", {"command": f"push {i}"}, _ERR)
         assert g.evaluate().kind == "none"
         assert g.recent_failure_summary() is None

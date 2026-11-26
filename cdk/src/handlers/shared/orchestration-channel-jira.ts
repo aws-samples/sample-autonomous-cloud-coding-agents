@@ -17,21 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Jira implementation of the surface-agnostic {@link Channel}. It maps the
- * channel-neutral feedback operations onto the existing Jira comment-back helpers
- * (`postIssueComment` / `reportIssueFailure`, which render the body as an Atlassian
- * Document Format doc under the hood).
- *
- * Jira's feedback surface is comment-only, so the adapter implements the required
- * post/update/failure methods plus workflow transitions. It omits reaction
- * capabilities because Jira has no equivalent primitive. The orchestration engine
- * checks optional methods and no-ops gracefully when a surface omits them.
- *
- * ``credentialsRef`` on an {@link IssueRef} is the Atlassian tenant id (``cloudId``)
- * that keys the Jira token registry.
- */
-
 import {
   postIssueComment,
   reportIssueFailure,
@@ -87,13 +72,5 @@ export function makeJiraChannel(registryTableName: string): Channel {
         options,
       );
     },
-
-    // Remaining optional capabilities are intentionally omitted: no reaction API
-    // (reactToComment, replaceCommentReaction, replaceIssueReaction), no guarded
-    // revertState, and no threaded-reply helper
-    // (postThreadedReply, upsertThreadedReply). The engine
-    // checks for each method and skips it, so the same orchestration core drives
-    // Jira without Jira-specific branching. Implementing one here is additive:
-    // no engine change is needed to pick it up.
   };
 }

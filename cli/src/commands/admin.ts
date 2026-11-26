@@ -35,8 +35,8 @@ import { DEFAULT_STACK_NAME } from '../operator-context';
 import { CliConfig } from '../types';
 
 /**
- * Generate a strong password meeting Cognito's default policy:
- * min 12 chars, with at least one upper, lower, digit, and symbol.
+ * Generate a strong password: min 12 chars, with at least one upper,
+ * lower, digit, and symbol.
  */
 export function generateTempPassword(): string {
   const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -64,7 +64,6 @@ export function generateTempPassword(): string {
 export function encodeBundle(config: CliConfig): string {
   const json = JSON.stringify({
     api_url: config.api_url,
-    // Optional (#246): only present once the registry is deployed.
     ...(config.registry_api_url ? { registry_api_url: config.registry_api_url } : {}),
     region: config.region,
     user_pool_id: config.user_pool_id,
@@ -73,7 +72,6 @@ export function encodeBundle(config: CliConfig): string {
   return Buffer.from(json, 'utf-8').toString('base64');
 }
 
-/** Decode a base64 configure bundle. */
 export function decodeBundle(bundle: string): CliConfig {
   let json: string;
   try {
@@ -127,7 +125,6 @@ const ADMIN_USERNAME_COLUMN_WIDTH = 36;
 const ADMIN_STATUS_COLUMN_WIDTH = 22;
 const ADMIN_ENABLED_COLUMN_WIDTH = 8;
 
-/** Cognito user-pool administration for stack admins (operator IAM credentials). */
 export function makeAdminCommand(): Command {
   const admin = new Command('admin')
     .description('Cognito user-pool administration (operator AWS credentials)');
@@ -269,12 +266,7 @@ function writeCredentialsFile(
   const inviteDir = path.join(getConfigDir(), 'invites');
   fs.mkdirSync(inviteDir, { recursive: true, mode: 0o700 });
   const invitePath = credentialsFilePath(email);
-  // Invites issue a temporary password the teammate rotates on first login;
-  // password-reset issues a permanent one. Label it so the recipient knows.
   const passwordLabel = kind === 'invite' ? 'temp password:' : 'password:';
-  // Pad every label to the widest one (`temp password:` = 14) so the value
-  // column lines up regardless of which labels are present — the aligned block
-  // the USER_GUIDE advertises.
   const LABEL_WIDTH = 'temp password:'.length;
   const lines = [
     `${'email:'.padEnd(LABEL_WIDTH)} ${email}`,

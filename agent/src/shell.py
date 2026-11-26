@@ -14,11 +14,7 @@ import time
 def log(prefix: str, text: str):
     """Print a timestamped, redacted log line.
 
-    Emits via ``os.write(1, ...)`` rather than ``print`` for parity with
-    ``server._emit_stdout_line``: content is always routed through
-    ``redact_secrets`` first, and the fd-level sink keeps CodeQL's
-    cleartext-logging query (which models print/TextIOWrapper.write)
-    from flagging the already-sanitized line. Tests observing this
+    Emits via ``os.write(1, ...)`` rather than ``print``. Tests observing this
     output must use ``capfd``, not ``capsys``.
     """
     ts = time.strftime("%H:%M:%S")
@@ -34,24 +30,13 @@ def log(prefix: str, text: str):
 def log_error_cw(message: str, *, task_id: str | None = None) -> None:
     """Emit an ERROR line to stdout AND the APPLICATION_LOGS CloudWatch group.
 
-    Observability gap: ``log("ERROR", ...)`` writes to container stdout,
-    which AgentCore routes to
-    ``/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`` rather than
-    the APPLICATION_LOGS group that ``TaskDashboard`` LogQueryWidgets
-    and ``bgagent status`` read. Agent-fatal errors were therefore
-    invisible in the two places operators normally look — discovered
-    in testing when a ``missing built-in hard-deny policies`` crash
-    surfaced only as a cryptic "unknown" on the CLI.
+    ``log("ERROR", ...)`` writes to container stdout, which AgentCore routes to
+    ``/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`` rather than the
+    APPLICATION_LOGS group.
 
-    This helper mirrors the ERROR line to APPLICATION_LOGS via a
-    fire-and-forget daemon thread (so it cannot block the failing
-    code path) using the same writer pattern as ``server.py::_warn_cw``.
-    Delivery failures are swallowed silently — the stdout ``log`` call
-    above still runs, and a caller that wants strict delivery should
-    use ``server._warn_cw`` directly from the server-only code paths.
+    The CloudWatch write runs in a fire-and-forget daemon thread. Delivery
+    failures are swallowed silently.
     """
-    # Always log to stdout for local / docker-compose parity with the
-    # normal ``log()`` path.
     log("ERROR", message)
 
     log_group = os.environ.get("LOG_GROUP_NAME")
@@ -69,14 +54,6 @@ def log_error_cw(message: str, *, task_id: str | None = None) -> None:
 
 
 def _log_error_cw_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
-    """Blocking CloudWatch put for ``log_error_cw`` — daemon-thread only.
-
-    Mirrors ``server.py::_warn_cw_write_blocking`` but targets a
-    separate ``agent_error/<task_id>`` stream so operators can alarm
-    on agent-runtime fatal errors distinctly from server-layer
-    warnings. Failures are swallowed (any surfaceable alarm should
-    fire on the absence of the expected stream, not on this helper).
-    """
     try:
         from aws_session import platform_client
 
@@ -91,22 +68,12 @@ def _log_error_cw_blocking(log_group: str, task_id: str | None, stamped: str) ->
             logEvents=[{"timestamp": int(time.time() * 1000), "message": stamped}],
         )
     except Exception:  # noqa: S110 - best-effort telemetry; stdout path already logged
-        # Intentionally silent. The caller (``log_error_cw``) has
-        # already written the same message to stdout via the regular
-        # ``log("ERROR", ...)`` path, so a CloudWatch delivery failure
-        # (IAM, network, quota) does not lose the signal — it only
-        # degrades it to the runtime-DEFAULT log group. Raising here
-        # would unwind the daemon thread mid-shutdown and emit a
-        # confusing secondary traceback during a primary failure.
         pass
 
 
 def truncate(text: str, max_len: int = 200) -> str:
-    """Truncate text for log display."""
     if not text:
         return ""
-    # Redact before cutting: a credential cut in two no longer equals its value,
-    # so log() would let the part before the cut through.
     text = redact_secrets(text).replace("\n", " ").strip()
     if len(text) > max_len:
         return text[:max_len] + "..."
@@ -124,10 +91,6 @@ def slugify(text: str, max_len: int = 40) -> str:
     return text or "task"
 
 
-# The credentials the agent puts into its own environment. Every repository
-# command inherits them (see ``_clean_env``), so a build that prints its
-# environment, or the agent running ``printenv``, writes them into the log. The
-# patterns below know GitHub token shapes only; these are redacted by value.
 _SECRET_ENV_VARS = (
     "GITHUB_TOKEN",
     "GH_TOKEN",
@@ -136,18 +99,14 @@ _SECRET_ENV_VARS = (
     "JIRA_APP_ACTOR_SHARED_SECRET",
 )
 
-# Only redact values at least this long: replacing a very short string would
-# mangle unrelated text that happens to contain it.
 _MIN_REDACTABLE_SECRET_LEN = 12
 
 
 def redact_secrets(text: str) -> str:
-    """Redact tokens and secrets from log output."""
     for name in _SECRET_ENV_VARS:
         secret = os.environ.get(name, "")
         if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
             text = text.replace(secret, "***")
-    # GitHub and generic token-like values.
     text = re.sub(r"(ghp_|github_pat_|gho_|ghs_|ghr_)[A-Za-z0-9_]+", r"\1***", text)
     text = re.sub(r"(x-access-token:)[^\s@]+", r"\1***", text)
     text = re.sub(
@@ -159,16 +118,8 @@ def redact_secrets(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    # A GitHub App installation token is ghs_<app id>_<JWT> since 2026, about 520
-    # characters: "." joins the three parts of the JWT and "-" occurs inside
-    # them. So a token runs on through both: in the catch-all rule, and behind
-    # the marker that the first rule left of it (last line). The first rule
-    # keeps its narrow class on purpose: with "." and "-" in it, a keyword
-    # directly behind a token would become part of the token, and the keyword's
-    # own rule, which runs later, would then replace less than it did. In both
-    # lines a token runs on through "*" as well: a JWT that holds one of the
-    # prefixes by chance has a marker of the first rule inside it, with the
-    # rest of the token behind that marker.
+    # A GitHub App installation token is ghs_<app id>_<JWT>: "." joins the three
+    # parts of the JWT and "-" occurs inside them.
     text = re.sub(r"(gh[opusr]_[A-Za-z0-9_][A-Za-z0-9_.*-]*)", "***", text)
     return re.sub(r"((?:gh[opusr]|github_pat)_\*{3})[.-][A-Za-z0-9_.*-]*", r"\1", text)
 
@@ -177,15 +128,11 @@ def _clean_env() -> dict[str, str]:
     """Return a copy of os.environ with OTEL auto-instrumentation vars removed.
 
     The ``opentelemetry-instrument`` wrapper injects PYTHONPATH and OTEL_*
-    env vars that would cause child Python processes (e.g. mise run build →
-    semgrep in the target repo) to attempt OTEL auto-instrumentation and fail
-    because the target repo's Python environment doesn't have the OTEL
-    packages installed.  Stripping these vars isolates target-repo commands
-    from the agent's own instrumentation.
+    env vars that would cause child Python processes to attempt OTEL
+    auto-instrumentation and fail because the target repo's Python environment
+    doesn't have the OTEL packages installed.
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("OTEL_")}
-    # Strip only OTEL-injected PYTHONPATH components (the sitecustomize.py
-    # directory), preserving any entries the target repo's toolchain may need.
     pythonpath = env.get("PYTHONPATH", "")
     if pythonpath:
         cleaned = os.pathsep.join(
@@ -198,10 +145,6 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-# Substrings that mark a line as a real failure in build/test tool output — used
-# to pull the FAILING line out of the MIDDLE of a large interleaved parallel-DAG
-# log (a plain tail misses it). Lower-cased comparison; conservative so we don't
-# flood on benign "warning"/"0 errors" lines.
 _FAILURE_LINE_MARKERS = (
     "fail ",  # jest "FAIL test/foo.test.ts", pytest "FAILED"
     "failed",
@@ -224,30 +167,18 @@ _FAILURE_LINE_MARKERS = (
     "task failed",  # mise "[//pkg:task] ERROR task failed"
 )
 
-# Benign lines that CONTAIN a marker substring but are not failures — filtered so
-# the surfaced set stays signal. e.g. "0 errors", "--no-error-on-unmatched". The
-# counts are whole numbers: "10 failed" and "20 errors" are not "0 failed".
 _FAILURE_LINE_NOISE = re.compile(
     r"(?<![0-9])0 (?:errors|failed|problems)"
     r"|no error"
     r"|--no-error"
-    r"|may fail"  # advisory prose
+    r"|may fail"
 )
 
-# Cap surfaced failure lines so a genuinely huge red run (hundreds of failing
-# assertions) can't flood CloudWatch; the count + a tail still convey scale.
 _MAX_SURFACED_FAILURE_LINES = 40
 _FAILURE_TAIL_LINES = 15
 
 
 def _surface_failure_lines(stdout: str) -> list[str]:
-    """From a failed command's stdout, return the lines most likely to name the
-    cause: every failure-signature line (scanning the WHOLE output, not just the
-    tail — a parallel task DAG interleaves output so the red line is often in the
-    middle) followed by a trailing-context tail. Deduped, order-preserving,
-    capped. This is the fix for build-gate failures that a plain tail couldn't
-    explain (the tail was often a passing package's coverage table, not the
-    error)."""
     lines = stdout.strip().splitlines()
     matched: list[str] = []
     for ln in lines:
@@ -258,8 +189,6 @@ def _surface_failure_lines(stdout: str) -> list[str]:
                 break
             matched.append(ln.rstrip())
     tail = [ln.rstrip() for ln in lines[-_FAILURE_TAIL_LINES:]]
-    # Order: failure-signature lines first (the WHY), then the tail (context),
-    # dropping tail lines already surfaced as matches.
     seen = set(matched)
     out = list(matched)
     if matched and tail:
@@ -268,34 +197,16 @@ def _surface_failure_lines(stdout: str) -> list[str]:
         if ln not in seen:
             out.append(ln)
             seen.add(ln)
-    # Fallback: nothing matched a failure marker (unknown tool) → just the tail,
-    # so we never log NOTHING on a failure.
     return out or tail
 
 
 # A process killed by a signal surfaces on ``Popen.returncode`` as the NEGATIVE
 # signal number (SIGKILL -> -9), whereas a shell reports the same death as
-# ``128 + signal`` (-> 137). Downstream classification keys on the shell
-# convention, so normalize here — the one place the distinction is still visible
-# — rather than teaching every consumer both encodings.
-#
-# This matters for diagnosis, not tidiness: the container/cgroup OOM-killer writes
-# its "Killed process" line to the KERNEL log, not the build's stderr, so an OOM'd
-# build often has NO stderr signature and the exit status is the only evidence.
-# Left raw, a directly-exec'd ``mise run build`` OOM-killed at -9 misses the 137
-# check and is reported as a GENUINE build failure — telling the user their code is
-# broken when the box merely ran out of memory.
+# ``128 + signal`` (-> 137).
 _SIGNAL_EXIT_BASE = 128
 
 
 def _exit_status(returncode: int | None) -> int:
-    """Normalize a ``Popen`` return code to the shell's ``128 + signal`` form.
-
-    ``None`` means the process was not yet reaped, which cannot happen after
-    ``wait()``. Map it to a non-zero failure rather than ``0``: treating an unknown
-    outcome as success is the one unsafe answer, since it would let a build that
-    was never verified report as passing.
-    """
     if returncode is None:
         return -1
     if returncode < 0:
@@ -303,78 +214,38 @@ def _exit_status(returncode: int | None) -> int:
     return returncode
 
 
-# How many lines of each pipe the streaming path keeps for its caller: the END of
-# the output, where the failure summary and the callers' stderr checks look. Every
-# line is in the log whatever this is. Without a bound the copy grows with the
-# output, and a build that floods it (a test retrying in a loop) can run the
-# session out of memory before the build timeout ends it.
 _MAX_CAPTURED_LINES = 200_000
 
-# How long a streamed command that ran into its timeout gets to end after
-# SIGTERM, before it is killed.
 _TIMEOUT_GRACE_S = 10
 
 
 def _run_cmd_streaming(
     cmd: list[str], cwd: str | None, timeout: int
 ) -> subprocess.CompletedProcess:
-    """Run *cmd* streaming BOTH pipes live to the log while capturing them.
-
-    The buffered ``subprocess.run(capture_output=True)`` path holds the ENTIRE
-    output in memory and never writes it to container stdout — so awslogs (→
-    CloudWatch) never sees the raw stream, and the only record is whatever the
-    caller's post-hoc summary chooses to emit. For a heavy, long, opaque command
-    (``mise run build``: 4 parallel packages, 3000+ tests, ~30 min) that meant a
-    build failure was diagnosable ONLY if the summary happened to capture the
-    right lines — a failing sub-task's error would be buffered away and never
-    shipped, making such failures very hard to investigate.
-
-    Streaming fixes that at the source: every line is written to the log (→
-    CloudWatch verbatim, redacted) AS IT HAPPENS, so the full build log always
-    exists — no curated slice, no guessing which lines matter, plus live progress
-    instead of a silent multi-minute gap. Two drain threads (one per pipe) avoid
-    the classic single-thread PIPE deadlock and keep stdout/stderr SEPARATE so the
-    returned ``CompletedProcess`` matches ``subprocess.run``'s contract exactly
-    (callers still read ``.stdout`` / ``.stderr`` / ``.returncode`` unchanged).
-    Of an output longer than ``_MAX_CAPTURED_LINES`` lines, ``.stdout`` and
-    ``.stderr`` hold the end.
-    """
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
-        # Pipes of bytes: the drain threads read them as text. Popen's own text
-        # mode would need its ``errors`` argument, which the SAST rule pack
-        # reports (python36-compatibility-Popen1).
+        # Popen's own text mode would need its ``errors`` argument, which the
+        # SAST rule pack reports (python36-compatibility-Popen1).
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=_clean_env(),
-        # A process group of its own, so that the timeout below can signal the
-        # command together with what it started. Not a session of its own: mise
-        # stops managing the processes of its tasks when it is a session leader,
-        # and then leaves the other tasks of a parallel build running when one
-        # of them fails.
+        # Not a session of its own: mise stops managing the processes of its
+        # tasks when it is a session leader.
         process_group=0,
     )
     out_lines: collections.deque[str] = collections.deque(maxlen=_MAX_CAPTURED_LINES)
     err_lines: collections.deque[str] = collections.deque(maxlen=_MAX_CAPTURED_LINES)
 
     def _drain(pipe, buf: collections.deque[str]) -> None:
-        # The text layer that Popen's own text mode puts on a pipe, with the
-        # defaults that mode uses: the same encoding, and every line ending read
-        # as "\n". A byte that is not valid in that encoding becomes U+FFFD.
-        # Strict decoding raises in this thread, which then closes its pipe: the
-        # rest of the output is lost and the command dies of SIGPIPE on its next
-        # write. Each line is handed over as it arrives.
         lines = io.TextIOWrapper(pipe, errors="replace")
-        # log() redacts each line; the buffer keeps the raw text for the caller
-        # (the failure classifier redacts again before it re-emits anything).
         try:
             for line in lines:
                 line = line.rstrip("\n")
                 buf.append(line)
                 log("CMD", f"  {line}")
         finally:
-            lines.close()  # closes the pipe as well
+            lines.close()
 
     t_out = threading.Thread(target=_drain, args=(proc.stdout, out_lines), daemon=True)
     t_err = threading.Thread(target=_drain, args=(proc.stderr, err_lines), daemon=True)
@@ -383,20 +254,12 @@ def _run_cmd_streaming(
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        # Stop the whole group, not only the command: the processes a build
-        # started (compilers, test runners) would otherwise go on running in the
-        # checkout and hold the pipes open. SIGTERM first: a tool that keeps its
-        # children in process groups of their own (mise) stops them when it is
-        # asked to stop, and SIGKILL cannot be passed on. SIGKILL is for a command
-        # that is still there after the grace period.
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if proc.poll() is None:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, sig)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_TIMEOUT_GRACE_S)
-        # Let the drain threads finish flushing the pipes the kill closes, so
-        # nothing is lost, then re-raise for the caller's timeout handling.
         t_out.join(timeout=10)
         t_err.join(timeout=10)
         raise
@@ -417,12 +280,7 @@ def run_cmd(
 ) -> subprocess.CompletedProcess:
     """Run a command with logging.
 
-    ``stream=True`` tees the command's output to the log line-by-line as it runs
-    (so the FULL output reaches CloudWatch verbatim + gives live progress) —
-    used for the long/opaque build & lint verify commands where a buffered,
-    post-hoc summary hid the real failure. Default (buffered) is unchanged for
-    the many short commands (git/gh/mise-install) where a curated summary is
-    plenty and streaming would just add noise.
+    ``stream=True`` tees the command's output to the log line-by-line as it runs.
     """
     log("CMD", redact_secrets(f"{label}: {' '.join(cmd)}"))
     if stream:
@@ -433,14 +291,12 @@ def run_cmd(
             cwd=cwd,
             capture_output=True,
             text=True,
-            errors="replace",  # as on the streaming path: U+FFFD, not UnicodeDecodeError
+            errors="replace",
             timeout=timeout,
             env=_clean_env(),
         )
     if result.returncode != 0:
         log("CMD", f"{label}: FAILED (exit {result.returncode})")
-        # When streaming, the FULL output already reached the log live — don't
-        # re-dump it. Just point at the surfaced failure lines for a quick jump.
         if stream:
             surfaced = _surface_failure_lines(result.stdout or "")
             if surfaced:
@@ -451,14 +307,6 @@ def run_cmd(
             if result.stderr:
                 for line in result.stderr.strip().splitlines()[:20]:
                     log("CMD", f"  {line}")
-            # ALSO surface stdout on failure. Build/test tooling (jest, tsc, the
-            # mise task DAG) writes the ACTUAL failing-task error to STDOUT, not
-            # stderr. A plain tail is NOT enough for a PARALLEL task DAG (the
-            # failing line scrolls into the MIDDLE while the tail is a passing
-            # package's coverage table), so scan the whole output for
-            # failure-signature lines FIRST, then a tail for context. Redact —
-            # repo build output is untrusted. (Buffered path only; the streaming
-            # path above already emitted everything verbatim.)
             if result.stdout:
                 surfaced = _surface_failure_lines(result.stdout)
                 for line in surfaced:
@@ -471,10 +319,6 @@ def run_cmd(
     return result
 
 
-# Signatures a transient (retryable) dependency/registry failure leaves in a
-# command's stderr — network blips, DNS hiccups, registry 5xx / rate limits.
-# NOT a permanent auth/not-found error: those are re-run-won't-help and would
-# just waste backoff time. Deliberately conservative.
 _TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
     "could not resolve host",
     "temporary failure in name resolution",
@@ -498,22 +342,13 @@ _TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
 def is_transient_cmd_failure(stderr: str) -> bool:
     """True if *stderr* looks like a transient (retryable) dependency failure.
 
-    Used by :func:`run_cmd_with_backoff` to decide whether another attempt is
-    worthwhile. Permanent failures (auth denied, repo not found, 4xx other than
-    429) return False so we fail fast instead of burning the backoff budget.
+    Permanent failures (auth denied, repo not found, 4xx other than 429) return
+    False.
     """
     low = (stderr or "").lower()
     return any(sig in low for sig in _TRANSIENT_CMD_SIGNATURES)
 
 
-# DNS name-resolution failures that NAME a host — a firewalled / non-existent
-# endpoint whose name cannot be resolved. Retrying never helps, so backoff bails
-# immediately. Deliberately NARROWER than hooks.detect_egress_denial:
-# a TCP-connect failure ("Failed to connect to <host> ... Connection timed out")
-# to an ALLOWLISTED host is genuinely transient and must stay retryable — so
-# ``Failed to connect``/``Connection refused`` are excluded here. A persistent
-# TCP failure is still reclassified to egress_denied by _fail_setup_command
-# AFTER the retries exhaust; only the pre-exhaustion bail is DNS-scoped.
 _UNRESOLVABLE_HOST_RE = re.compile(
     r"could not resolve host:?\s+[A-Za-z0-9._-]+"
     r"|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\s+[A-Za-z0-9._-]+"
@@ -523,13 +358,6 @@ _UNRESOLVABLE_HOST_RE = re.compile(
 
 
 def _names_unresolvable_host(stderr: str) -> bool:
-    """True when *stderr* is a DNS name-resolution failure naming a host.
-
-    Such a host cannot be reached no matter how often we retry (non-existent or
-    firewalled at DNS), so backoff bails immediately rather than burn its budget
-    and emit misleading ``dependency_unreachable`` events. A host-less
-    ``Temporary failure in name resolution`` (no nameable endpoint) and a
-    transient TCP-connect timeout to an allowlisted host both stay retryable."""
     return bool(_UNRESOLVABLE_HOST_RE.search(stderr or ""))
 
 
@@ -550,20 +378,14 @@ def run_cmd_with_backoff(
     (``base_delay_s * 2**(attempt-1)``) ONLY when the failure looks transient
     (:func:`is_transient_cmd_failure`). Permanent failures return immediately.
     Always runs with ``check=False`` internally so the caller inspects
-    ``returncode`` — self-remediation must never raise mid-retry.
+    ``returncode``.
 
-    ``on_retry(attempt, max_attempts, stderr)`` is an optional auditable-event
-    callback fired before each backoff sleep (kept as a callback so ``shell``
-    stays free of ``hooks``/``progress`` imports — the caller wires in the
-    blocker event). ``sleep`` is injectable so tests don't actually wait.
+    ``on_retry(attempt, max_attempts, stderr)`` is an optional callback fired
+    before each backoff sleep. ``sleep`` is injectable so tests don't actually
+    wait.
 
-    Self-remediation is scope-preserving BY CONSTRUCTION: it only re-invokes the
-    exact same ``cmd`` with the same environment. It grants no new credentials
-    and mutates no IAM policy or egress allowlist — a retried ``git clone`` uses
-    the same token and DNS rules as the first attempt.
+    Only re-invokes the exact same ``cmd`` with the same environment.
     """
-    # ``max(1, ...)`` guarantees the loop body runs at least once, so ``result``
-    # is always bound by the time we return it — no None-typed fall-through.
     result = run_cmd(cmd, label, cwd=cwd, timeout=timeout, check=False)
     for attempt in range(1, max(1, max_attempts) + 1):
         if attempt > 1:
@@ -571,10 +393,6 @@ def run_cmd_with_backoff(
         if result.returncode == 0:
             return result
         stderr = result.stderr or ""
-        # A named-host failure is a firewalled/non-existent endpoint — retrying
-        # never helps and would emit misleading dependency_unreachable events.
-        # Bail immediately so _fail_setup_command reclassifies it to the
-        # non-retryable egress_denied remedy.
         exhausted = attempt >= max_attempts
         if exhausted or not is_transient_cmd_failure(stderr) or _names_unresolvable_host(stderr):
             break

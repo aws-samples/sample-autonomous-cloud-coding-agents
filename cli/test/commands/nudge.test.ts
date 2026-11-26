@@ -89,7 +89,6 @@ describe('nudge command', () => {
     await cmd.parseAsync(['node', 'test', 'TASK-123', 'hello', '--output', 'json']);
 
     const output = consoleSpy.mock.calls[0][0] as string;
-    // Should be valid JSON matching the payload.
     expect(JSON.parse(output)).toEqual(nudgeData);
   });
 

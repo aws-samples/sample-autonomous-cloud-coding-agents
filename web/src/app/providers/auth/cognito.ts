@@ -22,11 +22,6 @@ import type { AuthAdapter, AuthSession, AuthUser } from './AuthProvider';
 /**
  * Sign-in with Cognito managed login: OAuth 2.0 authorization code + PKCE (S256)
  * against the stack's public app client, no client secret.
- *
- * Tokens live in sessionStorage, so they are scoped to the tab and gone when it
- * closes. The ID token is decoded only to show who is signed in and to check it
- * was issued for this client; the API's Cognito authorizer verifies it on every
- * request, so nothing here is an authorization decision.
  */
 export interface CognitoAuthOptions {
   readonly region: string;
@@ -44,7 +39,7 @@ export interface CognitoAuthEnvironment {
   readonly location: Pick<Location, 'origin' | 'pathname' | 'search' | 'hash'>;
   /** Leaves the app for the hosted sign-in or sign-out page. */
   redirect(url: string): void;
-  /** Rewrites the current URL without navigating (drops `?code=` after the callback). */
+  /** Rewrites the current URL without navigating. */
   replaceUrl(path: string): void;
   now(): number;
 }
@@ -52,13 +47,11 @@ export interface CognitoAuthEnvironment {
 export const CALLBACK_PATH = '/auth/callback';
 const TOKENS_KEY = 'abca-console-tokens';
 const PENDING_KEY = 'abca-console-pending-sign-in';
-/** Refresh this long before expiry, so a token never lapses mid-request. */
 const EXPIRY_MARGIN_MS = 60_000;
 
 interface StoredTokens {
   readonly idToken: string;
   readonly refreshToken?: string;
-  /** Epoch ms when the ID token expires. */
   readonly expiresAt: number;
 }
 
@@ -81,7 +74,6 @@ interface IdTokenClaims {
 }
 
 class CognitoAuthError extends Error {
-  /** Cognito refused the request itself (4xx): retrying with the same tokens cannot help. */
   readonly permanent: boolean;
 
   constructor(message: string, { permanent = false } = {}) {
@@ -116,7 +108,6 @@ export function decodeJwtPayload(token: string): Record<string, unknown> {
   return payload as Record<string, unknown>;
 }
 
-/** Only same-origin paths are valid post-sign-in destinations (no open redirect). */
 function safeReturnPath(value: string): string {
   return value.startsWith('/') && !value.startsWith('//') && !value.startsWith(CALLBACK_PATH) ? value : '/';
 }
@@ -139,9 +130,7 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
   let refreshing: Promise<StoredTokens> | null = null;
   /**
    * The sign-in callback can only be completed once: its state and code are single-use.
-   * React StrictMode (development) calls `restore` twice on mount, so both calls must
-   * share the one attempt instead of the second failing with "does not match".
-   * Shared only while in flight; afterwards the stored tokens are the source of truth.
+   * React StrictMode (development) calls `restore` twice on mount.
    */
   let callback: Promise<AuthSession> | null = null;
 
@@ -179,18 +168,15 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
     return tokens;
   }
 
-  /** Listeners of the live session, told when it ends because the tokens cannot be refreshed. */
   const expiredListeners = new Set<() => void>();
 
   async function refresh(current: StoredTokens): Promise<StoredTokens> {
     try {
       if (!current.refreshToken) throw new CognitoAuthError('your session has expired; sign in again', { permanent: true });
-      // Cognito does not rotate the refresh token by default; keep the one we have.
+      // Cognito does not rotate the refresh token by default.
       const body = await tokenRequest({ grant_type: 'refresh_token', refresh_token: current.refreshToken });
       return store(body.id_token, body.refresh_token ?? current.refreshToken);
     } catch (error) {
-      // A refused refresh (expired or revoked refresh token) ends the session for good;
-      // network errors and 5xx keep it, so a brief outage does not sign anyone out.
       if (error instanceof CognitoAuthError && error.permanent) {
         env.storage.removeItem(TOKENS_KEY);
         for (const listener of [...expiredListeners]) listener();
@@ -227,7 +213,6 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
         const stored = readJson<StoredTokens>(env.storage, TOKENS_KEY);
         env.storage.removeItem(TOKENS_KEY);
         if (stored?.refreshToken) {
-          // Best effort: the hosted logout below also ends the managed-login session.
           await env.fetch(`${domain}/oauth2/revoke`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -304,7 +289,6 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
         code_challenge_method: 'S256',
       });
       env.redirect(`${domain}/oauth2/authorize?${query}`);
-      // The page is navigating away; never settle so the UI stays in its loading state.
       return new Promise<never>(() => undefined);
     },
   };

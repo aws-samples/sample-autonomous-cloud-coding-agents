@@ -26,9 +26,6 @@ import { handler as showHandler } from '../../src/handlers/registry-show';
 import type { RegistryClient } from '../../src/handlers/shared/registry/client';
 import { RegistryResolutionError } from '../../src/handlers/shared/registry/types';
 
-// Mock the factory so handlers get our fake client (no AWS). `publish` is a
-// standalone fn (not just a method on the object) so tests can assert on it
-// without tripping @typescript-eslint/unbound-method.
 const mockPublish = jest.fn();
 const mockClient: jest.Mocked<RegistryClient> = {
   publish: mockPublish,
@@ -74,7 +71,6 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   };
 }
 
-/** Build an authorizer.claims block with a cognito:groups membership. */
 function withGroups(groups: string[]): APIGatewayProxyEvent['requestContext']['authorizer'] {
   return { claims: { 'sub': 'user-1', 'cognito:groups': groups.join(',') } };
 }
@@ -110,8 +106,6 @@ describe('registry-publish handler', () => {
   });
 
   test('400 VALIDATION_ERROR on malformed JSON body', async () => {
-    // parseBody returns null on a JSON.parse failure and the handler maps that
-    // to a 400 — the fail-closed path the semgrep suppression on parseBody claims.
     const res = await publishHandler(makeEvent({
       requestContext: { ...makeEvent().requestContext, authorizer: withGroups(['RegistryPublisher']) },
       body: '{not json',
@@ -166,9 +160,6 @@ describe('registry-publish handler', () => {
     expect(JSON.parse(res.body).error.code).toBe('REGISTRY_VERSION_EXISTS');
   });
 
-  // Per-kind runtime contract (#246 review): runtime was previously only checked
-  // as `typeof object`, so arrays / empty / wrong-kind payloads published a 201
-  // and later resolved into a loader that silently skipped them.
   describe('per-kind runtime validation (400, publish never called)', () => {
     const publishAs = async (body: Record<string, unknown>): Promise<number> => {
       const res = await publishHandler(makeEvent({
@@ -286,9 +277,8 @@ describe('registry-resolve handler', () => {
     const res = await resolveHandler(ev('registry://mcp_server/acme/pdf-tools@^1.4.1'));
     expect(res.statusCode).toBe(200);
     const { runtime } = JSON.parse(res.body).data;
-    // Header keys survive (discovery signal); values masked; url reduced to origin.
     expect(runtime.headers).toEqual({ 'Authorization': '***', 'X-Api-Key': '***' });
-    expect(runtime.url).toBe('https://mcp.example'); // query-string token dropped
+    expect(runtime.url).toBe('https://mcp.example');
     expect(runtime.transport).toBe('http');
     expect(runtime.tool_prefix).toBe('mcp__pdf__');
     expect(JSON.stringify(res.body)).not.toContain('SUPERSECRET');
@@ -302,8 +292,6 @@ describe('registry-resolve handler', () => {
       namespace: 'acme',
       name: 'pdf-tools',
       version: '1.4.1',
-      // A record that (pre-fix) slipped extra keys past publish; the reader must
-      // not leak them even though they are not on any denylist.
       runtime: {
         transport: 'http',
         url: 'https://h/mcp',
@@ -317,7 +305,6 @@ describe('registry-resolve handler', () => {
     const res = await resolveHandler(ev('registry://mcp_server/acme/pdf-tools@^1.4.1'));
     expect(res.statusCode).toBe(200);
     const { runtime } = JSON.parse(res.body).data;
-    // Only allowlisted fields survive; api_key/env/command/args are absent.
     expect(runtime.api_key).toBeUndefined();
     expect(runtime.env).toBeUndefined();
     expect(runtime.command).toBeUndefined();
@@ -360,8 +347,6 @@ describe('registry-show handler', () => {
   });
 
   test('surfaces a malformed-only asset (flagged) instead of 404-ing it', async () => {
-    // An asset whose only version has a corrupt descriptor must not masquerade
-    // as absent — the operator needs to see the corruption exists (#791).
     mockClient.listBrowseEntries.mockResolvedValue([
       { malformed: true, kind: 'skill', namespace: 'acme', name: 'readme-helper', version: '1.0.0', status: 'APPROVED' },
     ]);

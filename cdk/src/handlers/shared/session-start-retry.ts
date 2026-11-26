@@ -17,34 +17,14 @@
  *  SOFTWARE.
  */
 
-/**
- * Session-start transient auto-retry (once), extracted from the durable
- * ``orchestrate-task`` handler so the four retry branches are unit-testable in
- * isolation, with MicroVM receipt/replay behavior also covered through the
- * strategy and durable-handler tests. See #599 review B1/B2.
- *
- * This retries the start API, before the caller has a session handle. That does
- * not guarantee idempotency: a lost success response can leave a live session
- * behind. MicroVM uses its saved start receipt and token; each other backend
- * still needs its own idempotency policy. A transient hiccup here (an
- * ECS deploy-race "TaskDefinition is inactive", ENI/capacity delay, a
- * Bedrock/agentcore throttle) usually clears on a second attempt, so the first
- * transient failure is swallowed and retried once. A NON-transient failure (bad
- * config, missing ECS substrate) is re-thrown immediately — retrying it just
- * wastes another request. Mid-run crashes are NOT handled here (that's a later step;
- * the agent may have pushed commits).
- */
-
 import type { ComputeStrategy, SessionHandle } from './compute-strategy';
 import { classifyError, isTransientError, MicrovmStartUncertainError } from './error-classifier';
 
-/** Emit a ``session_start_retry`` telemetry event. Matches the shape of
- *  ``emitTaskEvent`` bound at the call site (best-effort — see below). */
+/** Emit a ``session_start_retry`` telemetry event. */
 export type RetryEventEmitter = (
   reason: string,
 ) => Promise<void>;
 
-/** Minimal logger surface (a subset of the handler's structured logger). */
 export interface RetryLogger {
   warn(message: string, meta?: Record<string, unknown>): void;
 }
@@ -55,16 +35,9 @@ export interface StartSessionWithRetryResult {
   readonly autoRetried: boolean;
 }
 
-/**
- * Symbol tag pinned onto the error thrown from branch 4 (transient-then-transient)
- * so the retry fact survives the throw — the ``autoRetried`` result field only
- * exists on the success paths. Kept as a Symbol (not an own string prop) so it
- * never collides with, or leaks into, the error's serialized shape. Read via
- * {@link isAutoRetried}.
- */
 const AUTO_RETRIED = Symbol('autoRetried');
 
-/** True iff ``err`` was thrown after an auto-retry already ran (branch 4). */
+/** True iff ``err`` was thrown after an auto-retry already ran. */
 export function isAutoRetried(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as Record<symbol, unknown>)[AUTO_RETRIED] === true;
 }
@@ -72,26 +45,14 @@ export function isAutoRetried(err: unknown): boolean {
 /**
  * Start a compute session, auto-retrying ONCE on a transient failure.
  *
- * Behaviour (the four branches #599 B2 asks be covered):
  *   1. first attempt succeeds            → return it, ``autoRetried: false``.
  *   2. first attempt fails NON-transient → re-throw the original error (no retry).
  *   3. first attempt fails transient, retry succeeds → return it, ``autoRetried: true``.
  *   4. first attempt fails transient, retry also fails → throw the retry's error
- *      TAGGED with ``autoRetried = true`` (see {@link isAutoRetried}). The result
- *      object carries ``autoRetried`` only on the success paths (1/3); on the
- *      double-failure this function throws, so the fact is instead pinned onto the
- *      thrown error itself — the caller reads it via {@link isAutoRetried} to stamp
- *      the ``[auto-retried]`` marker. Without the tag the caller could not tell a
- *      double-transient failure (retry ran) from a first-attempt failure (it did
- *      not), and would wrongly tell the user "reply to retry" (N1).
+ *      TAGGED with ``autoRetried = true`` (see {@link isAutoRetried}).
  *
- * The ``emitRetryEvent`` call is BEST-EFFORT and internally guarded (B1): a
- * TaskEvents PutItem fault (throttle/timeout — exactly the conditions that
- * co-occur with the transient session-start failures this handles) must NOT
- * abort or mis-attribute the retry. A telemetry failure is logged and swallowed;
- * the retry proceeds regardless. Previously the emit was unguarded and, if it
- * threw after ``autoRetried`` was set but before the retry ran, the user was
- * told a second attempt failed when none had.
+ * The ``emitRetryEvent`` call is best-effort: a telemetry failure is logged and
+ * swallowed; the retry proceeds regardless.
  */
 export async function startSessionWithRetry(
   strategy: Pick<ComputeStrategy, 'startSession'>,
@@ -106,17 +67,9 @@ export async function startSessionWithRetry(
     const handle = await strategy.startSession(input);
     return { handle, autoRetried: false };
   } catch (firstErr) {
-    // Classify the RAW error, NOT a `Session start failed: …` wrapper (#599 N2):
-    // `/Session start failed/i` is itself a TRANSIENT pattern, so wrapping made
-    // EVERY session-start failure classify transient — a genuine config/auth
-    // fault (missing ECS env, AccessDenied) would eat a pointless ~1-min retry
-    // and the "non-transient throws immediately" branch below was effectively
-    // dead. Classifying the raw string restores that branch. (Widening the
-    // classifier's transient patterns — e.g. ThrottlingException — is a separate
-    // classifier-completeness concern, not this retry gate.)
     const classification = classifyError(String(firstErr));
     if (!isTransientError(classification) && !(firstErr instanceof MicrovmStartUncertainError)) {
-      throw firstErr; // service/user error — a retry won't help; surface now.
+      throw firstErr;
     }
     const uncertain = firstErr instanceof MicrovmStartUncertainError;
     deps.logger.warn(uncertain
@@ -125,8 +78,6 @@ export async function startSessionWithRetry(
       task_id: deps.taskId,
       error: firstErr instanceof Error ? firstErr.message : String(firstErr),
     });
-    // Best-effort telemetry — a PutItem fault here must never abort the retry
-    // or mis-report the outcome (B1).
     try {
       await deps.emitRetryEvent(uncertain ? 'MicroVM start response unknown' : classification?.title ?? 'transient');
     } catch (emitErr) {
@@ -139,15 +90,9 @@ export async function startSessionWithRetry(
       const handle = await strategy.startSession(input);
       return { handle, autoRetried: true };
     } catch (retryErr) {
-      // Even a definite rejection on the second call cannot prove that the
-      // first, unanswered call created nothing. Preserve that uncertainty.
       const finalError = firstErr instanceof MicrovmStartUncertainError || retryErr instanceof MicrovmStartUncertainError
         ? new MicrovmStartUncertainError(String(retryErr), { cause: retryErr })
         : retryErr;
-      // Branch 4: the retry ALSO failed. Pin the retry fact onto the thrown error
-      // so the caller can stamp ``[auto-retried]`` (N1) — otherwise a double-
-      // transient failure is indistinguishable from a first-attempt failure and
-      // the user is wrongly told "reply to retry" instead of "I already retried".
       if (typeof finalError === 'object' && finalError !== null) {
         (finalError as Record<symbol, unknown>)[AUTO_RETRIED] = true;
       }

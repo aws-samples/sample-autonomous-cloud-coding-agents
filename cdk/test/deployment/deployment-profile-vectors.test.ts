@@ -29,8 +29,6 @@ import {
   resolveDeploymentFeatures,
 } from '../../src/deployment/features';
 
-// The CLI suite runs the same vectors against the CLI's own copy of these rules.
-// See contracts/deployment-profile-vectors/README.md.
 const VECTOR_DIR = path.join(__dirname, '..', '..', '..', 'contracts', 'deployment-profile-vectors');
 const SOURCE = 'abca.deployment.json';
 
@@ -79,13 +77,11 @@ describe('deployment-profile vectors: context switches', () => {
     }
     const resolved = resolve();
     expect(resolved).toEqual(expected.features);
-    // What the CLI has to report is exactly the switches that changed the selection.
     const changed = DEPLOYMENT_FEATURES.filter(feature => resolved[feature] !== features[feature]);
     expect(changed.map(feature => FEATURE_CONTEXT_KEYS[feature])).toEqual(expected.conflicts);
   });
 
   test('every context switch overrides a profile in at least one case', () => {
-    // A case that expects an error resolves nothing, so it proves no switch name here.
     const overriding = cases.filter(({ expected }) => expected.error === undefined).flatMap(({ expected }) => expected.conflicts);
     expect([...new Set(overriding)].sort()).toEqual(Object.values(FEATURE_CONTEXT_KEYS).sort());
   });

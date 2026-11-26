@@ -43,8 +43,6 @@ describe('linearOauthSecretName', () => {
 
 describe('LINEAR_OAUTH_SCOPES', () => {
   test('matches the actor=app-compatible scope set verified in the spike', () => {
-    // Locked: removing app:assignable / app:mentionable breaks the Agent install
-    // (verified 2026-05-18); adding `admin` breaks actor=app entirely.
     expect(LINEAR_OAUTH_SCOPES).toEqual(['read', 'write', 'app:assignable', 'app:mentionable']);
   });
 });
@@ -54,7 +52,6 @@ describe('generatePkce', () => {
     const { codeVerifier, codeChallenge } = generatePkce();
     expect(codeVerifier).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(codeChallenge).toMatch(/^[A-Za-z0-9_-]+$/);
-    // base64url-encoded SHA-256 = 43 chars (256 bits / 6 bits per char, no padding)
     expect(codeChallenge.length).toBe(43);
   });
 
@@ -67,7 +64,6 @@ describe('generatePkce', () => {
 
   test('challenge is deterministic from the verifier', async () => {
     const { codeVerifier, codeChallenge } = generatePkce();
-    // Replay the verifier through SHA-256 and base64url-encode — must match.
     const { createHash } = await import('crypto');
     const expected = createHash('sha256').update(codeVerifier).digest().toString('base64url');
     expect(codeChallenge).toBe(expected);
@@ -91,8 +87,6 @@ describe('buildAuthorizationUrl', () => {
     expect(parsed.searchParams.get('code_challenge')).toBe('challenge-base64url');
     expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
     expect(parsed.searchParams.get('actor')).toBe('app');
-    // Space-separated per RFC 6749 §3.3. Comma-separated triggers Linear's
-    // misleading "Invalid redirect_uri" — caught during smoke test 2026-05-19.
     expect(parsed.searchParams.get('scope')).toBe('read write app:assignable app:mentionable');
   });
 
@@ -109,10 +103,6 @@ describe('buildAuthorizationUrl', () => {
   });
 
   test('forceConsent adds prompt=consent so an already-installed app can RE-authorize', () => {
-    // Without this, Linear short-circuits an installed app with "already
-    // installed" and returns no authorization code — so `linear setup`, the
-    // documented remedy for a revoked authorization, could not actually recover
-    // one (live-caught 2026-07-25).
     const url = buildAuthorizationUrl({
       clientId: 'cid',
       redirectUri: 'https://localhost:8443/oauth/callback',
@@ -134,8 +124,6 @@ describe('buildAuthorizationUrl', () => {
   });
 
   test('forceConsent composes with actor=app — the combination the install path needs', () => {
-    // The failing case is specifically an actor=app re-install, so both params
-    // must survive together.
     const parsed = new URL(buildAuthorizationUrl({
       clientId: 'cid',
       redirectUri: 'https://localhost:8443/oauth/callback',
@@ -155,8 +143,6 @@ describe('computeExpiresAt', () => {
     expect(computeExpiresAt(86400, now)).toBe('2026-05-20T12:00:00.000Z');
   });
 });
-
-// ─── Token endpoint round-trip tests ────────────────────────────────────────
 
 function mockResponse(status: number, body: unknown): Response {
   return {
@@ -190,7 +176,6 @@ describe('exchangeAuthorizationCode', () => {
     expect(result.expires_in).toBe(86399);
     expect(result.scope).toBe('read write app:assignable app:mentionable');
 
-    // Verify the wire body is exactly what Linear expects (RFC 6749 §4.1.3).
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(LINEAR_TOKEN_ENDPOINT);
@@ -237,17 +222,12 @@ describe('exchangeAuthorizationCode', () => {
   });
 
   test('an off-contract 200 does NOT print the access token it carried', async () => {
-    // The dangerous case is not a missing token — it is a PRESENT one alongside some
-    // other field being off-contract. The guard requires `expires_in` and `scope`, so a
-    // 200 carrying a perfectly good credential with a string `expires_in` failed it, and
-    // the message interpolated the raw body: the token went to the operator's terminal
-    // and into any CI log capturing stdout, where it outlives the session that leaked it.
     const secret = 'lin_oauth_SUPER_SECRET_VALUE';
     const fetchImpl = jest.fn().mockResolvedValueOnce(mockResponse(200, {
       access_token: secret,
       refresh_token: 'lin_refresh_ALSO_SECRET',
       token_type: 'Bearer',
-      expires_in: '3600', // string, not number — off contract
+      expires_in: '3600',
       scope: 'read write',
     }));
 
@@ -262,12 +242,9 @@ describe('exchangeAuthorizationCode', () => {
 
     await expect(attempt).rejects.toThrow(/unexpected shape/);
     const message = await attempt.catch((err: unknown) => String(err));
-    // No credential material, in any form.
     expect(message).not.toContain(secret);
     expect(message).not.toContain('lin_refresh_ALSO_SECRET');
-    // Still diagnostic: names the field that is wrong and what was expected.
     expect(message).toContain('expires_in expected number, got string');
-    // Key NAMES are safe and useful; values are not.
     expect(message).toContain('keys present: access_token');
   });
 
@@ -313,7 +290,6 @@ describe('refreshAccessToken', () => {
     const sent = new URLSearchParams(init.body);
     expect(sent.get('grant_type')).toBe('refresh_token');
     expect(sent.get('refresh_token')).toBe('lin_refresh_old');
-    // refresh grant does NOT send code/code_verifier/redirect_uri
     expect(sent.get('code')).toBeNull();
     expect(sent.get('redirect_uri')).toBeNull();
   });
@@ -334,11 +310,6 @@ describe('refreshAccessToken', () => {
 });
 
 describe('verifyLinearRefreshAndPersist', () => {
-  // This is the only code that can settle "is this workspace's authorization
-  // actually alive?", and it does so DESTRUCTIVELY: Linear rotates the refresh
-  // token on every use, so an attempt that isn't persisted spends the stored
-  // token and strands the workspace. Both halves are pinned here.
-
   const STORED = JSON.stringify({
     access_token: 'lin_old',
     refresh_token: 'lin_refresh_old',
@@ -367,20 +338,14 @@ describe('verifyLinearRefreshAndPersist', () => {
 
     expect(result).toBe('refreshed');
     const saved = JSON.parse(writeSecret.mock.calls[0][0]);
-    // The rotated refresh token is what makes the NEXT refresh possible; saving
-    // the old one back would work once and then fail forever.
     expect(saved.refresh_token).toBe('lin_refresh_rotated');
     expect(saved.access_token).toBe('lin_new');
     expect(saved.expires_at).toBe('2026-07-27T10:00:00.000Z');
-    // Fields it does not own are carried through untouched — the webhook secret
-    // and client credentials live in this same bundle.
     expect(saved.client_secret).toBe('csec');
     expect(saved.workspace_slug).toBe('acme');
   });
 
   test('a rotation that could not be saved reports error, never health', async () => {
-    // The token has already been spent at this point, so a green tick here would
-    // hide a workspace this very check just broke.
     const result = await verifyLinearRefreshAndPersist({
       readSecret: async () => STORED,
       writeSecret: async () => { throw new Error('AccessDeniedException on PutSecretValue'); },
@@ -402,8 +367,6 @@ describe('verifyLinearRefreshAndPersist', () => {
   });
 
   test('a 5xx or network failure is error — NOT revoked', async () => {
-    // Reporting revoked here would send an operator to re-authorize a perfectly
-    // healthy workspace because Linear had a bad minute.
     for (const failing of [
       jest.fn().mockResolvedValueOnce(mockResponse(503, { error: 'service_unavailable' })),
       jest.fn().mockRejectedValueOnce(new Error('ECONNRESET')),
@@ -418,8 +381,6 @@ describe('verifyLinearRefreshAndPersist', () => {
   });
 
   test('a bundle with no refresh token is rejected without any network call', async () => {
-    // Nothing can renew this grant, which is a genuine dead end rather than an
-    // inconclusive probe.
     const fetchImpl = jest.fn();
     const result = await verifyLinearRefreshAndPersist({
       readSecret: async () => JSON.stringify({ access_token: 'lin_old', client_id: 'cid', client_secret: 'csec' }),
@@ -455,7 +416,6 @@ describe('readExistingWebhookSecret — fail-closed pre-read (#612 review B1/B2)
 
   it('returns the existing lin_wh_ secret when the bundle has one (→ preserve, not clobber)', async () => {
     const got = await readExistingWebhookSecret(async () => bundle('lin_wh_thisWorkspace'), notFound);
-    // This is the value `setup` keeps when the operator supplies none.
     expect(got).toBe('lin_wh_thisWorkspace');
   });
 
@@ -473,9 +433,6 @@ describe('readExistingWebhookSecret — fail-closed pre-read (#612 review B1/B2)
   });
 
   it('THROWS (fails closed) on AccessDenied — must NOT default to undefined and clobber', async () => {
-    // The B1 bug: a bare catch here returned undefined, and `setup` then mirrored the
-    // stack-wide secret over the stored one (the #611 clobber), silently. The pre-read
-    // must surface the error instead.
     const accessDenied = Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
     await expect(
       readExistingWebhookSecret(async () => { throw accessDenied; }, notFound),
@@ -499,10 +456,6 @@ describe('readExistingWebhookSecret — fail-closed pre-read (#612 review B1/B2)
 });
 
 describe('readExistingOauthTokens — keeps the fallback real when moving to the vault', () => {
-  // A fresh vault onboarding stores no Linear token, which is the point. But a
-  // workspace MOVING onto the vault already has a working one, and writing empty
-  // strings over it would destroy the only credential that still works if the vault
-  // becomes unreachable — making the documented Secrets-Manager fallback a fiction.
   const notFound = (err: unknown) => (err as { name?: string }).name === 'ResourceNotFoundException';
 
   test('returns the token fields worth preserving', async () => {
@@ -522,8 +475,6 @@ describe('readExistingOauthTokens — keeps the fallback real when moving to the
   });
 
   test('a bundle with NO refresh token has nothing worth preserving', async () => {
-    // Without a refresh token the bundle cannot renew itself, so it is not a
-    // fallback — carrying it forward would only look like one.
     const got = await readExistingOauthTokens(
       async () => JSON.stringify({ access_token: 'lin_oauth_a', webhook_signing_secret: 'lin_wh_z' }),
       notFound,
@@ -539,7 +490,6 @@ describe('readExistingOauthTokens — keeps the fallback real when moving to the
   });
 
   test('any OTHER read failure throws — silently discarding a live token is worse', async () => {
-    // AccessDenied/KMS/throttle must not be mistaken for "nothing to preserve".
     await expect(readExistingOauthTokens(async () => {
       throw Object.assign(new Error('denied'), { name: 'AccessDeniedException' });
     }, notFound)).rejects.toThrow(/denied/);
@@ -555,11 +505,6 @@ describe('readExistingOauthTokens — keeps the fallback real when moving to the
 });
 
 describe('resolveStoredGrantFields — a preserved grant must never be overwritten with blanks', () => {
-  // The precedence that decides whether `bgagent linear setup` keeps or destroys a
-  // working Secrets-Manager grant when a workspace moves onto the vault. A vault
-  // onboarding issues no token of its own, so if the preserved values are not carried
-  // forward the bundle is written with empty strings — and nothing fails until the
-  // vault is unreachable and the documented fallback turns out not to exist.
   const NOW = new Date('2026-09-01T00:00:00.000Z');
   const issued = {
     access_token: 'lin_new',
@@ -580,13 +525,10 @@ describe('resolveStoredGrantFields — a preserved grant must never be overwritt
     expect(out.access_token).toBe('lin_new');
     expect(out.refresh_token).toBe('rt_new');
     expect(out.scope).toBe('read write');
-    // Absolute, derived from the relative `expires_in` — NOT the preserved timestamp.
     expect(out.expires_at).toBe('2026-09-01T01:00:00.000Z');
   });
 
   test('with no token issued, the preserved grant is carried forward verbatim', () => {
-    // The vault path. Getting this wrong destroys the only credential that still works
-    // if the vault becomes unreachable.
     expect(resolveStoredGrantFields(undefined, preserved, NOW)).toEqual(preserved);
   });
 

@@ -19,7 +19,6 @@
 
 import { logger } from '../../../src/handlers/shared/logger';
 
-/** Capture the first JSON line written to a stream during `fn`. */
 function captureLine(stream: 'stdout' | 'stderr', fn: () => void): Record<string, unknown> {
   const lines: string[] = [];
   const spy = jest.spyOn(process[stream], 'write').mockImplementation((chunk: unknown) => {
@@ -64,7 +63,6 @@ describe('logger', () => {
     const withTask = logger.child({ task_id: 't-1' });
     const withUser = withTask.child({ user_id: 'u-1' });
     expect(captureLine('stdout', () => withUser.info('x'))).toMatchObject({ task_id: 't-1', user_id: 'u-1' });
-    // Base logger stays context-free.
     expect(captureLine('stdout', () => logger.info('x')).task_id).toBeUndefined();
   });
 });

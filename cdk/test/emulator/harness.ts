@@ -18,23 +18,9 @@
  */
 
 /**
- * Shared setup for the emulator-backed handler tests (ADR-013 Tier 2a).
- *
- * These suites run real handler code in-process and let its AWS calls go over
- * the wire to an AWS Emulator (https://github.com/aws/aws-emulator). Nothing
- * here configures an endpoint: the SDK clients the handlers already build pick
- * up AWS_ENDPOINT_URL, AWS_REGION and the emulator's credentials file from the
- * environment, and Node trusts its certificate through NODE_EXTRA_CA_CERTS.
- *
- * The files are named `*.emulator.ts`, which the unit configuration does not
- * match. They run only through `jest.emulator.config.js`
- * (`mise run test:integration`), which refuses to start unless that
- * environment is the emulator's and the emulator answers.
- *
  * The emulator keeps state in memory and has no reset route. Each test file
- * therefore names its tables uniquely (so files can share one instance, run in
- * parallel and be re-run without a restart), and each test writes under a user
- * id of its own (so tests need no cleanup between them).
+ * therefore names its tables uniquely, and each test writes under a user id of
+ * its own.
  */
 
 import {
@@ -45,10 +31,8 @@ import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-/** Timeout for table setup (ms). The emulator alone holds a new table in CREATING for 3 s; Jest's default is 5 s. */
 const SETUP_TIMEOUT_MS = 30_000;
 
-/** How long to wait for a new table to become ACTIVE (seconds). Shorter than the hook, so its own error is the one shown. */
 const TABLE_WAIT_SECONDS = 20;
 
 /**
@@ -56,13 +40,10 @@ const TABLE_WAIT_SECONDS = 20;
  * stack: created on the emulator before its tests and deleted after them.
  *
  * The CreateTable inputs are read from the synthesized template, so key schema
- * and indexes are the constructs' own. A handler that queries an index its
- * construct no longer declares fails here instead of after a deploy.
+ * and indexes are the constructs' own.
  *
- * Streams and point-in-time recovery are not carried over. Neither is TTL, on
- * purpose: the emulator deletes an expired item within a second where AWS takes
- * up to days, so with TTL on, code that forgets to compare `ttl` with the clock
- * looks correct here.
+ * Streams and point-in-time recovery are not carried over. Neither is TTL: the
+ * emulator deletes an expired item within a second where AWS takes up to days.
  * @param declare - instantiates the table constructs under test, each with an explicit `tableName`.
  * @param seed - writes the rows every test in the file needs, once the tables are ACTIVE.
  * @param withoutIndexes - per table name, index names to leave out: the table as it was before a
@@ -97,7 +78,6 @@ export function emulatorTables(
       }));
       created.push(table.TableName);
     }
-    // Create them all before waiting: the CREATING window then costs one wait, not one per table.
     for (const TableName of created) {
       await waitUntilTableExists({ client: ddb, maxWaitTime: TABLE_WAIT_SECONDS, minDelay: 1 }, { TableName });
     }

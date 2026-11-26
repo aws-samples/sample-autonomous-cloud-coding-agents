@@ -19,7 +19,6 @@
 
 // SPDX-License-Identifier: MIT-0
 
-/** Shared by the two runtimes that run server.py's periodic heartbeat worker. */
 const AGENT_HEARTBEAT_GRACE_SEC = 120;
 const AGENT_HEARTBEAT_STALE_SEC = 240;
 

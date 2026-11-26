@@ -22,20 +22,12 @@ run = '''
 echo "Project: $PROJECT_NAME"
 '''
 
-# QUALITY
-# The ruff tasks name their configuration (--config): ruff then applies
-# agent/pyproject.toml to every file. Left to discover configuration per directory,
-# it would let a ruff.toml or [tool.ruff] added below agent/ replace the rules,
-# the ignores and the banned-api table for that directory, with the gate still green.
-# They also run without ruff's cache (--no-cache). A plain `ruff check` or
-# `ruff format` by hand does discover such a file, and the cache then hands the
-# results it stored for the files beside it to the tasks: they stayed green until
-# the cache was removed. Uncached, the whole tree takes a fraction of a second.
+# Left to discover configuration per directory, ruff would let a ruff.toml or
+# [tool.ruff] added below agent/ replace the rules, the ignores and the banned-api
+# table for that directory. --config applies agent/pyproject.toml to every file.
 #
-# The four tasks that only check (lint, format:check, typecheck, lint:deadcode)
-# run `uv run --locked`. A plain `uv run` re-locks when pyproject.toml is ahead of
-# uv.lock: the check would rewrite the lockfile and still pass. With --locked it
-# fails instead and says that the lockfile needs to be updated.
+# A plain `uv run` re-locks when pyproject.toml is ahead of uv.lock: the check would
+# rewrite the lockfile and still pass. With --locked it fails instead.
 
 [tasks.lint]
 description = "Lint with ruff"
@@ -61,14 +53,11 @@ run = "uv run --locked ty check"
 description = "Dead code with vulture at min_confidence 80 (#282, cairn MVG gate #6): unreachable code, and imports and function arguments it is sure are unused. Unused functions, classes, methods and variables are rated 60 and are NOT reported. Settings in pyproject.toml, intentional keeps in .vulture_allowlist.py."
 run = "uv run --locked vulture"
 
-# --cov-config names the file that holds the coverage settings. Without it coverage.py
-# reads the file a COVERAGE_RCFILE variable names, when one is set, and that file's
-# source and omit lists would decide what the floor measures.
+# Without --cov-config coverage.py reads the file a COVERAGE_RCFILE variable names, when
+# one is set, and that file's source and omit lists would decide what the floor measures.
 [tasks.test]
 description = "Run tests with pytest (coverage floor enforced; use `uv run pytest --no-cov` for focused runs)"
 run = "uv run pytest --junit-xml=test-reports/junit.xml --cov=src --cov-config=pyproject.toml --cov-branch --cov-fail-under=89 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
-
-# SECURITY
 
 [tasks."security:bandit"]
 description = "Run Bandit"
@@ -76,10 +65,6 @@ run = "uv run bandit -c pyproject.toml -r . --severity-level=high"
 
 [tasks."security:image"]
 description = "Scan container image with trivy"
-# Build context is repo root (..) so Dockerfile can COPY contracts/
-# alongside agent/ — matches cdk/src/stacks/agent.ts. Without -f and
-# the .. context, the build fails because COPY agent/... can't find
-# agent/ inside the agent/ directory.
 run = [
   "ARCH=\"$(uname -m)\"; PLATFORM=\"linux/arm64\"; if [ \"$ARCH\" = \"x86_64\" ]; then PLATFORM=\"linux/amd64\"; fi; docker build --build-arg TARGETPLATFORM=\"$PLATFORM\" --build-arg CACHE_BUST=\"$(date +%s)\" -f Dockerfile -t bgagent-local:latest ..",
   "trivy image --scanners vuln --ignore-unfixed --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 bgagent-local:latest",
@@ -102,8 +87,6 @@ run = [
     { task = "security:image" },
 ]
 
-# LOCAL DEVELOPMENT (DynamoDB Local for progress events)
-
 [tasks."local:up"]
 description = "Start DynamoDB Local and create tables for local agent testing"
 run = [
@@ -116,7 +99,7 @@ description = "Stop DynamoDB Local (all data is ephemeral)"
 run = "docker compose down"
 
 # The two scans switch the pager of AWS CLI v2 off with an empty AWS_PAGER, not with
-# --no-cli-pager: AWS CLI v1 rejects that flag, and the tasks then reported no events.
+# --no-cli-pager: AWS CLI v1 rejects that flag.
 
 [tasks."local:events"]
 description = "Query progress events from DynamoDB Local"

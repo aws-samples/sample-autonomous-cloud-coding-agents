@@ -206,7 +206,7 @@ describe('OperatorConsoleStack', () => {
   test('tells the bundle where the console API is', () => {
     const entry = Object.values(template.findResources('Custom::CDKBucketDeployment'))
       .find((d) => (d.Properties.SystemMetadata as Record<string, string>)['cache-control'] === 'no-cache');
-    // config.json's keys live in the asset; its token values (here the console API URL) are markers.
+    // `Source.jsonData` keeps the keys in the asset and passes token values as `SourceMarkers`.
     expect(JSON.stringify(entry?.Properties.SourceMarkers)).toMatch(/"Ref":"ConsoleApi[0-9A-F]+"/);
   });
 
@@ -219,7 +219,6 @@ describe('OperatorConsoleStack', () => {
   });
 
   test('the Linear function has enough memory to start', () => {
-    // At the 128 MB default it ran out of memory during init in a live deploy.
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: { Variables: Match.objectLike({ LINEAR_WEBHOOK_DEDUP_TABLE_NAME: Match.anyValue() }) },
       MemorySize: 512,
@@ -231,10 +230,8 @@ describe('OperatorConsoleStack', () => {
       .filter((p) => JSON.stringify(p.Properties.Roles).includes('ConsoleLinearFn'))
       .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>);
     const actions = statements.flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
-    // Task table: Query on the Linear-issue index only; no reads of task rows themselves.
     const query = statements.find((st) => st.Action === 'dynamodb:Query');
     expect(JSON.stringify(query?.Resource)).toContain('/index/LinearIssueIndex');
-    // Start claims: put and delete, no general writes.
     expect(actions).toEqual(expect.arrayContaining(['dynamodb:PutItem', 'dynamodb:DeleteItem', 'secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue']));
     expect(actions.filter((a) => /UpdateItem|BatchWriteItem/.test(a))).toEqual([]);
     expect(JSON.stringify(statements)).toContain('bgagent-linear-oauth-*');

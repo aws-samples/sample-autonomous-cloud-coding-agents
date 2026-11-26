@@ -1,12 +1,3 @@
-"""System prompt for the repo-less ``default/agent-v1`` workflow (#248 Phase 3).
-
-A repo-less knowledge task has no repository, branch, or PR — it works from the
-``task_description`` (and any attachments / memory) and produces an artifact or a
-comment rather than a pull request. This template therefore carries none of the
-git/branch/PR placeholders the coding ``BASE_PROMPT`` uses; it substitutes only
-``{task_id}``, ``{workspace}``, ``{max_turns}``, and ``{memory_context}``.
-"""
-
 DEFAULT_AGENT_PROMPT = """You are an autonomous assistant running in an isolated cloud environment.
 
 Task ID: {task_id}

@@ -25,7 +25,6 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   GetSecretValueCommand: jest.fn((input) => ({ input })),
 }));
 
-// Imported after the mock is registered.
 import {
   getSlackSecret,
   invalidateSlackSecretCache,
@@ -42,9 +41,7 @@ describe('getSlackSecret', () => {
   });
 
   test('returns null for a secret that is scheduled for deletion', async () => {
-    // A workspace removed the app: its bot token is deleted with a recovery
-    // window, and until that ends GetSecretValue answers with this error
-    // instead of ResourceNotFoundException.
+    // GetSecretValue answers a secret inside its deletion recovery window with this error, not ResourceNotFoundException.
     smSendMock.mockRejectedValueOnce(Object.assign(
       new Error("You can't perform this operation on the secret because it was marked for deletion."),
       { name: 'InvalidRequestException' },
@@ -54,10 +51,6 @@ describe('getSlackSecret', () => {
   });
 
   test('rethrows the same error for a secret that is not a bot token', async () => {
-    // The signing secret and the OAuth credentials are read by ARN. Absent
-    // means "not populated yet" to their callers, and in that state the
-    // events endpoint answers a url_verification without a signature: a
-    // signing secret that cannot be read must stay an error.
     smSendMock.mockRejectedValueOnce(Object.assign(
       new Error("You can't perform this operation on the secret because it was marked for deletion."),
       { name: 'InvalidRequestException' },
@@ -131,9 +124,6 @@ describe('verifySlackSignature', () => {
     expect(verifySlackSignature(signingSecret, sig, ts, 'tampered-body')).toBe(false);
   });
 
-  // Empty-secret fail-open guard, mirroring the GitHub/Linear verifiers:
-  // HMAC('', input) is computable by anyone — an empty signing secret must
-  // never produce an accepted signature.
   test('rejects empty signingSecret even with a matching empty-key HMAC', () => {
     const ts = currentTimestamp();
     const body = 'token=abc&command=/bgagent&text=help';
@@ -176,8 +166,6 @@ describe('verifySlackRequest', () => {
   });
 
   test('refetches and verifies when cached secret was rotated out', async () => {
-    // First fetch: stale secret (will fail verification).
-    // Second fetch (forced refresh): rotated secret (succeeds).
     smSendMock
       .mockResolvedValueOnce({ SecretString: 'stale-secret' })
       .mockResolvedValueOnce({ SecretString: 'rotated-secret' });

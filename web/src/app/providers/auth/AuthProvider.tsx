@@ -38,10 +38,6 @@ export interface AuthSession {
   onExpired?(listener: () => void): () => void;
 }
 
-/**
- * Pluggable sign-in mechanism. The production adapter uses Cognito managed
- * login; the mock adapter exists only in mock-mode dev builds.
- */
 export interface AuthAdapter {
   /** Resumes an existing session (for example after the sign-in redirect); null when signed out. */
   restore(): Promise<AuthSession | null>;
@@ -49,7 +45,7 @@ export interface AuthAdapter {
   signIn(): Promise<AuthSession | null>;
 }
 
-/** Fails closed: no session can be established. Used until a real adapter is configured. */
+/** Fails closed: no session can be established. */
 export function unavailableAuthAdapter(reason: string): AuthAdapter {
   return {
     restore: () => Promise.reject(new Error(reason)),
@@ -89,8 +85,6 @@ export function AuthProvider({ adapter, children }: { adapter: AuthAdapter; chil
     };
   }, [adapter]);
 
-  // A session that expires by itself (refresh token gone) returns the app to sign-in,
-  // instead of every request retrying a token that can no longer be refreshed.
   const session = state.status === 'signed-in' ? state.session : null;
   useEffect(() => session?.onExpired?.(() => setState({ status: 'signed-out', reason: 'Your session expired. Sign in again.' })), [session]);
 

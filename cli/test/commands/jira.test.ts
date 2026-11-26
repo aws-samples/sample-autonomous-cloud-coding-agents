@@ -54,11 +54,9 @@ jest.mock('../../src/jira-app-actor', () => {
   };
 });
 
-// child_process.execFile — `openBrowser` shells out to the OS opener.
 const execFileMock = jest.fn();
 jest.mock('child_process', () => ({ execFile: (...args: unknown[]) => execFileMock(...args) }));
 
-// Secrets Manager — invite-user reads the per-tenant OAuth bundle.
 const smSend = jest.fn();
 jest.mock('@aws-sdk/client-secrets-manager', () => {
   const actual = jest.requireActual('@aws-sdk/client-secrets-manager');
@@ -68,7 +66,6 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
   };
 });
 
-// OAuth callback server — avoid binding a real localhost socket in `setup`.
 const awaitOauthCallbackMock = jest.fn();
 jest.mock('../../src/oauth-callback-server', () => {
   const actual = jest.requireActual('../../src/oauth-callback-server');
@@ -78,13 +75,11 @@ jest.mock('../../src/oauth-callback-server', () => {
   };
 });
 
-// ApiClient — the `link` action calls `.jiraLink()`.
 const jiraLinkMock = jest.fn();
 jest.mock('../../src/api-client', () => ({
   ApiClient: jest.fn(() => ({ jiraLink: jiraLinkMock })),
 }));
 
-// Shared prompts — avoid touching real stdin in `setup` and `link`.
 const promptSecretMock = jest.fn();
 const promptLineMock = jest.fn();
 jest.mock('../../src/prompt-secret', () => ({
@@ -92,7 +87,6 @@ jest.mock('../../src/prompt-secret', () => ({
   promptLine: (...args: unknown[]) => promptLineMock(...args),
 }));
 
-// DynamoDB DocumentClient — capture PutCommand inputs from the `map` action.
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/lib-dynamodb', () => {
   const actual = jest.requireActual('@aws-sdk/lib-dynamodb');
@@ -102,7 +96,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
   };
 });
 
-// CloudFormation — `findStackOutput` reads JiraProjectMappingTableName from here.
 const cfnSend = jest.fn();
 jest.mock('@aws-sdk/client-cloudformation', () => {
   const actual = jest.requireActual('@aws-sdk/client-cloudformation');
@@ -157,9 +150,7 @@ describe('makeJiraCommand', () => {
     expect(map).toBeDefined();
     const labelOpt = map!.options.find((o) => o.long === '--label');
     expect(labelOpt).toBeDefined();
-    // Default is the package-wide trigger label ('bgagent').
     expect(labelOpt!.defaultValue).toBe('bgagent');
-    // `--repo` is required on map.
     expect(map!.options.find((o) => o.long === '--repo')?.required).toBe(true);
   });
 
@@ -170,10 +161,8 @@ describe('makeJiraCommand', () => {
     const prOpt = map!.options.find((o) => o.long === '--status-on-pr');
     expect(startOpt).toBeDefined();
     expect(prOpt).toBeDefined();
-    // Optional: not mandatory and no default value (so the agent falls back to
-    // its heuristics when unset). `.required` here is Commander's "the option
-    // *argument* is required when the flag is present" (from `<name>`), not
-    // "the flag is mandatory" — that's `.mandatory`.
+    // Commander: `.required` says the option's argument is required when the
+    // flag is present (from `<name>`); `.mandatory` says the flag is.
     expect(startOpt!.mandatory).toBeFalsy();
     expect(prOpt!.mandatory).toBeFalsy();
     expect(startOpt!.defaultValue).toBeUndefined();
@@ -253,8 +242,6 @@ describe('jira map action status overrides', () => {
   });
 
   test('treats whitespace-only overrides as unset (not persisted)', async () => {
-    // #605: a truthy whitespace value would otherwise persist and permanently
-    // no-op at the agent (strip() -> "" matches no status, no fallback).
     const program = makeJiraCommand();
     await program.parseAsync([
       'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
@@ -317,7 +304,6 @@ describe('jira link action', () => {
     jiraLinkMock.mockResolvedValueOnce({ linked_at: '2026-06-17T01:00:00.000Z' });
     const program = makeJiraCommand();
     await program.parseAsync(['node', 'bgagent', 'link', 'CODE123', '--output', 'json']);
-    // Single jiraLink call (no dry-run preview in JSON mode).
     expect(jiraLinkMock).toHaveBeenCalledTimes(1);
     expect(jiraLinkMock).toHaveBeenCalledWith('CODE123');
     expect(logSpy.mock.calls.some((c) => String(c[0]).includes('2026-06-17T01:00:00.000Z'))).toBe(true);
@@ -325,14 +311,13 @@ describe('jira link action', () => {
 
   test('text mode aborts without linking when the user declines', async () => {
     jiraLinkMock.mockResolvedValueOnce({
-      jira_account_id: 'acct-1', // no name/email/site → exercises fallback branches
+      jira_account_id: 'acct-1',
     });
     promptLineMock.mockResolvedValueOnce('n');
 
     const program = makeJiraCommand();
     await program.parseAsync(['node', 'bgagent', 'link', 'CODE123']);
 
-    // Only the dry-run preview ran; no real link call.
     expect(promptLineMock).toHaveBeenCalledWith('Continue? [Y/n]');
     expect(jiraLinkMock).toHaveBeenCalledTimes(1);
     expect(jiraLinkMock).toHaveBeenCalledWith('CODE123', { dryRun: true });
@@ -340,7 +325,6 @@ describe('jira link action', () => {
   });
 
   test('text mode shows a dry-run preview, then confirms and links', async () => {
-    // First call = dry-run preview; second = the real link.
     jiraLinkMock
       .mockResolvedValueOnce({
         jira_user_name: 'Maya K',
@@ -359,8 +343,6 @@ describe('jira link action', () => {
   });
 
   test('text mode does not link when the confirmation cannot be read', async () => {
-    // At the end of the input the shared prompt rejects. The private prompt this command had
-    // never answered, and the process ended with exit code 0 as if the link had been made.
     jiraLinkMock.mockResolvedValueOnce({ jira_account_id: 'acct-1' });
     promptLineMock.mockRejectedValueOnce(new Error('No input provided.'));
 
@@ -615,9 +597,7 @@ describe('jira invite-user action', () => {
           status: 'active',
         },
       })
-      // Existing-link lookup: no active mapping for the picked Jira identity.
       .mockResolvedValueOnce({})
-      // PutCommand writing the pending# row.
       .mockResolvedValueOnce({});
     smSend.mockResolvedValueOnce({
       SecretString: JSON.stringify(sampleToken({
@@ -667,8 +647,6 @@ describe('jira invite-user action', () => {
       headers: { Authorization: 'Bearer access-xyz' },
     });
 
-    // calls[0] = registry GetCommand, calls[1] = existing-link GetCommand,
-    // calls[2] = the pending# PutCommand.
     const putCmd = ddbSend.mock.calls[2][0] as PutCommand;
     expect(putCmd).toBeInstanceOf(PutCommand);
     expect(putCmd.input.TableName).toBe('JiraUsersTable');
@@ -863,8 +841,6 @@ describe('jira invite-user action', () => {
   });
 
   test('warns (but still writes the invite) when the Jira identity is already linked', async () => {
-    // Registry GetCommand → active tenant; existing-link GetCommand → an
-    // active mapping for the resolved account; PutCommand → the pending row.
     ddbSend
       .mockResolvedValueOnce({
         Item: {
@@ -892,12 +868,10 @@ describe('jira invite-user action', () => {
 
     await runInvite(['cloud-123', 'acct-1']);
 
-    // Existing-link lookup keyed on `<cloudId>#<accountId>`.
     const linkLookup = ddbSend.mock.calls[1][0] as GetCommand;
     expect(linkLookup).toBeInstanceOf(GetCommand);
     expect(linkLookup.input.Key).toEqual({ jira_identity: 'cloud-123#acct-1' });
     expect(logSpy.mock.calls.some((call) => String(call[0]).includes('already linked'))).toBe(true);
-    // The invite is still written despite the warning.
     expect(ddbSend.mock.calls[2][0]).toBeInstanceOf(PutCommand);
   });
 
@@ -912,7 +886,6 @@ describe('jira invite-user action', () => {
 
     await expect(runInvite(['cloud-123', 'acct-1'])).rejects.toThrow(/inactive or is an app account/);
 
-    // Registry + secret read happened, but no invite row was written.
     expect(ddbSend).toHaveBeenCalledTimes(1);
   });
 
@@ -941,7 +914,7 @@ describe('jira invite-user action', () => {
           status: 'active',
         },
       })
-      .mockResolvedValueOnce({}) // existing-link lookup: not linked
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(Object.assign(new Error('conditional check failed'), {
         name: 'ConditionalCheckFailedException',
       }));
@@ -1018,7 +991,6 @@ describe('jira setup action', () => {
   afterEach(() => loadConfigSpy.mockRestore());
 
   test('throws a clear error when required stack outputs are missing (not deployed)', async () => {
-    // No outputs → findStackOutput returns null for both → setup aborts early.
     cfnSend.mockResolvedValue({ Stacks: [{ Outputs: [] }] });
     const program = makeJiraCommand();
     program.exitOverride();
@@ -1227,8 +1199,6 @@ describe('jira setup action', () => {
     const logSpy = jest.spyOn(console, 'log').mockImplementation();
     const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     execFileMock.mockImplementation((_c: string, _a: string[], cb: (e: Error | null) => void) => cb(null));
-    // Callback returns a direct-oauth result with a state that can't match the
-    // freshly generated one → setup throws right after randomState()/PKCE.
     awaitOauthCallbackMock.mockResolvedValue({ kind: 'direct-oauth', code: 'auth-code', state: 'definitely-not-the-state' });
     try {
       const program = makeJiraCommand();
@@ -1272,7 +1242,6 @@ describe('jira setup action', () => {
         ],
       }],
     });
-    // id_token present but not a 3-segment JWT → cognitoSubFromSession throws.
     const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
       id_token: 'not-a-jwt',
     } as ReturnType<typeof config.loadCredentials>);
@@ -1287,7 +1256,6 @@ describe('jira setup action', () => {
   });
 
   test('resolves caller identity then prompts for the Client ID (covers cognitoSubFromSession + promptSecret)', async () => {
-    // Outputs present so setup proceeds past the deploy gate.
     cfnSend.mockResolvedValue({
       Stacks: [{
         Outputs: [
@@ -1296,14 +1264,11 @@ describe('jira setup action', () => {
         ],
       }],
     });
-    // A well-formed id_token with a `sub` claim so cognitoSubFromSession succeeds.
     const payload = Buffer.from(JSON.stringify({ sub: 'cognito-sub-123' })).toString('base64url');
     const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue({
       id_token: `header.${payload}.sig`,
     } as ReturnType<typeof config.loadCredentials>);
     const logSpy = jest.spyOn(console, 'log').mockImplementation();
-    // promptSecret returns '' so setup throws "Client ID is required" right
-    // after the prompt (before the OAuth flow).
     promptSecretMock.mockReset().mockResolvedValue('');
     try {
       const program = makeJiraCommand();
@@ -1451,7 +1416,6 @@ describe('jira map action', () => {
     loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
-    // `process.exit` throws so we can assert it was reached without killing Jest.
     exitSpy = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code}`);
     }) as never);
@@ -1471,7 +1435,6 @@ describe('jira map action', () => {
 
   test('writes an active mapping row with the resolved label on the happy path', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo', '--label', 'agentme']);
-    // One read of the row that the put replaces, then the put.
     expect(ddbSend).toHaveBeenCalledTimes(2);
     expect(ddbSend.mock.calls[0][0].input).toEqual({
       TableName: 'ProjMapTable',
@@ -1496,7 +1459,6 @@ describe('jira map action', () => {
   });
 
   test('a second map keeps the first onboarded_at and moves updated_at', async () => {
-    // The mapping table, one row of it: a put stores the item, a get returns it.
     let row: Record<string, unknown> | undefined;
     ddbSend.mockImplementation(async (command: unknown) => {
       if (command instanceof PutCommand) {
@@ -1505,7 +1467,6 @@ describe('jira map action', () => {
       }
       return { Item: row };
     });
-    // Only the clock is faked, so that the two runs are a month apart.
     jest.useFakeTimers({
       now: new Date('2026-01-02T03:04:05.000Z'),
       doNotFake: [
@@ -1535,7 +1496,6 @@ describe('jira map action', () => {
   });
 
   test('stops with the AWS error, before writing, when the mapping row cannot be read', async () => {
-    // Not a reason to take the row for new: the put would date the mapping from today.
     ddbSend.mockRejectedValueOnce(Object.assign(
       new Error('User is not authorized to perform: dynamodb:GetItem'),
       { name: 'AccessDeniedException' },

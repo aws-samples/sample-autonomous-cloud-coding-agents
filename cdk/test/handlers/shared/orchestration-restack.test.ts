@@ -20,7 +20,6 @@
 import { planDirectRestack, planRestack } from '../../../src/handlers/shared/orchestration-restack';
 import type { OrchestrationChildRow } from '../../../src/handlers/shared/orchestration-store';
 
-/** Build a child row. `started` → released with a branch; else blocked. */
 function row(
   sub: string,
   deps: string[] = [],
@@ -45,7 +44,6 @@ describe('planRestack', () => {
   test('linear chain A→B→C, A changes → re-stack B then C (topo order)', () => {
     const steps = planRestack([row('A'), row('B', ['A']), row('C', ['B'])], 'A');
     expect(steps.map((s) => s.child.sub_issue_id)).toEqual(['B', 'C']);
-    // B merges A's branch; C merges B's branch (both in scope).
     expect(steps[0].mergeBranches).toEqual(['branch-A']);
     expect(steps[1].mergeBranches).toEqual(['branch-B']);
   });
@@ -56,9 +54,8 @@ describe('planRestack', () => {
   });
 
   test('only STARTED dependents are re-stacked; blocked ones are skipped', () => {
-    // A changed; B started (released), C still blocked.
     const steps = planRestack([row('A'), row('B', ['A']), row('C', ['B'], { started: false })], 'A');
-    expect(steps.map((s) => s.child.sub_issue_id)).toEqual(['B']); // C will get fresh code on its first release
+    expect(steps.map((s) => s.child.sub_issue_id)).toEqual(['B']);
   });
 
   test('diamond A→{B,C}→D, A changes → B, C, then D (D merges both updated preds)', () => {
@@ -69,7 +66,7 @@ describe('planRestack', () => {
     const ids = steps.map((s) => s.child.sub_issue_id);
     expect(ids).toContain('B');
     expect(ids).toContain('C');
-    expect(ids[ids.length - 1]).toBe('D'); // D is last (depends on B + C)
+    expect(ids[ids.length - 1]).toBe('D');
     const dStep = steps.find((s) => s.child.sub_issue_id === 'D')!;
     expect([...dStep.mergeBranches].sort()).toEqual(['branch-B', 'branch-C']);
   });
@@ -92,16 +89,14 @@ describe('planRestack', () => {
   });
 
   test('a re-stack with no resolvable predecessor branch is dropped', () => {
-    // B depends on A, but A somehow has no branch — nothing to merge.
     const a = { ...row('A'), child_branch_name: undefined };
     const steps = planRestack([a, row('B', ['A'])], 'A');
-    expect(steps).toEqual([]); // B's only predecessor (A) has no branch → no merge → dropped
+    expect(steps).toEqual([]);
   });
 });
 
 describe('planDirectRestack (reconciler cascade — one hop)', () => {
   test('linear chain A→B→C, A changes → re-stacks ONLY B (its direct dependent)', () => {
-    // C is NOT re-stacked now — it cascades when B's restack task completes.
     const steps = planDirectRestack([row('A'), row('B', ['A']), row('C', ['B'])], 'A');
     expect(steps.map((s) => s.child.sub_issue_id)).toEqual(['B']);
     expect(steps[0].mergeBranches).toEqual(['branch-A']);
@@ -135,7 +130,7 @@ describe('planDirectRestack (reconciler cascade — one hop)', () => {
 
   test('only STARTED direct dependents are re-stacked', () => {
     const steps = planDirectRestack([row('A'), row('B', ['A'], { started: false })], 'A');
-    expect(steps).toEqual([]); // B not started → gets fresh code on its first release
+    expect(steps).toEqual([]);
   });
 
   test('changed node with no dependents → empty', () => {
@@ -152,7 +147,6 @@ describe('planDirectRestack (reconciler cascade — one hop)', () => {
   });
 
   test('does NOT recurse: grandchild is untouched even when started', () => {
-    // A→B→C all started; A changes → only B (C waits for B to finish).
     const steps = planDirectRestack([row('A'), row('B', ['A']), row('C', ['B'])], 'A');
     expect(steps.map((s) => s.child.sub_issue_id)).not.toContain('C');
   });

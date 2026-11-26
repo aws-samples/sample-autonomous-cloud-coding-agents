@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Credential lookups in ``config.py`` against a real Secrets Manager API."""
-
 from __future__ import annotations
 
 import json
@@ -35,12 +33,7 @@ def create_secret(emulator):
 
 @pytest.fixture
 def token_env(agent_env, monkeypatch):
-    """Both resolvers cache the token in ``os.environ``; undo that after the test.
-
-    They assign ``os.environ[...]`` directly, which pytest only reverts for
-    variables ``monkeypatch`` already owns — so claim them here, set to empty
-    (which the resolvers treat as "not cached").
-    """
+    """Both resolvers cache the token in ``os.environ``; undo that after the test."""
     monkeypatch.setenv("GITHUB_TOKEN", "")
     monkeypatch.setenv("LINEAR_API_TOKEN", "")
     monkeypatch.delenv("LINEAR_VAULT_ENABLED", raising=False)
@@ -79,8 +72,6 @@ class TestGithubTokenFromSecretsManager:
 class TestLinearTokenFromSecretsManager:
     @staticmethod
     def _oauth_secret(**overrides) -> str:
-        # expires_at is far enough ahead that the resolver takes the token as
-        # valid (an expiring one yields no token).
         expires_at = (datetime.now(UTC) + timedelta(days=1)).isoformat().replace("+00:00", "Z")
         return json.dumps(
             {
@@ -100,7 +91,6 @@ class TestLinearTokenFromSecretsManager:
         assert resolved == "emulator-linear-access"
         assert os.environ["LINEAR_API_TOKEN"] == "emulator-linear-access"  # noqa: S105
 
-    # ``shell.log`` writes to fd 1 directly, so these two read it with ``capfd``.
     def test_secret_that_is_not_json_yields_no_token(self, token_env, create_secret, capfd):
         arn = create_secret("not json")
 
@@ -111,8 +101,6 @@ class TestLinearTokenFromSecretsManager:
         arn = f"arn:aws:secretsmanager:us-east-1:000000000000:secret:absent-{uuid.uuid4().hex}"
 
         assert resolve_linear_api_token({"linear_oauth_secret_arn": arn}) == ""
-        # The resolver escalates to ERROR only for the two "will not self-heal"
-        # codes, matching on the code string the service returns.
         assert "ERROR resolve_linear_api_token failed: ResourceNotFoundException" in (
             capfd.readouterr().out
         )

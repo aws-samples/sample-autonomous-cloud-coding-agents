@@ -48,10 +48,6 @@ const VIEWS: Readonly<Record<TaskView, { label: string; status?: readonly TaskSt
 
 const VIEW_OPTIONS: SelectProps.Option[] = (Object.keys(VIEWS) as TaskView[]).map((value) => ({ value, label: VIEWS[value].label }));
 
-/**
- * Sorting and filtering happen in the browser (the API returns newest first and
- * filters only by status and repository), so the page loads this many tasks.
- */
 const MAX_LOADED_TASKS = 500;
 
 const ANY = 'any';
@@ -80,13 +76,11 @@ export function TaskListPage() {
   const query = useTaskList(VIEWS[view].status, repo || undefined);
   const all = useMemo(() => query.data?.pages.flatMap((page) => page.data) ?? [], [query.data]);
 
-  // Keep loading pages so sorting and filtering see every task, up to the cap.
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
   useEffect(() => {
     if (hasNextPage && !isFetchingNextPage && all.length < MAX_LOADED_TASKS) void fetchNextPage();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage, all.length]);
 
-  /** Repositories seen so far, plus the chosen one even when no loaded task uses it. */
   const repoOptions = useMemo<SelectProps.Option[]>(() => {
     const repos = new Set(all.map((t) => t.repo).filter((r): r is string => !!r));
     if (repo) repos.add(repo);

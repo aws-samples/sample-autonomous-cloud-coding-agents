@@ -1,4 +1,3 @@
 dist/
 coverage/
-# Live dev config fetched from your deployment by `mise //web:dev:live`.
 .config.local.json

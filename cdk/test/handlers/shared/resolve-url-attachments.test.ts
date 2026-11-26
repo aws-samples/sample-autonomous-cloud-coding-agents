@@ -46,7 +46,7 @@ describe('isPrivateIp', () => {
     });
 
     test('blocks 169.254.x.x (link-local)', () => {
-      expect(isPrivateIp('169.254.169.254')).toBeDefined(); // AWS metadata
+      expect(isPrivateIp('169.254.169.254')).toBeDefined();
       expect(isPrivateIp('169.254.0.1')).toBeDefined();
     });
 
@@ -80,7 +80,7 @@ describe('isPrivateIp', () => {
       expect(isPrivateIp('8.8.8.8')).toBeUndefined();
       expect(isPrivateIp('1.1.1.1')).toBeUndefined();
       expect(isPrivateIp('203.0.113.1')).toBeUndefined();
-      expect(isPrivateIp('100.63.255.255')).toBeUndefined(); // Just below CGN
+      expect(isPrivateIp('100.63.255.255')).toBeUndefined();
     });
   });
 
@@ -119,9 +119,6 @@ describe('isPrivateIp', () => {
     });
 
     test('blocks an IPv6 address written with an IPv4 address inside, whatever it embeds', () => {
-      // The download of Linear uploads checked the embedded address with a rule of
-      // its own before it shared this function: the compatible form (::x.x.x.x),
-      // and any spelling that ends in "::" or "::ffff:" and a private address.
       expect(isPrivateIp('::169.254.169.254')).toBeDefined();
       expect(isPrivateIp('::0.0.0.2')).toBeDefined();
       expect(isPrivateIp('::8.8.8.8')).toBeDefined();
@@ -130,8 +127,8 @@ describe('isPrivateIp', () => {
     });
 
     test('allows public IPv6 addresses', () => {
-      expect(isPrivateIp('2001:4860:4860::8888')).toBeUndefined(); // Google DNS
-      expect(isPrivateIp('2606:4700:4700::1111')).toBeUndefined(); // Cloudflare DNS
+      expect(isPrivateIp('2001:4860:4860::8888')).toBeUndefined();
+      expect(isPrivateIp('2606:4700:4700::1111')).toBeUndefined();
     });
   });
 
@@ -144,11 +141,6 @@ describe('isPrivateIp', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// resolveUrlAttachments integration tests
-// ---------------------------------------------------------------------------
-
-// Mock DNS, https, and S3
 jest.mock('dns', () => ({
   promises: {
     resolve4: jest.fn(),
@@ -156,7 +148,6 @@ jest.mock('dns', () => ({
   },
 }));
 
-// Only the request is faked: no test opens a socket. The Agent stays the real one.
 jest.mock('https', () => ({ ...jest.requireActual('https'), request: jest.fn() }));
 
 jest.mock('@aws-sdk/client-s3', () => ({
@@ -201,7 +192,6 @@ describe('resolveUrlAttachments', () => {
     bedrockClient: {},
   };
 
-  /** One answer of the remote server; `afterMs` is the time it takes to arrive. */
   interface ServerAnswer {
     readonly status: number;
     readonly headers?: Record<string, string>;
@@ -209,11 +199,6 @@ describe('resolveUrlAttachments', () => {
     readonly afterMs?: number;
   }
 
-  /**
-   * Script the remote server: one answer per https.request call, in order. An answer
-   * arrives as Node delivers one: in a later turn of the event loop, the body in two
-   * chunks. Destroying the request cancels it.
-   */
   function serverAnswers(...answers: ServerAnswer[]): void {
     for (const { status, headers = {}, body, afterMs = 0 } of answers) {
       httpsRequest.mockImplementationOnce((_options: unknown, onResponse: (res: EventEmitter) => void) => {
@@ -237,7 +222,6 @@ describe('resolveUrlAttachments', () => {
     }
   }
 
-  /** A URL attachment as create-task stores it: not fetched yet, named after the last path segment. */
   const pendingUrl = (sourceUrl: string, attachmentId = 'att-1') => createAttachmentRecord({
     attachment_id: attachmentId,
     type: 'url',
@@ -258,14 +242,13 @@ describe('resolveUrlAttachments', () => {
     jest.clearAllMocks();
     httpsRequest.mockReset();
     dns.resolve4.mockResolvedValue(['1.2.3.4']);
-    isAllowedMimeType.mockReturnValue(true); // one test below turns it to false
+    isAllowedMimeType.mockReturnValue(true);
     screenImage.mockResolvedValue({
       content: PNG_MAGIC,
       contentType: 'image/png',
       checksum: 'abc123',
       screening: { status: 'passed' },
     });
-    // Like the real function, it hands back the content it was given.
     screenTextFile.mockImplementation(async (content: Buffer, contentType: string) => (
       { content, contentType, checksum: 'abc123', screening: { status: 'passed' } }
     ));
@@ -356,9 +339,6 @@ describe('resolveUrlAttachments', () => {
   test('rejects URLs with unsupported content type', async () => {
     isAllowedMimeType.mockReturnValue(false);
 
-    // We need to mock the actual HTTP request here, but since pinnedHttpsRequest
-    // uses native https module which is hard to mock cleanly, we verify the
-    // validation-level protection via isAllowedMimeType
     const urlAttachment = createAttachmentRecord({
       attachment_id: 'att-1',
       type: 'url',
@@ -368,7 +348,6 @@ describe('resolveUrlAttachments', () => {
       source_url: 'https://example.com/file.exe',
     });
 
-    // DNS resolves to a private IP so we don't need to actually fetch
     dns.resolve4.mockResolvedValue(['169.254.169.254']);
 
     await expect(resolveUrlAttachments(
@@ -462,8 +441,6 @@ describe('resolveUrlAttachments', () => {
 
     await expect(outcome).rejects.toBeInstanceOf(AttachmentResolutionError);
     await expect(outcome).rejects.toThrow('Combined attachment size exceeds the 52428800-byte task limit.');
-    // Five files of 10 MB are exactly the limit and are kept; the sixth is fetched, counted
-    // and refused; the other four are never asked for.
     expect(httpsRequest).toHaveBeenCalledTimes(6);
     expect(mockS3Client.send).toHaveBeenCalledTimes(5);
   });
@@ -496,7 +473,6 @@ describe('resolveUrlAttachments', () => {
       jest.useRealTimers();
     });
 
-    /** Let `ms` of fake time pass while the resolver runs, and report how the call ended and when. */
     async function outcomeAfter(ms: number, attachments: AttachmentRecord[]) {
       const started = Date.now();
       const outcome = resolveAll(attachments).then(
@@ -508,8 +484,6 @@ describe('resolveUrlAttachments', () => {
     }
 
     test('gives the URL attachments of a task 30 seconds together', async () => {
-      // A host that answers every request after 9 s, under the 10 s limit of one request:
-      // two redirects, then the image. That is 27 s for one image and 81 s for three.
       const slowImage: ServerAnswer[] = [
         { status: 302, headers: { location: '/moved' }, afterMs: 9_000 },
         { status: 302, headers: { location: '/moved-again' }, afterMs: 9_000 },
@@ -522,13 +496,11 @@ describe('resolveUrlAttachments', () => {
         error: 'AttachmentResolutionError: URL attachments could not be fetched and screened within 30s (stopped at https://img.example.com/b.png).',
         afterMs: 30_000,
       });
-      // The first image arrived at 27 s and was stored; the second got the 3 s that were left.
       expect(httpsRequest).toHaveBeenCalledTimes(4);
       expect(mockS3Client.send).toHaveBeenCalledTimes(1);
     });
 
     test('starts no request once the 30 seconds are used up', async () => {
-      // The lookup of the host name alone takes 31 s; no timer covers a lookup.
       dns.resolve4.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(['1.2.3.4']), 31_000)));
       serverAnswers({ status: 200, headers: { 'content-type': 'image/png' }, body: PNG_MAGIC });
 

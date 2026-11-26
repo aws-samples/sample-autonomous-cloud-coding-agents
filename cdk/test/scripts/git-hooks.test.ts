@@ -17,31 +17,16 @@
  *  SOFTWARE.
  */
 
-/**
- * Test for the commands of the local git hooks in `.pre-commit-config.yaml`.
- *
- * The hooks start through a login shell (`bash -lc`). On macOS that shell puts
- * /usr/local/bin and /opt/homebrew/bin back in front of the directories mise had
- * added to PATH, and mise leaves them there: a hook then runs the node, gitleaks
- * or semgrep of the machine and not the version `mise.toml` pins. Which tool a
- * hook finds depends on the machine, so no test can show it everywhere. This one
- * holds the two things that prevent it: `MISE_ACTIVATE_AGGRESSIVE=1` in front of
- * every mise task, which makes mise put its tools first, and no `node` called
- * without mise.
- *
- * Same placement rationale as `check-constants-sync.test.ts`: `cdk/test/` is the
- * Jest tree that can reach the repository root.
- */
+// On macOS a login shell (`bash -lc`) puts /usr/local/bin and /opt/homebrew/bin back in front of the directories mise
+// added to PATH, and mise leaves them there unless `MISE_ACTIVATE_AGGRESSIVE=1` is set.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 const CONFIG = fs.readFileSync(path.resolve(__dirname, '../../../.pre-commit-config.yaml'), 'utf-8');
 
-/** The command of every hook that starts through a login shell: what stands between the quotes. */
 const COMMANDS = [...CONFIG.matchAll(/^ +entry: bash -lc '(.*)'/gm)].map((match) => match[1]);
 
-/** Where a command starts its first mise task (`mise run <task>` or `mise //<package>:<task>`), or -1. */
 const firstTask = (command: string): number => command.search(/\bmise (run |\/\/)/);
 
 describe('git hooks that start through a login shell', () => {
@@ -63,7 +48,6 @@ const HOOKS = new Map(
 );
 
 describe('type-check hooks', () => {
-  /** The packages that have an ESLint hook: the TypeScript packages. */
   const packages = [...HOOKS.keys()].filter((id) => id.endsWith('-eslint')).map((id) => id.slice(0, -'-eslint'.length));
   const hook = (pkg: string): string => HOOKS.get(`${pkg}-typecheck`) ?? '';
 
@@ -78,7 +62,6 @@ describe('type-check hooks', () => {
     for (const pkg of packages) {
       const files = /^ +files: (.*)$/m.exec(hook(pkg))?.[1];
       const exclude = /^ +exclude: (.*)$/m.exec(hook(pkg))?.[1];
-      /** prek starts a hook for a file that matches its `files` and does not match its `exclude`. */
       const starts = (file: string): boolean =>
         files !== undefined && new RegExp(files).test(file) && (exclude === undefined || !new RegExp(exclude).test(file));
 

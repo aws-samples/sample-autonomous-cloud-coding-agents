@@ -46,9 +46,7 @@ export interface DecisionPostCommitInput {
 /**
  * Shared approve/deny tail after the decision transaction commits: write the
  * `approval_decision_recorded` audit event, then attempt the optional MicroVM
- * wake. Neither step may fail the request — the human decision is already
- * committed on TaskApprovalsTable, and the durable supervisor recovers a
- * sleeping worker if the wake cannot finish here.
+ * wake. Neither step may fail the request.
  */
 export async function recordDecisionPostCommit(input: DecisionPostCommitInput): Promise<void> {
   const postCommit = approvalPostCommitOptions(input.invocationStartedMs, input.context);

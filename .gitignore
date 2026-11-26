@@ -1,6 +1,3 @@
-# ──────────────────────────────────────────────
-# Logs
-# ──────────────────────────────────────────────
 logs
 *.log
 npm-debug.log*
@@ -8,17 +5,11 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
-# ──────────────────────────────────────────────
-# Runtime / process
-# ──────────────────────────────────────────────
 pids
 *.pid
 *.seed
 *.pid.lock
 
-# ──────────────────────────────────────────────
-# Coverage & test reports
-# ──────────────────────────────────────────────
 coverage
 agent/.coverage
 *.lcov
@@ -34,14 +25,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 junit.xml
 /coverage/
 
-# ──────────────────────────────────────────────
-# Node / JS
-# ──────────────────────────────────────────────
 node_modules/
-# Also match a SYMLINK named node_modules. The trailing-slash form above matches
-# directories only, so a symlink (e.g. one pointing at a shared install in
-# another worktree) slips past it and can be committed by `git add -A`. A
-# committed symlink then breaks CI at install time with EEXIST.
+# The trailing-slash form matches directories only: this one also matches a symlink.
 node_modules
 jspm_packages/
 .eslintcache
@@ -50,16 +35,10 @@ jspm_packages/
 .cache
 .parcel-cache/
 
-# ──────────────────────────────────────────────
-# Python
-# ──────────────────────────────────────────────
 *.pyc
 __pycache__/
 agent/.venv/
 
-# ──────────────────────────────────────────────
-# CDK / CloudFormation outputs
-# ──────────────────────────────────────────────
 cdk.out/
 /cdk/cdk.out*/
 /cdk/cdk-*.out/
@@ -67,68 +46,37 @@ cdk.out/
 cdk.context.json
 /assets/
 
-# Output of the integ runner, which #1084 removed together with the integ test.
-# Nothing writes these two directories any more. A checkout that ran the test
-# may still have them: the snapshot holds a copy of every Lambda handler asset,
-# about 100 MB. These lines keep `git add .` from staging them there, and
-# `rm -rf cdk/test/integ` removes them. Only the runner's own directory names
-# are ignored, so that a new file in cdk/test/integ still shows up.
 /cdk/test/integ/*.snapshot/
 /cdk/test/integ/cdk-integ.out.*/
 
-# ──────────────────────────────────────────────
-# Build outputs (compiled TS → JS)
-# ──────────────────────────────────────────────
 /cdk/lib/
 /cli/lib/
 /dist/
 build/Release
 
-# ──────────────────────────────────────────────
-# Docs build
-# ──────────────────────────────────────────────
 /docs/dist/
 local-docs/
 
-# ──────────────────────────────────────────────
-# IDE / editor
-# ──────────────────────────────────────────────
 .idea
 .vscode
 .DS_Store
 
-# ──────────────────────────────────────────────
-# Security scan outputs
-# ──────────────────────────────────────────────
 gitleaks-*.json
 agent/gitleaks-report.json
 
-# ──────────────────────────────────────────────
-# Environment / secrets
-# ──────────────────────────────────────────────
 .env
 .env.*
 .claude/settings.local.json
 
-# ──────────────────────────────────────────────
-# Claude Code plugins
-# ──────────────────────────────────────────────
 .mcp.json
 .remember/
 .claude/worktrees/
 
-# ──────────────────────────────────────────────
-# Misc
-# ──────────────────────────────────────────────
 *.bkp
 Plans/
 
-# draw.io editor artifacts
 .$*.drawio.bkp
 
-# ──────────────────────────────────────────────
-# Explicit keeps (override ignores above)
-# ──────────────────────────────────────────────
 !.node-version
 !.ort.yml
 !/.github/workflows/build.yml

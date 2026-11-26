@@ -17,10 +17,6 @@
  *  SOFTWARE.
  */
 
-// The sweep's eligibility + body rendering are covered by the pure planner's own
-// tests; these cover the handler's I/O wiring — that a plan reaches the channel
-// as the right issue/parent/reply triple, and that failures stay non-fatal.
-
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({ send: ddbSend })),
@@ -34,8 +30,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
-// Mock at the per-surface helper, NOT the channel: the real Linear adapter runs,
-// so the test exercises the actual channel-op → surface-call mapping.
 const upsertThreadedReplyMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
   upsertThreadedReply: (...args: unknown[]) => upsertThreadedReplyMock(...args),
@@ -58,18 +52,15 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = REGISTRY;
 process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
 
-// The sweep compares each task's created_at against the wall clock, so pin now.
 const NOW = Date.parse('2026-06-29T13:30:00Z');
 
-// Imported after the env + mocks above: the handler reads them at module load.
 import { handler } from '../../src/handlers/iteration-heartbeat-sweep';
 
-/** A RUNNING iteration task image, as the StatusIndex projects it. */
 function runningTask(overrides: { taskId?: string; createdAt?: string } = {}) {
   return {
     task_id: { S: overrides.taskId ?? 'task-1' },
     status: { S: 'RUNNING' },
-    created_at: { S: overrides.createdAt ?? '2026-06-29T13:20:00Z' }, // 10 min in
+    created_at: { S: overrides.createdAt ?? '2026-06-29T13:20:00Z' },
     channel_source: { S: 'linear' },
     pr_number: { N: '42' },
     channel_metadata: {
@@ -122,20 +113,11 @@ describe('iteration heartbeat sweep', () => {
 
     expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
     const [ctx, issueId, parentCommentId, body, existingReplyId, options] = upsertThreadedReplyMock.mock.calls[0];
-    // The channel builds the per-workspace context from the task's own workspace.
     expect(ctx).toEqual({ linearWorkspaceId: 'ws-1', registryTableName: REGISTRY });
-    // The reply is addressed to the issue the trigger comment lives on, threaded
-    // under that comment, editing the reply captured at trigger time.
     expect(issueId).toBe('issue-1');
     expect(parentCommentId).toBe('cmt-1');
     expect(existingReplyId).toBe('reply-1');
     expect(body).toContain('🔄 Working');
-    // A separate writer appends the deploy preview to this same reply, so the
-    // heartbeat must carry it over rather than overwrite it — AND, as the least
-    // important writer of the three, it must yield entirely once the reply has
-    // settled rather than re-render "working" over an outcome.
-    // A liveness tick is progress, never an outcome, so it never asks for the
-    // terminal writer's restore-if-overwritten behaviour.
     expect(options).toEqual({ preservePreview: true, skipIfSettled: true, repairIfOverwritten: false });
   });
 
@@ -229,7 +211,6 @@ describe('iteration heartbeat sweep', () => {
   });
 
   test('a task whose channel has no credentials registry is skipped, not attempted', async () => {
-    // The handler reads the registries at module load: load it again without Jira's.
     jest.resetModules();
     delete process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
     const { handler: withoutJira } = await import('../../src/handlers/iteration-heartbeat-sweep');

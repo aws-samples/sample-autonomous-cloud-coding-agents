@@ -27,7 +27,6 @@ describe('parseChoice', () => {
     expect(parseChoice('week', RANGES, 'month')).toBe('week');
   });
 
-  // `constructor` and `toString` are on every object: a label record does not offer them.
   it.each([null, '', 'year', 'WEEK', 'constructor', 'toString'])('falls back when the URL has %s', (value) => {
     expect(parseChoice(value, RANGES, 'month')).toBe('month');
   });

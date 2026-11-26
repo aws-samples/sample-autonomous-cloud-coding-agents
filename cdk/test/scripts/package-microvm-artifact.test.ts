@@ -31,9 +31,6 @@ const BUILD_INPUTS = [
   'agent/prepare-commit-msg.sh', 'agent/managed-settings.json', 'contracts/constants.json',
 ];
 
-// An executable fake CLI exercises the real shell/Python packagers without
-// network access. It validates PUT checksums and enforces If-None-Match against
-// a local object store; unexpected AWS operations fail instead of falling back.
 const AWS = `#!/usr/bin/env python3
 import base64, hashlib, json, os, pathlib, sys
 args = sys.argv[1:]
@@ -98,8 +95,6 @@ describe('MicroVM artifact packaging and immutable publication', () => {
       path.join(fixture, 'cdk/scripts/package-microvm-artifact.sh'), ...args,
     ], {
       encoding: 'utf8',
-      // Measured idle: 7 to 11 seconds. A parallel build takes several times that, and the
-      // previous 20s cap killed those runs (`status: null`). 120s is about ten times the idle run.
       timeout: 120_000,
       env: {
         ...process.env,
@@ -123,7 +118,6 @@ describe('MicroVM artifact packaging and immutable publication', () => {
     for (const name of ['package-microvm-artifact.sh', 'build-microvm-artifact.py']) {
       write(`cdk/scripts/${name}`, fs.readFileSync(path.join(REPO, 'scripts', name), 'utf8'));
     }
-    // The script prints the bundle version deployments require from this file.
     write('cdk/bootstrap/BOOTSTRAP_VERSION', fs.readFileSync(path.join(REPO, 'bootstrap', 'BOOTSTRAP_VERSION'), 'utf8'));
     write('agent/Dockerfile', 'FROM scratch\nCOPY agent/src/ /app/src/\n');
     for (const file of BUILD_INPUTS) write(file, `contents of ${file}\n`);
@@ -145,7 +139,6 @@ describe('MicroVM artifact packaging and immutable publication', () => {
     const hash = createHash('sha256').update(bytes).digest('hex');
     expect(firstKey).toBe(`microvm-images/agent-artifact-${hash}.zip`);
     expect(first.stdout).toContain(`--context microvm_artifact_sha256=${hash}`);
-    // The printed instructions name the bundle preflight requires, not a stale copy.
     const required = fs.readFileSync(path.join(REPO, 'bootstrap', 'BOOTSTRAP_VERSION'), 'utf8').trim();
     expect(first.stdout).toContain(`Both layouts require bootstrap policy bundle ${required}`);
     expect(first.stdout).toContain(`Deployments require bootstrap bundle ${required}`);

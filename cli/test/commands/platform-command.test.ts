@@ -61,7 +61,6 @@ describe('platform outputs command', () => {
     expect(output).toContain('ApiUrl');
     expect(output).toContain('All outputs:');
     expect(output).toContain('SomeOther');
-    // Key outputs section must precede the catch-all section.
     expect(output.indexOf('Key outputs:')).toBeLessThan(output.indexOf('All outputs:'));
   });
 

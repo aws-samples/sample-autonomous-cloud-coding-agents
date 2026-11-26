@@ -37,7 +37,6 @@ describe('infrastructurePolicy', () => {
   });
 
   it('is under 6144 characters when serialized', () => {
-    // AWS managed policy size limit
     expect(rendered.length).toBeLessThan(6144);
   });
 
@@ -58,8 +57,7 @@ describe('infrastructurePolicy', () => {
 
   it('lets the execution role pass ONLY itself, ONLY to CloudFormation (nested stacks)', () => {
     // CloudFormation creates nested stacks as the execution role and passes that
-    // role on to each child, which needs iam:PassRole on the role itself. Keep this
-    // narrow: it must never become a general PassRole grant.
+    // role on to each child, which needs iam:PassRole on the role itself.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{
       Sid: string;
@@ -83,12 +81,6 @@ describe('infrastructurePolicy', () => {
   });
 
   it('KEEPS the iam:PassedToService allowlist on IAMPassRole', () => {
-    // ADR-021 P2r2-F9 added an UNCONDITIONED `iam:PassRole` to the
-    // `compute-lambda-microvm` policy, because the Lambda MicroVMs service presents
-    // no usable value for this key. That fix must not spread: this statement covers
-    // every role in the stack by prefix, so dropping its condition here would
-    // relax ~30 roles to fix two. The narrow statement lives in the conditional
-    // per-backend policy precisely so this one can stay as it is.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{
       Sid: string;
@@ -130,7 +122,6 @@ describe('IaCRole-ABCA-Application', () => {
   });
 
   it('is under 6144 characters when serialized', () => {
-    // AWS managed policy size limit
     expect(rendered.length).toBeLessThan(6144);
   });
 
@@ -192,10 +183,6 @@ describe('IaCRole-ABCA-Application', () => {
   });
 
   it('grants Put/Delete provisioned-concurrency, not just Get (#409)', () => {
-    // The Slack-events function pins provisioned concurrency on its `live`
-    // alias, so the exec role needs Put (create/update) and Delete (removal),
-    // not only the Get verb. Get-without-Put rolled the deploy back with
-    // AccessDenied on lambda:PutProvisionedConcurrencyConfig.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
     const allActions = statements.flatMap((s) =>
@@ -206,11 +193,6 @@ describe('IaCRole-ABCA-Application', () => {
   });
 
   it('LambdaEventSourceMappings grants tagging (CDK event-source constructs tag the mapping)', () => {
-    // Regression guard for #407: DynamoDBEventSource (and peers) tag the
-    // created event source mapping, so the exec role needs Tag/UntagResource
-    // on event-source-mapping:*. The TagResource granted elsewhere is scoped
-    // to function:*/layer:* and does not cover mappings, so a fresh deploy
-    // rolled back with AccessDenied on lambda:TagResource. Lock the contract.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{ Sid: string; Action?: string | string[] }>;
     const esm = statements.find((s) => s.Sid === 'LambdaEventSourceMappings');
@@ -222,14 +204,6 @@ describe('IaCRole-ABCA-Application', () => {
   });
 
   it('SecretsManager statement allow-lists a secret pattern for every integration that creates a secret', () => {
-    // Regression guard for #402: each integration construct that creates a
-    // Secrets Manager secret (GitHub token, Slack, Linear, Jira, GitHub
-    // screenshot) names it after its construct id, so the CFN exec role's
-    // scoped CreateSecret allow-list must carry a matching prefix. A missing
-    // pattern is invisible to the service-prefix check above (it's still
-    // `secretsmanager:`) but fails the deploy with AccessDenied at
-    // CreateSecret time. Jira shipped without its pattern; this locks the
-    // contract so the next integration can't repeat it.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{
       Sid: string;
@@ -254,12 +228,6 @@ describe('IaCRole-ABCA-Application', () => {
   });
 
   it('SNS statement grants the create + subscribe verbs the OperationalAlerts topic needs (#629)', () => {
-    // Per-verb guard (mirrors the #409/#407 provisioned-concurrency and
-    // event-source-mapping-tagging guards): a missing verb is invisible to
-    // the service-prefix check above (still `sns:`) but rolls back a fresh
-    // deploy with AccessDenied. CreateTopic creates the topic;
-    // Subscribe/GetTopicAttributes are exercised when `-c alertEmail=...`
-    // adds an email subscription.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{ Sid: string; Action?: string | string[] }>;
     const sns = statements.find((s) => s.Sid === 'SNS');
@@ -282,7 +250,6 @@ describe('IaCRole-ABCA-Observability', () => {
   });
 
   it('is under 6144 characters when serialized', () => {
-    // AWS managed policy size limit
     expect(rendered.length).toBeLessThan(6144);
   });
 
@@ -340,14 +307,6 @@ describe('IaCRole-ABCA-Observability', () => {
   });
 
   it('S3ApplicationBuckets grants the bucket-feature actions the stack buckets enable', () => {
-    // Regression guard for #404: the exec role must hold a CreateBucket-time
-    // action for every feature the application buckets turn on, or a fresh
-    // deploy rolls back with AccessDenied at that specific configure call.
-    // AttachmentsBucket sets `versioned: true`, so PutBucketVersioning (and
-    // GetBucketVersioning for the read/drift path) are required — they were
-    // missing, which is how this reached main. The service-prefix check above
-    // can't catch it (still `s3:`). If a bucket later enables notifications,
-    // CORS, etc., add the matching action here and to the policy together.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{
       Sid: string;
@@ -372,9 +331,6 @@ describe('IaCRole-ABCA-Observability', () => {
   });
 
   it('KMSCustomerManagedKeys grants CreateKey + tag on * (the unscopable create path) (#629)', () => {
-    // kms:CreateKey and kms:TagResource must be unconditioned on `*`:
-    // the key ARN does not exist at create time and TagResource applies
-    // the very tag that scopes the lifecycle statement below.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{
       Sid: string;
@@ -386,17 +342,12 @@ describe('IaCRole-ABCA-Observability', () => {
     const actions = Array.isArray(create!.Action) ? create!.Action : [create!.Action];
     expect(actions).toContain('kms:CreateKey');
     expect(actions).toContain('kms:TagResource');
-    // The create/read statement must NOT carry policy-mutation actions —
-    // those belong to the tag-scoped lifecycle statement.
     expect(actions).not.toContain('kms:PutKeyPolicy');
     expect(actions).not.toContain('kms:ScheduleKeyDeletion');
     expect(create!.Condition).toBeUndefined();
   });
 
   it('KMSCustomerManagedKeysLifecycle gates key-takeover actions on the ABCA resource tag (#629)', () => {
-    // PutKeyPolicy / ScheduleKeyDeletion on `*` would let the deploy role
-    // take over or delete any CMK in the account. They are confined to
-    // keys carrying the `ABCA=operational-alerts` tag the construct stamps.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{
       Sid: string;
@@ -423,7 +374,6 @@ describe('IaCRole-ABCA-Compute-AgentCore', () => {
   });
 
   it('is under 6144 characters when serialized', () => {
-    // AWS managed policy size limit
     expect(rendered.length).toBeLessThan(6144);
   });
 
@@ -467,7 +417,6 @@ describe('IaCRole-ABCA-Compute-ECS', () => {
   });
 
   it('is under 6144 characters when serialized', () => {
-    // AWS managed policy size limit
     expect(rendered.length).toBeLessThan(6144);
   });
 
@@ -511,7 +460,6 @@ describe('computeLambdaMicrovmPolicy', () => {
   });
 
   it('is under 6144 characters when serialized', () => {
-    // AWS managed policy size limit
     expect(rendered.length).toBeLessThan(6144);
   });
 
@@ -555,14 +503,6 @@ describe('computeLambdaMicrovmPolicy', () => {
     }
 
     it('carries NO iam:PassedToService condition — the service presents no usable value', () => {
-      // The whole point of the statement. `infrastructure`'s IAMPassRole already
-      // matches these roles by prefix, but its `iam:PassedToService` allowlist is
-      // DENIED on this path: live 2026-08-07, CloudFormation could not pass the
-      // build role to CreateMicrovmImage ("...is not authorized to perform:
-      // iam:PassRole ... (Service: LambdaMicrovms, Status Code: 403)") while the
-      // out-of-band create-image call passed the SAME role successfully with
-      // unconditioned operator credentials. Re-adding a condition here re-breaks
-      // the CDK-managed image path.
       expect(passRoleStatement().Condition).toBeUndefined();
     });
 
@@ -580,18 +520,10 @@ describe('computeLambdaMicrovmPolicy', () => {
         'arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole',
         'arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmConnectorRole',
       ]);
-      // NOT the stack-wide role prefix the conditioned statement uses: an
-      // unconditioned pass on `backgroundagent-dev-*` would drop the
-      // iam:PassedToService constraint for every role in the stack to fix two.
       expect(resources).not.toContain('arn:aws:iam::*:role/backgroundagent-dev-*');
     });
 
     it('does NOT cover the MicroVM execution role', () => {
-      // CloudFormation never passes it — the orchestrator does, at RunMicrovm,
-      // under its own exact-ARN grant (task-orchestrator.ts). Including it here
-      // would extend an unconditioned pass to the role that runs untrusted repo
-      // code, for no deploy-time reason. The live physical name is
-      // `backgroundagent-dev-LambdaMicrovmComputeExecutionRo-<suffix>`.
       const resources = passRoleStatement().Resource as string[];
       const executionRoleArn =
         'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeExecutionRo-abc123';
@@ -603,14 +535,8 @@ describe('computeLambdaMicrovmPolicy', () => {
     });
 
     it('matches the live physical names CloudFormation generated for both roles', () => {
-      // Regression guard on the truncation window: CFN truncates the logical id to
-      // fit 64 chars before appending a random suffix, so a pattern that reaches
-      // past the cut silently matches nothing. The ROLE-NAME segments below are
-      // verbatim from the live run (the build role's is the one in the
-      // AccessDenied above) — that is the part the assertion exercises. The
-      // account id is the repo's standard placeholder, not the live one: the glob
-      // match depends only on the role-name segment, and this is a public sample
-      // repo.
+      // CFN truncates the logical id to fit 64 chars before appending a random suffix,
+      // so a pattern that reaches past the cut silently matches nothing.
       const resources = passRoleStatement().Resource as string[];
       const live = [
         'arn:aws:iam::123456789012:role/backgroundagent-dev-LambdaMicrovmComputeBuildRoleF0-9FxjQbiJC3px',
@@ -632,7 +558,6 @@ describe('computeLambdaMicrovmPolicy', () => {
           .test(`arn:aws:iam::123456789012:role/${name}`));
       expect(matches('backgroundagent-dev-MicrovmBuildRole')).toBe(true);
       expect(matches('backgroundagent-dev-MicrovmConnectorRole')).toBe(true);
-      // A supported stack name such as `backgroundagent-dev-team-b` (#904 review).
       expect(matches('backgroundagent-dev-team-b-MicrovmBuildRole')).toBe(true);
       expect(matches('backgroundagent-dev-team-b-MicrovmConnectorRole')).toBe(true);
       for (const name of [
@@ -654,18 +579,12 @@ describe('computeLambdaMicrovmPolicy', () => {
       Array.isArray(s.Action) ? s.Action : [s.Action],
     );
 
-    // AWS::Lambda::MicrovmImage + AWS::Lambda::NetworkConnector, plus the
-    // documented dependent of CreateMicrovmImage.
     expect(allActions).toContain('lambda:CreateMicrovmImage');
     expect(allActions).toContain('lambda:CreateNetworkConnector');
     expect(allActions).toContain('lambda:PassNetworkConnector');
   });
 
   it('grants NO runtime session lifecycle actions (those belong to the orchestrator role)', () => {
-    // A deploy role that can start, suspend, or mint tokens for MicroVMs is a
-    // privilege escalation — the orchestrator gets those, per-deployment.
-    // Compared as exact actions, not substrings: `lambda:GetMicrovmImage` (which
-    // the deploy role legitimately needs) contains `lambda:GetMicrovm`.
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{ Action: string | string[] }>;
     const allActions = new Set(statements.flatMap((s) =>
@@ -705,8 +624,6 @@ describe('Cross-policy validation', () => {
   });
 
   it('returns exactly 6 policies', () => {
-    // infrastructure, application, observability, compute-agentcore,
-    // compute-ecs, compute-lambda-microvm (ADR-021).
     expect(policies).toHaveLength(6);
   });
 

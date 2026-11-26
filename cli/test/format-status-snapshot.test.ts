@@ -22,10 +22,6 @@ import { ChannelSource, TaskDetail, TaskEvent } from '../src/types';
 
 const NOW = Date.parse('2026-04-29T15:30:20Z');
 
-/**
- * Build a TaskDetail with sensible defaults for status-snapshot tests.
- * Callers override only the fields relevant to the scenario under test.
- */
 function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
   return {
     task_id: 'abc123',
@@ -46,11 +42,8 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     channel_source: 'api',
     created_at: '2026-04-29T15:27:00Z',
     updated_at: '2026-04-29T15:30:00Z',
-    started_at: '2026-04-29T15:27:06Z', // 3m 14s before NOW
+    started_at: '2026-04-29T15:27:06Z',
     completed_at: null,
-    // Default null: the exact-output assertion below must not have to carry a
-    // Heartbeat line, and "the agent has not beaten yet" is the honest default for
-    // a freshly-built fixture.
     agent_heartbeat_at: null,
     compute_type: null,
     duration_s: null,
@@ -108,9 +101,6 @@ describe('formatStatusSnapshot', () => {
 
   test('happy path renders the full template', () => {
     const task = buildTask();
-    // Events are newest-first per the ``?desc=1`` contract. ULIDs are
-    // lexicographically time-sortable; event_ids are chosen so the
-    // ascending lexical order matches the ascending timestamp order.
     const events: TaskEvent[] = [
       mkEvent({
         event_id: '01ARZ3NDEKTSV4RRFFQ69G5F04',
@@ -133,7 +123,7 @@ describe('formatStatusSnapshot', () => {
       mkEvent({
         event_id: '01ARZ3NDEKTSV4RRFFQ69G5F01',
         event_type: 'agent_milestone',
-        timestamp: '2026-04-29T15:29:38Z', // 42s before NOW
+        timestamp: '2026-04-29T15:29:38Z',
         metadata: { milestone: 'nudge_acknowledged' },
       }),
     ];
@@ -159,7 +149,7 @@ describe('formatStatusSnapshot', () => {
     const task = buildTask({
       status: 'SUBMITTED',
       started_at: null,
-      created_at: '2026-04-29T15:30:18Z', // 2s before NOW
+      created_at: '2026-04-29T15:30:18Z',
       max_turns: null,
       max_budget_usd: null,
       turns_attempted: null,
@@ -179,9 +169,9 @@ describe('formatStatusSnapshot', () => {
     const task = buildTask({
       status: 'COMPLETED',
       completed_at: '2026-04-29T15:29:50Z',
-      duration_s: 164, // 2m 44s — authoritative SDK value
+      duration_s: 164,
       cost_usd: 0.44,
-      turns_attempted: 14, // the Claude Code CLI's own count: above the limit of 12
+      turns_attempted: 14,
       turns_completed: 11,
     });
 
@@ -189,15 +179,11 @@ describe('formatStatusSnapshot', () => {
 
     expect(rendered).toContain('Task abc123 — COMPLETED (2m 44s total)');
     expect(rendered).toContain('Current:       task completed');
-    // With no live cost event, falls back to task.cost_usd.
     expect(rendered).toContain('Cost:          $0.44 / budget $2.00');
-    // The count shown against the limit is turns_completed, never turns_attempted (#919).
     expect(rendered).toContain('Turn:          11 / 12');
   });
 
   test('finished task shows turns_completed whatever the event window holds', () => {
-    // The 20 newest events of a finished task may or may not hold an ``agent_turn``,
-    // and older agents numbered these events per message, not per answer.
     const task = buildTask({
       status: 'COMPLETED',
       completed_at: '2026-04-29T15:29:50Z',
@@ -211,8 +197,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('task stopped at the turn limit shows the limit, not the attempt that was aborted', () => {
-    // Such a task is FAILED, and its record holds the limit as turns_completed
-    // and the limit plus one as turns_attempted.
     const task = buildTask({
       status: 'FAILED',
       completed_at: '2026-04-29T15:29:50Z',
@@ -226,7 +210,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('finished task without a count on its record falls back to the live turn', () => {
-    // A cancelled task: the agent writes no terminal record, so no count.
     const task = buildTask({ status: 'CANCELLED', completed_at: '2026-04-29T15:29:50Z' });
 
     const rendered = formatStatusSnapshot(task, [mkEvent({ metadata: { turn: 5 } })], NOW);
@@ -235,8 +218,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('finished task with a count of 0 on its record falls back to the live turn', () => {
-    // What the record holds when the agent step failed after the session had
-    // made its turns: 0 stands for "no count", not for a task without a turn.
     const task = buildTask({
       status: 'FAILED',
       completed_at: '2026-04-29T15:29:50Z',
@@ -266,9 +247,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('tool_call takes priority over turn for "Current"', () => {
-    // Design contract: the newest agent_tool_call OR agent_turn wins —
-    // whichever appears first in the newest-first list. A tool call
-    // mid-turn is the most useful "what is the agent doing right now".
     const task = buildTask();
     const events: TaskEvent[] = [
       mkEvent({
@@ -296,23 +274,18 @@ describe('formatStatusSnapshot', () => {
     });
 
     const rendered = formatStatusSnapshot(task, [], NOW);
-    // Header still renders; elapsed becomes a placeholder.
     expect(rendered).toContain(`Task abc123 — RUNNING (${'—'})`);
   });
 
   test('formats hours for long-running tasks', () => {
     const task = buildTask({
-      started_at: '2026-04-29T12:25:05Z', // ~3h 5m before NOW
+      started_at: '2026-04-29T12:25:05Z',
     });
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).toMatch(/\(3h 05m elapsed\)/);
   });
 
   test('defensively resorts events so ascending input still renders the newest', () => {
-    // Invariant lock: a future upstream regression (handler, GSI, proxy,
-    // or caller wiring) could pass events ascending by mistake. The
-    // formatter must still identify the newest milestone by event_id so
-    // the snapshot never silently renders a stale tool call as "current".
     const task = buildTask();
     const older = mkEvent({
       event_id: '01ARZ3NDEKTSV4RRFFQ69G5F01',
@@ -326,7 +299,6 @@ describe('formatStatusSnapshot', () => {
       timestamp: '2026-04-29T15:29:50Z',
       metadata: { milestone: 'newer' },
     });
-    // Both orderings must resolve to "newer" as the latest milestone.
     expect(formatStatusSnapshot(task, [newer, older], NOW)).toContain(
       'Last milestone: newer',
     );
@@ -336,24 +308,14 @@ describe('formatStatusSnapshot', () => {
   });
 
   describe('agent_heartbeat_at — in-guest liveness (ADR-021 P2r2-F11)', () => {
-    // `bgagent status` renders this snapshot, so this is the surface that decides
-    // whether the heartbeat is observable at all. It was not: the field lived in
-    // DynamoDB, drove the orchestrator's hang detector, and never reached the API —
-    // so a live verification run polled `status`, saw nothing, and recorded
-    // "heartbeats NOT observed" against the wrong defect.
-
     test('shows the age beside the Last event line while the task is live', () => {
-      const task = buildTask({ agent_heartbeat_at: '2026-04-29T15:29:36Z' }); // 44s before NOW
+      const task = buildTask({ agent_heartbeat_at: '2026-04-29T15:29:36Z' });
       const rendered = formatStatusSnapshot(task, [], NOW);
       expect(rendered).toContain('  Heartbeat:     44s ago');
-      // Ordering is the point of putting it here: control-plane freshness
-      // (`Last event`) and in-guest freshness (`Heartbeat`) read together.
       expect(rendered.indexOf('Heartbeat:')).toBeLessThan(rendered.indexOf('Last event:'));
     });
 
     test('a stale beat is visible as a large age rather than being hidden', () => {
-      // The actionable case: the substrate says RUNNING and the guest went quiet.
-      // 45 s is the write cadence, so ~4 minutes is unambiguous.
       const task = buildTask({ agent_heartbeat_at: '2026-04-29T15:26:20Z' });
       expect(formatStatusSnapshot(task, [], NOW)).toContain('  Heartbeat:     4m 00s ago');
     });
@@ -372,7 +334,7 @@ describe('formatStatusSnapshot', () => {
     });
 
     test('is omitted on ecs, where the agent beats once, at its start, and the age only grows', () => {
-      const task = buildTask({ compute_type: 'ecs', agent_heartbeat_at: '2026-04-29T15:29:36Z' }); // 44s before NOW
+      const task = buildTask({ compute_type: 'ecs', agent_heartbeat_at: '2026-04-29T15:29:36Z' });
       expect(formatStatusSnapshot(task, [], NOW)).not.toContain('Heartbeat:');
     });
 
@@ -383,9 +345,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('missing / non-string timestamp degrades "Last event" to placeholder', () => {
-    // The event table is weakly typed at the storage layer: a malformed
-    // agent write could produce a row without ``timestamp``. Without the
-    // guard this line would render the literal ``undefined``.
     const task = buildTask();
     const brokenEvent = {
       event_id: '01ARZ3NDEKTSV4RRFFQ69G5F10',
@@ -398,13 +357,9 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('live cost and turn events override persisted TaskDetail values', () => {
-    // Contract: a running task may have a fresher ``agent_cost_update`` /
-    // ``agent_turn`` than what was last persisted on the TaskRecord. The
-    // snapshot prefers the live event so the user sees the current state,
-    // not the stale DB row.
     const task = buildTask({
       cost_usd: 0.10,
-      turns_completed: 3, // on the record, but the task is running: the live turn event below wins
+      turns_completed: 3,
     });
     const events: TaskEvent[] = [
       mkEvent({
@@ -426,10 +381,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('renders Trace S3 line when trace_s3_uri is non-null', () => {
-    // Contract parity with ``formatTaskDetail``: trace-enabled tasks must
-    // surface the S3 URI in the default ``bgagent status <id>`` snapshot so
-    // terminal users don't need to fall back to ``--output json`` to
-    // discover where the trajectory was uploaded.
     const task = buildTask({
       trace: true,
       trace_s3_uri: 's3://trace-bucket/tenants/u1/tasks/abc123/trace.jsonl.gz',
@@ -441,8 +392,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('omits Trace S3 line when trace_s3_uri is null', () => {
-    // Zero-diff for non-trace tasks — matches the conditional rendering of
-    // ``PR:`` / ``Cost:`` in ``formatTaskDetail``.
     const task = buildTask();
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).not.toContain('Trace S3:');
@@ -459,8 +408,6 @@ describe('formatStatusSnapshot', () => {
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).not.toContain('Artifact:');
   });
-
-  // ---- Workflow + Reason (PR #52 CLI UX carry-forward) ----
 
   test('renders Workflow line for pr_iteration tasks with PR number', () => {
     const task = buildTask({
@@ -489,9 +436,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('omits PR-number suffix on Workflow line when pr_number is absent', () => {
-    // Defensive: a pr_iteration task without a pr_number would be a
-    // server-side data shape oddity, but the renderer must not emit a
-    // dangling "PR #undefined".
     const task = buildTask({
       resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: null,
@@ -538,8 +482,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('CANCELLED and TIMED_OUT terminals also render Reason when available', () => {
-    // Regression guard: the ``=== COMPLETED`` check must be exact so
-    // other terminals still surface their cause.
     const cancelled = buildTask({
       status: 'CANCELLED',
       error_classification: {
@@ -583,8 +525,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('RUNNING status never renders a Reason line', () => {
-    // Non-terminal. An error_message on a running task would be
-    // in-flight noise — do not render it at snapshot time.
     const task = buildTask({
       status: 'RUNNING',
       error_message: 'transient',
@@ -593,8 +533,6 @@ describe('formatStatusSnapshot', () => {
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).not.toContain('Reason:');
   });
-
-  // ---- Channel + Description (PR #52 CLI UX carry-forward) ----
 
   test('Channel line shows api for default task records', () => {
     const task = buildTask({ channel_source: 'api' });
@@ -609,10 +547,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('Channel line is always present (even when channel_source is an unexpected value)', () => {
-    // Defence-in-depth: even though ``ChannelSource`` narrows the type to
-    // ``api | webhook``, a corrupt DDB record could still arrive at the
-    // formatter. The snapshot degrades to the placeholder rather than
-    // omitting the line — consistent with other always-present rows.
     const task = buildTask({ channel_source: '' as unknown as ChannelSource });
     const rendered = formatStatusSnapshot(task, [], NOW);
     expect(rendered).toContain('Channel:       —');
@@ -631,13 +565,10 @@ describe('formatStatusSnapshot', () => {
     const lines = rendered.split('\n');
     const descStart = lines.findIndex(l => l.startsWith('  Description:'));
     expect(descStart).toBeGreaterThan(-1);
-    // At least two physical lines rendered for the description.
     const continuation = lines[descStart + 1];
-    expect(continuation).toMatch(/^ {17}\S/); // 2-space indent + 15-char gutter + non-space
-    // Every rendered physical line should be <= 80 chars (the snapshot
-    // target terminal width).
+    expect(continuation).toMatch(/^ {17}\S/);
     for (let i = descStart; i < lines.length && lines[i].startsWith(' '); i++) {
-      if (!lines[i].match(/^ {2}[A-Z]/)) break; // next labeled row
+      if (!lines[i].match(/^ {2}[A-Z]/)) break;
       expect(lines[i].length).toBeLessThanOrEqual(80);
     }
   });
@@ -651,13 +582,9 @@ describe('formatStatusSnapshot', () => {
   test('Description trims leading/trailing whitespace but preserves inner spacing', () => {
     const task = buildTask({ task_description: '  Fix   the   bug   ' });
     const rendered = formatStatusSnapshot(task, [], NOW);
-    // Trimmed at the ends; words inside get single-space-joined because
-    // the wrapper splits on whitespace.
     expect(rendered).toContain('Description:   Fix the bug');
     expect(rendered).not.toContain('  Description:     ');
   });
-
-  // --- #251: blocker surface ---
 
   test('surfaces the latest agent_blocked event with resource + hint', () => {
     const task = buildTask();
@@ -665,7 +592,7 @@ describe('formatStatusSnapshot', () => {
       mkEvent({
         event_id: '01ARZ3NDEKTSV4RRFFQ69G5F10',
         event_type: 'agent_blocked',
-        timestamp: '2026-04-29T15:29:20Z', // 60s before NOW
+        timestamp: '2026-04-29T15:29:20Z',
         metadata: {
           kind: 'egress_denied',
           detail: 'connection refused',
@@ -685,7 +612,7 @@ describe('formatStatusSnapshot', () => {
       mkEvent({
         event_id: '01ARZ3NDEKTSV4RRFFQ69G5F10',
         event_type: 'agent_blocked',
-        timestamp: '2026-04-29T15:00:00Z', // earlier
+        timestamp: '2026-04-29T15:00:00Z',
         metadata: {
           kind: 'dependency_unreachable',
           detail: 'npm registry timeout',
@@ -697,7 +624,7 @@ describe('formatStatusSnapshot', () => {
       mkEvent({
         event_id: '01ARZ3NDEKTSV4RRFFQ69G5F20',
         event_type: 'agent_blocked',
-        timestamp: '2026-04-29T15:29:20Z', // later → wins
+        timestamp: '2026-04-29T15:29:20Z',
         metadata: {
           kind: 'egress_denied',
           detail: 'connection refused',
@@ -719,8 +646,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('suppresses a historical Blocker line on a COMPLETED task (#251 review)', () => {
-    // A task that hit a blocker, self-remediated, and reached COMPLETED must not
-    // show the stale ⛔ — that would misrepresent a success as blocked.
     const task = buildTask({ status: 'COMPLETED' });
     const events: TaskEvent[] = [
       mkEvent({
@@ -741,9 +666,6 @@ describe('formatStatusSnapshot', () => {
   });
 
   test('still shows the Blocker line on a FAILED task (#251 review — guard is COMPLETED-only)', () => {
-    // The suppression is narrow: on a failure state the blocker is the
-    // actionable cause and must stay visible. Guards against a mistaken
-    // broadening to every terminal status.
     const task = buildTask({ status: 'FAILED' });
     const events: TaskEvent[] = [
       mkEvent({

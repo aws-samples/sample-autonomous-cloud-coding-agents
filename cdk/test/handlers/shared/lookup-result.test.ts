@@ -17,12 +17,6 @@
  *  SOFTWARE.
  */
 
-// The whole point of `LookupResult` is that "genuinely nothing" and "the lookup
-// broke" stay distinguishable (#756 Cat 2 / AI004). Its two failure-ish variants
-// share the `ok: false` tag, so the guards — not `switch` exhaustiveness — are
-// what keep them apart. These tests lock the guards to the *variant*, not to
-// `ok`, so a future third `ok: false` state can't quietly satisfy both.
-
 import {
   LOOKUP_ABSENT,
   isLookupAbsent,
@@ -39,8 +33,6 @@ describe('lookupFound', () => {
   });
 
   test('treats falsy values as found, not absent', () => {
-    // A lookup that legitimately resolves to 0 / '' / false / null must not be
-    // re-collapsed into "nothing found" — that is the masking, one layer up.
     expect(lookupFound(0)).toEqual({ ok: true, value: 0 });
     expect(lookupFound('')).toEqual({ ok: true, value: '' });
     expect(lookupFound(false)).toEqual({ ok: true, value: false });
@@ -50,8 +42,6 @@ describe('lookupFound', () => {
 
 describe('LOOKUP_ABSENT', () => {
   test('is ok: false with absent set and NO error field', () => {
-    // `'error' in r` is the discriminator both guards use, so the absent variant
-    // must not carry the key at all — not even as undefined.
     expect(LOOKUP_ABSENT).toEqual({ ok: false, absent: true });
     expect('error' in LOOKUP_ABSENT).toBe(false);
   });
@@ -69,8 +59,6 @@ describe('lookupFailed', () => {
   });
 
   test('an undefined cause is still a failure, not an absence', () => {
-    // A thrown `undefined` is legal in JS. The variant must remain a failure —
-    // `'error' in r` holds even when the value is undefined.
     const r = lookupFailed(undefined);
     expect(isLookupFailure(r)).toBe(true);
     expect(isLookupAbsent(r)).toBe(false);
@@ -96,8 +84,6 @@ describe('isLookupFailure / isLookupAbsent', () => {
   });
 
   test('are exact complements over the two ok: false variants', () => {
-    // Guards against a regression where both guards accept (or both reject) the
-    // same variant — which is how a failure ends up handled as an empty result.
     for (const r of [LOOKUP_ABSENT, lookupFailed('x')] as Array<LookupResult<string>>) {
       expect(isLookupAbsent(r)).toBe(!isLookupFailure(r));
     }
@@ -126,9 +112,6 @@ describe('lookupValueOr', () => {
   });
 
   test('returns the fallback for BOTH absent and failed', () => {
-    // The deliberate collapse for purely best-effort callers. Asserted so the
-    // fact that it erases the absent/failed distinction stays explicit: any
-    // caller that needs the distinction must branch BEFORE calling this.
     expect(lookupValueOr(LOOKUP_ABSENT as LookupResult<string>, null)).toBeNull();
     expect(lookupValueOr(lookupFailed(new Error('boom')) as LookupResult<string>, null)).toBeNull();
   });

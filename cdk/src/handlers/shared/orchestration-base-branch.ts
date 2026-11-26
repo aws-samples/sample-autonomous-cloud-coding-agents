@@ -17,29 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * Pure base-branch selection for stacked child PRs.
- *
- * A released child must SEE its predecessors' code without waiting for a
- * human merge. A git branch has exactly one base, so:
- *   - 0 predecessors (root)  → branch off the repo default branch (main).
- *   - 1 predecessor (linear) → stack: base = that predecessor's branch
- *     (a true stacked PR; the child's diff shows only its own changes).
- *   - N predecessors (diamond) → branch off main and MERGE all
- *     predecessor branches into the child's branch before work starts,
- *     so the child sees every predecessor's code. (No human merge needed;
- *     starts as soon as all predecessors are task-complete.)
- *
- * Pure: takes the predecessors' resolved branch names + the repo default
- * branch, returns the base + merge-list the release path threads to the
- * agent. No I/O, so the diamond/linear/root branching is unit-testable in
- * isolation.
- */
-
-/** A predecessor whose branch the child may stack on / merge in. */
 export interface PredecessorBranch {
   readonly sub_issue_id: string;
-  /** The predecessor task's current head branch (persisted branch_name). */
   readonly branch_name: string;
 }
 
@@ -51,7 +30,6 @@ export interface BaseBranchSelection {
    * (multi-predecessor only). Empty for root + linear children.
    */
   readonly merge_branches: readonly string[];
-  /** Shape, for logging/observability. */
   readonly shape: 'root' | 'linear' | 'diamond';
 }
 
@@ -72,9 +50,6 @@ export interface SelectBaseBranchParams {
  */
 export function selectBaseBranch(params: SelectBaseBranchParams): BaseBranchSelection {
   const defaultBranch = params.defaultBranch ?? 'main';
-  // Dedup BEFORE the count check: two predecessors resolving to the same
-  // branch are one stack target, not a diamond — stack cleanly rather
-  // than needlessly branching off main to "merge" a single branch.
   const branches = [...new Set(
     params.predecessors
       .map((p) => p.branch_name)
@@ -87,7 +62,5 @@ export function selectBaseBranch(params: SelectBaseBranchParams): BaseBranchSele
   if (branches.length === 1) {
     return { base_branch: branches[0], merge_branches: [], shape: 'linear' };
   }
-  // Diamond: branch off the default branch, merge every distinct
-  // predecessor branch in (already deduped + sorted above).
   return { base_branch: defaultBranch, merge_branches: branches, shape: 'diamond' };
 }

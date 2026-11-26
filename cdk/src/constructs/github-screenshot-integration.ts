@@ -32,30 +32,18 @@ import { Construct } from 'constructs';
 import { ScreenshotBucket } from './screenshot-bucket';
 import { ComponentUaAspect } from './solution-ua-aspect';
 
-/** Async screenshot-processor Lambda timeout (seconds). */
 const PROCESSOR_TIMEOUT_SECONDS = 120;
 
-/** Async-invoke DLQ message retention (days). */
 const PROCESSOR_DLQ_RETENTION_DAYS = 14;
 
-/** DLQ-depth alarm metric period (minutes). */
 const DLQ_ALARM_PERIOD_MINUTES = 5;
 
-/** Processor Lambda-Errors alarm metric period (minutes). */
 const ERROR_ALARM_PERIOD_MINUTES = 5;
 
-/** Processor Lambda-Errors alarm evaluation range (periods). Paired with
- *  `datapointsToAlarm: 1` below, this is 1-of-2, NOT 2-of-2: any single
- *  breaching period alarms. Do not remove `datapointsToAlarm` — CloudWatch
- *  would default it back to this value and a one-off crash would never fire. */
 const ERROR_ALARM_EVALUATION_PERIODS = 2;
 
-/** Async screenshot-processor Lambda memory (MB). */
 const PROCESSOR_MEMORY_MB = 512;
 
-/**
- * Properties for GitHubScreenshotIntegration construct.
- */
 export interface GitHubScreenshotIntegrationProps {
   /** The existing REST API to add the GitHub webhook route to. */
   readonly api: apigw.RestApi;
@@ -92,7 +80,7 @@ export interface GitHubScreenshotIntegrationProps {
 
   /**
    * Removal policy for the dedup table + screenshot bucket. Defaults
-   * to DESTROY so dev stacks don't accumulate orphans on `cdk destroy`.
+   * to DESTROY.
    */
   readonly removalPolicy?: RemovalPolicy;
 
@@ -113,19 +101,15 @@ export interface GitHubScreenshotIntegrationProps {
  * CDK construct that adds the GitHub-deployment-status → screenshot →
  * PR-comment pipeline.
  *
- * Topology mirrors `LinearIntegration`:
+ * Topology:
  *   - Receiver Lambda (HMAC-verifies, dedups, async-invokes processor)
  *   - Async processor Lambda (drives AgentCore Browser, uploads PNG,
  *     posts the PR comment)
- *   - Dedup DynamoDB table (1h TTL — covers GitHub's 5-attempt retry
- *     window with slack)
+ *   - Dedup DynamoDB table
  *   - Webhook signing-secret (Secrets Manager placeholder; populated
  *     manually when the operator pastes GitHub's value into the secret)
  *   - Private screenshot S3 bucket; served anonymously via CloudFront OAC
  *   - API Gateway route `POST /v1/github/webhook`
- *
- * Inbound-only adapter — there's no outbound polling or stream
- * consumer, just the webhook → screenshot → comment fan-out.
  */
 export class GitHubScreenshotIntegration extends Construct {
   /** Private bucket; served via CloudFront OAC. Hosts the screenshot PNGs. */
@@ -147,48 +131,30 @@ export class GitHubScreenshotIntegration extends Construct {
   /** Async processor Lambda (browser + S3 + PR comment). */
   public readonly webhookProcessorFn: lambda.NodejsFunction;
 
-  /** Fires when a failed async invocation lands in the processor DLQ —
-   *  mirrors ``FanOutConsumer.dlqDepthAlarm``: without it the queue is
-   *  "for operator inspection" that no operator is ever told to make. */
+  /** Fires when a failed async invocation lands in the processor DLQ. */
   public readonly processorDlqDepthAlarm: cloudwatch.Alarm;
 
-  /** Fires when the processor Lambda's ``Errors`` metric breaches. The
-   *  handler swallows its per-step operational failures (log + return),
-   *  so this metric ticks only on faults that ESCAPE the handler —
-   *  init-time crashes (missing env at cold start, bundling defect),
-   *  unhandled throws in an unguarded path, or the 120s hard timeout.
-   *  For that population it fires no later than — and, when the retry
-   *  ladder straddles a period boundary, one window before — the DLQ-depth
-   *  alarm (which waits for Lambda's async-retry ladder to land a message).
-   *  Follows the ``metricErrors`` shape of ``task-orchestrator.ts``
-   *  OrchestratorErrorAlarm, but is 1-of-2 (``datapointsToAlarm: 1``) where
-   *  that alarm is genuinely 2-of-2, and uses threshold 1 since any escaped
-   *  error here is significant. */
+  /** Fires when the processor Lambda's ``Errors`` metric breaches: only
+   *  faults that escape the handler (init-time crash, unhandled throw,
+   *  hard timeout). */
   public readonly processorErrorAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: GitHubScreenshotIntegrationProps) {
     super(scope, id);
 
-    // Solution-attribution component label (#319): every Lambda in this GitHub
-    // screenshot integration is part of the webhook ingest surface. One aspect
-    // labels them all (and any future function added here); the universal
-    // `app/` segment is set by the stack-level aspect.
     Aspects.of(this).add(new ComponentUaAspect('webhook'));
 
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
-    // --- Screenshot bucket (private; served via CloudFront with OAC) ---
     this.screenshotBucket = new ScreenshotBucket(this, 'ScreenshotBucket', {
       removalPolicy,
     });
 
-    // --- Webhook signing secret (operator-populated placeholder) ---
     this.webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       description: 'GitHub deployment-status webhook signing secret — populate manually after configuring the GitHub webhook',
       removalPolicy,
     });
 
-    // --- Dedup table ---
     this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
       partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -202,20 +168,6 @@ export class GitHubScreenshotIntegration extends Construct {
       externalModules: ['@aws-sdk/*'],
     };
 
-    // --- Async processor (browser + S3 + comment) ---
-    // Lambda timeout: 120s. The handler enforces a single wall-clock
-    // deadline of 110s (TOTAL_BUDGET_MS in github-webhook-processor.ts)
-    // shared across PR-lookup retry + screenshot capture + S3 PUT +
-    // comment POST, so no individual sub-step can run past the Lambda
-    // timeout even on the worst-case path. The 10s headroom covers
-    // SDK auto-retries + the runtime's shutdown grace so a hard timeout
-    // never severs an in-flight comment-post. (theagenticguy PR-241
-    // review item B1: previous comment under-counted the 35s retry
-    // ladder that runs before captureScreenshot's 60s budget.)
-    // Async-invoke failure backstop: the handler swallows its own errors,
-    // but an init-time crash (missing env at cold start, bundling defect)
-    // would otherwise vanish after Lambda's built-in async retries. The
-    // DLQ keeps the failed invocation payload for operator inspection.
     const processorDlq = new sqs.Queue(this, 'WebhookProcessorDlq', {
       retentionPeriod: Duration.days(PROCESSOR_DLQ_RETENTION_DAYS),
       enforceSSL: true,
@@ -246,10 +198,6 @@ export class GitHubScreenshotIntegration extends Construct {
       bundling: commonBundling,
     });
 
-    // Alarm on any record landing in the DLQ. The processor handler
-    // swallows its own errors, so only init-time crashes reach this queue
-    // — rare, but each one is a screenshot pipeline silently down. Same
-    // threshold-1 shape as FanOutConsumer.dlqDepthAlarm.
     this.processorDlqDepthAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorDlqDepthAlarm', {
       metric: processorDlq.metricApproximateNumberOfMessagesVisible({
         period: Duration.minutes(DLQ_ALARM_PERIOD_MINUTES),
@@ -262,32 +210,12 @@ export class GitHubScreenshotIntegration extends Construct {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
-    // Alarm on the processor's Errors metric (#284 AC). Complementary to
-    // the DLQ-depth alarm above, not redundant. The handler is best-effort
-    // by design — it catches its per-step operational failures (bad token,
-    // AgentCore/S3/comment-post errors) and returns success, so those
-    // surface as tagged log events, NOT as Lambda Errors. This alarm
-    // therefore fires on the faults that ESCAPE the handler: an init-time
-    // crash (missing env at cold start, bundling defect), an unhandled
-    // throw in an unguarded path, or the 120s hard timeout. That is the
-    // same failure class the DLQ eventually catches, but it is observable
-    // earlier: the Errors metric is stamped at invocation time, so this
-    // alarm fires no later than — and, when the retry ladder straddles a
-    // period boundary, one window before — the DLQ-depth alarm, which must
-    // wait for Lambda's async-retry ladder to land a message. threshold 1 / 1-of-2 eval periods matches the AC;
-    // the metricErrors shape follows ``task-orchestrator.ts``
-    // OrchestratorErrorAlarm (which uses threshold 3 — we use 1 because any
-    // escaped error here is significant).
     this.processorErrorAlarm = new cloudwatch.Alarm(this, 'WebhookProcessorErrorAlarm', {
       metric: this.webhookProcessorFn.metricErrors({
         period: Duration.minutes(ERROR_ALARM_PERIOD_MINUTES),
       }),
       threshold: 1,
       evaluationPeriods: ERROR_ALARM_EVALUATION_PERIODS,
-      // Fire on the FIRST breaching datapoint. Unset, this defaults to
-      // evaluationPeriods (2 consecutive), which for a sparse invocation
-      // metric means a single-event crash never alarms: its retries land
-      // in one period and NOT_BREACHING fills the neighbour.
       datapointsToAlarm: 1,
       alarmDescription:
         'Screenshot webhook processor Lambda errors breached threshold — deploy-preview screenshots are failing (check IAM, AgentCore Browser quota, and dependency health)',
@@ -297,16 +225,6 @@ export class GitHubScreenshotIntegration extends Construct {
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);
     props.githubTokenSecret.grantRead(this.webhookProcessorFn);
 
-    // Optional Linear feedback path. Wired only when a registry table
-    // is provided. The processor scans the registry for active
-    // workspaces, then per-workspace looks up the OAuth token from
-    // Secrets Manager (`bgagent-linear-oauth-*` prefix, written by
-    // `bgagent linear setup`).
-    //
-    // PutSecretValue is intentional, not a typo: resolveLinearOauthToken
-    // rotates Linear's refresh token in place when it expires (the same
-    // pattern as the orchestrator role). This is a write grant by
-    // design — see linear-oauth-resolver.ts.
     if (props.linearWorkspaceRegistryTable) {
       props.linearWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
@@ -323,9 +241,6 @@ export class GitHubScreenshotIntegration extends Construct {
     }
 
     if (props.jiraWorkspaceRegistryTable) {
-      // The Jira OAuth resolver rotates refresh tokens and must persist the
-      // replacement token in the existing tenant-scoped secret. PutSecretValue
-      // enables that refresh path; it does not permit creating arbitrary secrets.
       props.jiraWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
@@ -338,30 +253,8 @@ export class GitHubScreenshotIntegration extends Construct {
       }));
     }
 
-    // Write access so the processor can persist screenshot_url onto the
-    // deploy task's TaskRecord (conditional UpdateItem). grantWriteData covers
-    // the UpdateItem; the handler's update is guarded by attribute_exists.
     if (props.taskTable) {
       props.taskTable.grantWriteData(this.webhookProcessorFn);
-      // iteration-UX: on an iteration re-deploy the processor resolves the
-      // issue's most-recent maturing-reply id via a Query on LinearIssueIndex
-      // (to append the `· [preview]` link to that reply). grantWriteData does
-      // NOT include dynamodb:Query nor the index ARN, so grant it narrowly —
-      // Query on just that one GSI, not blanket grantReadData on the table.
-      //
-      // findIterationReplyId then GetItems each candidate's `head_sha` on the
-      // BASE table to attribute the deploy to the right iteration when several
-      // iterations overlap. That GetItem read needs dynamodb:GetItem on the
-      // base-table ARN — the Query GSI grant does NOT cover it. Without this,
-      // the GetItem throws AccessDenied, is swallowed non-fatally, and the
-      // preview is captured + posted to the PR but never appended to the Linear
-      // iteration reply (observed in practice — the head_sha refinement was
-      // added without extending its IAM grant).
-      // The same GetItem grant serves the read that precedes every write:
-      // persistScreenshotUrl reads the repository of the task named by the
-      // branch and writes only onto a task of the deployment's repository.
-      // Without it no screenshot is stored and no tracker gets the preview.
-      // Each tracker's index only when that tracker is wired (ADR-024).
       const issueIndexes = [
         ...(props.linearWorkspaceRegistryTable ? ['LinearIssueIndex'] : []),
         ...(props.jiraWorkspaceRegistryTable ? ['JiraIssueIndex'] : []),
@@ -391,20 +284,9 @@ export class GitHubScreenshotIntegration extends Construct {
       }));
     }
 
-    // AgentCore Browser session lifecycle + automation-stream connect.
-    // Action set scoped to the three calls the handler actually makes;
-    // resource is `*` because Browser sessions are ephemeral and the
-    // two `Connect*Stream` data-plane actions in the AWS Service
-    // Authorization Reference for `bedrock-agentcore` declare no
-    // resource types or condition keys (they require Resource:"*"
-    // anyway). cdk-nag IAM5 suppression annotates the resource
-    // wildcard.
-    //
-    // Source: AWS Service Authorization Reference for bedrock-agentcore,
-    //   https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
-    //   - bedrock-agentcore:StartBrowserSession (Write)
-    //   - bedrock-agentcore:StopBrowserSession (Write)
-    //   - bedrock-agentcore:ConnectBrowserAutomationStream (Read; no resource scoping)
+    // `bedrock-agentcore:ConnectBrowserAutomationStream` declares no resource
+    // types or condition keys, so it requires Resource "*":
+    // https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
     this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'bedrock-agentcore:StartBrowserSession',
@@ -414,7 +296,6 @@ export class GitHubScreenshotIntegration extends Construct {
       resources: ['*'],
     }));
 
-    // --- Webhook receiver (verify, dedup, dispatch) ---
     this.webhookFn = new lambda.NodejsFunction(this, 'WebhookFn', {
       entry: path.join(handlersDir, 'github-webhook.ts'),
       handler: 'handler',
@@ -436,7 +317,6 @@ export class GitHubScreenshotIntegration extends Construct {
     this.webhookDedupTable.grantReadWriteData(this.webhookFn);
     this.webhookProcessorFn.grantInvoke(this.webhookFn);
 
-    // --- API Gateway route ---
     const githubResource = props.api.root.addResource('github');
     const webhookResource = githubResource.addResource('webhook');
     const webhookMethod = webhookResource.addMethod(

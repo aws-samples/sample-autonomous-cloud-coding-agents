@@ -32,10 +32,8 @@ const LOOKUP_PAGE_SIZE = 25;
 const MAX_CANDIDATE_READS = 25;
 
 /**
- * Whether a task belongs to the repository of the deployment. Letter case is
- * not compared, as in the screenshot processor that calls this module: GitHub
- * answers to any spelling of a name and reports its own, a task has the
- * spelling of its blueprint.
+ * Letter case is not compared: GitHub answers to any spelling of a name and
+ * reports its own, a task has the spelling of its blueprint.
  */
 function isTaskOfRepo(task: TaskRecord, repo: string): boolean {
   return task.repo?.toLowerCase() === repo.toLowerCase();
@@ -61,8 +59,6 @@ export async function deliverJiraDeploymentPreview(
     const metadata = original.channel_metadata;
     const cloudId = metadata?.jira_cloud_id;
     const issueKey = metadata?.jira_issue_key;
-    // A synthetic integration node has no Jira issue. The screenshot update on
-    // its task wakes the shared reconciler, which refreshes the parent rollup.
     if (isIntegrationNode(metadata?.orchestration_sub_issue_id ?? '')) return;
     if (!cloudId || !issueKey) throw new Error('Jira deployment task is missing channel metadata');
     if (isIntegrationNode(issueKey)) throw new Error('Synthetic node is not a Jira issue');
@@ -105,14 +101,10 @@ export async function deliverJiraDeploymentPreview(
         }
         cursor = page.LastEvaluatedKey;
       } while (cursor && !matched);
-      // Never guess "newest iteration": overlapping deployments can belong to
-      // different replies. A known original SHA can still be delivered normally.
       if (!matched && (sawIteration || original.head_sha) && original.head_sha !== sha) {
         throw new Error('No Jira task matches the deployment SHA');
       }
     } else if (task.head_sha !== sha) {
-      // An iteration recorded without head_sha is refused as well, on purpose:
-      // a preview is never attributed by guessing.
       throw new Error('Jira iteration SHA does not match the deployment');
     }
     await budget.run(() => ddb.send(new UpdateCommand({
@@ -131,13 +123,8 @@ export async function deliverJiraDeploymentPreview(
       if (!result.ok) throw new Error('Jira iteration preview update failed');
       return;
     }
-    // Only the standalone comment is built from these URLs, so only it is refused.
-    // An iteration comment renders no preview block for a URL that is not allowed.
     const document = jiraPreviewDocument(screenshotUrl, previewUrl);
     if (!document) throw new Error('Jira screenshot URL is not allowed');
-    // Claim before POST: duplicate events, including concurrent deliveries, must
-    // never create a second comment. Keep uncertain/failed POSTs claimed because
-    // Jira may have committed before a transport timeout. Failures are observable.
     try {
       await budget.run(() => ddb.send(new UpdateCommand({
         TableName: tableName,

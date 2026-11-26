@@ -1,6 +1,3 @@
-# Test fixtures for py-silent-success-masking (run: semgrep test .semgrep/).
-
-
 def fetch_items() -> list:
     raise NotImplementedError
 
@@ -100,7 +97,6 @@ def masked_multi_except():
         return None
 
 
-# The handler's type as a tuple, without `as`.
 def masked_tuple_except() -> list:
     try:
         return fetch_items()
@@ -119,7 +115,6 @@ def masked_tuple_except_with_finally():
         print("done")
 
 
-# A try statement with an `else:` clause, whatever its handlers.
 def masked_with_else() -> list:
     try:
         items = fetch_items()
@@ -146,7 +141,6 @@ def masked_with_else_and_finally() -> list:
         print("done")
 
 
-# What the `else:` clause returns is the success path, not a fallback.
 def ok_return_in_else() -> None:
     try:
         fetch_items()
@@ -157,8 +151,6 @@ def ok_return_in_else() -> None:
         return None
 
 
-# A conditional re-raise does not clear the fallthrough default: callers that
-# hit the non-fatal path still cannot distinguish failure from empty success.
 def masked_conditional_reraise(fatal: bool) -> list:
     try:
         return fetch_items()
@@ -169,18 +161,14 @@ def masked_conditional_reraise(fatal: bool) -> list:
         return []
 
 
-# Classify-then-reraise: a "not found" is a legitimate empty success, and
-# every other error reraises on the fallthrough — so the caller can still tell
-# failure from empty. The reraise comes AFTER the classified return, which is
-# what distinguishes this from masked_conditional_reraise (raise guarded first).
 def ok_classify_then_reraise(fetch, is_not_found):
     try:
         return fetch()
     except Exception as exc:
         # ok: py-silent-success-masking
         if is_not_found(exc):
-            return None  # genuine empty success
-        raise  # everything else fails closed
+            return None
+        raise
 
 
 def ok_tuple_classify_then_reraise(fetch, is_not_found):

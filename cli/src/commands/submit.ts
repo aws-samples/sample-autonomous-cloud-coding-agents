@@ -46,10 +46,6 @@ import {
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
-/** Scope prefixes the server accepts (see ``parseApprovalScope`` on the
- *  CDK side). ``all_session`` is the one form without ``:`` that can be
- *  granted before a task starts: ``this_call``, ``tool_type_session`` and
- *  ``tool_group_session`` stand for a call that is waiting for approval. */
 const SCOPE_PREFIXES = [
   'tool_type:',
   'tool_group:',
@@ -120,13 +116,6 @@ export function makeSubmitCommand(): Command {
       if (opts.pr === undefined && opts.reviewPr === undefined && opts.issue === undefined && !opts.task) {
         throw new CliError('At least one of --issue, --task, --pr, or --review-pr is required.');
       }
-      // --repo is required for repo-bound workflows (the common case) but a
-      // repo-less workflow (e.g. knowledge/web-research-v1, default/agent-v1)
-      // runs without one. The CLI can't see each workflow's requires_repo flag
-      // (the server owns that), so the rule is: --repo is mandatory UNLESS the
-      // caller explicitly selected a workflow with --workflow — then the server
-      // admits or rejects based on that workflow's requires_repo. --pr/--review-pr
-      // always imply a repo-bound coding workflow, so they still require --repo.
       if (!opts.repo && !opts.workflow) {
         throw new CliError('--repo is required (omit it only with --workflow for a repo-less workflow).');
       }
@@ -187,7 +176,6 @@ export function makeSubmitCommand(): Command {
         initialApprovals = preApproveRaw as readonly ApprovalScope[];
       }
 
-      // Resolve --attachment arguments into API attachment objects
       const attachmentArgs = (opts.attachment ?? []) as readonly string[];
       const attachments: Attachment[] = [];
       if (attachmentArgs.length > 0) {
@@ -197,44 +185,28 @@ export function makeSubmitCommand(): Command {
         let inlineBytes = 0;
         for (const arg of attachmentArgs) {
           const attachment = resolveAttachmentArg(arg, inlineBytes);
-          // The decoded size, as the API counts it; a URL or a file to upload adds nothing.
           inlineBytes += Buffer.byteLength(attachment.data ?? '', 'base64');
           attachments.push(attachment);
         }
       }
 
-      // Resolve the workflow selector. --pr/--review-pr imply the coding pr_*
-      // workflows; an explicit --workflow overrides. The published mapping
-      // (WORKFLOWS.md §"Replacing task types") is new_task→coding/new-task-v1,
-      // pr_iteration→coding/pr-iteration-v1, pr_review→coding/pr-review-v1.
       let workflowRef: string | undefined = opts.workflow;
       if (workflowRef === undefined && opts.pr !== undefined) {
         workflowRef = 'coding/pr-iteration-v1';
       } else if (workflowRef === undefined && opts.reviewPr !== undefined) {
         workflowRef = 'coding/pr-review-v1';
       } else if (workflowRef === undefined && opts.repo) {
-        // A bare repo-present submit (no --workflow/--pr/--review-pr) is the old
-        // `new_task` default: clone → build → open a PR. The SERVER ladder
-        // deliberately resolves an absent workflow_ref to the repo-less
-        // default/agent-v1 (WORKFLOWS.md §"Resolution order"), so the CLI must
-        // send the coding workflow EXPLICITLY rather than omit it — otherwise
-        // `bgagent submit --repo X --task Y` silently regresses from "opens a PR"
-        // to "emits an S3 markdown artifact". A repo-less submit (no --repo, with
-        // --workflow) is unaffected: it carries its explicit workflow_ref above.
         workflowRef = DEFAULT_CODING_WORKFLOW_ID;
       }
       const prNumber = opts.pr ?? opts.reviewPr;
 
       const client = new ApiClient();
       const body: CreateTaskRequest = {
-        // Omitted entirely for a repo-less workflow (#248 Phase 3) — sending
-        // ``repo: undefined`` would serialize as an explicit null on some paths.
         ...(opts.repo && { repo: opts.repo }),
         ...(opts.issue !== undefined && { issue_number: opts.issue }),
         ...(opts.task && { task_description: opts.task }),
         ...(opts.maxTurns !== undefined && { max_turns: opts.maxTurns }),
         ...(opts.maxBudget !== undefined && { max_budget_usd: opts.maxBudget }),
-        // Note: --pr and --review-pr are mutually exclusive (validated above).
         ...(workflowRef !== undefined && { workflow_ref: workflowRef }),
         ...(prNumber !== undefined && { pr_number: prNumber }),
         ...(opts.trace && { trace: true }),
@@ -246,18 +218,15 @@ export function makeSubmitCommand(): Command {
 
       const createResponse = await client.createTask(body, opts.idempotencyKey);
 
-      // If presigned uploads are needed, upload files and confirm
       let task = createResponse;
       if (createResponse.upload_instructions && createResponse.upload_instructions.length > 0) {
         process.stderr.write(`Uploading ${createResponse.upload_instructions.length} attachment(s)...\n`);
-        // The files declared for upload, in the order of the request.
         const toUpload = attachmentArgs.filter((_, i) => attachments[i].expected_size_bytes !== undefined);
         for (const instruction of createResponse.upload_instructions) {
           await uploadViaPresignedPost(fileToUpload(instruction, createResponse, toUpload), instruction);
           process.stderr.write(`  Uploaded: ${instruction.filename}\n`);
         }
 
-        // Confirm uploads to trigger screening and transition to SUBMITTED
         process.stderr.write('Confirming uploads...\n');
         task = await confirmUploadsWithRetry(client, createResponse.task_id);
       }
@@ -274,10 +243,6 @@ export function makeSubmitCommand(): Command {
     });
 }
 
-/**
- * The request field of `--microvm-sleep-after`, or nothing when the option is not given.
- * A function of its own so that the action above, whose complexity is recorded, does not grow.
- */
 function microvmSleepAfterField(raw: string | undefined): { microvm_sleep_after_s?: number } {
   if (raw === undefined) return {};
   const seconds = raw === 'off' ? 0 : /^\d+$/.test(raw) ? Number(raw) : NaN;
@@ -288,11 +253,6 @@ function microvmSleepAfterField(raw: string | undefined): { microvm_sleep_after_
   return { microvm_sleep_after_s: seconds };
 }
 
-// ---------------------------------------------------------------------------
-// Attachment resolution helpers
-// ---------------------------------------------------------------------------
-
-/** Resolve a user-supplied path and validate it stays under CWD (CWE-22 mitigation). */
 function safeResolvePath(userPath: string): string {
   // nosemgrep: path-join-resolve-traversal -- this IS the path-traversal guard
   const resolved = path.resolve(userPath);
@@ -305,17 +265,6 @@ function safeResolvePath(userPath: string): string {
   return resolved;
 }
 
-/**
- * The local file an upload instruction is for. Its name alone does not say: two files can
- * have the same one (before/shot.png, after/shot.png), and a retried submission is asked
- * only for the uploads that are still missing. The task lists its attachments of that name
- * with the uploads last, in the order of the request, so the place of the instruction's
- * attachment among those is the place of its file among the files of that name. The
- * pairing is by place alone: a retry has to name the files of one name in the order of
- * the first run.
- *
- * @param declared - the files declared for upload, in the order of the request.
- */
 function fileToUpload(
   instruction: AttachmentUploadInstruction,
   task: CreateTaskResponse,
@@ -330,13 +279,11 @@ function fileToUpload(
   return safeResolvePath(file);
 }
 
-const MAX_INLINE_SIZE_BYTES = 500 * 1024; // 500 KB
+const MAX_INLINE_SIZE_BYTES = 500 * 1024;
 
-/** Inline data the API accepts in one request, all files together (MiB). */
 const MAX_TOTAL_INLINE_SIZE_MB = 3;
 const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
 
-/** MIME type lookup by file extension: the types the API accepts. */
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -351,16 +298,7 @@ const MIME_BY_EXT: Record<string, string> = {
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg']);
 
-/**
- * Resolve a CLI --attachment argument to an Attachment object.
- * Handles URLs (https://...) and local file paths.
- *
- * @param inlineBytes - size of the files this request already carries inline.
- */
 function resolveAttachmentArg(arg: string, inlineBytes: number): Attachment {
-  // URL detection: starts with https://
-  // Omit content_type for URLs — the server-side resolver determines the
-  // actual content type from the HTTP response's Content-Type header.
   if (arg.startsWith('https://')) {
     return { type: 'url', url: arg };
   }
@@ -369,7 +307,6 @@ function resolveAttachmentArg(arg: string, inlineBytes: number): Attachment {
     throw new CliError(`URL attachments must use HTTPS: ${arg}`);
   }
 
-  // Local file
   const resolvedPath = safeResolvePath(arg);
   if (!fs.existsSync(resolvedPath)) {
     throw new CliError(`Attachment file not found: ${arg}`);
@@ -392,7 +329,6 @@ function resolveAttachmentArg(arg: string, inlineBytes: number): Attachment {
   const type: AttachmentType = IMAGE_MIMES.has(contentType) ? 'image' : 'file';
 
   if (stat.size > MAX_INLINE_SIZE_BYTES || inlineBytes + stat.size > MAX_TOTAL_INLINE_SIZE_BYTES) {
-    // Large file, or no room left in the request: use presigned upload path (metadata only, no data)
     return {
       type,
       content_type: contentType,
@@ -411,16 +347,6 @@ function resolveAttachmentArg(arg: string, inlineBytes: number): Attachment {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Presigned POST upload helper
-// ---------------------------------------------------------------------------
-
-/**
- * Upload a local file to S3 via a presigned POST (multipart/form-data).
- * Policy fields from the API must precede the file; use FormData so Node sets
- * the boundary and Content-Length correctly for multi-megabyte payloads.
- */
-/** Upload timeout: 2 minutes for large files. */
 const UPLOAD_TIMEOUT_MS = 120_000;
 
 async function uploadViaPresignedPost(
@@ -433,8 +359,7 @@ async function uploadViaPresignedPost(
   for (const [key, value] of Object.entries(instruction.upload_fields)) {
     form.append(key, value);
   }
-  // File must be last. S3 POST Object uses Content-Type from the policy field,
-  // not the multipart part — do not set a part Content-Type (breaks some clients).
+  // S3 POST Object ignores every form field after the file.
   form.append('file', new Blob([fileData]), path.basename(filePath));
 
   const controller = new AbortController();
@@ -462,8 +387,6 @@ async function uploadViaPresignedPost(
     clearTimeout(timeout);
   }
 
-  // S3 POST Object returns 204 on success. Some error conditions return 200
-  // with an XML error body (e.g., KMS failures). Check for XML error pattern.
   const text = await res.text().catch(() => '');
   if (!res.ok || (res.status === 200 && text.includes('<Error>'))) {
     throw new CliError(
@@ -472,39 +395,18 @@ async function uploadViaPresignedPost(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Upload confirmation
-// ---------------------------------------------------------------------------
-
-/** Confirmations sent for one submission before a gateway timeout is reported as the error. */
 const CONFIRM_MAX_ATTEMPTS = 3;
 
-/** How often the task is read while its confirmation runs on behind a gateway timeout. */
 const CONFIRM_POLL_INTERVAL_MS = 5_000;
 
-/**
- * 165 s of reading the task. A confirmation runs for at most 180 s (its Lambda timeout)
- * and the gateway gave up after 29 s of them; the rest is room for a cold start.
- */
 const CONFIRM_MAX_POLLS = 33;
 
-/**
- * Confirm the uploads, and do not take a gateway timeout for a failure.
- *
- * API Gateway ends a request after 29 s, but the confirmation runs on behind it and
- * then submits or fails the task. So after a 504, read the task until it has left
- * PENDING_UPLOADS: it is then the answer, and one that has ended without completing is
- * reported with its reason (a second confirmation is refused for it, without the reason).
- * Confirm again only when the task is still pending once the confirmation cannot be
- * running any more: that call goes on from the progress a confirmation that ran out of
- * time has saved. It is not sent while the first one may still be running, because a
- * second confirmation beside it screens every upload again.
- */
 async function confirmUploadsWithRetry(client: ApiClient, taskId: string): Promise<TaskDetail> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await client.confirmUploads(taskId);
     } catch (err) {
+      // API Gateway ends a request after 29 s; the confirmation behind it runs on.
       const gatewayTimeout = err instanceof ApiError && err.statusCode === 504;
       if (!gatewayTimeout || attempt === CONFIRM_MAX_ATTEMPTS) throw err;
       process.stderr.write(`  Screening of task ${taskId} is still running; waiting for it to finish...\n`);
@@ -514,7 +416,6 @@ async function confirmUploadsWithRetry(client: ApiClient, taskId: string): Promi
         try {
           task = await client.getTask(taskId);
         } catch (readErr) {
-          // A read that fails for a moment (5xx, network) is no answer: read again.
           if (!isTransientError(readErr)) throw readErr;
           continue;
         }

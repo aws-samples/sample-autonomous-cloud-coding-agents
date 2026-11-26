@@ -1,47 +1,13 @@
 """Per-task scoped AWS credentials for tenant-data access.
 
-This module centralizes how the agent obtains boto3 clients/resources for
-**tenant data** (the task's own DynamoDB rows and its S3 trace/attachment
-objects). Instead of using the long-lived compute role (AgentCore Runtime
-``ExecutionRole`` or ECS Fargate task role) directly, the agent assumes a
-per-task **SessionRole** with session tags ``{user_id, repo, task_id}`` and
-uses the resulting short-lived, tag-scoped credentials. The SessionRole's IAM
-policy self-constrains via ``aws:PrincipalTag/*`` conditions
-(``dynamodb:LeadingKeys`` on ``task_id`` for the task tables, an S3 prefix
-condition on ``user_id`` for the trace bucket). Existing scoped credentials
-can only reach their tagged task. The compute role chooses those tags: a
-compromised worker with ambient credentials is a separate trust boundary.
-Task updates are additionally restricted to reporting/approval attributes;
-whole-row replacement and coordinator metadata writes are not granted.
+boto3 clients/resources for tenant data (the task's own DynamoDB rows and its
+S3 trace/attachment objects) are built from a per-task SessionRole assumed with
+session tags ``{user_id, repo, task_id}``, on refreshable credentials.
 
-Two properties matter for correctness:
-
-1. **Refreshable, not one-shot.** The agent runs under credentials that are
-   themselves an assumed role, so the agent's own ``sts:AssumeRole`` is *role
-   chaining*, which AWS hard-caps at 1 hour regardless of the role's
-   ``MaxSessionDuration``. Tasks can run up to ``maxLifetime`` (8 h), so a
-   single ``assume_role()`` call would yield credentials that expire mid-task
-   and fail every subsequent call with ``ExpiredToken``. We wrap the assume
-   call in botocore ``RefreshableCredentials`` so boto3 transparently
-   re-assumes before expiry.
-
-2. **Backend-agnostic.** The same code path works whether the agent boots
-   under an AgentCore execution role or an ECS task role — both are valid
-   assuming principals in the SessionRole trust policy.
-
-**Fail-safe vs. fail-closed:**
-
-- When ``AGENT_SESSION_ROLE_ARN`` is **unset** (local dev, tests, or a
-  deployment that has not yet provisioned the SessionRole), this module returns
-  plain boto3 clients/resources backed by the ambient credential chain —
-  identical to the pre-feature behavior. Scoping is opt-in and its absence does
-  not block task execution.
-- When ``AGENT_SESSION_ROLE_ARN`` **is set**, scoping has been *requested*, so a
-  failure to build the scoped session is treated as a hard error: this module
-  raises :class:`SessionScopingError` rather than silently degrading to the
-  ambient (cross-tenant) compute role. For a tenant-isolation control, silently
-  running unscoped is the most dangerous failure mode — the agent keeps working
-  but stops isolating tenants — so we fail **closed** (abort the task) instead.
+- ``AGENT_SESSION_ROLE_ARN`` unset: plain boto3 clients/resources on the
+  ambient credential chain.
+- ``AGENT_SESSION_ROLE_ARN`` set: a scoped session that cannot be built raises
+  :class:`SessionScopingError`; there is no fallback to the ambient compute role.
 """
 
 from __future__ import annotations
@@ -51,41 +17,27 @@ import threading
 from datetime import UTC
 from typing import Any
 
-# Env var holding the per-task SessionRole ARN. Set by the orchestrator on the
-# compute environment (AgentCore runtime env / ECS container overrides).
 SESSION_ROLE_ARN_ENV = "AGENT_SESSION_ROLE_ARN"
 
-# Role chaining caps the assumed session at 1 hour. Request the maximum the
-# cap allows; botocore refreshes well before this elapses.
+# AWS caps a role-chained session at 1 hour, whatever the role's
+# ``MaxSessionDuration``.
 _CHAINED_SESSION_DURATION_S = 3600
 
 # IAM session-tag value constraints: keys <=128 chars, values <=256 chars.
 _MAX_TAG_VALUE_LEN = 256
 
-# Retry mode of every client and resource built in this module, unless the
-# caller's Config or the environment (AWS_RETRY_MODE) names another. botocore
-# 1.44 changed its default from "legacy" (5 attempts, 10 for DynamoDB) to
-# "standard" (3 attempts, 4 for DynamoDB, and a retry quota). The agent keeps the
-# default it ran with before, so that an SDK update does not change how long a
-# throttled or failing call is retried. Changing the mode is a product decision,
-# not a side effect of a version bump.
+# botocore 1.44 changed its default retry mode from "legacy" (5 attempts, 10 for
+# DynamoDB) to "standard" (3 attempts, 4 for DynamoDB, and a retry quota).
 RETRY_MODE = "legacy"
 
-# The variable botocore reads the retry mode from. When it is set, this module
-# names no mode and botocore applies the operator's choice, as it always did.
 _RETRY_MODE_ENV = "AWS_RETRY_MODE"
 
 _lock = threading.Lock()
-_session: Any = None  # cached boto3.Session (scoped or plain)
-_scoped: bool | None = None  # None until first resolution; True if tag-scoped
+_session: Any = None
+_scoped: bool | None = None
 _ambient_lock = threading.Lock()
 _ambient_credentials: dict[int, Any] = {}
 
-# Session-tag values, set by ``configure_session``: ``run_task`` calls it twice
-# per task, first with its arguments as they came and then with the resolved
-# TaskConfig. Kept in private module state — NOT os.environ — so the
-# tenant identifiers are not inherited by the untrusted repo subprocesses the
-# agent spawns (build/test/tooling). Read by ``_session_tags`` at assume time.
 _tags: dict[str, str] = {}
 
 
@@ -93,17 +45,12 @@ class SessionScopingError(RuntimeError):
     """Per-session IAM scoping was requested but could not be established.
 
     Raised when ``AGENT_SESSION_ROLE_ARN`` is set but the scoped session cannot
-    be built. Fails the task closed rather than silently falling back to the
-    ambient (cross-tenant) compute role.
+    be built.
     """
 
 
 def fast_fail_config(read_timeout: int = 2) -> Any:
-    """One attempt with short timeouts, for calls inside a MicroVM lifecycle budget.
-
-    Lifecycle hooks and suspend-time checkpoints must answer within the service
-    hook budget, so a stalled endpoint fails fast instead of being retried.
-    """
+    """One attempt with short timeouts, for calls inside a MicroVM lifecycle budget."""
     from botocore.config import Config
 
     return Config(connect_timeout=2, read_timeout=read_timeout, retries={"total_max_attempts": 1})
@@ -112,11 +59,7 @@ def fast_fail_config(read_timeout: int = 2) -> Any:
 def build_session_tags(user_id: str, repo: str, task_id: str) -> list[dict[str, str]]:
     """Build the AssumeRole ``Tags`` list from tenant identifiers.
 
-    Only non-empty values are included. Values are truncated to the IAM limit
-    so an over-long repo slug can never make ``AssumeRole`` fail. Shared by the
-    in-process tenant-data session (:func:`_session_tags`) and the out-of-process
-    Bedrock credential helper (``bedrock_creds_helper.py``) so both mint the
-    same ``{user_id, repo, task_id}`` tags from one definition.
+    Only non-empty values are included. Values are truncated to the IAM limit.
     """
     pairs = (("user_id", user_id), ("repo", repo), ("task_id", task_id))
     return [{"Key": key, "Value": value[:_MAX_TAG_VALUE_LEN]} for key, value in pairs if value]
@@ -125,14 +68,9 @@ def build_session_tags(user_id: str, repo: str, task_id: str) -> list[dict[str, 
 def configure_session(user_id: str, repo: str, task_id: str) -> None:
     """Record session-tag values in private module state for later use.
 
-    ``run_task`` calls it twice per task: first with its arguments as they
-    came, so that a failure while the configuration is built is recorded under
-    the task's own tags, and then with the resolved ``TaskConfig``. Idempotent;
-    safe to call before any tenant-data client is created. Does not itself
-    assume the role — the first ``get_session()`` call does, with these tags,
-    so this must run first. Values are stored in a
-    module global (not ``os.environ``) so tenant identifiers do not leak into
-    spawned subprocesses.
+    Idempotent; safe to call before any tenant-data client is created. Does not
+    itself assume the role — the first ``get_session()`` call does, with these
+    tags, so this must run first.
     """
     global _tags
     tags = {
@@ -149,10 +87,7 @@ def configure_session(user_id: str, repo: str, task_id: str) -> None:
 def release_session(task_id: str) -> None:
     """Forget the finished task's session so a reused server can start the next task.
 
-    ``configure_session`` refuses a new identity while a session exists, which
-    keeps one task from borrowing another's scoped credentials. Once that task
-    has finished, its session must be dropped so the next task can build its
-    own. A session that belongs to a different task is left alone.
+    A session that belongs to a different task is left alone.
     """
     global _session, _scoped, _tags
     with _lock:
@@ -177,27 +112,13 @@ def reset_session_cache() -> None:
 
 
 def _session_tags() -> list[dict[str, str]]:
-    """Build the AssumeRole ``Tags`` list from the configured tag values.
-
-    Only non-empty values are included (filtered at ``configure_session``).
-    Values are truncated to the IAM limit so an over-long repo slug can never
-    make ``AssumeRole`` fail closed.
-    """
     return [{"Key": key, "Value": value[:_MAX_TAG_VALUE_LEN]} for key, value in _tags.items()]
 
 
-# Public alias of the IAM tag-value length cap, for the Bedrock credential
-# helper which builds tags from CLI args rather than module state.
 MAX_TAG_VALUE_LEN = _MAX_TAG_VALUE_LEN
 
 
 def _build_scoped_session(role_arn: str) -> Any:
-    """Build a boto3 Session backed by refreshable assumed-role credentials.
-
-    The refresh callback re-invokes ``sts:AssumeRole`` (with session tags) each
-    time botocore decides the cached credentials are near expiry, so a task
-    running past the 1-hour role-chaining cap keeps working.
-    """
     import boto3
     from botocore.config import Config
     from botocore.credentials import (
@@ -210,19 +131,11 @@ def _build_scoped_session(role_arn: str) -> Any:
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     task_id = _tags.get("task_id", "")
-    # Role session name must be <=64 chars and match [\w+=,.@-]. task_id is a
-    # short slug (a ULID, ~26 chars, in the API path; a 12-char hex fallback
-    # when the agent generates its own) — well under 64. The ``abca-`` prefix
-    # keeps CloudTrail entries identifiable. Truncate defensively regardless.
+    # Role session name must be <=64 chars and match [\w+=,.@-].
     session_name = f"abca-{task_id}"[:64] or "abca-session"
 
-    # A dedicated STS client built from the *ambient* (compute-role) chain.
-    # This is the role-chaining caller; the assumed SessionRole credentials it
-    # returns must NOT be used to build it, or refresh would recurse. Carries
-    # the static md/ UA segment so the assume-role call is attributed too.
     sts_config = fast_fail_config() if get_context(task_id) is not None else Config()
     sts_client = platform_client("sts", region_name=region, config=sts_config)
-    # A retained client's refresh must never pick up another task's identity.
     tags = _session_tags()
 
     def _refresh() -> dict[str, str]:
@@ -242,14 +155,8 @@ def _build_scoped_session(role_arn: str) -> Any:
         }
 
     botocore_session = get_botocore_session()
-    # Static md/ solution-attribution segment at the session level: it
-    # propagates to every client AND resource derived from this session, so
-    # all tenant-data calls carry it. (#319)
     botocore_session.user_agent_extra = ua.static_user_agent_extra()
     _name_retry_mode(botocore_session)
-    # No credentials yet: get_session() resolves them once, right after this
-    # returns, so a role that cannot be assumed fails closed there instead of
-    # on every later tenant-data call. botocore re-assumes before expiry.
     botocore_session._credentials = DeferredRefreshableCredentials(
         method="sts-assume-role-session-tags",
         refresh_using=_refresh,
@@ -263,7 +170,7 @@ def get_session() -> Any:
     """Return the cached boto3 Session for tenant-data access.
 
     Tag-scoped (assumed SessionRole) when ``AGENT_SESSION_ROLE_ARN`` is set;
-    otherwise a plain session on the ambient credential chain (fail-safe).
+    otherwise a plain session on the ambient credential chain.
     """
     global _session, _scoped
     if _session is not None:
@@ -275,16 +182,8 @@ def get_session() -> Any:
 
         role_arn = os.environ.get(SESSION_ROLE_ARN_ENV, "").strip()
         if role_arn:
-            # Scoping was requested. Build the scoped session or FAIL CLOSED —
-            # never silently downgrade to the ambient compute role, which can
-            # reach every tenant's data (that is exactly what this control
-            # prevents).
             try:
                 session = _build_scoped_session(role_arn)
-                # Assume the role now. Left to botocore it happens on the first
-                # signed request, where an STS refusal is one more error behind
-                # a best-effort wrapper and the task carries on. Cache nothing
-                # until it succeeded.
                 session.get_credentials().get_frozen_credentials()
                 _session = session
                 _scoped = True
@@ -303,10 +202,6 @@ def get_session() -> Any:
                     f"{SESSION_ROLE_ARN_ENV} but could not be established"
                 ) from exc
         else:
-            # Scoping not requested (local/dev/tests, or pre-provisioning):
-            # plain ambient session. Built from an explicit botocore session so
-            # the static md/ solution-attribution segment rides every derived
-            # client/resource (propagation requires the botocore session). (#319)
             from botocore.session import get_session as get_botocore_session
 
             import ua
@@ -330,23 +225,16 @@ def is_scoped() -> bool:
 
 
 def _retry_mode() -> str | None:
-    """The retry mode this module names, or ``None`` when it names none.
-
-    ``None`` when ``AWS_RETRY_MODE`` is set: botocore then reads the operator's
-    choice itself, exactly as before its default changed. See ``RETRY_MODE``.
-    """
     return None if os.environ.get(_RETRY_MODE_ENV) else RETRY_MODE
 
 
 def _name_retry_mode(botocore_session: Any) -> None:
-    """Name the retry mode on a botocore session, for every client it builds."""
     mode = _retry_mode()
     if mode:
         botocore_session.set_config_variable("retry_mode", mode)
 
 
 def _base_client_config() -> Any:
-    """``ua.client_config()`` (the static md/ UA) with the retry mode named."""
     from botocore.config import Config
 
     import ua
@@ -357,18 +245,8 @@ def _base_client_config() -> Any:
 
 
 def _merge_ua_config(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Return ``kwargs`` with the static md/ UA merged into any ``config``.
-
-    Preserves a caller-supplied ``botocore.config.Config``. Non-colliding keys
-    (``read_timeout`` etc.) survive via ``Config.merge``. ``user_agent_extra``
-    is the one key that *does* collide: botocore's ``merge`` gives precedence to
-    the argument, so a naive merge would silently drop the caller's extra. We
-    therefore *concatenate* both extras (caller first, then ours) so neither is
-    lost — matching the scoped-session path, which keeps both segments. (#319)
-
-    The retry mode (``RETRY_MODE``) is merged in the same way. ``retries`` is one
-    mapping, which ``merge`` replaces whole, so a caller's own retry settings are
-    carried over and the mode is added only where the caller named none.
+    """botocore's ``Config.merge`` lets its argument win on every key it sets, and
+    replaces the ``retries`` mapping whole.
     """
     from botocore.config import Config
 
@@ -385,13 +263,6 @@ def _merge_ua_config(kwargs: dict[str, Any]) -> dict[str, Any]:
         ua_config = ua_config.merge(Config(retries={**ua_config.retries, **caller_retries}))
     caller_extra = getattr(existing, "user_agent_extra", None)
     if caller_extra:
-        # merge() would let our user_agent_extra win outright; instead keep both
-        # by combining them into one extra. Overlay that combined UA onto
-        # ua_config (Config.merge lets the argument win only on the keys it
-        # sets — here just user_agent_extra), so every OTHER key ua_config
-        # carries survives. Falling through to the shared existing.merge below
-        # then preserves every caller key too, keeping this branch consistent
-        # with the no-collision path. (#319 review)
         combined = f"{caller_extra} {ua.static_user_agent_extra()}"
         ua_config = ua_config.merge(Config(user_agent_extra=combined))
     kwargs["config"] = existing.merge(ua_config)
@@ -402,10 +273,8 @@ def tenant_client(service_name: str, **kwargs: Any) -> Any:
     """boto3 client for tenant data.
 
     When the per-task SessionRole is configured, the client is built from the
-    tag-scoped, refreshable session (which already carries the static md/ UA at
-    the session level). Otherwise it delegates directly to ``boto3.client`` —
-    behaviorally identical to the pre-feature code path (transparent to
-    callers/tests that mock ``boto3.client``) but with the md/ UA merged in.
+    tag-scoped, refreshable session. Otherwise it delegates directly to
+    ``boto3.client``, with the md/ UA merged in.
     """
     session = get_session()
     if is_scoped():
@@ -428,17 +297,14 @@ def tenant_resource(service_name: str, **kwargs: Any) -> Any:
 def platform_client(service_name: str, **kwargs: Any) -> Any:
     """boto3 client for **platform** (non-tenant) calls on the ambient chain.
 
-    For the direct ``boto3.client(...)`` sites that deliberately bypass the
-    scoped session (CloudWatch Logs, Secrets Manager, bedrock-agentcore): they
-    talk to platform resources, not tenant data, so they use the compute role's
-    ambient credentials — but should still carry the static md/ solution
-    attribution. Merges the UA into any caller ``config``. (#319)
+    For platform resources (CloudWatch Logs, Secrets Manager,
+    bedrock-agentcore), not tenant data: uses the compute role's ambient
+    credentials and merges the static md/ solution attribution into any caller
+    ``config``. (#319)
     """
     import boto3
 
     client = boto3.client(service_name, **_merge_ua_config(kwargs))
-    # Track the ambient credential object so a MicroVM resume can refresh it
-    # before any platform call reuses keys cached from before the freeze.
     credentials = getattr(getattr(client, "_request_signer", None), "_credentials", None)
     if credentials is not None:
         with _ambient_lock:
@@ -447,7 +313,6 @@ def platform_client(service_name: str, **kwargs: Any) -> Any:
 
 
 def _microvm_scoped_credentials(task_id: str) -> Any:
-    """Require the existing task identity; never reset/rebuild a cached session."""
     session = get_session()
     with _lock:
         if not _scoped or not task_id or _tags.get("task_id") != task_id:
@@ -456,18 +321,10 @@ def _microvm_scoped_credentials(task_id: str) -> Any:
 
 
 def _locked_refresh(credentials: Any, *, force: bool) -> dict[str, str]:
-    """Refresh and export one coherent key/expiry pair on the retained object.
-
-    Botocore has no public forced-refresh operation. Keep its lock/private API
-    use here and exercise it against the installed botocore in regression tests.
-    A mandatory refresh propagates errors even while the old keys remain valid.
-    The enclosing lifecycle callback supplies the overall wall-clock budget.
-    """
+    """Botocore has no public forced-refresh operation."""
     from botocore.credentials import RefreshableCredentials
 
     if not isinstance(credentials, RefreshableCredentials):
-        # Static env keys cannot prove renewal after sleep. Do not invent a TTL
-        # or claim that rereading the same environment refreshed the runtime role.
         raise SessionScopingError("MicroVM resume requires a refreshable credential provider")
     if not credentials._refresh_lock.acquire(timeout=2):
         raise TimeoutError("Credential refresh lock did not become available")
@@ -507,9 +364,8 @@ def refresh_microvm_credentials(task_id: str) -> None:
     """Refresh ambient callers first, then the same tag-scoped tenant object.
 
     Call only behind the closed guest resume barrier. Cached DynamoDB/S3 and
-    platform clients keep their credential references; replacing a boto3 session
-    would leave those references stale. Unknown/static ambient providers fail
-    closed until their runtime renewal path has been established.
+    platform clients keep their credential references. Unknown/static ambient
+    providers fail closed.
     """
     tenant = _microvm_scoped_credentials(task_id)
     with _ambient_lock:

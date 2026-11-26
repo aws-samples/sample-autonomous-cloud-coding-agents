@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-/** Namespace of the webhook intake metrics. The alarm in stacks/agent.ts reads it. */
+/** Namespace of the webhook intake metrics. */
 export const WEBHOOK_METRIC_NAMESPACE = 'ABCA/Webhooks';
 
 /** Counts the screening calls that failed, each of which dropped the content it was screening. */
@@ -28,12 +28,9 @@ type WebhookScreeningSource = 'jira-comments' | 'linear-docs' | 'linear-comments
 /**
  * Count one block of advisory third-party content (comments, project documents or the
  * context of a Linear agent session) that a webhook processor dropped because the guardrail
- * call that screens it failed (#794). The processor still submits the task, so without this
- * count the only trace is a log line. Content that the guardrail blocked is not counted:
- * that is screening at work.
+ * call that screens it failed (#794). Content that the guardrail blocked is not counted.
  *
- * Written as an embedded-metric log line, which CloudWatch Logs turns into the metric: it
- * needs no CloudWatch permission and no client.
+ * Written as an embedded-metric log line, which CloudWatch Logs turns into the metric.
  */
 export function emitWebhookScreeningFailedMetric(source: WebhookScreeningSource): void {
   process.stdout.write(JSON.stringify({

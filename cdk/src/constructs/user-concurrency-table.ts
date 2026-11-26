@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for UserConcurrencyTable construct.
- */
 export interface UserConcurrencyTableProps {
   /**
    * Optional table name override.
@@ -52,9 +49,6 @@ export interface UserConcurrencyTableProps {
  * The application layer uses conditional updates for increment/decrement.
  */
 export class UserConcurrencyTable extends Construct {
-  /**
-   * The underlying DynamoDB table. Use this to grant access or read the table name.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: UserConcurrencyTableProps = {}) {

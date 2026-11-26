@@ -17,37 +17,12 @@
  *  SOFTWARE.
  */
 
-/**
- * Outbound AWS SDK User-Agent solution attribution (#319) — CLI surface.
- *
- * Every AWS API call made by the `bgagent` CLI carries two ABCA
- * solution-attribution segments in the `User-Agent` header:
- *
- *     app/uksb-wt64nei4u6        <- native AWS_SDK_UA_APP_ID env (defaulted below)
- *     md/uksb-wt64nei4u6#cli     <- static, baked once at construction
- *
- * **The `app/` segment is emitted by the SDK itself** from the
- * `AWS_SDK_UA_APP_ID` environment variable (read natively by JS v3). The CLI
- * has no deploy-time env wiring, so {@link applyDefaultAppId} sets a default
- * value at process startup — but only when the env var is unset, so an
- * operator who exports `AWS_SDK_UA_APP_ID=''` (or any other value) keeps full
- * control and can opt out.
- *
- * This module otherwise owns only the **static `md/` segment** — a stable
- * `cli` label baked once via `customUserAgent` at client construction. No
- * per-request trace, no middleware.
- *
- * Counterparts: `agent/src/ua.py` and `cdk/src/handlers/shared/ua.ts`.
- * Solution id, wire format, and sanitization rules must stay identical.
- */
-
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
-/** AWS solution-attribution id for ABCA. Per-surface literal by design. */
+/** AWS solution-attribution id for ABCA. */
 export const SOLUTION_ID = 'uksb-wt64nei4u6';
 
-/** Stable per-component label: this surface IS the bgagent CLI. */
 const COMPONENT = 'cli';
 
 /** Standard AWS SDK env var the JS v3 SDK reads natively for the `app/` segment. */
@@ -55,8 +30,7 @@ export const APP_ID_ENV = 'AWS_SDK_UA_APP_ID';
 
 /**
  * RFC 7230 token charset. `#` is the scheme's structural separator and is
- * deliberately excluded. Mirrors `_ALLOWED` in `agent/src/ua.py`. The `u` flag
- * matches by code point, as Python iterates a string, so a character outside
+ * excluded. The `u` flag matches by code point, so a character outside
  * the Basic Multilingual Plane is one `-`, not two.
  */
 const UA_TOKEN_SAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/gu;
@@ -68,7 +42,7 @@ export function sanitizeUaValue(raw: string): string {
 
 /**
  * Set `AWS_SDK_UA_APP_ID` to the ABCA solution id when the operator has not
- * already set it. Called once at CLI startup. Never overrides an existing
+ * already set it. Never overrides an existing
  * value — including an explicit empty string, which is a deliberate opt-out.
  */
 export function applyDefaultAppId(): void {
@@ -88,13 +62,10 @@ export function abcaUserAgent(): { customUserAgent: [string, string][] } {
 
 /**
  * The single attributed way to construct an AWS SDK v3 client. Composes the
- * static `md/` segment ({@link abcaUserAgent}) into the client config so
- * omission is impossible at the call site. Caller-supplied opts (region,
- * timeouts) are preserved — and a caller who supplies their own
- * `customUserAgent` pairs keeps them, with the ABCA `md/` pair appended rather
- * than overwritten (the SDK renders all pairs). No call site sets
- * `customUserAgent` today, so the merge is latent hardening; it keeps the
- * factory composable instead of clobbering. (#319)
+ * static `md/` segment ({@link abcaUserAgent}) into the client config.
+ * Caller-supplied opts (region, timeouts) are preserved — and a caller who
+ * supplies their own `customUserAgent` pairs keeps them, with the ABCA `md/`
+ * pair appended rather than overwritten (the SDK renders all pairs).
  */
 export function makeClient<C>(
   Ctor: new (cfg: { customUserAgent: [string, string][] }) => C,
@@ -104,7 +75,7 @@ export function makeClient<C>(
   return new Ctor({ ...cfg, customUserAgent: [...callerUa, ...abcaUserAgent().customUserAgent] });
 }
 
-/** Attributed `DynamoDBDocumentClient` — the wrapper form, in one call. */
+/** Attributed `DynamoDBDocumentClient`: {@link makeClient} applied to the wrapped `DynamoDBClient`. */
 export function makeDocClient(cfg: Record<string, unknown> = {}): DynamoDBDocumentClient {
   return DynamoDBDocumentClient.from(makeClient(DynamoDBClient, cfg));
 }

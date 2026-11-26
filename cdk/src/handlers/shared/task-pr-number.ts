@@ -22,9 +22,7 @@ import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound } from './l
 
 /**
  * A task's PR number: the numeric ``pr_number`` (preferred), else the number in
- * ``pr_url`` (``.../pull/N``). Orchestration child tasks commonly persist only
- * ``pr_url``. Null when neither yields a positive integer: the task ran but
- * never opened a PR.
+ * ``pr_url`` (``.../pull/N``). Null when neither yields a positive integer.
  */
 export function prNumberFromTask(task: { pr_number?: unknown; pr_url?: unknown }): number | null {
   if (
@@ -46,19 +44,9 @@ export function prNumberFromTask(task: { pr_number?: unknown; pr_url?: unknown }
 
 /**
  * Read a task's PR number from its TaskRecord ({@link prNumberFromTask}).
- *
- * Deduplicated from the byte-for-byte-equivalent copies that previously lived
- * in orchestration-reconciler (``resolvePrNumber``) and linear-webhook-processor
- * (``resolveChildPrNumber``) — both swallowed the read failure into a bare
- * ``null`` (#756 Cat 2). Returns a {@link LookupResult} so callers can tell
- * "dependent has no PR yet" (absent) from "the TaskRecord read broke" (error):
- * the restack cascade must not misreport an outage as "no PR — skipping".
- *
- * This helper deliberately does NOT log the failure itself: the cause travels in
- * the result, and every caller holds orchestration/task context worth logging
- * alongside it (all four current callers do). That makes logging a **caller
- * obligation** — a caller that neither logs the failure nor branches on
- * ``isLookupFailure`` re-creates the silent drop this extraction removed.
+ * Returns a {@link LookupResult}: absent when the task has no PR, error when
+ * the TaskRecord read failed. Never throws, and does not log the failure: the
+ * cause travels in the result.
  */
 export async function readTaskPrNumber(
   ddb: DynamoDBDocumentClient,

@@ -52,7 +52,6 @@ describe('regional capability catalog', () => {
 
   test('has an entry for every compute backend and limits only Lambda MicroVMs to Regions', () => {
     const backends = Object.keys(CAPABILITY_CATALOG.compute) as ComputeBackend[];
-    // resolveComputeBackend throws on a name that is not a backend.
     expect(backends.map(backend => resolveComputeBackend(backend)).sort()).toEqual(['agentcore', 'ecs', 'lambda-microvm']);
     expect(backends.filter(backend => CAPABILITY_CATALOG.compute[backend].regions)).toEqual(['lambda-microvm']);
   });
@@ -70,7 +69,6 @@ describe('regional capability catalog', () => {
         expect(capability.regions.length).toBeGreaterThan(0);
         expect(new Set(capability.regions).size).toBe(capability.regions.length);
         for (const region of capability.regions) expect(region).toMatch(REGION);
-        // A Region-limited capability names the services that limit it.
         expect(capability.requiredServices.length).toBeGreaterThan(0);
       }
     },
@@ -87,7 +85,6 @@ describe('regional capability catalog', () => {
   });
 
   test('has AgentCore zone data for every core Region so the VPC can be auto-pinned', () => {
-    // The zone table tracks Runtime, a superset of Memory, so only this direction holds.
     for (const region of CAPABILITY_CATALOG.core.regions!) {
       expect([region, region in AGENTCORE_SUPPORTED_AZ_IDS]).toEqual([region, true]);
     }

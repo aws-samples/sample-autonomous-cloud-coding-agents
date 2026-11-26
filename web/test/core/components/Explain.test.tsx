@@ -34,7 +34,6 @@ const HELD = {
   how: 'Tasks that made an approval request, divided by the tasks that ran.',
 };
 
-/** A metric as a tile draws it: all of it is the hover target, and the "i" stands beside its label. */
 function renderMetric() {
   const view = render(
     <Explain title="Waited in line" explanation={WAITED} data-testid="metric">
@@ -46,7 +45,6 @@ function renderMetric() {
 
 const bubble = () => screen.queryByRole('tooltip');
 
-/** What a screen reader says after the name: each question and its answer, and nothing else. */
 const described = ({ what, why, how }: Explanation) => `What it is: ${what} Why it matters: ${why} How it's computed: ${how}`;
 
 function pass(ms: number): void {
@@ -55,13 +53,11 @@ function pass(ms: number): void {
   });
 }
 
-/** The pointer comes to rest on `target` and stays until its bubble is open. */
 function rest(target: HTMLElement): void {
   fireEvent.pointerMove(target);
   pass(250);
 }
 
-/** For the next 400 ms, in steps of 10: the bubble is on screen all the time, or never. */
 function staysFor400ms(shown: boolean): void {
   for (let ms = 0; ms < 400; ms += 10) {
     pass(10);
@@ -156,7 +152,6 @@ describe('Explain', () => {
     it('is not closed by a finger that touches the target and lifts while the mouse rests on it', () => {
       const { metric } = renderMetric();
       rest(metric);
-      // A finger does not hover, on its way out either: on a touch screen, a scroll that starts on the tile.
       fireEvent.pointerMove(metric, { pointerType: 'touch' });
       fireEvent.pointerLeave(metric, { pointerType: 'touch' });
       pass(1000);
@@ -229,7 +224,6 @@ describe('Explain', () => {
       rest(metric);
       fireEvent.pointerLeave(metric);
       fireEvent.pointerMove(screen.getByRole('tooltip'));
-      // Escape removes the bubble from under the pointer: the browser reports no leave for it.
       fireEvent.keyDown(document.body, { key: 'Escape' });
       expect(bubble()).not.toBeInTheDocument();
 
@@ -256,7 +250,6 @@ describe('Explain', () => {
     it('opens on a tap and closes on the next', () => {
       const { metric, icon } = renderMetric();
       fireEvent.pointerMove(metric, { pointerType: 'touch' });
-      // The first tap gives the "i" the focus, which opens the bubble before the click arrives.
       fireEvent.pointerDown(icon, { pointerType: 'touch' });
       fireEvent.focus(icon);
       fireEvent.click(icon);
@@ -277,7 +270,6 @@ describe('Explain', () => {
       fireEvent.click(icon);
       expect(bubble()).toBeInTheDocument();
 
-      // Neither the focus nor a pointer holds this bubble: nothing else would close it there.
       fireEvent.pointerDown(icon, { pointerType: 'touch' });
       fireEvent.click(icon);
       expect(bubble()).not.toBeInTheDocument();
@@ -295,7 +287,6 @@ describe('Explain', () => {
     it('toggles from the keyboard after a press of the pointer that ended in no click', () => {
       const { icon } = renderMetric();
       fireEvent.focus(icon);
-      // Pressed on the "i" and released elsewhere: no click follows.
       fireEvent.pointerDown(icon);
       fireEvent.keyDown(document.body, { key: 'Escape' });
       expect(bubble()).not.toBeInTheDocument();
@@ -311,7 +302,6 @@ describe('Explain', () => {
       fireEvent.focus(icon);
       fireEvent.click(icon);
       expect(bubble()).toBeInTheDocument();
-      // What the press recorded is used once: this click (a key, an assistive technology) toggles what is on screen.
       fireEvent.click(icon);
       expect(bubble()).not.toBeInTheDocument();
     });
@@ -323,7 +313,6 @@ describe('Explain', () => {
       fireEvent.focus(icon);
       fireEvent.click(icon);
       expect(bubble()).toBeInTheDocument();
-      // The click gave the "i" the focus, which holds the bubble when the pointer leaves.
       fireEvent.pointerLeave(metric);
       pass(1000);
       expect(bubble()).toBeInTheDocument();
@@ -336,13 +325,12 @@ describe('Explain', () => {
 
     it('does not open again for a pointer that moves on the target after a click has closed the bubble', () => {
       const { metric, icon } = renderMetric();
-      // The pointer is still on its way to the "i" when it presses: the wait for it to rest is running.
       fireEvent.pointerMove(metric);
       fireEvent.pointerDown(icon);
       fireEvent.focus(icon);
       fireEvent.click(icon);
       fireEvent.pointerDown(icon);
-      // jsdom knows no :hover: for the moment the bubble closes, the target says that the pointer is on it.
+      // jsdom knows no :hover.
       const onTarget = vi.spyOn(metric, 'matches').mockReturnValue(true);
       fireEvent.click(icon);
       onTarget.mockRestore();
@@ -361,18 +349,14 @@ describe('Explain', () => {
       expect(name).not.toBeVisible();
       // Chrome joins the pieces of a hidden name with spaces: "About w aited in line".
       expect(Array.from(name?.childNodes ?? [], (node) => node.nodeValue)).toEqual(['About waited in line']);
-      // A title would be a second bubble on hover, which is why the name is not the button's own label.
       expect(icon).not.toHaveAttribute('title');
-      // In a form, a button that is not told otherwise submits it.
       expect(icon).toHaveAttribute('type', 'button');
     });
 
     it('describes the "i" by each question and its answer, in one piece of text, whether or not the bubble is open', () => {
       const { icon } = renderMetric();
       const description = document.getElementById(icon.getAttribute('aria-describedby') ?? '');
-      // It is for a listener only: on the page it would stand in every tile, above its label.
       expect(description).not.toBeVisible();
-      // A listener hears where each answer starts. Not the title, which is the name already.
       expect(Array.from(description?.childNodes ?? [], (node) => node.nodeValue)).toEqual([
         'What it is: The share of your tasks that could not start right away.'
         + ' Why it matters: Waiting adds to every time on this page.'
@@ -391,7 +375,6 @@ describe('Explain', () => {
       );
       const part = screen.getByRole('img', { name: 'Failed or stopped' });
       expect(screen.queryByRole('button')).not.toBeInTheDocument();
-      // The number of a graph part is in its name and in the bubble, under the title: not in the description.
       expect(part).toHaveAccessibleDescription(described(HELD));
 
       fireEvent.focus(part);
@@ -425,7 +408,7 @@ describe('Explain', () => {
     );
     const waited = screen.getByTestId('waited');
     rest(waited);
-    // jsdom knows no :hover: for the moment its bubble closes, the first target says that the pointer is on it.
+    // jsdom knows no :hover.
     const onTarget = vi.spyOn(waited, 'matches').mockReturnValue(true);
     fireEvent.focus(screen.getByRole('button', { name: 'About held for approval' }));
     onTarget.mockRestore();

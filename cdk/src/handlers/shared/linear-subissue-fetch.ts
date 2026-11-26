@@ -17,24 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Fetch a Linear parent issue's sub-issue dependency graph, as authored
- * by a human in the tracker. Reads ``children`` (sub-issues) and, per
- * child, its ``inverseRelations`` of type ``blocks`` (what blocks it) to
- * build ``depends_on`` edges, then hands the result to
- * ``orchestration-dag.ts::validateDag``.
- *
- * Direct GraphQL against Linear, Bearer-authenticated with the
- * per-workspace OAuth token resolved by ``resolveLinearOauthToken``.
- * Mirrors the request shape proven in ``linear-feedback.ts``.
- *
- * Unlike the best-effort feedback path, discovery is load-bearing: a
- * fetch failure must be distinguishable from "this issue genuinely has
- * no sub-issues" so the caller (the webhook processor) can decide
- * whether to fall back to a single task or surface an error. Hence the
- * discriminated ``FetchSubIssueGraphResult`` rather than a bare array.
- */
-
 import { logger } from './logger';
 import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound } from './lookup-result';
 import type { DagNode } from './orchestration-dag';
@@ -46,27 +28,11 @@ const REQUEST_TIMEOUT_MS = 8000;
 /** Linear `IssueRelation.type` value meaning "source blocks target". */
 const RELATION_TYPE_BLOCKS = 'blocks';
 
-/**
- * Page size for the children / relations connections.
- *
- * This query fetches a SINGLE page (no cursor loop), and nothing upstream caps
- * the size of a human-authored sub-issue graph. So an over-size epic used to be
- * SILENTLY truncated to the first 100 children AND the dropped children's
- * dependency edges were filtered out, leaving the survivors to release out of
- * order. Rather than truncate, we detect ``hasNextPage`` on either connection
- * and return an explicit ``error`` (fail loud) so the operator splits the epic
- * instead of getting a wrong-order run. 100 is the ceiling for a single epic; a
- * genuinely larger workload should be several epics.
- */
 const CONNECTION_PAGE_SIZE = 100;
 
 /**
- * GraphQL: fetch a parent issue's children and each child's blockers.
- *
  * For child C, ``inverseRelations`` of type ``blocks`` are relations
- * whose *source* issue blocks C — i.e. C's predecessors. We take the
- * related issue id from each as a ``depends_on`` edge. ``pageInfo.hasNextPage``
- * on both connections lets us detect (and reject) a truncated over-size graph.
+ * whose *source* issue blocks C — i.e. C's predecessors.
  */
 const SUB_ISSUE_GRAPH_QUERY = `
 query SubIssueGraph($issueId: String!, $first: Int!) {
@@ -95,20 +61,11 @@ query SubIssueGraph($issueId: String!, $first: Int!) {
 
 /** One sub-issue plus the metadata the orchestration row needs. */
 export interface SubIssueNode extends DagNode {
-  /** Linear sub-issue UUID (same as ``id``). */
+  /** Linear sub-issue UUID. */
   readonly id: string;
   /** Human-readable identifier (e.g. ``ENG-42``) for comments/logs. */
   readonly identifier?: string;
-  /** Sub-issue title for the task description. */
   readonly title?: string;
-  /**
-   * Sub-issue scope/description. A planner writes a rich
-   * per-piece scope — often naming a concrete deliverable (a file, a route) —
-   * and that scope is what the reviewer approves. It must reach the coding
-   * agent so it builds what the plan promised (e.g. the exact filename), not a
-   * title-only guess. Populated from the plan when a planner seeded the graph;
-   * absent when an existing sub-issue graph is fetched by title only.
-   */
   readonly description?: string;
   /**
    * Opaque, adapter-owned metadata copied onto the released child task.
@@ -162,10 +119,7 @@ export interface FetchSubIssueGraphOptions {
  *
  * Returns:
  * - ``ok``          — at least one child; ``children`` carry ``depends_on``
- *   edges restricted to siblings within this child set (edges pointing
- *   outside the set are dropped here and surface as a dangling-edge
- *   rejection only if the caller chooses to keep them; we keep them so
- *   ``validateDag`` can flag a genuinely malformed graph).
+ *   edges restricted to siblings within this child set.
  * - ``no_children`` — the issue exists but has no sub-issues (caller
  *   falls back to a single task).
  * - ``error``       — network / auth / GraphQL failure (caller surfaces
@@ -226,11 +180,6 @@ export async function fetchSubIssueGraph(
     return { kind: 'no_children', parentIssueId: issue.id };
   }
 
-  // Fail LOUD on truncation instead of silently dropping children (and
-  // their dependency edges). If Linear reports more children than
-  // one page holds, or any child has more blockers than one page holds, we can't
-  // build a correct DAG from a single fetch — reject so the operator splits the
-  // epic rather than getting a silently-wrong-order run.
   if (issue.children?.pageInfo?.hasNextPage) {
     logger.warn('Linear sub-issue fetch truncated — parent has more children than one page', {
       parent_issue_id: issue.id, page_size: CONNECTION_PAGE_SIZE,
@@ -253,12 +202,6 @@ export async function fetchSubIssueGraph(
     };
   }
 
-  // Restrict depends_on edges to ids that are themselves children of
-  // this parent — a "blocks" relation pointing at an issue outside the
-  // epic is not an intra-epic ordering constraint. (validateDag also
-  // guards dangling edges, but filtering here keeps the persisted graph
-  // clean and the dangling check meaningful for genuinely malformed
-  // intra-epic references only.)
   const childIds = new Set(
     childNodes.map((c) => c.id).filter((id): id is string => typeof id === 'string'),
   );
@@ -274,13 +217,7 @@ export async function fetchSubIssueGraph(
       id: c.id,
       ...(c.identifier !== undefined && { identifier: c.identifier }),
       ...(c.title !== undefined && { title: c.title }),
-      // A human-authored sub-issue often carries its OWN scope in the
-      // description (a checklist, an acceptance criterion). This used to fetch
-      // title-only, so the child agent built from a title guess. Carry the
-      // description so buildChildDescription hands it to the coding agent
-      // (matching a planner-written scope, which already populates this).
       ...(typeof c.description === 'string' && c.description.trim() !== '' && { description: c.description }),
-      // Dedup edges (Linear can surface a relation from both directions).
       depends_on: [...new Set(blockers)],
     });
   }
@@ -288,23 +225,17 @@ export async function fetchSubIssueGraph(
   return { kind: 'ok', parentIssueId: issue.id, children };
 }
 
-/** GraphQL: an issue's parent id (for the comment trigger — sub-issue → parent). */
 const ISSUE_PARENT_QUERY = `
 query IssueParent($issueId: String!) {
   issue(id: $issueId) { id parent { id } }
 }`;
 
 /**
- * Fetch a sub-issue's parent issue id, for the comment trigger. A Linear
- * comment names the issue it is on (the sub-issue); to find its orchestration
- * we need the PARENT (orchestration_id is derived from the parent).
+ * Fetch a sub-issue's parent issue id.
  *
  * Returns a {@link LookupResult}: ``found`` with the parent id, ``absent`` when
  * the issue genuinely has no parent (a top-level issue — not part of any
- * orchestration), or a failure when the fetch/auth/GraphQL call breaks. The
- * distinction matters: a failure previously collapsed to the same ``null`` as
- * "no parent", silently downgrading an orchestration child to the standalone
- * path (#756 Cat 2). Never throws.
+ * orchestration), or a failure when the fetch/auth/GraphQL call breaks. Never throws.
  */
 export async function fetchIssueParentId(
   accessToken: string,

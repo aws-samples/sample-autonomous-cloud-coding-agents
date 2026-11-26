@@ -1,29 +1,10 @@
-"""Lockstep: the image installs the Claude Code CLI version that the SDK bundles.
-
-The agent has Claude Code twice. ``claude-agent-sdk`` (pinned in
-``pyproject.toml``) ships a CLI inside its wheel and records that CLI's version;
-``Dockerfile`` installs ``@anthropic-ai/claude-code`` from npm onto PATH. The SDK
-drives the CLI over a control protocol, so both must be the same version (#215).
-The two pins live in different ecosystems and a dependency update moves one of
-them alone. This test is what holds them together: before it, the lockstep was a
-comment beside each pin.
-
-It reads the Dockerfile as text. It sees every command that names the package,
-with a version or without, but not what the command does with it, and not a CLI
-that reaches the image some other way.
-"""
-
 import re
 from importlib.metadata import version
 from pathlib import Path
 
-# Hard import: if a later SDK stops recording its bundled CLI version in this
-# module, read the version from where that SDK records it. Do not drop the test.
 from claude_agent_sdk._cli_version import __cli_version__ as bundled_cli_version
 
 _DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
-# The package as a command argument, with its version when that is a literal one.
-# Inside a path ("$(npm root -g)/@anthropic-ai/claude-code") it is not an argument.
 _CLI_PACKAGE = re.compile(r"(?<![\w/])@anthropic-ai/claude-code(?![\w/-])(?:@([\w.+-]+))?")
 
 

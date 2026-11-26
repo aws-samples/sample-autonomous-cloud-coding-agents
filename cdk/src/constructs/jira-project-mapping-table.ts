@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for JiraProjectMappingTable construct.
- */
 export interface JiraProjectMappingTableProps {
   /**
    * Optional table name override.
@@ -48,10 +45,8 @@ export interface JiraProjectMappingTableProps {
  * DynamoDB table mapping Jira Cloud projects to GitHub repositories.
  *
  * Schema: jira_project_identity (PK) — composite key `{cloudId}#{projectKey}`.
- * `cloudId` is the Atlassian tenant identifier (returned by OAuth + present on
- * every webhook payload); `projectKey` is the human project key (e.g. `ENG`).
- * The composite key keeps the same project key across distinct tenants
- * unambiguous.
+ * `cloudId` is the Atlassian tenant identifier; `projectKey` is the human
+ * project key (e.g. `ENG`).
  *
  * Fields:
  * - repo — `owner/repo`
@@ -62,9 +57,6 @@ export interface JiraProjectMappingTableProps {
  * - onboarded_at, updated_at — ISO timestamps
  */
 export class JiraProjectMappingTable extends Construct {
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: JiraProjectMappingTableProps = {}) {

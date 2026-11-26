@@ -44,7 +44,6 @@ interface Deployment {
   readonly directory: string;
   readonly census: AssemblyCensus;
   readonly application: TemplateJson;
-  /** Nested application templates (for example the MicroVM stack), which can import network exports directly. */
   readonly nested: readonly TemplateJson[];
   readonly network?: TemplateJson;
 }
@@ -58,16 +57,10 @@ function isNetworkResource(id: string): boolean {
   return id.startsWith('AgentVpc') || id.startsWith('DnsFirewall');
 }
 
-/**
- * Inline, the parent passes network references into nested stacks as parameters;
- * split, the nested template imports the network exports itself. Drop those
- * parameters so both topologies compare equal apart from where networking lives.
- */
 function withoutNetworkParameters(resource: TemplateJson): TemplateJson {
   if (resource?.Type !== 'AWS::CloudFormation::Stack') return resource;
   const parameters = Object.fromEntries(Object.entries((resource.Properties.Parameters ?? {}) as Record<string, TemplateJson>)
     .filter(([, value]) => !(typeof value?.Ref === 'string' && isNetworkResource(value.Ref))));
-  // The nested template differs accordingly, so its content-addressed URL does too.
   const { Parameters: _parameters, TemplateURL: _url, ...properties } = resource.Properties;
   return { ...resource, Properties: Object.keys(parameters).length ? { ...properties, Parameters: parameters } : properties };
 }
@@ -163,8 +156,6 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
   }
 
   beforeAll(async () => {
-    // Blueprint timestamps are intentionally unchanged from main. Fix the clock
-    // only for this comparison so it isolates the network ownership change.
     jest.useFakeTimers({ now: new Date('2026-10-02T00:00:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
     inline = await synthesize('inline');
     split = await synthesize('split');
@@ -219,14 +210,10 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     expect(removed).toHaveLength(1);
     expect(importedExports([threeZones.application, ...threeZones.nested]).has(removed[0])).toBe(true);
 
-    // Stage one: every import in the target application still resolves in the
-    // deployed three-zone network. --exclusively keeps that network unchanged.
     const targetImports = importedExports([reducedZones.application, ...reducedZones.nested]);
     expect(targetImports.has(removed[0])).toBe(false);
     for (const name of targetImports) expect(oldExports.get(name)).toEqual(newExports.get(name));
 
-    // Stage two: the network can drop the unused export and subnet. Remaining
-    // exported resources keep their identities and service properties.
     const removedSubnetId = oldExports.get(removed[0]).Ref;
     expect(threeZones.network!.Resources[removedSubnetId].Type).toBe('AWS::EC2::Subnet');
     expect(reducedNetwork.Resources).not.toHaveProperty(removedSubnetId);
@@ -291,10 +278,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     const [beforeVersionId, beforeVersion] = versionOf(inline.application);
     const [afterVersionId, afterVersion] = versionOf(split.application);
     expect(withoutMetadata(afterVersion)).toEqual(withoutMetadata(beforeVersion));
-    // The ECS orchestrator's environment names the private subnets: by reference
-    // inline, by import in the split topology. The logical ID of its version hashes
-    // that, so map this one immutable version ID there. On the other backends, and
-    // for the guardrail version on every backend, both templates must have the same ID.
+    // CDK hashes a function's environment into the logical ID of its current version.
     const originalId = (id: string): string => compute === 'ecs' && id === afterVersionId ? beforeVersionId : id;
     function normalize(value: any): any {
       if (Array.isArray(value)) return value.map(normalize);
@@ -316,7 +300,6 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
       expect({ [key]: normalize(withoutNetworkParameters(resource)) })
         .toEqual({ [key]: normalize(withoutNetworkParameters(inline.application.Resources[key])) });
     }
-    // Nested application stacks (MicroVM) import their network references directly.
     for (const name of importedExports(split.nested)) {
       expect(exports.has(JSON.stringify(name))).toBe(true);
       imports.add(JSON.stringify(name));
@@ -358,8 +341,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
         .filter(([, resource]) => resource.Type === 'AWS::Lambda::Function');
       for (const [id, fn] of functions) {
         expect(fn.Properties.Environment?.Variables?.AWS_SDK_UA_APP_ID).toBe(`uksb-wt64nei4u6#${APP_NAME}`);
-        // Core CDK providers use generic CfnResource without a TagManager;
-        // require parity with their existing tags as well as attributed SDK calls.
+        // Core CDK providers use generic CfnResource without a TagManager.
         expect(fn.Properties.Tags).toEqual(inline.application.Resources[id].Properties.Tags);
       }
       const tagged = functions.filter(([, fn]) => fn.Properties.Tags);

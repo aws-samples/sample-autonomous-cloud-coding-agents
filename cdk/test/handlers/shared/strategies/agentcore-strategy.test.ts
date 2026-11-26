@@ -81,8 +81,6 @@ describe('AgentCoreComputeStrategy', () => {
     });
 
     test('reuses shared BedrockAgentCoreClient across instances', async () => {
-      // The lazy singleton may already be initialized from prior tests.
-      // Record the current call count, then verify no additional constructor calls happen.
       const callsBefore = MockedClient.mock.calls.length;
 
       mockSend.mockResolvedValue({});
@@ -102,7 +100,6 @@ describe('AgentCoreComputeStrategy', () => {
         blueprintConfig: { compute_type: 'agentcore', runtime_arn: defaultRuntimeArn },
       });
 
-      // Lazy singleton: at most one constructor call total across all strategy instances
       const callsAfter = MockedClient.mock.calls.length;
       expect(callsAfter - callsBefore).toBeLessThanOrEqual(1);
       expect(mockSend).toHaveBeenCalledTimes(2);

@@ -54,7 +54,6 @@ const ATTACHMENTS_BUCKET_NAME = process.env.ATTACHMENTS_BUCKET_NAME;
 /** GitHub caps issue titles at 256 characters; store no more than that. */
 export const ISSUE_TITLE_MAX_LENGTH = 256;
 
-/** Conservative fallback token count for images where metadata could not be read. */
 const MAX_IMAGE_TOKENS_FALLBACK = 1568;
 
 /**
@@ -76,53 +75,6 @@ export interface PollState {
   readonly microvmOwnershipLost?: boolean;
 }
 
-/**
- * Whether a backend's liveness is (partly) inferred from `agent_heartbeat_at`.
- *
- * The *periodic* writer is `_heartbeat_worker` (`agent/src/server.py`, 45 s
- * cadence), which runs ONLY on substrates that go through the FastAPI server:
- * `/invocations` (AgentCore) and the `/run` hook (MicroVMs) both reach it via
- * `_run_task_background`. `agent/src/pipeline.py` also writes the timestamp ONCE
- * at RUNNING on every substrate, but that single write goes stale by design — so
- * this predicate decides which backends may treat staleness as SIGNAL rather than
- * as an artefact of never being refreshed.
- *
- * - `agentcore` — yes, and it is the ONLY liveness signal there:
- *   `AgentCoreComputeStrategy.pollSession` is an explicit stub that always
- *   reports `running`, so a crashed container is invisible without the heartbeat.
- * - `lambda-microvm` — yes, and it is the SECOND of two complementary signals
- *   (ADR-021 P2). The substrate `GetMicrovm` check catches a VM that DIED; it
- *   cannot catch a VM that is alive and healthy while the in-guest pipeline is
- *   hung, deadlocked, or OOM-killed inside the guest — nothing self-terminates on
- *   this substrate (live-verified: a MicroVM with a broken hook sat in `RUNNING`
- *   indefinitely with no `stateReason`). Without the heartbeat check such a task
- *   would burn the full ~8.5 h poll window, billing an 8-hour MicroVM
- *   reservation, before the safety net fired. So liveness here is substrate state
- *   AND agent heartbeat.
- * - `ecs` — no, and this is a HARD CORRECTNESS CONSTRAINT, not a tuning
- *   preference. The ECS boot command (`ecs-strategy.ts`) invokes
- *   `run_task_from_payload` directly and "bypasses the uvicorn server entirely",
- *   so `_heartbeat_worker` NEVER STARTS and `agent_heartbeat_at` is written
- *   exactly once. Enabling this for `ecs` would fail EVERY ECS task after
- *   ~4 minutes, regardless of container health: that single write makes the
- *   timestamp PRESENT, so the staleness arm below applies (`runningAge > 120 &&
- *   hbAge > 240`), not the never-beat arm (`runningAge > 120 + 240`). The two
- *   thresholds are not additive on this path — `pipeline.py` calls
- *   `write_running` and `write_heartbeat` back to back, so `hbAge ≈ runningAge`
- *   and the 120 s gate is already cleared by the time the 240 s one binds.
- *   `AGENT_HEARTBEAT_STALE_SEC` alone sets the deadline. Separately — and only as
- *   a secondary point — ECS does not need it: `DescribeTasks` reports a real
- *   container exit (including OOM-kill, exit 137) with an exit code, and the ECS
- *   poll block in `orchestrate-task.ts` already interprets it with its own
- *   patience counters.
- *
- * A `switch` rather than a set membership test so a fourth backend cannot be
- * added without making an explicit, compile-checked decision here — the culture
- * ADR-021 sub-decision 1 asks for. The checkable fact that decides a new
- * backend's answer is "does the agent serve HTTP on it?", not taste: if the
- * substrate boots through `server.py` the worker runs, and if it boots the
- * pipeline directly it does not.
- */
 function heartbeatLivenessApplies(computeType: ComputeType): boolean {
   switch (computeType) {
     case 'agentcore':
@@ -137,22 +89,6 @@ function heartbeatLivenessApplies(computeType: ComputeType): boolean {
   }
 }
 
-/**
- * What to CALL the thing that died, in operator-facing failure copy.
- *
- * The heartbeat-stale message used to hard-code "container", which was true for
- * the only two backends that existed when it was written and became false the
- * moment `lambda-microvm` joined the heartbeat path: a MicroVM has no container,
- * so the message told the operator to go looking for one. Same defect class as
- * the reconcile detail that said "substrate state completed" — copy that names
- * something which did not happen.
- *
- * Deliberately NOT exhaustive-switched: `compute_type` is optional on
- * `TaskRecord` (absent on tasks written before the field existed), and the
- * fallback has to be a true generic rather than a guess. A new backend that
- * forgets to add itself here degrades to "runtime", which is accurate — so this
- * is one of the few places where a `default` is better than a `never` guard.
- */
 function substrateNoun(computeType: ComputeType | undefined): string {
   switch (computeType) {
     case 'lambda-microvm':
@@ -262,7 +198,6 @@ export async function transitionTask(
 
   let condition = '#status = :fromStatus';
   if (expectedMicrovmId) {
-    // A MicroVM transition applies only while the task still names this worker.
     condition += ' AND compute_type = :microvmType AND session_id = :microvmId AND compute_metadata.microvmId = :microvmId';
     expressionValues[':microvmType'] = 'lambda-microvm';
     expressionValues[':microvmId'] = expectedMicrovmId;
@@ -288,9 +223,8 @@ export interface EventCorrelation {
 /**
  * Build the correlation envelope for a task from its identity fields:
  * a `log` child stamping `{task_id, user_id, repo}` on every line, and the
- * matching `correlation` for `emitTaskEvent`. Single source so the log context
- * and the event envelope can't drift. `repo` is omitted (not null/empty) for
- * repo-less workflows.
+ * matching `correlation` for `emitTaskEvent`. `repo` is omitted (not null/empty)
+ * for repo-less workflows.
  */
 export function envelopeFor(
   identity: { task_id: string; user_id: string; repo?: string },
@@ -330,27 +264,18 @@ export async function emitTaskEvent(
       ...(correlation?.user_id && { user_id: correlation.user_id }),
       ...(correlation?.repo && { repo: correlation.repo }),
       // The document client leaves out an undefined attribute of the item itself,
-      // but throws on one inside a map, and then the event is not written at all.
+      // but throws on one inside a map.
       ...(metadata && { metadata: Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== undefined)) }),
     },
   }), options);
 }
 
-/** Minimum allowed poll interval (5 seconds). */
 const MIN_POLL_INTERVAL_MS = 5_000;
-/** Maximum allowed poll interval (5 minutes). */
 const MAX_POLL_INTERVAL_MS = 300_000;
 
 /**
  * Build the ``compute_metadata`` map persisted on the task row at session start,
- * so a later handler can act on the right backend without re-deriving anything:
- * ``cancel-task.ts`` reads ``clusterArn``/``taskArn`` from it today, and ADR-021
- * sub-decision 2 has the approve/deny Lambdas read ``microvmId`` from it in P3.
- *
- * Kept as an exhaustive switch (not a ternary + spread) so a fourth backend is a
- * compile error here rather than a silently empty metadata map — the field is
- * load-bearing for compute shutdown, and a missing handle is exactly what
- * ``task_cancel_compute_orphan`` exists to alarm on.
+ * so a later handler can act on the right backend without re-deriving anything.
  *
  * DynamoDB stores this as ``Record<string, string>`` (see
  * ``TaskRecord.compute_metadata``), so every value must already be a string.
@@ -362,9 +287,6 @@ export function buildComputeMetadata(handle: SessionHandle): Record<string, stri
     case 'agentcore':
       return { runtimeArn: handle.runtimeArn };
     case 'lambda-microvm':
-      // ADR-021: `microvmId` keys every lifecycle API; `endpoint` is per-session
-      // state that becomes load-bearing the day an orchestrator→agent HTTP
-      // consumer appears (none exists in P1–P3).
       return { microvmId: handle.microvmId, endpoint: handle.endpoint, ...readMicrovmImageMetadata(handle) };
     default: {
       const _exhaustive: never = handle;
@@ -379,13 +301,8 @@ export function buildComputeMetadata(handle: SessionHandle): Record<string, stri
  * @returns the merged blueprint config.
  */
 export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintConfig> {
-  // Correlation envelope on this shared function's logs too, matching the
-  // orchestrate handler's child logger. `repo` omitted for repo-less workflows.
   const { log } = envelopeFor(task);
 
-  // Repo-less workflows (those with no target repository) have no per-repo
-  // Blueprint — use platform defaults directly rather than a RepoTable lookup
-  // on a missing repo.
   const repoConfig = task.repo ? await loadRepoConfig(task.repo) : null;
 
   if (repoConfig) {
@@ -399,7 +316,6 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     log.info('No per-repo config found, using platform defaults');
   }
 
-  // Clamp poll_interval_ms to safe range
   let pollIntervalMs = repoConfig?.poll_interval_ms;
   if (pollIntervalMs !== undefined) {
     const clamped = Math.min(Math.max(pollIntervalMs, MIN_POLL_INTERVAL_MS), MAX_POLL_INTERVAL_MS);
@@ -414,8 +330,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     }
   }
 
-  // All workflows inherit the deployment backend, including repo-less and read-only tasks.
-  // A conflicting repository pin fails before concurrency admission.
+  // No workflow changes the backend: a read-only or repo-less task also runs on the repository's pin, or else on the default backend (#852).
   return {
     compute_type: resolveRepositoryBackend(repoConfig?.compute_type, process.env.DEPLOYED_COMPUTE_TYPE),
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
@@ -440,10 +355,6 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
  * Resolve the Blueprint's ``registry://`` asset refs (#246) to a bundle the
  * agent can load. Fail-closed: any unresolved ref throws, which the orchestrator
  * turns into a FAILED task rather than running with a missing/substituted asset.
- *
- * Resolution runs here (not at create-task) so only this one Lambda carries the
- * Agent Registry SDK + IAM, mirroring how ``cedar_policies`` already flows from
- * RepoConfig into the payload.
  */
 export async function resolveRegistryAssets(
   blueprintConfig: BlueprintConfig | undefined,
@@ -473,11 +384,6 @@ export async function resolveRegistryAssets(
   return resolved;
 }
 
-/**
- * Map passed AttachmentRecords into the payload shape the agent runtime expects.
- * Only includes attachments that passed screening (others are already rejected).
- * Throws AttachmentBudgetExceededError if total image token cost exceeds budget.
- */
 function resolveAttachmentPayloads(
   attachments: AttachmentRecord[],
   tokenBudget: number,
@@ -496,8 +402,6 @@ function resolveAttachmentPayloads(
     }
 
     if (att.type === 'image') {
-      // Use actual estimate if available, otherwise apply a conservative default
-      // to prevent images with unreadable metadata from bypassing the budget check.
       totalImageTokens += att.token_estimate ?? MAX_IMAGE_TOKENS_FALLBACK;
     }
 
@@ -525,13 +429,6 @@ function resolveAttachmentPayloads(
   return payloads;
 }
 
-/**
- * Put the attachment records on the task once its URL attachments are fetched,
- * screened and uploaded. Until then such a record is `pending` and has no size,
- * object version or checksum, and without this write it would stay so for good.
- * Best-effort: a failure is logged and hydration goes on, because the agent gets
- * its attachments from the payload, not from the record.
- */
 async function storeAttachmentRecords(taskId: string, attachments: AttachmentRecord[], log: Logger): Promise<void> {
   try {
     await ddb.send(new UpdateCommand({
@@ -548,16 +445,6 @@ async function storeAttachmentRecords(taskId: string, attachments: AttachmentRec
   }
 }
 
-/**
- * Structural guard on the TaskRecord's persisted ``approval_gate_cap`` (the
- * human-in-the-loop approval limit) before we thread it into the agent payload.
- * The submit path bounds-checks the blueprint value before writing it
- * (``create-task-core.ts``), so under a clean flow this guard is
- * tautologically satisfied. It exists to catch hand-edited DDB rows /
- * schema drift — a corrupted value would otherwise crash the agent's
- * ``PolicyEngine.__init__`` at container start, which is much worse UX
- * than "silently fall through to the engine default of 50 and warn."
- */
 function isValidApprovalGateCap(value: unknown): value is number {
   return (
     typeof value === 'number'
@@ -579,9 +466,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.HYDRATING);
   await emitTaskEvent(task.task_id, 'hydration_started', undefined, correlation);
 
-  // One GitHub token for all that hydration fetches, the URL attachments included:
-  // the repository's own where its blueprint sets one, else the platform's
-  // (loadBlueprintConfig has merged the two).
   const { github_token_secret_arn: githubTokenSecretArn, memory_token_budget: memoryTokenBudget } = blueprintConfig ?? {};
   const hydratedContext = await hydrateContext(task, {
     githubTokenSecretArn,
@@ -589,8 +473,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     memoryTokenBudget,
   });
 
-  // If guardrail screening blocked the hydrated context, emit audit event and throw
-  // to trigger task failure (the caller in orchestrate-task.ts catches and transitions to FAILED)
   if (hydratedContext.guardrail_blocked) {
     try {
       await emitTaskEvent(task.task_id, 'guardrail_blocked', {
@@ -609,7 +491,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     throw new Error(`Guardrail blocked: ${hydratedContext.guardrail_blocked}`);
   }
 
-  // For PR iteration: resolve actual branch name from PR head_ref
   if (hydratedContext.resolved_branch_name) {
     try {
       await ddb.send(new UpdateCommand({
@@ -627,7 +508,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     }
   }
 
-  // Keep the issue title on the record so task lists can name the task.
   const issueTitle = hydratedContext.issue?.title.trim().slice(0, ISSUE_TITLE_MAX_LENGTH);
   if (issueTitle) {
     try {
@@ -645,12 +525,9 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     }
   }
 
-  // Compute prompt version from the system prompt template + overrides
-  // (deterministic parts only — excludes memory context which varies per invocation)
   const promptVersionInput = blueprintConfig?.system_prompt_overrides ?? '';
   const promptVersion = computePromptVersion('system_prompt_v1', promptVersionInput ? { overrides: promptVersionInput } : undefined);
 
-  // Store prompt version on the task record
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
@@ -665,16 +542,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     });
   }
 
-  // max_budget_usd uses 2-tier override (no platform default — absent means unlimited).
   const effectiveBudget = task.max_budget_usd ?? blueprintConfig?.max_budget_usd;
 
-  // Warn if a persisted approval_gate_cap is present but not a valid integer
-  // in [APPROVAL_GATE_CAP_MIN, APPROVAL_GATE_CAP_MAX].
-  // The payload block below silently omits invalid values (rather than
-  // crashing container start on PolicyEngine.__init__), but the only
-  // way to reach this branch is schema drift or a hand-edited DDB row,
-  // so it's worth an operator-visible signal — otherwise a corrupted
-  // record would quietly revert the task to the engine default-50.
   if (
     task.approval_gate_cap !== undefined
     && !isValidApprovalGateCap(task.approval_gate_cap)
@@ -686,9 +555,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     });
   }
 
-  // Resolve URL attachments: fetch (SSRF-safe), screen, upload to S3.
-  // This step handles type: 'url' attachments that are still pending.
-  // Throws AttachmentResolutionError on failure (propagates to fail the task).
   let resolvedAttachments = task.attachments ?? [];
   if (resolvedAttachments.some(a => a.type === 'url' && a.screening.status === 'pending') && ATTACHMENTS_BUCKET_NAME) {
     const { BedrockRuntimeClient } = await import('@aws-sdk/client-bedrock-runtime');
@@ -707,14 +573,11 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       );
     }
 
-    // Resolve the GitHub token for URL fetches that target GitHub domains
     let githubToken: string | undefined;
     if (githubTokenSecretArn) {
       try {
         githubToken = await resolveGitHubToken(githubTokenSecretArn);
       } catch (err) {
-        // Check if any pending URL attachments target GitHub — if so, fail clearly
-        // rather than proceeding to get an opaque 401/403 on fetch.
         const githubHosts = ['github.com', 'raw.githubusercontent.com', 'api.github.com'];
         const pendingUrlAtts = resolvedAttachments.filter(a => a.type === 'url' && a.screening.status === 'pending');
         const hasGitHubUrl = pendingUrlAtts.some(a => {
@@ -754,16 +617,10 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     await storeAttachmentRecords(task.task_id, resolvedAttachments, log);
   }
 
-  // Resolve attachment payloads for the agent (only passed-screening attachments).
-  // Token budget check is applied here — throws AttachmentBudgetExceededError if
-  // image tokens exceed the configured prompt token budget.
   const attachmentPayloads = resolvedAttachments.length > 0 && ATTACHMENTS_BUCKET_NAME
     ? resolveAttachmentPayloads(resolvedAttachments, Number(process.env.USER_PROMPT_TOKEN_BUDGET ?? '100000'))
     : [];
 
-  // Resolve registry assets (#246). Fail-closed: an unresolved ref throws here
-  // and the orchestrator transitions the task to FAILED. The audit triple is
-  // stamped on the TaskRecord; the runtime bundle rides in the payload.
   const resolvedAssets = await resolveRegistryAssets(blueprintConfig, log);
   if (resolvedAssets.length > 0) {
     await ddb.send(new UpdateCommand({
@@ -772,9 +629,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       UpdateExpression: 'SET #ra = :ra, #ua = :now',
       ExpressionAttributeNames: { '#ra': 'resolved_assets', '#ua': 'updated_at' },
       ExpressionAttributeValues: {
-        // Persist warnings (e.g. ["DEPRECATED"]) alongside the audit triple so a
-        // user inspecting the task record can see a deprecated asset ran — ADR-022
-        // sub-decision 4 promises this, and a Lambda log alone isn't durable (#246).
         ':ra': resolvedAssets.map((a) => ({
           kind: a.kind,
           id: `${a.namespace}/${a.name}`,
@@ -785,8 +639,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
       },
     }));
 
-    // Emit a durable TaskEvent per warned asset (deprecation is the main case),
-    // so the warning surfaces in the task's event stream, not just Lambda logs.
     for (const a of resolvedAssets) {
       if (a.warnings.length > 0) {
         await emitTaskEvent(task.task_id, 'registry_asset_warning', {
@@ -799,15 +651,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     }
   }
 
-  // Registry cedar_policy_module assets (#246, PR 3) reach the agent through the
-  // SAME cedar_policies payload field as inline blueprint policies, so they are
-  // byte-identical from the PolicyEngine's view (the cedar-parity contract holds
-  // by construction). Inline blueprint policies come first, then resolved modules.
-  //
-  // Fail-closed: a pinned module whose cedar_text is empty/whitespace must fail
-  // the task, not be silently dropped — a dropped policy is usually a *deny* rule,
-  // so silently omitting it would WIDEN what the agent may do while the audit
-  // record still claims the module was applied (#246 review).
   const resolvedCedar = resolvedAssets
     .filter((a) => a.kind === 'cedar_policy_module')
     .map((a) => {
@@ -829,23 +672,12 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
     task_id: task.task_id,
-    // user_id is required by the agent ONLY when ``trace`` is true —
-    // the agent writes the trajectory to
-    // ``traces/<user_id>/<task_id>.jsonl.gz`` and the handler's
-    // per-caller-prefix guard relies on the agent landing under the
-    // submitter's prefix. Threaded unconditionally so scripts that
-    // inspect the payload can always see it; costs one
-    // Cognito-sub-sized string in the JSON.
     user_id: task.user_id,
     branch_name: hydratedContext.resolved_branch_name ?? task.branch_name,
     ...(task.issue_number !== undefined && { issue_number: String(task.issue_number) }),
     resolved_workflow: task.resolved_workflow ?? { id: 'coding/new-task-v1', version: '1.0.0' },
     ...(task.pr_number !== undefined && { pr_number: task.pr_number }),
     ...(hydratedContext.resolved_base_branch && { base_branch: hydratedContext.resolved_base_branch }),
-    // Orchestration children carry their stacked base branch + (diamond
-    // dependency case) predecessor branches to merge in, via channel_metadata.
-    // The PR-task ``resolved_base_branch`` path above wins if both are set
-    // (a task is never both a PR-iteration and an orchestration child).
     ...(!hydratedContext.resolved_base_branch
       && task.channel_metadata?.orchestration_base_branch
       && { base_branch: task.channel_metadata.orchestration_base_branch }),
@@ -854,59 +686,23 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     ...(task.task_description && { prompt: task.task_description }),
     max_turns: task.max_turns ?? blueprintConfig?.max_turns ?? DEFAULT_MAX_TURNS,
     ...(effectiveBudget !== undefined && { max_budget_usd: effectiveBudget }),
-    // Only include when true so the agent's ``inp.get("trace", False)``
-    // default semantics remain the no-op path. Keeps the wire payload
-    // slim for the common non-trace case.
     ...(task.trace === true && { trace: true }),
     ...(blueprintConfig?.model_id && { model_id: blueprintConfig.model_id }),
     ...(blueprintConfig?.system_prompt_overrides && { system_prompt_overrides: blueprintConfig.system_prompt_overrides }),
-    // Per-repo build/lint verification commands. Absent → agent defaults
-    // to ``mise run build`` / ``mise run lint``. Set for non-mise repos so
-    // build-regression gating actually runs the repo's real command.
     ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
     ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
-    // cedarText is inline blueprint policies ++ resolved registry
-    // cedar_policy_module text (#246), so it supersedes the raw
-    // blueprintConfig.cedar_policies — byte-identical to inline when no
-    // registry cedar is pinned.
     ...(cedarText.length > 0 && { cedar_policies: cedarText }),
-    // Registry (#246): the resolved runtime bundle the agent's loaders apply
-    // (MCP servers merged into .mcp.json; cedar/skills applied downstream).
     ...(resolvedAssets.length > 0 && {
       resolved_assets: resolvedAssets.map((a) => ({
         kind: a.kind, namespace: a.namespace, name: a.name, version: a.version, runtime: a.runtime,
       })),
     }),
-    // The agent's PreToolUse hook uses this to compute the maxLifetime
-    // ceiling on per-gate human-in-the-loop approval timeouts.
-    // Stamped at HYDRATING → RUNNING transition time so the clock
-    // only starts when the container is alive. Format is ISO 8601
-    // UTC to match the rest of the TaskRecord timestamp fields.
     task_started_at: new Date().toISOString(),
-    // Human-in-the-loop pre-approval data. Threaded so the agent's
-    // PolicyEngine can seed ApprovalAllowlist + set
-    // task_default_timeout_s without a second DDB round-trip.
     ...(task.approval_timeout_s !== undefined && { approval_timeout_s: task.approval_timeout_s }),
     ...(task.initial_approvals && task.initial_approvals.length > 0 && { initial_approvals: task.initial_approvals }),
-    // Seed the engine's per-task approval-gate counter from the
-    // TaskTable-persisted value so a container restart mid-task resumes
-    // the cumulative gate budget instead of resetting to 0. Only
-    // forwarded when non-zero so the agent's default (0) path remains
-    // unchanged for fresh tasks; the TaskRecord is already loaded above,
-    // so no extra DDB read.
     ...(typeof task.approval_gate_count === 'number' && task.approval_gate_count > 0 && {
       initial_approval_gate_count: task.approval_gate_count,
     }),
-    // Thread the TaskRecord-persisted approval-gate cap so the agent's
-    // PolicyEngine adopts the blueprint-configured value (or the platform
-    // default of 50 frozen at submit-time) instead of its compile-time
-    // fallback. Older task records that predate this field omit it — the
-    // agent then falls back to its own default of 50. Extra guards past
-    // ``typeof`` because a hand-edited DDB row could carry NaN, Infinity,
-    // a float, or an out-of-bounds value — all would crash
-    // PolicyEngine.__init__ downstream; omitting here keeps the container
-    // starting cleanly with the engine default and leaves an
-    // operator-visible warning.
     ...(isValidApprovalGateCap(task.approval_gate_cap)
       && { approval_gate_cap: task.approval_gate_cap }),
     prompt_version: promptVersion,
@@ -940,12 +736,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
  * Returns the updated PollState; the waitStrategy decides whether to continue.
  *
  * Heartbeat staleness is evaluated for the backends
- * {@link heartbeatLivenessApplies} names — `agentcore` (its only liveness signal)
- * and `lambda-microvm` (the in-guest half of "substrate state AND agent
- * heartbeat"). Thresholds are shared across both on purpose: the timestamp is
- * written by the same pipeline code at the same cadence regardless of substrate,
- * so a backend-specific grace window would encode a difference that does not
- * exist.
+ * {@link heartbeatLivenessApplies} names, with the same thresholds for each.
  *
  * @param taskId - the task to poll.
  * @param state - current poll state.
@@ -969,20 +760,12 @@ export async function pollTaskStatus(
     }));
     item = result.Item;
   } catch (err) {
-    // A read that is refused (denied, malformed, credentials not accepted) is
-    // not expected to clear. Counted as missed polls it would keep the
-    // orchestration waiting until the poll window closes, on a row that
-    // finalization has to read as well. Thrown from here it ends the
-    // orchestration at this poll. The MicroVM supervisor applies the same rule
-    // to its read of this row.
     if (permanent(err)) {
       logger.error('Task status read refused, ending the orchestration', { task_id: taskId, error: String(err) });
       throw err;
     }
-    // Any other failed read (a throttle, a 5xx, a timeout) is one missed poll,
-    // not the end of the orchestration: an error thrown from the
-    // waitForCondition check fails the durable execution, and then nothing
-    // finalizes the task. The attempt counts, so the poll window still closes.
+    // The durable execution SDK does not retry a waitForCondition check that throws:
+    // it fails the operation.
     logger.warn('Task status read failed, counting it as a missed poll', {
       task_id: taskId,
       error: err instanceof Error ? err.message : String(err),
@@ -1038,8 +821,6 @@ export async function finalizeTask(
   pollState: PollState,
   userId: string,
 ): Promise<boolean> {
-  // Strong read: finalization can immediately follow a committed start
-  // failure or cancellation, and a stale active state emits the wrong event.
   const task = await loadTask(taskId, true);
   const expectedId = pollState.microvmSupervisor?.microvmId;
   if (expectedId && (task.user_id !== userId || task.compute_type !== 'lambda-microvm'
@@ -1051,10 +832,6 @@ export async function finalizeTask(
   return true;
 }
 
-/**
- * The MicroVM supervisor gave up on a live worker: end the task as FAILED, or
- * TIMED_OUT at the session deadline, unless another writer already ended it.
- */
 async function finalizeMicrovmSupervisorFailure(
   taskId: string,
   pollState: PollState,
@@ -1063,8 +840,6 @@ async function finalizeMicrovmSupervisorFailure(
   correlation: ReturnType<typeof envelopeFor>['correlation'],
 ): Promise<void> {
   const reason = pollState.microvmFailureReason!;
-  // Approval/HYDRATING permit FAILED, not TIMED_OUT. This is infrastructure
-  // failure and must not invent a TIMED_OUT decision on the approval row.
   const timeout = reason === 'session-deadline'
     && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING);
   const terminal = timeout ? TaskStatus.TIMED_OUT : TaskStatus.FAILED;
@@ -1093,8 +868,6 @@ async function finalizeMicrovmSupervisorFailure(
 
 async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId: string, task: TaskRecord): Promise<void> {
   const currentStatus = task.status;
-  // Correlation envelope on this function's own log lines too, not just the
-  // events it emits — admission→terminal logs must join by {user_id, repo}.
   const { log, correlation } = envelopeFor(task);
 
   if (pollState.microvmFailureReason && !TERMINAL_STATUSES.includes(currentStatus)) {
@@ -1102,19 +875,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
     return;
   }
 
-  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast.
-  //
-  // FINALIZING is in the guard DEFENSIVELY, and is currently unreachable: the
-  // only writer of `sessionUnhealthy` is `pollTaskStatus`, which computes it
-  // under `currentStatus === TaskStatus.RUNNING`, so a FINALIZING task can never
-  // arrive here with the flag set. It is kept rather than removed because the
-  // reachability depends on a predicate in ANOTHER function: the day
-  // `pollTaskStatus` widens its own status gate (P3's suspend policy already has
-  // to revisit that block), a heartbeat-stale FINALIZING task must fail rather
-  // than fall through to the normal terminal path and be reported as a success.
-  // Dropping the arm would make that a silent behaviour change instead of a
-  // no-op. Do NOT "simplify" it away without also pinning `pollTaskStatus`'s
-  // RUNNING-only gate with a test.
   if (
     pollState.sessionUnhealthy
     && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING)
@@ -1129,8 +889,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
       }, pollState.microvmSupervisor?.microvmId);
       transitioned = true;
     } catch (err) {
-      // Task may have transitioned concurrently (e.g. agent wrote terminal status).
-      // Re-read to avoid double-decrement or contradictory events.
       log.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -1142,8 +900,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
       }, correlation);
       await decrementConcurrency(userId);
     } else {
-      // Transition failed — re-read task to determine actual state.
-      // If already terminal the block below will handle TTL + concurrency.
       const reread = await loadTask(taskId, true);
       if (TERMINAL_STATUSES.includes(reread.status)) {
         log.info('Heartbeat path: task already terminal after failed transition', { status: reread.status });
@@ -1160,7 +916,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
     return;
   }
 
-  // If the agent already wrote a terminal status, just finalize
   if (TERMINAL_STATUSES.includes(currentStatus)) {
     log.info('Task already in terminal state', { status: currentStatus });
 
@@ -1176,16 +931,9 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
       log.warn('Failed to stamp TTL on terminal task', { error: err instanceof Error ? err.message : String(err) });
     }
 
-    // Memory fallback: if the agent did not write memory, write a minimal episode
     if (MEMORY_ID && !task.memory_written) {
       log.info('Agent did not write memory — writing fallback episode');
       try {
-        // Coerce at the shared helper rather than ``Number(...)`` so a
-        // corrupt ``cost_usd`` (the agent stores it as a string)
-        // collapses to ``undefined`` (and logs a warn) rather than
-        // rendering ``Cost: $NaN.`` into the episode text — see
-        // ``memory.ts::writeMinimalEpisode`` line 325 which calls
-        // ``.toFixed(4)`` on the value.
         const durationS = coerceNumericOrNull(
           task.duration_s,
           { field: 'duration_s', task_id: taskId },
@@ -1196,8 +944,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
           { field: 'cost_usd', task_id: taskId },
           logger,
         );
-        // Memory actorId: repo for coding tasks, user:{user_id} for repo-less
-        // workflows (those with no target repository).
         const actorNamespace = task.repo ?? `user:${task.user_id}`;
         const written = await writeMinimalEpisode(
           MEMORY_ID,
@@ -1225,11 +971,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
     return;
   }
 
-  // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
-  // window closes, terminate the task through an allowed transition: approval
-  // waits permit FAILED, not TIMED_OUT, and reaching the execution limit is not
-  // a human denial. The stranded-approval reconciler remains a secondary
-  // safety net for tasks the orchestrator already lost track of.
   if (
     currentStatus === TaskStatus.RUNNING
     || currentStatus === TaskStatus.FINALIZING
@@ -1245,7 +986,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
           : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
-      // Task may have transitioned concurrently — re-read and accept
       log.warn('Finalization transition failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
     }
     await emitTaskEvent(taskId, terminalStatus === TaskStatus.FAILED ? 'task_failed' : 'task_timed_out', {
@@ -1258,8 +998,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
     return;
   }
 
-  // If still HYDRATING after poll timeout, the session never started (e.g. container crash).
-  // Transition to FAILED so the task doesn't stay stuck forever.
   if (currentStatus === TaskStatus.HYDRATING) {
     try {
       await transitionTask(taskId, currentStatus, TaskStatus.FAILED, {
@@ -1277,7 +1015,6 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
     return;
   }
 
-  // Unexpected state — log and release concurrency
   log.error('Unexpected task state during finalization', { status: currentStatus });
   await decrementConcurrency(userId);
 }
@@ -1307,10 +1044,6 @@ export async function queueTask(task: TaskRecord): Promise<boolean> {
       admission_attempts: (typeof task.admission_attempts === 'number' ? task.admission_attempts : 0) + 1,
     });
   } catch (err) {
-    // A concurrent transition (user cancel between our status read and
-    // this write) wins; the task is no longer SUBMITTED so it must not
-    // be queued. Anything else is unexpected — rethrow so the durable
-    // step retries.
     if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
       logger.info('Queue transition lost to a concurrent status change — skipping', { task_id: task.task_id });
       return false;
@@ -1360,9 +1093,6 @@ export async function failTask(
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  // Only emit / release concurrency after a successful transition. Callers such as
-  // orchestrate-task rethrow after failTask; Durable Execution retries the step and
-  // would otherwise re-run emit + decrement while the task is already FAILED.
   if (transitioned) {
     await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
     if (releaseConcurrency) {
@@ -1371,10 +1101,6 @@ export async function failTask(
   }
 }
 
-/**
- * Decrement the user's concurrency counter (best-effort).
- * @param userId - the user ID.
- */
 async function decrementConcurrency(userId: string): Promise<void> {
   try {
     await ddb.send(new UpdateCommand({
@@ -1397,16 +1123,6 @@ async function decrementConcurrency(userId: string): Promise<void> {
   }
 }
 
-/**
- * Parse the JSON-encoded predecessor merge-branch list that the
- * orchestration release path stashes in
- * ``channel_metadata.orchestration_merge_branches`` (the diamond-dependency
- * case, where a child depends on more than one predecessor). Best-effort: a
- * malformed value yields an empty list rather than failing the orchestration —
- * the child still branches off its base, it just won't have the predecessor
- * code merged in (surfaced as a normal build failure if it actually needed it,
- * never a silent crash here).
- */
 function parseMergeBranches(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw) as unknown;

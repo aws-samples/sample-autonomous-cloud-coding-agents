@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Unit tests for progress_writer._ProgressWriter."""
-
 from __future__ import annotations
 
 import asyncio
@@ -24,10 +22,6 @@ from progress_writer import (
 )
 
 
-# Reset the shared circuit-breaker state between every test so a tripped
-# breaker in one test does not silently disable the writer-under-test in
-# the next.  Forgetting this was the single largest hazard flagged when
-# review finding #8 consolidated per-writer state into a shared map.
 @pytest.fixture(autouse=True)
 def _reset_shared_circuit_breaker_state():
     _reset_circuit_breakers()
@@ -35,33 +29,22 @@ def _reset_shared_circuit_breaker_state():
     _reset_circuit_breakers()
 
 
-# ---------------------------------------------------------------------------
-# _generate_ulid
-# ---------------------------------------------------------------------------
-
-
 class TestGenerateUlid:
     def test_length_is_26(self):
         assert len(_generate_ulid()) == 26
 
     def test_monotonic_ordering_across_milliseconds(self):
-        """ULIDs generated across different milliseconds are lexicographically ordered."""
         import time
 
         ids = []
         for _ in range(5):
             ids.append(_generate_ulid())
-            time.sleep(0.002)  # 2ms gap to ensure different timestamp
+            time.sleep(0.002)
         assert ids == sorted(ids)
 
     def test_uniqueness(self):
         ids = {_generate_ulid() for _ in range(100)}
         assert len(ids) == 100
-
-
-# ---------------------------------------------------------------------------
-# _truncate_preview
-# ---------------------------------------------------------------------------
 
 
 class TestTruncatePreview:
@@ -77,7 +60,7 @@ class TestTruncatePreview:
     def test_long_string_truncated(self):
         long = "x" * 300
         result = _truncate_preview(long)
-        assert len(result) <= 203  # 200 + "..."
+        assert len(result) <= 203
         assert result.endswith("...")
 
     def test_custom_max_len(self):
@@ -89,17 +72,11 @@ class TestTruncatePreview:
         assert _truncate_preview(s) == s
 
 
-# ---------------------------------------------------------------------------
-# _ProgressWriter — init and disable
-# ---------------------------------------------------------------------------
-
-
 class TestProgressWriterInit:
     def test_noop_when_env_var_unset(self, monkeypatch):
         monkeypatch.delenv("TASK_EVENTS_TABLE_NAME", raising=False)
         pw = _ProgressWriter("task-1")
         pw.write_agent_milestone("test", "detail")
-        # Should not raise — silently no-ops (table_name is None so _put_event returns early)
         assert pw._table_name is None
         assert pw._table is None
 
@@ -109,11 +86,6 @@ class TestProgressWriterInit:
         pw = _ProgressWriter("task-1")
         assert pw._table_name == "my-table"
         assert pw._disabled is False
-
-
-# ---------------------------------------------------------------------------
-# _ProgressWriter — DDB writes
-# ---------------------------------------------------------------------------
 
 
 class TestProgressWriterPutEvent:
@@ -270,15 +242,7 @@ class TestProgressWriterPutEvent:
         assert before + ttl_90_days <= item["ttl"] <= after + ttl_90_days + 1
 
 
-# ---------------------------------------------------------------------------
-# _ProgressWriter — correlation envelope (#245)
-# ---------------------------------------------------------------------------
-
-
 class TestCorrelationEnvelope:
-    """Every emitted event stamps {user_id, repo, trace_id} when known, so the
-    agent-side event stream joins to orchestrator logs and the X-Ray trace."""
-
     def _writer(self, monkeypatch, **kwargs):
         monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
         writer = _ProgressWriter("task-42", **kwargs)
@@ -295,7 +259,6 @@ class TestCorrelationEnvelope:
         assert item["trace_id"] == "a" * 32
 
     def test_repo_less_omits_repo(self, monkeypatch):
-        # repo-less workflow (#248 Phase 3): repo is None → key omitted, not null.
         writer = self._writer(monkeypatch, user_id="user-1", repo=None)
         with patch("progress_writer.current_otel_trace_id", return_value="b" * 32):
             writer.write_agent_milestone("m", "")
@@ -304,7 +267,6 @@ class TestCorrelationEnvelope:
         assert "repo" not in item
 
     def test_missing_trace_id_omits_key(self, monkeypatch):
-        # No recording span (tracing disabled) → trace_id key omitted entirely.
         writer = self._writer(monkeypatch, user_id="user-1", repo="org/repo")
         with patch("progress_writer.current_otel_trace_id", return_value=None):
             writer.write_agent_milestone("m", "")
@@ -312,8 +274,6 @@ class TestCorrelationEnvelope:
         assert "trace_id" not in item
 
     def test_defaults_omit_all_correlation_keys(self, monkeypatch):
-        # Back-compat: a writer built without the envelope (empty user_id) stamps
-        # none of the optional keys, keeping the historical item shape.
         writer = self._writer(monkeypatch)
         with patch("progress_writer.current_otel_trace_id", return_value=None):
             writer.write_agent_milestone("m", "")
@@ -323,19 +283,7 @@ class TestCorrelationEnvelope:
         assert "trace_id" not in item
 
 
-# ---------------------------------------------------------------------------
-# _ProgressWriter — --trace preview cap (design §10.1)
-# ---------------------------------------------------------------------------
-
-
 class TestProgressWriterTrace:
-    """Trace-enabled writers use a 4 KB preview cap instead of 200 chars.
-
-    The cap is per-instance, not a mutable global: two writers in the
-    same process (unit tests, local batch mode) can coexist with
-    different caps without cross-contamination.
-    """
-
     @pytest.fixture()
     def trace_writer(self, monkeypatch):
         monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
@@ -356,8 +304,6 @@ class TestProgressWriterTrace:
             turn=1, model="c4", thinking=long_text, text="", tool_calls_count=0
         )
         item = table.put_item.call_args[1]["Item"]
-        # 3000 chars fits inside the 4 KB trace cap → returned verbatim,
-        # no "..." suffix appended.
         assert item["metadata"]["thinking_preview"] == long_text
 
     def test_trace_still_caps_at_4096_plus_ellipsis(self, trace_writer):
@@ -369,9 +315,6 @@ class TestProgressWriterTrace:
         )
         item = table.put_item.call_args[1]["Item"]
         preview = item["metadata"]["thinking_preview"]
-        # 4096 content chars + "..." = 4099. Assert the prefix content so
-        # a regression that kept the last 4096 (instead of the first)
-        # surfaces here instead of passing silently.
         assert len(preview) == 4099
         assert preview[:4096] == "y" * 4096
         assert preview.endswith("...")
@@ -379,13 +322,12 @@ class TestProgressWriterTrace:
     @pytest.mark.parametrize(
         "length,expected_len,has_ellipsis",
         [
-            (4095, 4095, False),  # below cap: passes through verbatim
-            (4096, 4096, False),  # exactly at cap (``<= max_len`` branch)
-            (4097, 4099, True),  # one over: truncated with ellipsis
+            (4095, 4095, False),
+            (4096, 4096, False),
+            (4097, 4099, True),
         ],
     )
     def test_trace_cap_boundary_conditions(self, trace_writer, length, expected_len, has_ellipsis):
-        # Lock the ``<=`` vs ``<`` off-by-one at the exact cap boundary.
         table = MagicMock()
         trace_writer._table = table
         trace_writer.write_agent_milestone("m", "x" * length)
@@ -408,7 +350,6 @@ class TestProgressWriterTrace:
         expected_len,
         has_ellipsis,
     ):
-        # Same off-by-one guard on the default 200-char path.
         table = MagicMock()
         normal_writer._table = table
         normal_writer.write_agent_milestone("m", "x" * length)
@@ -417,7 +358,6 @@ class TestProgressWriterTrace:
         assert preview.endswith("...") is has_ellipsis
 
     def test_normal_writer_default_200_char_cap_preserved(self, normal_writer):
-        # Regression guard: trace=False must keep the 200-char cap.
         table = MagicMock()
         normal_writer._table = table
         long_text = "z" * 500
@@ -426,11 +366,9 @@ class TestProgressWriterTrace:
         )
         item = table.put_item.call_args[1]["Item"]
         preview = item["metadata"]["thinking_preview"]
-        assert len(preview) == 203  # 200 + "..."
+        assert len(preview) == 203
 
     def test_trace_flag_applies_to_all_preview_fields(self, trace_writer):
-        # Cover every preview site so a future ``write_agent_X`` that
-        # forgets ``self._preview(...)`` gets caught.
         table = MagicMock()
         trace_writer._table = table
         long = "L" * 1000
@@ -448,7 +386,6 @@ class TestProgressWriterTrace:
         assert table.put_item.call_args[1]["Item"]["metadata"]["message_preview"] == long
 
     def test_two_writers_in_same_process_have_independent_caps(self, normal_writer, trace_writer):
-        # Per-instance cap — not a mutable module global.
         normal_table = MagicMock()
         trace_table = MagicMock()
         normal_writer._table = normal_table
@@ -460,13 +397,8 @@ class TestProgressWriterTrace:
 
         n_details = normal_table.put_item.call_args[1]["Item"]["metadata"]["details"]
         t_details = trace_table.put_item.call_args[1]["Item"]["metadata"]["details"]
-        assert len(n_details) == 203  # 200 + "..."
-        assert t_details == long  # under 4096, full pass-through
-
-
-# ---------------------------------------------------------------------------
-# _ProgressWriter — fail-open behavior
-# ---------------------------------------------------------------------------
+        assert len(n_details) == 203
+        assert t_details == long
 
 
 class TestProgressWriterFailOpen:
@@ -485,7 +417,6 @@ class TestProgressWriterFailOpen:
 
     def test_single_failure_does_not_raise(self, writer, failing_table):
         writer.write_agent_milestone("test", "")
-        # No exception raised
         assert writer._failure_count == 1
         assert writer._disabled is False
 
@@ -500,14 +431,12 @@ class TestProgressWriterFailOpen:
             writer.write_agent_milestone("test", "")
         assert writer._disabled is True
 
-        # Reset mock to track new calls
         failing_table.put_item.reset_mock()
         writer.write_agent_milestone("test", "")
         failing_table.put_item.assert_not_called()
 
     def test_success_resets_failure_count(self, writer):
         table = MagicMock()
-        # Fail once, then succeed
         table.put_item.side_effect = [Exception("fail"), None]
         writer._table = table
 
@@ -518,17 +447,11 @@ class TestProgressWriterFailOpen:
         assert writer._failure_count == 0
 
 
-# ---------------------------------------------------------------------------
-# _ProgressWriter — lazy boto3 init
-# ---------------------------------------------------------------------------
-
-
 class TestProgressWriterLazyInit:
     def test_boto3_imported_lazily(self, monkeypatch):
         monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         pw = _ProgressWriter("task-lazy")
-        # Table should not be initialized until first write
         assert pw._table is None
 
     def test_boto3_import_error_disables(self, monkeypatch):
@@ -542,19 +465,7 @@ class TestProgressWriterLazyInit:
         assert pw._disabled is True
 
 
-# ---------------------------------------------------------------------------
-# Error classification — permanent vs transient failures
-# ---------------------------------------------------------------------------
-
-
 def _make_client_error(code: str, message: str = "boom") -> Exception:
-    """Build a duck-typed ``ClientError``-like exception.
-
-    We avoid ``from botocore.exceptions import ClientError`` to keep the
-    test module importable in environments where ``botocore`` is missing
-    — matching the classifier's own structural duck-typing in
-    :func:`progress_writer._classify_ddb_error`.
-    """
     err = Exception(message)
     setattr(  # noqa: B010 — intentional dynamic attr to duck-type ClientError
         err,
@@ -568,9 +479,6 @@ def _make_client_error(code: str, message: str = "boom") -> Exception:
 
 
 class TestClassifyDdbError:
-    """Unit-level coverage of the classifier so higher-level tests can
-    focus on the writer's flow rather than re-testing the taxonomy."""
-
     @pytest.mark.parametrize(
         "code",
         [
@@ -611,11 +519,6 @@ class TestClassifyDdbError:
 
 
 class TestProgressWriterFailOpenClassified:
-    """Finding #6: bare ``except Exception`` folded permanent and
-    transient errors into the same breaker.  These tests lock the new
-    contract so a regression (e.g. re-introducing a bare handler) fails
-    immediately."""
-
     @pytest.fixture()
     def writer(self, monkeypatch):
         monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
@@ -623,16 +526,10 @@ class TestProgressWriterFailOpenClassified:
         return _ProgressWriter("task-finding6")
 
     def test_permanent_error_does_not_trip_breaker(self, writer):
-        # ValidationException is the canonical case: a trace-heavy event
-        # pushes the item over the 400 KB DDB limit.  Subsequent events
-        # are smaller and would succeed — so we must NOT trip the
-        # counter on this class of error.
         table = MagicMock()
         table.put_item.side_effect = _make_client_error("ValidationException")
         writer._table = table
 
-        # Fire WELL past the transient threshold.  Any bare-except
-        # regression would trip the breaker here.
         for _ in range(10):
             writer.write_agent_milestone("test", "")
 
@@ -642,8 +539,6 @@ class TestProgressWriterFailOpenClassified:
         )
 
     def test_transient_error_trips_breaker_as_before(self, writer):
-        # Regression guard: the original circuit-breaker contract is
-        # preserved for transient errors.
         table = MagicMock()
         table.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
         writer._table = table
@@ -655,10 +550,6 @@ class TestProgressWriterFailOpenClassified:
         assert writer._failure_count == _ProgressWriter._MAX_FAILURES
 
     def test_access_denied_disables_writer_immediately_with_loud_log(self, writer, capsys):
-        # AccessDeniedException is permanent AND catastrophic: IAM
-        # misconfig means every single future write will fail the same
-        # way.  Flip the breaker on the FIRST occurrence so we don't
-        # waste three rounds of CloudWatch noise discovering it.
         table = MagicMock()
         table.put_item.side_effect = _make_client_error("AccessDeniedException")
         writer._table = table
@@ -668,15 +559,12 @@ class TestProgressWriterFailOpenClassified:
         assert writer._disabled is True, (
             "AccessDeniedException must flip the breaker on first occurrence"
         )
-        # Loud log line: operators need to spot this during rollouts.
         captured = capsys.readouterr()
         assert "permanent error" in captured.out.lower()
         assert "AccessDeniedException" in captured.out
         assert "disabling" in captured.out.lower()
 
     def test_resource_not_found_disables_writer_immediately(self, writer):
-        # Same fast-path as AccessDeniedException: a missing table will
-        # never un-miss itself, so retry is pointless.
         table = MagicMock()
         table.put_item.side_effect = _make_client_error("ResourceNotFoundException")
         writer._table = table
@@ -686,10 +574,6 @@ class TestProgressWriterFailOpenClassified:
         assert writer._disabled is True
 
     def test_unknown_exception_treated_as_transient_with_error_log(self, writer, capsys):
-        # Unknown exceptions default to transient-style counting (so a
-        # new botocore release adding a transient code does not instantly
-        # silence the stream) but log at ERROR level so operators notice
-        # and add the code to the classifier.
         table = MagicMock()
         table.put_item.side_effect = RuntimeError("mystery")
         writer._table = table
@@ -697,33 +581,19 @@ class TestProgressWriterFailOpenClassified:
         writer.write_agent_milestone("test", "")
 
         assert writer._failure_count == 1
-        assert writer._disabled is False  # below threshold
+        assert writer._disabled is False
         captured = capsys.readouterr()
-        # Loud ERROR marker so it stands out in CloudWatch Logs.
         assert "ERROR" in captured.out
         assert "UNKNOWN" in captured.out
 
 
-# ---------------------------------------------------------------------------
-# Shared circuit-breaker state across progress events
-# ---------------------------------------------------------------------------
-
-
 class TestSharedCircuitBreaker:
-    """Before this change the runner and pipeline writers kept
-    independent state, so a throttling burst would trip one while the
-    other kept emitting milestones — producing a visibly half-alive
-    stream.  These tests lock the shared-state contract."""
-
     @pytest.fixture()
     def env(self, monkeypatch):
         monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
     def test_shared_circuit_breaker_across_writers_same_task_id(self, env):
-        # Two writers for the same task: tripping the first must disable
-        # the second.  This is the core half-alive-stream regression
-        # guard.
         w1 = _ProgressWriter("task-shared")
         w2 = _ProgressWriter("task-shared")
 
@@ -737,19 +607,12 @@ class TestSharedCircuitBreaker:
         assert w1._disabled is True
         assert w2._disabled is True, "Shared breaker must also disable the sibling writer"
 
-        # Second writer must not hit DDB once the shared breaker is open
-        # — early-return on ``_disabled`` check at the top of
-        # ``_put_event``.
         t2 = MagicMock()
         w2._table = t2
         w2.write_agent_milestone("milestone", "")
         t2.put_item.assert_not_called()
 
     def test_separate_tasks_have_independent_breakers(self, env):
-        # State is keyed by ``task_id``, not shared globally — tripping
-        # task A must not disable task B (critical when two tasks run in
-        # the same process, e.g. local batch mode or future shared-runtime
-        # deploys).
         w_a = _ProgressWriter("task-a")
         w_b = _ProgressWriter("task-b")
 
@@ -761,22 +624,15 @@ class TestSharedCircuitBreaker:
             w_a.write_agent_milestone("x", "")
         assert w_a._disabled is True
 
-        # Task B is untouched.
         assert w_b._disabled is False
         assert w_b._failure_count == 0
 
-        # And still writes.
         t_b = MagicMock()
         w_b._table = t_b
         w_b.write_agent_milestone("y", "")
         t_b.put_item.assert_called_once()
 
     def test_unknown_sentinel_task_id_is_isolated(self, env):
-        # ``runner.py`` falls back to ``config.task_id or "unknown"`` —
-        # lock that the sentinel does not bleed state across two real
-        # tasks that both end up using it.  (Two ``"unknown"`` writers
-        # legitimately share state; this test pins that a real task_id
-        # and the sentinel remain distinct.)
         w_real = _ProgressWriter("task-real")
         w_unknown = _ProgressWriter("unknown")
 
@@ -788,13 +644,9 @@ class TestSharedCircuitBreaker:
             w_unknown.write_agent_milestone("x", "")
         assert w_unknown._disabled is True
 
-        # Real task is unaffected.
         assert w_real._disabled is False
 
     def test_reset_helper_clears_shared_state_between_tests(self, env):
-        # Pinned because forgetting to reset is the single largest
-        # hazard of shared state — every test in this module relies on
-        # the autouse fixture clearing the map.
         w = _ProgressWriter("task-reset")
         t = MagicMock()
         t.put_item.side_effect = _make_client_error("ProvisionedThroughputExceededException")
@@ -803,18 +655,12 @@ class TestSharedCircuitBreaker:
             w.write_agent_milestone("x", "")
         assert w._disabled is True
 
-        # Reset and confirm a fresh writer for the same task starts
-        # clean.
         _reset_circuit_breakers()
         w2 = _ProgressWriter("task-reset")
         assert w2._disabled is False
         assert w2._failure_count == 0
 
     def test_success_on_one_writer_resets_shared_counter(self, env):
-        # A successful write on any writer for the task must reset the
-        # shared failure counter — otherwise transient errors on two
-        # writers interleaved with successes would still trip the
-        # breaker counter as if they were consecutive.
         w1 = _ProgressWriter("task-share-success")
         w2 = _ProgressWriter("task-share-success")
 
@@ -824,8 +670,6 @@ class TestSharedCircuitBreaker:
         w1.write_agent_milestone("turn", "")
         assert w1._failure_count == 1
 
-        # w2 writes successfully — shared counter must reset, so the
-        # sibling writer sees it as fresh too.
         t2 = MagicMock()
         w2._table = t2
         w2.write_agent_milestone("milestone", "")
@@ -833,9 +677,6 @@ class TestSharedCircuitBreaker:
         assert w2._failure_count == 0
 
     def test_permanent_error_on_one_writer_does_not_affect_sibling_breaker(self, env):
-        # Cross-check of the #6 + #8 interaction: a permanent error on
-        # one writer must NOT trip the shared breaker, so the sibling
-        # writer continues to function.
         w1 = _ProgressWriter("task-perm-cross")
         w2 = _ProgressWriter("task-perm-cross")
 
@@ -846,28 +687,13 @@ class TestSharedCircuitBreaker:
             w1.write_agent_milestone("oversized", "x" * 10)
         assert w1._disabled is False
 
-        # Sibling is still writing.
         t2 = MagicMock()
         w2._table = t2
         w2.write_agent_milestone("normal", "y")
         t2.put_item.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# Chunk 3: approval-gate milestone helpers (§11.1)
-# ---------------------------------------------------------------------------
-
-
 class TestApprovalMilestoneHelpers:
-    """Lock the 14 agent-side approval milestone payloads against §11.1.
-
-    Every helper emits ``event_type == "agent_milestone"`` with structured
-    metadata that downstream consumers (fan-out Lambda, SSE stream, dashboard
-    queries) read by key. Testing at the ``_put_event`` boundary verifies the
-    DDB shape without coupling to the internal ``_put_approval_milestone``
-    helper.
-    """
-
     @pytest.fixture()
     def writer(self, monkeypatch):
         monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events-table")
@@ -921,7 +747,6 @@ class TestApprovalMilestoneHelpers:
             matching_rule_ids=[],
         )
         _, metadata = self._last_event(writer)
-        # Default preview cap is 200 chars; helper truncates to preserve DDB budget.
         assert len(metadata["input_preview"]) <= 210
 
     def test_approval_granted(self, writer):
@@ -951,13 +776,7 @@ class TestApprovalMilestoneHelpers:
         assert metadata["request_id"] == "01KREQ"
         assert metadata["timeout_s"] == 300
 
-    # --- Chunk 8a: outcome-event schema superset for ApprovalMetricsPublisher
-
     def test_approval_granted_includes_created_at_when_supplied(self, writer):
-        # ApprovalMetricsPublisher needs ``created_at`` to compute
-        # ``ApprovalDecisionLatencyMs`` on the APPROVED branch. The agent
-        # caller (hooks.py) propagates it from the approval row; the
-        # writer must surface it on the emitted event metadata.
         writer.write_approval_granted(
             request_id="01KREQ",
             scope="tool_type:Read",
@@ -970,10 +789,6 @@ class TestApprovalMilestoneHelpers:
         assert metadata["decided_at"] == "2026-05-07T00:00:05Z"
 
     def test_approval_granted_omits_created_at_when_absent(self, writer):
-        # Backward-compat — a caller that hasn't been updated (or the
-        # deploy-window old container) must still produce a valid event.
-        # The publisher Lambda's schema-mismatch branch handles these
-        # by skipping the latency emit + firing METRIC_EMIT_SKIPPED.
         writer.write_approval_granted(
             request_id="01KREQ",
             scope="tool_type:Read",
@@ -1003,12 +818,6 @@ class TestApprovalMilestoneHelpers:
         assert "created_at" not in metadata
 
     def test_approval_timed_out_includes_8a_fields_when_supplied(self, writer):
-        # ApprovalMetricsPublisher needs all three for its TIMED_OUT
-        # branch: ``created_at`` for latency, ``effective_timeout_s``
-        # for the breakdown histogram, ``matching_rule_ids`` for the
-        # rule_id dimension. Emitting all three lets the publisher
-        # drop only the specific metric branch whose input is missing
-        # rather than the whole event.
         writer.write_approval_timed_out(
             request_id="01KREQ",
             timeout_s=300,
@@ -1027,7 +836,6 @@ class TestApprovalMilestoneHelpers:
         ]
 
     def test_approval_timed_out_omits_8a_fields_when_absent(self, writer):
-        # Backward-compat — legacy caller shape keeps working.
         writer.write_approval_timed_out(request_id="01KREQ", timeout_s=300)
         _, metadata = self._last_event(writer)
         assert metadata["milestone"] == "approval_timed_out"
@@ -1036,9 +844,6 @@ class TestApprovalMilestoneHelpers:
         assert "matching_rule_ids" not in metadata
 
     def test_approval_timed_out_matching_rule_ids_list_copy(self, writer):
-        # Defensive copy — mutating the caller's list post-call must not
-        # corrupt the emitted metadata. Mirrors the pattern used for
-        # ``initial_approvals`` / other list payloads in this module.
         rule_ids = ["a", "b"]
         writer.write_approval_timed_out(
             request_id="01KREQ", timeout_s=300, matching_rule_ids=rule_ids
@@ -1110,7 +915,6 @@ class TestApprovalMilestoneHelpers:
         )
         _, metadata = self._last_event(writer)
         assert metadata["milestone"] == "approval_ceiling_shrinking"
-        # Key name uses the design-doc spelling for downstream parsers.
         assert metadata["maxLifetime_remaining_s"] == 900
         assert metadata["cleanup_margin_s"] == 120
         assert metadata["task_default_timeout_s"] == 300
@@ -1141,9 +945,6 @@ class TestApprovalMilestoneHelpers:
         assert metadata["reason"] == "user decision landed during TIMED_OUT write"
 
     def test_policy_decision_cached(self, writer):
-        # IMPL-23: cache hits emit a `policy_decision` milestone with
-        # `decision_source="recent_decision_cache"`. Validates the IMPL-23
-        # metadata contract documented in §12.8.
         writer.write_policy_decision_cached(
             tool_name="Bash",
             tool_input_sha256="abcdef123456",
@@ -1160,7 +961,6 @@ class TestApprovalMilestoneHelpers:
         assert metadata["cached_decision"] == "DENIED"
         assert metadata["cached_reason"] == "user said force-push is too risky"
         assert metadata["original_decision_ts"] == "2026-05-07T12:00:00Z"
-        # A hit on the exact input was not denied for a rule: no such key.
         assert "matched_rule_id" not in metadata
 
     def test_policy_decision_cached_truncates_long_reason(self, writer):
@@ -1172,14 +972,9 @@ class TestApprovalMilestoneHelpers:
             original_decision_ts="2026-05-07T12:00:00Z",
         )
         _, metadata = self._last_event(writer)
-        # Default preview cap is 200 chars; preserve DDB budget under adversarial reasons.
         assert len(metadata["cached_reason"]) <= 210
 
     def test_rule_level_cache_hit_reaches_the_event_stream(self, writer):
-        # The user denied a force push and the agent retries it on another
-        # branch within the minute. The engine denies the retry from its
-        # rule-level cache and names the rule in the metadata the PreToolUse
-        # hook hands to this writer. IMPL-23: every cache hit emits an event.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         engine.recent_decisions.record_rule_decision(
             "Bash",
@@ -1207,9 +1002,6 @@ class TestApprovalMilestoneHelpers:
 
 
 class TestFormatBlockerReason:
-    """The canonical terminal-reason contract (decision D) — must stay in
-    lockstep with the CDK classifier's ``BLOCKED[<kind>]`` regex."""
-
     def test_basic_format(self):
         assert format_blocker_reason("missing_secret", "no OPENAI_API_KEY") == (
             "BLOCKED[missing_secret]: no OPENAI_API_KEY"
@@ -1227,7 +1019,6 @@ class TestFormatBlockerReason:
         )
 
     def test_every_kind_round_trips(self):
-        # Each kind produces a prefix the classifier can key on.
         for kind in BLOCKER_KINDS:
             reason = format_blocker_reason(kind, "detail", resource="res")
             assert reason.startswith(f"BLOCKED[{kind}]:")

@@ -33,22 +33,18 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   const requestId = ulid();
 
   try {
-    // 1. Extract authenticated user
     const userId = extractUserId(event);
     if (!userId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
-    // 2. Parse request body
     const body = parseBody<CreateTaskRequest>(event.body);
     if (!body) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
 
-    // 3. Extract idempotency key
     const idempotencyKey = event.headers['Idempotency-Key'] ?? event.headers['idempotency-key'];
 
-    // 4. Delegate to shared core
     return await createTaskCore(body, {
       userId,
       teamIds: extractUserGroups(event),

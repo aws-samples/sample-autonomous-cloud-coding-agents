@@ -17,28 +17,18 @@
  *  SOFTWARE.
  */
 
-/** Structured logger surface: the three level methods plus `child`. */
 export interface Logger {
   info(message: string, data?: Record<string, unknown>): void;
   warn(message: string, data?: Record<string, unknown>): void;
   error(message: string, data?: Record<string, unknown>): void;
   /**
    * Return a logger that merges `context` (e.g. the correlation envelope
-   * `{ task_id, user_id, repo }`) into every line, so per-call sites don't
-   * repeat it. Per-call `data` wins on key collision.
+   * `{ task_id, user_id, repo }`) into every line. Per-call `data` wins on
+   * key collision.
    */
   child(context: Record<string, unknown>): Logger;
 }
 
-/**
- * Minimal structured logger that writes JSON to stdout/stderr.
- * Uses process.stdout.write / process.stderr.write to avoid the
- * `no-console` eslint rule. CloudWatch captures both streams.
- *
- * @param context - persistent fields merged into every line (see `child`).
- */
-// Closure over a context obj, not Powertools — no child-of-child depth or
-// sampling needed, just a persistent correlation envelope.
 function makeLogger(context: Record<string, unknown> = {}): Logger {
   const write = (stream: NodeJS.WriteStream, level: string, message: string, data?: Record<string, unknown>): void => {
     stream.write(JSON.stringify({ level, message, ...context, ...data }) + '\n');

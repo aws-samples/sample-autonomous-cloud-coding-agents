@@ -1,14 +1,3 @@
-# A6 re-stack (#305): re-merge a CHANGED predecessor branch into an existing
-# stacked-child PR so the child is no longer stale. Like pr-iteration it
-# operates on an existing PR branch (push_resolve — no new PR), but it also
-# receives the updated predecessor branch(es) as merge_branches, which repo.py
-# merges into the working tree before the agent runs. The agent reconciles
-# conflicts, verifies the build, and pushes the same branch.
-#
-# Triggered by the platform (the A6 re-stack handler off a pull_request
-# webhook), not by a user. Writeable; Cedar principal "new_task" (the
-# id→legacy map has no restack entry, so it falls to new_task — a writeable
-# coding identity, correct here).
 id: coding/restack-v1
 version: 1.0.0
 domain: coding

@@ -19,7 +19,6 @@
 
 import { fetchSubIssueGraph } from '../../../src/handlers/shared/linear-subissue-fetch';
 
-/** Build a mock fetch returning a given JSON body + ok/status. */
 function mockFetch(body: unknown, init: { ok?: boolean; status?: number } = {}): typeof fetch {
   return (async () => ({
     ok: init.ok ?? true,
@@ -28,12 +27,11 @@ function mockFetch(body: unknown, init: { ok?: boolean; status?: number } = {}):
   })) as unknown as typeof fetch;
 }
 
-/** Shape a Linear `issue.children` GraphQL response. */
 function graphResponse(children: Array<{
   id: string;
   identifier?: string;
   title?: string;
-  blockedBy?: string[]; // ids that block this child (inverseRelations type "blocks")
+  blockedBy?: string[];
 }>) {
   return {
     data: {
@@ -72,7 +70,6 @@ describe('fetchSubIssueGraph — success shapes', () => {
   });
 
   test('drops blockedBy edges that point outside the child set', async () => {
-    // C is blocked by GHOST (not a sibling) — edge dropped.
     const fetchImpl = mockFetch(graphResponse([
       { id: 'C', blockedBy: ['GHOST'] },
     ]));
@@ -92,7 +89,7 @@ describe('fetchSubIssueGraph — success shapes', () => {
                 id: 'B',
                 inverseRelations: {
                   nodes: [
-                    { type: 'related', issue: { id: 'A' } }, // not a blocker
+                    { type: 'related', issue: { id: 'A' } },
                     { type: 'duplicate', issue: { id: 'A' } },
                   ],
                 },
@@ -173,15 +170,13 @@ describe('fetchSubIssueGraph — error shapes', () => {
     expect(result.kind).toBe('error');
   });
 
-  // An over-size epic must FAIL LOUD, not silently truncate: dropping children
-  // also drops their dependency edges, so the survivors release out of order.
   test('children truncated (hasNextPage) → error, not a silently-cut graph', async () => {
     const fetchImpl = mockFetch({
       data: {
         issue: {
           id: 'PARENT',
           children: {
-            pageInfo: { hasNextPage: true }, // Linear says there are more children
+            pageInfo: { hasNextPage: true },
             nodes: [{ id: 'A' }, { id: 'B' }],
           },
         },

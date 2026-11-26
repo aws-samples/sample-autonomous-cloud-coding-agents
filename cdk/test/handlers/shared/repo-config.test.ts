@@ -140,7 +140,6 @@ describe('loadRepoConfig', () => {
     expect(result?.cedar_policies).toEqual(policies);
   });
 
-  // Chunk 7b — approval_gate_cap is surfaced when present
   test('returns approval_gate_cap when present in config', async () => {
     const config = {
       repo: 'org/repo',

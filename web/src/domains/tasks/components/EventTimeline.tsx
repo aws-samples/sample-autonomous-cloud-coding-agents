@@ -32,7 +32,6 @@ import { buildTurns } from '../../../core/util/turns';
 import { MAX_TASK_EVENTS, useTaskEvents } from '../hooks';
 import { TurnList } from './TurnList';
 
-/** Per-tool-call noise; hidden by default so milestones and blockers stand out. */
 const VERBOSE_EVENT_TYPES = new Set(['agent_tool_call', 'agent_tool_result', 'agent_turn', 'agent_cost_update']);
 
 type View = 'turns' | 'events';

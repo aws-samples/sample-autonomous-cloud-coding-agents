@@ -60,8 +60,6 @@ function relevant(snapshot: MicrovmLifecycleSnapshot, input: ApprovalWakeInput):
     return snapshot.requestId === input.requestId
       && (snapshot.approval.kind !== 'present' || snapshot.approval.status === input.decision);
   }
-  // The guest may already have consumed this decision while an earlier Suspend
-  // is still in flight. Fence only this decision's old intent, never a new gate.
   return snapshot.status === TaskStatus.RUNNING && snapshot.requestId === null
     && snapshot.intent?.request_id === input.requestId;
 }
@@ -111,8 +109,6 @@ export async function wakeMicrovmAfterApproval(input: ApprovalWakeInput): Promis
       return;
     }
 
-    // Save even if AWS still reports RUNNING/SUSPENDING. A delayed Suspend must
-    // not strand the worker after the decision handler has returned.
     stage = 'substrate-read';
     options.abortSignal?.throwIfAborted();
     client ??= makeClient(LambdaMicrovmsClient);
@@ -164,8 +160,6 @@ export async function wakeMicrovmAfterApproval(input: ApprovalWakeInput): Promis
     } catch (error) {
       await report('resume-request-failed', error);
     } finally {
-      // Check after both acknowledged and uncertain outcomes. No next action
-      // follows a cancellation, changed gate or ownership loss in this handler.
       stage = 'post-resume-read';
       options.abortSignal?.throwIfAborted();
       await readMicrovmLifecycleSnapshot(input.taskId, input.userId, options);

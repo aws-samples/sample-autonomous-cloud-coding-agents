@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Concurrency regressions for the guest approval/sleep boundary."""
-
 import asyncio
 import threading
 from unittest.mock import Mock
@@ -99,7 +97,7 @@ async def test_unaccounted_work_or_progress_disables_sleep_without_blocking_tool
     else:
         context.progress_write_failed()
         with context.activity():
-            pass  # A later success does not recover the lost event.
+            pass
     with pytest.raises(LifecycleUnavailable):
         await context.suspend(Mock(), budget_s=1)
     await context.leave_approval(park)
@@ -249,7 +247,6 @@ async def test_concurrent_lifecycle_calls_do_not_share_transition_ownership():
         release.set()
     await suspend
     await context.resume(Mock(), budget_s=1)
-    # The same gate cannot sleep again while the released waiter catches up.
     with pytest.raises(LifecycleUnavailable):
         await context.suspend(Mock(), budget_s=1)
     await context.leave_approval(park)
@@ -262,8 +259,7 @@ async def test_concurrent_lifecycle_calls_do_not_share_transition_ownership():
 @pytest.mark.anyio
 async def test_original_deadline_survives_freeze_and_expired_resume(monkeypatch):
     clock = {"wall": 1000.0, "mono": 50.0}
-    # Patch only the module method through a proxy; replacing global monotonic
-    # would also freeze asyncio's own timeout scheduler.
+    # Replacing the global time.monotonic would also freeze asyncio's timeout scheduler.
     monkeypatch.setattr(
         "hooks.time",
         Mock(time=lambda: clock["wall"], monotonic=lambda: clock["mono"]),
@@ -323,8 +319,6 @@ async def test_progress_writer_acknowledgments_are_shared_and_missing_table_refu
         writer._put_event("agent_milestone", {"message": "saved"})
         writer._table.put_item.assert_called_once()
 
-        # A second writer's dropped event must invalidate the same task's
-        # barrier, even after the first writer successfully writes again.
         missing = _ProgressWriter("progress-task")
         missing._table_name = None
         missing._put_event("agent_milestone", {"message": "lost"})
@@ -362,7 +356,7 @@ async def test_resume_reseeds_from_fresh_os_entropy_after_refresh(monkeypatch):
     seed = Mock()
     monkeypatch.setattr("microvm_lifecycle.os.urandom", entropy)
     monkeypatch.setattr("microvm_lifecycle.random.seed", seed)
-    reseed_random()  # Same entry point used by /run.
+    reseed_random()
     context, _ = await parked()
     await context.suspend(Mock(), budget_s=1)
 

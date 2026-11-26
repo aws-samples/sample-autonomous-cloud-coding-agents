@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Exercise production HTTP routes with real controller state and bounded work."""
-
 from __future__ import annotations
 
 import asyncio
@@ -84,8 +82,7 @@ class TestLifecycleHttp:
         [
             ("suspend", "acknowledged", 200),
             ("suspend", "unavailable", 409),
-            # Any other non-200 makes the service terminate the VM, so an unsafe
-            # suspend of a registered task is declined with 200 instead.
+            # The service terminates the VM on any non-200 answer to a suspend.
             ("suspend", "invalid", 200),
             ("suspend", "failed", 200),
             ("resume", "acknowledged", 200),
@@ -524,15 +521,12 @@ class TestLifecycleHttp:
         response = await client.post(PREFIX + "/suspend", json={})
         assert (response.status_code, response.json()["status"]) == (200, "declined")
         callbacks[0].assert_called_once()
-        # The first acknowledgment still holds: the barrier stays closed.
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(context.wait_until_open(), 0.05)
 
     async def test_declined_suspend_keeps_guest_working_and_wakes_without_refresh(
         self, context, callbacks, client
     ):
-        # The race the service punishes: work resumed after the orchestrator's
-        # read but before the hook. The guest must survive the freeze.
         await context.tool_started("working")
         response = await client.post(PREFIX + "/suspend", json={})
         assert (response.status_code, response.json()["status"]) == (200, "declined")
@@ -549,7 +543,6 @@ class TestLifecycleHttp:
         await context.wait_until_open()
         for callback in callbacks:
             callback.assert_not_called()
-        # Declining for a race does not disable a later, safe sleep.
         context.tool_finished("working")
         parked, _ = await park(context)
         assert (await client.post(PREFIX + "/suspend", json={})).json()["status"] == "acknowledged"

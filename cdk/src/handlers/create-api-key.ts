@@ -31,7 +31,6 @@ import { isValidWebhookName, parseBody } from './shared/validation';
 const ddb = makeDocClient();
 const TABLE_NAME = process.env.API_KEY_TABLE_NAME!;
 
-/** Default scope granted when the caller omits `scopes`. */
 const DEFAULT_SCOPES: readonly ApiKeyScope[] = ['webhooks:manage'];
 
 /**

@@ -20,7 +20,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useApi } from '../../app/providers/api/ApiProvider';
 
-/** Approval requests time out in minutes, so the inbox refreshes faster than the task list. */
 const PENDING_REFRESH_MS = 10_000;
 
 const approvalKeys = {
@@ -33,8 +32,6 @@ export function usePendingApprovals() {
     queryKey: approvalKeys.pending,
     queryFn: () => api.listPending(),
     refetchInterval: PENDING_REFRESH_MS,
-    // Every answer is a new object, also one that equals the last: "Asked" and "Expires" are read off the
-    // clock, and are read again only when the answer the page holds changes.
     structuralSharing: false,
   });
 }
@@ -43,8 +40,7 @@ export type Decision = { readonly kind: 'approve' } | { readonly kind: 'deny'; r
 
 /**
  * Approves or denies one request. `onDecided` runs from the hook, not from `mutate`:
- * refreshing the pending list removes the card that asked, and React Query skips
- * `mutate` callbacks once their component has unmounted.
+ * React Query skips `mutate` callbacks once their component has unmounted.
  */
 export function useDecide(taskId: string, requestId: string, onDecided?: (decision: Decision) => void) {
   const api = useApi();

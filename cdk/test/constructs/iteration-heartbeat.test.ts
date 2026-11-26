@@ -59,8 +59,6 @@ describe('IterationHeartbeat', () => {
   });
 
   test('surfaces the task table + its status index to the handler', () => {
-    // The sweep queries the StatusIndex GSI for RUNNING tasks; without both env
-    // vars it has nothing to sweep and silently no-ops.
     const template = synth();
     const fns = template.findResources('AWS::Lambda::Function');
     const sweep = Object.values(fns).find((f) => {
@@ -76,8 +74,6 @@ describe('IterationHeartbeat', () => {
   });
 
   test('can read tasks and update comment state without creating or deleting tasks', () => {
-    // Jira heartbeat bodies are durable so overlapping preview/terminal writers
-    // converge. Only UpdateItem is added to the existing read grants.
     const template = synth();
     const policies = template.findResources('AWS::IAM::Policy');
     const actions = JSON.stringify(Object.values(policies)

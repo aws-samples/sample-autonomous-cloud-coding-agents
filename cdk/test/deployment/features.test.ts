@@ -91,11 +91,9 @@ describe('readDeploymentProfile', () => {
 
   test('reads a per-stack profile for additional deployments and never inherits the shared one', () => {
     writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), JSON.stringify(profileJson({ jira: true })));
-    // The shared file belongs to the default stack: another stack without its own file keeps the legacy topology.
     expect(readDeploymentProfile(node({ stackName: 'second-dev' }), root)).toBeUndefined();
     writeFileSync(path.join(root, 'abca.deployment.second-dev.json'), JSON.stringify(profileJson({ slack: true })));
     expect(readDeploymentProfile(node({ stackName: 'second-dev' }), root)?.features).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, slack: true });
-    // The default stack keeps using the shared file.
     expect(readDeploymentProfile(node({ stackName: 'backgroundagent-dev' }), root)?.features.jira).toBe(true);
     expect(readDeploymentProfile(node(), root)?.features.jira).toBe(true);
   });

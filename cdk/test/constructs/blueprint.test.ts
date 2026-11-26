@@ -45,7 +45,6 @@ function createStack(
 }
 
 /**
- * Extract the serialized Fn::Join string parts from the Custom::AWS Create property.
  * AwsCustomResource serializes parameters as Fn::Join when CDK tokens are present.
  */
 function getCreateJoinParts(template: Template): string[] {
@@ -145,8 +144,6 @@ describe('Blueprint construct', () => {
     const serialized = parts.join('');
     expect(serialized).toContain('"max_turns":{"N":"50"}');
   });
-
-  // --- #748: agent.maxBudgetUsd (mirrors agent.maxTurns) ------------------
 
   test('maps agent max budget prop', () => {
     const { template } = createStack({
@@ -434,8 +431,6 @@ describe('Blueprint construct', () => {
     expect(serialized).toContain('#cedar_policies');
   });
 
-  // --- Registry asset refs (#246) ---
-
   test('maps registry asset refs to DynamoDB lists', () => {
     const { template } = createStack({
       assets: {
@@ -466,13 +461,9 @@ describe('Blueprint construct', () => {
       },
     });
     const serialized = getUpdateJoinParts(template).join('');
-    // Regression guard (#246): the onUpdate UpdateExpression previously omitted
-    // the three asset-ref columns, so a redeploy silently dropped them.
     expect(serialized).toContain('#mcp_servers');
     expect(serialized).toContain('#cedar_policy_modules');
     expect(serialized).toContain('#skills');
-    // Only the REMOVE clause of the UpdateExpression — not everything after the
-    // word, which would sweep in ExpressionAttributeNames and match every column.
     const removeClause = /REMOVE ([^"\\]*)/.exec(serialized)?.[1] ?? '';
     expect(removeClause).not.toContain('#mcp_servers');
     expect(removeClause).not.toContain('#cedar_policy_modules');
@@ -480,16 +471,9 @@ describe('Blueprint construct', () => {
   });
 
   test('onUpdate does NOT remove model_id — the CLI is a sanctioned co-writer of it', () => {
-    // Regression guard for a fix that was WRONG. Clearing `model_id` when a Blueprint
-    // declares none looked symmetric with the asset refs, but onUpdate runs on every
-    // deploy (its parameters embed a synth-time timestamp) and `bgagent repo onboard
-    // --model` deliberately carries the value forward (ADR-017 sanctions both writers).
-    // The clear therefore deleted an operator's CLI pin on every unrelated redeploy,
-    // while the troubleshooting guide prescribes that pin as the fix for a wrong model.
     const noModel = /REMOVE ([^"\\]*)/.exec(getUpdateJoinParts(createStack().template).join(''))?.[1] ?? '';
     expect(noModel).not.toContain('#model_id');
 
-    // And a declared override is still written, not merely left alone.
     const withModel = getUpdateJoinParts(
       createStack({ agent: { modelId: 'us.anthropic.claude-opus-5' } }).template,
     ).join('');
@@ -497,15 +481,10 @@ describe('Blueprint construct', () => {
   });
 
   test('onUpdate REMOVEs asset columns that are now empty (detach on redeploy)', () => {
-    // Only mcpServers pinned: cedar_policy_modules + skills must be REMOVEd so a
-    // redeploy that cleared them detaches the stale DDB refs (#246).
     const { template } = createStack({
       assets: { mcpServers: ['registry://mcp_server/acme/pdf-tools@^1.4.1'] },
     });
     const serialized = getUpdateJoinParts(template).join('');
-    // mcp_servers is SET (populated); the other two are REMOVEd. Assert on the
-    // exact REMOVE clause so the ExpressionAttributeNames block (which maps all
-    // three names) doesn't confuse the check.
     expect(serialized).toContain('#mcp_servers = :mcp_servers');
     expect(serialized).toContain('REMOVE #cedar_policy_modules, #skills');
     expect(serialized).not.toContain('REMOVE #mcp_servers');
@@ -554,16 +533,12 @@ describe('Blueprint construct', () => {
     new Blueprint(stack, 'Blueprint', {
       repo: 'org/my-repo',
       repoTable,
-      // A well-formed skill ref, but pinned under mcpServers — must be rejected
-      // so a field typo can't silently activate a different asset class.
       assets: { mcpServers: ['registry://skill/acme/research@1.0.0'] },
     });
     expect(() => Template.fromStack(stack)).toThrow(
       /Wrong kind for assets.mcpServers ref.*expected a 'mcp_server' ref but got 'skill'/,
     );
   });
-
-  // --- Chunk 7b: security.approvalGateCap ---------------------------------
 
   test('exposes approvalGateCap as public property when configured', () => {
     const app = new App();
@@ -679,8 +654,6 @@ describe('Blueprint construct', () => {
     expect(() => Template.fromStack(stack)).toThrow(/Invalid security.approvalGateCap: 3.14.*integer/);
   });
 
-  // --- #748: agent.maxBudgetUsd bounds must match the CLI's 0.01–100 ------
-
   test('rejects maxBudgetUsd below minimum at synth', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
@@ -756,14 +729,10 @@ describe('Blueprint construct', () => {
   });
 
   test('blueprint bounds are the SAME constants the task-submit path validates against', () => {
-    // #748 — the whole point of the prop is that a per-repo default and a
-    // per-task override cannot disagree about what is in range. Both must read
-    // ``contracts/constants.json``, not two hand-copied literals.
     expect(MAX_BUDGET_USD_MIN).toBe(0.01);
     expect(MAX_BUDGET_USD_MAX).toBe(100);
   });
 
-  // 2 ** 53 is the first integer the orchestrator would read back from the row as a BigInt.
   test.each([0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53])('rejects memoryTokenBudget %p at synth', (budget) => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
@@ -815,8 +784,6 @@ describe('Blueprint construct', () => {
     });
     expect(() => Template.fromStack(stackMax)).not.toThrow();
   });
-
-  // --- Chunk 7c: synth-time info annotation when cap is omitted ----------
 
   test('emits info annotation when approvalGateCap is not configured', () => {
     const app = new App();
@@ -981,7 +948,6 @@ describe('Blueprint agent.modelId validation', () => {
 
   test('accepts a granted model under the geography the deployment grants', () => {
     expect(synthError('us.anthropic.claude-opus-5')).toBe('');
-    // The colon of a version suffix does not make an ID an ARN.
     expect(synthError('us.anthropic.claude-haiku-4-5-20251001-v1:0')).toBe('');
     expect(synthError('global.anthropic.claude-opus-5', GLOBAL)).toBe('');
   });
@@ -994,7 +960,6 @@ describe('Blueprint agent.modelId validation', () => {
   });
 
   test('rejects an unprefixed value that is not a granted model without building a suggestion from it', () => {
-    // `opus` is a Claude Code alias.
     const error = synthError('opus', GLOBAL);
     expect(error).toContain("Invalid agent.modelId: 'opus'. It has no geography prefix.");
     expect(error).toContain("Use 'global.<model-id>' with a model this deployment grants (");
@@ -1031,7 +996,6 @@ describe('Blueprint agent.modelId validation', () => {
       bedrockModels: ['anthropic.claude-opus-5-5', 'anthropic.claude-haiku-5-5', 'anthropic.example-added'],
     };
     expect(synthError('us.anthropic.example-added', context)).toBe('');
-    // The override replaces the default list, so a default it leaves out is not granted.
     expect(synthError('us.anthropic.claude-sonnet-4-6', context))
       .toContain("'anthropic.claude-sonnet-4-6' is not a model this deployment grants");
   });
@@ -1069,8 +1033,6 @@ describe('Blueprint agent.modelId validation', () => {
   });
 
   test('reads the context only for a Blueprint that pins a model', () => {
-    // An unknown geography is reported by the grant sites. A Blueprint without a model
-    // must not report it as well; one with a model cannot be checked without it.
     const unknownGeo = { bedrockGeoRegion: 'usa' };
     expect(() => createStack(undefined, unknownGeo)).not.toThrow();
     expect(synthError('us.anthropic.claude-opus-5', unknownGeo)).toContain("'bedrockGeoRegion' must be one of");

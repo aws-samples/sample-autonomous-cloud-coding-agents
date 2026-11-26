@@ -28,36 +28,26 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** Default age before a PENDING_UPLOADS task is auto-cancelled (seconds; 30 minutes). */
 const DEFAULT_PENDING_UPLOAD_TIMEOUT_SECONDS = 1800;
 
-/** Default task-record retention used for event TTL (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/** Cleanup Lambda timeout (seconds). */
 const CLEANUP_TIMEOUT_SECONDS = 30;
 
-/** Default cleanup schedule interval (minutes). */
 const DEFAULT_SCHEDULE_MINUTES = 5;
 
-/** Cleanup Lambda memory (MB). */
 const CLEANUP_MEMORY_MB = 256;
 
-/**
- * Properties for PendingUploadCleanup construct.
- */
 export interface PendingUploadCleanupProps {
   /** TaskTable (has StatusIndex GSI used by the query). */
   readonly taskTable: dynamodb.ITable;
 
-  /** TaskEventsTable (handler writes pending_upload_expired events). */
   readonly taskEventsTable: dynamodb.ITable;
 
-  /** Attachments S3 bucket (handler deletes orphaned objects). */
   readonly attachmentsBucket: s3.IBucket;
 
   /**
-   * How often to run the cleanup. Defaults to 5 minutes.
+   * How often to run the cleanup.
    * @default Duration.minutes(5)
    */
   readonly schedule?: Duration;
@@ -73,16 +63,8 @@ export interface PendingUploadCleanupProps {
 }
 
 /**
- * Scheduled Lambda that auto-cancels stale PENDING_UPLOADS tasks.
- *
- * Tasks with presigned-upload attachments are created in PENDING_UPLOADS.
- * If the client never calls confirm-uploads (crash, abandoned session,
- * network issue), these tasks sit indefinitely. This construct runs a
- * scheduled Lambda that transitions expired tasks to CANCELLED and
- * deletes their orphaned S3 objects.
- *
- * Race safety: The Lambda uses conditional DynamoDB writes so it cannot
- * conflict with a concurrent confirm-uploads call.
+ * Scheduled Lambda that transitions expired PENDING_UPLOADS tasks to
+ * CANCELLED and deletes their orphaned S3 objects.
  */
 export class PendingUploadCleanup extends Construct {
   public readonly fn: lambda.NodejsFunction;
@@ -103,7 +85,6 @@ export class PendingUploadCleanup extends Construct {
       timeout: Duration.seconds(CLEANUP_TIMEOUT_SECONDS),
       memorySize: CLEANUP_MEMORY_MB,
       environment: {
-        // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
@@ -116,11 +97,8 @@ export class PendingUploadCleanup extends Construct {
       },
     });
 
-    // TaskTable: read (query by StatusIndex) + conditional UpdateItem.
     props.taskTable.grantReadWriteData(this.fn);
-    // TaskEvents: write pending_upload_expired events.
     props.taskEventsTable.grantWriteData(this.fn);
-    // Attachments bucket: list + delete orphaned objects.
     props.attachmentsBucket.grantRead(this.fn);
     props.attachmentsBucket.grantDelete(this.fn);
 

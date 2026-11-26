@@ -39,7 +39,6 @@ describe('AgentVpc', () => {
   });
 
   test('creates public and private subnets', () => {
-    // 2 AZs × 2 subnet types = 4 subnets
     template.resourceCountIs('AWS::EC2::Subnet', 4);
   });
 
@@ -136,7 +135,6 @@ describe('AgentVpc with custom props', () => {
     new AgentVpc(stack, 'AgentVpc', { maxAzs: 3 });
     const template = Template.fromStack(stack);
 
-    // 3 AZs × 2 subnet types = 6 subnets
     template.resourceCountIs('AWS::EC2::Subnet', 6);
   });
 
@@ -161,18 +159,13 @@ describe('AgentVpc with custom props', () => {
     });
     const template = Template.fromStack(stack);
 
-    // 2 explicit AZs × 2 subnet types = 4 subnets
     template.resourceCountIs('AWS::EC2::Subnet', 4);
 
-    // Subnets are pinned to the requested AZ *names* — the whole point of the
-    // fix (a wrong-count assertion would pass even if AZs were unpinned).
     template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1b' });
     template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1c' });
   });
 
   test('throws when both availabilityZones and maxAzs are supplied', () => {
-    // ec2.Vpc rejects the combination; surface it rather than silently dropping
-    // maxAzs, which hid a wrong mental model at the call site.
     const stack = new Stack(new App(), 'TestStack', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -192,13 +185,10 @@ describe('AgentVpc with custom props', () => {
 
   test('env-agnostic synth falls back to Fn::GetAZs (no pinning, no crash)', () => {
     const app = new App();
-    // No env → account/region are tokens. The production AgentStack synthesizes
-    // this way, so auto-pin is skipped and CDK selects AZs at deploy time.
     const stack = new Stack(app, 'TestStack');
     new AgentVpc(stack, 'AgentVpc');
     const template = Template.fromStack(stack);
 
-    // Default maxAzs (2) → 4 subnets; AZ resolved at deploy via Fn::GetAZs.
     template.resourceCountIs('AWS::EC2::Subnet', 4);
     template.hasResourceProperties('AWS::EC2::Subnet', {
       AvailabilityZone: {
@@ -217,7 +207,6 @@ describe('AgentVpc with custom props', () => {
     });
     const template = Template.fromStack(stack);
 
-    // 3 AZs × 2 subnet types = 6 subnets
     template.resourceCountIs('AWS::EC2::Subnet', 6);
   });
 });
@@ -246,7 +235,6 @@ describe('AgentVpc under cdk-nag', () => {
     }));
     expect(groups).toHaveLength(7);
     for (const group of groups) {
-      // The broad id (AwsSolutions-EC23) would also hide a real finding.
       expect(group.Metadata?.cdk_nag?.rules_to_suppress).toEqual([
         { id: 'CdkNagValidationFailure', applies_to: ['AwsSolutions-EC23'], reason: expect.any(String) },
       ]);

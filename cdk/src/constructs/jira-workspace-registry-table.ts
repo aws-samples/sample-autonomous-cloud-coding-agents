@@ -21,9 +21,6 @@ import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 
-/**
- * Properties for JiraWorkspaceRegistryTable construct.
- */
 export interface JiraWorkspaceRegistryTableProps {
   /**
    * Optional table name override.
@@ -48,7 +45,7 @@ export interface JiraWorkspaceRegistryTableProps {
  * DynamoDB table tracking Jira Cloud tenants that have completed OAuth onboarding.
  *
  * Schema: jira_cloud_id (PK) — Atlassian's tenant identifier (UUID), the stable
- * key returned from `accessible-resources` and present on every webhook payload.
+ * key returned from `accessible-resources`.
  *
  * Fields:
  * - site_url — `https://<your-domain>.atlassian.net` (display only; NOT a
@@ -68,18 +65,8 @@ export interface JiraWorkspaceRegistryTableProps {
  *   `bgagent jira setup` (audit only; runtime callers do not need this)
  * - installed_at, updated_at — ISO timestamps
  * - status — 'active' | 'revoked'
- *
- * The webhook receiver, processor, and orchestrator look up `oauth_secret_arn`
- * here from the inbound webhook's `cloudId`, then fetch (and, on the Lambda
- * paths, refresh) the tenant's OAuth/signing secret from Secrets Manager —
- * see `jira-oauth-resolver.ts`. Inbound OAuth remains user-delegated. Outbound
- * writes prefer one Forge app identity per tenant; installs without it retain
- * OAuth as an explicit migration fallback.
  */
 export class JiraWorkspaceRegistryTable extends Construct {
-  /**
-   * The underlying DynamoDB table.
-   */
   public readonly table: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: JiraWorkspaceRegistryTableProps = {}) {

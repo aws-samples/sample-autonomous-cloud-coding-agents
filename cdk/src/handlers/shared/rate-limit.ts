@@ -17,30 +17,11 @@
  *  SOFTWARE.
  */
 
-/**
- * Cedar HITL per-user per-minute rate-limit helpers.
- *
- * The synthetic ``RATE#<user_id>#<verb>`` rows on ``TaskApprovalsTable``
- * carry a minute-bucketed counter (TTL-reaped after ~120s) keyed on the
- * UTC `yyyymmddhhmm` produced by {@link formatMinuteBucket}. Centralising
- * the formatter here removes the per-handler duplication flagged in
- * PR review (S5) and keeps the bucket boundary identical across
- * approve, deny, get-pending, get-policies, and nudge-task.
- */
-
-/**
- * TTL for rate-limit counter rows (seconds). Only the current minute
- * bucket matters, so ~2 minutes covers clock skew before DDB reaps it.
- */
 export const RATE_LIMIT_ROW_TTL_SECONDS = 120;
 
-/** Digits in the ``YYYY`` year component of a minute bucket. */
 const YEAR_DIGITS = 4;
 
-/**
- * UTC minute bucket as ``YYYYMMDDhhmm``. Stable across handlers — drift
- * here would invalidate per-minute rate-limit counters.
- */
+/** UTC minute bucket as ``YYYYMMDDhhmm``. */
 export function formatMinuteBucket(date: Date): string {
   const y = date.getUTCFullYear().toString().padStart(YEAR_DIGITS, '0');
   const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');

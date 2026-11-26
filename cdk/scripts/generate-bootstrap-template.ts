@@ -17,15 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Generates a custom CDK bootstrap template that replaces AdministratorAccess
- * with ABCA least-privilege managed policies. The template supports per-compute-variant
- * selection via the ComputeTypes parameter.
- *
- * Usage: npx tsx scripts/generate-bootstrap-template.ts
- * Output: cdk/bootstrap/bootstrap-template.yaml
- */
-
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -48,8 +39,6 @@ import {
 } from '../src/bootstrap/template-size';
 import { BOOTSTRAP_VERSION, computeBootstrapHash } from '../src/bootstrap/version';
 
-// --- Paths ---
-// aws-cdk is hoisted to the workspace root node_modules; use require.resolve to find it
 const awsCdkDir = join(require.resolve('aws-cdk/package.json'), '..');
 const cdkBootstrapTemplatePath = join(
   awsCdkDir,
@@ -61,23 +50,12 @@ const cdkBootstrapTemplatePath = join(
 const outputDir = join(__dirname, '..', 'bootstrap');
 const outputPath = join(outputDir, 'bootstrap-template.yaml');
 
-/**
- * Build the bootstrap template object.
- *
- * Exported so tests can compare the committed artifact against an independently
- * constructed template. A test that only round-trips the committed file through a
- * parser proves nothing — `load(dump(x)) === x` holds for any object — so it cannot
- * detect the artifact drifting from the generator that is supposed to produce it.
- */
 export function buildTemplate(): any {
-  // --- Read and parse the default template ---
   const rawTemplate = readFileSync(cdkBootstrapTemplatePath, 'utf-8');
   const template: any = yaml.load(rawTemplate);
 
-  // --- Step 1: Update BootstrapVariant default ---
   template.Parameters.BootstrapVariant.Default = 'ABCA: Least-Privilege Bootstrap';
 
-  // --- Step 2: Add ComputeTypes parameter ---
   template.Parameters.ComputeTypes = {
     Type: 'CommaDelimitedList',
     Default: 'agentcore',
@@ -85,15 +63,7 @@ export function buildTemplate(): any {
       'Comma-separated list of compute backends to enable. Valid values: agentcore, ecs, lambda-microvm.',
   };
 
-  // --- Step 3: Add conditions ---
-  /**
-   * "The joined ComputeTypes list contains `needle`" as a CloudFormation
-   * condition. There is no `Fn::Contains`, so the trick is: split the joined list
-   * on the needle and compare element 0 against the whole string — they differ
-   * only if the needle was actually present. Extracted into a helper (it was
-   * inline for ECS) so a third backend cannot introduce a subtly different
-   * variant of the same expression.
-   */
+  // CloudFormation conditions have no `Fn::Contains`.
   function includesComputeType(needle: string): Record<string, unknown> {
     const joined = { 'Fn::Join': ['', { Ref: 'ComputeTypes' }] };
     return {
@@ -109,11 +79,8 @@ export function buildTemplate(): any {
   }
 
   template.Conditions.IncludeComputeEcs = includesComputeType('ecs');
-  // ADR-021: matched on the full `lambda-microvm` token, NOT a prefix — a bare
-  // `Fn::Split` on `lambda` would also fire for any future `lambda*` backend name.
   template.Conditions.IncludeComputeLambdaMicrovms = includesComputeType('lambda-microvm');
 
-  // --- Step 4: Add managed policy resources ---
   interface PolicyDef {
     logicalId: string;
     policyName: string;
@@ -158,7 +125,6 @@ export function buildTemplate(): any {
 
   for (const { logicalId, policyName, policyFn, condition } of policyDefs) {
     const policyDoc = policyFn().toJSON();
-    // Ensure Version is present in the policy document
     if (!policyDoc.Version) {
       policyDoc.Version = '2012-10-17';
     }
@@ -169,14 +135,8 @@ export function buildTemplate(): any {
         ManagedPolicyName: {
           'Fn::Sub': `cdk-\${Qualifier}-${policyName}-\${AWS::AccountId}-\${AWS::Region}`,
         },
-        // Minified JSON string, not a nested mapping. `PolicyDocument` is a `Json`-typed
-        // property, so CloudFormation accepts either — but the shape decides whether the
-        // template fits inline. As a mapping, the CLI's re-serialisation expands every
-        // statement key and every action onto its own line and the body lands at 53,369,
-        // over the 51,200 inline ceiling; a string scalar survives re-serialisation on one
-        // line and brings it to 45,743 (#864). No permission changes: IAM parses the string
-        // and stores it as a normal policy document (verified end-to-end — CFN creates the
-        // policy and `iam:GetPolicyVersion` returns parsed JSON, not a literal string).
+        // A JSON string, not a mapping: the CLI re-serialises a mapping with every statement key
+        // and action on its own line, which puts the body over the 51,200 inline ceiling (#864).
         PolicyDocument: JSON.stringify(policyDoc),
         Description: `ABCA Bootstrap: ${policyName} permissions for CloudFormation execution role`,
       },
@@ -189,9 +149,6 @@ export function buildTemplate(): any {
     template.Resources[logicalId] = resource;
   }
 
-  // --- Step 5: Modify CloudFormationExecutionRole ManagedPolicyArns ---
-  // Replace the conditional that falls back to AdministratorAccess with our managed policies.
-  // Keep the CloudFormationExecutionPolicies parameter override for flexibility.
   const coreRefs = [
     { Ref: 'IaCRoleABCAInfrastructure' },
     { Ref: 'IaCRoleABCAApplication' },
@@ -226,7 +183,6 @@ export function buildTemplate(): any {
     },
   ];
 
-  // --- Step 6: Add outputs ---
   template.Outputs.BootstrapPolicyVersion = {
     Description: 'The version of the ABCA bootstrap policy bundle',
     Value: BOOTSTRAP_VERSION,
@@ -263,12 +219,7 @@ export function buildTemplate(): any {
   return template;
 }
 
-/**
- * Render the committed artifact: header comment + YAML body.
- *
- * Exported alongside {@link buildTemplate} so the drift test can assert the committed
- * file is exactly what the generator produces today.
- */
+/** Render the committed artifact: header comment + YAML body. */
 export function renderTemplate(): string {
   const template: any = buildTemplate();
 
@@ -279,7 +230,6 @@ export function renderTemplate(): string {
     forceQuotes: false,
   });
 
-  // Add a header comment
   const header = [
     '# GENERATED FILE - DO NOT EDIT DIRECTLY',
     '# This template is generated by: npx tsx scripts/generate-bootstrap-template.ts',
@@ -302,24 +252,16 @@ export function renderTemplate(): string {
   return header + yamlOutput;
 }
 
-/** Generate the artifact, refusing to emit one that cannot bootstrap a fresh account. */
 function main(): void {
   mkdirSync(outputDir, { recursive: true });
 
   const rendered = renderTemplate();
 
-  // Measure a temporary sibling, then rename on success. Writing the real artifact first
-  // would leave an over-budget template on disk after a failed run, so the next command
-  // that reads it — including `cdk bootstrap` — would use a file the generator rejected.
-  // A sibling rather than the OS temp dir keeps the rename atomic on one filesystem.
   const stagingPath = `${outputPath}.tmp`;
   writeFileSync(stagingPath, rendered);
 
   let bodySize: number;
   try {
-    // Gate on what CloudFormation actually receives, which is NOT `rendered`. The CLI
-    // re-serialises the parsed object and compares that; on-disk formatting is discarded.
-    // See src/bootstrap/template-size.ts for the CLI code path this mirrors.
     bodySize = cloudFormationBodySize(stagingPath, join(__dirname, '..'));
 
     const verdict = checkTemplateBudget(bodySize);
@@ -349,7 +291,6 @@ function main(): void {
   );
 }
 
-// Only write when invoked as a script, so importing for tests has no side effects.
 if (require.main === module) {
   main();
 }

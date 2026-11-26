@@ -1,11 +1,3 @@
-# The migrated `pr_iteration` task type: iterate on an existing pull request —
-# push follow-up commits to its branch and resolve the PR URL. Selected via
-# workflow_ref (the new_task→coding mapping: pr_iteration → coding/pr-iteration-v1).
-#
-# Faithful migration of the inline pr_iteration behavior using
-# ensure_pr(strategy: push_resolve). Its Cedar principal is the id-derived audit
-# identity "pr_iteration" (writeable); since Phase 2a, read-only enforcement keys
-# off context.read_only, not the principal — and this workflow is not read-only.
 id: coding/pr-iteration-v1
 version: 1.0.0
 domain: coding

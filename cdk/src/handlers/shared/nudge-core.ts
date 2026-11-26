@@ -23,10 +23,8 @@ import { GuardrailScreeningError, screenWithGuardrail } from './context-hydratio
 import { formatMinuteBucket } from './rate-limit';
 import type { NudgeRecord } from './types';
 
-/** TTL for stored nudge rows (days). */
 const NUDGE_RETENTION_DAYS = 30;
 const NUDGE_RETENTION_SECONDS = NUDGE_RETENTION_DAYS * 86400;
-/** TTL for rate-limit counter rows (~2 minutes — only need the current minute bucket). */
 const RATE_LIMIT_ROW_TTL_SECONDS = 120;
 
 /** Outcome of {@link submitNudge}. Every non-``accepted`` kind is a refusal the caller must surface. */
@@ -50,12 +48,9 @@ export interface SubmitNudgeParams {
  * Screen → rate-limit → persist a steering message for a running task. The
  * agent runtime consumes it at its next between-turns seam.
  *
- * Shared by the REST nudge handler and the Linear agent-session ``prompted``
- * path so both entry points enforce the same guardrail (fail-closed) and the
- * same per-task per-minute budget. Ownership and task-state checks stay with
- * the caller — they differ per entry point (Cognito user vs. linked Linear
- * actor). Guardrail screening runs BEFORE the rate-limit counter so a blocked
- * message does not consume a slot.
+ * The guardrail fails closed and the budget is per task per minute. Ownership
+ * and task-state checks stay with the caller. Guardrail screening runs BEFORE
+ * the rate-limit counter so a blocked message does not consume a slot.
  *
  * Throws only on unexpected DynamoDB errors.
  */
@@ -80,8 +75,6 @@ export async function submitNudge(params: SubmitNudgeParams): Promise<SubmitNudg
     throw err;
   }
 
-  // Per-task per-minute rate limit: a synthetic row in the nudges table
-  // (PK = `RATE#<task_id>`, SK = `MINUTE#<yyyymmddhhmm>`) with a short TTL.
   try {
     await ddb.send(new UpdateCommand({
       TableName: nudgesTableName,

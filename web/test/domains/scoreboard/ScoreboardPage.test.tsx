@@ -35,14 +35,12 @@ const isScoreboard = (request: Request, range?: ScoreboardRange) => {
   return params.get('view') === 'scoreboard' && (!range || params.get('range') === range);
 };
 
-/** Answers the scoreboard request with the mock API's numbers for the range it asks for, changed by `change`. */
 function serveChanged(change: (board: Scoreboard) => Scoreboard): void {
   server.use(http.get(`${TEST_API_BASE}/tasks`, ({ request }) => (isScoreboard(request)
     ? HttpResponse.json({ data: change(mockScoreboard(isScoreboard(request, '7d') ? '7d' : '30d', new Date())) })
     : undefined)));
 }
 
-/** Holds the scoreboard request (of one range, or of any) until the returned function is called; the mock API then answers it. */
 function holdScoreboard(range?: ScoreboardRange): () => void {
   let release = () => {};
   const held = new Promise<void>((resolve) => {
@@ -55,7 +53,6 @@ function holdScoreboard(range?: ScoreboardRange): () => void {
   return release;
 }
 
-/** The period with no task finished in it: every count at zero, every fraction and duration without a value. */
 function emptied(period: ScoreboardPeriod): ScoreboardPeriod {
   const none = { count: 0, total: 0 };
   const noTask = { count: 0, task_ids: [] };
@@ -87,10 +84,8 @@ const boom = () => HttpResponse.json({ error: { code: 'INTERNAL_ERROR', message:
 
 const PREVIOUS_LINE = /days before$/;
 
-/** Between the two units of a duration. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 
-/** The section headings of the page; the side navigation has a heading of the same level. */
 const sectionHeadings = () => screen.queryAllByRole('heading', { level: 2 })
   .filter((heading) => !heading.closest('nav'))
   .map((heading) => heading.textContent);
@@ -98,7 +93,6 @@ const sectionHeadings = () => screen.queryAllByRole('heading', { level: 2 })
 describe('ScoreboardPage', () => {
   afterEach(() => {
     vi.useRealTimers();
-    // The shell keeps the colour mode there; the setup clears sessionStorage only.
     localStorage.clear();
   });
 
@@ -128,11 +122,9 @@ describe('ScoreboardPage', () => {
     expect(screen.getByRole('status')).toHaveTextContent(/^52 tasks finished in the last 30 days: 37 asked for a new pull request, 26 delivered a verified one\./);
     expect(screen.getByRole('button', { name: 'Last 30 days' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText(/^Not measured by ABCA: the hours people spent/)).toBeInTheDocument();
-    // Under the numbers: whose they are, how a period and its spend differ from the Costs page's, and where every user's are.
     expect(screen.getByText('These numbers cover your own tasks. A period is 7 or 30 times 24 hours back from now and its spend is that of the'
       + ' tasks that write code, while the Costs page adds every task over whole UTC days, so the same range can show a different spend there.'
       + ' Numbers for every user are on the CloudWatch dashboard, in the "Factory scoreboard" row.')).toBeInTheDocument();
-    // How far the page sees: said under its title, and where the first section ends.
     expect(screen.getByText(/ Your own tasks, up to the merge\.$/)).toBeInTheDocument();
     expect(screen.getByText(/^Not measured by ABCA: deploy, .* The last thing ABCA sees is the merge\.$/)).toBeInTheDocument();
   });
@@ -162,13 +154,11 @@ describe('ScoreboardPage', () => {
     expect(within(spend).getByText('-')).toBeInTheDocument();
     expect(within(spend).getByText('No verified pull request in this period. $12.40 spent on 6 tasks that write code and started. 1 has no recorded cost.')).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Time to verified pull request: no data' })).toBeInTheDocument();
-    // ABCA has read neither of the week's two pull requests on GitHub: the three numbers over the merged ones say so, not that none is merged.
     for (const name of ['Time to merged pull request: no data', 'Merged, so far: no data', 'Merged without being sent back: no data']) {
       const unread = screen.getByRole('group', { name });
       expect(within(unread).getByText('-')).toBeInTheDocument();
       expect(within(unread).getByText('ABCA has not read the 2 new pull requests of this period on GitHub.')).toBeInTheDocument();
     }
-    // Nor the one of the week before, the only one old enough to wait: the API gives no count, and the tile no task.
     const waiting = screen.getByRole('group', { name: 'Pull requests open for more than 7 days: no data' });
     expect(within(waiting).getByText('-')).toBeInTheDocument();
     expect(within(waiting).getByText('ABCA has not read these pull requests on GitHub.')).toBeInTheDocument();
@@ -177,7 +167,6 @@ describe('ScoreboardPage', () => {
     expect(within(screen.getByRole('group', { name: 'Stopped by a guardrail: 0' })).queryByRole('link')).not.toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent(/^8 tasks finished in the last 7 days/);
     expect(screen.getByRole('button', { name: 'Last 7 days' })).toHaveAttribute('aria-pressed', 'true');
-    // One task of the week before asked for a pull request: only the two shares over such tasks are set against it.
     for (const name of ['Ended in a verified pull request: 0%', 'Verified pull request with no stop for a person: 0%']) {
       expect(within(screen.getByRole('group', { name })).getByText('0% (0 of 1) in the 7 days before')).toBeInTheDocument();
     }
@@ -203,7 +192,6 @@ describe('ScoreboardPage', () => {
     expect(body).toHaveStyle({ opacity: '0.5' });
     expect(router.state.location.search).toBe('?range=7d');
     expect(router.state.historyAction).toBe('REPLACE');
-    // Still the numbers of the month. What says so is outside the dimmed part, where it is announced.
     expect(screen.getByRole('group', { name: 'Ended in a verified pull request: 70%' })).toBeInTheDocument();
     expect(status).toHaveTextContent(/^Loading the scoreboard$/);
     expect(body).not.toContainElement(status);
@@ -228,7 +216,6 @@ describe('ScoreboardPage', () => {
   });
 
   it('reads the numbers again after five minutes', async () => {
-    // Only the interval clock is in the test's hands; it still runs on its own, for the waits of the test.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'], shouldAdvanceTime: true });
     let reads = 0;
     server.use(http.get(`${TEST_API_BASE}/tasks`, ({ request }) => {
@@ -252,7 +239,6 @@ describe('ScoreboardPage', () => {
     expect(within(tile).getByText('-')).toBeInTheDocument();
     expect(screen.getAllByRole('group', { name: /: loading$/ })).toHaveLength(TILE_COUNT);
     expect(screen.queryByRole('group', { name: 'Tasks finished, by how they ended' })).not.toBeInTheDocument();
-    // Said where the first sentence of the page will be, and in the table of outcomes.
     expect(screen.getByRole('status')).toHaveTextContent(/^Loading the scoreboard$/);
     expect(screen.getAllByText('Loading the scoreboard')).toHaveLength(2);
 
@@ -272,7 +258,6 @@ describe('ScoreboardPage', () => {
 
   it.each<[string, Partial<Scoreboard>]>([
     ['no pull request waits', { open_over_7d: { count: 0, task_ids: [] } }],
-    // Not counted is not waiting: the API gives no count when it did not read the period before.
     ['the pull requests that wait are not counted', { previous: null, open_over_7d: null }],
   ])('says so, and offers a new task, when nothing finished and %s', async (_what, rest) => {
     serveChanged((month) => ({ ...month, current: emptied(month.current), ...rest }));
@@ -285,7 +270,6 @@ describe('ScoreboardPage', () => {
   });
 
   it('draws its sections when nothing finished in the period and pull requests of the period before wait', async () => {
-    // The count is of the whole response: three of last week are still open, in a week without a task.
     const waitingIds = [MOCK_IDS.completedOld, MOCK_IDS.completed, MOCK_IDS.noChanges];
     serveChanged((week) => ({ ...week, current: emptied(week.current), open_over_7d: { count: 3, task_ids: waitingIds } }));
     renderRoute('/scoreboard?range=7d');
@@ -293,10 +277,8 @@ describe('ScoreboardPage', () => {
     expect(within(waiting).getAllByRole('link').map((task) => task.textContent)).toEqual(['DONEOLD1', 'DONEPR01', 'NOCHANGE']);
     expect(sectionHeadings()).toEqual(['Speed', 'Quality', 'Leverage', 'Trust', 'Tasks finished']);
     expect(screen.queryByText(/The scoreboard fills in as your tasks finish\.$/)).not.toBeInTheDocument();
-    // Every other number says that the period has nothing.
     expect(screen.getByRole('status')).toHaveTextContent(/^0 tasks finished in the last 7 days: 0 asked for a new pull request/);
     expect(within(screen.getByRole('group', { name: 'Merged, so far: no data' })).getByText('No new pull request in this period.')).toBeInTheDocument();
-    // The table lists the six outcomes at zero, each with the dash of a number that has nothing to divide by; a bar with no part is not drawn.
     const rows = within(screen.getByRole('table', { name: 'Tasks finished by outcome' })).getAllByRole('row').slice(1);
     expect(rows.map((row) => Array.from(row.querySelectorAll('td'), (cell) => cell.textContent))).toEqual(Array(6).fill(['0', '-']));
     expect(screen.queryByRole('group', { name: 'Tasks finished, by how they ended' })).not.toBeInTheDocument();
@@ -325,7 +307,6 @@ describe('ScoreboardPage', () => {
   });
 
   it('compares nothing, and warns of nothing, when only the period before was not read; the pull requests that wait are then not counted', async () => {
-    // The API gives no count of them without the period before: its tasks hold the pull requests old enough to wait.
     serveChanged((month) => ({ ...month, previous: null, open_over_7d: null }));
     renderRoute('/scoreboard');
     expect(await screen.findByRole('group', { name: 'Ended in a verified pull request: 70%' })).toBeInTheDocument();
@@ -344,7 +325,6 @@ describe('ScoreboardPage', () => {
     expect(within(stopped).getByRole('link', { name: 'Task BLOCKED1' })).toHaveAttribute('href', `/tasks/${blocked}`);
     const blanket = screen.getByRole('group', { name: 'Started with blanket approval: 3' });
     expect(within(blanket).getAllByRole('link').map((task) => task.textContent)).toEqual(['DONEPR01', 'CANCEL01', 'DONEOLD1']);
-    // The pull requests that wait for a person: the one that has waited longest comes first.
     const waiting = screen.getByRole('group', { name: 'Pull requests open for more than 7 days: 2' });
     expect(within(waiting).getAllByRole('link').map((task) => task.textContent)).toEqual(['DONEOLD1', 'DONEPR01']);
     expect(within(waiting).getByRole('link', { name: 'Task DONEOLD1' })).toHaveAttribute('href', `/tasks/${MOCK_IDS.completedOld}`);
@@ -354,7 +334,6 @@ describe('ScoreboardPage', () => {
   });
 
   it('says under the count of the pull requests that wait what it leaves out, after the links of the ones it counts', async () => {
-    // Twenty more verified pull requests than ABCA follows: those of an orchestration.
     serveChanged((month) => ({
       ...month,
       current: { ...month.current, outcomes: { ...month.current.outcomes, verified_pr: month.current.outcomes.verified_pr + 20 } },
@@ -363,7 +342,6 @@ describe('ScoreboardPage', () => {
     const waiting = await screen.findByRole('group', { name: 'Pull requests open for more than 7 days: 2' });
     const links = within(waiting).getAllByRole('link');
     expect(links.map((task) => task.textContent)).toEqual(['DONEOLD1', 'DONEPR01']);
-    // Between the number and its links, the sentence would make them read as the orchestration's.
     const leftOut = within(waiting).getByText('The 20 of an orchestration are not followed.');
     expect(links[1].compareDocumentPosition(leftOut)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
@@ -381,15 +359,12 @@ describe('ScoreboardPage', () => {
     renderRoute('/scoreboard');
     const icon = await screen.findByRole('button', { name: 'About waited in line' });
     expect(screen.getAllByRole('button', { name: /^About / })).toHaveLength(TILE_COUNT);
-    // The icon's name keeps a name inside the label as it is written.
     expect(screen.getByRole('button', { name: 'About not reworked through ABCA, so far' })).toBeInTheDocument();
-    // The icon stays on the line of the label's last word, however the label wraps.
     const lastWord = within(screen.getByRole('group', { name: /^Waited in line: / })).getByText('line');
     expect(lastWord).toContainElement(icon);
     expect(lastWord).toHaveStyle({ whiteSpace: 'nowrap' });
 
     fireEvent.focus(icon);
-    // A task that waits too long in line ends as failed; "ran out of time" is another outcome on this page.
     expect(screen.getByRole('tooltip').textContent).toBe(bubbleText('Waited in line', {
       what: 'The share of your tasks that could not start right away because you already had as many running as allowed.',
       why: 'A high share says your limit on tasks running at once, not the agents, holds work back. How long work waits to start is'
@@ -403,9 +378,7 @@ describe('ScoreboardPage', () => {
     renderRoute('/scoreboard');
     await screen.findByRole('group', { name: 'Ended in a verified pull request: 70%' });
     for (const { label, explanation } of SECTIONS.flatMap((section) => section.tiles)) {
-      // A label holds no character that a pattern reads as anything but itself.
       const group = screen.getByRole('group', { name: new RegExp(`^${label}: `) });
-      // One bubble at a time: the one that opens closes the one before it.
       fireEvent.focus(within(group).getByRole('button', { name: aboutLabel(label) }));
       expect(screen.getByRole('tooltip').textContent).toBe(bubbleText(label, explanation));
     }
@@ -426,7 +399,6 @@ describe('ScoreboardPage', () => {
       ['Finished without a verified pull request: 17 of 52 finished tasks, 33%', '17'],
       ['Failed or stopped: 9 of 52 finished tasks, 17%', '9'],
     ]);
-    // However small its share, a part stays wide enough for a pointer or a finger to hit.
     expect(within(bar).getAllByRole('img').map((part) => part.style.minWidth)).toEqual(['24px', '24px', '24px']);
     const rows = within(screen.getByRole('table', { name: 'Tasks finished by outcome' })).getAllByRole('row').slice(1);
     expect(rows.map((row) => Array.from(row.querySelectorAll('th, td'), (cell) => cell.textContent))).toEqual([
@@ -437,21 +409,17 @@ describe('ScoreboardPage', () => {
       ['Cancelled', '2', '4%'],
       ['Ran out of time', '2', '4%'],
     ]);
-    // The table is the legend of the bar: the swatch of a row is the colour of its part.
     const parts = within(bar).getAllByRole('img').map((part) => part.querySelector('div')?.style.background);
     const swatches = rows.map((row) => row.querySelector<HTMLElement>('span[aria-hidden="true"]')?.style.background);
-    // Slots 0, 2 and 1 of the light palette.
     expect(parts).toEqual(['rgb(42, 120, 214)', 'rgb(27, 175, 122)', 'rgb(235, 104, 52)']);
     expect(swatches).toEqual([parts[0], parts[1], parts[1], parts[2], parts[2], parts[2]]);
   });
 
   it('draws the bar and its legend in the dark palette in dark mode', async () => {
-    // The shell reads the mode it was left in, and applies it to the page.
     localStorage.setItem('abca-console-theme', 'dark');
     renderRoute('/scoreboard');
     const part = await screen.findByRole('img', { name: /^Verified pull request: 26/ });
     const table = screen.getByRole('table', { name: 'Tasks finished by outcome' });
-    // Slot 0 of the dark palette, #3987e5 (#2a78d6 in light mode).
     await waitFor(() => expect(part.querySelector('div')?.style.background).toBe('rgb(57, 135, 229)'));
     expect(table.querySelector<HTMLElement>('span[aria-hidden="true"]')?.style.background).toBe('rgb(57, 135, 229)');
   });
@@ -460,7 +428,6 @@ describe('ScoreboardPage', () => {
     renderRoute('/scoreboard');
     const part = await screen.findByRole('img', { name: 'Failed or stopped: 9 of 52 finished tasks, 17%' });
     expect(part).toHaveAttribute('tabindex', '0');
-    // The bubble is the one tooltip of a part: a title would open a second.
     expect(part).not.toHaveAttribute('title');
 
     fireEvent.focus(part);

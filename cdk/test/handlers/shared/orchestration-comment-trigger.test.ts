@@ -76,7 +76,6 @@ describe('parseCommentTrigger', () => {
       .toEqual({ triggered: true, instruction: 'Thanks One more thing: fix the flaky test' });
     expect(parseCommentTrigger('@bgagent... any update?'))
       .toEqual({ triggered: true, instruction: 'any update?' });
-    // Alone it is a bare mention: an empty instruction, not the instruction ".".
     expect(parseCommentTrigger('@bgagent.')).toEqual({ triggered: true, instruction: '' });
   });
 
@@ -95,18 +94,12 @@ describe('parseCommentTrigger', () => {
     const block = '```yaml\nsteps:\n  - name: build\n    run: make\n```';
     expect(parseCommentTrigger(`@bgagent replace the step with:\n${block}`).instruction)
       .toBe(`replace the step with:\n${block}`);
-    // The mention may also close the comment, on a line of its own.
     expect(parseCommentTrigger(`Replace the step with:\n${block}\n@bgagent`).instruction)
       .toBe(`Replace the step with:\n${block}`);
   });
 
-  // The bot's OWN comments must never re-trigger it, even when (especially
-  // when) they contain a literal @bgagent — otherwise it replies to itself
-  // forever.
   describe('self-comment guard — the bot never triggers on its own comments', () => {
     test('the disambiguation reply does NOT trigger, even though it embeds an "@bgagent <issue>:" example', () => {
-      // This EXACT body once spammed ~50 replies: it starts with 👋 and contains
-      // a literal @bgagent example, which an earlier regex re-matched → loop.
       const body = '👋 I couldn\'t tell which sub-issue that\'s about.\n\nOtherwise, comment on the '
         + 'specific sub-issue, or name it here — e.g. `@bgagent ABCA-123: <what to change>`. The sub-issues are:';
       expect(parseCommentTrigger(body).triggered).toBe(false);
@@ -157,14 +150,11 @@ describe('detectNearMissMention — a wrong-handle mention gets a nudge, not sil
   test('@abca (label-name confusion) is a near-miss → nudge', () => {
     expect(detectNearMissMention('@abca approve')).toBe(true);
     expect(detectNearMissMention('hey @abca can you make it 2 tasks')).toBe(true);
-    // …even with a :suffix the reviewer copied from the label.
     expect(detectNearMissMention('@abca:auto please')).toBe(true);
   });
 
   test('a boundary-miss @bgagent handle is a near-miss (parseCommentTrigger deliberately skips it)', () => {
-    // parseCommentTrigger's `@bgagent(?!\w|\.\w)` does NOT trigger on these …
     expect(parseCommentTrigger('ping @bgagentbot for help').triggered).toBe(false);
-    // … so detectNearMissMention catches them for the nudge instead of a silent drop.
     expect(detectNearMissMention('ping @bgagentbot for help')).toBe(true);
     expect(detectNearMissMention('@bgagentx approve')).toBe(true);
   });
@@ -177,8 +167,6 @@ describe('detectNearMissMention — a wrong-handle mention gets a nudge, not sil
   });
 
   test('the CORRECT @bgagent handle is NOT a near-miss (it triggers normally)', () => {
-    // A real trigger never reaches the near-miss branch, but assert it here too:
-    // the exact token must not be flagged as a wrong handle.
     expect(detectNearMissMention('@bgagent approve')).toBe(false);
     expect(detectNearMissMention('@bgagent make it 2 tasks')).toBe(false);
   });
@@ -196,9 +184,7 @@ describe('detectNearMissMention — a wrong-handle mention gets a nudge, not sil
   });
 
   test("the bot's own comments are never near-misses (no self-nudge loop)", () => {
-    // The wrong-mention nudge is 👋-prefixed → bot-authored → must not re-detect.
     expect(detectNearMissMention('👋 I answer to `@bgagent` — I don\'t pick up other @-names')).toBe(false);
-    // A plan comment embeds a literal "@bgagent approve" example — still not a near-miss.
     expect(detectNearMissMention('🗂️ Proposed breakdown … reply `@bgagent approve`')).toBe(false);
   });
 });
@@ -211,8 +197,6 @@ describe('parseRetryIntent — recognise a plain "retry" command', () => {
   });
 
   test('a retry word leading a SUBSTANTIVE edit is NOT a bare retry (routes to iterate/revise)', () => {
-    // "retry the footer but change the color and spacing too" is an edit request,
-    // not a bare retry — must fall through so it isn't swallowed by the retry path.
     expect(parseRetryIntent('retry the footer but change the color and spacing and margins')).toBe(false);
   });
 
@@ -220,7 +204,6 @@ describe('parseRetryIntent — recognise a plain "retry" command', () => {
     expect(parseRetryIntent('')).toBe(false);
     expect(parseRetryIntent('looks good, ship it')).toBe(false);
     expect(parseRetryIntent('change the header color')).toBe(false);
-    // A bare @bgagent (empty instruction) is "address latest review", never a retry.
     expect(parseRetryIntent('   ')).toBe(false);
   });
 
@@ -230,18 +213,12 @@ describe('parseRetryIntent — recognise a plain "retry" command', () => {
   });
 
   test('a retry phrase EMBEDDED in a longer word does not fire', () => {
-    // The phrase match is whole-word: only a non-[a-z0-9] char (or a string
-    // edge) may flank it. Guards the boundary contract that the substring scan
-    // in hasPhrase upholds (it replaced a phrase-interpolated `new RegExp`).
     for (const s of ['retryx', 'abcretry', 'xrerun', 'rerunner', 'retry9', '9retry']) {
       expect(parseRetryIntent(s)).toBe(false);
     }
   });
 
   test('phrases containing regex metacharacters match literally, not as patterns', () => {
-    // "re-run" is a RETRY_PHRASES member containing '-'. A phrase must never be
-    // interpreted as a pattern: "re.run"/"reXrun" must NOT match "re-run", and a
-    // user typing regex syntax must not have it evaluated.
     expect(parseRetryIntent('re-run')).toBe(true);
     expect(parseRetryIntent('re.run')).toBe(false);
     expect(parseRetryIntent('reXrun')).toBe(false);

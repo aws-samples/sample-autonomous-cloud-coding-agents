@@ -17,10 +17,7 @@
  *  SOFTWARE.
  */
 
-/** The parent stack passes its execution role to nested CloudFormation stacks.
- * Resolve its exact ARN from bootstrap parameters, without a self-referencing
- * GetAtt or a wildcard grant over other deployment/application roles.
- */
+/** The parent stack passes its execution role to nested CloudFormation stacks. */
 export function nestedStackExecutionPolicy() {
   return {
     Version: '2012-10-17',

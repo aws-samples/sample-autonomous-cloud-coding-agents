@@ -23,18 +23,10 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/** HTTPS port — the only egress allowed from the Runtime ENIs. */
 const HTTPS_PORT = 443;
 
-/**
- * Default zone count. Kept equal to `AUTO_PIN_AZ_COUNT` in
- * `constructs/agentcore-azs.ts` so auto-pinning does not change the topology of
- * a stack that deploys fine today; the coupling is asserted in
- * `test/constructs/agentcore-azs.test.ts`.
- */
 const DEFAULT_AGENT_VPC_AZS = 2;
 
-/** AgentCore high-availability floor: at least two zones. */
 const MIN_AGENT_VPC_AZS = 2;
 
 const MAX_RESERVED_NETWORK_AZS = 6;
@@ -43,8 +35,6 @@ const MAX_RESERVED_NETWORK_AZS = 6;
 export function resolveNetworkReservedAzs(value: unknown): number {
   if (value === undefined) return 0;
   const count = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
-  // Six slots cover the largest current regional AZ count and bound CDK's
-  // placeholder allocation. The normal three-to-two-zone reduction needs one.
   if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > MAX_RESERVED_NETWORK_AZS) {
     throw new Error(`networkReservedAzs must be an integer from 0 to ${MAX_RESERVED_NETWORK_AZS}`);
   }
@@ -57,15 +47,9 @@ export interface AgentNetwork {
   readonly runtimeSecurityGroup: ec2.ISecurityGroup;
 }
 
-/**
- * Properties for the AgentVpc construct.
- */
 export interface AgentVpcProps {
   /**
    * Maximum number of availability zones to use.
-   *
-   * Ignored when {@link availabilityZones} is provided (CDK does not allow
-   * both `maxAzs` and an explicit zone list on the same VPC).
    * @default 2
    */
   readonly maxAzs?: number;
@@ -75,29 +59,12 @@ export interface AgentVpcProps {
    * to place the VPC — and therefore the AgentCore Runtime ENIs — into.
    *
    * AgentCore only supports a subset of the physical availability zones in a
-   * region, and AZ *names* are aliased per-account to physical zone IDs (so
-   * `us-east-1a` is not the same physical zone across accounts). When CDK is
-   * left to pick zones by name (the `maxAzs` default) it can land the Runtime
-   * subnets in a zone AgentCore does not support, and the
-   * `AWS::BedrockAgentCore::Runtime` resource fails to stabilize with
-   * `NotStabilized` ("subnets are in unsupported availability zones"), rolling
-   * back the whole stack.
-   *
-   * Pin this to AZ names whose physical zone IDs are AgentCore-supported to
-   * make a fresh deploy deterministic regardless of the account's
-   * name → zone-ID mapping. The supported zone-ID set differs per region and
-   * can change over time — see the AWS
+   * region, and AZ *names* are aliased per-account to physical zone IDs — see the AWS
    * {@link https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html#agentcore-supported-azs Supported Availability Zones}
    * table, and the per-region `AGENTCORE_SUPPORTED_AZ_IDS` map in
    * `constructs/agentcore-azs.ts`.
    *
-   * Callers normally don't set this directly: `resolveAgentCoreAzs` (invoked
-   * from `main.ts`) auto-selects supported zone names for the target account,
-   * or honors the validated `agentcore:availabilityZones` context override, and
-   * passes the result through `AgentStackProps.agentCoreAvailabilityZones`.
-   *
-   * Mutually exclusive with {@link maxAzs} — supplying both throws, matching
-   * `ec2.Vpc`'s own contract rather than silently ignoring one of them.
+   * Mutually exclusive with {@link maxAzs} — supplying both throws.
    * Must list at least two zones (AgentCore high-availability guidance).
    * @default - CDK selects the first `maxAzs` zones by name
    */
@@ -131,7 +98,6 @@ export interface AgentVpcProps {
  * Flow logs are enabled for audit.
  */
 export class AgentVpc extends Construct implements AgentNetwork {
-  /** The VPC where the Runtime will be deployed. */
   public readonly vpc: ec2.Vpc;
 
   /** Security group for the Runtime ENIs — allows only TCP 443 egress. */
@@ -142,9 +108,6 @@ export class AgentVpc extends Construct implements AgentNetwork {
 
     const pinnedAzs = props.availabilityZones;
 
-    // `ec2.Vpc` rejects `availabilityZones` + `maxAzs` together. Surface that as
-    // our own error instead of spreading one away silently: a caller who set
-    // both has a wrong mental model and should hear about it.
     if (pinnedAzs?.length && props.maxAzs !== undefined) {
       throw new Error(
         'AgentVpc supports availabilityZones or maxAzs, but not both — '
@@ -163,17 +126,11 @@ export class AgentVpc extends Construct implements AgentNetwork {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
     const reservedAzs = resolveNetworkReservedAzs(this.node.tryGetContext('networkReservedAzs'));
 
-    // --- VPC ---
-    // When explicit AZs are provided (to target AgentCore-supported physical
-    // zones), pass them directly and omit maxAzs — CDK does not allow both.
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       ...(pinnedAzs?.length
-        // CDK appends reserved placeholders to this array; keep the caller's
-        // real AZ selection intact for application wiring and diagnostics.
+        // CDK appends reserved placeholders to the array it is given.
         ? { availabilityZones: [...pinnedAzs] }
         : { maxAzs }),
-      // Keep active + reserved slots constant during an AZ reduction so CDK's
-      // private subnet CIDRs do not shift and force subnet replacements.
       reservedAzs,
       natGateways,
       restrictDefaultSecurityGroup: true,
@@ -193,15 +150,13 @@ export class AgentVpc extends Construct implements AgentNetwork {
 
     const resourceVpcPath = `${props.resourcePath ?? this.node.path}/Vpc`;
     if (props.resourcePath !== undefined) {
-      // CDK gives the VPC and each subnet their own inherited Name tag. Preserve
-      // those scopes so routes, NAT, endpoints and the IGW keep their old names.
+      // CDK tags the VPC and each subnet with a Name derived from its own construct path.
       Tags.of(this.vpc).add('Name', resourceVpcPath);
       for (const subnet of [...this.vpc.publicSubnets, ...this.vpc.privateSubnets]) {
         Tags.of(subnet).add('Name', `${resourceVpcPath}${subnet.node.path.slice(this.vpc.node.path.length)}`);
       }
     }
 
-    // --- Flow logs (satisfies AwsSolutions-VPC7) ---
     const flowLogGroup = new logs.LogGroup(this, 'FlowLogGroup', {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy,
@@ -213,7 +168,6 @@ export class AgentVpc extends Construct implements AgentNetwork {
     });
     if (props.resourcePath !== undefined) Tags.of(flowLog).add('Name', `${resourceVpcPath}/FlowLog`);
 
-    // --- Security group (HTTPS-only egress) ---
     this.runtimeSecurityGroup = new ec2.SecurityGroup(this, 'RuntimeSG', {
       vpc: this.vpc,
       description: 'AgentCore Runtime - egress TCP 443 only',
@@ -226,7 +180,6 @@ export class AgentVpc extends Construct implements AgentNetwork {
       'Allow HTTPS egress (GitHub + package registries via NAT, AWS services via endpoints)',
     );
 
-    // --- Gateway endpoints (free, no ENI cost) ---
     this.vpc.addGatewayEndpoint('S3Endpoint', {
       service: ec2.GatewayVpcEndpointAwsService.S3,
     });
@@ -235,7 +188,6 @@ export class AgentVpc extends Construct implements AgentNetwork {
       service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
     });
 
-    // --- Interface endpoints (private DNS enabled, placed in private subnets) ---
     const interfaceEndpoints: Array<{ id: string; service: ec2.InterfaceVpcEndpointAwsService }> = [
       { id: 'EcrApiEndpoint', service: ec2.InterfaceVpcEndpointAwsService.ECR },
       { id: 'EcrDockerEndpoint', service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER },
@@ -253,13 +205,10 @@ export class AgentVpc extends Construct implements AgentNetwork {
         subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       });
       if (props.resourcePath !== undefined) {
-        // GroupDescription is replacement-sensitive. The CDK default includes
-        // the current stack path, so explicitly keep the pre-extraction value.
+        // CloudFormation replaces a security group whose GroupDescription changes, and the CDK default includes the construct path.
         const group = endpoint.node.findChild('SecurityGroup').node.defaultChild as ec2.CfnSecurityGroup;
         group.groupDescription = `${resourceVpcPath}/${ep.id}/SecurityGroup`;
       }
-      // AwsSolutions-EC23 reports a validation failure here, not a verdict, so it checks
-      // nothing on these groups. test/constructs/agent-vpc.test.ts pins their ingress.
       NagSuppressions.addResourceSuppressions(endpoint.connections.securityGroups, [
         {
           id: 'CdkNagValidationFailure',

@@ -36,23 +36,11 @@ const lambdaClient = makeClient(LambdaClient);
 const WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.JIRA_WEBHOOK_DEDUP_TABLE_NAME!;
 const PROCESSOR_FUNCTION_NAME = process.env.JIRA_WEBHOOK_PROCESSOR_FUNCTION_NAME!;
-/** Optional. When unset, the per-tenant signing-secret path is skipped
- *  and only the stack-wide secret is consulted (back-compat). */
 const WORKSPACE_REGISTRY_TABLE = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
 
-/**
- * Dedup window (seconds). Atlassian retries failed deliveries far less
- * aggressively than Linear, but we keep an 8-hour window to cover
- * delayed retries on transient outages and clock skew.
- */
 const DEDUP_TTL_HOURS = 8;
 const DEDUP_TTL_SECONDS = DEDUP_TTL_HOURS * 3600;
 
-/**
- * Top-level shape of the Jira webhook envelope we care about for dedup +
- * routing. Other fields are forwarded to the processor as part of the raw
- * body — the processor parses its own copy.
- */
 interface JiraWebhookEnvelope {
   readonly webhookEvent?: string;
   readonly timestamp?: number;
@@ -64,18 +52,10 @@ interface JiraWebhookEnvelope {
   readonly comment?: {
     readonly id?: string;
   };
-  /** `cloudId` is delivered as a top-level field on Atlassian Cloud webhooks. */
   readonly matchedWebhookIds?: number[];
   readonly user?: { readonly accountId?: string };
 }
 
-/**
- * Atlassian's webhook payload doesn't always include `cloudId` at the top
- * level — older delivery payloads omit it, and self-hosted webhook
- * configurations don't carry it. We require it for tenant-scoped
- * verification; the receiver passes whatever it can extract through to
- * the processor and lets that step report a clear error if absent.
- */
 interface JiraEnvelopeWithCloud extends JiraWebhookEnvelope {
   readonly cloudId?: string;
 }
@@ -86,9 +66,7 @@ interface JiraEnvelopeWithCloud extends JiraWebhookEnvelope {
  * Verifies the `X-Hub-Signature` HMAC over the raw body, dedups on
  * issue events on `(issueKey, webhookEvent, timestamp)` and comment events on
  * `(issueKey, comment_created, commentId)` with an 8h TTL, then async-invokes
- * the processor Lambda so we can ack quickly. Atlassian sends the
- * algorithm prefix (`sha256=…`) — `verifyJiraSignature` strips it before
- * comparison.
+ * the processor Lambda.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
@@ -96,12 +74,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Request body is required' });
     }
 
-    // HMAC is computed over the raw `event.body` string. If API Gateway is
-    // ever configured with binary media types it can deliver the body
-    // base64-encoded (`isBase64Encoded: true`), in which case both the JSON
-    // parse and the signature comparison would be over the wrong bytes. We
-    // assume a UTF-8 JSON body (Atlassian sends `application/json`); reject
-    // loudly rather than silently failing verification on the encoded form.
     if (event.isBase64Encoded) {
       logger.error('Jira webhook delivered base64-encoded; expected raw JSON body');
       return jsonResponse(400, { error: 'Unexpected body encoding' });
@@ -122,22 +94,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
-    // `null` parses, but reading a field of it throws: answer as for unparseable JSON.
     if (payload === null) {
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
 
-    // Per-tenant verification first. Uses the stack-wide verifier if (a) registry
-    // table not configured, (b) no cloudId in body, (c) tenant not in registry,
-    // or (d) tenant's stored secret lacks `webhook_signing_secret`.
-    // Per-tenant MISMATCH and REVOKED are fatal — no alternate verification.
-    //
-    // `verifiedViaStackWide` is propagated to the processor: a per-tenant
-    // signature proves the sender knows *that* tenant's secret (so the
-    // body-supplied `cloudId` is trustworthy for routing), whereas the
-    // stack-wide secret is not bound to any tenant. The processor refuses
-    // to route a stack-wide-verified delivery to a body-chosen `cloudId`,
-    // binding it to the sole active tenant instead.
     let verified = false;
     let verifiedViaStackWide = false;
     const verificationCloudId = payload.cloudId
@@ -164,7 +124,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
         return jsonResponse(401, { error: 'Tenant not active' });
       }
-      // 'no-per-tenant-secret' uses the stack-wide verifier.
     }
 
     if (!verified) {
@@ -181,11 +140,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
-    // Advisory replay window. The dedup table catches the common retry case;
-    // this guards against very old replays. Atlassian's `timestamp` is only
-    // advisory (it isn't part of the signed material), so a missing value
-    // can't be rejected — but we log it so the skipped check is observable
-    // rather than a silent fail-open.
     if (payload.timestamp === undefined) {
       logger.warn('Jira webhook has no timestamp — replay-window check skipped', {
         jira_cloud_id: payload.cloudId,
@@ -202,7 +156,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       webhookEvent === 'jira:issue_created' || webhookEvent === 'jira:issue_updated';
     const isCommentEvent = webhookEvent === 'comment_created';
     if (!isIssueEvent && !isCommentEvent) {
-      // Silent 200 so Atlassian doesn't retry unsupported event types.
       logger.info('Ignoring unsupported Jira webhook', { webhookEvent });
       return jsonResponse(200, { ok: true });
     }
@@ -220,12 +173,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Missing comment identifier' });
     }
 
-    // Dedup via conditional PutItem.
-    //
-    // Comment ids are stable and unique, so they are the strongest dedup key
-    // for comment_created. Issue events have no entity id beyond the issue and
-    // continue using the delivery timestamp so separate label additions do not
-    // collapse into one event.
     const dedupDiscriminator = isCommentEvent
       ? commentId!
       : payload.timestamp ?? 'unknown';
@@ -264,8 +211,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         issue_key: issueKey,
         webhookEvent,
       });
-      // Roll back the dedup row so a future Atlassian retry can dispatch.
-      // Without this, all retries hit the dedup TTL and silently drop.
       try {
         await ddb.send(new DeleteCommand({
           TableName: DEDUP_TABLE_NAME,

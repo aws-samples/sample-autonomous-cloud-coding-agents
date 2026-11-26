@@ -24,7 +24,6 @@ import { supportsMicrovmLifecycle } from './image-capability';
 import { intentMatchesGate, type MicrovmLifecycleSnapshot } from './lifecycle';
 import { MICROVM_TRANSITION_POLL_MS } from './types';
 
-// Initial policy values, not service limits. Live timings must validate them.
 const MICROVM_WAKE_MARGIN_MS = 60_000;
 const MICROVM_MIN_USEFUL_SLEEP_MS = 30_000;
 
@@ -85,7 +84,6 @@ export function decideMicrovmLifecycle(input: MicrovmLifecyclePolicyInput): Micr
   return decideAwaitingApproval({ input, sleeping, sameGate, nextPollInMs, transitionPoll, wake });
 }
 
-/** Values the gate branch shares with the caller; computed once per decision. */
 interface GateContext {
   readonly input: MicrovmLifecyclePolicyInput;
   readonly sleeping: boolean;
@@ -95,14 +93,11 @@ interface GateContext {
   readonly wake: (reason: string) => MicrovmLifecycleDecision;
 }
 
-/** The AWAITING_APPROVAL branch of `decideMicrovmLifecycle`. */
 function decideAwaitingApproval(ctx: GateContext): MicrovmLifecycleDecision {
   const { input, sleeping, sameGate, nextPollInMs, transitionPoll, wake } = ctx;
   const { snapshot, nowMs, sessionDeadlineMs } = input;
   const approval = snapshot.approval;
   if (approval.kind !== 'present') {
-    // A failed/missing read is not permission to sleep. Preserve wake intent
-    // even while RUNNING if an earlier suspend might still be in flight.
     if (sleeping || snapshot.intent) return wake(`approval-${approval.kind}`);
     return { action: 'wait', reason: `approval-${approval.kind}`, nextPollInMs: transitionPoll };
   }
@@ -117,7 +112,6 @@ function decideAwaitingApproval(ctx: GateContext): MicrovmLifecycleDecision {
 
   const sleepAfterSeconds = snapshot.sleepAfterSeconds === undefined
     ? MICROVM_SLEEP_AFTER_S_DEFAULT : snapshot.sleepAfterSeconds;
-  // A malformed stored preference loses savings, never wake or cleanup.
   if (!Number.isInteger(sleepAfterSeconds) || sleepAfterSeconds <= 0 || sleepAfterSeconds > MICROVM_SLEEP_AFTER_S_MAX) {
     return sleeping || snapshot.intent ? wake('task-sleep-disabled')
       : { action: 'wait', reason: 'task-sleep-disabled', nextPollInMs };
@@ -127,8 +121,6 @@ function decideAwaitingApproval(ctx: GateContext): MicrovmLifecycleDecision {
     if (!sameGate || snapshot.intent?.action !== 'suspend' || snapshot.intent.deadline_ms !== approval.deadlineMs) {
       return wake('unintended-suspension');
     }
-    // A declined suspend still freezes the VM: wake it, or the tool that made
-    // the guest decline stays frozen until the gate is answered.
     if (input.substrate.microvmState === 'SUSPENDED' && input.suspendCheckpointConfirmed === false) {
       return wake('suspend-declined');
     }
@@ -137,8 +129,6 @@ function decideAwaitingApproval(ctx: GateContext): MicrovmLifecycleDecision {
   if (!input.suspendEnabled || !supportsMicrovmLifecycle(snapshot.handle)) {
     return { action: 'wait', reason: 'suspend-disabled', nextPollInMs };
   }
-  // A prior gate's in-flight suspend must be resolved conservatively. Persist a
-  // wake for this gate rather than attributing that old sleep request to it.
   if (snapshot.intent?.action === 'suspend' && !sameGate) return wake('previous-gate-suspend');
   const graceEndsAt = approval.createdAtMs + sleepAfterSeconds * 1000;
   if (nowMs < graceEndsAt) {

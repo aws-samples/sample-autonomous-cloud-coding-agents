@@ -31,17 +31,6 @@ export function makeLoginCommand(): Command {
     .action(async (opts) => {
       debug(`Logging in as: ${opts.username}`);
       const password = opts.password || await promptPassword();
-      // First-login rotation: invites now issue a *temporary* password, so
-      // Cognito challenges with NEW_PASSWORD_REQUIRED. Pass an interactive
-      // prompt so the user can set a permanent password inline; `login`
-      // answers the challenge and persists the resulting tokens.
-      //
-      // Gate the prompt on *real* interactivity. Passing it unconditionally
-      // makes the guard in `login` unreachable, so a first-login account driven
-      // non-interactively (`--password` on a pipe / CI) would block forever on
-      // the readline prompt with no terminal to answer it. When stdin is not a
-      // TTY or `--password` was supplied, hand `login` no prompt so it raises
-      // the clear "log in interactively" error instead of hanging.
       const interactive = Boolean(process.stdin.isTTY) && !opts.password;
       await login(opts.username, password, interactive ? () => {
         console.log('This account requires a new password on first login.');
@@ -62,7 +51,6 @@ function promptPassword(): Promise<string> {
     process.stderr.write('Password: ');
 
     if (process.stdin.isTTY) {
-      // TTY mode: read character-by-character with echo disabled
       process.stdin.setRawMode(true);
       process.stdin.resume();
 
@@ -98,11 +86,7 @@ function promptPassword(): Promise<string> {
 
       process.stdin.on('data', onData);
     } else {
-      // Non-TTY (piped input): read a single line. Resolve *before* closing —
-      // `rl.close()` emits `'close'` synchronously, so the close-reject would
-      // otherwise win the race and reject with "No password provided." even
-      // when a line was read. `resolved` also stops the close handler firing
-      // when the stream ends normally after a successful read.
+      // Resolve *before* closing: `rl.close()` emits `'close'` synchronously.
       let resolved = false;
       rl.once('line', (line) => {
         resolved = true;

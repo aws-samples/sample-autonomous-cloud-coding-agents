@@ -41,33 +41,20 @@ export interface PlatformStackContext {
 
 /**
  * Platform defaults when a Blueprint field is absent from RepoTable.
- * Keep aligned with ``docs/design/REPO_ONBOARDING.md`` and orchestrator merge logic.
  */
 export const PLATFORM_REPO_DEFAULTS = {
   compute_type: 'agentcore',
   /**
-   * The model a repo gets when it pins none — the cross-region inference profile
-   * the runtime actually invokes (see the agent's ``ANTHROPIC_MODEL`` fallback and
-   * the Bedrock grant list it must appear in).
-   *
-   * Keep these three in step. This is not only what ``repo show`` prints (in the
-   * deployment's own geography, see {@link platformDefaultModelId}):
-   * ``platform doctor`` derives the model it probes for ACCESS from this value, so
-   * if it names a different model than the runtime invokes, doctor can report a
-   * healthy stack while every task fails at turn 0 with AccessDenied.
+   * The model a repo gets when it pins none: the cross-region inference profile the
+   * runtime invokes.
    */
   model_id: 'global.anthropic.claude-opus-5-5',
   max_turns: 200,
-  /** ``DEFAULT_MEMORY_TOKEN_BUDGET`` of ``cdk/src/handlers/shared/memory.ts``; a test holds the two equal. */
   memory_token_budget: 2_000,
   poll_interval_ms: 30_000,
   approval_gate_cap: 50,
 } as const;
 
-/**
- * The stack invokes the platform default through the inference profiles of its own geography,
- * so the geography the stack exports replaces the one in the literal.
- */
 function platformDefaultModelId(bedrockGeoRegion: string | null): string {
   const literal = PLATFORM_REPO_DEFAULTS.model_id;
   const deployedGeo = bedrockGeoRegion?.trim();
@@ -113,9 +100,6 @@ export interface RepoShowLine {
 
 /**
  * Build operator-facing repo config with explicit platform-default resolution.
- *
- * Blueprint constructs only write optional fields to RepoTable when configured in
- * CDK. Absence does not mean "disabled" — the orchestrator merges platform defaults.
  */
 export function formatRepoConfigForDisplay(
   config: RepoConfigRow,
@@ -149,9 +133,6 @@ export function formatRepoConfigForDisplay(
   ] as const) {
     const value = config[key];
     if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0)) {
-      // `repo show` (text and JSON) must never echo a raw secret ARN — redact
-      // here so the JSON branch, which serializes blueprint_overrides wholesale,
-      // honors the command's "secret ARNs redacted" contract.
       blueprintOverrides[key] = key === 'github_token_secret_arn'
         ? redactSecretArn(String(value))
         : value;

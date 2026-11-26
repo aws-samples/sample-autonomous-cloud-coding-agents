@@ -68,11 +68,8 @@ const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME;
 const TASK_TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const TASK_EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
-/** Optional: without it a follow-up to a running task cannot be forwarded to the agent. */
 const NUDGES_TABLE_NAME = process.env.NUDGES_TABLE_NAME;
-/** Same value TaskApi gives `POST /tasks/{id}/nudge`: both paths share one counter row. */
 const NUDGE_RATE_LIMIT_PER_MINUTE = Number(process.env.NUDGE_RATE_LIMIT_PER_MINUTE ?? '10');
-/** Optional: holds the session → task pointer that covers the issue index's lag. */
 const WEBHOOK_DEDUP_TABLE = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME;
 
 const UNLINKED_ACTOR_MESSAGE =
@@ -89,10 +86,7 @@ const NOT_MAPPED_MESSAGE =
   + '`bgagent linear map`, then mention me again.';
 
 /**
- * Entry point for ``AgentSessionEvent`` deliveries (ADR-018 Phase 2). Called by
- * the webhook processor after the receiver verified the signature and the
- * processor bound the workspace; only reached when
- * ``LINEAR_AGENT_SESSIONS_ENABLED`` is on.
+ * Entry point for ``AgentSessionEvent`` deliveries.
  *
  * - ``created`` (bgagent @-mentioned or delegated an issue) → start a task, or
  *   iterate on the issue's existing PR when the mention carries an instruction.
@@ -126,16 +120,12 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
 
   const resolved = await resolveLinearOauthToken(request.workspaceId, WORKSPACE_REGISTRY_TABLE);
   if (!resolved) {
-    // No token ⇒ no way to emit an activity; Linear will mark the session unresponsive.
     logger.warn('Agent-session delivery for an unresolvable workspace — ignoring', logCtx);
     return;
   }
   const emit = (content: AgentActivityContent, ephemeral = false) =>
     emitSessionActivity(resolved.accessToken, request, content, ephemeral);
-  // Per-workspace evidence that sessions open here; the comment trigger only
-  // yields to sessions in workspaces that carry it. Started now but awaited
-  // only once the delivery is handled, so its round trip never sits between
-  // the webhook and the acknowledgement Linear times at 10s. Never rejects.
+  // Awaited only after the delivery is handled: Linear times the acknowledgement at 10s.
   const workspaceMarked = recordWorkspaceAgentSession(ddb, WORKSPACE_REGISTRY_TABLE, request.workspaceId);
   try {
     await respondToAgentSession(request, resolved, emit, logCtx);
@@ -151,8 +141,6 @@ async function respondToAgentSession(
   logCtx: Record<string, unknown>,
 ): Promise<void> {
   if (request.stopRequested) {
-    // Orchestration children are cancelled through the epic, never from a
-    // per-issue session (the reconciler owns their lifecycle).
     if (await belongsToOrchestration(resolved.accessToken, request.issueId)) {
       await emit({ type: 'response', body: `Stop request ignored. ${ORCHESTRATION_MESSAGE}` });
       return;
@@ -161,9 +149,8 @@ async function respondToAgentSession(
     return;
   }
 
-  // Acknowledge first: Linear marks the session unresponsive unless an activity
-  // lands within 10s of `created`. Everything below may take longer.
-  // Ephemeral, so an async-invoke retry's repeat ack replaces rather than stacks.
+  // Linear marks the session unresponsive unless an activity lands within 10s
+  // of `created`.
   await emit({
     type: 'thought',
     body: request.action === 'created'
@@ -207,8 +194,6 @@ async function respondToAgentSession(
 
   const prNumber = priorTask ? prNumberFromTask(priorTask) : null;
   const iterate = Boolean(priorTask?.repo && prNumber !== null && request.directive);
-  // The previous run paused to ask a question (surfaced as an `elicitation`):
-  // this reply is the answer, so resume the original request with it.
   const clarifyResume = !iterate && Boolean(request.directive) && isClarifyHold(priorTask) && Boolean(priorTask?.repo);
   const repo = iterate || clarifyResume ? priorTask!.repo! : await resolveMappedRepo(issue, request.workspaceId);
   if (!repo) {
@@ -256,9 +241,6 @@ async function respondToAgentSession(
   );
 
   if (result.statusCode === 200) {
-    // Idempotent replay of a delivery we already admitted — its activity was
-    // emitted then. The task is the ORIGINAL one, not the id generated above:
-    // point at it, in case the first delivery died before writing its pointer.
     logger.info('Agent-session delivery replayed an existing task — no new activity', { ...logCtx, idempotency_key: idempotencyKey });
     await pointIssueAtTask(request.issueId, replayedTaskId(result.body));
     return;
@@ -268,8 +250,6 @@ async function respondToAgentSession(
     await emit({ type: 'error', body: describeCreateTaskFailure(result.statusCode, result.body) });
     return;
   }
-  // Only now that the task exists: a prompt or stop that lands before the
-  // issue index catches up finds it through this pointer.
   await pointIssueAtTask(request.issueId, taskId);
   logger.info('Agent-session task created', { ...logCtx, task_id: taskId, repo, iterate, clarify_resume: clarifyResume });
   await emit(iterate
@@ -282,7 +262,6 @@ async function pointIssueAtTask(issueId: string, taskId: string | null): Promise
   await writeSessionTaskPointer(ddb, WEBHOOK_DEDUP_TABLE, { issueId, taskId });
 }
 
-/** The task id in createTaskCore's idempotent-replay (200) body, if it can be read. */
 function replayedTaskId(rawBody: string): string | null {
   try {
     const taskId = (JSON.parse(rawBody) as { data?: { task_id?: unknown } }).data?.task_id;
@@ -292,17 +271,6 @@ function replayedTaskId(rawBody: string): string | null {
   }
 }
 
-/**
- * Screen Linear's ``promptContext`` on its own before it joins the task
- * description. It carries the issue's comment thread — other people's text —
- * and createTaskCore screens the whole description fail-closed, so one comment
- * that trips the guardrail would otherwise block the requester's task.
- *
- * Same posture as the label trigger's comment screening: context that is
- * blocked, cannot be screened, or has no guardrail to screen it is DROPPED and
- * the task proceeds on the requester's own instruction and the issue as
- * fetched (which createTaskCore still screens, fail-closed).
- */
 async function screenSessionContextOrDrop(
   promptContext: string | null,
   taskId: string,
@@ -325,12 +293,6 @@ async function screenSessionContextOrDrop(
   }
 }
 
-/**
- * Whether ``request`` arrived in the session that ``task`` reports into, while
- * that task is still running. Only that session hears the task's outcome from
- * the fan-out plane; any other session (a second mention, another user's
- * session, a session on a label-triggered run) hears nothing more.
- */
 function isRunningTasksOwnSession(request: AgentSessionRequest, task: PriorTask | null): boolean {
   return Boolean(task)
     && !isTerminal(task!.status)
@@ -339,13 +301,9 @@ function isRunningTasksOwnSession(request: AgentSessionRequest, task: PriorTask 
 }
 
 /**
- * A refusal is the session's answer, so it is a ``response`` — which also
- * closes the session, as a refused ``stop`` requires — with one exception.
  * Linear derives session state from the LAST activity, so in the session a
  * running task reports into, a closing or ``error`` activity would mark the
  * owner's healthy run as finished or failed because a teammate was refused.
- * There the refusal is a ``thought`` and the task's own final activity still
- * closes the session.
  */
 function refusal(body: string, request: AgentSessionRequest, priorTask: PriorTask | null): AgentActivityContent {
   return isRunningTasksOwnSession(request, priorTask) ? { type: 'thought', body } : { type: 'response', body };
@@ -353,11 +311,7 @@ function refusal(body: string, request: AgentSessionRequest, priorTask: PriorTas
 
 /**
  * ``stop`` signal: Linear requires the agent to take no further action and
- * confirm with a final ``response``/``error``. Same behaviour as
- * ``DELETE /tasks/{id}``: the task is cancelled (transition + event in one
- * transaction) and its compute is stopped, so the agent does not finish its
- * turn and push after "Stopped". The fan-out dispatcher skips its own cancel
- * confirmation for this path.
+ * confirm with a final ``response``/``error``.
  */
 async function handleStopRequest(
   request: AgentSessionRequest,
@@ -375,7 +329,6 @@ async function handleStopRequest(
     await emit({ type: 'response', body: 'Stopped. Nothing was running for this issue.' });
     return;
   }
-  // Same rule as DELETE /tasks/{id}: only the task's owner can cancel it.
   if (priorTask.user_id !== platformUserId) {
     logger.warn('Agent-session stop from a user who does not own the running task — refusing', {
       linear_agent_session_id: request.sessionId, task_id: priorTask.task_id,
@@ -397,8 +350,6 @@ async function handleStopRequest(
     await emit({ type: 'response', body: `Stopped. Task \`${priorTask.task_id}\` had already finished.` });
     return;
   }
-  // `priorTask` is the row as read before the cancel — the statuses and compute
-  // handle stopTaskCompute decides on.
   await stopTaskCompute(tables, priorTask, now);
   logger.info('Agent-session stop cancelled task', {
     linear_agent_session_id: request.sessionId, task_id: priorTask.task_id, cancelled_by: platformUserId,
@@ -409,14 +360,6 @@ async function handleStopRequest(
   });
 }
 
-/**
- * A follow-up while a task is running is forwarded to the agent as a nudge.
- *
- * The task's own session hears about its outcome from the fan-out plane, so a
- * reply there is a ``thought``. Any other session (a second mention, or a
- * session on a label-triggered run) never will — it gets a final ``response``
- * so Linear does not leave it hanging until it goes stale.
- */
 async function steerRunningTask(
   request: AgentSessionRequest,
   task: PriorTask,
@@ -431,8 +374,6 @@ async function steerRunningTask(
       : `Already working on this issue in task \`${task.task_id}\`; its progress is reported where it was started.`);
     return;
   }
-  // Same rule as POST /tasks/{id}/nudge: only the owner steers a running agent,
-  // since the nudge runs under the owner's identity and budget.
   if (task.user_id !== platformUserId) {
     await reply(`Task \`${task.task_id}\` is still running. ${NOT_OWNER_MESSAGE}`);
     return;
@@ -464,7 +405,6 @@ async function steerRunningTask(
   await reply(body);
 }
 
-/** The prior task as read from the base table (strongly consistent). */
 type PriorTask = LinearIssueTask & ClarifyHoldRow
   & Pick<TaskRecord, 'session_id' | 'agent_runtime_arn' | 'compute_type' | 'compute_metadata' | 'created_at'>
   & {
@@ -473,14 +413,8 @@ type PriorTask = LinearIssueTask & ClarifyHoldRow
   };
 
 /**
- * The issue's newest ABCA task, scoped to this workspace. Throws on a lookup
- * failure: guessing "no task" would start a duplicate run beside a live one.
- *
- * Two sources, because neither is enough alone. The ``LinearIssueIndex`` GSI
- * knows every task for the issue but is eventually consistent, so it can miss
- * one created a moment ago. The session → task pointer is strongly consistent
- * but only covers tasks a session just started. Each candidate row is re-read
- * from the base table, and the newer one wins.
+ * The ``LinearIssueIndex`` GSI is eventually consistent, so it can miss a task
+ * created a moment ago; the session → task pointer covers that gap.
  */
 async function findPriorTask(request: AgentSessionRequest): Promise<PriorTask | null> {
   const lookup = await lookupTaskByLinearIssue(ddb, TASK_TABLE_NAME, request.issueId);
@@ -499,24 +433,15 @@ async function findPriorTask(request: AgentSessionRequest): Promise<PriorTask | 
   return fromIndex ?? fromPointer;
 }
 
-/**
- * Strongly consistent read of one candidate. The index projects no
- * clarify/owner/compute detail and may lag, so "still running?" (nudge vs. new
- * task) and "who owns it?" are decided on the row itself.
- */
 async function readTaskForIssue(taskId: string, request: AgentSessionRequest): Promise<PriorTask | null> {
   const { Item: record } = await ddb.send(new GetCommand({
     TableName: TASK_TABLE_NAME,
     Key: { task_id: taskId },
     ConsistentRead: true,
   }));
-  // A pointer written just before a create that was then rejected names no row.
   if (!record) return null;
   const task = record as PriorTask;
   const ownerWorkspaceId = task.channel_metadata?.linear_workspace_id;
-  // Only a MISMATCH is another tenant's task. A task with no recorded workspace
-  // predates that field; Linear issue ids are globally unique, so it is this
-  // issue's task, and ignoring it would start a duplicate beside it.
   if (ownerWorkspaceId && ownerWorkspaceId !== request.workspaceId) {
     logger.warn('Agent-session issue\'s task belongs to another workspace — ignoring it', {
       linear_issue_id: request.issueId,
@@ -528,12 +453,6 @@ async function readTaskForIssue(taskId: string, request: AgentSessionRequest): P
   return task;
 }
 
-/**
- * Same membership test the comment path routes on: the issue is an epic with
- * its own orchestration, or a STARTED child of one. Those stay on the comment
- * path, which owns the epic panel and dependency cascade (ADR-018: sessions are
- * per-issue and have no cross-issue rollup).
- */
 async function belongsToOrchestration(accessToken: string, issueId: string): Promise<boolean> {
   if (!ORCHESTRATION_TABLE) return false;
   const own = await loadOrchestration(ddb, ORCHESTRATION_TABLE, deriveOrchestrationId(issueId));
@@ -551,11 +470,6 @@ async function belongsToOrchestration(accessToken: string, issueId: string): Pro
   return Boolean(child?.child_task_id);
 }
 
-/**
- * Project → repo mapping, through the same helper as the label trigger so both
- * channels admit the same issues — including mappings written before the owning
- * workspace was recorded, which the label path still accepts.
- */
 async function resolveMappedRepo(issue: AgentSessionIssue, workspaceId: string): Promise<string | null> {
   const mapping = await lookupLinearProjectMapping(ddb, PROJECT_MAPPING_TABLE, issue.projectId, workspaceId);
   if (mapping.kind === 'foreign') {
@@ -585,7 +499,6 @@ async function emitSessionActivity(
 ): Promise<void> {
   const result = await emitAgentActivity(accessToken, request.sessionId, content, { ephemeral });
   if (!result.ok) {
-    // Best-effort: the task outcome is still delivered by the fan-out plane.
     logger.warn('Failed to emit Linear agent activity', {
       linear_agent_session_id: request.sessionId,
       activity_type: content.type,
@@ -594,12 +507,6 @@ async function emitSessionActivity(
   }
 }
 
-/**
- * User-facing reason for a rejected task. Validation and guardrail messages
- * (400) are written for the requester and shown as-is, matching the comment
- * channel; everything else gets a fixed string, because a session is readable
- * by the whole workspace and budget/limit responses carry spend and team ids.
- */
 function describeCreateTaskFailure(statusCode: number, rawBody: string): string {
   if (statusCode === 400) {
     try {

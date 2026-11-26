@@ -347,8 +347,6 @@ describe('budget admission', () => {
     const admission = budgets.checkBudgetAdmission('user-1', teamIds);
     await expect(admission)
       .rejects.toThrow('belongs to 99 teams; budget rollup supports at most 98');
-    // The text is shown to whoever asked for the task, who is not always the
-    // billed user (a comment on someone else's Linear issue): no user id in it.
     await expect(admission).rejects.not.toThrow('user-1');
     expect(ddbSend).not.toHaveBeenCalled();
     expect(cognitoSend).not.toHaveBeenCalled();

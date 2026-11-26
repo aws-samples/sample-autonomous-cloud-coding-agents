@@ -20,9 +20,7 @@
 import { BatchGetCommand, QueryCommand, type QueryCommandInput } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
-/** Answers DescribeTable, so that `mockSend` sees the data-plane calls only. */
 const mockDescribeTable = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({})),
@@ -124,7 +122,6 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   };
 }
 
-/** A DescribeTable answer in which UserCreatedAtIndex has the given status, or is missing. */
 const describedWith = (IndexStatus?: string) => ({
   Table: {
     GlobalSecondaryIndexes: [
@@ -149,7 +146,6 @@ describe('list-tasks handler', () => {
     expect(body.data).toHaveLength(2);
     expect(body.data[0].task_id).toBe('task-1');
     expect(body.data[1].task_id).toBe('task-2');
-    // Summary should not include detail-only fields
     expect(body.data[0].session_id).toBeUndefined();
     expect(body.data[0].error_message).toBeUndefined();
     expect(body.pagination.has_more).toBe(false);
@@ -212,7 +208,6 @@ describe('list-tasks handler', () => {
   test('summaries carry cost, completion time and source, for cost views', async () => {
     const body = JSON.parse((await handler(makeEvent())).body);
     expect(body.data[1]).toMatchObject({ cost_usd: 1.25, completed_at: '2025-03-14T11:58:00Z', channel_source: 'api' });
-    // Not finished or no cost reported yet: explicit nulls, not missing keys.
     expect(body.data[0]).toMatchObject({ cost_usd: null, completed_at: null, channel_source: 'api' });
   });
 
@@ -221,7 +216,6 @@ describe('list-tasks handler', () => {
 
     const body = JSON.parse((await handler(makeEvent())).body);
 
-    // What a heartbeat says differs by backend, so a list that shows one has to know which it is.
     expect(body.data.map((summary: { compute_type: string | null }) => summary.compute_type)).toEqual(['ecs', null]);
   });
 
@@ -250,8 +244,6 @@ describe('list-tasks handler', () => {
   });
 
   test('returns 400 for a next_token that cannot be decoded', async () => {
-    // A token that lost its end. Taken for no token, it restarted the list at the
-    // first page with status 200, and the client took that page for the next one.
     const cut = Buffer.from('{"task_id":"01K').toString('base64');
     const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
 
@@ -271,7 +263,6 @@ describe('list-tasks handler', () => {
   });
 
   test('applies repo filter', async () => {
-    // Not the scoreboard's rules: the name as the task holds it, letter for letter, and any value.
     const event = makeEvent({ queryStringParameters: { repo: 'Org/My Repo' } });
     const result = await handler(event);
 
@@ -286,7 +277,6 @@ describe('list-tasks handler', () => {
     await handler(event);
 
     const queryInput = MockQueryCommand.mock.calls[0][0];
-    // limit + 1: the extra row tells a full page whether another task follows.
     expect(queryInput.Limit).toBe(6);
   });
 
@@ -333,8 +323,6 @@ describe('list-tasks handler', () => {
     });
 
     test('keeps querying past filtered-out pages until the page is full', async () => {
-      // Page 1: every row read was filtered out, but a cursor remains. Page 2 is the
-      // default reply: enough tasks to fill limit=1 plus one extra.
       const cursor = { task_id: 'task-0', user_id: 'user-123', created_at: '2025-03-16T09:00:00Z' };
       mockSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: cursor });
 
@@ -355,20 +343,17 @@ describe('list-tasks handler', () => {
       const body = JSON.parse(result.body);
 
       const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
-      // Boundary is the last task actually returned (task-1), so task-2 is not skipped.
       expect(decoded).toEqual({ task_id: 'task-1', user_id: 'user-123', created_at: TASK_ITEMS[0].created_at });
     });
 
     test('stops after the page cap and hands back the raw cursor', async () => {
-      // Every page filters to nothing but keeps returning a cursor.
       mockSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { task_id: 'task-x' } });
 
       const result = await handler(makeEvent({ queryStringParameters: { status: 'FAILED' } }));
       const body = JSON.parse(result.body);
 
-      expect(mockSend).toHaveBeenCalledTimes(10); // MAX_QUERY_PAGES
+      expect(mockSend).toHaveBeenCalledTimes(10);
       expect(body.data).toHaveLength(0);
-      // The read is not finished, so the list must not be reported as complete.
       expect(body.pagination.has_more).toBe(true);
       const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
       expect(decoded).toEqual({ task_id: 'task-x' });
@@ -376,8 +361,6 @@ describe('list-tasks handler', () => {
   });
 
   describe('choice of index (UserCreatedAtIndex is being built on the deploy that adds it)', () => {
-    // The handler remembers that the index is ACTIVE, so each test loads a copy of its own.
-    // That copy has its own command mocks, so these tests read the commands `mockSend` got.
     let listTasks: typeof handler;
     const indexesRead = () => mockSend.mock.calls.map(([command]) => command.input.IndexName);
 
@@ -403,10 +386,8 @@ describe('list-tasks handler', () => {
       expect(mockDescribeTable.mock.calls.map(([command]) => command.input)).toEqual([{ TableName: 'Tasks' }]);
       expect(indexesRead()).toEqual(['UserStatusIndex']);
       expect(body.data.map((t: { task_id: string }) => t.task_id)).toEqual(['task-1']);
-      // The cursor is one of the index that was read.
       const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
       expect(decoded).toEqual({ task_id: 'task-1', user_id: 'user-123', status_created_at: TASK_ITEMS[0].status_created_at });
-      // The deployment guide tells operators to look for this line.
       expect(logged).toContain('UserCreatedAtIndex is not ACTIVE');
     });
 
@@ -435,8 +416,6 @@ describe('list-tasks handler', () => {
 
     test.each([
       ['ACTIVE', 'UserCreatedAtIndex'],
-      // UserCreatedAtIndex is not read before it is ACTIVE; DynamoDB refuses this key on
-      // UserStatusIndex, so the request is a 500.
       ['CREATING', 'UserStatusIndex'],
     ])('a created_at cursor follows the status check: %s reads %s', async (status, index) => {
       mockDescribeTable.mockResolvedValue(describedWith(status));
@@ -462,12 +441,6 @@ describe('list-tasks handler', () => {
     type Terminal = (typeof TERMINAL)[number];
     interface Page { Items: ScoreboardTask[]; LastEvaluatedKey?: Record<string, unknown> }
 
-    /**
-     * Answers the queries of a scoreboard read: for each status its pages, in the order they
-     * are read; a status without pages holds no task. Every query moves the clock a second
-     * on, as a real read does: a handler that reads the clock a second time sends bounds, or
-     * returns a period, that disagree with the first reading.
-     */
     function indexHolds(pages: Partial<Record<Terminal, Page[]>>): void {
       const served = new Map<string, number>();
       mockSend.mockImplementation(({ input }: { input: QueryCommandInput }) => {
@@ -479,7 +452,6 @@ describe('list-tasks handler', () => {
       });
     }
 
-    /** The queries sent for one status, in the order they were sent. */
     const queriesFor = (status: Terminal): QueryCommandInput[] => MockQueryCommand.mock.calls
       .map(([input]) => input as QueryCommandInput)
       .filter((input) => input.ExpressionAttributeValues?.[':hi'] === `${status}#~`);
@@ -488,7 +460,6 @@ describe('list-tasks handler', () => {
       handler(makeEvent({ queryStringParameters: { view: 'scoreboard', ...query } }));
     const scoreboardIn = (result: APIGatewayProxyResult): Scoreboard => JSON.parse(result.body).data;
 
-    /** A scoreboard request, with what it wrote to the error log. */
     async function loggedScoreboard(): Promise<{ result: APIGatewayProxyResult; logged: string }> {
       const stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const result = await getScoreboard();
@@ -497,11 +468,6 @@ describe('list-tasks handler', () => {
       return { result, logged };
     }
 
-    /**
-     * New work that ended in a verified pull request at `at`, as the projection returns it;
-     * `status` makes it a task that ended otherwise. The platform's stamps have milliseconds,
-     * the agent's are whole seconds.
-     */
     function finishedAt(at: string, status: Terminal = 'COMPLETED'): ScoreboardTask {
       const createdMs = Date.parse(at) - 24 * 60 * 1000;
       return {
@@ -521,7 +487,6 @@ describe('list-tasks handler', () => {
       };
     }
 
-    /** The pages of a status whose read is cut: six, the cap, and after each the key of `time`, so more is left to read. */
     const cutAt = (status: Terminal, time: string, tasks: ScoreboardTask[] = []): Page[] => Array.from({ length: 6 }, (_, page) => ({
       Items: page === 0 ? tasks : [],
       LastEvaluatedKey: { user_id: 'user-123', task_id: `task-${page}`, status_created_at: `${status}#${time}` },
@@ -536,7 +501,6 @@ describe('list-tasks handler', () => {
     });
 
     test('returns the scoreboard of the caller\'s finished tasks: the range asked for and the period before it', async () => {
-      // The pull request of the task of the earlier period was found open on GitHub.
       const earlier: ScoreboardTask = { ...finishedAt('2026-10-01T10:30:00Z'), pr_state: 'open' };
       indexHolds({
         COMPLETED: [{ Items: [finishedAt('2026-11-18T10:24:00Z'), earlier] }],
@@ -547,7 +511,6 @@ describe('list-tasks handler', () => {
 
       const result = await getScoreboard();
 
-      // The numbers themselves are pinned where they are computed (test/handlers/shared/scoreboard.test.ts).
       expect(result.statusCode).toBe(200);
       expect(Object.keys(JSON.parse(result.body))).toEqual(['data']);
       expect(scoreboardIn(result)).toMatchObject({
@@ -560,10 +523,8 @@ describe('list-tasks handler', () => {
           outcomes: { verified_pr: 1, unverified_pr: 0, no_new_pr: 0, failed: 1, cancelled: 1, timed_out: 1 },
         },
         previous: { from: '2026-09-20T12:00:00.000Z', to: '2026-10-20T12:00:00.000Z', finished: 1, outcomes: { verified_pr: 1 } },
-        // A number of the whole read, which reached the start of the earlier period.
         open_over_7d: { count: 1, task_ids: [earlier.task_id] },
       });
-      // One query per terminal status, and no look at the table: the index it reads is always there.
       expect(mockSend).toHaveBeenCalledTimes(4);
       expect(mockDescribeTable).not.toHaveBeenCalled();
     });
@@ -579,8 +540,6 @@ describe('list-tasks handler', () => {
         TableName: 'Tasks',
         IndexName: 'UserStatusIndex',
         KeyConditionExpression: 'user_id = :uid AND status_created_at BETWEEN :lo AND :hi',
-        // Sixty days before the request, in the form with milliseconds: `.` sorts before `Z`,
-        // so the agent's whole-second keys of that first second are inside the bounds.
         ExpressionAttributeValues: { ':uid': 'user-123', ':lo': `${status}#2026-09-20T12:00:00.000Z`, ':hi': `${status}#~` },
         ScanIndexForward: false,
       });
@@ -642,7 +601,6 @@ describe('list-tasks handler', () => {
       const board = scoreboardIn(await getScoreboard());
 
       expect(queriesFor('COMPLETED').map((query) => query.ExclusiveStartKey)).toEqual([undefined, ...tasks.slice(0, -1).map(keyAfter)]);
-      // Six pages of one status, one page of each of the other three.
       expect(mockSend).toHaveBeenCalledTimes(9);
       expect(board).toMatchObject({
         truncated: false,
@@ -652,7 +610,6 @@ describe('list-tasks handler', () => {
     });
 
     test('reads a response without Items as a page that holds no task', async () => {
-      // The SDK types `Items` as optional.
       mockSend.mockResolvedValue({});
 
       const board = scoreboardIn(await getScoreboard());
@@ -663,7 +620,6 @@ describe('list-tasks handler', () => {
 
     test('a read cut inside one status starts the scoreboard after the cut, for every status', async () => {
       indexHolds({
-        // Six pages and still more to read: what failed at 08:30:15 or earlier may be unread.
         FAILED: cutAt('FAILED', '2026-11-10T08:30:15Z', [
           finishedAt('2026-11-18T09:00:00Z', 'FAILED'),
           finishedAt('2026-11-12T09:00:00.000Z', 'FAILED'),
@@ -672,12 +628,8 @@ describe('list-tasks handler', () => {
         COMPLETED: [{
           Items: [
             finishedAt('2026-11-17T10:00:00Z'),
-            // The first second that every status covers.
             finishedAt('2026-11-10T08:30:16Z'),
-            // The second of the cut: a failed task with a millisecond stamp sorts before the
-            // whole-second key the read stopped at, and may be unread.
             finishedAt('2026-11-10T08:30:15.900Z'),
-            // Before the cut, in the current period and in the previous one.
             finishedAt('2026-11-01T10:00:00Z'),
             finishedAt('2026-10-01T10:00:00Z'),
           ],
@@ -700,7 +652,6 @@ describe('list-tasks handler', () => {
       expect(queriesFor('FAILED')).toHaveLength(6);
       expect(board.truncated).toBe(true);
       expect(board.previous).toBeNull();
-      // It would count the completed tasks the cut happened to leave: no number is reported.
       expect(board.open_over_7d).toBeNull();
       expect(board.current).toMatchObject({
         from: '2026-11-10T08:30:16.000Z',
@@ -749,7 +700,6 @@ describe('list-tasks handler', () => {
 
       expect(result.statusCode).toBe(500);
       expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
-      // The line names the view: a failing scoreboard read is told from a failing list.
       expect(JSON.parse(logged)).toMatchObject({
         message: 'Failed to list tasks',
         view: 'scoreboard',
@@ -758,7 +708,6 @@ describe('list-tasks handler', () => {
     });
 
     describe('for one repository', () => {
-      /** A task of another repository of the same caller, whose name starts with the one asked for: the filter takes whole names. */
       const elsewhere = (at: string, status: Terminal = 'COMPLETED'): ScoreboardTask =>
         ({ ...finishedAt(at, status), task_id: `elsewhere-${status}-${at}`, repo: 'org/repo-two' });
       const sent = (): QueryCommandInput[] => MockQueryCommand.mock.calls.map(([input]) => input as QueryCommandInput);
@@ -770,14 +719,11 @@ describe('list-tasks handler', () => {
             Items: [
               finishedAt('2026-11-18T10:24:00Z'),
               elsewhere('2026-11-17T10:00:00Z'),
-              // Work without a repository belongs to none.
               { ...finishedAt('2026-11-16T10:00:00Z'), task_id: 'repo-less', repo: undefined },
               earlier,
-              // A third repository, whose name ends with the one asked for.
               { ...elsewhere('2026-10-02T10:00:00Z'), repo: 'big-org/repo', pr_state: 'open' },
             ],
           }],
-          // A record holds the name as it was submitted: this one in another letter case.
           FAILED: [{ Items: [{ ...finishedAt('2026-11-05T14:00:03.120Z', 'FAILED'), repo: 'Org/Repo' }, elsewhere('2026-11-06T09:00:00Z', 'FAILED')] }],
         });
 
@@ -789,7 +735,6 @@ describe('list-tasks handler', () => {
           previous: { finished: 1, outcomes: { verified_pr: 1 } },
           open_over_7d: { count: 1, task_ids: [earlier.task_id] },
         });
-        // Nothing about the repository goes to DynamoDB: the queries are those of a request without it.
         const withRepository = sent();
         MockQueryCommand.mockClear();
         jest.setSystemTime(NOW);
@@ -810,7 +755,6 @@ describe('list-tasks handler', () => {
       });
 
       test('what the response says about the read does not change with the repository', async () => {
-        // The cut is in a status that holds no task of the repository asked for.
         indexHolds({
           FAILED: cutAt('FAILED', '2026-11-10T08:30:15Z', [elsewhere('2026-11-12T09:00:00Z', 'FAILED')]),
           COMPLETED: [{ Items: [finishedAt('2026-11-17T10:00:00Z'), finishedAt('2026-11-01T10:00:00Z')] }],
@@ -830,7 +774,6 @@ describe('list-tasks handler', () => {
         expect(JSON.parse(result.body).error.message).toBe('Invalid range value. Expected "7d" or "30d".');
       });
 
-      // The empty value is a value: the parameter is there, and names no repository.
       test.each(['not-a-repository', ''])('returns 400 for the repository "%s", and reads nothing', async (repo) => {
         const result = await getScoreboard({ repo });
 

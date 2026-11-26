@@ -26,10 +26,7 @@ import { decodeBundle } from './admin';
 
 /**
  * All four core fields (api-url, region, user-pool-id, client-id) are required
- * the first time — subsequent invocations may update a subset. `--from-bundle`
- * accepts a base64 string (printed by `bgagent admin invite-user`) carrying
- * all four fields at once. `--stack-name` reads the same fields from
- * CloudFormation (same outputs as `bgagent platform outputs`).
+ * the first time — subsequent invocations may update a subset.
  */
 export function makeConfigureCommand(): Command {
   return new Command('configure')
@@ -86,7 +83,6 @@ export function makeConfigureCommand(): Command {
       const { stack_name: previousStack, ...previous } = existing ?? ({} as Partial<CliConfig>);
       const merged: Partial<CliConfig> = {
         ...previous,
-        // A hand-entered API URL may belong to any stack; only keep the name while the API is unchanged.
         ...(previousStack && (providedFields.api_url === undefined || providedFields.api_url === existing?.api_url)
           ? { stack_name: previousStack } : {}),
         ...providedFields,
@@ -114,7 +110,6 @@ export function makeConfigureCommand(): Command {
         return;
       }
 
-      // The next command would send a token of the previous user pool to the new API.
       if (existing?.user_pool_id && existing.user_pool_id !== merged.user_pool_id) clearCredentials();
       saveConfig(merged as CliConfig);
       console.log('Configuration saved.');

@@ -42,8 +42,6 @@ import {
 import { logger } from '../../../src/handlers/shared/logger';
 import { MAX_ATTACHMENT_SIZE_BYTES } from '../../../src/handlers/shared/validation';
 
-// Plain text validates on absence of null bytes; a leading PNG signature for
-// image cases.
 const TEXT_BYTES = Buffer.from('error: boom\nstacktrace...');
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
 
@@ -68,7 +66,6 @@ function storageCtx() {
   };
 }
 
-/** A fetch Response-like object whose body streams the given buffer once. */
 function bytesResponse(buf: Buffer, status = 200): Response {
   let sent = false;
   return {
@@ -139,11 +136,9 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
     expect(records[0].s3_key).toBe('attachments/user-1/task-1/att-1/error.log');
     expect(records[0].type).toBe('file');
     expect(putSendMock).toHaveBeenCalledTimes(1);
-    // GET was addressed by attachment id on the gateway base, not the raw content URL.
     const fetchUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(fetchUrl).toContain('api.atlassian.com/ex/jira/cloud-1/rest/api/3/attachment/content/att-1');
-    // Accept must be permissive: the content endpoint 406s on
-    // `application/octet-stream` and serves the file's own media type.
+    // Jira's attachment content endpoint answers 406 to `Accept: application/octet-stream`.
     const fetchInit = (global.fetch as jest.Mock).mock.calls[0][1] as { headers: Record<string, string> };
     expect(fetchInit.headers.Accept).toBe('*/*');
   });
@@ -179,12 +174,10 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
 
     expect(records).toHaveLength(0);
     expect(global.fetch).not.toHaveBeenCalled();
-    // No token needed when nothing survives the filter.
     expect(resolveJiraOauthTokenMock).not.toHaveBeenCalled();
   });
 
   test('respects remainingSlots (combined 10-attachment cap)', async () => {
-    // Fresh response per call — bytesResponse's stream is single-use.
     (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(TEXT_BYTES)));
     screenTextFileMock.mockResolvedValue({
       content: TEXT_BYTES, contentType: 'text/plain', checksum: 's', screening: { status: 'passed' },
@@ -199,15 +192,13 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
   });
 
   test('enforces the 50MB total cap on REAL downloaded bytes (declared size ignored)', async () => {
-    // Each body is a real ~9MB buffer, but the declared size lies ("1"). The
-    // cap must key off real bytes, so 6×9MB = 54MB > 50MB → throws mid-batch.
-    const nineMb = Buffer.alloc(9 * 1024 * 1024, 0x61); // 'a' — valid text bytes
+    const nineMb = Buffer.alloc(9 * 1024 * 1024, 0x61);
     (global.fetch as jest.Mock).mockImplementation(() => Promise.resolve(bytesResponse(nineMb)));
     screenTextFileMock.mockResolvedValue({
       content: nineMb, contentType: 'text/plain', checksum: 's', screening: { status: 'passed' },
     });
     const raw = Array.from({ length: 6 }, (_, i) => ({
-      id: `att-${i}`, filename: `f${i}.log`, mimeType: 'text/plain', size: 1, // under-declared
+      id: `att-${i}`, filename: `f${i}.log`, mimeType: 'text/plain', size: 1,
     }));
 
     await expect(downloadScreenAndStoreJiraAttachments(raw, 10, storageCtx()))
@@ -221,14 +212,11 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
       10,
       storageCtx(),
     )).rejects.toThrow(/empty \(0 bytes\)/);
-    // Nothing screened or uploaded for an empty file.
     expect(screenTextFileMock).not.toHaveBeenCalled();
     expect(putSendMock).not.toHaveBeenCalled();
   });
 
   test('deletes already-uploaded objects when a later attachment fails (no orphans)', async () => {
-    // First attachment succeeds + uploads; second fails to download → the
-    // batch throws and the first object must be cleaned up.
     (global.fetch as jest.Mock)
       .mockResolvedValueOnce(bytesResponse(TEXT_BYTES))
       .mockResolvedValueOnce(bytesResponse(Buffer.alloc(0), 500));
@@ -245,7 +233,6 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
       storageCtx(),
     )).rejects.toBeInstanceOf(JiraAttachmentError);
 
-    // One PutObject (att-1) then one DeleteObjects cleanup covering it.
     const deleteCalls = putSendMock.mock.calls.filter(
       (c: any) => c[0]?.constructor?.name === 'DeleteObjectsCommand' || c[0]?.input?.Delete,
     );
@@ -253,7 +240,6 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
   });
 
   test('magic-byte mismatch throws JiraAttachmentError (fail-closed)', async () => {
-    // Declared text/plain but bytes contain a null → validateMagicBytes fails.
     (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(Buffer.from([0x00, 0x01, 0x02])));
 
     await expect(downloadScreenAndStoreJiraAttachments(
@@ -295,7 +281,6 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
     const oneLog = [{ id: 'att-1', filename: 'error.log', mimeType: 'text/plain', size: TEXT_BYTES.length }];
 
     test('a failed screening call: the SDK error stays in the log', async () => {
-      // ApplyGuardrail denied. The SDK's text names the role and the account.
       const sdkText = 'User: arn:aws:sts::123456789012:assumed-role/Stack-JiraWebhookProcessorRole/fn is not authorized to perform: bedrock:ApplyGuardrail';
       (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(TEXT_BYTES));
       screenTextFileMock.mockRejectedValueOnce(Object.assign(new Error(sdkText), { name: 'AccessDeniedException' }));
@@ -330,8 +315,8 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
       .mockResolvedValueOnce(bytesResponse(Buffer.alloc(0), 401))
       .mockResolvedValueOnce(bytesResponse(TEXT_BYTES));
     resolveJiraOauthTokenMock
-      .mockResolvedValueOnce(goodToken) // initial
-      .mockResolvedValueOnce({ ...goodToken, accessToken: 'at-2' }); // forced refresh
+      .mockResolvedValueOnce(goodToken)
+      .mockResolvedValueOnce({ ...goodToken, accessToken: 'at-2' });
     screenTextFileMock.mockResolvedValueOnce({
       content: TEXT_BYTES, contentType: 'text/plain', checksum: 's', screening: { status: 'passed' },
     });
@@ -349,7 +334,7 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
 
   test('persistent 401 (refresh returns same token) → JiraAttachmentError, no second GET', async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(Buffer.alloc(0), 401));
-    resolveJiraOauthTokenMock.mockResolvedValue(goodToken); // refresh yields same token
+    resolveJiraOauthTokenMock.mockResolvedValue(goodToken);
 
     await expect(downloadScreenAndStoreJiraAttachments(
       [{ id: 'att-1', filename: 'error.log', mimeType: 'text/plain', size: 5 }],
@@ -364,7 +349,6 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(tooBig));
 
     await expect(downloadScreenAndStoreJiraAttachments(
-      // metadata claims small; the body is authoritative and overshoots.
       [{ id: 'att-1', filename: 'error.log', mimeType: 'text/plain', size: 5 }],
       10,
       storageCtx(),
@@ -398,8 +382,6 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
       storageCtx(),
     );
 
-    // No path traversal survives: the key stays under the per-task prefix and
-    // the filename segment carries no slashes or `..`.
     expect(records).toHaveLength(1);
     expect(records[0].s3_key.startsWith('attachments/user-1/task-1/att-1/')).toBe(true);
     expect(records[0].filename).not.toContain('/');
@@ -412,7 +394,6 @@ describe('downloadScreenAndStoreJiraAttachments', () => {
       10,
       storageCtx(),
     );
-    // Unsafe id → dropped before any download; nothing selected.
     expect(records).toHaveLength(0);
     expect(global.fetch).not.toHaveBeenCalled();
   });
@@ -428,7 +409,6 @@ describe('fetchRecentHumanComments', () => {
   test('keeps human (atlassian) authors, drops app/bot authors, renders oldest-first', async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(jsonResponse({
       comments: [
-        // API returns newest-first.
         { author: { displayName: 'Grace', accountType: 'atlassian' }, body: adf('Latest human note'), created: '2026-07-03T00:00:00Z' },
         { author: { displayName: 'ABCA Bot', accountType: 'app' }, body: adf('Starting…'), created: '2026-07-02T00:00:00Z' },
         { author: { displayName: 'Ada', accountType: 'atlassian' }, body: adf('First human note'), created: '2026-07-01T00:00:00Z' },
@@ -438,18 +418,14 @@ describe('fetchRecentHumanComments', () => {
     const comments = await fetchRecentHumanComments(ctx, 'ENG-1');
 
     expect(comments).toHaveLength(2);
-    // Reversed to oldest-first.
     expect(comments[0].author).toBe('Ada');
     expect(comments[0].markdown).toBe('First human note');
     expect(comments[1].author).toBe('Grace');
-    // URL requests newest-first, one full page: the cap of ten is applied to
-    // the human comments, after the filter.
     const url = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(url).toContain('orderBy=-created');
     expect(url).toContain('maxResults=100');
   });
 
-  /** Answers as Jira does: the newest `maxResults` comments of the thread. */
   function serveThread(newestFirst: readonly unknown[]): void {
     (global.fetch as jest.Mock).mockImplementationOnce((url: string) => {
       const maxResults = Number(new URL(url).searchParams.get('maxResults'));
@@ -463,8 +439,6 @@ describe('fetchRecentHumanComments', () => {
   });
 
   test('keeps the newest human comments when ABCA has commented more often since', async () => {
-    // Six human comments, then seven comments of the app (a start, a result, a
-    // preview and two iterations): a window of ten comments holds three humans.
     const appComment = (n: number) => ({
       author: { displayName: 'bgagent', accountType: 'app' },
       body: adf(`✅ Task completed ${n}`),
@@ -486,8 +460,6 @@ describe('fetchRecentHumanComments', () => {
   });
 
   test('drops the comments ABCA posted as the setup user', async () => {
-    // A site without the Forge app: ABCA writes with the setup user's OAuth
-    // token, so Jira shows its comments under that user's name and accountType.
     const jane = { displayName: 'Jane', accountType: 'atlassian' };
     serveThread([
       { author: jane, body: adf('Please cover the CSV export too.'), created: '2026-07-04T00:00:00Z' },

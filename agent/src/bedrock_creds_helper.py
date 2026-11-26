@@ -1,37 +1,13 @@
 """Credential helper for Claude Code's Bedrock calls (#215, cost attribution).
 
-Claude Code (``CLAUDE_CODE_USE_BEDROCK=1``) makes every ``InvokeModel`` call —
-not the agent's boto3 — so the per-task tenant-data SessionRole in
-``aws_session.py`` cannot tag those calls. Instead Claude Code's
-``awsCredentialExport`` setting (in the image's managed-settings layer) runs
-this script, captures its JSON stdout, and signs Bedrock requests with the
-returned credentials. With a real ``Expiration`` it re-runs ~5 min before
-expiry during active use. The CLI (probed on 2.1.191 and 2.1.301 with
-``scripts/verify_microvm_credentials.py``) returns its previous cached value
-while that refresh runs in the background: this is NOT an acknowledged
-refresh barrier after MicroVM sleep. MicroVM workers instead leave this export
-empty and use the scoped container-credential provider installed by the parent.
-That provider renews synchronously before signing an expired-key request.
-The pin then moved to 2.1.319, which was not probed: its code for this cache
-and for the container-credential path reads the same as 2.1.301's.
+Claude Code's ``awsCredentialExport`` setting runs this script, captures its
+JSON stdout, and signs Bedrock requests with the returned credentials. With a
+real ``Expiration`` it re-runs ~5 min before expiry during active use, and
+returns its previous cached value while that refresh runs in the background.
 
-Goal: assume the per-task SessionRole with ``{user_id, repo, task_id}`` STS
-session tags so Bedrock spend is attributable per user/repo in AWS Cost
-Explorer / CUR 2.0 (``iamPrincipal/*`` dimensions, after the operator activates
-the cost-allocation tags). The same role already carries the tenant-data grants;
-Track-1 only adds ``bedrock:InvokeModel*`` to it (see ``agent-session-role.ts``).
-
-**Other backends fail OPEN.** Bedrock attribution is a billing/observability control, not a
-tenant-isolation one (contrast ``aws_session.py``, which fails closed). If the
-attribution config is absent or the assume-role fails, this helper emits the
-**ambient** compute-role credentials so Bedrock keeps working untagged — losing
-chargeback granularity is not a security incident, and the compute role retains
-``InvokeModel`` precisely so this fallback works.
-
-The role ARN and tag values are read from a 0600 JSON file the agent writes at
-startup (``write_attribution_file``), not from the environment — so the tenant
-identifiers are not inherited by the untrusted repo subprocesses the agent
-spawns, matching the discipline in ``aws_session.py``.
+Assumes the per-task SessionRole with ``{user_id, repo, task_id}`` STS session
+tags. If the attribution config is absent or the assume-role fails, emits the
+**ambient** compute-role credentials instead.
 
 Output shape (consumed by Claude Code's awsCredentialExport):
 
@@ -46,17 +22,12 @@ import os
 import sys
 from typing import Any
 
-#: Set to "1" by the MicroVM credential broker for its Claude child process.
 MICROVM_CREDENTIAL_BROKER_ENV = "ABCA_MICROVM_CREDENTIAL_BROKER"
 
-# Fixed path the agent writes (0600) and this helper reads. A fixed path is
-# required because the managed-settings ``awsCredentialExport`` command is
-# static (baked into the image) and cannot carry per-task arguments.
 ATTRIBUTION_FILE_ENV = "BEDROCK_ATTRIBUTION_FILE"
 DEFAULT_ATTRIBUTION_FILE = "/home/agent/.bedrock-attribution.json"
 
-# Role chaining caps the assumed session at 1 hour; request the max the cap
-# allows. Claude Code refreshes ~5 min before the returned Expiration.
+# AWS caps a role-chained session at 1 hour.
 _CHAINED_SESSION_DURATION_S = 3600
 
 
@@ -69,14 +40,10 @@ def write_attribution_file(
 ) -> str:
     """Persist the SessionRole ARN + STS tags for the helper to read.
 
-    Written 0600 and owned by the agent user. Returns the path written. Called
-    by the agent at startup (see ``runner._setup_agent_env``) only when a
-    SessionRole is configured; absence is the fail-open signal.
+    Written 0600 and owned by the agent user. Returns the path written.
     """
     target = path or attribution_file_path()
     payload = json.dumps({"role_arn": role_arn, "tags": tags})
-    # Create with 0600 from the start (os.open + O_CREAT honors mode, modulo
-    # umask) so the secret-adjacent file is never briefly world-readable.
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(payload)
@@ -84,16 +51,6 @@ def write_attribution_file(
 
 
 def _warn(message: str) -> None:
-    """Emit a diagnostic to stderr.
-
-    This process's **stdout is the credential channel** — Claude Code parses it
-    as the ``awsCredentialExport`` JSON result — so diagnostics MUST go to
-    stderr or they would corrupt the credential envelope. (This is also why
-    ``shell.log``, which writes to fd 1, is unusable here.) Every fail-open path
-    logs through here so a silent, weeks-long loss of cost attribution is
-    instead a visible, correlatable signal — the fallback stays open, but it is
-    never invisible.
-    """
     print(f"[bedrock-creds] {message}", file=sys.stderr)
 
 
@@ -113,17 +70,10 @@ def _frozen_to_creds(frozen: Any, expiry_iso: str | None) -> dict[str, str]:
 
 
 def _ambient_credentials() -> dict[str, str]:
-    """Frozen ambient (compute-role) credentials — the fail-open fallback."""
-    # TID251: only the ambient credentials are read, to hand them on; no client is
-    # built, and this fallback must not depend on aws_session importing cleanly.
     import botocore.session  # noqa: TID251
 
     creds = botocore.session.get_session().get_credentials()  # noqa: TID251
     if creds is None:
-        # No resolvable credentials at all — the deepest degradation. Emit an
-        # empty object; Claude Code then falls back to its own default-chain
-        # resolution. Surface it: if that fallback also fails, this stderr line
-        # is the only breadcrumb.
         _warn(
             "no resolvable AWS credentials; emitting empty envelope, "
             "Claude Code will use its default chain"
@@ -134,10 +84,6 @@ def _ambient_credentials() -> dict[str, str]:
 
 def resolve_credentials() -> dict[str, str]:
     """Use the MicroVM default provider, otherwise retain attribution fallback."""
-    # The parent supplies a single scoped loopback provider and removes other
-    # credential sources from the MicroVM Claude child. Exporting even those
-    # scoped credentials here would reintroduce Claude's stale export cache.
-    # Do not read the attribution file or initialize boto3 in this branch.
     if os.environ.get(MICROVM_CREDENTIAL_BROKER_ENV) == "1":
         return {}
     path = attribution_file_path()
@@ -147,14 +93,9 @@ def resolve_credentials() -> dict[str, str]:
         role_arn = cfg["role_arn"]
         tags = cfg.get("tags", [])
     except FileNotFoundError:
-        # Attribution not configured (local/dev, or pre-provisioning). Expected
-        # and benign — debug-level signal only.
         _warn("attribution file absent; not configured — using ambient creds")
         return _ambient_credentials()
     except (OSError, ValueError, KeyError) as exc:
-        # File present but unreadable/malformed/schema-drifted. This is NOT the
-        # benign "not configured" case — it points at a write_attribution_file
-        # bug or a partial write, so it warrants a louder signal.
         _warn(
             f"attribution file present but unreadable ({type(exc).__name__}: {exc}); "
             "using ambient creds"
@@ -162,16 +103,11 @@ def resolve_credentials() -> dict[str, str]:
         return _ambient_credentials()
 
     try:
-        # boto3 is imported here (not just via platform_client, which imports it
-        # lazily at call time) so a missing SDK still fails open to ambient creds
-        # — instead of raising an uncaught ImportError. (#319)
         import boto3  # noqa: F401  -- availability probe for the fail-open below
         from botocore.exceptions import BotoCoreError, ClientError
 
         from aws_session import platform_client
     except ImportError as exc:
-        # boto3 missing/broken in the image is a packaging defect, not the
-        # expected assume-role failure — name it explicitly so it can't hide.
         _warn(f"boto3 unavailable ({exc}); using ambient creds — fix the image")
         return _ambient_credentials()
 
@@ -193,18 +129,12 @@ def resolve_credentials() -> dict[str, str]:
             "Expiration": c["Expiration"].isoformat(),
         }
     except (ClientError, BotoCoreError) as exc:
-        # Expected assume failure: role not yet provisioned, AccessDenied,
-        # transient STS error. Fail open so Bedrock keeps working on the
-        # compute role; spend for this task is untagged.
         _warn(
             f"assume_role failed ({type(exc).__name__}: {exc}); using ambient creds "
             "— Bedrock spend will be UNTAGGED"
         )
         return _ambient_credentials()
     except Exception as exc:
-        # Anything else (unexpected STS response shape, a logic bug here) is NOT
-        # the expected fallback. Still fail open — this is a billing control, not
-        # isolation — but flag it distinctly so it isn't mistaken for AccessDenied.
         _warn(
             f"UNEXPECTED error minting tagged creds ({type(exc).__name__}: {exc}); "
             "using ambient creds"

@@ -17,13 +17,6 @@
  *  SOFTWARE.
  */
 
-// `add-workspace`, `invite-user`, `update-webhook-secret` and `list-projects` on a stack whose
-// registry already holds a workspace, driven through `parseAsync` with the OAuth flow, Linear
-// and AWS replaced by doubles.
-//
-// The commands find a workspace by scanning the registry. DynamoDB applies a Scan's `Limit`
-// to the rows it reads, before the filter, and the registry double below answers the same
-// way: a lookup that only works for the first row of the table fails here as it does on AWS.
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -36,8 +29,6 @@ import { PutCommand, ScanCommand, type ScanCommandInput } from '@aws-sdk/lib-dyn
 import { makeLinearCommand } from '../../src/commands/linear';
 import * as configMod from '../../src/config';
 
-// The callback server answers with the `state` of the authorization URL the command prints,
-// one macrotask later: the command starts listening before it prints the URL.
 let capturedState = '';
 const awaitOauthCallbackMock = jest.fn(
   () =>
@@ -69,8 +60,6 @@ jest.mock('../../src/prompt-secret', () => ({
   promptSecret: (...args: unknown[]) => promptSecretMock(...args),
 }));
 
-// The visible prompts read one line through readline when stdin is not a terminal. These are
-// the lines the operator types, in order; Enter once they run out.
 let typed: string[] = [];
 jest.mock('readline', () => ({
   createInterface: () => ({
@@ -106,12 +95,10 @@ jest.mock('@aws-sdk/client-dynamodb', () => {
   return { ...actual, DynamoDBClient: jest.fn(() => ({})) };
 });
 
-// A syntactically valid id_token whose payload carries a `sub` claim.
 const FAKE_ID_TOKEN = `x.${Buffer.from(JSON.stringify({ sub: 'sub-abc' })).toString('base64url')}.y`;
 
 type Row = Record<string, unknown>;
 
-/** The registry row of an onboarded workspace. Its bundle is stored under `bgagent-linear-oauth-<slug>`. */
 function workspaceRow(slug: string, extra: Row = {}): Row {
   return {
     linear_workspace_id: `org-${slug}`,
@@ -122,11 +109,7 @@ function workspaceRow(slug: string, extra: Row = {}): Row {
   };
 }
 
-/**
- * Answer a Scan of the registry the way DynamoDB does: read `Limit` rows, then apply the
- * filter to the rows read. Knows the one filter shape the CLI uses, `name = :value` clauses
- * joined by AND, and refuses any other.
- */
+// DynamoDB applies a Scan's `Limit` to the rows it reads, before the filter.
 function scanRegistry(rows: Row[], input: ScanCommandInput): { Items: Row[] } {
   const values = input.ExpressionAttributeValues ?? {};
   const clauses = (input.FilterExpression?.split(' AND ') ?? []).map((clause) => {
@@ -142,16 +125,11 @@ function scanRegistry(rows: Row[], input: ScanCommandInput): { Items: Row[] } {
 describe('linear commands on a registry that already holds a workspace', () => {
   const originalFetch = global.fetch;
   let registry: Row[];
-  /** Secrets Manager, by secret name. */
   let secrets: Record<string, string>;
-  /** Every bundle the command stored, in order. */
   let bundleWrites: Array<Record<string, unknown>>;
-  /** What Linear answers for the workspace `beta`, and the projects it lists for any token. */
   let linear: { members: Row[]; teams: unknown; projects: Row[] };
   let cfgSpy: jest.SpiedFunction<typeof configMod.loadConfig>;
   let credSpy: jest.SpiedFunction<typeof configMod.loadCredentials>;
-  // The visible prompts take the readline branch only when stdin is not a terminal, which it
-  // is when one file is run from a shell. Pinned, so that the tests do not wait for keys.
   const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 
   beforeEach(() => {
@@ -201,11 +179,9 @@ describe('linear commands on a registry that already holds a workspace', () => {
     });
     promptSecretMock.mockReset().mockResolvedValue('lin_wh_beta');
 
-    // Every Linear call of these commands is a GraphQL POST; tell them apart by the query.
     global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
       const query = String(init?.body);
       let body: unknown = { data: { users: { nodes: linear.members } } };
-      // First: the projects query asks for the teams of each project as well.
       if (query.includes('projects')) {
         body = { data: { projects: { nodes: linear.projects } } };
       } else if (query.includes('organization')) {
@@ -232,7 +208,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
     credSpy.mockRestore();
   });
 
-  /** Run `bgagent linear <args>` and return the lines it printed. */
   async function run(...args: string[]): Promise<string[]> {
     const printed: string[] = [];
     const logSpy = jest.spyOn(console, 'log').mockImplementation((...parts: unknown[]) => {
@@ -249,7 +224,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
     return printed;
   }
 
-  /** The items the command put into a table. */
   const puts = (table: string): Row[] => ddbSend.mock.calls
     .map(([cmd]) => cmd)
     .filter((cmd) => cmd instanceof PutCommand && cmd.input.TableName === table)
@@ -257,10 +231,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
 
   describe('add-workspace', () => {
     test('stores the signing secret with the token and records that the workspace owns it', async () => {
-      // With a second active workspace on the stack, the webhook receiver accepts a delivery
-      // only from a workspace whose row says that its signing secret is its own. The operator
-      // pastes that secret here, so the row has to say so: without the flag every delivery of
-      // the workspace just added is answered 401.
       await run('add-workspace', 'beta', '--no-browser');
 
       expect(puts('registry-table')).toEqual([expect.objectContaining({
@@ -270,8 +240,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
         status: 'active',
         webhook_secret_owned: true,
       })]);
-      // One write, which already carries the secret: no moment at which the row is active
-      // and its bundle has no signing secret.
       expect(bundleWrites).toEqual([expect.objectContaining({
         name: 'bgagent-linear-oauth-beta',
         workspace_id: 'org-beta',
@@ -281,10 +249,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
     });
 
     test('dates the token from the exchange, however long the operator takes to paste the secret', async () => {
-      // `expires_at` counts from the moment the bundle is built. Built after the prompt, it
-      // would outlive the token by the time spent looking for the secret, and the platform
-      // would go on using an access token that Linear has stopped accepting.
-      // Only the clock is faked: the callback double still resolves on a real timer.
       jest.useFakeTimers({
         now: new Date('2026-06-17T00:00:00.000Z'),
         doNotFake: [
@@ -302,7 +266,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
         jest.useRealTimers();
       }
 
-      // One hour (`expires_in`) after the exchange, not after the paste.
       expect(bundleWrites).toEqual([expect.objectContaining({ expires_at: '2026-06-17T01:00:00.000Z' })]);
     });
 
@@ -322,8 +285,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
       ['first', ['beta', 'alpha']],
       ['second', ['alpha', 'beta']],
     ])('refuses a workspace that is already registered, when its row is the %s of the registry', async (_position, order) => {
-      // `beta` is on the Identity vault. Adding it again would replace its row with one that
-      // has neither the vault binding nor the proof that the signing secret is its own.
       const beta = workspaceRow('beta', { provider_name: 'bgagent-linear-oauth-beta', vault_user_id: 'linear-ws-beta', webhook_secret_owned: true });
       registry = order.map((slug) => (slug === 'beta' ? beta : workspaceRow(slug)));
       secrets['bgagent-linear-oauth-beta'] = JSON.stringify({ client_id: 'cid', client_secret: 'csecret' });
@@ -335,9 +296,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
     });
 
     test('refuses a slug that is registered to another workspace', async () => {
-      // Linear reports `beta` as the URL key of org-beta, and the registry has that slug for
-      // another workspace, which gave the key up or was set up under a slug that is not its
-      // key. The bundle is named by the slug: the write would replace the token its row reads.
       registry = [workspaceRow('alpha'), workspaceRow('beta', { linear_workspace_id: 'org-before' })];
       secrets['bgagent-linear-oauth-beta'] = JSON.stringify({ access_token: 'tok-before' });
 
@@ -350,13 +308,10 @@ describe('linear commands on a registry that already holds a workspace', () => {
     });
 
     test('ends by linking the admin to the member they pick, never to the app\'s own user', async () => {
-      // The same picker that ends `setup`, called with this command's own workspace, user
-      // and table. The bot comes first in Linear's answer: unfiltered, it would be choice 1.
       linear.members = [
         { id: 'bot', name: 'bgagent', email: 'bot-uuid@oauthapp.linear.app' },
         { id: 'user-maya', name: 'Maya K', email: 'maya@example.test' },
       ];
-      // Enter keeps the client id of the app already installed; then the first member listed.
       typed = ['', '1'];
 
       const printed = await run('add-workspace', 'beta', '--no-browser');
@@ -375,9 +330,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
     });
 
     test('names `setup` as the command to run again, never itself', async () => {
-      // Once this run has registered the workspace, `add-workspace` refuses it. Neither the
-      // self-link picker (no member listed here) nor the team keys (query refused here) can
-      // be retried with the command that just ran.
       linear.teams = { errors: [{ message: 'Authentication required' }] };
 
       const printed = await run('add-workspace', 'beta', '--no-browser');
@@ -419,8 +371,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
     });
 
     test('still refuses a workspace that was removed, and sends it to `setup`', async () => {
-      // Not to `add-workspace`: a removed workspace keeps its row, and that command refuses a
-      // workspace that has one.
       registry = [workspaceRow('alpha'), workspaceRow('beta', { status: 'revoked' })];
 
       await expect(run('invite-user', 'beta')).rejects.toThrow(
@@ -433,7 +383,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
 
   describe('update-webhook-secret', () => {
     test('sends a workspace that has no credential bundle to `setup`', async () => {
-      // `remove-workspace` deletes the bundle and keeps the row, so `add-workspace` would refuse.
       await expect(run('update-webhook-secret', 'beta')).rejects.toThrow(
         'Workspace \'beta\' is not installed (no Secrets Manager secret \'bgagent-linear-oauth-beta\'). '
         + 'Run `bgagent linear setup beta` first.',
@@ -443,12 +392,10 @@ describe('linear commands on a registry that already holds a workspace', () => {
 
   describe('list-projects', () => {
     const ROADMAP = { slug: 'alpha', id: 'p-1', name: 'Roadmap', team: 'Platform' };
-    /** What the command wrote to stderr: why a workspace is missing from the list. */
     let errors: string[];
     let errSpy: jest.SpiedFunction<typeof console.error>;
 
     beforeEach(() => {
-      // The command sets the exit code, and one left behind becomes the exit code of Jest.
       process.exitCode = undefined;
       linear.projects = [{ id: 'p-1', name: 'Roadmap', teams: { nodes: [{ name: 'Platform' }] } }];
       errors = [];
@@ -460,14 +407,11 @@ describe('linear commands on a registry that already holds a workspace', () => {
       errSpy.mockRestore();
     });
 
-    /** `beta` is onboarded as well, and its bundle holds no token to ask Linear with. */
     function onboardBetaWithoutToken(): void {
       secrets['bgagent-linear-oauth-beta'] = JSON.stringify({ refresh_token: 'refresh-beta' });
     }
 
     test('--output json exits 1 when a workspace could not be queried, after the projects of the others', async () => {
-      // A script reads stdout and the exit code. The list is valid JSON and is not the whole
-      // answer: the reason is on stderr, and only the exit code tells the script.
       onboardBetaWithoutToken();
 
       const printed = await run('list-projects', '--output', 'json');
@@ -478,7 +422,6 @@ describe('linear commands on a registry that already holds a workspace', () => {
     });
 
     test('--output json prints [] and exits 1 when Linear refuses the only workspace asked', async () => {
-      // `[]` with exit code 0 is what a workspace without projects gives.
       global.fetch = jest.fn(async () => ({ ok: false, status: 401, json: async () => ({}) })) as unknown as typeof fetch;
 
       const printed = await run('list-projects', '--slug', 'alpha', '--output', 'json');

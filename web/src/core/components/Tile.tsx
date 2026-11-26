@@ -30,8 +30,6 @@ const MIN_COLUMN_WIDTH = 220;
  * one label wraps and the next does not.
  */
 export function TileGrid({ columns, children }: { columns: number; children: ReactNode }) {
-  // A track is never narrower than its share of `columns` columns, so auto-fill stops at that many;
-  // capping it at 100% lets a single column be narrower than the minimum where the page is.
   const column = `max(${MIN_COLUMN_WIDTH}px, (100% - ${(columns - 1) * COLUMN_GAP}px) / ${columns})`;
   return (
     <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${column}), 1fr))`, gap: `20px ${COLUMN_GAP}px` }}>
@@ -40,7 +38,6 @@ export function TileGrid({ columns, children }: { columns: number; children: Rea
   );
 }
 
-/** The three lines of a tile. In a {@link TileGrid} they are the lines of its row; anywhere else they stack. */
 const LINES: CSSProperties = { display: 'grid', gridTemplateRows: 'subgrid', gridRow: 'span 3', rowGap: 0 };
 
 /** A label with the "i" that explains it. The label's last word keeps the icon beside it, so the icon never wraps onto a line of its own. */

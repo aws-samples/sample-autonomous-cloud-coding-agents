@@ -32,7 +32,6 @@ function synth(): { template: Template; page: LinearVaultConsentPage } {
 describe('LinearVaultConsentPage construct', () => {
   test('serves the page from a PRIVATE bucket via CloudFront + OAC', () => {
     const { template } = synth();
-    // Bucket blocks all public access — the page is public via CloudFront only.
     template.hasResourceProperties('AWS::S3::Bucket', {
       PublicAccessBlockConfiguration: {
         BlockPublicAcls: true,
@@ -48,7 +47,6 @@ describe('LinearVaultConsentPage construct', () => {
         DefaultCacheBehavior: Match.objectLike({ ViewerProtocolPolicy: 'redirect-to-https' }),
       }),
     });
-    // The bucket policy must grant the distribution, never a wildcard principal.
     const policies = JSON.stringify(template.findResources('AWS::S3::BucketPolicy'));
     expect(policies).toContain('cloudfront.amazonaws.com');
     expect(policies).not.toContain('"Principal":"*"');
@@ -56,7 +54,6 @@ describe('LinearVaultConsentPage construct', () => {
 
   test('exposes an https consent URL on the distribution domain', () => {
     const { page } = synth();
-    // Unresolved token at synth; assert the shape we build around it.
     expect(page.consentUrl.startsWith('https://')).toBe(true);
     expect(page.consentUrl.endsWith('/')).toBe(true);
   });
@@ -66,23 +63,16 @@ describe('the consent page itself', () => {
   const html = renderConsentPage();
 
   test('renders the session id with textContent, NEVER innerHTML (reflected-XSS guard)', () => {
-    // The session id arrives in the query string, so it is untrusted input
-    // reflected onto the page. Assigning it as markup would turn a static page
-    // into a reflected-XSS vector — this is the one line that must not regress.
     expect(html).toContain('session.textContent = sessionId');
     expect(html).not.toContain('innerHTML');
     expect(html).not.toContain('document.write');
     expect(html).not.toContain('outerHTML');
     expect(html).not.toContain('insertAdjacentHTML');
-    // No eval-style sinks either.
     expect(html).not.toMatch(/\beval\(/);
   });
 
   test('is self-contained — no external scripts, styles, fonts or images', () => {
-    // Renders on a locked-down browser, and has nothing to exfiltrate the session
-    // id to.
     expect(html).not.toMatch(/<script[^>]+src=/);
-    // An inline `data:` icon is allowed — it fetches nothing. Anything remote is not.
     expect(html).not.toMatch(/<link[^>]+href=["']?https?:/);
     expect(html).not.toMatch(/https?:\/\//);
   });
@@ -93,9 +83,6 @@ describe('the consent page itself', () => {
   });
 
   test('does NOT print a command to run', () => {
-    // The CLI is already waiting on a prompt for this value, so a command here is a
-    // second thing to read. It is also a drift hazard: the page ships with the stack
-    // and kept telling operators to run `vault-setup` after that command was removed.
     expect(html).not.toContain('bgagent linear vault-setup');
     expect(html).not.toContain('--session');
     expect(html).not.toContain('--code');
@@ -106,8 +93,6 @@ describe('the consent page itself', () => {
   });
 
   test('suppresses the favicon request, which would 403 from the page-only bucket', () => {
-    // The browser fetches /favicon.ico unprompted; nothing serves it, so an operator
-    // with devtools open sees a 403 during consent and reasonably suspects the flow.
     expect(html).toContain('<link rel="icon" href="data:,">');
   });
 
@@ -116,14 +101,6 @@ describe('the consent page itself', () => {
   });
 });
 
-/**
- * Execute the page's inline script against a minimal DOM shim.
- *
- * The grep-based assertions above prove a dangerous sink is ABSENT; these prove the
- * page actually BEHAVES correctly — that it reads the right query parameter, writes
- * to the right elements, and treats a hostile session id as text. A typo in an
- * element id or param name would sail past a grep and only surface in a browser.
- */
 function runPageScript(search: string): {
   title: string;
   lede: string;
@@ -146,7 +123,6 @@ function runPageScript(search: string): {
       get: () => el._text as string,
       set: (v: unknown) => { el._text = String(v); },
     });
-    // Any attempt to write markup is recorded rather than silently allowed.
     for (const sink of ['innerHTML', 'outerHTML']) {
       Object.defineProperty(el, sink, {
         set: () => { markupWrites.push(`${id}.${sink}`); },
@@ -190,9 +166,6 @@ describe('the consent page, executed', () => {
   });
 
   test('a HOSTILE session id is rendered as text, never as markup', () => {
-    // Behavioural XSS proof: the payload must survive verbatim as text content and
-    // no markup sink may be touched. This is what the grep assertions imply but
-    // cannot actually demonstrate.
     const payload = '"><img src=x onerror=alert(1)>';
     const r = runPageScript(`?session_id=${encodeURIComponent(payload)}`);
     expect(r.session).toBe(payload);
@@ -207,10 +180,6 @@ describe('the consent page, executed', () => {
   });
 
   test('the DIRECT flow hands back code AND state, so the CLI can correlate', () => {
-    // Serving both flows from one page is what removes localhost entirely. The direct
-    // flow additionally needs `state` returned: without it the CLI cannot check the
-    // pasted code against the request it started, which is the check that stops a
-    // code acquired elsewhere being exchanged. One string, so it is still one copy.
     const r = runPageScript('?code=abc123&state=st-9');
     expect(r.title).toBe('Linear authorized');
     expect(r.session).toBe('code=abc123&state=st-9');
@@ -218,8 +187,6 @@ describe('the consent page, executed', () => {
   });
 
   test('a direct redirect with no state still yields a bare code', () => {
-    // Defensive: an authorization that omitted state must remain pasteable rather
-    // than producing a malformed fragment.
     const r = runPageScript('?code=abc123');
     expect(r.session).toBe('abc123');
   });

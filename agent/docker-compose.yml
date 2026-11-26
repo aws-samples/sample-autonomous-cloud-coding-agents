@@ -1,13 +1,3 @@
-# Local development services for agent testing.
-#
-# Usage:
-#   docker compose up -d          # Start DynamoDB Local
-#   docker compose down            # Stop and clean up
-#
-# The agent container (run via run.sh --local-events) connects to
-# the "agent-local" network to reach DynamoDB Local at
-# http://dynamodb-local:8000.
-
 services:
   dynamodb-local:
     image: amazon/dynamodb-local:latest

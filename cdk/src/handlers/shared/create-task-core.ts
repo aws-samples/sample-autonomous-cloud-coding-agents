@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-// HTTP create-task path: validation, persistence, orchestrator invoke. Related: orchestrator.ts, preflight.ts.
-// Idempotent replay: same user + same Idempotency-Key → 200 + TaskDetail (no duplicate write, no orchestrator re-invoke).
-// Tests: cdk/test/handlers/shared/create-task-core.test.ts, cdk/test/handlers/shared/create-task-core-presign-failure.test.ts,
-// cdk/test/handlers/create-task.test.ts
-
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { PutObjectCommand, DeleteObjectsCommand, S3Client } from '@aws-sdk/client-s3';
@@ -80,24 +75,19 @@ export interface TaskCreationContext {
   readonly idempotencyKey?: string;
   /**
    * Task ID to use instead of minting one. Only trusted server-side callers
-   * set this — a webhook processor that downloads + screens + uploads
-   * attachments to S3 *before* calling createTaskCore needs the task ID up
-   * front so the S3 object keys match the eventual task record.
+   * set this.
    */
   readonly taskId?: string;
   /**
    * Attachment records the caller has already downloaded, screened (status
-   * `passed`), and uploaded to S3 — e.g. Jira `media` file attachments a
-   * trusted webhook processor fetched authenticated and ran through the same
-   * Bedrock Guardrail pipeline. Merged verbatim into the
+   * `passed`), and uploaded to S3. Merged verbatim into the
    * persisted attachments and NOT re-screened here. Every record MUST be a
    * passed record with storage fields populated; a non-`passed` record is a
    * caller contract violation and fails the request closed.
    *
-   * These bypass the wire `Attachment`/`validateAttachments` path (which caps
-   * inline at 500 KB and can't authenticate a Jira download), so the caller is
-   * responsible for enforcing the per-file / total-size / count limits before
-   * upload.
+   * These bypass the wire `Attachment`/`validateAttachments` path, so the
+   * caller is responsible for enforcing the per-file / total-size / count
+   * limits before upload.
    */
   readonly preScreenedAttachments?: readonly AttachmentRecord[];
 }
@@ -117,7 +107,6 @@ const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
 const s3Client = ATTACHMENTS_BUCKET ? makeClient(S3Client) : undefined;
 
-/** Human-readable description of a workflow's required-input contract (for 400s). */
 function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; oneOf?: readonly string[] }): string {
   const parts: string[] = [];
   if (requiredInputs.allOf?.length) {
@@ -143,24 +132,11 @@ export async function createTaskCore(
   context: TaskCreationContext,
   requestId: string,
 ): Promise<APIGatewayProxyResult> {
-  // 1. Resolve the workflow first. workflow_ref replaces task_type: an
-  // explicit ref resolves to its pinned {id, version}; an absent ref falls back
-  // to the platform default. An unknown ref is a 400. The resolved workflow's
-  // ``requiresRepo`` then decides whether ``repo`` is mandatory — a repo-less
-  // workflow (Phase 3) is submitted with no repo and skips onboarding.
   if (!isValidWorkflowRef(body.workflow_ref)) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid workflow_ref. Expected "<domain>/<name>-vN[@<constraint>]".', requestId);
   }
-  // A repo-bound task with no explicit workflow_ref must run the disciplined
-  // coding workflow (coding/new-task-v1), not the repo-less default/agent-v1.
-  // That decision now lives at each channel's call site (they pin
-  // CODING_WORKFLOW_ID explicitly), NOT in a resolver-level hasRepo default —
-  // so resolveWorkflowRef takes only the ref here.
   const resolvedWorkflow = resolveWorkflowRef(body.workflow_ref);
   if (resolvedWorkflow === null) {
-    // Distinguish an unknown id from an unsatisfiable @version pin so the caller
-    // learns which it is — a bad pin no longer silently runs the shipped
-    // version.
     const reason = resolveWorkflowRefError(body.workflow_ref);
     const message = reason === 'unsatisfiable_version'
       ? `workflow_ref "${body.workflow_ref}" pins a version that is not available.`
@@ -169,19 +145,11 @@ export async function createTaskCore(
   }
   const workflow = getWorkflowDescriptor(resolvedWorkflow.id)!;
 
-  // 1a-model. Rule 13 (WORKFLOWS.md §"Model selection"): a workflow that pins a
-  // preferred model must pin one on the platform allow-list. An unpermitted id
-  // FAILS admission rather than silently downgrading (fail-closed, consistent
-  // with the rest of admission). Workflows that declare no model inherit the
-  // Blueprint/platform default and are always admitted.
   const badModel = disallowedWorkflowModel(resolvedWorkflow.id);
   if (badModel !== null) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requests model "${badModel}", which is not on the platform allow-list.`, requestId);
   }
 
-  // 1a. Repo validation. ``requiresRepo`` decides whether a repo is *mandatory*;
-  // ``requiresRepo: false`` means repo-OPTIONAL (a repo-less workflow may still
-  // run against a repo). A repo, when present, must be well-formed regardless.
   if (workflow.requiresRepo && !body.repo) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requires a repo. Expected format: owner/repo.`, requestId);
   }
@@ -189,16 +157,7 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid repo. Expected format: owner/repo.', requestId);
   }
 
-  // 1b. Onboarding gate + Cedar HITL blueprint-cap resolution (§4 step 5,
-  //     decision #13) — runs whenever a repo is present (a repo-less submission
-  //     has no repo to onboard). A single RepoTable GetItem covers BOTH
-  //     (capturing the cap at submit-time means mid-task blueprint edits cannot
-  //     shift the cap beneath a running task). A repo-less task takes the
-  //     platform default cap.
   let resolvedApprovalGateCap: number = APPROVAL_GATE_CAP_DEFAULT;
-  // Whether the cap came from a blueprint (vs the platform default) — surfaced
-  // in the "Task created" log. A repo-less submission has no blueprint, so it
-  // stays false.
   let capFromBlueprint = false;
   if (body.repo) {
     const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
@@ -208,13 +167,6 @@ export async function createTaskCore(
     const blueprintCap = repoConfig?.approval_gate_cap;
     if (blueprintCap !== undefined) {
       if (typeof blueprintCap !== 'number' || !Number.isInteger(blueprintCap)) {
-        // Blueprint construct's synth-time validation should have caught
-        // this, but a hand-edited RepoConfig row could bypass it. Fail
-        // closed rather than persisting junk onto the TaskRecord.
-        // 503 (not 500) — the condition is permanent until the blueprint
-        // is re-deployed, but from the user's perspective this is "platform
-        // can't accept this right now"; 500 would misleadingly suggest a
-        // transient internal glitch worth retrying.
         logger.error('Blueprint misconfiguration — approval_gate_cap is not an integer', {
           repo: body.repo,
           blueprint_cap: blueprintCap,
@@ -250,10 +202,8 @@ export async function createTaskCore(
     }
   }
 
-  // A pr_* workflow resolves an existing PR rather than opening a new branch.
   const isPrTask = workflow.requiredInputs.allOf?.includes('pr_number') ?? false;
 
-  // The body is parsed JSON: the checks below read a description as text.
   if (body.task_description != null && typeof body.task_description !== 'string') {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid task_description. Must be a string.', requestId);
   }
@@ -262,7 +212,6 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, `The "${resolvedWorkflow.id}" workflow requires ${describeRequiredInputs(workflow.requiredInputs)}.`, requestId);
   }
 
-  // Validate pr_number against the resolved workflow's input contract.
   const prNumberResult = validatePrNumber(body.pr_number);
   if (prNumberResult === null) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid pr_number. Must be a positive integer.', requestId);
@@ -274,9 +223,6 @@ export async function createTaskCore(
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'pr_number is only allowed for a pull-request workflow (e.g. coding/pr-iteration-v1, coding/pr-review-v1).', requestId);
   }
 
-  // An issue number follows the rule of a pull request number. Hydration puts
-  // the stored value into the path of a GitHub request, where a text with dot
-  // segments would name another repository.
   const issueNumber = validatePrNumber(body.issue_number);
   if (issueNumber === null) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid issue_number. Must be a positive integer.', requestId);
@@ -290,9 +236,6 @@ export async function createTaskCore(
   if (maxTurnsResult === null) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid max_turns. Must be an integer between 1 and 500.', requestId);
   }
-  // Store only user-explicit max_turns on the task record (undefined when not specified).
-  // The effective value is computed at orchestration time using the 3-tier override:
-  // platform default < per-repo Blueprint config < per-task user override.
   const userMaxTurns = maxTurnsResult;
 
   const maxBudgetResult = validateMaxBudgetUsd(body.max_budget_usd);
@@ -301,22 +244,17 @@ export async function createTaskCore(
   }
   const userMaxBudgetUsd = maxBudgetResult;
 
-  // --trace is a strict boolean — reject strings / numbers so a
-  // misbehaving client can't accidentally enable it with ``"trace":
-  // "false"`` (which would be truthy).
   if (body.trace !== undefined && typeof body.trace !== 'boolean') {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid trace. Must be a boolean.', requestId);
   }
   const userTrace = body.trace === true;
 
-  // Validate attachments
   const attachmentResult = validateAttachments(body.attachments as unknown[] | undefined);
   if (!attachmentResult.valid) {
     return errorResponse(400, ErrorCode.VALIDATION_ERROR, attachmentResult.error, requestId);
   }
   const validatedAttachments = attachmentResult.parsed;
 
-  // Fail-closed: reject requests with attachments when bucket is not configured
   if (validatedAttachments.length > 0 && (!s3Client || !ATTACHMENTS_BUCKET)) {
     logger.error('Attachments submitted but ATTACHMENTS_BUCKET_NAME is not configured', {
       user_id: context.userId,
@@ -327,10 +265,6 @@ export async function createTaskCore(
       'Attachment storage is not configured. Please contact your administrator.', requestId);
   }
 
-  // Cedar HITL — validate approval_timeout_s if supplied (§7.3 step 5).
-  // maxLifetime-based ceiling clip is applied at orchestrator
-  // invocation time; at submit time we only enforce the `[floor, cap]`
-  // envelope.
   let approvalTimeoutS: number | undefined;
   if (body.approval_timeout_s !== undefined) {
     if (typeof body.approval_timeout_s !== 'number'
@@ -364,7 +298,6 @@ export async function createTaskCore(
         + `and ${MICROVM_SLEEP_AFTER_S_MAX} seconds (0 disables sleep).`, requestId);
   }
 
-  // Cedar HITL — validate initial_approvals if supplied (§7.3 step 4).
   let initialApprovals: string[] | undefined;
   if (body.initial_approvals !== undefined) {
     if (!Array.isArray(body.initial_approvals)) {
@@ -394,9 +327,6 @@ export async function createTaskCore(
     initialApprovals = normalized;
   }
 
-  // 2. Check idempotency before budget enforcement or any content-screening
-  // spend. A valid replay returns the original task even if its scope has since
-  // exhausted a monthly hard stop.
   if (context.idempotencyKey !== undefined && context.idempotencyKey !== null) {
     if (!isValidIdempotencyKey(context.idempotencyKey)) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid Idempotency-Key format.', requestId);
@@ -419,12 +349,6 @@ export async function createTaskCore(
 
       if (existingTask.Item) {
         const existingRecord = existingTask.Item as TaskRecord;
-        // ``repo`` and ``branch_name`` are intentionally NOT required here: a
-        // repo-less workflow persists no repo and an empty
-        // ``branch_name`` (it never branches). Both are legitimately falsy on a
-        // valid repo-less record, so a falsy check would wrongly reject a valid
-        // repo-less replay as "incomplete" (500). Only the true identity/audit
-        // fields that every record must carry are required.
         const requiredReplayFields = ['task_id', 'user_id', 'status', 'channel_source', 'created_at', 'updated_at'] as const;
         const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
         if (missingFields.length > 0) {
@@ -455,10 +379,6 @@ export async function createTaskCore(
     }
   }
 
-  // 2b. Fleet budget admission runs before Bedrock screening and attachment
-  // processing, so an exhausted hard stop bounds rejection-path spend as well
-  // as task creation. Headless adapters resolve Cognito groups here; direct API
-  // calls pass the token's group claim through TaskCreationContext.
   let budgetAdmission;
   try {
     budgetAdmission = await checkBudgetAdmission(context.userId, context.teamIds);
@@ -516,8 +436,6 @@ export async function createTaskCore(
     );
   }
 
-  // 3. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
-  //    must not reach the agent — a Bedrock outage blocks task submissions)
   if (bedrockClient && body.task_description) {
     try {
       const guardrailResult = await bedrockClient.send(new ApplyGuardrailCommand({
@@ -542,21 +460,11 @@ export async function createTaskCore(
     }
   }
 
-  // Generate task ID early so attachment S3 keys use the correct task ID.
-  // A trusted server-side caller (e.g. the Jira webhook processor) may
-  // supply the ID so the S3 keys of attachments it uploaded before this call
-  // match the eventual task record.
   const taskId = context.taskId ?? ulid();
 
-  // 3b. Process inline attachments: screen (with retry + EXIF strip), upload to S3, build records.
-  // Presigned attachments are deferred to confirm-uploads; URL attachments are resolved during hydration.
   const attachmentRecords: AttachmentRecord[] = [];
   const uploadedS3Keys: string[] = [];
   if (validatedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
-    // Build screening config — fail-closed if guardrail is not configured.
-    // Reject inline AND presigned attachments upfront: presigned attachments will
-    // need screening in confirm-uploads, so rejecting early prevents the user from
-    // wasting time uploading files that can never be screened.
     if (!bedrockClient || !process.env.GUARDRAIL_ID || !process.env.GUARDRAIL_VERSION) {
       const hasScreenable = validatedAttachments.some(a => a.delivery === 'inline' || a.delivery === 'presigned');
       if (hasScreenable) {
@@ -577,7 +485,6 @@ export async function createTaskCore(
       if (att.delivery !== 'inline') continue;
       const inlineAtt = att as InlineAttachment;
 
-      // Validate base64 encoding before decode
       if (!isValidBase64(inlineAtt.data)) {
         await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
         return errorResponse(400, ErrorCode.ATTACHMENT_INVALID_CONTENT,
@@ -587,7 +494,6 @@ export async function createTaskCore(
       const decoded = Buffer.from(inlineAtt.data, 'base64');
       const attachmentId = ulid();
 
-      // Screen content via Bedrock with retry, EXIF stripping, and format conversion
       let screenResult;
       try {
         const isImage = inlineAtt.type === 'image';
@@ -621,7 +527,6 @@ export async function createTaskCore(
           `Attachment '${inlineAtt.filename}' was blocked by content policy (${categories}).`, requestId);
       }
 
-      // Upload cleaned content to S3 (images are EXIF-stripped and re-encoded)
       const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${context.userId}/${taskId}/${attachmentId}/${inlineAtt.filename}`;
       let putResult;
       try {
@@ -646,7 +551,6 @@ export async function createTaskCore(
 
       uploadedS3Keys.push(s3Key);
 
-      // Estimate image token cost (best-effort, non-blocking)
       const tokenEstimate = inlineAtt.type === 'image'
         ? estimateImageTokensFromBuffer(screenResult.content, inlineAtt.content_type)
         : undefined;
@@ -665,8 +569,6 @@ export async function createTaskCore(
       }));
     }
 
-    // URL attachments: store as pending records — resolved during hydration
-    // (resolveUrlAttachments in orchestrator fetches, screens, and uploads to S3).
     for (const att of validatedAttachments) {
       if (att.delivery !== 'url_fetch') continue;
       attachmentRecords.push(createAttachmentRecord({
@@ -679,8 +581,6 @@ export async function createTaskCore(
       }));
     }
 
-    // Presigned upload attachments get pending records (confirmed via confirm-uploads endpoint)
-    // Generate presigned POST policies so the client can upload directly to S3.
     for (const att of validatedAttachments) {
       if (att.delivery !== 'presigned') continue;
       const presignedAtt = att as PresignedAttachment;
@@ -696,12 +596,6 @@ export async function createTaskCore(
     }
   }
 
-  // Pre-screened attachments: records a trusted server-side caller already
-  // downloaded, screened (passed), and uploaded to S3 — e.g. Jira `media`
-  // attachments fetched authenticated by the webhook processor. They
-  // bypass the wire `Attachment` path, so they are merged verbatim and never
-  // re-screened. Fail closed on a caller contract violation: a non-`passed`
-  // record must never reach the agent.
   if (context.preScreenedAttachments && context.preScreenedAttachments.length > 0) {
     for (const rec of context.preScreenedAttachments) {
       if (rec.screening.status !== 'passed') {
@@ -711,8 +605,6 @@ export async function createTaskCore(
           request_id: requestId,
           metric_type: 'prescreened_attachment_invalid',
         });
-        // Roll back any inline uploads this call made (empty on the Jira
-        // webhook path, which supplies no wire attachments) before failing.
         if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
         return errorResponse(500, ErrorCode.INTERNAL_ERROR,
           'A pre-screened attachment was not in a passed state.', requestId);
@@ -721,13 +613,6 @@ export async function createTaskCore(
     attachmentRecords.push(...context.preScreenedAttachments);
   }
 
-  // Aggregate size ceiling ACROSS sources (review): each source enforces its own
-  // subtotal (wire inline, the URL resolver per-URL, the Linear batch's own total),
-  // but nothing summed the MERGED set — so N sources could each pass their own
-  // check and jointly blow past the task-wide cap (e.g. 5×10 MB public images +
-  // 5×10 MB Linear files ≈ 100 MB under a 50 MB limit). Sum every record whose
-  // size is known NOW (inline + pre-screened; presigned uploads are still `pending`
-  // and are bounded separately at confirm-uploads time) and fail closed.
   const knownTotalBytes = attachmentRecords.reduce(
     (sum, r) => sum + (typeof (r as { size_bytes?: number }).size_bytes === 'number' ? (r as { size_bytes: number }).size_bytes : 0),
     0,
@@ -740,7 +625,6 @@ export async function createTaskCore(
       request_id: requestId,
       metric_type: 'attachment_total_size_exceeded',
     });
-    // Don't orphan any inline uploads this call made before rejecting.
     if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
     return errorResponse(
       400, ErrorCode.VALIDATION_ERROR,
@@ -749,26 +633,16 @@ export async function createTaskCore(
     );
   }
 
-  // 4. Generate identifiers and timestamps
   const now = new Date().toISOString();
-  // A task with no repo never clones, branches, or opens a PR (the agent prompt
-  // forbids it), so a bgagent/<id>/... branch name is misleading noise. Key off
-  // the actual absence of a repo, NOT workflow.requiresRepo — a repo-OPTIONAL
-  // workflow that WAS given a repo runs the repo-bound path and still gets a
-  // branch. PR tasks resolve their real branch later; other repo-bound tasks
-  // get the generated working-branch name.
   const branchName = !body.repo
     ? ''
     : isPrTask
       ? 'pending:pr_resolution'
       : generateBranchName(taskId, body.task_description ?? body.repo);
 
-  // Determine initial status: PENDING_UPLOADS if any presigned attachments need uploading,
-  // otherwise SUBMITTED (inline/url/no attachments go straight to the pipeline).
   const hasPresignedAttachments = validatedAttachments.some(a => a.delivery === 'presigned');
   const initialStatus = hasPresignedAttachments ? TaskStatus.PENDING_UPLOADS : TaskStatus.SUBMITTED;
 
-  // 5. Build task record
   const taskRecord: TaskRecord = {
     task_id: taskId,
     user_id: context.userId,
@@ -787,15 +661,10 @@ export async function createTaskCore(
     ...(context.idempotencyKey && { idempotency_key: context.idempotencyKey }),
     channel_source: context.channelSource,
     channel_metadata: context.channelMetadata,
-    // Hoist linear_issue_id to the top level so the sparse
-    // LinearIssueIndex GSI can resolve an issue → its newest task + PR (a GSI
-    // cannot key off the nested channel_metadata map). Linear-origin only.
+    // DynamoDB GSIs cannot key on nested map values.
     ...(context.channelMetadata?.linear_issue_id && {
       linear_issue_id: context.channelMetadata.linear_issue_id,
     }),
-    // DynamoDB GSIs cannot key on nested map values. Hoist the tenant-scoped
-    // Jira issue identity so JiraIssueIndex can resolve comment triggers back
-    // to the newest PR-producing task.
     ...(context.channelSource === 'jira'
       && context.channelMetadata?.jira_cloud_id
       && context.channelMetadata?.jira_issue_key
@@ -807,32 +676,19 @@ export async function createTaskCore(
     status_created_at: `${initialStatus}#${now}`,
     created_at: now,
     updated_at: now,
-    // Cedar HITL extensions (§10.2). Only written when the submit
-    // payload supplied them; ``approval_timeout_s`` defaults to the
-    // engine default at agent runtime when absent here.
     ...(approvalTimeoutS !== undefined && { approval_timeout_s: approvalTimeoutS }),
-    // Capture the default so future deployments cannot change this task's preference.
     microvm_sleep_after_s: microvmSleepAfterS,
     ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
-    // Persisted counter the stranded-approval reconciler + agent
-    // counter both read (§13.6). Seeded to 0 at task-create time.
     approval_gate_count: 0,
-    // Cedar HITL (§4 step 5, decision #13): per-task cap captured at
-    // submit-time. Blueprint override wins when within bounds; otherwise
-    // platform default of 50. Persisted so a container restart or a
-    // mid-task blueprint edit cannot shift the cap beneath the task.
     approval_gate_cap: resolvedApprovalGateCap,
   };
 
-  // 6. Write task record
   await ddb.send(new PutCommand({
     TableName: TABLE_NAME,
     Item: taskRecord,
     ConditionExpression: 'attribute_not_exists(task_id)',
   }));
 
-  // 7. Write task_created event (best-effort — event loss is acceptable,
-  //    task record is the source of truth)
   try {
     await ddb.send(new PutCommand({
       TableName: EVENTS_TABLE_NAME,
@@ -863,18 +719,10 @@ export async function createTaskCore(
     repo: body.repo,
     channel_source: context.channelSource,
     request_id: requestId,
-    // Chunk 7b: surface the resolved cap + its source so operators can
-    // detect a broken blueprint-plumbing deploy (all four fallback
-    // layers in the resolution cascade converge here). ``source`` is
-    // "blueprint" when the blueprint explicitly configured the value,
-    // "platform_default" when it fell through to 50.
     approval_gate_cap: resolvedApprovalGateCap,
     approval_gate_cap_source: capFromBlueprint ? 'blueprint' : 'platform_default',
   });
 
-  // 8. Async-invoke the orchestrator (fire-and-forget).
-  // Skip for PENDING_UPLOADS — the orchestrator is invoked from confirm-uploads
-  // once all attachments are uploaded and screened.
   if (initialStatus === TaskStatus.SUBMITTED && lambdaClient && process.env.ORCHESTRATOR_FUNCTION_ARN) {
     try {
       await lambdaClient.send(new InvokeCommand({
@@ -896,9 +744,7 @@ export async function createTaskCore(
     }
   }
 
-  // 9. Return created task
   if (hasPresignedAttachments && s3Client && ATTACHMENTS_BUCKET) {
-    // Generate presigned POST policies for presigned attachments
     let uploadInstructions: AttachmentUploadInstruction[];
     try {
       uploadInstructions = await generateUploadInstructions(taskRecord, s3Client);
@@ -909,7 +755,6 @@ export async function createTaskCore(
         request_id: requestId,
         metric_type: 'presigned_post_generation_failure',
       });
-      // Transition task to FAILED so it doesn't remain orphaned in PENDING_UPLOADS
       try {
         const failedAt = new Date().toISOString();
         await ddb.send(new UpdateCommand({
@@ -945,19 +790,11 @@ export async function createTaskCore(
   return successResponse(201, toTaskDetail(taskRecord), requestId);
 }
 
-/**
- * Check one entry of initial_approvals (§7.3 step 4).
- * @param entry - the entry as the request body holds it.
- * @returns the parsed scope, or the message of the 400 that refuses the entry.
- */
 function checkInitialApproval(entry: unknown): { ok: true; scope: string } | { ok: false; message: string } {
   const parseResult = parseApprovalScope(String(entry));
   if (!parseResult.ok) {
     return { ok: false, message: `Invalid initial_approvals entry "${String(entry)}": ${parseResult.message}.` };
   }
-  // These three stand for the call that is waiting for a decision. Before
-  // the task starts there is none: the agent cannot seed its allowlist
-  // from them, and the task would fail when the agent starts.
   if (['this_call', 'tool_type_session', 'tool_group_session'].includes(parseResult.scope)) {
     return {
       ok: false,
@@ -966,17 +803,10 @@ function checkInitialApproval(entry: unknown): { ok: true; scope: string } | { o
         + 'Name the tool or the group, for example "tool_type:Bash".',
     };
   }
-  // Degenerate-pattern guard for bash_pattern:/write_path: scopes
-  // (§7.4). Rejecting at submit is kinder than silently letting a
-  // degenerate pattern through and having it match every tool call.
   if (
     parseResult.scope.startsWith('bash_pattern:')
     || parseResult.scope.startsWith('write_path:')
   ) {
-    // Take everything after the first colon — the value itself may
-    // contain colons (e.g. ``bash_pattern:git log --format=%h:%s``), so a
-    // ``split(':', 2)`` would truncate it and could turn a legitimate
-    // pattern into a degenerate-looking fragment, producing a spurious 400.
     const value = parseResult.scope.slice(parseResult.scope.indexOf(':') + 1);
     if (isDegeneratePattern(value)) {
       return {
@@ -990,47 +820,32 @@ function checkInitialApproval(entry: unknown): { ok: true; scope: string } | { o
   return { ok: true, scope: parseResult.scope };
 }
 
-/** Auto-cancel window for tasks awaiting presigned uploads (minutes). */
 const PENDING_UPLOAD_EXPIRY_MINUTES = 30;
 
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
 
-/** Base64 encodes 3 bytes into 4 characters — length must be a multiple of this. */
 const BASE64_GROUP_SIZE = 4;
 
-/** Validate that a string is well-formed base64. */
 function isValidBase64(data: string): boolean {
   if (data.length === 0) return false;
   if (data.length % BASE64_GROUP_SIZE !== 0) return false;
   return BASE64_PATTERN.test(data);
 }
 
-/** Presigned POST policy expiry: 10 minutes. */
 const PRESIGNED_POST_EXPIRY_SECONDS = 600;
 
-/**
- * Answer a replayed Idempotency-Key with the task as it is now. A task that still
- * waits for its uploads comes with new upload instructions: the answer to the
- * creating request held the only copy, and a client that sends the request again
- * after a failed upload or confirmation cannot finish the task without them.
- */
 async function replayResponse(record: TaskRecord, requestId: string): Promise<APIGatewayProxyResult> {
   let detail: CreateTaskResponse = toTaskDetail(record);
   if (record.status === TaskStatus.PENDING_UPLOADS && s3Client) {
     detail = {
       ...detail,
       upload_instructions: await generateUploadInstructions(record, s3Client),
-      // The cleanup counts from the creation of the task, not from this answer.
       task_expires_at: new Date(Date.parse(record.created_at) + PENDING_UPLOAD_EXPIRY_MINUTES * 60 * 1000).toISOString(),
     };
   }
   return successResponse(200, detail, requestId, { 'Idempotent-Replay': 'true' });
 }
 
-/**
- * Generate presigned POST upload instructions for the uploads a task waits for:
- * its pending attachment records that are not fetched from a URL.
- */
 async function generateUploadInstructions(
   taskRecord: TaskRecord,
   client: S3Client,
@@ -1040,9 +855,6 @@ async function generateUploadInstructions(
 
   for (const record of presignedRecords) {
     const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${taskRecord.user_id}/${taskRecord.task_id}/${record.attachment_id}/${record.filename}`;
-    // Type assertion: @aws-sdk/s3-presigned-post bundles a nested @aws-sdk/client-s3
-    // with divergent @smithy/types declarations. The runtime is compatible; only the
-    // type declarations conflict. Cast to `any` at the boundary.
     const { url, fields } = await createPresignedPost(client as any, {
       Bucket: ATTACHMENTS_BUCKET!,
       Key: s3Key,
@@ -1069,10 +881,6 @@ async function generateUploadInstructions(
   return instructions;
 }
 
-/**
- * Clean up S3 objects from a partially-failed inline upload.
- * Best-effort — the 90-day lifecycle is the safety net if cleanup fails.
- */
 async function cleanupOrphanedAttachments(client: S3Client, keys: string[]): Promise<void> {
   if (keys.length === 0 || !ATTACHMENTS_BUCKET) return;
   try {

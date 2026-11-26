@@ -82,8 +82,6 @@ describe('resolveComputeStrategy', () => {
   test('throws a named error for an unknown compute_type (exhaustive-never default)', () => {
     expect(() =>
       resolveComputeStrategy({
-        // Cast past the exhaustive union to exercise the runtime default arm —
-        // a hand-edited RepoTable row can carry a value the type system forbids.
         compute_type: 'quantum-annealer' as ComputeType,
         runtime_arn: 'arn:test',
       }),
@@ -91,8 +89,6 @@ describe('resolveComputeStrategy', () => {
   });
 
   test('every ComputeType member resolves to a strategy whose type field round-trips', () => {
-    // Guards the pairing itself: a new backend added to ComputeType but wired to
-    // the wrong class would still be instanceof-correct in the tests above.
     const all: ComputeType[] = ['agentcore', 'ecs', 'lambda-microvm'];
     for (const computeType of all) {
       const strategy = resolveComputeStrategy({ compute_type: computeType, runtime_arn: 'arn:test' });

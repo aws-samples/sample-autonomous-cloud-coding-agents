@@ -28,14 +28,6 @@ import { logger } from './logger';
 import { sanitizeExternalContent } from './sanitization';
 import { makeClient } from './ua';
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/**
- * Provenance tag indicating who wrote a memory record.
- * Must stay in sync with Python-side MEMORY_SOURCE_TYPES in agent/src/memory.py.
- */
 type MemorySourceType =
   | 'agent_episode'
   | 'agent_learning'
@@ -51,43 +43,29 @@ export interface MemoryContext {
   readonly past_episodes: string[];
 }
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
 const MEMORY_READ_TIMEOUT_MS = 5_000;
 const DEFAULT_MEMORY_TOKEN_BUDGET = 2_000;
 
-/** Rough token estimate: ~4 chars per token. */
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 
-/** Schema version at which content_sha256 became mandatory on write. */
 const MIN_SCHEMA_VERSION_WITH_CONTENT_HASH = 3;
 
-/** Decimal places when rendering USD cost in minimal memory episodes. */
 const COST_USD_DECIMAL_PLACES = 4;
 
-/** Rough token estimate: ~4 chars per token. */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
 }
 
-/** Compute SHA-256 hash of text content (UTF-8 encoded; must match agent/src/memory.py). */
 function hashContent(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-/** Result of content integrity check (audit-only — never gates retrieval). */
 type IntegrityResult = 'match' | 'mismatch' | 'no_hash';
 
 /**
- * Check content integrity against a stored SHA-256 hash (audit-only).
- *
  * AgentCore's extraction pipeline transforms content (summarization,
  * consolidation), so the hash of extracted records will legitimately
- * differ from the write-time hash. This check is therefore an audit
- * signal, not a retrieval gate — callers log the result but never
- * discard records based on it.
+ * differ from the write-time hash.
  */
 function checkContentIntegrity(
   text: string,
@@ -95,8 +73,6 @@ function checkContentIntegrity(
 ): IntegrityResult {
   const expected = metadata?.content_sha256?.stringValue;
   if (!expected) {
-    // v3+ records should always have a hash — missing hash signals a
-    // corrupted write or a write-path regression that stopped emitting hashes.
     const schemaVersion = metadata?.schema_version?.stringValue;
     if (schemaVersion && parseInt(schemaVersion, 10) >= MIN_SCHEMA_VERSION_WITH_CONTENT_HASH) {
       logger.warn('Schema v3+ record missing content_sha256 — possible corrupted write', {
@@ -110,18 +86,11 @@ function checkContentIntegrity(
   return hashContent(text) === expected ? 'match' : 'mismatch';
 }
 
-/** Record metadata shape returned by AgentCore RetrieveMemoryRecords. */
 interface MemoryRecordSummary {
   content?: { text?: string };
   metadata?: Record<string, { stringValue?: string }>;
 }
 
-/**
- * Sanitize, audit-check, and collect text from memory record summaries.
- *
- * Each record is sanitized, integrity-checked (audit-only — mismatches are
- * logged but never cause records to be discarded), and appended to `out`.
- */
 function processMemoryRecords(
   records: MemoryRecordSummary[],
   out: string[],
@@ -134,9 +103,6 @@ function processMemoryRecords(
     if (!text) continue;
     const sanitized = sanitizeExternalContent(text);
     if (checkContentIntegrity(sanitized, record.metadata) === 'mismatch') {
-      // Expected for extracted records — AgentCore transforms content
-      // during extraction (summarization, consolidation). Log at WARN so
-      // CloudWatch alarms can detect spikes (genuine tampering or write bugs).
       logger.warn('Memory record hash mismatch (expected for extracted records)', {
         actor_namespace: actorNamespace,
         namespace_path: namespacePath,
@@ -152,7 +118,6 @@ function processMemoryRecords(
   }
 }
 
-// Lazy-init client (only created if MEMORY_ID is set)
 let agentCoreClient: BedrockAgentCoreClient | undefined;
 function getClient(): BedrockAgentCoreClient {
   if (!agentCoreClient) {
@@ -160,10 +125,6 @@ function getClient(): BedrockAgentCoreClient {
   }
   return agentCoreClient;
 }
-
-// ---------------------------------------------------------------------------
-// Memory read
-// ---------------------------------------------------------------------------
 
 /**
  * Load memory context for a repository from AgentCore Memory.
@@ -185,7 +146,7 @@ function getClient(): BedrockAgentCoreClient {
  * Returns `undefined` on any error (fail-open).
  *
  * @param memoryId - the AgentCore Memory resource ID.
- * @param repo - the "owner/repo" string used as namespace key (maps to actorId).
+ * @param actorNamespace - the namespace key (maps to actorId): "owner/repo" for coding tasks.
  * @param taskDescription - optional task description for semantic search query.
  * @param tokenBudget - token budget of the returned context (estimated at ~4 chars per token).
  * @returns memory context or undefined on failure.
@@ -199,18 +160,11 @@ export async function loadMemoryContext(
   try {
     const client = getClient();
 
-    // Namespace paths derived from the strategy templates configured in agent-memory.ts.
-    // Events are written with actorId = the namespace key (a repo for coding
-    // tasks, ``user:{user_id}`` for repo-less workflows — ADR-014 addendum
-    // 2026-06-08), so extracted records land at /{actorNamespace}/knowledge/
-    // and /{actorNamespace}/episodes/{taskId}/.
     const semanticNamespacePath = `/${actorNamespace}/knowledge/`;
     const episodicNamespacePath = `/${actorNamespace}/episodes/`;
 
-    // Run semantic and episodic searches in parallel
     // eslint-disable-next-line @cdklabs/promiseall-no-unbounded-parallelism
     const [semanticResult, episodicResult] = await Promise.all([
-      // Semantic search — factual knowledge about this repo
       taskDescription
         ? client.send(new RetrieveMemoryRecordsCommand({
           memoryId,
@@ -224,7 +178,6 @@ export async function loadMemoryContext(
           return undefined;
         })
         : Promise.resolve(undefined),
-      // Episodic search — recent task episodes (prefix matches all sessions)
       client.send(new RetrieveMemoryRecordsCommand({
         memoryId,
         namespacePath: episodicNamespacePath,
@@ -253,7 +206,6 @@ export async function loadMemoryContext(
       return undefined;
     }
 
-    // Enforce token budget — trim oldest entries first
     let totalTokens = 0;
     const budgetedKnowledge: string[] = [];
     const budgetedEpisodes: string[] = [];
@@ -303,20 +255,16 @@ export async function loadMemoryContext(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Memory write (orchestrator fallback)
-// ---------------------------------------------------------------------------
-
 /**
  * Write a minimal task episode to memory as a fallback when the agent container
  * did not write memory (crash, timeout, OOM).
  *
- * Uses `actorId = repo` and `sessionId = taskId` to match the namespace
+ * Uses `actorId = actorNamespace` and `sessionId = taskId` to match the namespace
  * templates configured on the extraction strategies:
  *   Episodic: `/{actorId}/episodes/{sessionId}/`
  *
  * @param memoryId - the AgentCore Memory resource ID.
- * @param repo - the "owner/repo" string (used as actorId for namespace derivation).
+ * @param actorNamespace - the namespace key (used as actorId for namespace derivation).
  * @param taskId - the task ID (used as sessionId for namespace derivation).
  * @param status - terminal task status.
  * @param durationS - task duration in seconds.
@@ -341,8 +289,6 @@ export async function writeMinimalEpisode(
       'Note: This is a minimal episode written by the orchestrator because the agent did not write memory.',
     ].filter(Boolean).join(' ');
 
-    // Hash the sanitized form; store the original. The read path re-sanitizes
-    // and checks against this hash: sanitize(original) at write == sanitize(stored) at read.
     const sanitizedText = sanitizeExternalContent(episodeText);
     const contentHash = hashContent(sanitizedText);
 

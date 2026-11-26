@@ -19,9 +19,6 @@
 
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from './microvm-regions';
 
-/**
- * Error categories for runtime task errors.
- */
 export const ErrorCategory = {
   AUTH: 'auth',
   NETWORK: 'network',
@@ -31,10 +28,6 @@ export const ErrorCategory = {
   GUARDRAIL: 'guardrail',
   CONFIG: 'config',
   TIMEOUT: 'timeout',
-  // Environmental blocker: agent could not progress for a missing
-  // secret, egress denial, unreachable dependency, or fail-closed policy
-  // engine error. Distinct from AUTH/CONFIG so operators can spot the
-  // typed, self-diagnosed faults the platform names precisely.
   BLOCKED: 'blocked',
   UNKNOWN: 'unknown',
 } as const;
@@ -47,20 +40,13 @@ export class MicrovmStartUncertainError extends Error {
 }
 
 /**
- * WHO should act, and whether retrying the SAME request can help — the axis a
- * channel reader needs to answer "just retry, or tell my admin?". Distinct from
- * ``category`` (which names WHAT broke) and from ``retryable`` (a plain boolean
- * that conflates "self-heals on retry" with "you must change something first"):
+ * WHO should act, and whether retrying the SAME request can help:
  *   - ``transient`` — an infrastructure/service HICCUP that usually clears itself:
- *     a retry of the identical request is the right move (ECS deploy-race, ENI
- *     delay, network blip, Bedrock throttle/5xx, concurrency cap). The platform
- *     may auto-retry these once at session-start; the user just retries otherwise.
+ *     a retry of the identical request is the right move. The platform
+ *     may auto-retry these once at session-start.
  *   - ``service`` — a real PLATFORM/CONFIG fault an operator owns: retrying the
- *     same request won't change the outcome until an admin fixes the setup (bad
- *     token/scopes, model not enabled, quota, blueprint misconfig).
- *   - ``user`` — the REQUEST or the code is the thing to change: the build/tests
- *     failed, content was blocked, the repo/PR wasn't found, max turns/budget hit.
- * Every classification carries exactly one. Guidance copy is derived from this.
+ *     same request won't change the outcome until an admin fixes the setup.
+ *   - ``user`` — the REQUEST or the code is the thing to change.
  */
 export const ErrorClass = {
   TRANSIENT: 'transient',
@@ -70,9 +56,6 @@ export const ErrorClass = {
 
 type ErrorClassType = (typeof ErrorClass)[keyof typeof ErrorClass];
 
-/**
- * Structured classification of a task error.
- */
 export interface ErrorClassification {
   readonly category: ErrorCategoryType;
   readonly title: string;
@@ -81,10 +64,7 @@ export interface ErrorClassification {
   readonly retryable: boolean;
   /**
    * transient (self-heals on retry) vs service (admin must fix) vs user (change
-   * the request/code). Drives {@link retryGuidance} and the session-start
-   * auto-retry. Optional so older/hand-built classifications still type-check;
-   * absent ⇒ treated as ``user`` (safest: don't promise a retry works, don't
-   * auto-retry). New PATTERNS should always set it.
+   * the request/code). Absent ⇒ treated as ``user``.
    */
   readonly errorClass?: ErrorClassType;
 }
@@ -95,7 +75,6 @@ interface ErrorPattern {
   readonly classification: ErrorClassification;
 }
 
-/** Stable codes written by the orchestrator; diagnostic text cannot override them. */
 const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassification>> = {
   MICROVM_RESUME_HOOK_FAILED: {
     category: ErrorCategory.COMPUTE,
@@ -148,9 +127,8 @@ function microvmTerminalCode(stateReason?: string): string {
 
 /**
  * Preserve the service reason for diagnosis, independently of the persisted code.
- * GetMicrovm exposes hook status only in stateReason. Recognize observed service
- * message shapes at this boundary; unknown wording stays a generic terminal failure.
- * The strategy itself continues to report state without applying health policy.
+ * GetMicrovm exposes hook status only in stateReason. Unknown wording stays a
+ * generic terminal failure.
  */
 export function formatMicrovmTerminalFailure(detail: string, stateReason?: string): string {
   const code = microvmTerminalCode(stateReason);
@@ -166,8 +144,6 @@ export function classifyMicrovmTerminalFailure(errorMessage?: string | null): Er
   if (MICROVM_RUN_HOOK_4XX.test(errorMessage)) return MICROVM_TERMINAL_CLASSIFICATIONS.MICROVM_RUN_HOOK_REJECTED;
   if (MICROVM_RESUME_HOOK_FAILURE.test(errorMessage)) return MICROVM_TERMINAL_CLASSIFICATIONS.MICROVM_RESUME_HOOK_FAILED;
 
-  // Old records have only the descriptive prefix. Do not let other words in
-  // their service reason override the known terminal failure.
   if (errorMessage.startsWith(MICROVM_TERMINAL_PREFIX)) {
     const reason = errorMessage.slice(errorMessage.indexOf(' (') + 2).replace(/\)$/, '');
     return MICROVM_TERMINAL_CLASSIFICATIONS[microvmTerminalCode(reason)];
@@ -177,9 +153,6 @@ export function classifyMicrovmTerminalFailure(errorMessage?: string | null): Er
 
 const PATTERNS: readonly ErrorPattern[] = [
   {
-    // The supervisor persists this reason for a permanent read failure or after
-    // exhausting its bounded retry count. Neither outcome establishes whether
-    // the retained worker was healthy or whether cleanup has completed.
     pattern: /^MicroVM supervisor: substrate-read-failed(?:-repeatedly)?$/,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -203,7 +176,6 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.SERVICE,
     },
   },
-  // --- Auth ---
   {
     pattern: /INSUFFICIENT_GITHUB_REPO_PERMISSIONS/i,
     classification: {
@@ -249,8 +221,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // The agent's push preflight (agent/src/repo.py): SAML SSO or an IP allow list
-    // blocks the token, which scopes would not fix.
     pattern: /GitHub organization policy blocks pushes to/i,
     classification: {
       category: ErrorCategory.AUTH,
@@ -262,7 +232,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // The agent's push preflight: no token change makes an archived repository writable.
     pattern: /is archived on GitHub, so it is read-only/i,
     classification: {
       category: ErrorCategory.CONFIG,
@@ -285,13 +254,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // GitHub was reached and refused the credential: the stored token is
-    // invalid, expired or revoked.
-    //
-    // ORDERING: this entry MUST stay ABOVE `GITHUB_UNREACHABLE`. Pre-flight
-    // files every non-2xx answer of its reachability probe under that reason, so
-    // the 401 arrives in the same message and would read as a network outage
-    // that a retry clears.
     pattern: /GitHub API returned HTTP 401/i,
     classification: {
       category: ErrorCategory.AUTH,
@@ -303,7 +265,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
-  // --- Network ---
   {
     pattern: /GITHUB_UNREACHABLE/i,
     classification: {
@@ -327,7 +288,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
-  // --- Concurrency ---
   {
     pattern: /concurrency limit/i,
     classification: {
@@ -340,13 +300,7 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
-  // --- Compute ---
   {
-    // A task dispatched against a task-def revision that was deregistered by a
-    // concurrent deploy. Transient + self-clearing on retry; dispatching against
-    // the task-definition FAMILY (rather than a pinned revision) prevents it going
-    // forward, but keep a precise classification so any historical/edge occurrence
-    // reads as "temporary, just retry", not a scary compute-health alarm.
     pattern: /TaskDefinition is inactive/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -358,16 +312,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // The repository is on a compute backend this stack cannot run it on. Either
-    // the pin is refused when the blueprint loads (`resolveRepositoryBackend` in
-    // compute-backend.ts), or the stack selects the backend but its strategy has
-    // nothing to start a session with (the "deployed without the … substrate"
-    // throw of the ECS and MicroVM strategies; for lambda-microvm that is the
-    // state between the first deploy and the one that adds the image).
-    //
-    // ORDERING: this entry MUST stay ABOVE the generic `Session start failed` and
-    // `Blueprint config load failed` entries. The messages are persisted under
-    // those two prefixes, and both entries offer a retry that cannot work.
     pattern: /compute_type '[\w-]+' is not deployed|deployed without the (?:ECS|Lambda MicroVMs) substrate/i,
     classification: {
       category: ErrorCategory.CONFIG,
@@ -381,19 +325,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // ADR-021 sub-decision 4, "Regional availability enforcement" (defense in
-    // depth): Lambda MicroVMs launched in 5 Regions, so a stack deployed
-    // elsewhere gets an endpoint-resolution failure from the SDK rather than a
-    // typed service error. Classify it as CONFIG + non-retryable so the task
-    // reply names the cause and the supported Regions instead of "temporary
-    // infrastructure issue — reply to retry" (which would loop forever).
-    //
-    // ORDERING: this entry MUST stay ABOVE the generic `Session start failed`
-    // pattern below, which would otherwise win on the persisted (wrapped)
-    // error_message and hand the user a retry remedy. Both alternatives are
-    // anchored on a `lambda`/`microvm` marker precisely so an AgentCore or ECS
-    // endpoint failure cannot be hijacked into MicroVM copy — their endpoint
-    // hosts are `bedrock-agentcore.*` / `ecs.*`.
     pattern: /(?:UnknownEndpoint|Inaccessible host|Could not resolve endpoint).{0,120}lambda|(?:lambda[- ]?microvms?|microvms?)\s+(?:service\s+)?(?:(?:is|are)\s+)?(?:not available|not supported|unavailable)\s+in\s+[^.\n]{0,50}\bregion\b/i,
     classification: {
       category: ErrorCategory.CONFIG,
@@ -411,44 +342,7 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.SERVICE,
     },
   },
-  // --- Lambda MicroVMs (ADR-021) ---
-  //
-  // SCOPING: the SDK-exception entries below are anchored on the
-  // ``MicroVM <operation> failed`` marker that
-  // ``lambda-microvm-strategy.wrapMicrovmError`` puts on every error it lets
-  // escape (see ``MICROVM_ERROR_MARKER``). The anchor is mandatory, not
-  // decorative: ``ThrottlingException``, ``ServiceQuotaExceededException`` and
-  // ``ResourceNotFoundException`` are generic AWS exception names that AgentCore,
-  // ECS, DynamoDB and Secrets Manager all throw too. Matching them unscoped
-  // would retroactively re-classify every other backend's throttle — changing
-  // its ``errorClass`` and therefore whether ``startSessionWithRetry``
-  // auto-retries it. Unmarked occurrences must keep falling through to whatever
-  // classified them before this section existed (a precise earlier pattern, or
-  // UNKNOWN).
-  //
-  // ``[\s\S]`` rather than ``.`` because SDK messages can span lines. The older
-  // quota/throttle/not-found patterns also accept the reverse wrapper order.
-  //
-  // ORDERING: this section sits immediately ABOVE the generic
-  // `Session start failed` catch-all. That is only safe BECAUSE of the marker:
-  // an unmarked `Session start failed: ThrottlingException` from AgentCore or ECS
-  // cannot match here and still reaches the generic entry with its original
-  // copy, while a MicroVM failure gets the precise remedy (quota-increase path,
-  // the MICROVM_* env vars to check) instead of "Check AgentCore Runtime or ECS
-  // cluster health" — advice that names the wrong substrate entirely. If the
-  // marker anchor is ever dropped, these MUST move back below the catch-all.
   {
-    // A `platform_config` block the orchestrator could not even assemble: a
-    // REQUIRED key is absent from the orchestrator Lambda's own environment, so
-    // `buildMicrovmPlatformConfig` refuses to start the session (ADR-021
-    // sub-decision 3 forbids baking these into the snapshot, so the /run payload
-    // is the only channel and an incomplete one cannot be sent).
-    //
-    // Distinct entry rather than letting it reach the generic `Session start
-    // failed` catch-all, which would call it TRANSIENT and tell the operator to
-    // check AgentCore/ECS health — the wrong substrate for a fault that lives in
-    // this backend's own wiring, and one that no retry can fix. Placed above the
-    // catch-all for the same marker-anchored reason as the SDK entries below.
     pattern: /MicroVM platform config failed/i,
     classification: {
       category: ErrorCategory.CONFIG,
@@ -463,9 +357,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // Account-level capacity may become available as other sessions terminate.
-    // Suspended-session quota accounting still needs live verification; do not
-    // promise that suspending a session frees capacity.
     pattern: /MicroVM [\w ]+failed[\s\S]*ServiceQuotaExceededException|ServiceQuotaExceededException[\s\S]*MicroVM [\w ]+failed/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -491,13 +382,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // A named resource the strategy was handed does not exist: a MicroVM image
-    // identifier/version, an execution role, or a network connector ARN. Always
-    // a deploy/config fault — retrying with the same ARNs cannot succeed.
-    //
-    // NOTE: `pollSession` maps a ResourceNotFoundException from `GetMicrovm` to
-    // `completed` (a reaped MicroVM) and never lets it reach here, so this entry
-    // only ever sees start-time resource faults.
     pattern: /MicroVM [\w ]+failed[\s\S]*ResourceNotFoundException|ResourceNotFoundException[\s\S]*MicroVM [\w ]+failed/i,
     classification: {
       category: ErrorCategory.CONFIG,
@@ -611,11 +495,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // The two messages of the stranded-task reconciler
-    // (`reconcile-stranded-tasks.ts`): a task that nothing was driving any more.
-    // For a task still HYDRATING it is the condition the orchestrator reports as
-    // `Session never started` above, found by the sweep because the orchestrator
-    // was gone. Without this entry they read "Unexpected error", not retryable.
     pattern: /Stranded: (?:SUBMITTED|HYDRATING) for \d+s|Approval stranded:/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -638,19 +517,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // The `claude` CLI on the agent image couldn't be exec'd: either the OS
-    // refused the binary (`OSError: [Errno 8] Exec format error: 'claude'`) or
-    // the claude-code shim reports its platform-native binary was never placed
-    // ("claude native binary not installed" — its postinstall silently fell
-    // back at image-build time). Observed in practice: three consecutive ECS runs
-    // all died at the run_agent step this way on a freshly rebuilt image, while the
-    // native binary was present but unwired. This is an IMAGE/infra fault, NOT a
-    // problem with the user's request — a fresh attempt usually lands on a host
-    // that materializes the image cleanly; a persistent one is a bad build an
-    // admin must rebuild. Without this bucket it fell through to a bare
-    // "Unexpected error" with no guidance (the anti-pattern the error-feedback
-    // work set out to kill). Matched before AGENT/UNKNOWN so the precise,
-    // retry-oriented copy wins.
     pattern: /Exec format error.*claude|claude.*Exec format error|claude native binary not installed/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -662,7 +528,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
-  // --- Agent ---
   {
     pattern: /Agent SDK stream ended without a ResultMessage/i,
     classification: {
@@ -674,29 +539,7 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.TRANSIENT,
     },
   },
-  // Specific agent_status classifiers — ordered BEFORE the generic
-  // ``Task did not succeed.*agent_status=`` catch-all so the concrete
-  // cap / runtime-error signals surface to users rather than the
-  // opaque "Agent task did not succeed" title. Each matches the
-  // status literal under BOTH wrappers the agent emits:
-  //   - ``agent_status=error_max_turns`` — ``agent/src/pipeline.py``
-  //     (``_resolve_overall_task_status``); and
-  //   - ``Agent session error (subtype='error_max_turns')`` —
-  //     ``agent/src/runner.py:515`` (the terminal-error path).
-  // Keying on only ``agent_status=`` missed the ``subtype=`` wrapper, so a
-  // real max-turns failure fell through to UNKNOWN → "Unexpected error"
-  // (observed in practice: a task hit the 100-turn cap but the reply
-  // said "Unexpected error"). Match either ``agent_status=``/``subtype=``.
   {
-    // A max-turns cap is a correct, self-explanatory classification. When the
-    // stuck-guard observed the last several tool calls repeating the SAME failure
-    // it is appended to the reason as a neutral OBSERVATION ("last tool calls
-    // repeated: `<cmd>` → <err>") — we surface WHAT was on screen but deliberately
-    // make NO causal claim about whether more turns would have helped: the
-    // trailing window (last 6 calls) can't distinguish a hard blocker from a long
-    // task that hit a recoverable snag only at the tail, so re-framing the whole
-    // run as "retrying a failing step" would misrepresent the latter. The reader
-    // sees the observed detail and the neutral remedy and decides.
     pattern: /(?:agent_status|subtype)=['"]?error_max_turns['"]?/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
@@ -730,12 +573,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // The build gate was KILLED by an environment fault (out of
-    // disk / OOM) — the code was never verified. The agent tags the verdict
-    // ``build_ok=infra`` so this reads as a retryable INFRA fault, not "your
-    // build failed" and not a bogus ✅ (a build also killed before the agent
-    // would otherwise look "already red → not a regression → success"). Matched
-    // before the generic ``Task did not succeed.*agent_status=`` catch-all.
     pattern: /Task did not succeed.*build_ok=infra/i,
     classification: {
       category: ErrorCategory.COMPUTE,
@@ -747,10 +584,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // ``_apply_delivery_gate`` (``agent/src/pipeline.py``) cannot tell lost changes
-    // from a run that correctly changed nothing (#751), so the copy names both.
-    // Retryable, because a fresh run usually lands lost work.
-    // Ordered before the generic ``agent_status=`` catch-all so it wins.
     pattern: /deliverable=lost/i,
     classification: {
       category: ErrorCategory.AGENT,
@@ -758,17 +591,10 @@ const PATTERNS: readonly ErrorPattern[] = [
       description: 'The agent finished and reported success, but no commit reached the branch and no pull request was opened. Either the agent found nothing to change (for example, the repository already has what the request asked for), or it made changes that were lost before they reached the branch. The platform cannot tell the two apart.',
       remedy: 'Check whether the repository already has what you asked for: if it does, nothing more is needed, and a retry would end the same way. If a change was expected, reply here to try again; if it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
       retryable: true,
-      // USER on purpose. TRANSIENT makes ``retryGuidance`` ask for a plain retry, which
-      // cannot help a run that correctly changed nothing.
       errorClass: ErrorClass.USER,
     },
   },
   {
-    // The sibling of the work-lost case: a commit DID land on the branch but
-    // the PR never opened (e.g. ``gh pr create`` failed after the push). The
-    // code is safe on the branch; the only missing step is opening the PR — so
-    // a retry (or an operator opening it by hand) recovers it. Distinct copy
-    // from the work-lost case so the reader knows the change is NOT gone.
     pattern: /deliverable=no_pr/i,
     classification: {
       category: ErrorCategory.AGENT,
@@ -779,12 +605,6 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.TRANSIENT,
     },
   },
-  // The agent finished cleanly and the post-agent build gate is what stopped
-  // the task (``agent/src/pipeline.py`` ``_resolve_overall_task_status``): the
-  // verify command ran past its time limit (``build_ok=timeout``) or failed
-  // (``build_ok=False``). ``failure-reply.ts`` tells the two apart for the
-  // replies it renders; without these entries every other reader got the generic
-  // catch-all below, "the agent reported a non-success status", not retryable.
   {
     pattern: /agent_status=['"]?(?:success|end_turn)['"]?.*build_ok=timeout/i,
     classification: {
@@ -793,9 +613,6 @@ const PATTERNS: readonly ErrorPattern[] = [
       description: 'The agent finished its change, but the configured build/verify command was still running when it hit the time limit and was stopped — it did not fail, it ran too long.',
       remedy: 'This is usually a slow build, not broken code — retry, since a one-off may just have been slow. If a repo\'s build is legitimately long, its build environment likely needs more time or capacity; contact your ABCA admin.',
       retryable: true,
-      // Intentionally USER (no auto-retry): re-running an unchanged slow build
-      // just times out again, so this must NOT be TRANSIENT — a human decides
-      // whether to retry or right-size the build. Do not "fix" this to TRANSIENT.
       errorClass: ErrorClass.USER,
     },
   },
@@ -833,7 +650,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
-  // --- Guardrail ---
   {
     pattern: /Guardrail blocked/i,
     classification: {
@@ -857,7 +673,6 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
-  // --- Config ---
   {
     pattern: /not available on your bedrock|not available.*bedrock deployment/i,
     classification: {
@@ -895,17 +710,7 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
-  // --- Timeout ---
   {
-    // An ``agent/`` subprocess (``run_cmd``) hit its wall-clock cap and Python
-    // raised an uncaught ``TimeoutExpired … timed out after N seconds``, which
-    // otherwise surfaces as a bare "Unexpected error". This is NOT a code
-    // failure — the command didn't fail, it ran too long — so name it precisely
-    // and point at "slow, retry", not the diff. NOTE: this matches only
-    // UNCAUGHT ``run_cmd`` timeouts, and the build and lint commands catch their
-    // own: a timed-out build gate arrives as ``build_ok=timeout`` (Agent block
-    // above). What reaches this entry is a command around the agent's work —
-    // clone, fetch, ``mise install``, push — so the copy must not name the build.
     pattern: /TimeoutExpired.*timed out after \d+(?:\.\d+)? ?s(econds)?|Command .*build.* timed out/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
@@ -913,8 +718,6 @@ const PATTERNS: readonly ErrorPattern[] = [
       description: 'A command the agent runs around its work (cloning the repository, fetching a branch, installing tools, pushing) was still running when it hit its time limit and was stopped — it did not fail, it ran too long.',
       remedy: 'Usually a slow network or a very large repository — retry. If it keeps happening on this repo, contact your ABCA admin with the task id.',
       retryable: true,
-      // USER, not TRANSIENT: a clone or install that needs more than its time
-      // limit hits it again, so the next step is a deliberate retry.
       errorClass: ErrorClass.USER,
     },
   },
@@ -932,17 +735,6 @@ const PATTERNS: readonly ErrorPattern[] = [
 
 ];
 
-/**
- * The agent's push preflight refusal (``PushCapabilityError`` in agent/src/repo.py):
- * ``Token cannot push to <repo>: GitHub refused the <token type> write access (<git
- * line>). To fix it, <fix>. The task stopped before the agent ran …``. The fix
- * depends on the token type (scope for a classic PAT, repository access and
- * Contents for a fine-grained one, installation for a GitHub App), so the
- * classification carries the agent's own fix rather than the generic remedy of
- * the ``Token cannot push`` pattern, which the orchestrator's preflight shares.
- * The fix is matched up to the sentence that follows it, so a period inside it (a
- * repository named ``a.b``) does not cut it short.
- */
 const AGENT_PUSH_REFUSAL = /Token cannot push to (\S+): GitHub refused the (.+?) write access \(.*?\)\. To fix it, (.+?)\. The task stopped before the agent ran/;
 
 function agentPushRefusalClassification(repo: string, tokenType: string, fix: string): ErrorClassification {
@@ -956,25 +748,9 @@ function agentPushRefusalClassification(repo: string, tokenType: string, fix: st
   };
 }
 
-/**
- * Canonical blocker-reason contract. Matches ``BLOCKED[<kind>]`` and,
- * separately, the optional `` (resource: <resource>)``
- * segment ``format_blocker_reason`` appends. This is the SINGLE source of truth
- * on the CDK side and must stay in lockstep with ``format_blocker_reason`` in
- * ``agent/src/progress_writer.py`` and the taxonomy table in
- * ``docs/design/CEDAR_HITL_GATES.md`` §13.
- *
- * The two parts are matched independently (not one ``$``-anchored regex)
- * because ``failTask`` persists ``TaskResult.error`` verbatim and it may be
- * wrapped with trailing text or a stack trace after the reason — anchoring the
- * resource group to end-of-string would silently drop the host/secret name in
- * exactly that case. ``kind`` is matched case-insensitively and lowercased
- * before dispatch so a mixed-case producer still routes to the right remedy.
- */
 const BLOCKED_KIND = /BLOCKED\[([a-z_]+)\]/i;
 const BLOCKED_RESOURCE = /\(resource:\s*([^)]+)\)/i;
 
-/** Closed blocker-kind set — mirrors ``BLOCKER_KINDS`` in agent/src/progress_writer.py. */
 export type BlockerKind =
   | 'missing_secret'
   | 'egress_denied'
@@ -983,15 +759,6 @@ export type BlockerKind =
   | 'auth_failure'
   | 'unknown_environmental';
 
-/**
- * Build the canonical terminal-reason string for an orchestration-side blocker —
- * the TypeScript twin of ``format_blocker_reason`` in
- * ``agent/src/progress_writer.py``. Produces ``BLOCKED[<kind>]: <detail>`` with
- * `` (resource: <resource>)`` appended when ``resource`` is set, so the same
- * ``classifyError`` regex that handles agent-carried reasons also classifies
- * reasons written directly by the orchestrator (e.g. a missing secret detected
- * during hydration).
- */
 const BLOCKER_KINDS: ReadonlySet<string> = new Set<BlockerKind>([
   'missing_secret',
   'egress_denied',
@@ -1001,17 +768,17 @@ const BLOCKER_KINDS: ReadonlySet<string> = new Set<BlockerKind>([
   'unknown_environmental',
 ]);
 
+/**
+ * Build the canonical terminal-reason string for an orchestration-side blocker:
+ * ``BLOCKED[<kind>]: <detail>`` with `` (resource: <resource>)`` appended when
+ * ``resource`` is set.
+ */
 export function formatBlockerReason(kind: BlockerKind, detail: string, resource?: string): string {
-  // Normalise an out-of-set kind to unknown_environmental — matches the Python
-  // format_blocker_reason fallback so a value cast via `as BlockerKind` (or a
-  // future non-literal caller) can never emit a reason the classifier's closed
-  // taxonomy won't recognise.
   const safeKind = BLOCKER_KINDS.has(kind) ? kind : 'unknown_environmental';
   const base = `BLOCKED[${safeKind}]: ${detail}`;
   return resource ? `${base} (resource: ${resource})` : base;
 }
 
-/** Per-kind blocker remedy builder. ``resource`` is the extracted name (secret, host, …). */
 function blockerClassification(kind: string, resource: string | undefined): ErrorClassification {
   const res = resource?.trim();
   switch (kind) {
@@ -1048,10 +815,6 @@ function blockerClassification(kind: string, resource: string | undefined): Erro
         retryable: false,
       };
     case 'auth_failure': {
-      // A Secrets Manager ARN resource means the secret exists but couldn't be
-      // read (AccessDenied / throttling) — the fix is IAM on the task role or
-      // blueprint wiring, NOT PAT scopes. A non-ARN resource is a
-      // runtime credential rejection where scope/validity is the right advice.
       const isSecretArn = res?.startsWith('arn:aws:secretsmanager:') ?? false;
       return {
         category: ErrorCategory.BLOCKED,
@@ -1066,7 +829,6 @@ function blockerClassification(kind: string, resource: string | undefined): Erro
       };
     }
     default:
-      // unknown_environmental + any future/mis-typed kind
       return {
         category: ErrorCategory.BLOCKED,
         title: 'Blocked: environmental fault',
@@ -1083,16 +845,9 @@ const UNKNOWN_CLASSIFICATION: ErrorClassification = {
   description: 'An unrecognized error occurred during task execution.',
   remedy: 'Check the full error message and agent logs for details. If the issue persists, report it.',
   retryable: false,
-  // Unknown = don't over-promise: a retry MIGHT clear a one-off, but we can't
-  // assert it, so treat like 'user' (surface + suggest escalation) rather than
-  // auto-retrying an error we don't understand.
   errorClass: ErrorClass.USER,
 };
 
-/**
- * Bounds what is classified: the agent stores at most 1,000 characters, and the
- * platform's own reasons carry their marker at the front.
- */
 const CLASSIFIED_MESSAGE_CHARS = 1000;
 
 /**
@@ -1108,13 +863,9 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
   if (typeof errorMessage !== 'string' || errorMessage === '') return null;
   const message = errorMessage.slice(0, CLASSIFIED_MESSAGE_CHARS);
 
-  // Read the orchestrator's code before scanning any appended service text.
   const microvmFailure = classifyMicrovmTerminalFailure(message);
   if (microvmFailure) return microvmFailure;
 
-  // Environmental blockers carry a canonical ``BLOCKED[<kind>]`` prefix
-  // and an extractable resource — check them first so the remedy can name the
-  // exact secret / host rather than falling through to a generic pattern.
   const kindMatch = BLOCKED_KIND.exec(message);
   if (kindMatch) {
     const resource = BLOCKED_RESOURCE.exec(message)?.[1];
@@ -1137,30 +888,15 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
 
 /**
  * True when the error is a transient infrastructure/service HICCUP that a plain
- * retry usually clears (see {@link ErrorClass}). Used to gate the session-start
- * auto-retry AND to tune the guidance copy. Absent errorClass ⇒ NOT transient
- * (conservative: never auto-retry an error we didn't explicitly mark).
+ * retry usually clears (see {@link ErrorClass}). Absent errorClass ⇒ NOT transient.
  */
 export function isTransientError(classification: ErrorClassification | null | undefined): boolean {
   return classification?.errorClass === ErrorClass.TRANSIENT;
 }
 
 /**
- * One short, user-facing NEXT-STEP line for a classified failure — the answer to
- * "should I just retry this, or tell my admin?" that a channel reader (Linear/
- * Slack) can act on WITHOUT reading CloudWatch. Derived from the classification's
- * ``errorClass`` (transient / service / user — never the raw error), so it stays
- * safe to show and consistent with the CLI's structured display.
- *
- * The three-way split (which the ``retryable`` boolean alone couldn't express):
- *   - **transient** — infra/service hiccup, request is fine, a retry clears it
- *     (ECS deploy-race, ENI delay, network blip, throttle, concurrency cap). If
- *     ``autoRetried`` is set, say we ALREADY retried once and it still failed.
- *   - **service** — a real platform/config fault an operator owns; retrying the
- *     same request won't change the outcome until an admin fixes the setup.
- *   - **user** — the request or the code is the thing to change (build/test
- *     failed, content blocked, wrong PR, max turns) — a plain reply-to-retry with
- *     guidance, except guardrail which needs an edit.
+ * One short, user-facing NEXT-STEP line for a classified failure. Derived from the
+ * classification's ``errorClass`` (transient / service / user — never the raw error).
  * Returned WITHOUT a trailing space; callers add their own separator.
  *
  * @param autoRetried set when the platform already auto-retried a transient
@@ -1181,17 +917,13 @@ export function retryGuidance(
         + 'reply here to try again. If it keeps happening, contact your ABCA admin.';
   }
   if (cls === ErrorClass.SERVICE) {
-    // Platform/config fault — a plain retry won't change the outcome; an admin owns it.
     return 'Retrying as-is won\'t fix this — it needs your ABCA admin to correct the access or configuration, then re-apply the label.';
   }
-  // user: the request/code is the thing to change.
   if (classification.category === ErrorCategory.GUARDRAIL) {
     return 'Retrying the same text won\'t help — edit the request to remove the flagged content, then re-apply the label.';
   }
   if (classification.retryable) {
-    // build/test failed, max-turns, transient agent crash → a fresh attempt (or guidance) can clear it.
     return 'Reply here with any extra guidance and I\'ll try again.';
   }
-  // not-retryable user/unknown (e.g. agent reported non-success) — don't promise a retry works.
   return 'A retry may not resolve this on its own — if it repeats, contact your ABCA admin with the task id above.';
 }

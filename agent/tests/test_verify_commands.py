@@ -1,5 +1,3 @@
-"""Tests for the configurable build/lint verification command (#1 build-gate fix)."""
-
 from __future__ import annotations
 
 import subprocess
@@ -35,10 +33,6 @@ class TestResolveVerifyArgv:
         ]
 
     def test_chained_command_runs_through_a_shell(self):
-        # #72: a && / | / ; chain must run via `bash -lc` so the WHOLE chain
-        # executes. Previously shlex-split into one `npm` call with `&&`/`npm`/…
-        # as bogus args — `npm ci` ran, ignored the rest, exited 0, and a broken
-        # lint/test in the chain NEVER ran (false "build OK").
         assert resolve_verify_argv("npm ci && npm run lint && npm test", "") == [
             "bash",
             "-lc",
@@ -52,15 +46,9 @@ class TestResolveVerifyArgv:
             assert argv[2] == cmd
 
     def test_plain_command_still_direct_argv(self):
-        # No operators → still a direct exec (no shell wrapper).
         assert resolve_verify_argv("npm run build", "") == ["npm", "run", "build"]
 
     def test_env_assignment_prefix_wraps_in_shell(self):
-        # A leading VAR=value env-prefix is shell syntax. Exec'd
-        # directly, shlex-split makes the FIRST token the "program" (VAR=value) →
-        # FileNotFoundError, crashing the task before the build runs. Must route
-        # through bash -lc so the assignment takes effect. (Observed in practice: a
-        # lint_command of `MISE_EXPERIMENTAL=1 mise //cdk:eslint` crashed at exit 1.)
         assert resolve_verify_argv("MISE_EXPERIMENTAL=1 mise //cdk:eslint", "") == [
             "bash",
             "-lc",
@@ -72,8 +60,6 @@ class TestResolveVerifyArgv:
         assert resolve_verify_argv(cmd, "") == ["bash", "-lc", cmd]
 
     def test_equals_not_at_start_is_not_an_env_prefix(self):
-        # An `=` inside a later arg (not a leading VAR= token) is NOT an env prefix
-        # — a plain command with such an arg still execs directly.
         assert resolve_verify_argv("npm run build --define=X=1", "") == [
             "npm",
             "run",
@@ -111,8 +97,6 @@ class TestVerifyBuildHonorsCommand:
         assert seen["argv"] == ["npm", "run", "build"]
 
     def test_verify_passes_the_build_timeout(self, monkeypatch):
-        # The verify subprocess must run under BUILD_VERIFY_TIMEOUT_S (not
-        # run_cmd's 600s default) so a real CI-parity build can finish.
         seen = self._capture_argv(monkeypatch)
         verify_build("/repo", "mise run build")
         assert seen["kw"].get("timeout") == post_hooks.BUILD_VERIFY_TIMEOUT_S
@@ -126,12 +110,9 @@ class TestVerifyBuildHonorsCommand:
         monkeypatch.setattr(post_hooks, "run_cmd", lambda argv, **kw: SimpleNamespace(returncode=1))
         outcome = verify_build("/repo", "npm run build")
         assert outcome.passed is False
-        assert outcome.timed_out is False  # ran-and-failed, not a timeout
+        assert outcome.timed_out is False
 
     def test_timeout_is_not_passed_AND_flagged_timed_out(self, monkeypatch):
-        # The key distinction: a timeout must read as "timed
-        # out", not a generic build failure. passed=False (a build that never
-        # finished isn't green) but timed_out=True so the reason differs.
         def boom(argv, **kw):
             raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
 
@@ -141,9 +122,6 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.timed_out is True
 
     def test_exit_127_is_INERT_not_a_build_failure(self, monkeypatch):
-        # Command-not-found (e.g. yarn missing) means the gate couldn't run —
-        # a CONFIG problem, not the agent's code. Must flag inert, not a failure,
-        # so the platform doesn't emit a false "build failed".
         monkeypatch.setattr(
             post_hooks,
             "run_cmd",
@@ -164,8 +142,6 @@ class TestVerifyBuildHonorsCommand:
         assert verify_build("/repo", "mise run build").inert is True
 
     def test_genuine_nonzero_is_a_failure_NOT_inert(self, monkeypatch):
-        # A real compiler/test failure (exit 1/2 with real output) must NOT be
-        # mislabeled inert — that would hide a genuine red build.
         monkeypatch.setattr(
             post_hooks,
             "run_cmd",
@@ -176,10 +152,6 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.inert is False
 
     def test_ENOSPC_is_INFRA_failure_not_a_build_failure(self, monkeypatch):
-        # Disk-full mid-build means the build couldn't COMPLETE on
-        # this host — an infra fault, not broken code. Must flag infra_failed
-        # (not a plain failure, not inert) so the platform reports "retry / needs
-        # capacity", not "build/tests failed".
         enospc = "yarn error ENOSPC: no space left on device, write"
         monkeypatch.setattr(
             post_hooks,
@@ -189,7 +161,7 @@ class TestVerifyBuildHonorsCommand:
         outcome = verify_build("/repo", "mise run build")
         assert outcome.passed is False
         assert outcome.infra_failed is True
-        assert outcome.inert is False  # NOT a config problem
+        assert outcome.inert is False
 
     def test_OOM_sigkill_137_is_INFRA_failure(self, monkeypatch):
         monkeypatch.setattr(
@@ -202,13 +174,6 @@ class TestVerifyBuildHonorsCommand:
         assert outcome.infra_failed is True
 
     def test_bare_sigkill_137_no_stderr_signature_is_INFRA_not_inert(self, monkeypatch):
-        # Regression observed in practice: the container/cgroup OOM-killer delivers
-        # SIGKILL and writes "Killed process …" to the KERNEL log, not the build
-        # process's own stderr — so an OOM'd `mise run build` exits 137 with NO
-        # "killed"/"out of memory" string captured. Such a 137 was mislabeled
-        # INERT (the greedy `mise`+`not found` heuristic matched an unrelated
-        # webhook-test fixture line in the big streamed log). A bare 137 must be
-        # INFRA (retry/capacity), never inert (config) and never a build failure.
         mise_and_notfound = (
             "[//agent:test] tests/test_attachments.py ...\n"
             "[//cdk:test] Linear project is not found — skipping\n"
@@ -222,14 +187,9 @@ class TestVerifyBuildHonorsCommand:
         outcome = verify_build("/repo", "mise run build")
         assert outcome.passed is False
         assert outcome.infra_failed is True
-        assert outcome.inert is False  # infra checked BEFORE inert
+        assert outcome.inert is False
 
     def test_bare_sigkill_137_plain_output_is_INFRA_not_a_build_failure(self, monkeypatch):
-        # The dangerous fall-through: a 137 whose captured output trips NEITHER the
-        # inert nor OOM string heuristics would have been reported as a GENUINE
-        # build FAILURE → a false gate blocking healthy code (and, in an epic,
-        # poisoning the dependent cascade). SIGKILL is a resource kill, not a
-        # test result, so it must be infra.
         monkeypatch.setattr(
             post_hooks,
             "run_cmd",
@@ -252,7 +212,6 @@ class TestIsVerifyCommandInert:
         assert is_verify_command_inert(1, "mise ERROR: no task named 'build'") is True
 
     def test_genuine_build_failure_is_NOT_inert(self):
-        # Real compiler/test output, exited non-zero → meaningful gating signal.
         real_failure = "TypeError: cannot read property 'x'\n1 test failed"
         assert is_verify_command_inert(2, real_failure) is False
 

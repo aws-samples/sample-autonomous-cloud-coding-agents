@@ -17,25 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Cedar-HITL Day-1 spike: cedar-wasm parse + annotation extraction contract.
- *
- * Locks the assumption (decision #22 / §15.6 of
- * docs/design/CEDAR_HITL_GATES.md) that @cedar-policy/cedar-wasm@4.12.0
- * preserves the five HITL annotations (@rule_id, @tier, @approval_timeout_s,
- * @severity, @category) verbatim as a string → string Record under
- * ``policyToJson(text).json.annotations``.
- *
- * If a future cedar-wasm release renames the key, drops values, or changes
- * the wrapper shape, this test flips red BEFORE shared/cedar-policy.ts
- * (Chunk 5) starts returning subtly-wrong annotation data to CreateTaskFn
- * and friends.
- *
- * Parity with cedarpy is tested separately in cedar-parity.test.ts against
- * the shared contracts/cedar-parity/ fixtures; this file validates only the
- * Lambda-side (cedar-wasm) API shape.
- */
-
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const cedar = require('@cedar-policy/cedar-wasm/nodejs');
 
@@ -89,9 +70,6 @@ describe('cedar-wasm API contract — policyToJson annotation surface', () => {
   test('policyToJson returns {type: success, json: {...}} wrapper', () => {
     const parts = cedar.policySetTextToParts(ANNOTATED_POLICY) as PolicySetParts;
     const parsed = cedar.policyToJson(parts.policies![0]) as PolicyJson;
-    // Chunk 5's shared/cedar-policy.ts checks parsed.type before touching
-    // .json — if cedar-wasm ever flattens this wrapper, the null-guard
-    // blocks parsing but the rule-ID map silently empties.
     expect(parsed.type).toBe('success');
     expect(parsed.json).toBeDefined();
   });
@@ -113,8 +91,6 @@ describe('cedar-wasm API contract — policyToJson annotation surface', () => {
   });
 
   test('approval_timeout_s annotation preserved as string', () => {
-    // Cedar annotations are always string-valued; the Lambda parser coerces
-    // to int inside isHardDenyRule / rule-ID lookup (§15.6 sketch).
     const { annotations } = firstPolicyJson(ANNOTATED_POLICY)!;
     expect(annotations!.approval_timeout_s).toBe('300');
     expect(typeof annotations!.approval_timeout_s).toBe('string');
@@ -151,9 +127,6 @@ describe('cedar-wasm API contract — policyToJson annotation surface', () => {
     const parts = cedar.policySetTextToParts(twoPolicies) as PolicySetParts;
     expect(parts.type).toBe('success');
     expect(parts.policies!.length).toBe(2);
-    // The shared parser (§15.6 parseRules sketch) iterates this array and
-    // calls policyToJson per element; confirming the split is ordered and
-    // lossless matters for per-rule annotation recovery.
     const first = cedar.policyToJson(parts.policies![0]) as PolicyJson;
     const second = cedar.policyToJson(parts.policies![1]) as PolicyJson;
     expect(first.json!.annotations!.rule_id).toBe('force_push_any');
@@ -174,11 +147,6 @@ describe('cedar-wasm API contract — isAuthorized shape', () => {
     expect(r.type).toBe('success');
     expect(r.response).toBeDefined();
     expect(r.response.decision).toBe('deny');
-    // cedar-wasm exposes matching policy IDs under diagnostics.reason
-    // (singular) — note the asymmetry with cedarpy's diagnostics.reasons
-    // (plural). The shared parser (§15.6) normalizes via the fixture
-    // comparator. IMPL-29 candidate: document this naming asymmetry in
-    // §15.6 so future maintainers don't trip on it.
     expect(r.response.diagnostics.reason).toEqual(['policy0']);
   });
 
@@ -199,9 +167,6 @@ describe('cedar-wasm API contract — isAuthorized shape', () => {
     });
     expect(r.type).toBe('success');
     expect(r.response.decision).toBe('deny');
-    // §6.3 annotation-merging depends on both matching policy IDs being
-    // returned here. If cedar-wasm short-circuits on first match, the
-    // cross-engine parity test (cedar-parity.test.ts) catches it.
     expect(r.response.diagnostics.reason.length).toBe(2);
   });
 });

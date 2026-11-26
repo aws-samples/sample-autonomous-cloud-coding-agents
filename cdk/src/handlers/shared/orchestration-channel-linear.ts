@@ -17,17 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Linear implementation of the surface-agnostic {@link Channel}. A thin adapter:
- * it maps the channel-neutral operations onto the existing Linear feedback
- * helpers, so the orchestration engine gets exactly today's
- * Linear behavior through the abstraction — no behavior change, just an indirection
- * the engine can also satisfy for other surfaces.
- *
- * Surface-specific choices made here (kept OUT of the engine): the reaction-emoji
- * mapping and the markdown comment format (Linear-native).
- */
-
 import {
   EMOJI_FAILURE,
   EMOJI_NEEDS_INPUT,
@@ -52,8 +41,6 @@ import {
   type StateIntent,
 } from './orchestration-channel';
 
-/** Map the engine's small reaction vocabulary to Linear's emoji names. This is
- *  the one place the surface's reaction set is known. */
 const REACTION_EMOJI: Record<Reaction, string> = {
   started: EMOJI_STARTED,
   succeeded: EMOJI_SUCCESS,
@@ -62,15 +49,8 @@ const REACTION_EMOJI: Record<Reaction, string> = {
 };
 
 /**
- * Map the engine's state intent onto how Linear is asked for that state: the
- * semantic state TYPE plus the state NAMES to prefer within it.
- *
- * The name preference is load-bearing, not decoration. Linear models both "In
- * Progress" and "In Review" as type ``started``, so type alone cannot say which
- * one the engine meant — without the name the transition would resolve to
- * whichever the team happens to order first and the two intents would collapse
- * into the same move. Teams that lack the preferred name still resolve to a
- * sensible state of the right type.
+ * Linear models both "In Progress" and "In Review" as type ``started``, so type
+ * alone cannot say which one the engine meant.
  */
 const STATE_TARGET: Record<StateIntent, { type: 'started' | 'completed'; prefer: readonly string[] }> = {
   started: { type: 'started', prefer: ['In Progress'] },
@@ -81,8 +61,7 @@ const STATE_TARGET: Record<StateIntent, { type: 'started' | 'completed'; prefer:
 /**
  * Build a Linear {@link Channel}. ``registryTableName`` is the workspace-registry
  * table the token resolver reads; an {@link IssueRef}'s ``credentialsRef`` is the
- * Linear workspace (organization) id that keys it. The feedback helpers each take
- * a {@link LinearFeedbackContext} built from that pair.
+ * Linear workspace (organization) id that keys it.
  */
 export function makeLinearChannel(registryTableName: string): Channel {
   const ctxFor = (issue: IssueRef): LinearFeedbackContext => ({
@@ -95,8 +74,6 @@ export function makeLinearChannel(registryTableName: string): Channel {
 
     async postComment(issue, body) {
       const res = await postIssueComment(ctxFor(issue), issue.issueId, body);
-      // postIssueComment doesn't return the new comment id, so callers that need
-      // to edit later use upsertComment instead. Report success/failure only.
       return res.ok ? { commentId: '' } : null;
     },
 
@@ -110,7 +87,6 @@ export function makeLinearChannel(registryTableName: string): Channel {
     },
 
     async reactToComment(comment, issue, reaction) {
-      // ADD-only (no delete of prior markers) — the instant receipt ack.
       return addCommentReaction(ctxFor(issue), comment.commentId, REACTION_EMOJI[reaction]);
     },
 

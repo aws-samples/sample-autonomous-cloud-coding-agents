@@ -21,13 +21,8 @@ import { isValidRepo } from './validation';
 
 /**
  * Subset of GitHub's `deployment_status` webhook payload that the
- * screenshot pipeline reads. Shared between the receiver (HMAC verify,
- * filter, dedup) and the processor (capture + post). Single source of
- * truth so the two sides can't drift on field shape — and so the
- * receiver-side filter and the processor-side reads agree on what's
- * required.
+ * screenshot pipeline reads.
  *
- * The interesting fields:
  *  - `deployment_status.state`: `success` | `failure` | `error` |
  *    `pending` | `in_progress`
  *  - `deployment_status.environment_url`: the deployed URL — lives on
@@ -37,12 +32,8 @@ import { isValidRepo } from './validation';
  *    it in.)
  *  - `deployment.environment`: provider-defined string (Vercel uses
  *    `Preview`/`Production`, Amplify uses the branch name, GitHub
- *    Actions uses whatever the workflow passes). Filtered against
- *    `SCREENSHOT_TARGET_ENVIRONMENT` for deployment statuses only; validated
- *    Amplify checks bypass this filter.
- *  - `deployment.sha`: the commit SHA the deploy is for (used to map
- *    back to a PR via commit-pulls for deployment statuses; Amplify checks
- *    carry a validated PR number and verify its live head directly).
+ *    Actions uses whatever the workflow passes).
+ *  - `deployment.sha`: the commit SHA the deploy is for.
  */
 export interface GitHubDeploymentStatusPayload {
   readonly action?: string;
@@ -108,7 +99,6 @@ export type PrLookupRetryableReason =
   | 'pr_not_linked'
   | 'budget_exhausted';
 
-/** Shared by receiver normalization and the processor's second URL check. */
 export const AMPLIFY_PREVIEW_HOST = /^pr-([1-9]\d*)\.[a-z0-9]+\.amplifyapp\.com$/;
 
 export type AmplifyPreviewCheckResult =
@@ -117,8 +107,7 @@ export type AmplifyPreviewCheckResult =
 
 /**
  * Normalize a signed Amplify PR preview check for capture. Rejections carry
- * static reason codes so the receiver can diagnose skips without logging input.
- * Keep the validated PR identity separate from the deployment-shaped payload.
+ * static reason codes.
  */
 export function normalizeAmplifyPreviewCheck(value: unknown): AmplifyPreviewCheckResult {
   const record = (input: unknown): Record<string, unknown> =>
@@ -176,9 +165,7 @@ export function normalizeAmplifyPreviewCheck(value: unknown): AmplifyPreviewChec
 
 /**
  * Validated `deployment_status` payload — every field the processor
- * requires to do useful work is present and non-empty. Returned by
- * `validateDeploymentStatusPayload` so callers can stop carrying
- * `?` everywhere downstream.
+ * requires to do useful work is present and non-empty.
  */
 export interface ValidatedDeploymentStatusPayload {
   readonly state: string;
@@ -192,10 +179,7 @@ export interface ValidatedDeploymentStatusPayload {
 
 /**
  * Narrow a raw deployment_status envelope into a fully-validated shape.
- * Returns null when any required field is missing, so the receiver and
- * processor share one validation contract instead of duplicating
- * presence checks. Callers that 200-skip on missing fields stay
- * responsible for their own logging / response.
+ * Returns null when any required field is missing.
  */
 export function validateDeploymentStatusPayload(
   raw: GitHubDeploymentStatusPayload,
@@ -220,12 +204,6 @@ export function validateDeploymentStatusPayload(
     return null;
   }
 
-  // Shape checks beyond presence: repoFullName and sha are interpolated
-  // into the GitHub API URL and the S3 object key downstream. The payload
-  // is HMAC-verified so this is defense-in-depth, not an exploit fix —
-  // but a malformed value should fail closed here rather than produce a
-  // bad URL or object key. (`isValidRepo` enforces `owner/repo`; GitHub
-  // sends full 40-char hex SHAs, accept abbreviated ones defensively.)
   if (!isValidRepo(repoFullName) || !/^[0-9a-f]{7,40}$/i.test(sha)) {
     return null;
   }

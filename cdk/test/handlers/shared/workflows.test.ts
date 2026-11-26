@@ -61,8 +61,6 @@ describe('resolveWorkflowRef', () => {
   });
 
   test('rejects an unsatisfiable @version pin instead of silently downgrading (#296 finding #6)', () => {
-    // Previously @9.9.9 was discarded and the task ran 1.0.0 — now it fails to
-    // resolve so the caller can 400 rather than silently run a different version.
     expect(resolveWorkflowRef('coding/pr-review-v1@9.9.9')).toBeNull();
     expect(resolveWorkflowRefError('coding/pr-review-v1@9.9.9')).toBe('unsatisfiable_version');
   });
@@ -81,10 +79,6 @@ describe('resolveWorkflowRef', () => {
   });
 
   test('CODING_WORKFLOW_ID resolves to the disciplined coding workflow', () => {
-    // The channel processors pin this at the call site for a repo-bound task
-    // (the "repo task ⇒ coding workflow" decision lives per-channel, not in the
-    // resolver default). Assert the constant points at a real, repo-bound,
-    // non-read-only workflow so a descriptor rename can't silently mispoint it.
     const resolved = resolveWorkflowRef(CODING_WORKFLOW_ID);
     expect(resolved).toEqual({ id: 'coding/new-task-v1', version: '1.0.0' });
   });
@@ -126,12 +120,6 @@ describe('descriptor field accessors', () => {
   });
 });
 
-/**
- * Drift guard: the CDK descriptor table is a hand-maintained mirror of the
- * agent-side YAML files (the agent owns the authoritative validator). This test
- * fails if a shipped workflow file's id/version/requires_repo/read_only stops
- * matching its CDK descriptor — forcing the mirror to be updated in lockstep.
- */
 describe('CDK descriptors stay in sync with agent/workflows/**', () => {
   const workflowsRoot = path.resolve(__dirname, '../../../../agent/workflows');
 
@@ -151,19 +139,11 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     return out;
   })();
 
-  // The reverse direction. The check above walks YAML → descriptor, so a
-  // descriptor with no workflow file is invisible to it. That orphan is worse
-  // than a missing descriptor: DESCRIPTORS is the live admission table, so a
-  // submitted ref resolves, the caller gets a 201, and the agent then dies when
-  // load_workflow can't find the file — an accepted task that cannot run.
   test('every CDK descriptor has a shipped workflow file (no orphan admissions)', () => {
     const shippedIds = new Set(yamlFiles.map((file) => {
       const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
       return doc.id as string;
     }));
-    // DESCRIPTORS is intentionally not exported (it is internal to the resolver),
-    // so read the ids off the source the same way this file already cross-checks
-    // the agent's own constants.
     const workflowsTs = fs.readFileSync(
       path.resolve(__dirname, '../../../src/handlers/shared/workflows.ts'), 'utf8',
     );
@@ -184,30 +164,21 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
       expect(descriptor).toBeDefined();
       expect(descriptor!.version).toBe(doc.version);
 
-      // requires_repo: explicit value, else domain default (coding ⇒ true).
       const resolvedRequiresRepo = doc.requires_repo !== undefined
         ? Boolean(doc.requires_repo)
         : doc.domain === 'coding';
       expect(descriptor!.requiresRepo).toBe(resolvedRequiresRepo);
       expect(descriptor!.readOnly).toBe(Boolean(doc.read_only ?? false));
 
-      // Rule 13 mirror: the descriptor's modelId must match the YAML's
-      // agent_config.model.id (undefined when the workflow declares no model).
       const agentConfig = (doc.agent_config ?? {}) as Record<string, unknown>;
       const model = (agentConfig.model ?? undefined) as Record<string, unknown> | undefined;
       const yamlModelId = model?.id as string | undefined;
       expect(descriptor!.modelId).toBe(yamlModelId);
 
-      // And any declared model must itself be on the platform allow-list —
-      // otherwise the workflow ships un-submittable (every task 400s at rule 13).
       if (yamlModelId !== undefined) {
         expect(WORKFLOW_MODEL_ALLOWLIST).toContain(yamlModelId);
       }
 
-      // required_inputs parity (#296 finding #10): the descriptor's allOf/oneOf
-      // must mirror the YAML's all_of/one_of exactly (order-insensitive). The
-      // admission "is this task spec satisfiable" check keys off the descriptor,
-      // so drift here silently over- or under-constrains submission.
       const ri = (doc.required_inputs ?? {}) as Record<string, unknown>;
       const yamlAllOf = (ri.all_of as string[] | undefined);
       const yamlOneOf = (ri.one_of as string[] | undefined);
@@ -217,29 +188,16 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     }
   });
 
-  // #296 finding #10: _KNOWN_WRITEABLE_WORKFLOW_IDS (agent/src/config.py) is a
-  // THIRD hand-maintained copy of the writeable set, used by the agent's
-  // load-failure fallback. It must agree with the descriptors: a workflow that
-  // is read_only:false (writeable) and repo-bound — i.e. the agent must allow
-  // writes if its file fails to load — has to be in that set, or its writes get
-  // mis-denied on the fallback path. Cross-check the agent constant against the
-  // CDK descriptors so adding a writeable workflow without updating the agent
-  // list fails CI here.
   test('agent _KNOWN_WRITEABLE_WORKFLOW_IDS matches the writeable repo-bound descriptors', () => {
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',
     );
-    // Tolerate ruff's formatting of the frozenset: it may render single-line
-    // ``frozenset(("a", "b"))`` or multi-line with whitespace between the parens.
     const match = configPy.match(/_KNOWN_WRITEABLE_WORKFLOW_IDS\s*=\s*frozenset\(\s*\(([^)]*)\)\s*\)/s);
     expect(match).not.toBeNull();
     const agentWriteable = new Set(
       [...match![1].matchAll(/"([^"]+)"/g)].map(m => m[1]),
     );
 
-    // The expected writeable set from the YAML: read_only:false AND requires_repo
-    // (pr-review is read-only; default/agent-v1 is repo-less and intentionally
-    // excluded so its fallback fails closed — mirrors the constant's own docstring).
     const expectedWriteable = new Set<string>();
     for (const file of yamlFiles) {
       const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
@@ -252,12 +210,6 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     expect([...agentWriteable].sort()).toEqual([...expectedWriteable].sort());
   });
 
-  // #296 finding #10 residual: REPO_LESS_DEFAULT_WORKFLOW_ID (agent/src/config.py)
-  // is the load-failure fallback's notion of "the one repo-less default". It must
-  // (a) match the CDK platform default and (b) actually be requires_repo:false in
-  // the YAML — otherwise the fallback mis-classifies repo-optionality on the very
-  // path that exists to fail closed. DEFAULT_WORKFLOW_ID (the coding default) must
-  // conversely be a repo-bound workflow. Both pinned here so drift fails CI.
   test('agent default-workflow constants agree with the YAML and CDK default', () => {
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',
@@ -270,10 +222,8 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     const repoLessDefault = grab('REPO_LESS_DEFAULT_WORKFLOW_ID');
     const codingDefault = grab('DEFAULT_WORKFLOW_ID');
 
-    // (a) the repo-less default matches the CDK platform default…
     expect(repoLessDefault).toBe(DEFAULT_WORKFLOW_ID);
 
-    // …and (b) the YAML for each names a workflow with the expected repo-optionality.
     const docById = new Map<string, Record<string, unknown>>();
     for (const file of yamlFiles) {
       const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
@@ -291,7 +241,6 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
 
 describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
   test('returns null for a workflow that declares no model (inherits default)', () => {
-    // No shipped workflow pins a model today, so all resolve to null (admitted).
     expect(disallowedWorkflowModel('coding/new-task-v1')).toBeNull();
     expect(disallowedWorkflowModel('default/agent-v1')).toBeNull();
     expect(disallowedWorkflowModel('knowledge/web-research-v1')).toBeNull();
@@ -306,26 +255,9 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
   });
 
-  // Every geography `resolveBedrockGeoRegion` ACCEPTS, not a hand-picked pair.
-  // `-c bedrockGeoRegion=eu` synths and deploys today, so an allow-list carrying only
-  // bare/`us.`/`global.` rejects every model-pinning workflow at admission on five of
-  // the seven — and the previous hardcoded ['us','global'] could not see it, while its
-  // comment claimed the others were undeployable. Derived, so a geography the CDK adds
-  // widens this test rather than silently escaping it.
   const DEPLOYABLE_GEOS = BEDROCK_GEO_REGIONS;
 
   test('the allow-list covers every GRANTED model in every geography it may be deployed with', () => {
-    // The real invariant: parity with the IAM grant list, not internal pairing.
-    //
-    // The previous version only checked that each entry had a matching bare/prefixed
-    // partner WITHIN the allow-list. That is satisfiable while being wrong in both
-    // directions, and both were live: three granted models had no `global.` form (so
-    // a workflow pinning one was rejected at admission on a global deploy), and an
-    // invented model pair passed the whole suite despite being granted nothing.
-    //
-    // Admission compares the literal string a workflow pins, and a deployment may run
-    // any geography, so every granted model needs its bare form plus a form for each
-    // geography a deploy could select.
     const missing: string[] = [];
     for (const bare of DEFAULT_BEDROCK_MODEL_IDS) {
       if (!WORKFLOW_MODEL_ALLOWLIST.includes(bare)) missing.push(bare);
@@ -338,12 +270,6 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
   });
 
   test('the allow-list is exactly the granted set × every geography (admission is geo-blind)', () => {
-    // NOT a grant-parity proof, and worth being explicit about: both sides are built by
-    // the same `flatMap` over the same two constants, so this can only fail if that
-    // one-line derivation is edited. What it does pin is that the derivation stays
-    // exactly "granted models × all geographies" — which means six of the seven
-    // geographies are admitted while the deploy grants none of them. That gap is
-    // deliberate and tracked in #846; the fallback is a turn-0 AccessDenied.
     const grantedForms = new Set<string>();
     for (const bare of DEFAULT_BEDROCK_MODEL_IDS) {
       grantedForms.add(bare);

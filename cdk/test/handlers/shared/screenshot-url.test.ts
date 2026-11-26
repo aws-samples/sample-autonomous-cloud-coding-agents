@@ -31,7 +31,7 @@ describe('extractTaskIdFromBranch (#247 — screenshot → parent panel)', () =>
     expect(extractTaskIdFromBranch('main')).toBeNull();
     expect(extractTaskIdFromBranch('feature/foo')).toBeNull();
     expect(extractTaskIdFromBranch('bgagent')).toBeNull();
-    expect(extractTaskIdFromBranch('bgagent//slug')).toBeNull(); // empty taskId
+    expect(extractTaskIdFromBranch('bgagent//slug')).toBeNull();
   });
   test('null for empty / nullish', () => {
     expect(extractTaskIdFromBranch('')).toBeNull();
@@ -48,23 +48,17 @@ describe('buildScreenshotKey', () => {
 
   test('omits deployment id segment when not provided', () => {
     const key = buildScreenshotKey('owner/repo', 'abc1234');
-    // No `-<digit>` between sha and the random suffix.
     expect(key).toMatch(/^screenshots\/owner_repo\/abc1234-[0-9a-f]{16}\.png$/);
     expect(key).not.toMatch(/abc1234-\d+-[0-9a-f]{16}/);
   });
 
   test('replaces ALL slashes in the repo slug, not just the first', () => {
-    // Defensive: GitHub repo names are owner/name (one slash), but
-    // `replace('/', '_')` would silently leave a second slash through.
-    // Reject keys without a random suffix.
     const key = buildScreenshotKey('owner/sub/repo', 'abc1234');
     expect(key.split('/')[0]).toBe('screenshots');
     expect(key.split('/')[1]).toBe('owner_sub_repo');
   });
 
   test('high-entropy suffix differs across calls (URL is not enumerable)', () => {
-    // Keys without a random suffix are rejected.
-    // guessable from the public PR (org+repo+sha all visible).
     const seen = new Set<string>();
     for (let i = 0; i < 100; i++) {
       seen.add(buildScreenshotKey('owner/repo', 'abc1234'));
@@ -133,9 +127,6 @@ describe('isAllowedScreenshotUrl', () => {
     ['https://[::ffff:10.0.0.1]/', 'IPv4-mapped IPv6'],
     ['https://[2001:db8::1]:8443/path', 'global IPv6 with port + path'],
   ])('rejects every IPv6 literal %s (%s)', (url) => {
-    // Enumerating ranges missed by naive host checks.
-    // fc00::/7 and NAT64. Preview URLs are always DNS names, so any
-    // IPv6 literal is rejected wholesale.
     expect(isAllowedScreenshotUrl(url)).toBe(false);
   });
 
@@ -149,18 +140,13 @@ describe('isAllowedScreenshotUrl', () => {
 
 describe('encodeMarkdownUrl', () => {
   test('percent-encodes parens so a crafted path cannot break out of a markdown link', () => {
-    // WHATWG URL parser keeps `)` in the host component.
-    // in the path, so a clean-hostname URL can still close the `](…)`
-    // early and inject content into a comment posted under ABCA's token.
     const attack = 'https://preview.vercel.app/x)](https://evil/a.png)';
     const encoded = encodeMarkdownUrl(attack);
     expect(encoded).not.toContain('(');
     expect(encoded).not.toContain(')');
-    // No `](` delimiter survives → cannot break out of `[text](url)`.
     expect(encoded).not.toContain('](');
-    // Interpolated into the link, the body stays a single link.
     const body = `[![preview](https://cdn/x.png)](${encoded})`;
-    expect(body.match(/\]\(/g)).toHaveLength(2); // image + link, nothing extra
+    expect(body.match(/\]\(/g)).toHaveLength(2);
   });
 
   test('leaves a normal preview URL functionally unchanged (browser decodes %28/%29)', () => {

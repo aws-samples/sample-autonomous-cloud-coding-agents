@@ -19,7 +19,6 @@
 
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -110,7 +109,6 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 beforeEach(() => {
   jest.clearAllMocks();
   mockSend.mockResolvedValue({ Item: TASK_RECORD });
-  // L3 item 3: HEAD the S3 object before presigning. Default: object exists.
   mockS3Send.mockResolvedValue({ ContentLength: 1234 });
   mockGetSignedUrl.mockResolvedValue('https://example.com/presigned?sig=abc');
 });
@@ -123,7 +121,6 @@ describe('get-trace-url handler', () => {
     const body = JSON.parse(result.body);
     expect(body.data.url).toBe('https://example.com/presigned?sig=abc');
     expect(typeof body.data.expires_at).toBe('string');
-    // Should parse as a future ISO timestamp ~15 min out
     const expiresAt = new Date(body.data.expires_at).getTime();
     const now = Date.now();
     const delta = expiresAt - now;
@@ -221,7 +218,6 @@ describe('get-trace-url handler', () => {
     mockSend.mockResolvedValueOnce({
       Item: {
         ...TASK_RECORD,
-        // Bucket matches, but the key is under a different user prefix
         trace_s3_uri: 's3://trace-bucket/traces/other-user/task-1.jsonl.gz',
       },
     });
@@ -248,11 +244,8 @@ describe('get-trace-url handler', () => {
     expect(JSON.parse(result.body).error.code).toBe('INTERNAL_ERROR');
   });
 
-  // -------- L3 item 3: HEAD-before-presign --------
-
   test('HEADs the S3 object before signing (race-between-DDB-write-and-S3-propagation guard)', async () => {
     await handler(makeEvent());
-    // HeadObject must be called with the same bucket/key as the presign.
     expect(mockS3Send).toHaveBeenCalledTimes(1);
     const sentCommand = mockS3Send.mock.calls[0][0];
     expect(sentCommand._type).toBe('S3Head');
@@ -263,7 +256,6 @@ describe('get-trace-url handler', () => {
   });
 
   test('returns 404 TRACE_NOT_AVAILABLE when HEAD throws NotFound (SDK v3 error name)', async () => {
-    // SDK v3 surfaces a missing S3 object as an error with name='NotFound'.
     const notFoundErr = new Error('Not Found');
     notFoundErr.name = 'NotFound';
     mockS3Send.mockRejectedValueOnce(notFoundErr);
@@ -271,12 +263,10 @@ describe('get-trace-url handler', () => {
 
     expect(result.statusCode).toBe(404);
     expect(JSON.parse(result.body).error.code).toBe('TRACE_NOT_AVAILABLE');
-    // Must NOT have attempted to sign a URL for a missing object.
     expect(mockGetSignedUrl).not.toHaveBeenCalled();
   });
 
   test('returns 404 TRACE_NOT_AVAILABLE when HEAD throws NoSuchKey', async () => {
-    // Some code paths (GET-style) surface missing as NoSuchKey; treat identically.
     const err = new Error('The specified key does not exist');
     err.name = 'NoSuchKey';
     mockS3Send.mockRejectedValueOnce(err);
@@ -288,8 +278,6 @@ describe('get-trace-url handler', () => {
   });
 
   test('returns 404 TRACE_NOT_AVAILABLE when HEAD returns HTTP 404 via $metadata', async () => {
-    // Belt-and-suspenders: catch a 404 that didn't tag error.name (older
-    // SDK versions or custom wrappers).
     const err = Object.assign(new Error('NotFound'), { $metadata: { httpStatusCode: 404 } });
     mockS3Send.mockRejectedValueOnce(err);
     const result = await handler(makeEvent());
@@ -300,10 +288,8 @@ describe('get-trace-url handler', () => {
   });
 
   test('returns 404 TRACE_NOT_AVAILABLE when HEAD returns HTTP 403 (how S3 reports a missing key to this role)', async () => {
-    // The handler's role holds s3:GetObject and no s3:ListBucket, and to such a
-    // caller S3 answers 403, not 404, for a key that does not exist: every trace
-    // the bucket's 7-day lifecycle has removed. A HEAD response has no body, so
-    // SDK v3 names the error 'Unknown' and only the status identifies it.
+    // To a caller with s3:GetObject and no s3:ListBucket, S3 answers 403, not 404,
+    // for a missing key. A HEAD response has no body, so only the status identifies it.
     const err = Object.assign(new Error('UnknownError'), { name: 'Unknown', $metadata: { httpStatusCode: 403 } });
     mockS3Send.mockRejectedValueOnce(err);
     const stdout = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
@@ -314,14 +300,10 @@ describe('get-trace-url handler', () => {
     expect(result.statusCode).toBe(404);
     expect(JSON.parse(result.body).error.code).toBe('TRACE_NOT_AVAILABLE');
     expect(mockGetSignedUrl).not.toHaveBeenCalled();
-    // The log keeps the status, so an operator can tell this from a plain 404.
     expect(logged).toContain('"http_status":403');
   });
 
   test('returns 500 when HEAD throws a generic error (not a 404)', async () => {
-    // A non-404 HEAD error is a real AWS problem (throttle, 500, 503,
-    // etc.). Surface as INTERNAL_ERROR — retrying is fine, but hiding
-    // behind TRACE_NOT_AVAILABLE would mislead the user into re-submitting.
     mockS3Send.mockRejectedValueOnce(new Error('AccessDenied'));
     const result = await handler(makeEvent());
 
@@ -365,21 +347,10 @@ describe('parseS3Uri', () => {
   });
 
   test('pins behavior on double-slash keys (leading / preserved in key)', () => {
-    // Current implementation produces ``key='/object'`` on ``s3://bucket//object``.
-    // S3 accepts this as a distinct key; the handler's prefix check then
-    // rejects it (key does not start with ``traces/<uid>/``). Pinning
-    // the shape so a future parser refactor does not silently change
-    // it.
     expect(parseS3Uri('s3://bucket//object')).toEqual({ bucket: 'bucket', key: '/object' });
   });
 
   test('pins behavior on query-string-like suffixes (treated as literal key chars)', () => {
-    // S3 object keys can legally contain ``?`` and ``#``. The parser
-    // treats the entire post-bucket path as the key — it does NOT
-    // URL-decode or strip query fragments. The handler's bucket +
-    // prefix guards still gate these; pinning behavior here so a
-    // future ``new URL(...)`` rewrite has an explicit contract to
-    // maintain (``URL`` would split off ``?`` into ``search``).
     expect(parseS3Uri('s3://bucket/traces/u/t.jsonl.gz?x=1')).toEqual({
       bucket: 'bucket',
       key: 'traces/u/t.jsonl.gz?x=1',

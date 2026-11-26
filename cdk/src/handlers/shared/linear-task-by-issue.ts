@@ -41,19 +41,12 @@ export interface LinearIssueTask {
 }
 
 /**
- * Outcome of an issue → newest-task lookup. Deliberately three-valued rather
- * than ``task | null``: "no task" and "the lookup broke" demand different
- * behaviour, and collapsing them is how an addressed ``@bgagent`` comment gets
- * dropped in silence.
+ * Outcome of an issue → newest-task lookup.
  *
  *  - ``found`` — the issue has an ABCA task; iterate on it.
  *  - ``none`` — the issue genuinely has no task, or its task predates the
- *    ``linear_issue_id`` hoist and so is invisible to this sparse GSI. Cannot be
- *    distinguished from each other here, which matters: after this feature is
- *    first deployed, EVERY task created by the previously-running code lands in
- *    this bucket, since nothing back-fills the attribute.
- *  - ``error`` — the Query failed. Nothing can be concluded about the issue, so
- *    treating it as "not ours" would be a guess presented as a fact.
+ *    ``linear_issue_id`` hoist and so is invisible to this sparse GSI.
+ *  - ``error`` — the Query failed.
  */
 export type LinearIssueTaskLookup =
   | { readonly kind: 'found'; readonly task: LinearIssueTask }
@@ -62,13 +55,9 @@ export type LinearIssueTaskLookup =
 
 /**
  * Resolve a Linear issue UUID → its NEWEST ABCA task via the sparse
- * ``LinearIssueIndex`` GSI. The GSI is keyed
- * ``(linear_issue_id, created_at)``; we query descending and take the first
- * row, so a re-labelled / re-run issue resolves to its latest task (the one
- * holding the live PR).
+ * ``LinearIssueIndex`` GSI.
  *
- * Best-effort: never throws. Reports a miss and a failure distinctly so the
- * caller can tell the user something rather than ignoring them — see
+ * Never throws. Reports a miss and a failure distinctly — see
  * {@link LinearIssueTaskLookup}.
  */
 export async function lookupTaskByLinearIssue(
@@ -82,7 +71,7 @@ export async function lookupTaskByLinearIssue(
       IndexName: LINEAR_ISSUE_INDEX_NAME,
       KeyConditionExpression: 'linear_issue_id = :iid',
       ExpressionAttributeValues: { ':iid': linearIssueId },
-      ScanIndexForward: false, // newest created_at first
+      ScanIndexForward: false,
       Limit: 1,
     }));
     const item = res.Items?.[0];

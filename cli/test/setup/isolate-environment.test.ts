@@ -21,14 +21,6 @@ import * as os from 'os';
 import * as path from 'path';
 import { getConfigDir, loadCredentials, tryLoadConfig } from '../../src/config';
 
-/**
- * What ``test/setup/isolate-environment.ts`` guarantees to every test file.
- *
- * If this fails, the ``jest.globalSetup`` entry in package.json no longer runs
- * that module (or the module stopped doing its job): tests read the
- * developer's ``~/.bgagent`` and AWS credentials again. Restore it; do not
- * adjust these expectations.
- */
 describe('test environment isolation', () => {
   test('home is a scratch directory without bgagent configuration or a cached login', () => {
     expect(path.basename(os.homedir())).toMatch(/^bgagent-cli-test-home-/);

@@ -28,25 +28,16 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
 /**
- * The MCP tool name this gateway federates (ADR-019 P1 exemplar). Kept as a
- * const so the CDK inline schema and any assertions reference one string.
+ * The MCP tool name this gateway federates (ADR-019).
  */
 export const REPO_CONFIG_TOOL_NAME = 'abca_repo_config';
 
 /**
- * Gateway target name. Gateway prefixes the tool as ``<targetName>___<toolName>``
- * in the Lambda client context; the handler strips that prefix. Named neutrally
- * (no channel-specific term like "linear") as a general repo-wide convention.
- * NOTE: this is only a naming convention — the agent-side
- * ``strip_linear_mcp_servers`` scrubber operates solely on the cloned repo's
- * on-disk ``.mcp.json`` and never sees a CDK resource name, so it plays no part
- * in keeping this entry untouched.
+ * Gateway prefixes the tool as ``<targetName>___<toolName>`` in the Lambda client
+ * context.
  */
 const REPO_CONFIG_TARGET_NAME = 'abca-repo-config';
 
-/**
- * Properties for {@link ToolGateway}.
- */
 export interface ToolGatewayProps {
   /**
    * RepoTable the ``abca_repo_config`` tool reads (GetItem, read-only). The
@@ -58,31 +49,21 @@ export interface ToolGatewayProps {
 
 /**
  * AgentCore Gateway that federates ABCA's agent-facing MCP tools behind a
- * single managed endpoint (ADR-019). This is the P1 slice: one read-only Lambda
- * target (``abca_repo_config``) proving the substrate-portable Gateway path end
- * to end, without OAuth.
+ * single managed endpoint (ADR-019), with one read-only Lambda target
+ * (``abca_repo_config``).
  *
- * Auth model (ADR-019 P1):
+ * Auth model:
  * - **Inbound** — ``AWS_IAM`` (SigV4). The agent signs Gateway requests with its
- *   task role; there is no Cognito user pool, JWT, or 3LO consent dance. NOTE:
- *   the L2 default authorizer is Cognito (it silently creates a user pool), so
+ *   task role. The L2 default authorizer is Cognito (it creates a user pool), so
  *   {@link agentcore.GatewayAuthorizer.usingAwsIam} is passed explicitly.
  * - **Outbound** — the gateway execution role (``GATEWAY_IAM_ROLE``), no vaulted
  *   credential. ``addLambdaTarget`` defaults the target's credential provider to
- *   {@link agentcore.GatewayCredentialProvider.fromIamRole} and auto-grants the
- *   gateway role ``lambda:InvokeFunction`` on the target Lambda, so no manual
- *   invoke grant is needed here.
- *
- * This whole construct is **context-gated** by the caller (it is only
- * instantiated when the gateway feature flag is set), so the default CDK synth
- * stays byte-for-byte unchanged and no new CFN types enter the bootstrap
- * policy's coverage set.
+ *   {@link agentcore.GatewayCredentialProvider.fromIamRole} and grants the
+ *   gateway role ``lambda:InvokeFunction`` on the target Lambda.
  */
 export class ToolGateway extends Construct {
-  /** The federating Gateway. */
   public readonly gateway: agentcore.Gateway;
 
-  /** Lambda backing the ``abca_repo_config`` tool. */
   public readonly repoConfigFn: lambda.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: ToolGatewayProps) {
@@ -90,18 +71,15 @@ export class ToolGateway extends Construct {
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
 
-    // --- Tool-backing Lambda: abca_repo_config (RepoTable GetItem) ---
     this.repoConfigFn = new lambda.NodejsFunction(this, 'RepoConfigFn', {
       entry: path.join(handlersDir, 'tool-repo-config.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.seconds(10),
-      // A single GetItem — 256 MB is ample.
       memorySize: 256,
       environment: {
         REPO_TABLE_NAME: props.repoTable.tableName,
-        // Solution UA attribution (#319): stable per-component md/ label.
         ABCA_COMPONENT: 'gwtool',
       },
       bundling: {
@@ -109,18 +87,13 @@ export class ToolGateway extends Construct {
       },
     });
 
-    // Read-only: the tool only ever GetItems the repo's config row.
     props.repoTable.grantReadData(this.repoConfigFn);
 
-    // --- Gateway: AWS_IAM (SigV4) inbound ---
     this.gateway = new agentcore.Gateway(this, 'Gateway', {
       authorizerConfiguration: agentcore.GatewayAuthorizer.usingAwsIam(),
       description: 'ABCA agent tool federation (ADR-019). SigV4 inbound; gateway-role outbound.',
     });
 
-    // --- Lambda target: abca_repo_config ---
-    // Outbound credential provider defaults to fromIamRole() (GATEWAY_IAM_ROLE);
-    // the bind auto-grants the gateway role invoke on repoConfigFn.
     this.gateway.addLambdaTarget('RepoConfigTarget', {
       gatewayTargetName: REPO_CONFIG_TARGET_NAME,
       description: "Look up a repo's ABCA onboarding config (compute substrate, model, build/lint commands).",
@@ -146,9 +119,6 @@ export class ToolGateway extends Construct {
       ]),
     });
 
-    // The L2's grantInvoke includes this function's qualified versions.
-    // Keep its binding/permission contract, with an exception for only that
-    // generated ARN family. Other gateway wildcards must still fail the audit.
     const functionId = Stack.of(this).getLogicalId(this.repoConfigFn.node.defaultChild as CfnFunction);
     NagSuppressions.addResourceSuppressions(this.gateway.role, [{
       id: 'AwsSolutions-IAM5',
@@ -156,7 +126,6 @@ export class ToolGateway extends Construct {
       appliesTo: [`Resource::<${functionId}.Arn>:*`],
     }], true);
 
-    // grantReadData → dynamodb:GetItem/Query/... on the table AND index/* ARNs.
     NagSuppressions.addResourceSuppressions(this.repoConfigFn, [
       {
         id: 'AwsSolutions-IAM4',
@@ -172,11 +141,7 @@ export class ToolGateway extends Construct {
   /**
    * The Gateway MCP endpoint URL the agent's in-process SigV4 bridge signs
    * against (wired as ``ABCA_TOOL_GATEWAY_URL`` on every substrate role).
-   *
-   * The L2 types ``Gateway.gatewayUrl`` as ``string | undefined``. Rather than
-   * a ``!`` non-null assertion at each call site — which would silently ship
-   * the literal string ``"undefined"`` into the env if the L2 ever returns
-   * undefined — resolve it once here and fail synth loudly instead.
+   * Throws when the L2's ``Gateway.gatewayUrl`` is undefined.
    */
   public get gatewayUrl(): string {
     const url = this.gateway.gatewayUrl;

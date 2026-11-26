@@ -18,61 +18,25 @@
  */
 
 /**
- * GitHub issue-comment edit-in-place helper (design §6.4).
- *
- * The fan-out plane maintains a single GitHub comment per task, edited
- * in place as the agent progresses through terminal states + pr_created
- * by default. Concurrency is handled entirely upstream: DDB Streams on
- * ``TaskEventsTable`` with ``ParallelizationFactor: 1`` guarantee
- * per-task ordering, and the fanout Lambda is the only writer on its
- * own comment. A second writer cannot race us, so last-writer-wins is
- * safe — there is no concurrent edit to lose.
- *
- * (An earlier revision used GitHub's ``If-Match`` / ETag for optimistic
- * concurrency. That approach was abandoned after in-account validation
- * proved GitHub's REST API does not support ``If-Match`` on
+ * GitHub's REST API does not support ``If-Match`` on
  * ``PATCH /issues/comments/{id}``: every conditional PATCH returns
  * HTTP 400 with
  * ``"Conditional request headers are not allowed in unsafe requests
  * unless supported by the endpoint"``. The ETag returned on GET is a
- * cache validator only. See PR #52 Scenario 7-extended deploy
- * validation.)
- *
- * The 404 fallback path is preserved: if the target comment was
- * deleted upstream (e.g. a user cleaned up the PR thread), we POST a
- * fresh one rather than losing the task's status surface.
- *
- * Raw ``fetch`` is used rather than octokit to match the existing
- * codebase pattern (``preflight.ts``, ``context-hydration.ts``).
+ * cache validator only.
  */
 
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 
-/** GitHub REST v3 media type — required on writes for stable behavior. */
 const GITHUB_ACCEPT = 'application/vnd.github.v3+json';
 
-/** Per-request timeout. GitHub's API is usually sub-second; 5 s is a
- *  generous ceiling for edge cases like region failover. */
 const GITHUB_TIMEOUT_MS = 5_000;
 
-/** User-Agent required by the GitHub API on all writes. */
 const USER_AGENT = 'abca-fanout/1.0';
 
-/** Rate-limit WARN threshold. GitHub's authenticated limit is 5000 req/h.
- *  Below 500 remaining we're within 10% of the 403 window — ops should
- *  see a signal well before the next-poll-storm exhausts the budget. */
 const RATE_LIMIT_WARN_THRESHOLD = 500;
 
-/**
- * Inspect ``X-RateLimit-Remaining`` on every GitHub response and emit a
- * WARN when the budget falls below ``RATE_LIMIT_WARN_THRESHOLD`` (L3
- * item 4). Does NOT block the request — the goal is an ops-visible
- * trail leading up to the 403 that would otherwise arrive unannounced.
- *
- * Called from both the POST and PATCH paths so partial-burst scenarios
- * (e.g. a reconciliation wave patching every comment) surface early.
- */
 function logRateLimitIfLow(response: Response, repo: string): void {
   const remainingHeader = response.headers.get('x-ratelimit-remaining');
   if (remainingHeader === null) return;
@@ -89,23 +53,18 @@ function logRateLimitIfLow(response: Response, repo: string): void {
 }
 
 /** Result of a comment upsert. ``created`` distinguishes the initial
- *  POST from subsequent PATCHes so the caller can gate the TaskRecord
- *  UpdateItem (first call persists the comment_id; later calls are
- *  no-ops on the TaskRecord since we no longer track an ETag). */
+ *  POST from subsequent PATCHes. */
 export interface UpsertCommentResult {
   readonly commentId: number;
   readonly created: boolean;
 }
 
-/** Minimal shape of the GitHub issue-comment API response. */
 interface GitHubCommentResponse {
   readonly id: number;
   readonly body: string;
 }
 
-/** Error that escapes this module. All HTTP errors funnel through here
- *  so the caller can log once and continue without introducing a new
- *  exception taxonomy. */
+/** Error that escapes this module. All HTTP errors funnel through here. */
 export class GitHubCommentError extends Error {
   readonly httpStatus: number | undefined;
   constructor(message: string, httpStatus?: number) {
@@ -151,7 +110,6 @@ export async function upsertTaskComment(params: {
     });
   } catch (err) {
     if (err instanceof GitHubCommentError && err.httpStatus === 404) {
-      // Upstream deletion — fall back to POSTing a fresh comment.
       logger.warn('[github-comment] previous comment deleted upstream, re-creating', {
         event: 'github.comment.recreated',
         repo,
@@ -163,11 +121,6 @@ export async function upsertTaskComment(params: {
   }
 }
 
-/**
- * PATCH an existing comment with the given body. One GitHub call per
- * event — no GET round-trip, no conditional headers (see file-level
- * rationale above). 404 propagates so the caller can POST-fallback.
- */
 async function patchExistingComment(params: {
   repo: string;
   commentId: number;
@@ -259,66 +212,27 @@ async function createComment(params: {
   return { commentId: payload.id, created: true };
 }
 
-// ---------------------------------------------------------------------------
-// Body rendering
-// ---------------------------------------------------------------------------
-
-/** Hidden HTML marker prefix that tags every bgagent-owned comment so
- *  a future reconciliation tool, user grep, or rehydration path can
- *  identify the in-place comment in a long PR thread. Exported so
- *  downstream callers (Chunk K forensics, Phase 3 audit trail, etc.)
- *  don't have to re-invent the regex. */
+/** Hidden HTML marker prefix that tags every bgagent-owned comment. */
 export const BGAGENT_COMMENT_MARKER_PREFIX = 'bgagent:task-id=';
 
-/** GitHub issue-comment body hard cap is 65 536 UTF-16 code units. We
- *  leave 5 KB of headroom for the truncation marker and for rough
- *  utf-8-vs-utf-16 skew. Any body exceeding this is truncated at
- *  ``renderCommentBody`` time rather than failing the PATCH with 422. */
+/** GitHub issue-comment body hard cap is 65 536 UTF-16 code units; a
+ *  longer body fails the PATCH with 422. */
 const MAX_COMMENT_BODY_CHARS = 60_000;
 
-/** Decimal places when rendering USD cost in GitHub comment tables. */
 const COST_USD_DECIMAL_PLACES = 4;
 
-/** Sanitize a server-sourced event type for inclusion in a Markdown
- *  table cell. Strips backticks, pipes, and newlines that would break
- *  the table layout. Event types today are enum-like (snake_case), so
- *  this is defensive against future writers emitting freer-form
- *  values, not a live vulnerability. */
 function sanitizeEventType(eventType: string): string {
   return eventType.replace(/[`|\r\n]/g, '');
 }
 
 /**
  * Sanitize a ``prUrl`` before interpolating it into a Markdown link
- * target (``[link](<here>)``). Without this guard a crafted URL could
- * break the table layout or inject trailing Markdown: ``)`` closes the
- * link prematurely, ``|`` starts a new table column, and CR / LF / ``]``
- * / ``"`` each let an attacker extend the comment body past the link.
- *
- * Strategy: strip the six characters that are meaningful inside
- * ``[text](target)`` Markdown AND reject anything that does not parse
- * as an ``http://`` or ``https://`` URL after the strip. The strip is
- * deliberately conservative — a legitimate GitHub PR URL
- * (``https://github.com/owner/repo/pull/42``) never contains any of the
- * listed characters, so false positives are effectively zero. Any URL
- * that fails validation returns ``null`` and the caller must omit the
- * Pull-request row entirely rather than risk a broken-layout comment.
- *
- * Refs: PR #52 finding #12 (Markdown injection
- * possible via ``prUrl`` in GitHub comment body).
+ * target (``[link](<here>)``). Any URL that fails validation returns
+ * ``null`` and the caller must omit the Pull-request row entirely.
  */
 export function sanitizeMarkdownLinkTarget(url: string | null | undefined): string | null {
   if (url === null || url === undefined) return null;
-  // Reject anything carrying a Markdown-significant character. We do
-  // NOT attempt to URL-encode these — encoded ``)`` (``%29``) would
-  // render correctly, but encoding opens a harder surface to reason
-  // about (e.g. an attacker who gets ``%0A`` past this function could
-  // still break the table on some Markdown renderers). A flat reject
-  // keeps the contract simple and the comment row trustworthy.
   if (/[\r\n\t\s)|\]"<>`]/.test(url)) return null;
-  // Validate the parsed URL is http(s). A ``javascript:`` link target
-  // is also attacker-controlled content and has no place in a status
-  // comment. ``new URL`` throws on malformed input.
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -335,18 +249,7 @@ function bgagentMarker(taskId: string): string {
 
 /**
  * A compact terminal-friendly summary the GitHub comment displays as
- * the task progresses. Kept small on purpose — GitHub truncates long
- * comments in mobile / email notifications and the PR activity log
- * accumulates the full history anyway.
- *
- * The numeric fields accept ``string`` alongside ``number | null`` to
- * honestly model what is stored: the agent writes ``duration_s`` and
- * ``cost_usd`` as DynamoDB String attributes (see
- * ``shared/numeric.ts``). ``renderCommentBody`` coerces defensively so
- * a future caller that forgets to run the shared coercion helper at
- * its own boundary does not crash the way the fanout dispatcher did in
- * Scenario 7-ext (``costUsd.toFixed is not a function``, commit
- * ``9fe704e``).
+ * the task progresses.
  */
 export interface CommentBodyInput {
   readonly taskId: string;
@@ -361,35 +264,16 @@ export interface CommentBodyInput {
 
 /**
  * Render the Markdown body for the in-place comment. Pure: no timing,
- * no network — callers can snapshot-test the exact bytes. The only
- * side effect is a ``logger.warn`` via ``coerceNumericOrNull`` if a
- * numeric field arrives with a non-finite value (e.g. ``'NaN'``), which
- * surfaces upstream writer bugs instead of silently dropping the row.
+ * no network. The only side effect is a ``logger.warn`` via
+ * ``coerceNumericOrNull`` if a numeric field arrives with a non-finite
+ * value (e.g. ``'NaN'``).
  *
- * Defense-in-depth vs. the caller's coercion (finding #9):
- *   - Callers SHOULD coerce DDB numerics at their own boundary using
- *     ``coerceNumericOrNull`` so the warn log carries their context
- *     (task_id, event_id). The fanout dispatcher does this today.
- *   - ``renderCommentBody`` coerces again internally so a future caller
- *     that forgets the boundary step (e.g. a Chunk K reconciler
- *     reading raw DDB items) still degrades to a null-omitted row
- *     instead of throwing ``TypeError: .toFixed is not a function``.
- *     Non-finite values (``NaN``, ``Infinity``) collapse to null and
- *     omit the row; finite values (including parseable strings) render
- *     normally.
- *
- * Markdown-link target sanitization (finding #12):
- *   - ``prUrl`` is interpolated into a Markdown link (``[link](<here>)``).
- *     Without sanitization a crafted URL containing ``)`` / ``|`` / CR
- *     / LF could break the table layout or inject trailing content.
- *     ``sanitizeMarkdownLinkTarget`` strips the injection surface and
- *     validates the URL is http(s); a rejected URL omits the row
- *     rather than rendering a broken or misleading link.
+ * Non-finite numeric values (``NaN``, ``Infinity``) collapse to null and
+ * omit the row; finite values (including parseable strings) render
+ * normally. A ``prUrl`` that ``sanitizeMarkdownLinkTarget`` rejects omits
+ * the row.
  */
 export function renderCommentBody(input: CommentBodyInput): string {
-  // Coerce DDB-string numerics defensively — see doc block above. The
-  // context object gives the ``numeric.coercion_failed`` warn enough
-  // breadcrumbs (field + task_id) to trace back to the upstream writer.
   const durationS = coerceNumericOrNull(
     input.durationS,
     { field: 'duration_s', task_id: input.taskId },
@@ -400,8 +284,6 @@ export function renderCommentBody(input: CommentBodyInput): string {
     { field: 'cost_usd', task_id: input.taskId },
     logger,
   );
-  // Sanitize the PR link target before interpolation. A rejected URL
-  // returns null and the row is omitted.
   const safePrUrl = sanitizeMarkdownLinkTarget(input.prUrl);
 
   const lines: string[] = [];
@@ -425,7 +307,5 @@ export function renderCommentBody(input: CommentBodyInput): string {
   }
   const rendered = lines.join('\n');
   if (rendered.length <= MAX_COMMENT_BODY_CHARS) return rendered;
-  // Truncate mid-body with a visible marker so the GitHub API accepts
-  // the edit and a human inspecting the PR sees that data was lost.
   return rendered.slice(0, MAX_COMMENT_BODY_CHARS) + '\n\n…(truncated — body exceeded 60 000 chars)';
 }

@@ -31,42 +31,21 @@ import {
 import { logger } from './logger';
 import { makeClient, makeDocClient } from './ua';
 
-/**
- * Lambda-side resolver for the per-tenant Jira Cloud OAuth token written
- * by `bgagent jira setup` (parity with the Linear resolver).
- *
- * Flow:
- *   1. Look up workspace registry by `cloudId` → `oauth_secret_arn`.
- *   2. Fetch the secret JSON via Secrets Manager.
- *   3. If `expires_at` is within 60s, refresh against Atlassian's
- *      `/oauth/token` endpoint (with stored `refresh_token`) and write the
- *      new JSON back to Secrets Manager.
- *   4. Return the access token.
- *
- * Both reads (registry row, secret value) are cached in-memory with a
- * short TTL so a hot Lambda doesn't hammer DDB / SM on every invocation.
- */
-
 const JIRA_TOKEN_ENDPOINT = 'https://auth.atlassian.com/oauth/token';
 
-/** Cache TTL for the registry row + secret value lookups, in milliseconds. */
 const REGISTRY_CACHE_TTL_MS = 60_000;
 const SECRET_CACHE_TTL_MS = 60_000;
 
-/** Refresh threshold: refresh tokens with <60s remaining. */
 const REFRESH_THRESHOLD_SECONDS = 60;
 
 /**
- * Time limit of one refresh request; without it an Atlassian that does not
- * answer holds the calling Lambda until its own timeout. A renewal that
- * Atlassian completed but answered too late is lost with the request: the
- * refresh token it used is disabled, and exchanging it again is tolerated only
- * within the reuse interval, 10 minutes by default
+ * A renewal that Atlassian completed but answered too late is lost with the
+ * request: the refresh token it used is disabled, and exchanging it again is
+ * tolerated only within the reuse interval, 10 minutes by default
  * (https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/).
  */
 const REFRESH_TIMEOUT_MS = 10_000;
 
-/** Registry row status values. Anything else is treated as `revoked` (fail-closed). */
 type RegistryRowStatus = 'active' | 'revoked';
 
 export interface RegistryRow {
@@ -82,7 +61,7 @@ export interface StoredOauthToken {
   readonly expires_at: string;
   readonly scope: string;
   /** Co-located OAuth client credentials so Lambda-side refresh works
-   *  without per-Lambda env vars (parity with the Linear store). */
+   *  without per-Lambda env vars. */
   readonly client_id: string;
   readonly client_secret: string;
   readonly cloud_id: string;
@@ -108,9 +87,8 @@ export interface StoredOauthToken {
    *  cloudId, so the sole active tenant also synchronizes its value to the
    *  stack-wide verifier.
    *
-   *  Optional for back-compat: tokens written before per-tenant signing
-   *  was wired up won't have it, so the receiver uses the stack-wide
-   *  `JIRA_WEBHOOK_SECRET_ARN` verifier for those installs. */
+   *  Optional: without it the receiver uses the stack-wide
+   *  `JIRA_WEBHOOK_SECRET_ARN` verifier. */
   readonly webhook_signing_secret?: string;
 }
 
@@ -124,17 +102,13 @@ export interface ResolverOptions {
   readonly fetchImpl?: typeof fetch;
   /**
    * Force a token refresh even when the stored `expires_at` claims the token
-   * is still valid. Used by the reactive-401 retry path: Atlassian can reject
-   * an access token (401) before its advertised expiry — server-side
-   * invalidation, a re-issued token after a scope change, or a token cached
-   * within {@link SECRET_CACHE_TTL_MS} that was rotated out-of-band. The
-   * proactive expiry check can't see those, so on a 401 the caller re-resolves
-   * with `forceRefresh: true` to bypass the in-memory *token* cache and the
-   * expiry short-circuit and mint a guaranteed-fresh token before retrying.
+   * is still valid: Atlassian can reject an access token (401) before its
+   * advertised expiry — server-side invalidation, a re-issued token after a
+   * scope change, or a token cached within {@link SECRET_CACHE_TTL_MS} that
+   * was rotated out-of-band. Bypasses the in-memory *token* cache and the
+   * expiry short-circuit.
    *
-   * The registry-row cache is intentionally NOT bypassed: a revoked access
-   * token does not change the row (`site_url`, `oauth_secret_arn`), so forcing
-   * a DDB read on every 401 would add load without changing the outcome.
+   * The registry-row cache is NOT bypassed.
    */
   readonly forceRefresh?: boolean;
 }
@@ -147,10 +121,6 @@ interface CacheEntry<T> {
 const registryCache = new Map<string, CacheEntry<RegistryRow>>();
 const tokenCache = new Map<string, CacheEntry<StoredOauthToken>>();
 
-/**
- * Drop cached values for a tenant. Used after a refresh so the next caller
- * picks up the rotated token.
- */
 export function invalidateJiraOauthCache(cloudId: string, oauthSecretArn?: string): void {
   registryCache.delete(cloudId);
   if (oauthSecretArn) tokenCache.delete(oauthSecretArn);
@@ -273,12 +243,10 @@ export async function resolveJiraOutboundAuth(
  *
  * On success: returns `{ accessToken, scope, siteUrl, oauthSecretArn }`.
  * Refreshes silently if the cached token is expiring. Returns null on any
- * failure (registry miss, secret missing, refresh-token revoked) so callers
- * can gracefully no-op rather than blowing up.
+ * failure (registry miss, secret missing, refresh-token revoked).
  *
  * Pass `options.forceRefresh` to mint a guaranteed-fresh token even when the
- * stored `expires_at` looks valid — see {@link ResolverOptions.forceRefresh}
- * (the reactive-401 retry path).
+ * stored `expires_at` looks valid — see {@link ResolverOptions.forceRefresh}.
  */
 export async function resolveJiraOauthToken(
   cloudId: string,
@@ -290,7 +258,6 @@ export async function resolveJiraOauthToken(
   const sm = options.secretsManagerClient ?? makeClient(SecretsManagerClient, { region });
   const forceRefresh = options.forceRefresh ?? false;
 
-  // ─── Step 1: Registry row ────────────────────────────────────────
   const row = await getRegistryRow(ddb, registryTableName, cloudId);
   if (!row) {
     logger.warn('Jira tenant not in registry', { jira_cloud_id: cloudId });
@@ -304,11 +271,6 @@ export async function resolveJiraOauthToken(
     return null;
   }
 
-  // ─── Step 2: Cached or fresh token JSON ──────────────────────────
-  // `forceRefresh` bypasses the in-memory token cache: the cached access token
-  // is the one a caller just saw 401, so we must re-read the secret (and
-  // refresh below) rather than hand the same dead token back. (The registry
-  // row above still uses its own cache — see ResolverOptions.forceRefresh.)
   const cached = forceRefresh ? undefined : tokenCache.get(row.oauth_secret_arn);
   let token: StoredOauthToken;
   if (cached && cached.expiresAt > Date.now() && !isTokenExpiring(cached.value.expires_at)) {
@@ -325,10 +287,6 @@ export async function resolveJiraOauthToken(
     token = fetched;
   }
 
-  // ─── Step 3: Refresh if expiring (or forced) ─────────────────────
-  // `forceRefresh` refreshes regardless of `expires_at`: a 401 on a
-  // not-yet-expired token means the stored access token is dead despite the
-  // timestamp, so trust the 401 over the clock and rotate.
   if (forceRefresh || isTokenExpiring(token.expires_at)) {
     const refreshed = await refreshJiraToken(token, sm, row.oauth_secret_arn, options);
     if (!refreshed) {
@@ -349,13 +307,7 @@ export async function resolveJiraOauthToken(
 
 /**
  * Strict variant of {@link getRegistryRow}: throws on infra error
- * (DDB throttle, network) instead of returning null. Use this from the
- * webhook signature-verification path where a `null` return would let
- * a transient throttle silently bypass per-tenant verification by using
- * the stack-wide verifier, and from the webhook processor where the row
- * decides whether a task is created: there a `null` return would drop an
- * admitted event as "tenant not onboarded" instead of failing the
- * invocation so that Lambda retries it.
+ * (DDB throttle, network) instead of returning null.
  */
 export async function getRegistryRowStrict(
   ddb: DynamoDBDocumentClient,
@@ -404,8 +356,6 @@ function parseRegistryRow(rawItem: unknown, cloudId: string): RegistryRow | null
   const item = rawItem as Partial<RegistryRow> | undefined;
   if (!item || !item.oauth_secret_arn || !item.site_url) return null;
 
-  // Fail-closed on the status field: missing or unknown values are treated
-  // as `revoked`. A partially-written row shouldn't grant access.
   const rawStatus = item.status as string | undefined;
   const status: RegistryRowStatus = rawStatus === 'active' ? 'active' : 'revoked';
   if (rawStatus !== 'active' && rawStatus !== 'revoked' && rawStatus !== undefined) {
@@ -458,8 +408,7 @@ export async function getOauthSecret(
 
 /**
  * Strict variant of {@link getOauthSecret}: throws on Secrets Manager
- * error instead of returning null. Use this from the signature-verification
- * path so a transient SM error doesn't silently fall back to stack-wide.
+ * error instead of returning null.
  */
 export async function getOauthSecretStrict(
   sm: SecretsManagerClient,
@@ -510,8 +459,7 @@ async function refreshJiraToken(
   if (first.kind === 'failure') return null;
 
   // `invalid_grant`: Atlassian rotates refresh_tokens on every use, so a
-  // concurrent Lambda may have refreshed before us. Re-read the secret
-  // and retry once if the refresh_token changed.
+  // concurrent Lambda may have refreshed before us.
   logger.warn('Jira token refresh got invalid_grant — re-reading secret to check for concurrent refresh', {
     secret_arn: secretArn,
     cloud_id: current.cloud_id,
@@ -639,11 +587,6 @@ async function tryRefreshOnce(
       SecretString: JSON.stringify(next),
     }));
   } catch (err) {
-    // Atlassian has already rotated the refresh_token server-side, but the
-    // new bundle didn't reach Secrets Manager. Do NOT cache `next`: caching
-    // would mask the breakage for SECRET_CACHE_TTL_MS while SM still holds a
-    // now-dead refresh_token. Invalidate so the next caller re-reads the
-    // (stale) secret and surfaces invalid_grant promptly rather than later.
     logger.error('Failed to persist refreshed Jira OAuth token — SM holds a stale refresh_token; tenant will require re-onboarding if this recurs', {
       secret_arn: secretArn,
       cloud_id: next.cloud_id,
@@ -663,7 +606,6 @@ async function tryRefreshOnce(
   return { kind: 'success', token: next };
 }
 
-/** Test-only: clear all caches. */
 export function _resetCachesForTesting(): void {
   registryCache.clear();
   tokenCache.clear();

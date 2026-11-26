@@ -33,7 +33,7 @@ import {
   RepoNotOnboardedError,
 } from './repo-lookup';
 
-/** TTL (days) for soft-deleted repo rows — matches Blueprint construct. */
+/** TTL (days) for soft-deleted repo rows. */
 export const REMOVED_REPO_TTL_DAYS = 30;
 
 export interface OnboardRepoOptions {
@@ -68,9 +68,6 @@ export async function onboardRepo(
   try {
     existing = await loadRepoConfig(region, tableName, repo);
   } catch (err) {
-    // Only a genuinely absent row means "start from scratch". Any other failure
-    // (table missing, AccessDenied, throttling) must propagate — swallowing it
-    // would silently wipe the existing blueprint overrides carried forward below.
     if (!(err instanceof RepoNotOnboardedError)) {
       throw err;
     }

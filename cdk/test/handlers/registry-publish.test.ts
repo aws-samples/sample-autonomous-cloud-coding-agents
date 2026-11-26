@@ -22,8 +22,6 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { handler } from '../../src/handlers/registry-publish';
 import { RegistryPublishIncompleteError } from '../../src/handlers/shared/registry/types';
 
-// The handler gets a fake registry client (no AWS), as in registry-handlers.test.ts,
-// which holds the authentication, validation and happy-path cases of this handler.
 const mockPublish = jest.fn();
 jest.mock('../../src/handlers/shared/registry/factory', () => {
   const actual = jest.requireActual('../../src/handlers/shared/registry/factory');
@@ -51,7 +49,6 @@ const publishedRecord = {
   runtime: {},
 };
 
-/** Send `body` to the handler as a member of RegistryPublisher. */
 function publish(body: Record<string, unknown>): Promise<APIGatewayProxyResult> {
   return handler({
     body: JSON.stringify(body),
@@ -62,9 +59,6 @@ function publish(body: Record<string, unknown>): Promise<APIGatewayProxyResult> 
 beforeEach(() => mockPublish.mockReset());
 
 describe('registry-publish handler: the coordinates must be strings', () => {
-  // RegExp.prototype.test converts its argument to a string, so ['acme'] and 5 used to
-  // pass the shape checks. The adapter compares stored coordinates with ===, which no
-  // array or number equals, so its immutability check found no existing record.
   test.each([
     ['namespace is an array', { namespace: ['acme'] }],
     ['name is a number', { name: 5 }],
@@ -81,7 +75,6 @@ describe('registry-publish handler: the coordinates must be strings', () => {
 
 describe('registry-publish handler: what a refused publish tells the publisher', () => {
   test('409 says so when the slot is held by a corrupt record that has to be deleted', async () => {
-    // The message the adapter builds when the existing record does not parse.
     mockPublish.mockRejectedValue(new ConflictException({
       message: 'record mcp_server/acme/pdf-tools@1.0.0 already exists but its descriptor is malformed (MALFORMED_DESCRIPTOR); delete it before republishing',
       $metadata: {},
@@ -94,10 +87,6 @@ describe('registry-publish handler: what a refused publish tells the publisher',
   });
 
   test('400 with the reason when AWS rejects the record as invalid', async () => {
-    // AWS validates a record when it is created (a name or version above 255 characters,
-    // a descriptor above its size limit, a server.json that does not follow the MCP
-    // schema) and answers ValidationException. The wording is modelled on the example
-    // in the user guide's troubleshooting page.
     mockPublish.mockRejectedValue(new ValidationException({
       message: "Schema validation failed: content is not in compliance with schema version '2025-12-11' for descriptor type 'mcp'.",
       reason: 'FieldValidationFailed',
@@ -126,15 +115,10 @@ describe('registry-publish handler: what a refused publish tells the publisher',
 });
 
 describe('registry-publish handler: an mcp_server the agent could not load is refused', () => {
-  // The agent writes a pinned server into the session's MCP configuration, where a header
-  // value that is not a string, or arguments that are not a list of strings, make the CLI
-  // skip the server. The agent fails such a task; the publisher should hear it first.
   test.each([
     ['a header value is a number', { transport: 'http', url: 'https://x', headers: { 'X-Shard': 3 } }, /headers.*string values/],
     ['a header value is null', { transport: 'http', url: 'https://x', headers: { 'X-Shard': null } }, /headers.*string values/],
     ['one of two header values is a number', { transport: 'http', url: 'https://x', headers: { 'Authorization': 'Bearer t', 'X-Shard': 3 } }, /headers.*string values/],
-    // The agent reads headers for http and sse and args for stdio only; the endpoint refuses a
-    // wrong shape whatever the transport, as its contract type reads.
     ['a header value is a number on a stdio server', { transport: 'stdio', command: 'npx', headers: { 'X-Shard': 3 } }, /headers.*string values/],
     ['args is a string on an http server', { transport: 'http', url: 'https://x', args: 'x' }, /args.*array of strings/],
     ['args is a string', { transport: 'stdio', command: 'npx', args: '-y pkg' }, /args.*array of strings/],

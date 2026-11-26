@@ -28,25 +28,15 @@ import {
 } from '../src/constructs/agentcore-azs';
 import { BuildAppOptions, buildApp } from '../src/main';
 
-/**
- * These tests drive the real `main.ts` wiring rather than a re-implementation of
- * it, so that deleting the AZ resolution, failing to thread the prop into
- * `AgentStack`, or annotating a scope CDK does not collect all fail here.
- *
- * `Template.fromStack` / `Annotations.fromStack` read the synthesized **stack
- * artifact** with validation skipped — which is exactly the seam that matters:
- * annotations attached to the `App` node never reach a stack artifact.
- */
-
 const ACCOUNT = '123456789012';
 const REGION = 'us-east-1';
 const STACK_NAME = 'backgroundagent-dev';
 
 const ZONES: AvailabilityZoneInfo[] = [
-  { zoneName: 'us-east-1a', zoneId: 'use1-az2' }, // supported
-  { zoneName: 'us-east-1b', zoneId: 'use1-az4' }, // supported
-  { zoneName: 'us-east-1c', zoneId: 'use1-az6' }, // unsupported
-  { zoneName: 'us-east-1d', zoneId: 'use1-az1' }, // supported
+  { zoneName: 'us-east-1a', zoneId: 'use1-az2' },
+  { zoneName: 'us-east-1b', zoneId: 'use1-az4' },
+  { zoneName: 'us-east-1c', zoneId: 'use1-az6' },
+  { zoneName: 'us-east-1d', zoneId: 'use1-az1' },
 ];
 
 const okZones: DescribeAzsFn = async () => ZONES;
@@ -70,12 +60,9 @@ describe('buildApp — AgentCore AZ wiring', () => {
   it('threads auto-pinned zones all the way into the VPC subnets', async () => {
     const template = Template.fromStack(stackOf(await app()));
 
-    // Sorted supported names capped at 2 => us-east-1a + us-east-1b, one public
-    // and one private subnet each.
     template.resourceCountIs('AWS::EC2::Subnet', 4);
     template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1a' });
     template.hasResourceProperties('AWS::EC2::Subnet', { AvailabilityZone: 'us-east-1b' });
-    // The unsupported zone must never appear.
     const subnets = template.findResources('AWS::EC2::Subnet');
     const azs = Object.values(subnets).map(s => s.Properties?.AvailabilityZone);
     expect(azs).not.toContain('us-east-1c');
@@ -83,8 +70,6 @@ describe('buildApp — AgentCore AZ wiring', () => {
   });
 
   it('pins from the context override on the env-agnostic path', async () => {
-    // An assembly synthesized without credentials has no account to read the
-    // zone mapping from, so the override is the only mechanism available there.
     const built = await buildApp({
       account: undefined,
       region: undefined,
@@ -97,9 +82,6 @@ describe('buildApp — AgentCore AZ wiring', () => {
   });
 
   it('surfaces a lookup failure as a stack-artifact ERROR (regression: annotations were dropped)', async () => {
-    // Previously the resolver annotated the App node, which CDK never collects
-    // into a stack artifact — a failed lookup produced a clean, silent synth and
-    // then the NotStabilized rollback this feature exists to prevent.
     const built = await app({
       describeAzs: async () => {
         throw new Error('AccessDeniedException');
@@ -114,9 +96,7 @@ describe('buildApp — AgentCore AZ wiring', () => {
   it('records the failure at error level in the assembly (what the CLI fails on)', async () => {
     // In-process `app.synth()` does not throw on error annotations; the CDK CLI
     // is what refuses to continue ("Synthesis finished with errors", exit 1) when
-    // a stack artifact carries an error-level message. Verified against the CLI
-    // in this tree, so this asserts exactly that condition — every real synth
-    // path (mise //cdk:synth, cdk deploy, build.yml) goes through the CLI.
+    // a stack artifact carries an error-level message.
     const built = await app({
       describeAzs: async () => {
         throw new Error('AccessDeniedException');
@@ -183,8 +163,6 @@ describe('buildApp — deferred migration settings', () => {
 });
 
 describe('buildApp — compact template output', () => {
-  // Read the emitted artifact: parsing with Template.fromStack loses indentation.
-  // synthesis/deployment.test.ts owns byte budgets across the full profile product.
   let templateText: string;
 
   beforeAll(async () => {
@@ -196,8 +174,6 @@ describe('buildApp — compact template output', () => {
   });
 
   it('emits the template without pretty-print indentation', () => {
-    // Assert the shape, not the saving, so the test does
-    // not need re-baselining every time a resource is added.
     expect(templateText).not.toContain('\n  ');
   });
 });

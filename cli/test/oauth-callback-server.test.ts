@@ -26,15 +26,9 @@ import {
   randomState,
 } from '../src/oauth-callback-server';
 
-// child_process.execFile: `openBrowser` shells out to the OS opener.
 const execFileMock = jest.fn();
 jest.mock('child_process', () => ({ execFile: (...args: unknown[]) => execFileMock(...args) }));
 
-/**
- * Make a plain HTTP GET request to localhost. Returns the response
- * status + body. Closes the connection cleanly so the server can
- * finish settling without hanging the test.
- */
 function localGet(urlSuffix: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.get({
@@ -51,17 +45,9 @@ function localGet(urlSuffix: string): Promise<{ status: number; body: string }> 
 }
 
 describe('awaitOauthCallback', () => {
-  // The real OAuth flow waits on Linear — to avoid binding the callback port
-  // (8080) in CI when it might be in use, these tests run sequentially via
-  // Jest's default test isolation per file. If a developer has another
-  // bgagent setup running locally, expect EADDRINUSE.
-
   test('captures session_id from the first valid request and resolves with kind=agentcore', async () => {
-    // Fire the server + the request in parallel; the server resolves once it
-    // sees the request, then closes.
     const expectedSessionId = 'urn:ietf:params:oauth:request_uri:test-uuid';
     const callbackPromise = awaitOauthCallback({ timeoutMs: 5_000 });
-    // Tiny delay so the server has time to bind before we make the request.
     await new Promise((r) => setTimeout(r, 100));
     const requestPromise = localGet(`/oauth/callback?session_id=${encodeURIComponent(expectedSessionId)}`);
 
@@ -75,8 +61,6 @@ describe('awaitOauthCallback', () => {
   });
 
   test('captures code+state from a direct Linear OAuth redirect with kind=direct-oauth', async () => {
-    // Phase 2.0b Option 2 path: Linear redirects with `code` + `state`
-    // (no AgentCore proxy in the middle).
     const callbackPromise = awaitOauthCallback({ timeoutMs: 5_000 });
     await new Promise((r) => setTimeout(r, 100));
     const requestPromise = localGet(
@@ -93,9 +77,6 @@ describe('awaitOauthCallback', () => {
   });
 
   test('rejects with Linear`s error_description when redirect has ?error=', async () => {
-    // Linear surfaces `?error=access_denied` if the user clicks Cancel on
-    // the consent screen. Distinguish that from a missing-params failure
-    // so the caller can present a clearer message.
     const callbackPromise = awaitOauthCallback({ timeoutMs: 5_000 });
     await new Promise((r) => setTimeout(r, 100));
     const responsePromise = localGet(
@@ -120,9 +101,6 @@ describe('awaitOauthCallback', () => {
     await new Promise((r) => setTimeout(r, 100));
     const responsePromise = localGet('/oauth/callback');
 
-    // Both promises settle together: the response carries the 400 + failure
-    // page, the callback promise rejects with the missing-params error.
-    // Capture both outcomes via allSettled so neither hangs the other.
     const [callbackOutcome, responseOutcome] = await Promise.allSettled([
       callbackPromise,
       responsePromise,
@@ -140,7 +118,6 @@ describe('awaitOauthCallback', () => {
   });
 
   test('rejects on timeout when no callback arrives', async () => {
-    // Short timeout so the test doesn't drag.
     const startedAt = Date.now();
     await expect(awaitOauthCallback({ timeoutMs: 200 })).rejects.toThrow(/Timed out/);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(180);
@@ -148,11 +125,6 @@ describe('awaitOauthCallback', () => {
   });
 
   test('CALLBACK_URL constant matches the documented localhost URL', () => {
-    // Regression-lock: the URL is also baked into the CDK construct's
-    // allowlist (cdk/src/constructs/cli-workload-identity.ts default).
-    // Drift here = silent OAuth failure at runtime ("redirect_uri not allowlisted").
-    // RFC 8252 §7.3: http://localhost is the right shape for native-app OAuth
-    // callbacks (no TLS required, no cert warnings). Port 8080 is conventional.
     expect(CALLBACK_URL).toBe('http://localhost:8080/oauth/callback');
   });
 });

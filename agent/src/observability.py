@@ -1,10 +1,8 @@
 """OpenTelemetry instrumentation helpers for the background agent.
 
-Provides a tracer and a convenience context manager for creating spans
-with standard task attributes.  ADOT auto-instrumentation (activated via
-the ``opentelemetry-instrument`` wrapper in the Dockerfile) handles
-exporter/propagator configuration automatically for AgentCore-hosted
-agents — this module only needs to create spans and set baggage.
+Creates spans and sets baggage.  Exporter and propagator configuration is
+done by ADOT auto-instrumentation (the ``opentelemetry-instrument`` wrapper
+in the Dockerfile), not here.
 """
 
 from __future__ import annotations
@@ -21,14 +19,10 @@ if TYPE_CHECKING:
 
     from opentelemetry.trace import Span
 
-# Module-level initialisation is safe because ADOT auto-instrumentation
-# (opentelemetry-instrument) configures the TracerProvider before the
-# application is imported.  The tracer is a lightweight proxy.
 _tracer: trace.Tracer = trace.get_tracer("backgroundagent")
 
 
 def get_tracer() -> trace.Tracer:
-    """Return the module-level OpenTelemetry tracer."""
     return _tracer
 
 
@@ -42,12 +36,6 @@ def task_span(
     * On failure the tracer records the exception on the span and sets its
       status to ERROR (the defaults of ``start_as_current_span``).
     * Accepts optional *attributes* dict merged onto the span at creation.
-
-    Usage::
-
-        with task_span("task.repo_setup", {"repo.url": "owner/repo"}) as span:
-            ...
-            span.set_attribute("build.before", True)
     """
     tracer = get_tracer()
     with tracer.start_as_current_span(name, attributes=attributes or {}) as span:
@@ -57,31 +45,16 @@ def task_span(
 def current_otel_trace_id() -> str | None:
     """Return the active span's trace id as a 32-char lowercase hex string.
 
-    Used to persist a cross-plane correlation id on the TaskRecord (#515 replay
-    bundle) so operators can join the task to its CloudWatch/X-Ray trace. Returns
-    ``None`` when there is no recording span (e.g. tracing disabled locally) or
-    the context is invalid, so callers can treat it as a graceful-missing field.
+    Returns ``None`` when there is no recording span or the context is invalid.
 
-    Never raises: a broken/misconfigured tracer degrades to ``None`` rather than
-    propagating. Callers read this inside DDB-write try-blocks (progress_writer),
-    where a raised trace error would otherwise be misclassified as a DDB failure
-    and trip the shared progress circuit breaker.
-
-    The degrade is *logged*, not silent (#756): a tracer fault and "no recording
-    span" both yield ``None``, and a caller cannot tell them apart, so the WARN
-    line is the only place that difference survives. It is deliberately emitted
-    per occurrence rather than once — this runs per progress event, so repetition
-    is the signal that the tracer is broken for the whole task, not one event.
+    Never raises: a tracer fault is logged at WARN, once per occurrence, and
+    yields ``None``.
     """
     try:
         span = trace.get_current_span()
         ctx = span.get_span_context()
         if not ctx.is_valid:
             return None
-        # format_trace_id renders the 128-bit id as zero-padded 32-char hex — the
-        # OTEL format, so it joins directly in CloudWatch Transaction Search. Note
-        # the X-Ray console renders trace ids as ``1-{8hex}-{24hex}``; to look this
-        # up there, transform to that form (the timestamp is the first 8 hex chars).
         return trace.format_trace_id(ctx.trace_id)
     except Exception as exc:
         log(
@@ -96,23 +69,15 @@ def current_otel_trace_id() -> str | None:
 def propagate_correlation_context(
     session_id: str,
     user_id: str = "",
-    # ``user_id`` uses ""-means-absent (Cognito sub, mirrors AgentConfig.user_id
-    # which is never None); ``repo`` uses None-means-absent (mirrors the optional
-    # TaskRecord.repo). Both conventions flow from upstream config types; the
-    # ``if x:`` guards below flatten either to "don't set the baggage key".
     repo: str | None = None,
 ) -> None:
     """Propagate the correlation envelope via OTEL baggage.
 
-    *session_id* correlates custom spans to the AgentCore session; *user_id*
-    and *repo* (#245) carry the platform identity and target repo so baggage
-    survives across pipeline phases on the task thread. Empty/None fields are
-    not set — so this runs (and is useful) even when *session_id* is empty but
-    the identity is known. *repo* is None for repo-less workflows (#248 Phase 3).
+    Sets ``session.id``, ``user.id`` and ``repo.url``. Empty/None fields are
+    not set.
 
-    The attached context is intentionally not detached: the background thread
-    runs a single task then exits, so the context is garbage-collected with the
-    thread.
+    The attached context is never detached: call this on a thread that runs a
+    single task and then exits.
     """
     ctx = context.get_current()
     if session_id:
@@ -121,4 +86,4 @@ def propagate_correlation_context(
         ctx = baggage.set_baggage("user.id", user_id, context=ctx)
     if repo:
         ctx = baggage.set_baggage("repo.url", repo, context=ctx)
-    context.attach(ctx)  # token not stored — thread-scoped lifetime
+    context.attach(ctx)

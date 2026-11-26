@@ -26,7 +26,6 @@ import {
 } from '../../../src/handlers/shared/github-comment';
 import { logger } from '../../../src/handlers/shared/logger';
 
-// ``fetch`` is the global transport; each test installs its own mock.
 const originalFetch = global.fetch;
 
 function mockResponse(opts: {
@@ -80,17 +79,12 @@ describe('github-comment: upsertTaskComment — POST', () => {
     });
 
     expect(result).toEqual({ commentId: 999, created: true });
-    // Exactly one POST — no fallback GET/PATCH on first publish.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://api.github.com/repos/owner/repo/issues/42/comments');
     expect((init as RequestInit).method).toBe('POST');
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe('token ghp_xxx');
-    // Defense: GitHub's PATCH endpoint rejects ``If-Match`` with HTTP 400
-    // ("Conditional request headers are not allowed in unsafe requests").
-    // No write path on this helper should ever emit that header. (Scenario
-    // 7-ext deploy validation caught this in production.)
     expect(headers['If-Match']).toBeUndefined();
   });
 
@@ -111,10 +105,6 @@ describe('github-comment: upsertTaskComment — POST', () => {
   });
 
   test('POST response without an ETag header is accepted (ETag is no longer load-bearing)', async () => {
-    // Pre-fix, a missing ETag header threw because the caller needed
-    // it as ``If-Match`` on the next PATCH. After dropping the
-    // conditional-PATCH path, ETag is merely informational — absence
-    // must not fail the dispatch.
     global.fetch = jest.fn().mockResolvedValue(
       mockResponse({ status: 201, etag: null, body: { id: 42, body: 'b' } }),
     ) as unknown as typeof fetch;
@@ -133,12 +123,7 @@ describe('github-comment: upsertTaskComment — POST', () => {
 
 describe('github-comment: upsertTaskComment — PATCH', () => {
   test('PATCHes the existing comment directly (one call, no GET, no If-Match header)', async () => {
-    // Design §6.4 post-fix: a single PATCH call per event. GitHub's
-    // REST API does not support ``If-Match`` on ``PATCH /issues/
-    // comments/{id}`` — every conditional PATCH returns HTTP 400
-    // ("Conditional request headers are not allowed in unsafe requests
-    // unless supported by the endpoint"). Concurrency is instead
-    // handled upstream by DDB Stream ordering. See file header.
+    // GitHub rejects ``If-Match`` on ``PATCH /issues/comments/{id}`` with HTTP 400.
     const fetchMock = jest.fn().mockResolvedValueOnce(
       mockResponse({ status: 200, etag: '"after"', body: { id: 7, body: 'new' } }),
     );
@@ -158,16 +143,13 @@ describe('github-comment: upsertTaskComment — PATCH', () => {
     expect(url).toBe('https://api.github.com/repos/owner/repo/issues/comments/7');
     expect((init as RequestInit).method).toBe('PATCH');
     const headers = (init as RequestInit).headers as Record<string, string>;
-    // BLOCKER regression guard: no conditional headers on PATCH.
     expect(headers['If-Match']).toBeUndefined();
     expect(headers['If-None-Match']).toBeUndefined();
   });
 
   test('on 404 (comment deleted upstream): falls back to POSTing a fresh comment', async () => {
     const fetchMock = jest.fn()
-      // PATCH returns 404
       .mockResolvedValueOnce(mockResponse({ status: 404, ok: false, etag: null }))
-      // fallback POST
       .mockResolvedValueOnce(
         mockResponse({ status: 201, etag: '"new"', body: { id: 8, body: 'body' } }),
       );
@@ -181,7 +163,6 @@ describe('github-comment: upsertTaskComment — PATCH', () => {
       existingCommentId: 7,
     });
 
-    // NEW comment id, created=true so the caller persists the new id.
     expect(result).toEqual({ commentId: 8, created: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('PATCH');
@@ -202,17 +183,10 @@ describe('github-comment: upsertTaskComment — PATCH', () => {
         existingCommentId: 7,
       }),
     ).rejects.toMatchObject({ name: 'GitHubCommentError', httpStatus: 500 });
-    // No retry on generic 5xx — caller's batch-level dispatcher log is
-    // the right layer to see the failure.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test('non-404 error (400) propagates without retry (guards against the If-Match regression reappearing silently)', async () => {
-    // If a future refactor re-adds a conditional header and GitHub
-    // returns 400, the error should bubble up as a GitHubCommentError
-    // with httpStatus=400 rather than being swallowed. The fallback
-    // POST must NOT fire on 400 — only 404 (comment deleted) triggers
-    // the POST retry.
     const fetchMock = jest.fn()
       .mockResolvedValueOnce(mockResponse({ status: 400, ok: false, etag: null }));
     global.fetch = fetchMock as unknown as typeof fetch;
@@ -246,8 +220,6 @@ describe('github-comment: upsertTaskComment — PATCH', () => {
   });
 
   test('PATCH body contains the rendered input verbatim', async () => {
-    // Locks the payload contract — a regression that stringified the
-    // wrong object would break every in-place edit silently.
     const fetchMock = jest.fn().mockResolvedValueOnce(
       mockResponse({ status: 200, etag: '"after"', body: { id: 7 } }),
     );
@@ -300,7 +272,6 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
 
   test('emits a WARN when x-ratelimit-remaining < 500 on PATCH response', async () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    // Single-call PATCH path.
     global.fetch = jest.fn().mockResolvedValueOnce(
       mockResponse({
         status: 200,
@@ -343,9 +314,6 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
       existingCommentId: undefined,
     });
 
-    // Rate-limit WARN is the only warn site touched by this path; a
-    // future unrelated warn in the dispatcher would break this. Pin
-    // specifically on the rate-limit event name.
     const rateLimitWarns = warnSpy.mock.calls.filter(
       c => (c[1] as Record<string, unknown> | undefined)?.event === 'github.rate_limit_low',
     );
@@ -359,7 +327,6 @@ describe('github-comment: X-RateLimit-Remaining WARN-below-500 (L3 item 4)', () 
         status: 201,
         etag: '"abc"',
         body: { id: 1, body: 'b' },
-        // No rateLimitRemaining set — header absent on the response.
       }),
     ) as unknown as typeof fetch;
 
@@ -391,7 +358,6 @@ describe('github-comment: renderCommentBody', () => {
       costUsd: 0.25,
     });
 
-    // Leading HTML marker so future lookups can grep the comment thread.
     expect(body.startsWith('<!-- bgagent:task-id=abc123 -->')).toBe(true);
     expect(body).toContain('| Task  | `abc123` |');
     expect(body).toContain('| Status | **RUNNING** |');
@@ -402,8 +368,6 @@ describe('github-comment: renderCommentBody', () => {
   });
 
   test('sanitizes event types that contain Markdown-breaking characters', () => {
-    // Defensive against future writers emitting freer-form event
-    // strings — today all event types are snake_case enum values.
     const body = renderCommentBody({
       taskId: 'abc',
       status: 'RUNNING',
@@ -415,13 +379,11 @@ describe('github-comment: renderCommentBody', () => {
       costUsd: null,
     });
     expect(body).toContain('agentbreakline');
-    // Ensure the injection characters never made it into the rendered body.
     expect(body).not.toMatch(/agent`/);
   });
 
   test('truncates bodies that would exceed the 65 536 GitHub ceiling', () => {
-    // Repeat a long line many times to cross the 60k cap.
-    const hugeStatus = 'RUNNING'.repeat(10_000); // 70k chars
+    const hugeStatus = 'RUNNING'.repeat(10_000);
     const body = renderCommentBody({
       taskId: 'abc',
       status: hugeStatus,
@@ -437,10 +399,6 @@ describe('github-comment: renderCommentBody', () => {
   });
 
   test('exports the BGAGENT marker prefix constant for downstream callers', () => {
-    // The marker prefix is the public convention for identifying
-    // bgagent-owned comments in PR threads. Exporting it keeps a
-    // Chunk K reconciliation / forensics caller from re-inventing
-    // the regex.
     expect(BGAGENT_COMMENT_MARKER_PREFIX).toBe('bgagent:task-id=');
     const body = renderCommentBody({
       taskId: 'T1',
@@ -470,28 +428,13 @@ describe('github-comment: renderCommentBody', () => {
     expect(body).not.toContain('Pull request');
     expect(body).not.toContain('Duration');
     expect(body).not.toContain('Cost');
-    // Required rows still present.
     expect(body).toContain('| Task  | `abc` |');
     expect(body).toContain('| Status | **SUBMITTED** |');
   });
 });
 
-// ---------------------------------------------------------------------------
-// renderCommentBody self-defends against
-// uncoerced DDB string numerics
-// ---------------------------------------------------------------------------
-
 describe('github-comment: renderCommentBody numeric self-defense (finding #9)', () => {
-  // The fanout dispatcher coerces ``cost_usd`` / ``duration_s`` at its
-  // own boundary, but that coverage is brittle: a future caller (a
-  // Chunk K reconciler, a Phase 3 rehydration path) that forgets the
-  // step would hit the same ``TypeError: toFixed is not a function``
-  // bug commit 9fe704e fixed in the fanout dispatcher. ``renderCommentBody``
-  // now coerces again so the crash surface is closed at the render site.
-
   test('string-typed costUsd from an uncoerced DDB Item does NOT throw', () => {
-    // Direct repro of the Scenario-7-ext symptom at the render boundary.
-    // The body must render a valid Cost row, not throw TypeError.
     const body = renderCommentBody({
       taskId: 'abc',
       status: 'COMPLETED',
@@ -499,7 +442,6 @@ describe('github-comment: renderCommentBody numeric self-defense (finding #9)', 
       latestEventType: 'task_completed',
       latestEventAt: '2026-05-05T00:00:00Z',
       prUrl: null,
-      // As the agent stores them: DynamoDB strings (see shared/numeric.ts).
       durationS: '96.0' as unknown as number,
       costUsd: '0.20939010000000002' as unknown as number,
     });
@@ -508,10 +450,6 @@ describe('github-comment: renderCommentBody numeric self-defense (finding #9)', 
   });
 
   test('non-finite string costUsd collapses to null and omits the Cost row', () => {
-    // A corrupt writer emitting ``'NaN'`` or ``'Infinity'`` must NOT
-    // produce a ``$NaN`` row. Coercion returns null, row is omitted,
-    // and a ``numeric.coercion_failed`` warn fires via the shared
-    // coercion helper so the writer bug surfaces in CloudWatch.
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
     try {
       const body = renderCommentBody({
@@ -537,8 +475,6 @@ describe('github-comment: renderCommentBody numeric self-defense (finding #9)', 
   });
 
   test('null cost / duration render no row (unchanged behavior — absent is not corrupt)', () => {
-    // Regression guard: the self-defense must NOT start warning on the
-    // legitimate "absent" case. Only non-finite coercions warn.
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
     try {
       renderCommentBody({
@@ -561,31 +497,18 @@ describe('github-comment: renderCommentBody numeric self-defense (finding #9)', 
   });
 });
 
-// ---------------------------------------------------------------------------
-// Markdown injection via prUrl
-// ---------------------------------------------------------------------------
-
 describe('github-comment: sanitizeMarkdownLinkTarget (finding #12)', () => {
-  // The helper is exported so callers outside renderCommentBody (e.g.
-  // future Slack / email renderers that may interpolate into markdown)
-  // can share the same validation surface.
-
   test('accepts a well-formed https GitHub PR URL unchanged', () => {
     const ok = 'https://github.com/owner/repo/pull/42';
     expect(sanitizeMarkdownLinkTarget(ok)).toBe(ok);
   });
 
   test('accepts a plain http URL unchanged', () => {
-    // Enterprise / self-hosted GitHub may serve over plain HTTP in
-    // internal networks; we still allow it. Non-http(s) schemes are
-    // rejected below.
     const ok = 'http://github.internal/owner/repo/pull/7';
     expect(sanitizeMarkdownLinkTarget(ok)).toBe(ok);
   });
 
   test.each([
-    // Each of these, if interpolated into ``[link](<url>)`` verbatim,
-    // would break the Markdown table layout or inject trailing content.
     ['close-paren', 'https://evil.example.com/a)|injected'],
     ['pipe', 'https://evil.example.com/a|new-col'],
     ['newline', 'https://evil.example.com/a\nnew line'],
@@ -620,10 +543,6 @@ describe('github-comment: sanitizeMarkdownLinkTarget (finding #12)', () => {
 
 describe('github-comment: renderCommentBody Markdown-link injection guard (finding #12)', () => {
   test('crafted prUrl with ) | ] does not break the Markdown table', () => {
-    // End-to-end: what happens at the render boundary when the PR URL
-    // is hostile. Pre-fix, the body contained ``[link](evil)|injected)``
-    // which rendered a broken link AND started a new table column.
-    // Post-fix, the row is omitted entirely.
     const body = renderCommentBody({
       taskId: 'abc',
       status: 'COMPLETED',
@@ -634,21 +553,11 @@ describe('github-comment: renderCommentBody Markdown-link injection guard (findi
       durationS: null,
       costUsd: null,
     });
-    // The Pull-request row is omitted because the URL failed validation.
     expect(body).not.toContain('Pull request');
-    // Defense-in-depth: none of the injection characters appear in a
-    // link-like context. Specifically, no ``[link](`` with a trailing
-    // pipe or close-paren that could close the link and open a new
-    // column.
     expect(body).not.toMatch(/\[link\]\([^)]*[|)]/);
   });
 
   test('javascript: scheme prUrl is rejected (omits the row rather than rendering)', () => {
-    // An attacker who controlled ``pr_url`` (e.g. via a future webhook
-    // field) could supply ``javascript:...``. Browsers don't execute
-    // clicks on Markdown links in GitHub comments (GitHub rewrites
-    // targets) but the row would still display the attacker-chosen
-    // label. Safer to omit entirely.
     const body = renderCommentBody({
       taskId: 'abc',
       status: 'RUNNING',
@@ -664,8 +573,6 @@ describe('github-comment: renderCommentBody Markdown-link injection guard (findi
   });
 
   test('legitimate https PR URL still renders the link row unchanged', () => {
-    // Regression guard: the sanitization must NOT reject real GitHub
-    // PR links — that would mask terminal comments silently.
     const prUrl = 'https://github.com/owner/repo/pull/42';
     const body = renderCommentBody({
       taskId: 'abc',

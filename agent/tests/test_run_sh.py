@@ -1,11 +1,3 @@
-"""``run.sh``, run with stand-ins for ``docker`` and ``aws`` first on PATH.
-
-``run.sh`` is the documented way to try the agent container locally (developer
-guide, README quick start), and nothing in the build executes it. Each test runs
-the real script and reads what it asked ``docker`` to do. No image is built, no
-container starts, and the AWS CLI of the machine is not called.
-"""
-
 import os
 import subprocess
 import sys
@@ -13,8 +5,6 @@ from pathlib import Path
 
 _AGENT = Path(__file__).resolve().parents[1]
 
-# Records the arguments of `docker build` and of `docker run`, one per line, and
-# answers `docker image inspect` with a size. Any other call (`docker rm`) succeeds.
 _DOCKER = """\
 #!/usr/bin/env bash
 case "$1" in
@@ -23,7 +13,6 @@ case "$1" in
 esac
 """
 
-# AWS CLI v2: `configure export-credentials` prints the credentials of the profile.
 _AWS_CLI_V2 = """\
 #!/usr/bin/env bash
 if [ "$1" = --version ]; then
@@ -48,14 +37,12 @@ fi
 
 
 def _run_sh(tmp_path, aws=_AWS_CLI_V2, **env) -> subprocess.CompletedProcess[str]:
-    """Run ``run.sh owner/repo 42`` for a user who has a ``~/.aws`` and no keys exported."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name, script in (("docker", _DOCKER), ("aws", aws)):
         (bin_dir / name).write_text(script, encoding="utf-8")
         (bin_dir / name).chmod(0o755)
     (tmp_path / "home" / ".aws").mkdir(parents=True)
-    # run.sh reads the CLI's answer with `python3`: the interpreter of this test run.
     path = [str(bin_dir), str(Path(sys.executable).parent), os.environ["PATH"]]
     return subprocess.run(
         ["bash", str(_AGENT / "run.sh"), "owner/repo", "42"],
@@ -75,12 +62,10 @@ def _run_sh(tmp_path, aws=_AWS_CLI_V2, **env) -> subprocess.CompletedProcess[str
 
 
 def _docker(tmp_path, command) -> list[str]:
-    """The arguments ``run.sh`` gave to ``docker build`` or to ``docker run``."""
     return (tmp_path / f"docker-{command}").read_text(encoding="utf-8").splitlines()
 
 
 def _copied_from_context(dockerfile: Path) -> list[str]:
-    """Every path a ``COPY`` of the Dockerfile reads from the build context."""
     sources = []
     for line in dockerfile.read_text(encoding="utf-8").splitlines():
         words = line.split()

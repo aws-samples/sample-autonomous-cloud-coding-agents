@@ -30,7 +30,6 @@ jest.mock('../../src/handlers/shared/context-hydration', () => ({
 }));
 jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ1') }));
 
-/** Loaded anew for each test: the handler keeps its answers per repository for a minute. */
 let handler: (event: APIGatewayProxyEvent) => Promise<APIGatewayProxyResult>;
 
 const PLATFORM_SECRET = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:platform';
@@ -61,7 +60,6 @@ beforeEach(async () => {
 const body = (res: { body: string }) => JSON.parse(res.body);
 const issueNumbers = (res: { body: string }) => body(res).data.issues.map((i: { number: number }) => i.number);
 
-/** Items as GitHub's "list repository issues" returns them: pull requests carry `pull_request`. */
 const issue = (number: number) => ({ number, title: `Issue ${number}`, html_url: `https://github.com/acme/game/issues/${number}`, updated_at: 'x' });
 const pullRequest = (number: number) => ({ ...issue(number), pull_request: { url: 'p' } });
 
@@ -83,15 +81,13 @@ describe('list-repo-issues', () => {
   });
 
   test('reads further pages when pull requests fill the first one', async () => {
-    // GitHub lists pull requests on this endpoint and has no parameter that leaves
-    // them out: 100 recently updated pull requests would hide every issue.
+    // GitHub's list-issues endpoint returns pull requests too, and has no parameter that excludes them.
     fetchMock
       .mockResolvedValueOnce(githubResponse(Array.from({ length: 100 }, (_, i) => pullRequest(1000 + i))))
       .mockResolvedValueOnce(githubResponse([issue(3), issue(2), issue(1)]));
     const res = await handler(makeEvent());
     expect(issueNumbers(res)).toEqual([3, 2, 1]);
     expect(fetchMock.mock.calls.map(([url]) => new URL(url).searchParams.get('page'))).toEqual(['1', '2']);
-    // One deadline for all pages keeps the total inside the Lambda's timeout.
     expect(fetchMock.mock.calls[1][1].signal).toBe(fetchMock.mock.calls[0][1].signal);
   });
 
@@ -111,8 +107,6 @@ describe('list-repo-issues', () => {
   });
 
   test('answers 503, not a short list, when a later page fails', async () => {
-    // What the first page gave is not the repository's list: answered alone it would
-    // hide the issues of the next page, the fault that reading further pages removes.
     fetchMock
       .mockResolvedValueOnce(githubResponse([...Array.from({ length: 99 }, (_, i) => pullRequest(1000 + i)), issue(7)]))
       .mockRejectedValueOnce(new Error('timeout'));
@@ -130,8 +124,6 @@ describe('list-repo-issues', () => {
   });
 
   test('answers a repeated request from memory, without spending another GitHub call', async () => {
-    // Every call spends the repository token that the orchestrator and the agents
-    // share; a script or a reloading tab must not be able to use up its hourly budget.
     fetchMock.mockResolvedValue(githubResponse([issue(2)]));
     const first = await handler(makeEvent());
     const second = await handler(makeEvent());
@@ -214,8 +206,7 @@ describe('list-repo-issues', () => {
   });
 
   test('explains it the same way when the time limit ends while a page is being read', async () => {
-    // fetch resolves when the headers are in. The time limit of all pages can end while
-    // the body is still arriving, and reading it then rejects with the signal's error.
+    // fetch resolves once the headers arrive; an abort during the body read rejects `json()` with the signal's error.
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,

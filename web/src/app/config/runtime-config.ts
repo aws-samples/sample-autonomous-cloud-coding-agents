@@ -17,13 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Deployment-specific settings, read at startup from `/config.json`.
- *
- * The CDK stack writes this file next to the bundle, so one prebuilt bundle
- * serves every deployment (no per-customer rebuild). None of these values are
- * secrets: the Cognito app client is a public client without a secret.
- */
 interface CognitoAuthConfig {
   readonly mode: 'cognito';
   readonly userPoolId: string;

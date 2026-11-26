@@ -34,13 +34,6 @@ const s3 = makeClient(S3Client);
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const TRACE_BUCKET_NAME = process.env.TRACE_ARTIFACTS_BUCKET_NAME!;
 
-/**
- * Presigned URL TTL. 15 minutes is long enough for a multi-MB trajectory
- * download on a slow link, short enough to bound the window for a leaked
- * URL to be useful. Also short enough that the caller's Cognito session
- * is still valid — if a user wants a fresh URL, they re-issue via
- * ``bgagent trace download``.
- */
 export const TRACE_URL_TTL_SECONDS = 900;
 
 /**
@@ -92,10 +85,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const s3Uri = record.trace_s3_uri;
     if (!s3Uri) {
-      // Covers two cases with one status code — the CLI can't disambiguate
-      // "never enabled" from "not yet uploaded" without racing the agent,
-      // and the user-facing remedy is the same: re-submit with --trace (or
-      // wait for the task to reach terminal).
       return errorResponse(
         404,
         ErrorCode.TRACE_NOT_AVAILABLE,
@@ -114,10 +103,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Trace URI is malformed.', requestId);
     }
 
-    // Defense in depth: refuse to presign URLs for objects in a bucket
-    // we don't own. Prevents a DDB-injection attack that spoofs a
-    // ``trace_s3_uri`` pointing at an attacker-controlled bucket from
-    // turning this handler into an open URL signer.
     if (parsed.bucket !== TRACE_BUCKET_NAME) {
       logger.error('TaskRecord.trace_s3_uri bucket does not match TRACE_ARTIFACTS_BUCKET_NAME', {
         task_id: taskId,
@@ -128,20 +113,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Trace URI references an unexpected bucket.', requestId);
     }
 
-    // Second defense-in-depth guard: the object key must live under the
-    // caller's own user prefix. The agent writes with
-    // ``traces/<user_id>/<task_id>.jsonl.gz`` by construction; an
-    // ownership-check mismatch here signals either a stale record or a
-    // cross-user write that escaped the runtime's per-prefix policy.
-    //
-    // Note: the comparator is the CALLER's ``userId`` (from Cognito),
-    // NOT ``record.user_id``. That is the stronger invariant: it defends
-    // against a compromised agent pointing one user's record at another
-    // user's artifact. ``record.user_id !== userId`` already short-
-    // circuited cross-user RECORD access above; this guard additionally
-    // prevents cross-user ARTIFACT access when the record is legitimately
-    // owned by the caller but ``trace_s3_uri`` was tampered with to
-    // point elsewhere. Do NOT "simplify" by using ``record.user_id``.
     const expectedKeyPrefix = `${TRACE_OBJECT_KEY_PREFIX}${userId}/`;
     if (!parsed.key.startsWith(expectedKeyPrefix)) {
       logger.error('TaskRecord.trace_s3_uri key is not under the caller\'s user prefix', {
@@ -154,28 +125,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(403, ErrorCode.FORBIDDEN, 'Trace artifact is not owned by the caller.', requestId);
     }
 
-    // HEAD-check the object before presigning. The agent may have
-    // written ``trace_s3_uri`` to DDB before the S3 PUT propagated, or
-    // a lifecycle policy / operator action may have deleted the
-    // artifact after the record was stamped. Issuing a URL that 404s
-    // XML from S3 would leave the user debugging a broken download with
-    // no obvious remedy; returning the same ``TRACE_NOT_AVAILABLE`` 404
-    // the CLI already knows how to message (re-submit with --trace) is
-    // strictly more user-friendly. ``s3:GetObject`` implicitly grants
-    // HeadObject per AWS IAM docs, so no extra permission is required.
     try {
       await s3.send(new HeadObjectCommand({ Bucket: parsed.bucket, Key: parsed.key }));
     } catch (err) {
-      // S3 SDK v3 returns either ``NotFound`` (object-level 404) or
-      // ``NoSuchKey`` (key-level 404) depending on operation; both map
-      // to the same user-facing outcome. So does HTTP 403: this role
-      // holds ``s3:GetObject`` without ``s3:ListBucket``, and to such a
-      // caller S3 answers 403, not 404, for a key that does not exist
-      // (HeadObject API reference, "Permissions"). That is every trace
-      // the bucket's lifecycle rule has expired. The bucket and the
-      // caller's key prefix were checked above, so a 403 here means a
-      // missing object unless the role's own grant is broken; the WARN
-      // keeps the status for that case.
+      // S3 SDK v3 returns either ``NotFound`` or ``NoSuchKey`` for a missing
+      // key, depending on operation. To a caller that holds ``s3:GetObject``
+      // without ``s3:ListBucket``, as this role does, S3 answers 403, not
+      // 404 (HeadObject API reference, "Permissions").
       const name = (err as { name?: string })?.name;
       const httpStatus = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
       if (name === 'NotFound' || name === 'NoSuchKey' || httpStatus === 404 || httpStatus === 403) {

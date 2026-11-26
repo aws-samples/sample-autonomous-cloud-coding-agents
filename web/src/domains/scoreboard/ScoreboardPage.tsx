@@ -52,7 +52,6 @@ import {
 import { NewTaskButton } from '../tasks/components/NewTaskButton';
 import { useScoreboard } from './hooks';
 
-/** The tasks behind a count, each by the end of its id, in the order the API names them. It names ten at most. */
 function TaskLinks({ flagged }: { flagged: Flagged }) {
   const unnamed = flagged.count - flagged.task_ids.length;
   return (
@@ -74,7 +73,6 @@ function ScoreTile({ tile, board }: { tile: TileSpec; board: Scoreboard | undefi
   const before = board && previousLine(tile, board);
   return (
     <Tile label={tile.label} loading={!board} value={board ? tile.value(board.current, board) : null} explanation={tile.explanation}>
-      {/* The links stand under the count they belong to. A line beside them is about other tasks, and comes after. */}
       {tasks && <TaskLinks flagged={tasks} />}
       {detail && <Box color="text-body-secondary">{detail}</Box>}
       {before && <Box variant="small" color="text-body-secondary">{before}</Box>}
@@ -82,11 +80,6 @@ function ScoreTile({ tile, board }: { tile: TileSpec; board: Scoreboard | undefi
   );
 }
 
-/**
- * One column grid for every section, so the tiles line up down the page. A section with
- * more tiles goes on to a second line: a fourth column would leave each tile too narrow
- * for the sentence under its number.
- */
 const COLUMNS = 3;
 
 function Section({ section, board }: { section: SectionSpec; board: Scoreboard | undefined }) {
@@ -103,20 +96,9 @@ function Section({ section, board }: { section: SectionSpec; board: Scoreboard |
 }
 
 const BAR_HEIGHT = 8;
-/** Above and below the bar: a part answers the pointer and takes the focus over three times the height it is drawn at. */
 const BAR_REACH = 8;
-/**
- * The smallest target a pointer or a finger can hit: a single failed task among hundreds
- * is drawn this wide, wider than its share. The table gives the true proportions.
- */
 const PART_MIN_WIDTH = 24;
 
-/**
- * The finished tasks as one whole in up to three parts: a thin bar with round ends, its
- * parts separated by gaps that show the surface, an empty part not drawn. The bar carries
- * no text: each part explains itself on hover and on focus, and the table under it gives
- * the numbers.
- */
 function OutcomeBar({ period, dark }: { period: ScoreboardPeriod; dark: boolean }) {
   const parts = outcomeParts(period).filter((part) => part.count > 0);
   const round = (end: boolean) => (end ? BAR_HEIGHT / 2 : 0);
@@ -143,15 +125,12 @@ function OutcomeBar({ period, dark }: { period: ScoreboardPeriod; dark: boolean 
   );
 }
 
-/** The table of all six outcomes is the bar's legend, through the swatch on each row, and its data. */
 function Outcomes({ period }: { period: ScoreboardPeriod | undefined }) {
   const dark = useDarkMode();
   return (
     <Container header={<Header variant="h2" description="Activity is a diagnostic, not a score.">Tasks finished</Header>}>
-      {/* Two tile columns wide in a window of the usual size: over the whole container a count sits far from its label. */}
       <div style={{ maxWidth: 700 }}>
         <SpaceBetween size="m">
-          {/* The page is drawn without a finished task when pull requests of the period before wait: there is then no bar. */}
           {period && period.finished > 0 && <OutcomeBar period={period} dark={dark} />}
           <Table<OutcomeRow>
             variant="embedded"
@@ -166,11 +145,9 @@ function Outcomes({ period }: { period: ScoreboardPeriod | undefined }) {
                 id: 'outcome',
                 header: 'Outcome',
                 isRowHeader: true,
-                // A label that wraps, as it does on a phone, continues under its first word and not under the swatch.
                 cell: (row) => <span style={{ display: 'flex', alignItems: 'baseline' }}><Swatch color={seriesColor(row.slot, dark)} />{row.label}</span>,
               },
               { id: 'tasks', header: 'Tasks', cell: (row) => formatCount(row.count) },
-              // No task finished: a share of nothing shows the dash a tile without a number shows.
               { id: 'share', header: 'Share', cell: (row) => row.share ?? '-' },
             ]}
           />
@@ -181,14 +158,9 @@ function Outcomes({ period }: { period: ScoreboardPeriod | undefined }) {
 }
 
 function ScoreboardBody({ board, stale }: { board: Scoreboard | undefined; stale: boolean }) {
-  // Pull requests can wait from the period before: with no task finished in this one, the page still has that count to show.
   const nothing = board?.current.finished === 0 && !board.open_over_7d?.count;
   return (
     <>
-      {/*
-        Above the numbers and announced when it changes: first that the scoreboard is loading, then what the
-        numbers count. It stands outside the dimmed part, which says nothing to someone who cannot see it.
-      */}
       <div role="status">
         {!board || stale ? (
           <Box variant="p" margin={{ bottom: 'l' }}><StatusIndicator type="loading">Loading the scoreboard</StatusIndicator></Box>
@@ -196,7 +168,6 @@ function ScoreboardBody({ board, stale }: { board: Scoreboard | undefined; stale
           <Box variant="p" margin={{ bottom: 'l' }}>{contextLine(board)}</Box>
         )}
       </div>
-      {/* While another range loads, the numbers of the range before it stay on screen, dimmed. */}
       <div aria-busy={stale} style={{ opacity: stale ? 0.5 : 1 }}>
         {nothing ? (
           <Container>

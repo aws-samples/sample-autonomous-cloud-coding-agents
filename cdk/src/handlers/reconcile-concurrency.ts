@@ -25,9 +25,6 @@ const ddb = makeClient(DynamoDBClient);
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME!;
 
-/**
- * Count actual active tasks for a user by querying the UserStatusIndex GSI.
- */
 async function countActiveTasks(userId: string): Promise<number> {
   let count = 0;
   let lastKey: Record<string, any> | undefined;

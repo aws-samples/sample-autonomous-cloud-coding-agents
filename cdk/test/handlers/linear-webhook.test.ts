@@ -131,7 +131,6 @@ describe('linear-webhook handler', () => {
   });
 
   test('401s when webhookTimestamp is stale', async () => {
-    // 5 minutes old — far outside the 60s replay window.
     const body = JSON.stringify({
       action: 'create',
       type: 'Issue',
@@ -160,12 +159,6 @@ describe('linear-webhook handler', () => {
   });
 
   test('acks agent-mode webhooks (AppUserNotification) with 200 and never forwards them', async () => {
-    // Fingerprint of an OAuth app configured as a Linear AGENT (agent/app
-    // events on). ABCA is a plain-comment integration — it must ack (so Linear
-    // stops retrying) but never forward, and it logs a WARN so an operator can
-    // spot "this workspace's app is in agent mode" (which breaks comment-thread
-    // UX). Here we assert the ack + non-forward; the WARN copy is covered by
-    // the source comment / docs, not a log-spy assertion (matches this suite).
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
     for (const type of ['AppUserNotification', 'AgentSession', 'AgentSessionEvent', 'AgentActivity']) {
       warnSpy.mockClear();
@@ -179,8 +172,8 @@ describe('linear-webhook handler', () => {
       });
       const result = await handler(makeEvent(body, sign(body)));
       expect(result.statusCode).toBe(200);
-      expect(lambdaSend).not.toHaveBeenCalled(); // never forwarded to the processor
-      expect(warnSpy).toHaveBeenCalledTimes(1); // surfaced loudly, not a silent INFO ignore
+      expect(lambdaSend).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
     }
     warnSpy.mockRestore();
   });
@@ -194,12 +187,12 @@ describe('linear-webhook handler', () => {
       organizationId: 'org-1',
       data: { id: 'cmt-1', body: '@bgagent fix it', issueId: 'iss-9' },
     });
-    ddbSend.mockResolvedValueOnce({}); // dedup Put succeeds
+    ddbSend.mockResolvedValueOnce({});
     lambdaSend.mockResolvedValueOnce({});
     const result = await handler(makeEvent(body, sign(body)));
     expect(result.statusCode).toBe(200);
-    expect(ddbSend).toHaveBeenCalled(); // deduped
-    expect(lambdaSend).toHaveBeenCalled(); // forwarded to processor
+    expect(ddbSend).toHaveBeenCalled();
+    expect(lambdaSend).toHaveBeenCalled();
   });
 
   test('ignores a non-create Comment event (edited/removed) with 200', async () => {
@@ -212,7 +205,7 @@ describe('linear-webhook handler', () => {
     });
     const result = await handler(makeEvent(body, sign(body)));
     expect(result.statusCode).toBe(200);
-    expect(lambdaSend).not.toHaveBeenCalled(); // not forwarded
+    expect(lambdaSend).not.toHaveBeenCalled();
   });
 
   test('400s when data.id is missing on an Issue event', async () => {
@@ -231,7 +224,7 @@ describe('linear-webhook handler', () => {
   test('verified Issue event dedups and invokes processor', async () => {
     const FRESH_TS = Date.now();
     const body = issueCreatePayload({ webhookTimestamp: FRESH_TS });
-    ddbSend.mockResolvedValueOnce({}); // conditional Put succeeds
+    ddbSend.mockResolvedValueOnce({});
     lambdaSend.mockResolvedValueOnce({});
 
     const result = await handler(makeEvent(body, sign(body)));
@@ -242,9 +235,7 @@ describe('linear-webhook handler', () => {
     expect(putCall![0].input.Item.dedup_key).toBe(`issue-1#create#${FRESH_TS}`);
     expect(putCall![0].input.ConditionExpression).toContain('attribute_not_exists');
 
-    // The TTL must outlast Linear's full retry horizon (first at +1m, then
-    // +1h, then +6h — ~7h total). Anything shorter lets the +1h/+6h retries
-    // land after the dedup row expires and double-dispatch the task.
+    // Linear retries a failed delivery at +1m, +1h and +6h.
     const nowSeconds = Math.floor(Date.now() / 1000);
     const ttl = putCall![0].input.Item.ttl as number;
     expect(ttl - nowSeconds).toBeGreaterThanOrEqual(7 * 60 * 60);
@@ -259,10 +250,7 @@ describe('linear-webhook handler', () => {
   });
 
   test('distinct deliveries for the same issue both dispatch', async () => {
-    // Linear reuses `webhookId` across deliveries from the same webhook
-    // config, so two separate events (label-off-then-on) share the webhookId
-    // but differ in webhookTimestamp. The dedup primitive must include
-    // timestamp so distinct events are not collapsed.
+    // Linear sends the same `webhookId` on every delivery of one webhook configuration.
     const FRESH_TS = Date.now();
     const FRESH_TS_2 = FRESH_TS + 1000;
     const body1 = issueCreatePayload({ webhookTimestamp: FRESH_TS });
@@ -297,16 +285,12 @@ describe('linear-webhook handler', () => {
   test('returns 500 and rolls back dedup row if processor invoke fails', async () => {
     const FRESH_TS = Date.now();
     const body = issueCreatePayload({ webhookTimestamp: FRESH_TS });
-    // 1st ddbSend: PutCommand (dedup reservation) succeeds
-    // 2nd ddbSend: DeleteCommand (rollback after invoke failure) succeeds
     ddbSend.mockResolvedValueOnce({}).mockResolvedValueOnce({});
     lambdaSend.mockRejectedValueOnce(new Error('Lambda throttle'));
 
     const result = await handler(makeEvent(body, sign(body)));
     expect(result.statusCode).toBe(500);
 
-    // Dedup row must be deleted so Linear's +1m/+1h/+6h retries can try again —
-    // otherwise a transient Lambda failure silently drops the task for 8h.
     const deleteCalls = ddbSend.mock.calls.filter((c) => c[0]._type === 'Delete');
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0][0].input.TableName).toBe('LinearDedup');

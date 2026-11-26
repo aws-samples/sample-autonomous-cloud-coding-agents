@@ -1,10 +1,3 @@
-"""Unit tests for the cross-field workflow validator (#248).
-
-The golden corpus (``test_workflow_validation_corpus.py``) is the parity
-contract; these tests pin individual rule behavior and edge cases directly, so a
-rule regression is attributable to a named rule rather than a corpus diff.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -13,7 +6,6 @@ from workflow import WorkflowValidationError, assert_valid, validate_workflow
 
 
 def _base() -> dict:
-    """A valid coding workflow (single source for mutation in tests)."""
     return {
         "id": "coding/new-task-v1",
         "version": "1.0.0",
@@ -46,7 +38,7 @@ def test_base_is_valid():
 
 def test_assert_valid_raises_on_violation():
     w = _base()
-    w["version"] = "2.0.0"  # rule-1
+    w["version"] = "2.0.0"
     with pytest.raises(WorkflowValidationError, match="rule-1"):
         assert_valid(w)
 
@@ -65,8 +57,6 @@ class TestIndividualRules:
         assert ("rule-2" in validate_workflow(w)) is expect
 
     def test_rule3_domain_default_repo_less(self):
-        # knowledge + requires_repo omitted -> repo-less by default; a clone_repo
-        # step is then invalid, and the schema's allOf does NOT catch it.
         w = _base()
         w["id"] = "knowledge/x-v1"
         w["domain"] = "knowledge"
@@ -84,17 +74,13 @@ class TestIndividualRules:
         assert "rule-3" in validate_workflow(w)
 
     def test_rule4_read_only_rejects_pr_create(self):
-        # read_only ⇒ an ensure_pr that writes the tree (create/push) is invalid.
         w = _base()
         w["read_only"] = True
         w["agent_config"]["tier"] = "read-only"
         w["agent_config"]["allowed_tools"] = ["Bash", "Read"]
-        # steps still contain ensure_pr strategy:create from _base()
         assert "rule-4" in validate_workflow(w)
 
     def test_rule4_read_only_rejects_ensure_pr_without_a_strategy(self):
-        # A step that names no strategy runs as `create` (the default of the
-        # pipeline and of the step handler): it pushes and opens a pull request.
         w = _base()
         w["read_only"] = True
         w["agent_config"]["tier"] = "read-only"
@@ -103,8 +89,6 @@ class TestIndividualRules:
         assert "rule-4" in validate_workflow(w)
 
     def test_rule7_repo_less_rejects_discover_and_provider(self):
-        # knowledge default (repo-less); repo_config that discovers / names a
-        # provider is invalid, and the schema can't see the domain default.
         w = _base()
         w["id"] = "knowledge/x-v1"
         w["domain"] = "knowledge"
@@ -126,7 +110,6 @@ class TestIndividualRules:
         assert "rule-5" in validate_workflow(w)
 
     def test_rule5_read_only_exempt_from_soft_deny(self):
-        # A read_only workflow need not carry soft_deny (it can't write).
         w = _base()
         w["read_only"] = True
         w["agent_config"]["tier"] = "read-only"
@@ -154,7 +137,6 @@ class TestIndividualRules:
         assert "rule-6" not in validate_workflow(w)
 
     def test_rule6_read_only_tier_rejects_elevated_fields(self):
-        # read-only is BELOW standard; it must not declare extended reach either.
         w = _base()
         w["read_only"] = True
         w["agent_config"]["tier"] = "read-only"
@@ -191,9 +173,6 @@ class TestIndividualRules:
         assert "rule-8" in validate_workflow(w)
 
     def test_rule8_unknown_deliver_target_flagged(self):
-        # ADR-014 addendum: deliver_artifact.target must name a registered
-        # deliverer. rule-8 catches an unknown target universally (rule-11 only
-        # catches it when it collides with the primary outcome).
         w = _base()
         w["id"] = "knowledge/x-v1"
         w["domain"] = "knowledge"
@@ -227,16 +206,15 @@ class TestIndividualRules:
 
     def test_rule9_unsatisfiable_input(self):
         w = _base()
-        w["required_inputs"] = {"all_of": ["pr_number"]}  # no pull_request source
+        w["required_inputs"] = {"all_of": ["pr_number"]}
         assert "rule-9" in validate_workflow(w)
 
     def test_rule11_outcome_requires_step(self):
         w = _base()
-        w["terminal_outcomes"] = {"primary": "artifact"}  # no deliver_artifact
+        w["terminal_outcomes"] = {"primary": "artifact"}
         assert "rule-11" in validate_workflow(w)
 
     def _repo_less_deliver(self, target: str, primary: str) -> dict:
-        """A repo-less workflow ending in one deliver_artifact step."""
         w = _base()
         w["id"] = "knowledge/x-v1"
         w["domain"] = "knowledge"
@@ -253,7 +231,6 @@ class TestIndividualRules:
         return w
 
     def test_rule11_comment_outcome_s3_only_target_flagged(self):
-        # primary=comment but the deliver step only targets s3 → never posts a comment.
         w = self._repo_less_deliver(target="s3", primary="comment")
         assert "rule-11" in validate_workflow(w)
 
@@ -263,30 +240,19 @@ class TestIndividualRules:
         assert "rule-11" not in validate_workflow(w)
 
     def test_rule11_artifact_outcome_comment_only_target_flagged(self):
-        # primary=artifact but the deliver step only posts a comment → no artifact.
         w = self._repo_less_deliver(target="comment", primary="artifact")
         assert "rule-11" in validate_workflow(w)
 
     def test_rule11_unknown_deliverer_target_flagged(self):
-        # ADR-014 addendum: target is an open string resolving to a registered
-        # deliverer. An unknown name produces nothing the validator can vouch
-        # for, so a declared primary outcome it doesn't back is flagged.
         w = self._repo_less_deliver(target="not_a_registered_deliverer", primary="artifact")
         assert "rule-11" in validate_workflow(w)
 
     def test_rule11_unset_target_comment_outcome_flagged(self):
-        # PR review #296 finding #7: an unset target now resolves to the runtime
-        # default (s3, produces only `artifact`), so a primary:comment workflow
-        # that omits target is flagged — it would never post the comment it
-        # declares. Previously the validator was lenient here (full set) and let
-        # this pass while the runtime silently delivered to s3 only.
         w = self._repo_less_deliver(target="s3", primary="comment")
-        del w["steps"][2]["target"]  # omit target entirely
+        del w["steps"][2]["target"]
         assert "rule-11" in validate_workflow(w)
 
     def test_rule11_unset_target_artifact_outcome_passes(self):
-        # The complement: primary:artifact with an unset target is fine, because
-        # the default target (s3) produces `artifact`. Validator and runtime agree.
         w = self._repo_less_deliver(target="s3", primary="artifact")
         del w["steps"][2]["target"]
         assert "rule-11" not in validate_workflow(w)
@@ -297,7 +263,6 @@ class TestIndividualRules:
         assert "rule-12" in validate_workflow(w)
 
     def test_rule12_advisory_continue_allowed(self):
-        # A non-side-effecting step may use on_failure: continue.
         w = _base()
         w["steps"].insert(3, {"kind": "verify_lint", "on_failure": "continue"})
         assert "rule-12" not in validate_workflow(w)
@@ -309,18 +274,15 @@ class TestIndividualRules:
 
 
 def test_validator_reports_complete_verdict_on_shape_invalid():
-    """Even a shape-invalid file gets the full cross-field verdict, not just 'schema'."""
     w = _base()
-    del w["steps"]  # schema violation
-    w["version"] = "2.0.0"  # rule-1 still computable
+    del w["steps"]
+    w["version"] = "2.0.0"
     verdict = validate_workflow(w)
     assert "schema" in verdict
     assert "rule-1" in verdict
 
 
 def test_rule13_not_enforced_locally():
-    """Model allow-list (rule 13) is a create-task-boundary check, not file-local."""
     w = _base()
     w["agent_config"]["model"] = {"id": "some.unapproved.model"}
-    # The file-local validator must NOT flag model choice — that's the boundary's job.
     assert validate_workflow(w) == []

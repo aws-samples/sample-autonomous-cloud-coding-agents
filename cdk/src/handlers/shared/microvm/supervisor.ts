@@ -107,7 +107,6 @@ function sameWorker(snapshot: MicrovmLifecycleSnapshot | undefined, input: Micro
     && snapshot.handle.sessionId === input.handle.sessionId && snapshot.handle.endpoint === input.handle.endpoint;
 }
 
-/** The fields whose change is logged once per change, not on every poll. */
 function observationDiagnostic(
   snapshot: MicrovmLifecycleSnapshot | undefined,
   substrate: SessionStatus | undefined,
@@ -167,7 +166,6 @@ function logObservationChange(
   }
 }
 
-/** Validates the cycle input and returns the state to continue from. */
 function initialSupervisorState(input: MicrovmSupervisorInput, now: number): MicrovmSupervisorState {
   if (!Number.isSafeInteger(input.pollIntervalMs) || input.pollIntervalMs <= 0) {
     throw new Error('MicroVM supervision requires a positive poll interval');
@@ -189,7 +187,6 @@ function initialSupervisorState(input: MicrovmSupervisorInput, now: number): Mic
   };
 }
 
-/** Narrows the session deadline to the lifetime AWS reports, when it is well-formed. */
 function withObservedLifetime(state: MicrovmSupervisorState, substrate: SessionStatus): MicrovmSupervisorState {
   const startedAt = substrate.microvmStartedAtMs;
   const maximum = substrate.microvmMaximumDurationSeconds;
@@ -199,7 +196,6 @@ function withObservedLifetime(state: MicrovmSupervisorState, substrate: SessionS
   return { ...state, lifetimeVerified: true, sessionDeadlineMs: Math.min(state.sessionDeadlineMs, observedDeadline) };
 }
 
-/** True when the worker sleeps although no wake or same-gate suspend explains it. */
 function isSuspendAnomaly(observed: string, state: MicrovmSupervisorState, snapshot: MicrovmLifecycleSnapshot): boolean {
   return (observed === 'SUSPENDING' || observed === 'SUSPENDED')
     && state.recovery?.kind !== 'wake'
@@ -225,7 +221,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
   let readFailed = false;
   let suspendRequested = false;
   let policyReason: string | undefined;
-  // Set by `observe` for the later phases of the same cycle.
   let observed = 'UNKNOWN';
   let approvalFailure = false;
   let wakeRepairWanted = false;
@@ -298,11 +293,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     suspendCheckpointConfirmed,
   });
 
-  /**
-   * For a SUSPENDED worker parked on its current gate: did the guest record the
-   * checkpoint for this suspend intent? A guest that declined (another tool was
-   * running) records none, and the service froze it anyway.
-   */
   const checkSuspendCheckpoint = async (current: MicrovmLifecycleSnapshot): Promise<boolean | undefined> => {
     const intent = current.intent;
     if (observed !== 'SUSPENDED' || current.status !== TaskStatus.AWAITING_APPROVAL
@@ -313,7 +303,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     return lookup === 'unavailable' ? undefined : lookup === 'found';
   };
 
-  /** Phase 1: read the task and the worker. Returns a result when the cycle ends here. */
   const observe = async (): Promise<MicrovmSupervisorResult | undefined> => {
     snapshot = await fresh();
     if (!sameWorker(snapshot, input)) return result({ kind: 'ownership-lost', reason: 'worker-record-changed-or-missing' });
@@ -346,12 +335,8 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     return undefined;
   };
 
-  /** Phase 2: start, keep or end the recovery clock from what AWS reports. */
   const trackRecovery = (current: MicrovmLifecycleSnapshot) => {
     if (observed === 'RUNNING') {
-      // AWS RUNNING does not prove the guest consumed a decided/expired gate.
-      // Recovery ends after fresh guest liveness, or an intentional early wake
-      // where the original human decision is still pending.
       if (state.recovery?.kind !== 'wake' || (!wakeRepairWanted && (
         (current.status === TaskStatus.RUNNING && (current.heartbeatAtMs ?? -1) >= state.recovery.sinceMs)
         || (current.status === TaskStatus.AWAITING_APPROVAL && !awaitingDecisionConsumption)
@@ -359,16 +344,11 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
         state = { ...state, recovery: undefined, consecutiveResumeFailures: 0 };
       }
     } else if ((observed === 'PENDING' || observed === 'UNKNOWN') && !state.recovery) {
-      // An uncertain observation cannot reset an in-flight wake/suspend clock.
       if (intentMatchesGate(current) && current.intent?.action === 'resume') {
         // AWS can report PENDING while restoring an already-running worker.
-        // An API-triggered wake may arrive between supervisor polls; retain its
-        // saved start time instead of reusing the worker's original boot clock.
         beginRecovery('wake', Math.min(Date.now(), current.intent.requested_at_ms));
       } else if (observed === 'PENDING'
         && (state.startupConfirmed === false || current.status === TaskStatus.HYDRATING)) {
-        // The coordinator marks the task RUNNING before AWS finishes startup.
-        // Retain first-observation age across failed initial reads and replay.
         beginRecovery('starting', state.firstObservedAtMs);
       } else {
         beginRecovery('unconfirmed');
@@ -376,7 +356,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     }
   };
 
-  /** Phase 3: the policy decision, with the wake-repair override and live suspend switch. */
   const decide = async () => {
     suspendEnabled = input.suspendEnabled && state.lifetimeVerified;
     suspendCheckpointConfirmed = await checkSuspendCheckpoint(snapshot!);
@@ -385,8 +364,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       && (observed === 'SUSPENDING' || observed === 'SUSPENDED')))
       && (decision.action === 'wait' || decision.action === 'suspend')
       && (observed === 'RUNNING' || observed === 'SUSPENDING' || observed === 'SUSPENDED')) {
-      // A previous cycle may have lost the wake-intent write. Its durable recovery
-      // state still forbids leaving the worker asleep while that write is retried.
       decision = {
         action: 'resume',
         requestReady: observed === 'SUSPENDED',
@@ -403,7 +380,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     return decision;
   };
 
-  /** Phase 4: decisions that end the cycle without a lifecycle request. */
   const settle = async (
     current: MicrovmLifecycleSnapshot, decision: MicrovmLifecycleDecision,
   ): Promise<MicrovmSupervisorResult | undefined> => {
@@ -427,7 +403,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     return result({ kind: 'continue' });
   };
 
-  /** Phase 5: save intent, recheck, send the suspend or resume request, recheck again. */
   const command = async (decision: MicrovmLifecycleDecision & { action: 'suspend' | 'resume' }) => {
     stage = `${decision.action}-intent`;
     if (decision.action === 'resume'
@@ -444,8 +419,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       if (!decision.requestReady) return retry();
     } else {
       beginRecovery('suspend', saved.intent.requested_at_ms);
-      // An uncompleted attempt while still RUNNING is a lost saving opportunity.
-      // Fence it with wake intent, including a delayed service-side suspension.
       if (recoveryExpired()) {
         beginRecovery('wake');
         await saveMicrovmLifecycleIntent(snapshot, 'resume', Date.now(), options);
@@ -453,10 +426,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       }
     }
 
-    // Recheck the live switch after saving intent, then refresh the gate. An
-    // immutable Lambda environment alone cannot disable an existing execution.
     if (decision.action === 'suspend') suspendEnabled = await readMicrovmSuspendEnabled(options);
-    // Database success is not a lock over the next AWS request.
     stage = 'pre-command-read';
     snapshot = await fresh();
     if (!sameWorker(snapshot, input)) return result({ kind: 'ownership-lost', reason: 'worker-record-changed-or-missing' });
@@ -465,7 +435,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     const latestDecision = policy();
     policyReason = latestDecision.reason;
     if (decision.action === 'suspend' && latestDecision.action !== 'suspend') {
-      // Approval/deadline/disable can win after intent was saved but before the call.
       beginRecovery('wake');
       await saveMicrovmLifecycleIntent(snapshot, 'resume', Date.now(), options);
       return retry();
@@ -489,8 +458,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     if (!sameWorker(snapshot, input)) return result({ kind: 'ownership-lost', reason: 'worker-record-changed-or-missing' });
     if (closed(snapshot.status)) return result({ kind: 'closed', status: snapshot.status });
     if (decision.action === 'suspend' && (commandError || policy().action !== 'suspend')) {
-      // Even a failed command can have committed. Retain wake until fresh AWS
-      // observations confirm recovery; never erase it after an acknowledgment.
       beginRecovery('wake');
       await saveMicrovmLifecycleIntent(snapshot, 'resume', Date.now(), options);
     }
@@ -512,8 +479,6 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     if (settledEnd) return settledEnd;
     return await command(decision as MicrovmLifecycleDecision & { action: 'suspend' | 'resume' });
   } catch (error) {
-    // A lost post-command read/write cannot prove the worker stayed awake.
-    // Persist this recovery obligation even when the wake-intent write failed.
     if (suspendRequested) beginRecovery('wake');
     state = { ...state, consecutivePollFailures: state.consecutivePollFailures + (readFailed ? 0 : 1) };
     readFailed = true;

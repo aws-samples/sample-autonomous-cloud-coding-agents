@@ -23,12 +23,6 @@ import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import type { GetPoliciesResponse, PolicyRuleSummary } from '../types';
 
-/**
- * `bgagent policies list --repo <owner/repo> [--tier hard|soft]` — list
- * the Cedar rules that apply to a repository (design §8.1).
- * `bgagent policies show --repo <owner/repo> --rule <rule_id>` —
- * show a single rule's detail.
- */
 export function makePoliciesCommand(): Command {
   const cmd = new Command('policies').description('Discover Cedar HITL policies for a repository');
 

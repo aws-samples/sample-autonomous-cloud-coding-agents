@@ -3,16 +3,13 @@
 #  MIT No Attribution — Copyright Amazon.com, Inc. or its affiliates.
 #
 # Orchestration debug helper for Linear parent/sub-issue orchestration.
-# One command to see the full state of an
-# orchestration run + the reconciler/processor logs — instead of
-# hand-writing DynamoDB scans and `aws logs tail` each time.
 #
 # Usage:
 #   scripts/orchestration-debug.sh                      # list all orchestrations
 #   scripts/orchestration-debug.sh <orchestration_id>   # full DAG state for one run
 #   scripts/orchestration-debug.sh logs [minutes]       # tail processor + reconciler logs
 #
-# Env overrides (auto-discovered from the deployed stack if unset):
+# Env overrides:
 #   STACK_NAME   (default: backgroundagent-dev)
 #   AWS_REGION   (default: us-east-1)
 #

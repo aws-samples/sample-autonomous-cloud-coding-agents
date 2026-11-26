@@ -18,7 +18,7 @@
  */
 
 // mise stops a task at the first command that exits non-zero, so the exit code of `preflight-bootstrap.ts` alone decides
-// whether `cdk deploy` starts (#126, #127). `test/bootstrap/preflight.test.ts` covers how a verdict is reached.
+// whether `cdk deploy` starts (#126, #127).
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -27,7 +27,6 @@ import * as path from 'node:path';
 
 const CDK = path.resolve(__dirname, '../..');
 const SCRIPT = path.join(CDK, 'scripts/preflight-bootstrap.ts');
-/** The task runs the script with `npx tsx`: its imports need more than type stripping. */
 const TSX = require.resolve('tsx/cli');
 
 const VERSION = fs.readFileSync(path.join(CDK, 'bootstrap/BOOTSTRAP_VERSION'), 'utf-8').trim();
@@ -46,7 +45,7 @@ const bundle = (version: string, hash: string): Toolkit => ({
 
 const CURRENT = bundle(VERSION, HASH);
 const OLDER = bundle('1.0.0', HASH);
-/** CloudFormation's answer for a stack that does not exist, as AWS CLI v1 writes it. v2 puts `aws: [ERROR]: ` in front of the line. */
+/** As AWS CLI v1 writes it. v2 puts `aws: [ERROR]: ` in front of the line. */
 const missing = (stack: string): string =>
   `\nAn error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id ${stack} does not exist\n`;
 const NOT_BOOTSTRAPPED: Toolkit = { error: missing('CDKToolkit').replace('An error', 'aws: [ERROR]: An error') };
@@ -58,8 +57,6 @@ interface Invocation {
   readonly cdkJson?: object;
 }
 
-// The working directory is a new one, not `cdk/`. The script reads `cdk.json` there for the compute backends of the app,
-// and the file of the checkout is the developer's to edit.
 function preflight(toolkit: Toolkit, { args = [], env = {}, cdkJson }: Invocation = {}) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-bootstrap-'));
   try {
@@ -81,8 +78,6 @@ process.stdout.write(JSON.stringify(toolkit.outputs));
       cwd,
       encoding: 'utf-8',
       timeout: 30_000,
-      // The script runs without the bypass, as in a deploy: an undefined value takes the one
-      // that this process inherited out of the environment.
       env: { ...process.env, PATH: `${cwd}${path.delimiter}${process.env.PATH}`, ABCA_SKIP_BOOTSTRAP_PREFLIGHT: undefined, ...env },
     });
     if (error) throw error;
@@ -93,7 +88,6 @@ process.stdout.write(JSON.stringify(toolkit.outputs));
 }
 
 describe('preflight-bootstrap', () => {
-  // Each test starts tsx, which loads the policy modules and aws-cdk-lib with them.
   jest.setTimeout(60_000);
 
   test('lets the deploy start on the bundle this checkout needs, after one read of CDKToolkit', () => {
@@ -172,8 +166,6 @@ describe('preflight-bootstrap', () => {
     expect(run.stderr).toMatch(/Compute-ECS/);
   });
 
-  // As in CDK, an argument wins over `cdk.json`, and of two arguments the later one. In
-  // another order the verdict is for backends that the deploy does not use.
   test('takes the compute backends from the last context argument, over an earlier one and over cdk.json', () => {
     const run = preflight(CURRENT, {
       args: ['-c', 'compute_types=agentcore,ecs', '-c', 'compute_types=agentcore'],

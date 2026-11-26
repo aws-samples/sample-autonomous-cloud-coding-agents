@@ -17,12 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * A trigger label added from the operator console arrives with ABCA's own Linear app
- * as the actor (no linked ABCA user). The console leaves a start claim; the processor
- * uses it only when the actor is unlinked, and releases it only once the task exists.
- */
-
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -80,7 +74,6 @@ beforeEach(() => {
   releaseStartClaimMock.mockResolvedValue(true);
 });
 
-/** Project mapping found; the app actor has no linked ABCA user. */
 function unlinkedAppActor() {
   ddbSend
     .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
@@ -106,7 +99,6 @@ test('a failure creating the task keeps the claim, so the retried delivery is st
   await expect(handler(labeled('linear-app-actor'))).rejects.toThrow('transient DynamoDB error');
   expect(releaseStartClaimMock).not.toHaveBeenCalled();
 
-  // Lambda retries the same delivery: the claim is still there and attributes the task.
   unlinkedAppActor();
   await handler(labeled('linear-app-actor'));
   expect(createTaskCoreMock).toHaveBeenCalledTimes(2);

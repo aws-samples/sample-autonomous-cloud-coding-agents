@@ -17,14 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * REST API wire types used by the console.
- *
- * Mirrors the subset of `cli/src/types.ts` (itself mirrored from
- * `cdk/src/handlers/shared/types.ts`) that the console reads. Keep field
- * names and shapes identical; see docs/design/API_CONTRACT.md.
- */
-
 export type TaskStatusType =
   | 'PENDING_UPLOADS'
   | 'QUEUED'
@@ -361,19 +353,13 @@ export interface CreateTaskRequest {
   readonly trace?: boolean;
 }
 
-/** Mirrors `MIN_MAX_TURNS` / `MAX_MAX_TURNS` / `DEFAULT_MAX_TURNS` in cdk/src/handlers/shared/validation.ts. */
 export const TURN_LIMIT = { min: 1, max: 500, default: 100 } as const;
 
-/** Mirrors `max_budget_usd` in contracts/constants.json. */
 export const BUDGET_LIMIT_USD = { min: 0.01, max: 100 } as const;
 
-/**
- * Clone → build → open a pull request. Mirrors `DEFAULT_CODING_WORKFLOW_ID` in the CLI,
- * which pins it for the same reason (see cli/src/commands/submit.ts).
- */
+/** Clone → build → open a pull request. */
 export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
-/** Mirrors `NUDGE_MAX_MESSAGE_LENGTH` in cli/src/types.ts. */
 export const NUDGE_MAX_MESSAGE_LENGTH = 2000;
 
 /** POST /v1/tasks/{task_id}/nudge response (HTTP 202). */

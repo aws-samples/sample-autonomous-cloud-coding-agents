@@ -61,12 +61,6 @@ import { invalidateJiraSecretCache } from '../../src/handlers/shared/jira-verify
 
 const WEBHOOK_SECRET = 'test-jira-webhook-secret';
 
-/**
- * Atlassian sends `X-Hub-Signature: sha256=<hex>` — verify the signature
- * helper accepts both the prefixed form (production) and bare hex
- * (defensive). Tests exercise the prefixed form because that's what
- * Atlassian actually delivers.
- */
 function sign(body: string): string {
   const hex = crypto.createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex');
   return `sha256=${hex}`;
@@ -215,7 +209,7 @@ describe('jira-webhook handler', () => {
   test('verified Issue event dedups and invokes processor', async () => {
     const FRESH_TS = Date.now();
     const body = issueCreatePayload({ timestamp: FRESH_TS });
-    ddbSend.mockResolvedValueOnce({}); // conditional Put succeeds
+    ddbSend.mockResolvedValueOnce({});
     lambdaSend.mockResolvedValueOnce({});
 
     const result = await handler(makeEvent(body, sign(body)));
@@ -226,7 +220,6 @@ describe('jira-webhook handler', () => {
     expect(putCall![0].input.Item.dedup_key).toBe(`ENG-42#jira:issue_created#${FRESH_TS}`);
     expect(putCall![0].input.ConditionExpression).toContain('attribute_not_exists');
 
-    // 8h dedup window — comfortably over Atlassian's retry horizon.
     const nowSeconds = Math.floor(Date.now() / 1000);
     const ttl = putCall![0].input.Item.ttl as number;
     expect(ttl - nowSeconds).toBeGreaterThanOrEqual(7 * 60 * 60);
@@ -241,8 +234,6 @@ describe('jira-webhook handler', () => {
   });
 
   test('distinct deliveries for the same issue both dispatch (timestamp distinguishes them)', async () => {
-    // Atlassian doesn't expose a per-delivery message id; the dedup primitive
-    // includes the envelope timestamp so a label-off-then-on pair both fire.
     const FRESH_TS = Date.now();
     const FRESH_TS_2 = FRESH_TS + 1000;
     const body1 = issueCreatePayload({ timestamp: FRESH_TS });
@@ -272,9 +263,6 @@ describe('jira-webhook handler', () => {
   });
 
   test('accepts a verified Issue event with no timestamp (replay check skipped, not fail-open-rejected)', async () => {
-    // Atlassian timestamps are advisory (not signed), so a missing one can't
-    // be treated as fatal. The delivery still dispatches; the dedup key
-    // collapses to `…#unknown`.
     const body = JSON.stringify({
       webhookEvent: 'jira:issue_created',
       issue: { id: '10001', key: 'ENG-42', fields: { labels: ['bgagent'], project: { id: 'p1', key: 'ENG' } } },
@@ -291,8 +279,6 @@ describe('jira-webhook handler', () => {
   });
 
   test('flags stack-wide verification to the processor (verified_via_stack_wide:true)', async () => {
-    // No per-tenant registry configured here → verification rides the
-    // stack-wide secret, which the processor must not trust for cloudId.
     const body = issueCreatePayload();
     ddbSend.mockResolvedValueOnce({});
     lambdaSend.mockResolvedValueOnce({});
@@ -321,16 +307,12 @@ describe('jira-webhook handler', () => {
   test('returns 500 and rolls back dedup row if processor invoke fails', async () => {
     const FRESH_TS = Date.now();
     const body = issueCreatePayload({ timestamp: FRESH_TS });
-    // 1st ddbSend: PutCommand (dedup reservation) succeeds
-    // 2nd ddbSend: DeleteCommand (rollback after invoke failure) succeeds
     ddbSend.mockResolvedValueOnce({}).mockResolvedValueOnce({});
     lambdaSend.mockRejectedValueOnce(new Error('Lambda throttle'));
 
     const result = await handler(makeEvent(body, sign(body)));
     expect(result.statusCode).toBe(500);
 
-    // Dedup row must be deleted so Atlassian's retry can try again —
-    // otherwise a transient Lambda failure silently drops the task.
     const deleteCalls = ddbSend.mock.calls.filter((c) => c[0]._type === 'Delete');
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0][0].input.TableName).toBe('JiraDedup');
@@ -361,9 +343,6 @@ describe('jira-webhook handler', () => {
   });
 
   test('accepts bare hex signature (no sha256= prefix) for back-compat / non-standard callers', async () => {
-    // A few Atlassian deployments and proxies strip the algorithm prefix.
-    // verifyJiraSignature intentionally accepts both shapes; this test
-    // pins that down so a future refactor doesn't accidentally drop it.
     const body = issueCreatePayload();
     const bareHex = crypto.createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex');
     ddbSend.mockResolvedValueOnce({});

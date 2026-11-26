@@ -67,11 +67,9 @@ function makeFakeClients(opts: {
     revoked_reason: string;
     installed_at: string;
   }> | null;
-  /** Make every DynamoDB UpdateCommand fail, to exercise the write-failure paths. */
   updateShouldFail?: Error;
   storedToken?: StoredOauthToken | null;
   putSecretValueShouldFail?: boolean;
-  /** Make GetSecretValue throw, to separate "read failed" from "no grant stored". */
   getSecretValueError?: Error;
 }) {
   const ddbSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
@@ -177,11 +175,6 @@ describe('resolveLinearOauthToken', () => {
     });
 
     test('RETURNS the vault subject on the vault-success path, for the agent', async () => {
-      // The agent mints its own token and must use the same subject, so the resolver
-      // has to hand it back — on the path that SUCCEEDS. It was only on the
-      // Secrets-Manager return, so a working vault resolution passed nothing on and
-      // the agent silently fell back to a dead token: reactions 401'd on an issue
-      // whose task was otherwise running fine.
       const clients = makeFakeClients({
         registryItem: {
           workspace_slug: 'acme',
@@ -201,12 +194,6 @@ describe('resolveLinearOauthToken', () => {
     });
 
     test('passes the RECORDED vault_user_id through, not a derived one', async () => {
-      // The subject is stored because it cannot be derived: it is slug-based, so one
-      // consent can onboard a workspace whose organization UUID is not yet known.
-      // The row parser copies fields explicitly and this one was missing from it, so
-      // the resolver silently fell back to deriving from the UUID, found no grant,
-      // and reported "requires consent" for a healthy workspace. Caught in
-      // production, not here, because the old test seam could not see this argument.
       const clients = makeFakeClients({
         registryItem: {
           workspace_slug: 'acme',
@@ -235,7 +222,6 @@ describe('resolveLinearOauthToken', () => {
           status: 'active',
           provider_name: 'bgagent-linear-oauth-acme',
         },
-        // A stored token exists but must NOT be read on the vault-success path.
         storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_should_not_be_used' }),
       });
       const resolveViaVault = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_from_vault' });
@@ -251,7 +237,6 @@ describe('resolveLinearOauthToken', () => {
       );
       expect(result?.accessToken).toBe('lin_oauth_from_vault');
       expect(result?.workspaceSlug).toBe('acme');
-      // Secrets Manager was never queried on the vault-success path.
       expect(clients.smSend).not.toHaveBeenCalled();
     });
 
@@ -273,7 +258,6 @@ describe('resolveLinearOauthToken', () => {
       });
 
       expect(resolveViaVault).toHaveBeenCalledTimes(1);
-      // Fell through to the SM path.
       expect(result?.accessToken).toBe('lin_oauth_SM_fallback');
       expect(clients.smSend).toHaveBeenCalled();
     });
@@ -284,7 +268,6 @@ describe('resolveLinearOauthToken', () => {
           workspace_slug: 'acme',
           oauth_secret_arn: 'arn:secret:acme',
           status: 'active',
-          // no provider_name
         },
         storedToken: makeStoredToken({ access_token: 'lin_oauth_SM_only' }),
       });
@@ -300,10 +283,6 @@ describe('resolveLinearOauthToken', () => {
     });
 
     describe('a token the vault returned is reused for a minute', () => {
-      // One comment on an issue resolves a token several times in a row (the
-      // reaction, the reply, the progress edit…), and every vault resolution is two
-      // AgentCore requests. The Secrets-Manager path has always kept its token for
-      // a minute; the vault path asked again each time.
       const vaultRow = {
         workspace_slug: 'acme',
         oauth_secret_arn: 'arn:secret:acme',
@@ -342,14 +321,11 @@ describe('resolveLinearOauthToken', () => {
       });
 
       test('a row latched on the vault inference is still asked: a kept token is no re-probe', async () => {
-        // The latch is cleared by a token in reply to the re-probe. A token kept from
-        // before the latch proves nothing about the grant now, so it must not clear it.
         const beforeTheLatch = vaultToken();
         await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
           ...makeFakeClients({ registryItem: vaultRow }),
           resolveViaVault: beforeTheLatch,
         });
-        // The row is latched, which also drops the cached row.
         await markWorkspaceRevoked(
           { send: jest.fn().mockResolvedValue({}) } as never,
           REGISTRY_TABLE, 'ws-uuid-1', vaultRow.installed_at, undefined, 'vault_consent_required',
@@ -385,12 +361,6 @@ describe('resolveLinearOauthToken', () => {
     expect(result).toBeNull();
   });
 
-  // Adversarial fail-closed guard for `bgagent linear remove-workspace` (#306):
-  // after a workspace is revoked (registry row flipped to status='revoked'),
-  // a request for that slug MUST NOT resolve to a usable token — even if a
-  // perfectly valid, non-expiring OAuth secret is still sitting in Secrets
-  // Manager. The status gate short-circuits BEFORE the secret is ever read,
-  // so a revoked workspace can never leak its token.
   test('fail-closed: a revoked workspace is rejected without ever reading the secret', async () => {
     const clients = makeFakeClients({
       registryItem: {
@@ -398,13 +368,10 @@ describe('resolveLinearOauthToken', () => {
         oauth_secret_arn: 'arn:secret:acme',
         status: 'revoked',
       },
-      // A fully valid, far-future token — the ONLY thing that should block
-      // resolution here is the revoked status.
       storedToken: makeStoredToken({ access_token: 'lin_oauth_still_valid' }),
     });
     const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, clients);
     expect(result).toBeNull();
-    // The secret must never be fetched for a revoked workspace.
     expect(clients.smSend).not.toHaveBeenCalled();
   });
 
@@ -428,8 +395,6 @@ describe('resolveLinearOauthToken', () => {
         oauth_secret_arn: 'arn:secret:acme',
         status: 'active',
       },
-      // Cast: the test deliberately writes a malformed token to assert the
-      // resolver guards against it.
       storedToken: { access_token: 'partial' } as unknown as StoredOauthToken,
     });
     const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, clients);
@@ -470,17 +435,12 @@ describe('resolveLinearOauthToken', () => {
     });
 
     expect(result?.accessToken).toBe('lin_oauth_new');
-    // Refresh body must include client_id+client_secret from the secret JSON.
     const sentBody = fetchImpl.mock.calls[0][1]!.body as string;
     const sent = new URLSearchParams(sentBody);
     expect(sent.get('grant_type')).toBe('refresh_token');
     expect(sent.get('refresh_token')).toBe('rt-old');
     expect(sent.get('client_id')).toBe('cid');
     expect(sent.get('client_secret')).toBe('csec');
-    // PutSecretValue must persist the ROTATED pair, not just be called. The stored
-    // bundle is what the NEXT invocation reads: persisting the old refresh token
-    // leaves this call green while the following refresh replays a token Linear
-    // already invalidated on rotation — a grant that dies on its first refresh.
     const putCalls = clients.smSend.mock.calls.filter(
       (c) => c[0]!.constructor.name === 'PutSecretValueCommand',
     );
@@ -529,11 +489,9 @@ describe('resolveLinearOauthToken', () => {
       },
       storedToken: makeStoredToken({ expires_at: new Date(Date.now() - 1000).toISOString() }),
     });
-    // The request's time limit, already run out: `AbortSignal.timeout` runs on a
-    // timer that jest's fake timers do not drive.
+    // jest's fake timers do not drive the timer of `AbortSignal.timeout`.
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.abort(new Error('timed out')));
     const fetchImpl = jest.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      // No answer ever comes: only the signal of the request ends the wait.
       if (init?.signal?.aborted) reject(init.signal.reason as Error);
     }));
 
@@ -558,7 +516,6 @@ describe('resolveLinearOauthToken', () => {
     });
 
     await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, clients);
-    // Second call hits the cache, doesn't re-query DDB.
     await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, clients);
     const ddbCallsBeforeInvalidate = clients.ddbSend.mock.calls.length;
     expect(ddbCallsBeforeInvalidate).toBe(1);
@@ -569,11 +526,6 @@ describe('resolveLinearOauthToken', () => {
   });
 
   test('concurrent-refresh recovery: re-read finds rotated token, skip second /oauth/token POST', async () => {
-    // Setup: stored token is expiring (10s from now). First /oauth/token
-    // call returns 400 invalid_grant (a concurrent caller already
-    // rotated). Re-read of SM finds the rotated, future-dated token.
-    // Resolver should return the freshly-read access_token without
-    // a second refresh POST.
     const expiringSoon = new Date(Date.now() + 10 * 1000).toISOString();
     const wellInFuture = new Date(Date.now() + 12 * 3600 * 1000).toISOString();
 
@@ -588,7 +540,6 @@ describe('resolveLinearOauthToken', () => {
       expires_at: wellInFuture,
     });
 
-    // First GetSecretValue returns stale; second returns rotated.
     const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
       const name = command.constructor.name;
       if (name === 'GetSecretValueCommand') {
@@ -615,9 +566,7 @@ describe('resolveLinearOauthToken', () => {
     });
 
     expect(result?.accessToken).toBe('lin_concurrent_winner');
-    // Exactly ONE /oauth/token POST — no second refresh call.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    // Two GetSecretValue calls (initial + re-read).
     const getSecretCalls = smSend.mock.calls.filter(
       (c) => c[0].constructor.name === 'GetSecretValueCommand',
     );
@@ -656,21 +605,10 @@ describe('resolveLinearOauthToken', () => {
     });
 
     expect(result).toBeNull();
-    // No second /oauth/token POST — once we know the refresh_token
-    // is permanently rejected, we don't retry against the same token.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   test('a permanently-rejected refresh records the revocation when a recorder is SUPPLIED', async () => {
-    // The failure this guards: when the authorization dies, every event for the
-    // workspace is dropped and the ONLY evidence was a log line, so an operator
-    // saw their trigger label do nothing with no way to find out why. Marking
-    // the row is what makes `bgagent platform doctor` able to say so.
-    //
-    // The recorder is OPT-IN: every Lambda that resolves a token holds read-only
-    // registry access, so defaulting it on meant the write failed AccessDenied
-    // and was swallowed on every revoked refresh — inert while reading as
-    // working. This passes it explicitly, the way a caller with the grant would.
     const expiringSoon = new Date(Date.now() + 10 * 1000).toISOString();
     const stale = makeStoredToken({ refresh_token: 'rt-dead', expires_at: expiringSoon });
 
@@ -710,14 +648,10 @@ describe('resolveLinearOauthToken', () => {
     };
     expect(input.ExpressionAttributeValues[':revoked']).toBe('revoked');
     expect(input.ExpressionAttributeValues[':reason']).toBe('refresh_token_rejected');
-    // Conditional on still being active, so a late straggler can't clobber a
-    // workspace an operator has already re-authorized.
     expect(input.ConditionExpression).toContain(':active');
   });
 
   test('a marker write failure does NOT break token resolution', async () => {
-    // Recording the diagnosis is strictly a bonus; if the registry write fails
-    // the caller must still get its clean null rather than a thrown handler.
     const expiringSoon = new Date(Date.now() + 10 * 1000).toISOString();
     const stale = makeStoredToken({ refresh_token: 'rt-dead2', expires_at: expiringSoon });
     const smSend = jest.fn().mockImplementation((command: { constructor: { name: string } }) => {
@@ -754,7 +688,6 @@ describe('resolveLinearOauthToken', () => {
       storedToken: stale,
     });
 
-    // First refresh: fetch throws (network failure).
     const fetchImpl = jest.fn().mockRejectedValueOnce(new Error('ECONNRESET'));
 
     const first = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
@@ -763,9 +696,6 @@ describe('resolveLinearOauthToken', () => {
     });
     expect(first).toBeNull();
 
-    // After the failure the cache should be invalidated. Verify by
-    // checking the second call goes back to SM (not a cached stale
-    // token). We use a fresh fetchImpl on the retry so it can succeed.
     const fetchImpl2 = jest.fn().mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -781,9 +711,6 @@ describe('resolveLinearOauthToken', () => {
       fetchImpl: fetchImpl2 as unknown as typeof fetch,
     });
     expect(second?.accessToken).toBe('lin_after_retry');
-    // The second call had to re-fetch from SM (token cache was cleared
-    // by the previous failure). Counting GetSecretValueCommand calls:
-    // first call = 1, second call after invalidation = 1 more = 2 total.
     const getSecretCalls = clients.smSend.mock.calls.filter(
       (c) => c[0].constructor.name === 'GetSecretValueCommand',
     );
@@ -795,7 +722,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
   const WS = 'ws-uuid-1';
   const INSTALLED = '2026-07-22T10:00:00.000Z';
 
-  /** The condition + values of the Nth Update. */
   function updateOf(send: jest.Mock, call = 0): { condition: string; values: Record<string, unknown> } {
     const input = (send.mock.calls[call][0] as {
       input: { ConditionExpression: string; ExpressionAttributeValues: Record<string, unknown> };
@@ -806,9 +732,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
   beforeEach(() => _resetCachesForTesting());
 
   test('scopes the write to the installation it diagnosed, not merely to "active"', async () => {
-    // status = active alone is not enough: a re-authorization writes active
-    // again, so a straggler holding the OLD token would satisfy that condition
-    // and revoke the working grant the operator just installed.
     const send = jest.fn().mockResolvedValue({});
     await markWorkspaceRevoked({ send } as never, REGISTRY_TABLE, WS, INSTALLED);
 
@@ -823,10 +746,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
     (conditional as { name?: string }).name = 'ConditionalCheckFailedException';
     const send = jest.fn().mockRejectedValue(conditional);
 
-    // Never throws — recording a diagnosis must not break token resolution.
-    // Returning FALSE (not just "not throwing") is what makes the alert dedup
-    // work: a revoked workspace keeps producing events, and only the caller whose
-    // conditional write actually applied may announce it (#812).
     await expect(markWorkspaceRevoked({ send } as never, REGISTRY_TABLE, WS, INSTALLED))
       .resolves.toBe(false);
   });
@@ -838,8 +757,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
   });
 
   test('with no installation to name, it requires the attribute to still be ABSENT', async () => {
-    // A row predating installed_at: a re-authorization adds the attribute, so
-    // requiring its absence likewise takes the row out of scope.
     const send = jest.fn().mockResolvedValue({});
     await markWorkspaceRevoked({ send } as never, REGISTRY_TABLE, WS);
 
@@ -855,11 +772,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
   });
 
   test('the resolver writes NOTHING to the registry when no recorder is supplied', async () => {
-    // Guards the inert-but-looks-working state: the resolver used to default the
-    // marker on, so on every revoked refresh it issued a registry write that the
-    // caller's read-only role rejected, and the AccessDenied was swallowed. No
-    // stack in the arc grants registry write, so the correct behaviour with no
-    // recorder is to not attempt the write at all.
     const stored = makeStoredToken({ expires_at: new Date(Date.now() + 60 * 1000).toISOString() });
     const clients = makeFakeClients({
       registryItem: {
@@ -876,7 +788,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
       json: async () => ({ error: 'invalid_grant', error_description: 'refresh token revoked' }),
     });
 
-    // No onAuthorizationRevoked supplied → no registry write is attempted.
     await resolveLinearOauthToken(WS, REGISTRY_TABLE, {
       ...clients,
       fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -889,10 +800,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
   });
 
   test('a SUPPLIED recorder carries the installation from the row the resolver read', async () => {
-    // The value must come from the read that drove this refresh attempt. Re-reading
-    // it inside the recorder would race a concurrent re-authorization exactly as
-    // the status-only condition did, so this asserts the wiring, not just that
-    // some marker fired.
     const stored = makeStoredToken({ expires_at: new Date(Date.now() + 60 * 1000).toISOString() });
     const clients = makeFakeClients({
       registryItem: {
@@ -928,14 +835,6 @@ describe('markWorkspaceRevoked — the verdict must not outlive the grant it jud
 });
 
 describe('a transient Secrets Manager error is not a revocation', () => {
-  // The latch takes a workspace offline and, once latched, the vault re-probe answers
-  // `consent-required` again — so Secrets Manager is never consulted a second time.
-  // That makes the verdict effectively permanent, which is only acceptable when the
-  // absence of a grant was actually established. A vault-dead / SM-alive workspace is
-  // a real state (`readExistingOauthTokens` preserves it deliberately) and it runs
-  // entirely off the Secrets-Manager token, so latching it on one throttled
-  // GetSecretValue would be exactly the silent, unrecoverable outage #812 was filed
-  // to eliminate.
   const WORKLOAD = 'abca_linear_oauth';
   let savedWorkload: string | undefined;
   let savedEnabled: string | undefined;
@@ -990,8 +889,6 @@ describe('a transient Secrets Manager error is not a revocation', () => {
   });
 
   test('a DELETED secret IS definitive, so it still latches', async () => {
-    // ResourceNotFound is evidence, not noise: the fallback genuinely no longer
-    // exists, so with the vault also refusing there is nothing left to resolve.
     const clients = makeFakeClients({
       registryItem: vaultRow,
       getSecretValueError: Object.assign(new Error('gone'), { name: 'ResourceNotFoundException' }),
@@ -1011,8 +908,6 @@ describe('a transient Secrets Manager error is not a revocation', () => {
   });
 
   test('a bundle present but carrying no grant IS definitive, so it still latches', async () => {
-    // The fresh-vault-onboarding shape: real JSON, client credentials and signing
-    // secret, no access/refresh token. Reading it succeeded; there is simply no grant.
     const clients = makeFakeClients({
       registryItem: vaultRow,
       storedToken: makeStoredToken({ access_token: '', refresh_token: '' }),
@@ -1029,8 +924,6 @@ describe('a transient Secrets Manager error is not a revocation', () => {
   });
 
   test('an SM-alive workspace keeps working when the vault needs consent', async () => {
-    // The state the whole guard protects: vault dead, Secrets Manager fine. It must
-    // resolve normally and record nothing.
     const clients = makeFakeClients({
       registryItem: vaultRow,
       storedToken: makeStoredToken({ access_token: 'lin_oauth_sm_alive' }),
@@ -1048,15 +941,9 @@ describe('a transient Secrets Manager error is not a revocation', () => {
   });
 
   describe('Linear rejects the refresh token of the stored fallback grant', () => {
-    // A workspace that moved onto the vault keeps its Secrets-Manager grant as a
-    // fallback, and nothing renews it once the vault serves every token: Linear
-    // expires a refresh token 30 days after issuance. So this rejection is where
-    // every such workspace ends up, and it says nothing about the vault grant.
-    // What it means depends on what the vault answered.
     const expiredFallback = () => makeStoredToken({
       refresh_token: 'rt-fallback-past-30-days',
       expires_at: new Date(Date.now() - 1000).toISOString(),
-      // Not the row's value, to show which installation the verdict is recorded for.
       installed_at: '2026-06-01T00:00:00.000Z',
     });
     const rejectedByLinear = () => jest.fn().mockResolvedValue({
@@ -1066,9 +953,6 @@ describe('a transient Secrets Manager error is not a revocation', () => {
     }) as unknown as typeof fetch;
 
     test('the vault was unavailable → NO latch, only this event fails', async () => {
-      // One throttled AgentCore call. Recording the fallback's rejection here latches
-      // the row `refresh_token_rejected`, the reason that is never re-probed: the
-      // vault is not asked again and a working workspace stays offline.
       const clients = makeFakeClients({ registryItem: vaultRow, storedToken: expiredFallback() });
       const recorder = jest.fn();
 
@@ -1085,9 +969,6 @@ describe('a transient Secrets Manager error is not a revocation', () => {
     });
 
     test('the vault says consent-required → recorded as the vault\'s verdict, so the re-probe can clear it', async () => {
-      // Neither path yields a token, as when the bundle holds no grant at all. The
-      // latch must be the same one: `vault_consent_required` for the row's
-      // installation, which a later vault token clears.
       const clients = makeFakeClients({ registryItem: vaultRow, storedToken: expiredFallback() });
       const recorder = jest.fn();
 
@@ -1110,12 +991,6 @@ describe('a transient Secrets Manager error is not a revocation', () => {
 });
 
 describe('a vault_consent_required latch must be able to self-heal', () => {
-  // The latch and the guard it trips are the same fact, so it seals itself: `status`
-  // goes to `revoked`, the resolver then returns before the vault is ever consulted
-  // again, and nothing short of a human re-consent can overturn it. That would be
-  // fine if the verdict were a measurement — but it is an inference from a token-less
-  // vault response, and any upstream fault that drops the recorded subject produces
-  // it for a perfectly healthy workspace.
   const WORKLOAD = 'abca_linear_oauth';
   const INSTALLED_AT = '2026-08-01T00:00:00.000Z';
   let savedWorkload: string | undefined;
@@ -1163,15 +1038,11 @@ describe('a vault_consent_required latch must be able to self-heal', () => {
     const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
       ...clients,
       resolveViaVault,
-      // Supplying a recorder is what marks this caller as holding the registry write —
-      // the clear is gated on it, exactly as the latch is.
       onAuthorizationRevoked: async () => undefined,
     });
 
     expect(resolveViaVault).toHaveBeenCalled();
     expect(result?.accessToken).toBe('lin_oauth_alive');
-    // And the row is put back: leaving it `revoked` while handing out a working token
-    // keeps `platform doctor` and the alerting reporting an outage that is over.
     const updates = updatesFrom(clients);
     expect(updates).toHaveLength(1);
     expect(updates[0].input!.UpdateExpression).toContain('revoked_reason');
@@ -1179,10 +1050,6 @@ describe('a vault_consent_required latch must be able to self-heal', () => {
   });
 
   test('a read-only role serves the token but does NOT attempt the clear', async () => {
-    // Five of the six minting Lambdas hold read-only on the registry. An ungated clear
-    // meant an AccessDenied logged at `error` on every event for a workspace the resolver
-    // was serving correctly. The row stays latched until the one write-capable role — the
-    // webhook processor — re-probes, which is the asymmetry the latch already has.
     const clients = makeFakeClients({
       registryItem: latchedRow('vault_consent_required'),
       storedToken: makeStoredToken({ access_token: '', refresh_token: '' }),
@@ -1191,18 +1058,13 @@ describe('a vault_consent_required latch must be able to self-heal', () => {
     const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
       ...clients,
       resolveViaVault: async () => ({ kind: 'token', accessToken: 'lin_oauth_alive' }),
-      // No recorder supplied ⇒ no registry write available.
     });
 
-    // The token is still served — refusing to resolve would be the worse failure.
     expect(result?.accessToken).toBe('lin_oauth_alive');
     expect(updatesFrom(clients)).toHaveLength(0);
   });
 
   test('a refresh_token_rejected latch is NOT re-probed — Linear already refused', async () => {
-    // The distinction is the whole point. That reason records a fact, not an
-    // inference, so re-probing it would be a pointless call on every event for a
-    // workspace that is genuinely dead.
     const clients = makeFakeClients({
       registryItem: latchedRow('refresh_token_rejected'),
       storedToken: makeStoredToken(),
@@ -1215,9 +1077,6 @@ describe('a vault_consent_required latch must be able to self-heal', () => {
   });
 
   test('a re-probe that still needs consent leaves the latch alone and does NOT fall back to SM', async () => {
-    // The row is revoked; the only reason it got past the status guard was to give
-    // the vault one more chance. Falling through would resurrect a workspace an
-    // operator sees as down, using a token the vault path had already replaced.
     const clients = makeFakeClients({
       registryItem: latchedRow('vault_consent_required'),
       storedToken: makeStoredToken({ access_token: 'lin_oauth_stale_SM' }),
@@ -1257,15 +1116,10 @@ describe('clearWorkspaceRevocation — scoped so it cannot resurrect the wrong r
     );
     const input = send.mock.calls[0][0].input as Record<string, unknown>;
     const condition = input.ConditionExpression as string;
-    // Without the reason clause this would also clear a `refresh_token_rejected`
-    // latch — a row Linear itself condemned — and hand back a workspace that is
-    // genuinely dead.
     expect(condition).toContain('revoked_reason = :inference');
     expect(condition).toContain('installed_at = :installed');
     expect((input.ExpressionAttributeValues as Record<string, unknown>)[':inference'])
       .toBe('vault_consent_required');
-    // The announcement claim goes too, or a later GENUINE revocation of this same
-    // installation would be deduped against the one being cleared here.
     expect(input.UpdateExpression).toContain('revocation_announced_at');
   });
 
@@ -1279,11 +1133,6 @@ describe('clearWorkspaceRevocation — scoped so it cannot resurrect the wrong r
 });
 
 describe('isRefreshTokenRejection — Linear does not send invalid_grant', () => {
-  // The classifier used to test `error === 'invalid_grant'` (what RFC 6749
-  // specifies) and Linear does not send that. Every real revocation was therefore
-  // filed as a generic failure, the permanent-rejection branch never ran, and the
-  // registry was never marked — detection that existed and could not fire. These
-  // are the exact payloads observed live.
   test("Linear's real revoked-token response is recognised", () => {
     expect(isRefreshTokenRejection(400, {
       error: 'invalid_request', error_description: 'Refresh token revoked',
@@ -1301,8 +1150,6 @@ describe('isRefreshTokenRejection — Linear does not send invalid_grant', () =>
   });
 
   test('a generic invalid_request is NOT treated as a dead grant', () => {
-    // invalid_request is also what a malformed request — our own bug — returns.
-    // Marking a workspace revoked for that would take a working workspace offline.
     expect(isRefreshTokenRejection(400, {
       error: 'invalid_request', error_description: 'Missing required parameter: client_id',
     })).toBe(false);
@@ -1315,13 +1162,7 @@ describe('isRefreshTokenRejection — Linear does not send invalid_grant', () =>
 });
 
 describe('token-lineage diagnostic logging', () => {
-  // Answers the one question a revoked grant cannot otherwise be asked after the
-  // fact: did it ever ROTATE, or was it rejected on its first refresh? Linear
-  // records no audit entry for the revocation and returns the same error either
-  // way, so if this is not logged as it happens it is not recoverable.
   const RAW_REFRESH = 'lin_refresh_SENSITIVE_should_never_be_logged';
-  // Mirrors the source's HMAC-SHA-256(salt) fingerprint — a keyed digest, not a
-  // bare hash of the secret. Kept in lockstep with TOKEN_FP_SALT / TOKEN_FP_LENGTH.
   const fp = (token: string): string =>
     createHmac('sha256', 'abca.linear.token-lineage.v1').update(token).digest('hex').slice(0, 12);
   const EXPECTED_FP = fp(RAW_REFRESH);
@@ -1338,7 +1179,6 @@ describe('token-lineage diagnostic logging', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  /** Every string in every log call, across all levels — for leak assertions. */
   function allLoggedText(): string {
     return [infoSpy, warnSpy, errorSpy]
       .flatMap((s) => s.mock.calls)
@@ -1346,10 +1186,6 @@ describe('token-lineage diagnostic logging', () => {
       .join(' ');
   }
 
-  // BOTH rejection shapes. Linear actually answers a dead refresh token with
-  // `invalid_request` and puts the detail in error_description; `invalid_grant` is
-  // what RFC 6749 specifies and what this code originally tested for alone. The
-  // forensics must attach to whichever arrives, or they are absent for the real one.
   test.each([
     ['invalid_request (what Linear really sends)', 'invalid_request'],
     ['invalid_grant (RFC 6749)', 'invalid_grant'],
@@ -1381,7 +1217,6 @@ describe('token-lineage diagnostic logging', () => {
     expect(forensics).toBeDefined();
     const data = forensics![1] as Record<string, unknown>;
     expect(data.refresh_token_fp).toBe(EXPECTED_FP);
-    // The age-at-death is the whole point of logging it here.
     expect(data.token_age_h).toBe(25);
     expect(allLoggedText()).not.toContain(RAW_REFRESH);
   });
@@ -1421,22 +1256,12 @@ describe('token-lineage diagnostic logging', () => {
     const data = refreshed![1] as Record<string, unknown>;
     expect(data.rotated_from_fp).toBe(EXPECTED_FP);
     expect(data.rotated_to_fp).toBe(fp(NEW_RAW));
-    // Neither the old nor the new raw refresh token may appear in any log.
     expect(allLoggedText()).not.toContain(RAW_REFRESH);
     expect(allLoggedText()).not.toContain(NEW_RAW);
   });
 });
 
 describe('a vault-managed bundle carries no grant, and must still verify webhooks', () => {
-  // THE fresh-vault-install bug. A vault-onboarded workspace writes access_token,
-  // refresh_token, expires_at and scope as empty strings by design — AgentCore holds
-  // the grant. The strict parse required all four, so it rejected the bundle before
-  // `webhook_signing_secret` could be read, verification fell back to the
-  // stack-wide secret, and every delivery 401'd while the install looked healthy.
-  //
-  // Missed in live testing because the workspace under test was MIGRATED from
-  // Secrets Manager and therefore still had tokens — the preservation behaviour
-  // masked it. Only a genuinely fresh vault install reaches this.
   const vaultBundle = JSON.stringify({
     access_token: '',
     refresh_token: '',
@@ -1463,8 +1288,6 @@ describe('a vault-managed bundle carries no grant, and must still verify webhook
   });
 
   test('a bundle missing IDENTITY fields is still rejected — this is not a blanket relaxation', async () => {
-    // Only the four grant fields become optional. A bundle without a workspace or
-    // client identity is corrupt and must not be treated as verifiable.
     const corrupt = JSON.stringify({ access_token: '', refresh_token: '', webhook_signing_secret: 'lin_wh_x' });
     const send = jest.fn().mockResolvedValue({ SecretString: corrupt });
     const stored = await getOauthSecretStrict(
@@ -1475,8 +1298,6 @@ describe('a vault-managed bundle carries no grant, and must still verify webhook
   });
 
   test('the refresh path still demands a full grant', async () => {
-    // Relaxing verification must not let the refresh path try to renew a grant that
-    // is not there; a vault workspace has no Secrets-Manager token to refresh.
     const send = jest.fn().mockResolvedValue({ SecretString: vaultBundle });
     const fetched = await getOauthSecret(
       { send } as unknown as Parameters<typeof getOauthSecret>[0],
@@ -1509,8 +1330,6 @@ describe('webhook_secret_owned — provenance, not value equality', () => {
   });
 
   test('leaves the field absent when the row predates it', async () => {
-    // Absent must not read as `false`: the reader distinguishes "not proven" from
-    // "proven not owned", and every row written before this field is the former.
     const row = await getRegistryRowStrict(rowWith({}), 'registry', 'ws-1');
     expect(row?.webhook_secret_owned).toBeUndefined();
   });
@@ -1518,9 +1337,6 @@ describe('webhook_secret_owned — provenance, not value equality', () => {
   test.each([['false-ish string', 'true'], ['number', 1], ['explicit false', false]] as const)(
     'refuses to treat a %s as proof of ownership',
     async (_label, value) => {
-      // Only a literal boolean `true` counts. A truthy-but-not-true value reaching this
-      // field would otherwise silently grant the workspace the same standing as one the
-      // operator actually supplied a secret for.
       const row = await getRegistryRowStrict(rowWith({ webhook_secret_owned: value }), 'registry', 'ws-1');
       expect(row?.webhook_secret_owned).toBeUndefined();
     },
@@ -1563,8 +1379,6 @@ describe('resolveSoleActiveLinearWorkspace — bind only when the answer is unam
   });
 
   test('follows pagination before concluding the answer is unique', async () => {
-    // A single-page read would report org-a as the sole workspace and bind deliveries to
-    // it, on a stack that actually has two tenants.
     const ddb = scanning([
       { Items: [{ linear_workspace_id: 'org-a', status: 'active' }], LastEvaluatedKey: { k: 1 } },
       { Items: [{ linear_workspace_id: 'org-b', status: 'active' }] },

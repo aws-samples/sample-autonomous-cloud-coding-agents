@@ -34,7 +34,6 @@ import { ExternalLink, RouterLink } from '../../core/components/RouterLink';
 import { formatRelativeTime, taskHref } from '../../core/util/format';
 import { MAX_REPO_TASKS, useLinearIssues, useRepoIssues, useStartGitHubIssue, useStartLinearIssue } from '../tasks/hooks';
 
-/** A search box appears once a list is long enough to need one. */
 const FILTER_FROM = 8;
 
 function includes(haystack: string, needle: string): boolean {
@@ -46,12 +45,6 @@ function Labels({ labels }: { labels: readonly string[] }) {
   return labels.length > 0 ? <Box variant="small" color="text-body-secondary">{labels.join(', ')}</Box> : <>-</>;
 }
 
-/** Open GitHub issues with no agent task yet. */
-/**
- * Open GitHub issues with no agent task yet. Start waits until every task of the
- * repository is loaded (`ready`): otherwise an issue whose task is on a later page
- * would look unstarted and get a second task.
- */
 function GitHubIssues({ repo, issues, ready, capped }: { repo: string; issues: readonly RepoIssueSummary[]; ready: boolean; capped: boolean }) {
   const start = useStartGitHubIssue(repo);
   const [filter, setFilter] = useState('');
@@ -126,7 +119,6 @@ function GitHubIssues({ repo, issues, ready, capped }: { repo: string; issues: r
   );
 }
 
-/** Open Linear issues the agent has not picked up, for one connected project. */
 function LinearIssues({ repo, project, issues }: { repo: string; project: LinearProjectIssues; issues: readonly LinearIssueSummary[] }) {
   const start = useStartLinearIssue(repo);
   const [filter, setFilter] = useState('');
@@ -167,7 +159,6 @@ function LinearIssues({ repo, project, issues }: { repo: string; project: Linear
               </span>
             ),
           },
-          // Status and priority together keep the table one screen wide.
           { id: 'state', header: 'In Linear', cell: (i) => [i.state, i.priority_label].filter(Boolean).join(' · ') || '-' },
           { id: 'updated', header: 'Updated', cell: (i) => formatRelativeTime(i.updated_at) },
           {
@@ -215,7 +206,6 @@ export function NotStartedPanel({ repo, tasks, tasksComplete, tasksCapped = fals
   const linearProjects = linear.data?.projects ?? [];
   const linearIssues = linearProjects.flatMap((p) => p.issues.filter((i) => i.agent.kind !== 'task').map((issue) => ({ project: p, issue })));
 
-  // null: this deployment has no console API to list issues with.
   if (github.data === null && (linear.data === null || linear.data === undefined)) return null;
 
   const tabs: Array<{ id: string; label: string; content: ReactNode }> = [];
@@ -229,7 +219,6 @@ export function NotStartedPanel({ repo, tasks, tasksComplete, tasksCapped = fals
     });
   }
   if (linear.isError) {
-    // Show the failure: hiding it made a broken connection look like "no Linear project".
     tabs.push({
       id: 'linear',
       label: 'Linear',

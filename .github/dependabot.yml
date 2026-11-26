@@ -45,8 +45,6 @@ updates:
       all-python:
         patterns: ["*"]
     ignore:
-      # Cedar engine parity — bump in lockstep with @cedar-policy/cedar-wasm via a
-      # dedicated coordinated PR. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23).
       - dependency-name: "cedarpy"
         update-types:
           - "version-update:semver-major"
@@ -68,19 +66,12 @@ updates:
       all-npm:
         patterns: ["*"]
     ignore:
-      # Cedar engine parity — bump in lockstep with cedarpy via a dedicated
-      # coordinated PR. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23).
       - dependency-name: "@cedar-policy/cedar-wasm"
         update-types:
           - "version-update:semver-major"
           - "version-update:semver-minor"
           - "version-update:semver-patch"
-      # knip is pinned exactly and its findings gate the build, so a new knip
-      # release can change what the gate reports. Bump it alone, by hand: inside
-      # the grouped update it would turn the one open npm PR red and hold back
-      # every other npm update. An ignore rather than a group exclude because
-      # open-pull-requests-limit is 1: a separate knip PR would take the only
-      # slot. `update-types` does not apply to security updates.
+      # `update-types` does not apply to security updates.
       - dependency-name: "knip"
         update-types:
           - "version-update:semver-major"

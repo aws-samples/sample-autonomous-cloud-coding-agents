@@ -1,34 +1,7 @@
-"""Unit tests for the Cedar-HITL three-outcome policy engine.
-
-Companion to ``test_policy.py`` which exercises the Phase 1 binary-decision
-surface via ``.allowed``. This module targets the new three-outcome
-behavior (``Outcome.ALLOW`` / ``Outcome.DENY`` / ``Outcome.REQUIRE_APPROVAL``)
-introduced for Cedar HITL gates. See
-``docs/design/CEDAR_HITL_GATES.md`` §§6, 12.
-
-Covers:
-
-- ``PolicyDecision`` construction (keywords; factory helpers).
-- ``Outcome`` enum membership and the ``.allowed`` shim's mapping.
-- ``ApprovalAllowlist`` for every scope type.
-- ``RecentDecisionCache`` TTL, LRU eviction, APPROVED-not-populated rule,
-  independent 50-entry memory bound.
-- Annotation parsing + multi-match merging (min timeout, max severity,
-  floor clamp, WARN on sub-120s).
-- Load-time validation: 64 KB cap, hard-deny disable rejection,
-  approval_gate_cap bounds, tier/rule_id checks.
-- Three-outcome pipeline happy paths: hard-deny → DENY, pre-approved →
-  ALLOW, soft-deny hit → REQUIRE_APPROVAL, rule-scope allowlist → ALLOW,
-  default fallthrough → ALLOW.
-- Recent-decision cache blocking a retry after DENIED outcome.
-- Fail-closed on cedarpy exceptions.
-"""
-
 from __future__ import annotations
 
 from unittest.mock import patch
 
-# Hard import — the policy engine requires cedarpy; skipping would hide drift.
 import cedarpy  # noqa: F401  (sanity import)
 import pytest
 
@@ -46,10 +19,6 @@ from policy import (
     _sha256_tool_input,
 )
 
-# ---------------------------------------------------------------------------
-# PolicyDecision + Outcome
-# ---------------------------------------------------------------------------
-
 
 class TestPolicyDecisionConstruction:
     def test_new_style_outcome_kwarg(self):
@@ -65,20 +34,14 @@ class TestPolicyDecisionConstruction:
             severity="medium",
             matching_rule_ids=("force_push_any",),
         )
-        # Critical backward-compat: Phase 1 callers that branch on
-        # ``if not decision.allowed: return deny`` must keep blocking
-        # REQUIRE_APPROVAL until the hook is extended to the three-outcome
-        # path in Chunk 3.
         assert d.allowed is False
 
     def test_outcome_is_required(self):
-        # No default: a decision is never an ALLOW by omission.
         without_outcome: dict = {"reason": "orphan"}
         with pytest.raises(TypeError, match="outcome"):
             PolicyDecision(**without_outcome)
 
     def test_decision_cannot_be_modified(self):
-        # Nothing can turn a DENY into an ALLOW after the engine returned it.
         d = PolicyDecision.deny("blocked")
         for name in ("outcome", "reason"):
             with pytest.raises(AttributeError):
@@ -129,10 +92,6 @@ class TestPolicyDecisionConstruction:
         assert d.cache_hit_metadata == payload
 
     def test_cache_hit_metadata_not_in_equality(self):
-        # Metadata is observability-only — two DENYs with the same outcome
-        # and reason are the "same" decision even if their original_decision_ts
-        # differs. Keeps __eq__/__hash__ stable for legacy callers that put
-        # PolicyDecision values in sets / dicts.
         bare = PolicyDecision(outcome=Outcome.DENY, reason="x")
         with_meta = PolicyDecision(
             outcome=Outcome.DENY,
@@ -142,10 +101,7 @@ class TestPolicyDecisionConstruction:
         assert bare == with_meta
         assert hash(bare) == hash(with_meta)
 
-    # -- #251 (decision E): fail_closed discriminator --------------------
-
     def test_fail_closed_defaults_false(self):
-        # Hard-denies and allows must NOT be flagged fail-closed.
         assert PolicyDecision.allow().fail_closed is False
         assert PolicyDecision.deny("Hard-deny: force_push_main").fail_closed is False
 
@@ -155,8 +111,6 @@ class TestPolicyDecisionConstruction:
         assert d.fail_closed is True
 
     def test_fail_closed_not_in_equality(self):
-        # Like cache_hit_metadata, fail_closed is derived observability and
-        # must not perturb __eq__/__hash__ for legacy set/dict callers.
         bare = PolicyDecision(outcome=Outcome.DENY, reason="x")
         flagged = PolicyDecision(outcome=Outcome.DENY, reason="x", fail_closed=True)
         assert bare == flagged
@@ -164,12 +118,8 @@ class TestPolicyDecisionConstruction:
 
 
 class TestEvaluateToolUseFailClosed:
-    """The fail_closed flag must be True at engine-error/unavailable sites and
-    False for intentional hard-deny + cache-deny (§13.16, decision E)."""
-
     def test_engine_unavailable_is_fail_closed(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Force the "policy engine unavailable" guard.
         engine._cedarpy = None
         d = engine.evaluate_tool_use("Bash", {"command": "echo hi"})
         assert d.outcome == Outcome.DENY
@@ -177,7 +127,6 @@ class TestEvaluateToolUseFailClosed:
 
     def test_unhashable_tool_input_is_fail_closed(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # A non-JSON-serialisable input trips the unhashable fail-closed path.
         d = engine.evaluate_tool_use("Bash", {"command": {1, 2, 3}})
         assert d.outcome == Outcome.DENY
         assert d.fail_closed is True
@@ -190,16 +139,10 @@ class TestEvaluateToolUseFailClosed:
         assert d.fail_closed is True
 
     def test_hard_deny_is_not_fail_closed(self):
-        # A read-only engine hard-denies Write — an INTENTIONAL deny.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", read_only=True)
         d = engine.evaluate_tool_use("Write", {"file_path": "x.py", "content": "y"})
         assert d.outcome == Outcome.DENY
         assert d.fail_closed is False
-
-
-# ---------------------------------------------------------------------------
-# ApprovalAllowlist — §6.4
-# ---------------------------------------------------------------------------
 
 
 class TestApprovalAllowlist:
@@ -236,10 +179,6 @@ class TestApprovalAllowlist:
         assert al.matches("Write", {"file_path": "src/main.py"}) is False
 
     def test_rule_scope_exposed_but_not_checked_in_matches(self):
-        # rule: scopes are checked POST soft-deny-eval inside the engine,
-        # not in .matches() (rule_ids are only known once Cedar reports
-        # matching policies). Confirm matches() returns False for rule-only
-        # allowlists, but the rule_ids set is populated.
         al = ApprovalAllowlist(["rule:deploy_staging"])
         assert al.matches("Bash", {"command": "terraform apply"}) is False
         assert "deploy_staging" in al.rule_ids
@@ -251,11 +190,6 @@ class TestApprovalAllowlist:
     def test_unknown_tool_group_rejected(self):
         with pytest.raises(ValueError, match="unknown tool_group"):
             ApprovalAllowlist(["tool_group:no_such_group"])
-
-
-# ---------------------------------------------------------------------------
-# RecentDecisionCache — §6.2, §12.8, §12.9
-# ---------------------------------------------------------------------------
 
 
 class TestRecentDecisionCache:
@@ -272,14 +206,11 @@ class TestRecentDecisionCache:
         assert cache.get("Bash", "nonexistent") is None
 
     def test_approved_decision_rejected(self):
-        # §12.8: cache must NOT be populated on APPROVED — otherwise a
-        # just-approved call would auto-deny on the next identical invocation.
         cache = RecentDecisionCache()
         with pytest.raises(ValueError, match="DENIED/TIMED_OUT"):
             cache.record("Bash", "sha-a", "APPROVED", "user said yes")
 
     def test_ttl_expiry(self):
-        # Inject a controllable clock so we can advance past the 60s window.
         now = [0.0]
 
         def fake_clock() -> float:
@@ -292,13 +223,11 @@ class TestRecentDecisionCache:
         assert cache.get("Bash", "sha-a") is None
 
     def test_lru_eviction_on_overflow(self):
-        # §12.9: cache memory bound is 50 entries INDEPENDENT of
-        # approval_gate_cap. Oldest entry evicted when the cap is hit.
         cache = RecentDecisionCache(max_entries=3)
         cache.record("Bash", "a", "DENIED", "1")
         cache.record("Bash", "b", "DENIED", "2")
         cache.record("Bash", "c", "DENIED", "3")
-        cache.record("Bash", "d", "DENIED", "4")  # evicts "a"
+        cache.record("Bash", "d", "DENIED", "4")
         assert cache.get("Bash", "a") is None
         assert cache.get("Bash", "d") is not None
 
@@ -307,18 +236,15 @@ class TestRecentDecisionCache:
         cache.record("Bash", "a", "DENIED", "1")
         cache.record("Bash", "b", "DENIED", "2")
         cache.record("Bash", "c", "DENIED", "3")
-        # Access "a" to promote it past "b" / "c".
         _ = cache.get("Bash", "a")
-        cache.record("Bash", "d", "DENIED", "4")  # evicts "b" now
-        assert cache.get("Bash", "a") is not None  # touched; stayed
-        assert cache.get("Bash", "b") is None  # evicted
+        cache.record("Bash", "d", "DENIED", "4")
+        assert cache.get("Bash", "a") is not None
+        assert cache.get("Bash", "b") is None
 
     def test_cache_max_entries_default(self):
         assert CACHE_MAX_ENTRIES == 50
 
     def test_record_stores_original_decision_ts(self):
-        # IMPL-23: cache hits must surface when the original decision landed
-        # so operators can correlate the cache-driven deny back to the gate.
         cache = RecentDecisionCache()
         cache.record(
             "Bash",
@@ -332,22 +258,14 @@ class TestRecentDecisionCache:
         assert entry.original_decision_ts == "2026-05-07T12:00:00Z"
 
     def test_record_defaults_original_decision_ts_to_now(self):
-        # Legacy callers that omit the kwarg still get a valid ISO string.
         cache = RecentDecisionCache()
         cache.record("Bash", "sha-a", "DENIED", "x")
         entry = cache.get("Bash", "sha-a")
         assert entry is not None
         assert entry.original_decision_ts.endswith("Z")
-        # Shape sanity: 2026-05-07T12:34:56.789012Z (26-27 chars) or
-        # 2026-05-07T12:34:56Z (20 chars) depending on Python's subsecond
-        # behavior — either way starts with the year.
         assert entry.original_decision_ts[:4].isdigit()
 
-    # --- Rule-level cache extension (B1, 2026-05-12) ---------------------
-
     def test_record_rule_decision_and_lookup(self):
-        # Rule-level cache catches semantic retries (same rule, different
-        # input) the input-hash cache misses. Seeded on DENIED only.
         cache = RecentDecisionCache()
         cache.record_rule_decision(
             "Bash",
@@ -368,8 +286,6 @@ class TestRecentDecisionCache:
         cache = RecentDecisionCache()
         cache.record_rule_decision("Bash", "rule_b", "DENIED", "b")
         cache.record_rule_decision("Bash", "rule_c", "DENIED", "c")
-        # ``get_rule_decision`` iterates in caller-order and returns the
-        # first hit. ``rule_a`` isn't cached → scan moves on to ``rule_b``.
         hit = cache.get_rule_decision("Bash", ["rule_a", "rule_b", "rule_c"])
         assert hit is not None
         assert hit[0] == "rule_b"
@@ -377,17 +293,11 @@ class TestRecentDecisionCache:
     def test_rule_cache_miss_returns_none(self):
         cache = RecentDecisionCache()
         cache.record_rule_decision("Bash", "force_push_any", "DENIED", "x")
-        # Different tool — rule cache is keyed on ``(tool, rule_id)``.
         assert cache.get_rule_decision("Write", ["force_push_any"]) is None
-        # Different rule on the same tool.
         assert cache.get_rule_decision("Bash", ["other_rule"]) is None
-        # Empty rule_ids list.
         assert cache.get_rule_decision("Bash", []) is None
 
     def test_rule_cache_timed_out_rejected(self):
-        # TIMED_OUT is ambiguous (user was away, not actively refusing),
-        # so it stays input-hash-scoped only. Rule-level cache rejects
-        # TIMED_OUT / APPROVED to keep the semantics clean.
         cache = RecentDecisionCache()
         with pytest.raises(ValueError, match="only accepts DENIED"):
             cache.record_rule_decision("Bash", "force_push_any", "TIMED_OUT", "x")
@@ -410,14 +320,9 @@ class TestRecentDecisionCache:
         cache = RecentDecisionCache(max_entries=2)
         cache.record_rule_decision("Bash", "rule_a", "DENIED", "1")
         cache.record_rule_decision("Bash", "rule_b", "DENIED", "2")
-        cache.record_rule_decision("Bash", "rule_c", "DENIED", "3")  # evicts rule_a
+        cache.record_rule_decision("Bash", "rule_c", "DENIED", "3")
         assert cache.get_rule_decision("Bash", ["rule_a"]) is None
         assert cache.get_rule_decision("Bash", ["rule_c"]) is not None
-
-
-# ---------------------------------------------------------------------------
-# PolicyEngine: three-outcome pipeline
-# ---------------------------------------------------------------------------
 
 
 class TestThreeOutcomePipeline:
@@ -443,16 +348,13 @@ class TestThreeOutcomePipeline:
         assert d.severity == "medium"
 
     def test_soft_deny_multi_match_merges_annotations(self):
-        # force_push_any (300s, medium) + force_push_main (600s, high) both
-        # match "git push --force origin main". Merge picks min(300, 600)=300s
-        # and max(medium, high)=high. §6.3.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin main"})
         assert d.outcome == Outcome.REQUIRE_APPROVAL
         assert "force_push_any" in d.matching_rule_ids
         assert "force_push_main" in d.matching_rule_ids
-        assert d.timeout_s == 300  # min across rules + task default
-        assert d.severity == "high"  # max across rules
+        assert d.timeout_s == 300
+        assert d.severity == "high"
 
     def test_default_allow_on_no_match(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
@@ -479,7 +381,6 @@ class TestThreeOutcomePipeline:
         assert d.outcome == Outcome.ALLOW
 
     def test_pre_approved_all_session_does_not_bypass_hard_deny(self):
-        # §12.5: hard-deny is absolute. No --pre-approve scope bypasses it.
         engine = PolicyEngine(
             task_type="new_task",
             repo="owner/repo",
@@ -490,8 +391,6 @@ class TestThreeOutcomePipeline:
         assert "Hard-deny" in d.reason
 
     def test_pre_approved_rule_scope_matched_post_soft_deny(self):
-        # rule: scope matches after the soft-deny eval knows which rules
-        # were triggered. Confirms the post-eval allowlist branch fires.
         engine = PolicyEngine(
             task_type="new_task",
             repo="owner/repo",
@@ -521,16 +420,9 @@ class TestThreeOutcomePipeline:
         assert d.outcome == Outcome.ALLOW
 
 
-# ---------------------------------------------------------------------------
-# Recent-decision cache integration
-# ---------------------------------------------------------------------------
-
-
 class TestRecentDecisionCacheIntegration:
     def test_denied_then_retry_hits_cache(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Seed cache directly via the public ``recent_decisions`` interface
-        # — simulates a prior DENIED outcome from the hook (§6.2 step 2.5).
         import hashlib
         import json as _json
 
@@ -543,17 +435,12 @@ class TestRecentDecisionCacheIntegration:
 
     def test_cache_does_not_shadow_hard_deny(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Even if the cache held an entry for "rm -rf /", step 1 hard-deny
-        # runs first so the denial reason is hard-deny, not cache.
         d = engine.evaluate_tool_use("Bash", {"command": "rm -rf /"})
         assert d.outcome == Outcome.DENY
         assert "Hard-deny" in d.reason
         assert "Recent" not in d.reason
 
     def test_cache_hit_attaches_metadata_for_impl_23(self):
-        # IMPL-23: a cache hit must carry the metadata the hook will forward
-        # to progress_writer.write_policy_decision_cached so cache-driven
-        # denies are visible in the TaskEventsTable event stream.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         import hashlib
         import json as _json
@@ -577,15 +464,7 @@ class TestRecentDecisionCacheIntegration:
             "original_decision_ts": "2026-05-07T12:00:00Z",
         }
 
-    # --- Rule-level cache integration (B1, 2026-05-12) ---------------------
-
     def test_semantic_retry_hits_rule_cache(self):
-        # Once the user has denied ``git push --force origin feature``
-        # and the hook seeded the rule cache with ``force_push_any``,
-        # the agent's retry on a DIFFERENT branch name should fast-deny
-        # instead of opening a fresh approval gate. Regression guard
-        # for the E2E Phase 4 finding: max_turns burn due to semantic
-        # retries not hitting the input-hash cache.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         engine.recent_decisions.record_rule_decision(
             "Bash",
@@ -594,9 +473,6 @@ class TestRecentDecisionCacheIntegration:
             "no force pushes",
             original_decision_ts="2026-05-12T19:00:00Z",
         )
-        # Different branch name → different input hash; input-hash cache
-        # would miss. Rule cache catches it because the Cedar eval still
-        # returns ``force_push_any`` as a matching rule.
         d = engine.evaluate_tool_use(
             "Bash", {"command": "git push --force origin some-other-branch"}
         )
@@ -608,8 +484,6 @@ class TestRecentDecisionCacheIntegration:
         assert d.cache_hit_metadata["original_decision_ts"] == "2026-05-12T19:00:00Z"
 
     def test_rule_cache_does_not_shadow_hard_deny(self):
-        # Hard-deny (step 1) still precedes rule-cache (step 3.5),
-        # mirroring the invariant for the input-hash cache.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         engine.recent_decisions.record_rule_decision("Bash", "rm_slash", "DENIED", "not allowed")
         d = engine.evaluate_tool_use("Bash", {"command": "rm -rf /"})
@@ -618,9 +492,6 @@ class TestRecentDecisionCacheIntegration:
         assert "Recent" not in d.reason
 
     def test_rule_cache_does_not_shadow_allowlist(self):
-        # Step 2 allowlist (tool-scope) wins over rule cache just like it
-        # wins over the input-hash cache. Pre-approval via allowlist is
-        # the user's explicit override.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         engine.allowlist.add("rule:force_push_any")
         engine.recent_decisions.record_rule_decision(
@@ -631,9 +502,6 @@ class TestRecentDecisionCacheIntegration:
         assert "Allowlist" in d.reason
 
     def test_pre_approval_beats_a_recent_denial_of_the_same_call(self):
-        # Step 2 (allowlist) runs before step 2.5 (recent-decision cache). The
-        # user denies a force push, then approves every Bash call of the
-        # session: the agent's retry within the minute must go through.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         tool_input = {"command": "git push --force origin feature"}
         engine.recent_decisions.record("Bash", _sha256_tool_input(tool_input), "DENIED", "not yet")
@@ -645,22 +513,14 @@ class TestRecentDecisionCacheIntegration:
 
     def test_non_cache_decisions_have_no_cache_hit_metadata(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # ALLOW path
         assert engine.evaluate_tool_use("Bash", {"command": "npm test"}).cache_hit_metadata is None
-        # Hard-deny path
         assert engine.evaluate_tool_use("Bash", {"command": "rm -rf /"}).cache_hit_metadata is None
-        # Soft-deny path
         assert (
             engine.evaluate_tool_use(
                 "Bash", {"command": "git push --force origin feature"}
             ).cache_hit_metadata
             is None
         )
-
-
-# ---------------------------------------------------------------------------
-# Load-time validation — §5.1, §12.4
-# ---------------------------------------------------------------------------
 
 
 class TestLoadTimeValidation:
@@ -689,8 +549,6 @@ class TestLoadTimeValidation:
         assert e.approval_gate_cap == APPROVAL_GATE_CAP_MAX
 
     def test_blueprint_disable_rejects_builtin_hard_deny_rule(self):
-        # §5.1, finding #9: blueprints may NOT disable built-in hard-deny
-        # rules. Attempting `disable: [rm_slash]` must fail at task start.
         with pytest.raises(ValueError, match="rm_slash"):
             PolicyEngine(
                 task_type="new_task",
@@ -699,23 +557,19 @@ class TestLoadTimeValidation:
             )
 
     def test_blueprint_disable_accepts_unknown_id(self):
-        # A disable entry that names a non-existent rule is tolerated (it's
-        # a no-op). Blueprint-drift safeguard — we reject only hard-deny.
         e = PolicyEngine(
             task_type="new_task",
             repo="owner/repo",
             blueprint_disable=["nonexistent_rule"],
         )
-        # Constructs cleanly; the unknown ID is stored but does nothing.
         assert "nonexistent_rule" in e._disabled_rule_ids
 
     def test_blueprint_64kb_cap_rejected(self):
-        # §12.4, finding #12: combined blueprint text > 64 KB rejected.
         big = (
             '@tier("soft") @rule_id("big") '
             "forbid (principal, action, resource) "
             'when { context.x like "*aaaaaaaaaa*" };'
-        ) * 1000  # well over 64 KB
+        ) * 1000
         assert len(big) > POLICIES_MAX_BYTES
         with pytest.raises(ValueError, match="64 KB cap"):
             PolicyEngine(
@@ -725,9 +579,6 @@ class TestLoadTimeValidation:
             )
 
     def test_registry_extra_policies_counted_in_64kb_cap(self):
-        # #246 review: registry cedar_policy_module assets arrive via the legacy
-        # extra_policies path, which previously bypassed the cap entirely. An
-        # oversized registry policy must be rejected just like blueprint text.
         big = 'forbid (principal, action, resource) when { context.x like "*aaaaaaaaaa*" };' * 1000
         assert len(big) > POLICIES_MAX_BYTES
         with pytest.raises(ValueError, match="64 KB cap"):
@@ -760,12 +611,6 @@ class TestLoadTimeValidation:
             )
 
     def test_blueprint_soft_timeout_sub_120s_emits_warn(self):
-        # IMPL-25: sub-120s is advisory, not strict. Construction succeeds;
-        # the WARN log line is emitted by shell.log() which prints to stdout,
-        # not Python's logging module, so stdlib caplog won't capture it.
-        # Asserting "construction does not raise" is sufficient signal for
-        # the accept-and-warn contract; WARN visibility is a CloudWatch
-        # concern (ops), not a unit-test concern.
         ok_but_warn = (
             '@tier("soft") @rule_id("quick") @approval_timeout_s("90") '
             '@severity("low") '
@@ -842,11 +687,6 @@ class TestLoadTimeValidation:
         ],
     )
     def test_policy_the_engine_cannot_use_fails_at_start(self, policies, message):
-        # One row per rejection. Without it the task would start with a rule
-        # that does not mean what its author wrote: a rule without its timeout
-        # or with an unknown severity, two rules behind one id, an absolute
-        # rule that a human can approve. Text that is not Cedar has to be
-        # reported as a parse error, not as whatever fails after it.
         with pytest.raises(ValueError, match=message):
             PolicyEngine(task_type="new_task", repo="owner/repo", **policies)
 
@@ -898,12 +738,6 @@ class TestLoadTimeValidation:
         ],
     )
     def test_rule_reading_an_absent_context_attribute_fails_at_start(self, rule, attribute):
-        # ``command`` exists only in the request that checks a shell command and
-        # ``file_path`` only in the one that checks a file write; the request
-        # that checks a tool by its name has neither. Cedar reports a rule that
-        # reads one where it is absent as an evaluation error, and at run time
-        # the engine then denies every call the rule is evaluated for
-        # ("fail-closed"): with the first rule, every tool call of the task.
         with pytest.raises(ValueError, match=rf"soft-deny Cedar probe failed.*{attribute}"):
             PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=[rule])
 
@@ -916,14 +750,8 @@ class TestLoadTimeValidation:
             PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_hard_policies=rule)
 
 
-# ---------------------------------------------------------------------------
-# Fail-closed posture — §13
-# ---------------------------------------------------------------------------
-
-
 class TestFailClosedPosture:
     def test_cedarpy_parse_error_maps_to_deny_fail_closed(self):
-        # §13.4: engine exception -> DENY with reason "fail-closed: ...".
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         engine._hard_policies = "THIS IS NOT VALID CEDAR"
         d = engine.evaluate_tool_use("Write", {"file_path": "a.py"})
@@ -939,26 +767,13 @@ class TestFailClosedPosture:
         assert "unavailable" in d.reason
 
     def test_unhashable_tool_input_surfaces_distinct_reason(self):
-        # Review finding #5: a non-JSON-serializable tool_input should be
-        # distinguishable from a Cedar evaluation failure so operators can
-        # tell the difference in CloudWatch.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         d = engine.evaluate_tool_use("Bash", {"command": object()})
         assert d.outcome == Outcome.DENY
         assert d.reason == "fail-closed: unhashable_tool_input"
 
 
-# ---------------------------------------------------------------------------
-# Regressions covered from Chunk 2 adversarial review
-# ---------------------------------------------------------------------------
-
-
 class TestReviewRegressions:
-    """Lock the review findings from Chunk 2 so a future refactor cannot
-    silently reintroduce them.
-    """
-
-    # Finding #1: blueprint_disable actually disables the soft rule at eval time.
     def test_blueprint_disable_suppresses_soft_deny(self):
         engine = PolicyEngine(
             task_type="new_task",
@@ -972,7 +787,6 @@ class TestReviewRegressions:
         )
 
     def test_blueprint_disable_partial_leaves_surviving_rules(self):
-        # Only disable force_push_any; force_push_main still fires on push to main.
         engine = PolicyEngine(
             task_type="new_task",
             repo="owner/repo",
@@ -983,7 +797,6 @@ class TestReviewRegressions:
         assert "force_push_main" in d.matching_rule_ids
         assert "force_push_any" not in d.matching_rule_ids
 
-    # Finding #2: legacy extra_policies with annotations rejected.
     def test_legacy_extra_policies_with_tier_annotation_rejected(self):
         with pytest.raises(ValueError, match="already declares"):
             PolicyEngine(
@@ -1000,7 +813,6 @@ class TestReviewRegressions:
                 extra_policies=['@rule_id("foo") forbid (principal, action, resource);'],
             )
 
-    # Finding #6: scope whitespace normalization + empty-value rejection.
     def test_allowlist_strips_whitespace(self):
         al = ApprovalAllowlist(["  tool_type: Read  "])
         assert al.matches("Read", {"file_path": "a.py"}) is True
@@ -1013,7 +825,6 @@ class TestReviewRegressions:
         with pytest.raises(ValueError, match="missing value"):
             ApprovalAllowlist(["tool_type:   "])
 
-    # Finding #7: base_permit exemption only applies to permit effect.
     def test_base_permit_forbid_not_exempted(self):
         bad = (
             '@rule_id("base_permit") '
@@ -1028,14 +839,7 @@ class TestReviewRegressions:
             )
 
 
-# ---------------------------------------------------------------------------
-# Chunk 3: approval-gate counters + denial queue (§6.5, §12.9)
-# ---------------------------------------------------------------------------
-
-
 class TestApprovalGateCounter:
-    """Lock the per-task gate counter surface the hook depends on (§6.5)."""
-
     def _engine(self) -> PolicyEngine:
         return PolicyEngine(task_type="new_task", repo="owner/repo")
 
@@ -1052,13 +856,9 @@ class TestApprovalGateCounter:
         e = self._engine()
         for _ in range(75):
             e.increment_approval_gate_count()
-        # Counter itself is unbounded — the cap check is enforced in the hook.
         assert e.approval_gate_count == 75
 
     def test_initial_approval_gate_count_seeds_counter(self):
-        # Chunk 7: container restarts resume the cumulative gate budget so
-        # the cap is respected across restarts (§13.6). The kwarg threads
-        # the TaskTable-persisted value into a fresh PolicyEngine.
         e = PolicyEngine(task_type="new_task", repo="owner/repo", initial_approval_gate_count=12)
         assert e.approval_gate_count == 12
 
@@ -1077,8 +877,6 @@ class TestApprovalGateCounter:
 
 
 class TestApprovalRateWindow:
-    """Sliding-window per-container rate limit (§12.9)."""
-
     def test_empty_window(self):
         e = PolicyEngine(task_type="new_task", repo="owner/repo")
         assert e.approvals_in_last_minute == 0
@@ -1087,32 +885,25 @@ class TestApprovalRateWindow:
         e = PolicyEngine(task_type="new_task", repo="owner/repo")
         e.record_approval_gate_timestamp(now=1000.0)
         e.record_approval_gate_timestamp(now=1010.0)
-        # Prune window pins at current monotonic time; inject deque directly
-        # to assert the count before pruning.
         assert len(e._approvals_last_minute) == 2
 
     def test_old_entries_pruned(self):
         e = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Seed with an entry older than the 60s window relative to a
-        # synthetic "now".
         e.record_approval_gate_timestamp(now=100.0)
         e.record_approval_gate_timestamp(now=105.0)
-        # Force prune at 200s: both old entries should drop out.
         e._prune_rate_window(200.0)
         assert len(e._approvals_last_minute) == 0
 
     def test_mixed_window_keeps_recent(self):
         e = PolicyEngine(task_type="new_task", repo="owner/repo")
-        e.record_approval_gate_timestamp(now=100.0)  # old
-        e.record_approval_gate_timestamp(now=155.0)  # within 60s of 200s
-        e.record_approval_gate_timestamp(now=199.0)  # within 60s of 200s
+        e.record_approval_gate_timestamp(now=100.0)
+        e.record_approval_gate_timestamp(now=155.0)
+        e.record_approval_gate_timestamp(now=199.0)
         e._prune_rate_window(200.0)
         assert list(e._approvals_last_minute) == [155.0, 199.0]
 
 
 class TestDenialInjectionQueue:
-    """Queue consumed by ``_denial_between_turns_hook`` (§6.5)."""
-
     def test_queue_starts_empty(self):
         e = PolicyEngine(task_type="new_task", repo="owner/repo")
         assert e.drain_denial_injections() == []
@@ -1126,13 +917,10 @@ class TestDenialInjectionQueue:
         drained = e.drain_denial_injections()
         assert [p["request_id"] for p in drained] == ["01K1", "01K2"]
         assert drained[0]["reason"] == "do it after tests pass"
-        # Drain clears the queue.
         assert e.drain_denial_injections() == []
 
 
 class TestCeilingShrinkingLatch:
-    """IMPL-26: ``approval_ceiling_shrinking`` is emit-once per task."""
-
     def test_first_call_returns_true(self):
         e = PolicyEngine(task_type="new_task", repo="owner/repo")
         assert e.mark_ceiling_shrinking_emitted() is True
@@ -1145,8 +933,6 @@ class TestCeilingShrinkingLatch:
 
 
 class TestRecentDecisionReasonText:
-    """A timed-out gate has no human reason; the retry deny must not print 'None'."""
-
     def test_timed_out_retry_omits_the_missing_reason(self):
         from policy import PolicyEngine, _sha256_tool_input
 

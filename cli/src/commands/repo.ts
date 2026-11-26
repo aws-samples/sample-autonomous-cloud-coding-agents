@@ -36,12 +36,6 @@ import { offboardRepo, onboardRepo } from '../repo-onboard';
 import { buildRepoOnboardNotes } from '../repo-onboard-notes';
 import { getStackOutput, getStackOutputs } from '../stack-outputs';
 
-/**
- * Redact the per-repo secret ARN before a `RepoConfigRow` is serialized to JSON.
- * `repo show` redacts this field via {@link formatRepoConfigForDisplay}; the
- * `list`/`onboard`/`offboard` JSON paths emit raw rows, so they must apply the
- * same redaction to honor the command's "secret ARNs redacted" contract.
- */
 function redactRepoRow(row: RepoConfigRow): RepoConfigRow {
   if (!row.github_token_secret_arn) {
     return row;
@@ -210,19 +204,8 @@ export function makeRepoCommand(): Command {
           );
         }
         const deployment = { stackName, computeSubstrate, computeDeploymentMode, computeTypes };
-        // Check explicit input early; onboardRepo also checks any stored override.
         assertComputeSubstrateDeployed({ ...deployment, computeType: opts.computeType });
 
-        // Same reasoning as the substrate gate above: reuse an output already
-        // fetched, and fail here rather than let a task die at turn 0 with an
-        // AccessDenied that names nothing.
-        //
-        // Trimmed HERE, not just inside the guard: validating a trimmed copy while
-        // writing the raw value means a trailing space passes the check and lands in
-        // the RepoTable, where it matches no real profile id. The granted set is
-        // trimmed for the same reason — `resolveBedrockModelIds` validates
-        // `trim().length` but stores the entry untrimmed, so an untrimmed grant would
-        // make the exact-match check falsely reject a model it just listed.
         const modelId = opts.model?.trim() || undefined;
         assertModelIdUsable({
           modelId,

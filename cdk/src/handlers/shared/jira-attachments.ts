@@ -18,29 +18,9 @@
  */
 
 /**
- * Authenticated Jira context enrichment at task-admission time (issue #577).
- *
- * The webhook processor calls these helpers after Jira OAuth is resolved to
- * pull the same practical context a Linear-origin task can use, which the
- * headless agent cannot fetch itself (the Atlassian Remote MCP only supports
- * interactive OAuth — see the parent tracker #580 and ADR-015):
- *
- *   - `downloadScreenAndStoreJiraAttachments` — resolve Jira `media` file
- *     attachments through the REST API (NOT the unauthenticated `content`
- *     URL), run each through the existing Bedrock Guardrail screening
- *     pipeline, upload the cleaned bytes to S3, and return `passed`
- *     AttachmentRecords for `createTaskCore` to persist verbatim. Fail-closed:
- *     a selected attachment that cannot be safely fetched/screened throws
- *     {@link JiraAttachmentError} so the caller rejects the whole task.
- *   - `fetchRecentHumanComments` — fetch recent human-authored comments and
- *     render them to markdown. Fail-open: any failure yields an empty list so
- *     the task still proceeds.
- *
- * Both reuse the auth + refresh-and-retry-once pattern established by
- * `jira-feedback.ts` and the screen → upload → record pattern established by
- * `resolve-url-attachments.ts`.
- *
- * Tests: cdk/test/handlers/shared/jira-attachments.test.ts
+ * Jira context enrichment at task-admission time (issue #577). The headless
+ * agent cannot fetch it itself: the Atlassian Remote MCP only supports
+ * interactive OAuth (#580, ADR-015).
  */
 
 import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
@@ -54,52 +34,30 @@ import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
 import { isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
 
-/**
- * Safe Jira attachment id: digits/letters/`-`/`_` only. Jira attachment ids are
- * numeric, but the payload is (in principle) attacker-shaped, and the id
- * becomes both an S3 key segment and the agent-side on-disk directory name
- * (`attachments_dir / attachment_id`). Reject anything that could traverse.
- */
 const SAFE_ATTACHMENT_ID = /^[A-Za-z0-9_-]+$/;
 
 /**
  * Atlassian cross-region REST gateway base. The per-tenant OAuth token is
  * minted with `audience=api.atlassian.com`, so it is only valid against this
  * gateway host scoped by `{cloudId}` — NOT against the raw `*.atlassian.net`
- * site host (which 401s such a token). Matches `jira-feedback.ts` and
- * `agent/src/jira_reactions.py`.
+ * site host (which 401s such a token).
  */
 const JIRA_API_BASE = 'https://api.atlassian.com/ex/jira';
 
-/** Per-request timeout for the binary attachment download. */
 const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
 
-/** Per-request timeout for the (small, JSON) comment fetch. */
 const COMMENT_FETCH_TIMEOUT_MS = 5_000;
 
-/** Default cap on recent comments folded into the task context. */
 const DEFAULT_MAX_COMMENTS = 10;
 
-/**
- * Comments read per fetch: one page of Jira's default size. The cap above
- * applies to the human comments found in it, so the comments ABCA posted
- * since the last human one do not use it up.
- */
 const COMMENT_PAGE_SIZE = 100;
 
-/**
- * Tenant-scoped context for a Jira REST call, resolved once per task by the
- * caller and threaded through so the OAuth resolver runs once, not per API
- * call. Mirrors {@link import('./jira-feedback').JiraFeedbackContext}.
- */
 export interface JiraTenantContext {
   /** Atlassian tenant identifier (`cloudId`) — registry key. */
   readonly cloudId: string;
-  /** Name of JiraWorkspaceRegistryTable, from CDK stack output. */
   readonly registryTableName: string;
 }
 
-/** S3 + screening dependencies for the attachment download path. */
 export interface JiraAttachmentStorage {
   readonly s3Client: S3Client;
   readonly bucketName: string;
@@ -125,10 +83,6 @@ export class JiraAttachmentError extends Error {
   }
 }
 
-/**
- * Subset of a Jira `issue.fields.attachment[]` entry we depend on. Extra
- * fields are tolerated.
- */
 interface RawJiraAttachment {
   readonly id?: string | number;
   readonly filename?: string;
@@ -137,17 +91,14 @@ interface RawJiraAttachment {
   readonly content?: string;
 }
 
-/** A candidate attachment that passed the pre-download filter. */
 interface SelectedAttachment {
   readonly id: string;
-  /** Sanitized, path-traversal-safe filename (see {@link safeFilename}). */
   readonly filename: string;
   readonly mimeType: string;
   readonly size: number;
   readonly isImage: boolean;
 }
 
-/** File extension to fall back to when a filename can't be made safe. */
 const MIME_FALLBACK_EXTENSION: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -159,16 +110,6 @@ const MIME_FALLBACK_EXTENSION: Record<string, string> = {
   'text/x-log': 'log',
 };
 
-/**
- * Produce a path-traversal-safe filename for a Jira attachment. Jira filenames
- * are arbitrary user uploads (spaces, parens, unicode), and the value becomes
- * an S3 key segment AND the agent-side on-disk filename, so an unsanitized
- * `../../evil` would be an arbitrary-write primitive. Mirror the URL path
- * (`validation.filenameFromUrl`): replace unsafe characters, then fall back to
- * a generated name keyed on the MIME type if the result still isn't valid.
- * Never rejects — a legitimate attachment with an awkward name keeps its bytes
- * under a safe name rather than being dropped.
- */
 function safeFilename(rawFilename: string, mimeType: string, index: number): string {
   const sanitized = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_');
   if (isValidFilename(sanitized)) return sanitized;
@@ -176,20 +117,6 @@ function safeFilename(rawFilename: string, mimeType: string, index: number): str
   return `attachment_${index}.${ext}`;
 }
 
-/**
- * Filter raw Jira attachments down to the set we'll fetch, enforcing the same
- * limits the wire path enforces:
- *   - supported MIME types only (PNG/JPEG images; text/csv/md/json/pdf/log)
- *   - per-file size <= MAX_ATTACHMENT_SIZE_BYTES (10 MB)
- *   - combined count (with slots already used by URL image attachments) <=
- *     MAX_ATTACHMENTS_PER_TASK (10)
- *   - running total size <= MAX_TOTAL_ATTACHMENT_SIZE_BYTES (50 MB)
- *
- * Unsupported / oversized / over-cap attachments are DROPPED (logged), not
- * errored: they simply never reach the agent, satisfying the fail-closed
- * contract without failing the task. The download step (which can error) only
- * ever sees this filtered, safe-by-metadata list.
- */
 function selectAttachments(
   raw: readonly RawJiraAttachment[],
   remainingSlots: number,
@@ -213,9 +140,6 @@ function selectAttachments(
       skipped++;
       continue;
     }
-    // The id becomes an S3 key segment AND the agent's on-disk directory name.
-    // A Jira id is numeric, but the payload is attacker-shaped in principle, so
-    // reject anything that isn't a safe token (path traversal / injection).
     if (!SAFE_ATTACHMENT_ID.test(id)) {
       skipped++;
       continue;
@@ -241,14 +165,6 @@ function selectAttachments(
   return { selected, skipped };
 }
 
-/**
- * GET the raw bytes of one attachment through the gateway attachment-content
- * endpoint, enforcing the size cap while reading. The 3LO token is only valid
- * against the gateway base (see {@link JIRA_API_BASE}); the raw site-host
- * `content` URL in the webhook payload would 401 this token, so we address the
- * attachment by id instead. Returns the outcome kind so the caller can force a
- * token refresh on a 401/403.
- */
 async function fetchAttachmentBytes(
   accessToken: string,
   cloudId: string,
@@ -264,18 +180,12 @@ async function fetchAttachmentBytes(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ATTACHMENT_FETCH_TIMEOUT_MS);
   try {
-    // `redirect: 'follow'` (the default) lets the gateway hand off to the
-    // backing media store; the Authorization header is dropped on cross-origin
-    // redirects by fetch, which is the desired behaviour — the redirect target
-    // carries its own short-lived signed URL.
     const resp = await fetch(url, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${accessToken}`,
         // The attachment-content endpoint returns the file's own content type
-        // (image/jpeg, application/pdf, …) and responds 406 Not Acceptable to a
-        // narrow `Accept: application/octet-stream`. Accept anything so the
-        // gateway can serve the real media type.
+        // and responds 406 Not Acceptable to `Accept: application/octet-stream`.
         Accept: '*/*',
       },
       signal: controller.signal,
@@ -286,9 +196,6 @@ async function fetchAttachmentBytes(
     if (!resp.ok) {
       return { kind: 'error', message: `HTTP ${resp.status}` };
     }
-    // Enforce the size cap while reading so a mislabeled/huge body can't blow
-    // the Lambda's memory. `size` metadata was already checked, but the body
-    // is authoritative.
     const reader = resp.body?.getReader();
     if (!reader) {
       return { kind: 'error', message: 'empty response body' };
@@ -307,7 +214,6 @@ async function fetchAttachmentBytes(
     }
     return { kind: 'ok', content: Buffer.concat(chunks) };
   } catch (err) {
-    // The outcome's message is posted on the Jira issue: the cause goes to the log.
     logger.warn('Jira attachment download: request failed', {
       jira_cloud_id: cloudId,
       attachment_id: attachmentId,
@@ -350,7 +256,6 @@ export async function downloadScreenAndStoreJiraAttachments(
   }
   if (selected.length === 0) return [];
 
-  // Resolve the token once for the batch; refresh reactively on a 401/403.
   let token = await resolveJiraOauthToken(ctx.cloudId, ctx.registryTableName);
   if (!token) {
     throw new JiraAttachmentError(
@@ -359,23 +264,13 @@ export async function downloadScreenAndStoreJiraAttachments(
   }
 
   const records: PassedAttachmentRecord[] = [];
-  // Keys uploaded so far this batch. On any failure we delete them so a
-  // partially-successful batch doesn't orphan objects in S3 (the caller's
-  // `cleanupOrphanedAttachments` only tracks inline uploads, not these).
   const uploadedKeys: string[] = [];
-  // Running total of REAL downloaded bytes. selectAttachments enforces the
-  // total against attacker-declared `size`, which can under-report; enforce
-  // the real total here so a batch that lies about sizes can't blow past the
-  // documented 50 MB ceiling.
   let totalBytes = 0;
 
   try {
     for (const att of selected) {
       let outcome = await fetchAttachmentBytes(token.accessToken, ctx.cloudId, att.id);
 
-      // Reactive refresh-and-retry-once on auth rejection, mirroring
-      // jira-feedback.writeCommentWithRefresh: the stored token may be dead
-      // despite a not-yet-reached expiry (server-side revocation).
       if (outcome.kind === 'auth') {
         logger.info('Jira attachment download got auth rejection — forcing token refresh and retrying once', {
           jira_cloud_id: ctx.cloudId,
@@ -404,7 +299,6 @@ export async function downloadScreenAndStoreJiraAttachments(
 
       const content = outcome.content;
 
-      // Enforce the total-size ceiling on real bytes (declared sizes can lie).
       totalBytes += content.length;
       if (totalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
         throw new JiraAttachmentError(
@@ -412,26 +306,18 @@ export async function downloadScreenAndStoreJiraAttachments(
         );
       }
 
-      // Reject an empty body. A 0-byte file (a common user mistake) would pass
-      // magic-byte + screening but trip createAttachmentRecord's size guard
-      // with a plain Error — outside the fail-closed conversion — so surface it
-      // as a JiraAttachmentError here to keep the reject-with-comment contract.
       if (content.length === 0) {
         throw new JiraAttachmentError(
           `Attachment '${att.filename}' is empty (0 bytes).`,
         );
       }
 
-      // The declared metadata MIME already passed the allowlist; confirm the
-      // bytes actually match it (blocks a masquerading/polyglot payload).
       if (!validateMagicBytes(content, att.mimeType)) {
         throw new JiraAttachmentError(
           `Attachment '${att.filename}' content does not match its declared type '${att.mimeType}'.`,
         );
       }
 
-      // Screen through the same Bedrock Guardrail pipeline as inline/URL
-      // attachments. Any block or screening failure is fail-closed.
       let screenResult;
       try {
         screenResult = att.isImage
@@ -444,9 +330,6 @@ export async function downloadScreenAndStoreJiraAttachments(
             { cause: err },
           );
         }
-        // Not a verdict on the file: the screening call itself failed (throttled,
-        // denied). The SDK's text can name the role and the account, and this
-        // error's message is posted on the Jira issue, so it stays in the log.
         logger.error('Screening call failed for Jira attachment', {
           jira_cloud_id: ctx.cloudId,
           attachment_filename: att.filename,
@@ -464,8 +347,6 @@ export async function downloadScreenAndStoreJiraAttachments(
         );
       }
 
-      // Upload the cleaned bytes under the same key layout as the inline/URL
-      // paths so downstream hydration/authorization is uniform.
       const attachmentId = att.id;
       const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${ctx.userId}/${ctx.taskId}/${attachmentId}/${att.filename}`;
       let putResult;
@@ -515,9 +396,6 @@ export async function downloadScreenAndStoreJiraAttachments(
       });
     }
   } catch (err) {
-    // Fail-closed: a mid-batch failure must not orphan the objects already
-    // uploaded this batch. Best-effort delete (the 90-day lifecycle is the
-    // backstop) before re-throwing so the caller still rejects the task.
     await deleteS3Objects(ctx.s3Client, ctx.bucketName, uploadedKeys);
     throw err;
   }
@@ -525,11 +403,6 @@ export async function downloadScreenAndStoreJiraAttachments(
   return records;
 }
 
-/**
- * Best-effort deletion of S3 objects by key. Never throws — cleanup failure is
- * logged and left to the bucket's lifecycle policy. Mirrors
- * `create-task-core.cleanupOrphanedAttachments`.
- */
 async function deleteS3Objects(s3Client: S3Client, bucketName: string, keys: readonly string[]): Promise<void> {
   if (keys.length === 0) return;
   try {
@@ -550,8 +423,7 @@ async function deleteS3Objects(s3Client: S3Client, bucketName: string, keys: rea
   }
 }
 
-/** Delete previously-stored pre-screened Jira attachment objects (exported for
- *  the processor to call when createTaskCore rejects the task after upload). */
+/** Best-effort deletion of previously-stored pre-screened Jira attachment objects. Never throws. */
 export async function cleanupPreScreenedAttachments(
   s3Client: S3Client,
   bucketName: string,
@@ -560,20 +432,18 @@ export async function cleanupPreScreenedAttachments(
   await deleteS3Objects(s3Client, bucketName, records.map((r) => r.s3_key).filter((k): k is string => Boolean(k)));
 }
 
-/** A rendered issue comment folded into the task context. */
 export interface RenderedComment {
   readonly author: string;
   readonly createdAt: string;
   readonly markdown: string;
 }
 
-/** Subset of a Jira comment object we depend on. Extra fields tolerated. */
 interface RawJiraComment {
   readonly author?: {
     readonly displayName?: string;
     readonly accountType?: string;
   };
-  readonly body?: unknown; // ADF document
+  readonly body?: unknown;
   readonly created?: string;
 }
 
@@ -584,15 +454,13 @@ interface JiraCommentPage {
 /**
  * Fetch the most recent human-authored comments on an issue and render them to
  * markdown, oldest-first. Best-effort / fail-open: any failure (auth, REST
- * error, malformed body) logs a WARN and returns `[]` so the task still
- * proceeds — comments are advisory context, not a gate.
+ * error, malformed body) logs a WARN and returns `[]`.
  *
  * "Human" = author `accountType === 'atlassian'` and a text that does not
  * start with one of ABCA's own comment markers. Atlassian marks app/bot
- * authors with `accountType: 'app'`, which drops what ABCA posts through the
- * Forge app (and other bots) without needing to know the app's own accountId.
- * What ABCA posts through OAuth belongs to the setup user, so those comments
- * are told by their marker ({@link isBotAuthoredComment}), as on Linear.
+ * authors with `accountType: 'app'`. What ABCA posts through OAuth belongs to
+ * the setup user, so those comments are told by their marker
+ * ({@link isBotAuthoredComment}).
  */
 export async function fetchRecentHumanComments(
   ctx: JiraTenantContext,
@@ -609,8 +477,6 @@ export async function fetchRecentHumanComments(
       return [];
     }
 
-    // Newest-first so the page holds the most recent; we reverse to
-    // oldest-first for rendering.
     const url =
       `${JIRA_API_BASE}/${encodeURIComponent(ctx.cloudId)}` +
       `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment` +
@@ -643,10 +509,7 @@ export async function fetchRecentHumanComments(
     const comments = Array.isArray(page.comments) ? page.comments : [];
     const rendered: RenderedComment[] = [];
     for (const c of comments) {
-      // The page is newest-first, so the first `maxComments` are the newest.
       if (rendered.length >= maxComments) break;
-      // Human authors only. Missing accountType is treated as non-human
-      // (conservative: better to omit an ambiguous author than surface a bot).
       if (c.author?.accountType !== 'atlassian') continue;
       const markdown = extractDescriptionMarkdown(c.body);
       if (!markdown.trim() || isBotAuthoredComment(markdown)) continue;
@@ -657,8 +520,6 @@ export async function fetchRecentHumanComments(
       });
     }
 
-    // API returned newest-first; render oldest-first so the thread reads
-    // naturally.
     rendered.reverse();
     if (rendered.length > 0) {
       logger.info('Fetched recent human Jira comments for task context', {

@@ -27,9 +27,8 @@ export function resolveComputeBackend(value: unknown = 'agentcore'): ComputeBack
 
 /**
  * Resolve the deployed backends from `compute_types` (comma list or array).
- * Without it, a legacy `compute_type=ecs|lambda-microvm` keeps the additive
- * shape `main` deploys today: AgentCore (still the repository default) plus
- * that backend.
+ * Without it, a legacy `compute_type=ecs|lambda-microvm` gives AgentCore (the
+ * repository default) plus that backend.
  */
 export function resolveComputeBackends(computeTypes: unknown, legacyComputeType?: unknown): ComputeBackend[] {
   if (computeTypes === undefined) {

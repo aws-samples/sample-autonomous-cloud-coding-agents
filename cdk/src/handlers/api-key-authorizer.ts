@@ -29,16 +29,8 @@ import { makeDocClient } from './shared/ua';
 const ddb = makeDocClient();
 const TABLE_NAME = process.env.API_KEY_TABLE_NAME!;
 
-/**
- * Scope this authorizer instance gates. API keys must hold it; Cognito JWTs
- * (interactive users) are exempt — a logged-in user manages their own
- * resources under the existing user-scoped model. Configured per route group
- * so a Phase 2 instance can gate task routes with `tasks:read`.
- */
 const REQUIRED_SCOPE = process.env.API_KEY_REQUIRED_SCOPE!;
 
-// Verifier is created once per container and caches the pool JWKS across warm
-// invocations. `tokenUse: 'id'` matches the id_token the bgagent CLI sends.
 const jwtVerifier = CognitoJwtVerifier.create({
   userPoolId: process.env.USER_POOL_ID!,
   tokenUse: 'id',
@@ -68,8 +60,7 @@ function generatePolicy(
 /**
  * Lambda REQUEST authorizer accepting EITHER a platform API key (`X-API-Key`)
  * OR a Cognito id token (`Authorization`). Returns `principalId = user_id` and
- * `context.userId`, which handlers read via `extractUserId` — identical to the
- * Cognito-authorizer path, so the webhook management handlers are unchanged.
+ * `context.userId`.
  */
 export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<APIGatewayAuthorizerResult> {
   const methodArn = event.methodArn;
@@ -101,8 +92,6 @@ async function authorizeApiKey(
     return generatePolicy('anonymous', 'Deny', methodArn);
   }
 
-  // Direct GetItem by partition key (strongly consistent) — a revoked key stops
-  // authenticating immediately, no GSI eventual-consistency window.
   const result = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { key_id: parsed.keyId },
@@ -134,8 +123,6 @@ async function authorizeApiKey(
     return generatePolicy(record.user_id, 'Deny', methodArn);
   }
 
-  // The record of what a key was used for (the method ARN names verb and
-  // route): after a key leaks, this is how an operator sees what it did.
   logger.info('API key authorized', { key_id: record.key_id, user_id: record.user_id, method_arn: methodArn });
 
   return generatePolicy(record.user_id, 'Allow', methodArn, {

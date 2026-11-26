@@ -17,24 +17,12 @@
  *  SOFTWARE.
  */
 
-/**
- * `mise //cdk:preflight` (and the first step of `mise //cdk:deploy`): refuse to deploy
- * against a bootstrap that cannot deploy this checkout (#126). Decision logic and
- * rationale: `src/bootstrap/preflight.ts`. Needs only `cloudformation:DescribeStacks`.
- *
- * Usage: tsx scripts/preflight-bootstrap.ts [--json] [--profile P] [--region R]
- *          [--toolkit-stack-name N] [-c compute_types=...] [...other cdk args, ignored]
- *
- * Exit 0 on PASS or WARN, 1 on FAIL. Escape hatch: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.
- */
-
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { evaluateBootstrap, requiredPolicySet, type BootstrapVerdict, type CfnOutput } from '../src/bootstrap/preflight';
 import { BOOTSTRAP_VERSION, computeBootstrapHash } from '../src/bootstrap/version';
 import { resolveComputeBackends } from '../src/handlers/shared/compute-backend';
 
-/** `--profile` / `--region` (space and `=` forms) as they appear in the CDK arg list. */
 function awsGlobalArgs(argv: readonly string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -52,7 +40,6 @@ function toolkitStackName(argv: readonly string[]): string {
   return i >= 0 && argv[i + 1] ? argv[i + 1]! : 'CDKToolkit';
 }
 
-/** The app's `compute_types`/`compute_type` context: `-c key=value` args win over cdk.json, as in CDK. */
 function contextValue(argv: readonly string[], key: string): unknown {
   for (let i = argv.length - 1; i >= 0; i -= 1) {
     const a = argv[i]!;
@@ -67,7 +54,6 @@ function contextValue(argv: readonly string[], key: string): unknown {
   }
 }
 
-/** CDKToolkit outputs, or null when the stack does not exist. Any other failure throws. */
 function readToolkitOutputs(argv: readonly string[]): CfnOutput[] | null {
   try {
     const raw = execFileSync('aws', [

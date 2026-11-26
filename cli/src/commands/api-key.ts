@@ -22,11 +22,6 @@ import { ApiClient } from '../api-client';
 import { followPages, formatApiKeyCreated, formatApiKeyDetail, formatApiKeyList, formatJson } from '../format';
 import { API_KEY_SCOPES, ApiKeyScope } from '../types';
 
-/**
- * Parse a comma-separated `--scopes` value into validated scope strings.
- * Throws (via commander's InvalidArgumentError) on an unknown scope so the
- * user sees the allowed set instead of a server 400.
- */
 function parseScopes(value: string): ApiKeyScope[] {
   const known = new Set<string>(API_KEY_SCOPES);
   const parts = value.split(',').map((s) => s.trim()).filter(Boolean);

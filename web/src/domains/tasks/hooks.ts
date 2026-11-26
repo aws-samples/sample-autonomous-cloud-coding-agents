@@ -24,19 +24,13 @@ import type { ApiClient } from '../../core/api/client';
 import { CODING_WORKFLOW_ID, type CreateTaskRequest, type TaskEvent, type TaskStatusType } from '../../core/api/types';
 import { isTerminal } from '../../core/util/task-health';
 
-/** Live views poll; the API has no push channel for browsers yet. */
 const LIST_REFRESH_MS = 15_000;
 const ACTIVE_TASK_REFRESH_MS = 10_000;
-/** Quicker, briefly: the last events usually land within seconds of the task finishing. */
 const FINAL_EVENTS_REFRESH_MS = 5_000;
 const PAGE_SIZE = 100;
 const EVENT_PAGE_SIZE = 100;
-/** Stop loading a task's history past this many events; a 500-turn task writes about 1,500. */
+/** Stop loading a task's history past this many events. */
 export const MAX_TASK_EVENTS = 5_000;
-/**
- * Each refresh asks again for the last few events it already has, so an event
- * written a moment late (with an id just before the newest) is not skipped.
- */
 const EVENT_REFRESH_OVERLAP = 20;
 
 const taskKeys = {
@@ -54,8 +48,6 @@ export function useTaskList(status?: readonly TaskStatusType[], repo?: string) {
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => (last.pagination.has_more && last.pagination.next_token ? last.pagination.next_token : undefined),
     refetchInterval: LIST_REFRESH_MS,
-    // Every answer is a new object, also one that equals the last: the pages derive "quiet", the 24-hour
-    // windows and "2m ago" from the clock, and derive them again only when the answer they hold changes.
     structuralSharing: false,
   });
 }
@@ -85,8 +77,6 @@ export function useTask(taskId: string) {
     queryKey: taskKeys.detail(taskId),
     queryFn: () => api.getTask(taskId),
     refetchInterval: (query) => (query.state.data && isTerminal(query.state.data.status) ? false : ACTIVE_TASK_REFRESH_MS),
-    // Every answer is a new object, also one that equals the last: the pages derive "quiet", the 24-hour
-    // windows and "2m ago" from the clock, and derive them again only when the answer they hold changes.
     structuralSharing: false,
   });
 }
@@ -102,12 +92,10 @@ export interface TaskEventLog {
  * from the newest event already loaded.
  */
 export async function loadTaskEvents(api: ApiClient, taskId: string, previous: TaskEventLog | undefined): Promise<TaskEventLog> {
-  // Past the cap the page shows what it has; refreshing would only drop the newest events.
   if (previous?.truncated) return previous;
   const known = previous?.events ?? [];
   const byId = new Map(known.map((e) => [e.event_id, e]));
   let after = known.length > 0 ? known[Math.max(0, known.length - EVENT_REFRESH_OVERLAP)].event_id : undefined;
-  // The first event itself is only re-read when the overlap reaches back to it.
   if (after !== undefined && known.length <= EVENT_REFRESH_OVERLAP) after = undefined;
   let nextToken: string | undefined;
   for (;;) {
@@ -115,7 +103,6 @@ export async function loadTaskEvents(api: ApiClient, taskId: string, previous: T
     for (const event of page.data) byId.set(event.event_id, event);
     if (byId.size >= MAX_TASK_EVENTS) break;
     if (page.data.length < EVENT_PAGE_SIZE || !page.pagination.has_more) break;
-    // `after` and `next_token` are alternatives; continue with whichever started the walk.
     if (after) after = page.data[page.data.length - 1].event_id;
     else if (page.pagination.next_token) nextToken = page.pagination.next_token;
     else break;
@@ -124,18 +111,12 @@ export async function loadTaskEvents(api: ApiClient, taskId: string, previous: T
   return { events: events.slice(0, MAX_TASK_EVENTS), truncated: events.length >= MAX_TASK_EVENTS };
 }
 
-/**
- * Events that end a task's run; once one is loaded the polling stops. The event of its pull
- * request's merge or close comes later, and the next visit of the page reads it.
- */
 const TERMINAL_EVENT_TYPES = new Set(['task_completed', 'task_failed', 'task_cancelled', 'task_timed_out']);
-/** After the task reports it finished, keep polling this many times for its final events. */
 const FINAL_EVENT_POLLS = 6;
 
 /**
- * A task's events, polled while it runs. The task record and its events arrive
- * separately, so when the task shows as finished its last events may not be loaded
- * yet: polling continues until a terminal event is in, for at most FINAL_EVENT_POLLS.
+ * A task's events, polled while it runs. Once the task shows as finished, polling
+ * continues until a terminal event is in, for at most FINAL_EVENT_POLLS.
  */
 export function useTaskEvents(taskId: string, live: boolean) {
   const api = useApi();
@@ -189,7 +170,6 @@ export function useSendMessage(taskId: string) {
   });
 }
 
-/** Open issues for the issue picker. Disabled until the repository name looks valid. */
 export function useRepoIssues(repo: string, enabled: boolean) {
   const api = useApi();
   return useQuery({
@@ -201,7 +181,6 @@ export function useRepoIssues(repo: string, enabled: boolean) {
   });
 }
 
-/** While the agent is picking issues up, refresh often so "Starting…" turns into a task link. */
 const LINEAR_STARTING_REFRESH_MS = 5_000;
 const LINEAR_REFRESH_MS = 60_000;
 

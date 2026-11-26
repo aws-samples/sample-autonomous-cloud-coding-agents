@@ -26,15 +26,8 @@ import { CliError } from './errors';
 /**
  * Localhost OAuth callback URL used during `bgagent linear setup`.
  *
- * HTTP (not HTTPS) is intentional. Per RFC 8252 §7.3 (OAuth 2.0 for
- * Native Apps) and Linear's docs, providers MUST treat http://localhost
- * URLs as a special case and not require TLS — the connection never
- * leaves the host. Using HTTP here removes the self-signed-cert browser
- * warning that scared early testers during the Phase 2.0b smoke.
- *
- * The redirect_uri value sent to Linear MUST byte-match what's configured
- * in Linear's app — keep this constant in sync with the LINEAR_SETUP_GUIDE
- * playbook entry.
+ * Plain HTTP: RFC 8252 §7.3 has providers accept loopback redirect URIs without TLS.
+ * Linear requires the `redirect_uri` to byte-match the one configured on its app.
  */
 const CALLBACK_HOST = 'localhost';
 export const CALLBACK_PORT = 8080;
@@ -53,19 +46,12 @@ const FAILURE_HTML = `<!doctype html>
 
 /**
  * Discriminated union over the two redirect shapes Linear may send to
- * the localhost callback. Was previously an all-nullable struct
- * `{ sessionId: string | null, code: string | null, state: string | null }`
- * which let callers (and tests) construct nonsense values like
- * "all three null" or "sessionId AND code+state set" — neither is
- * actually reachable in production. Splitting into two cases makes
- * downstream pattern-matching exhaustive and the "impossible state"
- * unrepresentable.
+ * the localhost callback.
  *
- * - `agentcore`: legacy AgentCore Identity USER_FEDERATION redirect.
+ * - `agentcore`: AgentCore Identity USER_FEDERATION redirect.
  *   AWS handles the code-for-token exchange itself; we receive only
- *   the session_id we use to poll for the resulting token. Parked
- *   path; kept for the eventual 2.0c resume.
- * - `direct-oauth`: Phase 2.0b Option 2. Linear redirects directly to
+ *   the session_id.
+ * - `direct-oauth`: Linear redirects directly to
  *   localhost with `code` + `state`. Caller MUST verify `state` against
  *   the value passed into `buildAuthorizationUrl` to prevent CSRF.
  */
@@ -83,8 +69,7 @@ export type CallbackResult =
 export interface CallbackServerOptions {
   /**
    * How long to keep the server listening before rejecting with a timeout
-   * error. The OAuth dance has a 600s server-side ceiling; 700s here
-   * covers slow-clicking users without holding the process open forever.
+   * error.
    *
    * @default 700_000 (700 seconds)
    */
@@ -92,32 +77,16 @@ export interface CallbackServerOptions {
 }
 
 /**
- * Start a one-shot HTTPS server that listens on `https://localhost:8443/oauth/callback`,
- * resolves with the captured `session_id` from the first GET it receives,
- * then shuts down.
+ * Start a one-shot HTTP server on {@link CALLBACK_URL}, resolve with the first callback
+ * it receives, then shut down.
  *
- * The OAuth dance flow:
- *   1. CLI calls `get_resource_oauth2_token(...)` and gets back an
- *      `authorizationUrl` + `sessionUri`.
- *   2. CLI starts THIS server.
- *   3. CLI opens `authorizationUrl` in the browser.
- *   4. User authorizes on Linear's consent screen.
- *   5. Linear redirects to `https://bedrock-agentcore.us-east-1.amazonaws.com/.../callback/<uuid>?code=...`.
- *   6. AWS exchanges the code with Linear, then redirects the browser to
- *      the URL we passed as `resourceOauth2ReturnUrl` — namely THIS server,
- *      with `?session_id=urn:ietf:params:oauth:request_uri:...` appended.
- *   7. We capture session_id, render a success page, and shut down.
- *   8. CLI polls `get_resource_oauth2_token` with `sessionUri` until the
- *      access token shows up.
- *
- * Returns a Promise resolving with the captured session_id, or rejecting
- * on timeout / server error / malformed callback.
+ * Rejects with CliError on timeout, on a port already in use, on an `error` parameter
+ * from Linear, and on a callback with neither `session_id` nor `code` + `state`. Any
+ * other server error rejects as raised.
  */
 export async function awaitOauthCallback(
   options: CallbackServerOptions = {},
 ): Promise<CallbackResult> {
-  // 700 s — above the OAuth dance's 600 s server-side ceiling (see
-  // `CallbackServerOptions.timeoutMs` doc).
   const DEFAULT_CALLBACK_TIMEOUT_MS = 700_000;
   const timeoutMs = options.timeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS;
 
@@ -130,7 +99,6 @@ export async function awaitOauthCallback(
         fn();
       } finally {
         clearTimeout(timer);
-        // .close() shuts down the listener; in-flight responses still complete.
         try {
           server.close();
         } catch {
@@ -141,24 +109,17 @@ export async function awaitOauthCallback(
 
     const server = http.createServer(
       (req, res) => {
-        // Defensive: if we somehow get a request after settling, just close it.
         if (settled || !req.url) {
           res.statusCode = 410;
           res.end();
           return;
         }
-        // We accept any path — Linear's redirect always goes to the configured
-        // redirect_uri (which matches CALLBACK_PATH), but matching loosely
-        // makes diagnosis easier when something is misconfigured.
         const url = new URL(req.url, CALLBACK_URL);
         const sessionId = url.searchParams.get('session_id');
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
         const error = url.searchParams.get('error');
 
-        // Linear may redirect with `?error=access_denied` if the user clicks
-        // Cancel on the consent screen. Surface that explicitly rather than
-        // saying "no session_id / code".
         if (error) {
           res.statusCode = 400;
           res.setHeader('content-type', 'text/html; charset=utf-8');
@@ -172,14 +133,9 @@ export async function awaitOauthCallback(
           return;
         }
 
-        // Need either session_id (AgentCore-style — legacy, parked path) or
-        // code+state (direct Linear OAuth — Phase 2.0b Option 2).
         if (!sessionId && !(code && state)) {
           res.statusCode = 400;
           res.setHeader('content-type', 'text/html; charset=utf-8');
-          // Settle on `finish` so the response body actually flushes before
-          // the listener closes — otherwise the client hangs waiting for
-          // bytes it never gets, leaving callers / tests deadlocked.
           res.once('finish', () => {
             settle(() => reject(new CliError(
               `OAuth callback received without session_id or code/state. Got URL: ${req.url}. `
@@ -192,10 +148,6 @@ export async function awaitOauthCallback(
         }
         res.statusCode = 200;
         res.setHeader('content-type', 'text/html; charset=utf-8');
-        // Build the discriminated union value here so callers don't
-        // see the all-nullable shape. Direct-OAuth path takes
-        // precedence: if Linear sent both session_id AND code+state
-        // (shouldn't happen, but defensively…) we treat it as direct.
         const result: CallbackResult = code && state
           ? { kind: 'direct-oauth', code, state }
           : { kind: 'agentcore', sessionId: sessionId! };
@@ -234,9 +186,6 @@ export async function awaitOauthCallback(
  * Open `url` in the user's default browser. Returns true on best-effort
  * success, false if no opener is available (e.g. headless SSH session) so
  * callers can fall back to printing the URL.
- *
- * Uses `child_process.execFile` directly rather than a dependency like
- * `open` — no need for a 200-line module to spawn one shell command.
  */
 export function openBrowser(url: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -257,8 +206,6 @@ export function openBrowser(url: string): Promise<boolean> {
 
 /**
  * Generate an opaque, URL-safe `state` value for OAuth CSRF protection.
- * 32 bytes of crypto-randomness — enough that collisions and guesses
- * are not realistic concerns.
  */
 export function randomState(): string {
   const STATE_BYTES = 32;

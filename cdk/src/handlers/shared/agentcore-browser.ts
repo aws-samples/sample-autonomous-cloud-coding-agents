@@ -32,28 +32,15 @@ import { makeClient } from './ua';
 
 const REGION = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1';
 
-/**
- * AWS-managed default browser identifier. AgentCore Browser publishes a
- * shared browser at this id without provisioning. (We could call
- * `CreateBrowser` to get a dedicated one, but the screenshot path
- * doesn't need any custom config — keep it simple.)
- */
+/** AgentCore Browser's AWS-managed default browser: usable without `CreateBrowser`. */
 const AWS_BROWSER_IDENTIFIER = 'aws.browser.v1';
 
-/**
- * Default budget for the entire screenshot job (start session → navigate
- * → screenshot → stop). Lambda timeout should be at least 15s above this
- * to leave headroom for the JSON encode + S3 PUT after the screenshot.
- */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-/** Post-load settle wait (ms) before screenshot — lets SPA fetches finish. */
 const PAGE_SETTLE_WAIT_MS = 2000;
 
-/** Inclusive lower bound for a successful HTTP status (2xx). */
 const HTTP_STATUS_SUCCESS_MIN = 200;
 
-/** Exclusive upper bound for a successful HTTP status (first non-2xx). */
 const HTTP_STATUS_REDIRECT_MIN = 300;
 
 interface CdpMessage {
@@ -67,30 +54,6 @@ interface CdpMessage {
 
 /**
  * Capture a full-page PNG screenshot of `url` via AgentCore Browser.
- *
- * Implementation notes:
- *  - Uses the native `WebSocket` (Node 24+) and speaks Chrome DevTools
- *    Protocol directly. Avoids pulling in Playwright / puppeteer-core
- *    into the Lambda bundle (would be ~150 MB).
- *  - The automation WSS endpoint requires a SigV4-signed handshake
- *    request. Browser session creation is a normal SigV4 SDK call;
- *    once the session is created, the WSS upgrade GET also needs
- *    SigV4 headers in `Sec-WebSocket-*` companion form. Node's
- *    `WebSocket` constructor accepts a custom `Headers` object via
- *    the `protocols`/`headers` slot in `clientOptions`.
- *  - The flow is intentionally minimal:
- *      1. StartBrowserSession (REST API; SDK call)
- *      2. WS connect to the automation streamEndpoint (SigV4 handshake)
- *      3. CDP `Target.attachToBrowserTarget` to get a flat session
- *      4. CDP `Target.getTargets`, find the about:blank page
- *      5. `Target.attachToTarget` (flatten=true) on that page → sessionId
- *      6. `Page.navigate` + wait for `Page.loadEventFired`
- *      7. `Page.captureScreenshot` (returns base64 PNG)
- *      8. StopBrowserSession (best-effort; sessions auto-expire)
- *
- *  We don't try to be clever about fonts, viewports, or cookie
- *  injection — the agent is just snapshotting public preview URLs
- *  that render with default settings (no auth, no per-user state).
  *
  * @param url The URL to navigate to and screenshot.
  * @param opts.timeoutMs Override the default 60s budget.
@@ -125,7 +88,6 @@ export async function captureScreenshot(url: string, opts: { timeoutMs?: number 
         sessionId,
       }));
     } catch (err) {
-      // Sessions auto-expire after ~10 minutes if we leak — log and move on.
       logger.warn('Failed to stop AgentCore Browser session (will auto-expire)', {
         session_id: sessionId,
         error: err instanceof Error ? err.message : String(err),
@@ -134,49 +96,24 @@ export async function captureScreenshot(url: string, opts: { timeoutMs?: number 
   }
 }
 
-/**
- * Open the automation WebSocket, drive CDP, return PNG bytes. Caller is
- * responsible for the StartBrowserSession + StopBrowserSession lifecycle.
- */
 async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number): Promise<Uint8Array> {
-  // AgentCore Browser's WSS endpoint accepts SigV4 in two forms: signed
-  // `Authorization` headers OR signed query parameters (presigned URL).
-  // We use the presigned-URL form because the `Host` header sent by the
-  // WS upgrade (handled inside `ws`) doesn't always match what we signed
-  // when using header-based auth, leading to 403s. Query-param signing
-  // sidesteps the Host-header reconciliation entirely.
   const signedUrl = await sigV4PresignWss(wssUrl);
   const ws = new WebSocket(signedUrl);
 
   const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(0, deadline - Date.now());
 
-  // CDP message id allocator. Scoped to the function so concurrent
-  // captures (unusual but possible in tests) don't share counter state.
   let nextCdpId = 1;
 
-  // Promise machinery for tracking in-flight CDP requests by `id`.
   const pending = new Map<number, { resolve: (msg: CdpMessage) => void; reject: (err: Error) => void }>();
   const eventQueue: CdpMessage[] = [];
-  // Each waiter has a predicate; on each incoming event we deliver to the
-  // FIRST waiter whose predicate matches, otherwise queue the event.
   interface EventWaiter {
     readonly predicate: (msg: CdpMessage) => boolean;
     readonly resolve: (msg: CdpMessage) => void;
   }
   const eventWaiters: EventWaiter[] = [];
 
-  // Track the latest Document response status PER FRAME so we can fail fast
-  // on 4xx/5xx (404 / 503 / auth wall pages) instead of capturing what looks
-  // like the app but isn't. The main frame's id is only known once
-  // Page.navigate resolves, but `Network.responseReceived` for the main
-  // document frequently arrives BEFORE that response — so record every
-  // Document status keyed by frameId and resolve which one is the main
-  // document afterwards. (Recording a single "latest" status instead would
-  // race: an early sub-frame response could be misattributed as the main
-  // document, or the real main-document status missed entirely.)
-  // Redirect chains re-fire for the same frameId; last write wins, which is
-  // the final response. (Auth walls that return 200 are out of scope — #287.)
+  // CDP can deliver the main document's `Network.responseReceived` before the `Page.navigate` response that carries its frameId.
   const documentStatusByFrame = new Map<string, number>();
 
   ws.on('message', (raw: RawData) => {
@@ -191,9 +128,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       const params = msg.params as
         | { type?: string; frameId?: string; response?: { status?: number } }
         | undefined;
-      // CDP's `Network.responseReceived` fires for every resource (HTML,
-      // JS, CSS, images, XHR, …). Only type==='Document' responses are
-      // candidate main-document responses.
       if (params?.type === 'Document' && typeof params.frameId === 'string') {
         const status = params.response?.status;
         if (typeof status === 'number') documentStatusByFrame.set(params.frameId, status);
@@ -221,14 +155,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     }
   });
 
-  // Open the socket. `ws` exposes node-style EventEmitter; the
-  // `unexpected-response` event surfaces HTTP-level handshake failures
-  // (e.g. 403 from misaligned SigV4) so we can log a meaningful error
-  // instead of an empty `error` event.
-  //
-  // Failure paths must close the socket — without `terminate()` on the
-  // open-timeout path, a hung handshake leaks the underlying TCP
-  // connection per failed attempt (review nit, PR #241).
   await new Promise<void>((resolve, reject) => {
     const onOpen = (): void => {
       cleanup();
@@ -262,7 +188,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   function cdpSend(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<CdpMessage> {
     const id = nextCdpId++;
     const message: CdpMessage = { id, method, params, ...(sessionId ? { sessionId } : {}) };
-    // Read once: when the timer fires nothing remains, and the message would say 0ms.
     const budgetMs = remaining();
     return new Promise<CdpMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -301,7 +226,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   }
 
   try {
-    // 1. List existing targets, find the default about:blank page.
     const targetsResp = await cdpSend('Target.getTargets');
     const targetInfos = narrowTargetInfos(targetsResp.result);
     const pageTarget = targetInfos.find((t) => t.type === 'page');
@@ -309,7 +233,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       throw new Error('No page target found in AgentCore Browser session');
     }
 
-    // 2. Attach with flatten=true to get a sessionId we can route subsequent commands to.
     const attachResp = await cdpSend('Target.attachToTarget', {
       targetId: pageTarget.targetId,
       flatten: true,
@@ -319,19 +242,9 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       throw new Error('Target.attachToTarget did not return a sessionId');
     }
 
-    // 3. Enable Page + Network so we get the `Page.loadEventFired` event
-    //    we wait on below AND the main-document response status. Network
-    //    has to be enabled BEFORE Page.navigate, or the response event
-    //    fires before our listener is wired and we miss the status.
-    //    (Document statuses are recorded per-frame by the single message
-    //    listener above; we resolve the main frame's status after load.)
     await cdpSend('Page.enable', {}, pageSessionId);
     await cdpSend('Network.enable', {}, pageSessionId);
 
-    // 4. Navigate. The response includes a `frameId`; we wait on the
-    //    `Page.loadEventFired` event below (more reliable than
-    //    `frameStoppedLoading` which can fire before navigation
-    //    actually starts on `about:blank` → real-URL transitions).
     const navResp = await cdpSend('Page.navigate', { url }, pageSessionId);
     const navError = narrowNavigateError(navResp.result);
     if (navError) {
@@ -339,27 +252,9 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
     }
     const mainDocumentFrameId = (navResp.result?.frameId as string | undefined) ?? null;
 
-    // 5. Wait for the page load event. SPA-style apps may continue
-    //    fetching after this fires, so add a 2s settle wait. For
-    //    typical preview URLs (Vercel/Netlify/Amplify CDN edges) this
-    //    is enough.
     await waitForEvent('Page.loadEventFired');
     await new Promise((r) => setTimeout(r, PAGE_SETTLE_WAIT_MS));
 
-    // 6. Reject non-2xx main-document statuses before screenshotting.
-    //    A 404 / 503 / auth wall renders a "successful" page from CDP's
-    //    perspective; the user sees a confidently-wrong screenshot of an
-    //    error page posted as the deploy preview. Throw → processor's
-    //    catch logs and skips the PR/Linear comment cleanly.
-    //    The main frame's id comes from the Page.navigate response; its
-    //    Document responses were recorded per-frame by the message
-    //    listener even if they arrived before navigate resolved. If
-    //    Page.navigate returned no frameId, only an unambiguous single
-    //    recorded status is trusted — with multiple frames we cannot
-    //    tell which is the main document.
-    //    If we never captured a status (e.g. a service variant that
-    //    doesn't emit Network events), fall through and capture
-    //    optimistically; that's the pre-#287 behaviour.
     let mainDocumentStatus: number | null = null;
     if (mainDocumentFrameId !== null) {
       mainDocumentStatus = documentStatusByFrame.get(mainDocumentFrameId) ?? null;
@@ -370,7 +265,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
       throw new Error(`Preview URL returned HTTP ${mainDocumentStatus}; skipping screenshot`);
     }
 
-    // 7. Take the screenshot.
     const shotResp = await cdpSend('Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: true,
@@ -385,15 +279,6 @@ async function runCdpScreenshot(wssUrl: string, url: string, timeoutMs: number):
   }
 }
 
-/**
- * Presign the WSS URL with SigV4 query parameters. AgentCore Browser
- * accepts auth either as headers on the upgrade GET or as query params
- * on the URL itself; the latter is more robust through WebSocket
- * clients that rewrite Host headers (e.g. `ws`).
- *
- * Returns a `wss://...?X-Amz-Algorithm=...&X-Amz-Credential=...&...`
- * URL ready to pass straight to `new WebSocket(...)`.
- */
 async function sigV4PresignWss(wssUrl: string): Promise<string> {
   const u = new URL(wssUrl);
   const signer = new SignatureV4({
@@ -404,10 +289,7 @@ async function sigV4PresignWss(wssUrl: string): Promise<string> {
     applyChecksum: false,
   });
 
-  // Convert wss:// → https:// for the signing request (SigV4 doesn't
-  // know about wss). The signature is over the path + query, so the
-  // protocol on the signed request is irrelevant — we paste the auth
-  // params back onto the original wss:// URL.
+  // SigV4 signs the method, host, path and query, not the scheme: the signed query is valid on the wss:// URL.
   const queryEntries = Array.from(u.searchParams.entries());
   const query: Record<string, string> = {};
   for (const [k, v] of queryEntries) query[k] = v;
@@ -421,7 +303,6 @@ async function sigV4PresignWss(wssUrl: string): Promise<string> {
     headers: { host: u.hostname },
   });
 
-  // 60s expiry is fine — we open the socket immediately after signing.
   const presigned = await signer.presign(req, { expiresIn: 60 });
   const out = new URL(wssUrl);
   for (const [k, v] of Object.entries(presigned.query ?? {})) {
@@ -430,12 +311,6 @@ async function sigV4PresignWss(wssUrl: string): Promise<string> {
   return out.toString();
 }
 
-/**
- * Type-narrow helpers for CDP response shapes. Replaces inline `as`
- * casts with checked accessors so a malformed response is logged as
- * `null`/`undefined` rather than silently miscoerced. (theagenticguy
- * PR-241 review: reduce unchecked casts in CDP plumbing.)
- */
 interface TargetInfo {
   readonly targetId: string;
   readonly type: string;

@@ -1,25 +1,10 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""The per-task scoped session (``aws_session.py``) against real STS and IAM APIs.
-
-``tests/test_aws_session.py`` checks the arguments handed to a mocked
-``assume_role``. Here the agent really assumes a SessionRole with its
-``{user_id, repo, task_id}`` session tags and uses the credentials it gets back.
-
-What the emulator lets these tests establish, and what it does not:
-
-* STS validates the request (role exists, trust policy allows ``sts:AssumeRole``
-  and ``sts:TagSession``, tag shape) and returns credentials that DynamoDB and S3
-  accept. That part behaves like AWS.
-* For a role created in the emulator, DynamoDB and S3 also evaluate the role's
-  identity policy, including ``dynamodb:LeadingKeys`` and
-  ``${aws:PrincipalTag/...}`` — so a cross-tenant call is denied here. AWS states
-  that this evaluation is not the same as the real one. The denial tests below
-  are therefore a tripwire for the agent's wiring (tags reach STS, tenant data
-  goes through the scoped session), never evidence that the policy is safe.
-* The role policy below is a hand-written mirror of
-  ``cdk/src/constructs/agent-session-role.ts``, not the deployed policy.
+"""For a role created in the emulator, DynamoDB and S3 evaluate the role's
+identity policy, including ``dynamodb:LeadingKeys`` and
+``${aws:PrincipalTag/...}``. AWS states that this evaluation is not the same as
+the real one.
 """
 
 from __future__ import annotations
@@ -40,7 +25,6 @@ from .conftest import EMULATOR_ACCOUNT_ID, approval_row
 
 _ASSUMABLE_BY_ACCOUNT = {"AWS": f"arn:aws:iam::{EMULATOR_ACCOUNT_ID}:root"}
 
-# AgentSessionRole.DDB_ITEM_ACTIONS (Scan is deliberately absent).
 _DDB_ITEM_ACTIONS = [
     "dynamodb:GetItem",
     "dynamodb:BatchGetItem",
@@ -159,7 +143,6 @@ class TestScopedCredentials:
         record = task_state.get_task(task_id)
         assert record is not None
         assert (record["status"], record["trace_s3_uri"]) == ("COMPLETED", uri)
-        # The terminal write moves updated_at with the status.
         assert record["updated_at"] == record["completed_at"]
 
     def test_approval_gate_transaction_spans_both_of_the_tasks_tables(self, scoped, task_id):
@@ -177,8 +160,6 @@ class TestScopedCredentials:
 
 
 class TestOtherTenantsDataIsOutOfReach:
-    """Tripwire only — see the module docstring for what a denial here means."""
-
     def test_event_for_another_task_is_denied_and_stops_the_writer(self, scoped, capsys):
         other_task = _generate_ulid()
         writer = _ProgressWriter(other_task)
@@ -220,10 +201,8 @@ class TestSessionRoleThatCannotBeAssumed:
     def test_scoping_fails_closed_and_nothing_reaches_tenant_data(
         self, unassumable, task_id, user_id
     ):
-        # What pipeline.run_task calls first, before any work starts.
         with pytest.raises(SessionScopingError) as raised:
             is_scoped()
-        # Every later tenant-data call is refused the same way; none runs unscoped.
         with pytest.raises(SessionScopingError):
             tenant_client("sts")
         uri = upload_trace_to_s3(task_id=task_id, user_id=user_id, body=b"\x1f\x8b trace")

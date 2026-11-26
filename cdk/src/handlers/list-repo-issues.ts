@@ -27,26 +27,12 @@ import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { ListRepoIssuesResponse, RepoIssueSummary } from './shared/types';
 import { isValidRepo } from './shared/validation';
 
-/** Enough for a picker; the console searches within the page. */
 const PAGE_SIZE = 50;
-/**
- * GitHub lists pull requests on this endpoint too and has no parameter that leaves
- * them out, so filling the picker can take several of GitHub's pages (100 items is
- * its maximum). Three fit the timeout below: GitHub takes between one and two
- * seconds for a page of 100. The cap also bounds what one request spends of the
- * repository token.
- */
+// GitHub's issues endpoint also lists pull requests and has no parameter that leaves them out; a page holds at most 100 items.
 const GITHUB_PAGE_SIZE = 100;
 const GITHUB_MAX_PAGES = 3;
-/** For all pages together, so the total stays inside the Lambda's timeout. */
 const GITHUB_TIMEOUT_MS = 8_000;
 
-/**
- * Answers per repository, kept for a minute in this execution environment: as long
- * as the console itself treats a list as fresh. Each GitHub call spends the token
- * that the orchestrator and the agents share (5,000 calls an hour for a personal
- * access token), and the list is read with that token, so it is the same for every caller.
- */
 const CACHE_TTL_MS = 60_000;
 const cache = new Map<string, { readonly body: ListRepoIssuesResponse; readonly expiresAt: number }>();
 
@@ -56,7 +42,6 @@ interface GitHubIssue {
   readonly html_url: string;
   readonly updated_at: string;
   readonly labels?: ReadonlyArray<string | { readonly name?: string }>;
-  /** Present when the "issue" is a pull request; GitHub lists both on this endpoint. */
   readonly pull_request?: unknown;
 }
 
@@ -77,8 +62,7 @@ function toSummary(issue: GitHubIssue): RepoIssueSummary {
  * console's issue picker.
  *
  * Calls GitHub server-side with the repository's token (its Blueprint override, else
- * the platform token), so the token never reaches a browser. Only onboarded
- * repositories are served: this is not a general GitHub proxy. Returns titles and
+ * the platform token). Only onboarded repositories are served. Returns titles and
  * metadata only, never issue bodies. An answer is reused for a minute, so a new
  * issue can take that long to show.
  *
@@ -97,7 +81,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (!isValidRepo(repo)) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'repo_id must be in owner/repo format.', requestId);
     }
-    // Fail closed: without the repo table the onboarding gate would allow any repository.
     if (!process.env.REPO_TABLE_NAME || !process.env.GITHUB_TOKEN_SECRET_ARN) {
       logger.error('list-repo-issues is missing REPO_TABLE_NAME or GITHUB_TOKEN_SECRET_ARN', { request_id: requestId });
       return errorResponse(503, ErrorCode.SERVICE_UNAVAILABLE, 'Issue listing is not configured on this deployment.', requestId);
@@ -113,8 +96,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const token = await resolveGitHubToken(config.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN);
     const signal = AbortSignal.timeout(GITHUB_TIMEOUT_MS);
-    // Keyed by number: the list is sorted by update time, so an update between
-    // two reads pushes the last item of one page onto the next, where it is read again.
     const issues = new Map<number, GitHubIssue>();
     for (let page = 1; page <= GITHUB_MAX_PAGES && issues.size < PAGE_SIZE; page++) {
       const url = `https://api.github.com/repos/${repo}/issues?state=open&sort=updated&direction=desc&per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
@@ -125,8 +106,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
           signal,
         });
-        // The time limit can end while the body is still arriving: reading it then
-        // rejects like a call that got no answer.
+        // An `AbortSignal` timeout that fires while the body is arriving rejects the body read.
         if (res.ok) items = (await res.json()) as GitHubIssue[];
       } catch (err) {
         logger.warn('GitHub issue list did not answer', { repo, request_id: requestId, error: String(err) });

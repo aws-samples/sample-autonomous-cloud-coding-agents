@@ -111,7 +111,6 @@ function run(previous?: MicrovmSupervisorState, change: Partial<MicrovmSuperviso
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // A guest that accepted the suspend recorded its checkpoint.
   mockCheckpoint.mockReset().mockResolvedValue('found');
   time = NOW;
   generation = 0;
@@ -295,7 +294,7 @@ test('unknown state has a fixed recovery window across serialized polls', async 
 });
 
 test('a newly RUNNING task retains the full startup allowance while its first worker observation is PENDING', async () => {
-  working(); // The coordinator marks the task RUNNING before AWS reports readiness.
+  working();
   strategy.pollSession.mockResolvedValue(observation('PENDING'));
   const first = await run();
   expect(first).toMatchObject({
@@ -393,8 +392,6 @@ test('an intended long sleep stays asleep and does not fail heartbeat liveness',
 });
 
 test('a guest that declined the suspend is woken although the intent matches the gate', async () => {
-  // Another tool was running: the guest answered 200 declined, recorded no
-  // checkpoint, and the service froze the VM anyway (#904 review).
   intent('suspend');
   strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
   mockCheckpoint.mockResolvedValue('missing');

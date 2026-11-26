@@ -57,7 +57,6 @@ describe('renderMaturingReply — the edit-in-place states', () => {
 
     test('a progress note alone (no elapsed yet) still surfaces', () => {
       const r = renderMaturingReply({ state: 'working', elapsedS: 10, progressNote: 'cloning repo' });
-      // elapsed below floor → omitted; note still shown
       expect(r).toContain('_cloning repo_');
       expect(r).not.toContain('elapsed');
     });
@@ -66,7 +65,6 @@ describe('renderMaturingReply — the edit-in-place states', () => {
       const r = renderMaturingReply({
         state: 'working', elapsedS: 200, progressNote: 'a'.repeat(200),
       });
-      // suffix line stays bounded (note capped at 80 + ellipsis)
       const suffix = r.split('\n').pop()!;
       expect(suffix.length).toBeLessThan(120);
       expect(suffix.endsWith('…_')).toBe(true);
@@ -100,12 +98,9 @@ describe('renderMaturingReply — the edit-in-place states', () => {
     expect(r).toContain('$0.79');
     expect(r).toContain('5m 9s');
     expect(r).toContain('total this PR: $2.04');
-    // Clickable image thumbnail: screenshot PNG embedded, linking to the deploy.
     expect(r).toContain('[![preview](https://cdn/x.png)](https://app.vercel.app)');
   });
 
-  // The agent stores duration_s with one decimal. The last half second of a
-  // minute belongs to the next minute: "60s" and "1m 60s" are not durations.
   test.each([
     [59.4, '59s'],
     [59.6, '1m'],
@@ -116,10 +111,6 @@ describe('renderMaturingReply — the edit-in-place states', () => {
   });
 
   test('a KNOWN-INCOMPLETE running total renders as "at least", not as the settled figure', () => {
-    // The sum comes from a paginated query plus a per-task read, either of which can
-    // be capped or fail. When it is short, saying so is the whole point: a number
-    // quietly lower than the truth is worse than an obviously approximate one,
-    // because nobody reconciling spend would think to doubt it.
     const r = renderMaturingReply({
       state: 'updated', prNumber: 293, costUsd: 0.79, runningTotalUsd: 2.04, runningTotalPartial: true,
     });
@@ -137,7 +128,7 @@ describe('renderMaturingReply — the edit-in-place states', () => {
   test('updated with screenshot but NO deploy url → plain embedded image (no link target)', () => {
     const r = renderMaturingReply({ state: 'updated', prNumber: 7, screenshotUrl: 'https://cdn/y.png' });
     expect(r).toContain('![preview](https://cdn/y.png)');
-    expect(r).not.toContain('[![preview]'); // not a link when no deploy url
+    expect(r).not.toContain('[![preview]');
   });
 
   test('updated with NO screenshot → no preview block at all', () => {
@@ -163,11 +154,10 @@ describe('renderMaturingReply — the edit-in-place states', () => {
   });
 
   test('terminal metadata line omits unknown parts gracefully', () => {
-    // Only cost known → no duration, no total, no empty separators.
     const r = renderMaturingReply({ state: 'updated', prNumber: 1, costUsd: 0.5 });
     expect(r).toContain('$0.50');
     expect(r).not.toContain('total this PR');
-    expect(r).not.toMatch(/·\s*·/); // no doubled separators
+    expect(r).not.toMatch(/·\s*·/);
   });
 
   test('on_it / working never carry a metadata line', () => {
@@ -188,8 +178,6 @@ describe('renderIterationSuccessReply — changed (a real edit)', () => {
   });
 
   test('codeChanged UNDEFINED (a caller that never sets it) → back-compat "✅ Updated — PR #N"', () => {
-    // The whole point of the back-compat default: anything that doesn't opt in
-    // behaves exactly as before.
     expect(renderIterationSuccessReply({ prNumber: 178 })).toBe('✅ Updated — PR #178.');
     expect(renderIterationSuccessReply({})).toBe('✅ Updated.');
   });
@@ -209,7 +197,7 @@ describe('renderIterationSuccessReply — no change (a question)', () => {
     });
     expect(r).toBe('💬 The login page is at /login.html, but it is not yet linked from the nav.');
     expect(r).not.toContain('Updated');
-    expect(r).not.toContain('290'); // a question reply must not imply a PR update
+    expect(r).not.toContain('290');
   });
 
   test('no change + NO answer → an honest "no change needed" (still not ✅ Updated)', () => {
@@ -221,8 +209,6 @@ describe('renderIterationSuccessReply — no change (a question)', () => {
   test('a long answer is truncated with an ellipsis', () => {
     const long = 'x'.repeat(5000);
     const r = renderIterationSuccessReply({ codeChanged: false, answerText: long });
-    // Cap is MAX_ANSWER_CHARS=2000 (aligned with the agent's persist cap so the
-    // renderer never drops chars the agent already bounded); '💬 ' prefix + ellipsis.
     expect(r.length).toBeLessThanOrEqual(2003);
     expect(r.length).toBeGreaterThan(1700);
     expect(r.endsWith('…')).toBe(true);
@@ -243,10 +229,6 @@ describe('isNoChangeIteration', () => {
 });
 
 describe('isTerminalMaturingReply — stop a late progress edit clobbering an outcome', () => {
-  // Two independent writers edit one reply: the terminal settle, and the
-  // stream-driven progress milestone. The milestone can be delivered AFTER the
-  // settle — observed just two seconds behind it — and the body is the ground
-  // truth about which has landed.
   test('every TERMINAL render is recognised as settled', () => {
     for (const state of ['updated', 'answered', 'failed'] as const) {
       const body = renderMaturingReply({
@@ -259,22 +241,17 @@ describe('isTerminalMaturingReply — stop a late progress edit clobbering an ou
   });
 
   test('PROGRESS renders are NOT settled, so progress still flows', () => {
-    // If these came back true, a reply would freeze at "On it" forever.
     for (const state of ['on_it', 'working'] as const) {
       expect(isTerminalMaturingReply(renderMaturingReply({ state, prNumber: 42 }))).toBe(false);
     }
   });
 
   test('a settled body with a preview block appended is still settled', () => {
-    // The screenshot webhook appends to the terminal body; that must not make it
-    // look un-settled.
     const settled = renderMaturingReply({ state: 'updated', prNumber: 7 });
     expect(isTerminalMaturingReply(`${settled}\n\n[![preview](p.png)](https://d)`)).toBe(true);
   });
 
   test('an unknown or absent body is treated as NOT settled (fail open)', () => {
-    // Conservative on purpose: a missed progress edit is cosmetic, a reply stuck
-    // at "On it" is a black box.
     expect(isTerminalMaturingReply(undefined)).toBe(false);
     expect(isTerminalMaturingReply(null)).toBe(false);
     expect(isTerminalMaturingReply('')).toBe(false);
@@ -292,8 +269,6 @@ describe('preservePreviewSuffix — converge the two async writers of one reply'
   const BLOCK = `[![preview](${PNG})](${DEPLOY})`;
 
   test('carries an already-landed clickable thumbnail from current onto the new body', () => {
-    // The screenshot webhook appended the block; this terminal re-render would
-    // otherwise drop it. Convergence re-attaches the EXACT block on its own line.
     const current = `✅ Updated — [PR #5](u). _$0.1_\n\n${BLOCK}`;
     const newBody = '✅ Updated — [PR #5](u). _$0.2 · 35s · total this PR: $0.5_';
     expect(preservePreviewSuffix(newBody, current)).toBe(`${newBody}\n\n${BLOCK}`);
@@ -308,7 +283,7 @@ describe('preservePreviewSuffix — converge the two async writers of one reply'
   test('no-op when the new body already carries its own preview (settle-after-append)', () => {
     const current = `✅ Updated.\n\n${BLOCK}`;
     const newBody = `✅ Updated — [PR #5](u).\n\n${BLOCK}`;
-    expect(preservePreviewSuffix(newBody, current)).toBe(newBody); // not doubled
+    expect(preservePreviewSuffix(newBody, current)).toBe(newBody);
   });
 
   test('no-op when current has no preview (the common no-deploy case)', () => {
@@ -325,7 +300,7 @@ describe('preservePreviewSuffix — converge the two async writers of one reply'
   test('idempotent across repeated settles', () => {
     const newBody = '✅ Updated — [PR #5](u). _$0.2_';
     const once = preservePreviewSuffix(newBody, `x\n\n${BLOCK}`);
-    const twice = preservePreviewSuffix(once, once); // current now already has it
+    const twice = preservePreviewSuffix(once, once);
     expect(twice).toBe(once);
   });
 });

@@ -41,37 +41,25 @@ const RATE_LIMIT_PER_MINUTE = Number(process.env.NUDGE_RATE_LIMIT_PER_MINUTE ?? 
 /**
  * POST /v1/tasks/{task_id}/nudge — submit a steering message to a running agent.
  *
- * Flow: auth → validate → ownership → state → guardrail → rate-limit → persist.
- *
- * Note ordering: guardrail screening runs BEFORE the rate-limit counter
- * increment so that a guardrail-blocked message does NOT consume a slot in
- * the user's per-minute budget. ApplyGuardrail is cheap compared to DDB,
- * and the user-facing UX of "accidentally blocked, lost a slot" is worse
- * than the alternative. Authenticated users are already rate-limited
- * upstream by API Gateway / Cognito.
+ * A guardrail-blocked message does not consume a slot of the per-minute rate limit.
  *
  * Returns 202 Accepted with the nudge_id. The nudge will be picked up by
  * the agent runtime at the next between-turns seam.
- * @param event - the API Gateway proxy event.
- * @returns the API Gateway proxy result.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
 
   try {
-    // 1. Auth
     const userId = extractUserId(event);
     if (!userId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
-    // 2. Path param
     const taskId = event.pathParameters?.task_id;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
-    // 3. Body validation
     let parsed: NudgeRequest | null = null;
     try {
       parsed = event.body ? JSON.parse(event.body) as NudgeRequest : null;
@@ -94,7 +82,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    // 4. Ownership + state check
     const getResult = await ddb.send(new GetCommand({
       TableName: TASK_TABLE_NAME,
       Key: { task_id: taskId },
@@ -115,8 +102,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    // 5–7. Guardrail screening (fail-closed) → per-task per-minute rate
-    // limit → persist. Shared with the Linear agent-session path.
     const result = await submitNudge({
       ddb,
       nudgesTableName: NUDGES_TABLE_NAME!,

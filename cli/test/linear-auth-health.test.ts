@@ -49,8 +49,6 @@ describe('isExpired', () => {
   });
 
   test('absent or unparseable expiry counts as expired', () => {
-    // Matches the platform resolver: prefer an unnecessary refresh over
-    // assuming a token nobody can date is still good.
     expect(isExpired(undefined, NOW)).toBe(true);
     expect(isExpired('not-a-date', NOW)).toBe(true);
   });
@@ -62,53 +60,33 @@ describe('classifyAuthState — expired vs revoked is the point of this check', 
   });
 
   test('rejected + already expired + a refresh token = INDETERMINATE, never healthy', () => {
-    // This shape is genuinely ambiguous: it is what a quiet-but-healthy workspace
-    // looks like AND what a revoked one looks like. The classifier must refuse to
-    // guess — failing every idle workspace would train operators to ignore the
-    // check, and passing them hides a real outage.
     expect(classifyAuthState('rejected', { hasRefreshToken: true, expiresAt: PAST }, NOW))
       .toBe('expired_indeterminate');
   });
 
   test('rejected while NOT expired = the authorization itself is gone', () => {
-    // A token that the surface refuses even though it should still be valid
-    // means the grant was revoked upstream — every event is being dropped.
     expect(classifyAuthState('rejected', { hasRefreshToken: true, expiresAt: FUTURE }, NOW))
       .toBe('revoked');
   });
 
   test('rejected with NO refresh token = revoked, since nothing can recover it', () => {
-    // Even if it merely expired, without a refresh token there is no path back
-    // without a human, so it must not be reported as self-healing.
     expect(classifyAuthState('rejected', { hasRefreshToken: false, expiresAt: PAST }, NOW))
       .toBe('revoked');
   });
 
   test('a probe that could not complete is unknown, never a verdict', () => {
-    // A network blip must not be reported as a revoked authorization — that
-    // would send an operator to re-authorize a healthy workspace.
     expect(classifyAuthState('error', { hasRefreshToken: true, expiresAt: FUTURE }, NOW)).toBe('unknown');
     expect(classifyAuthState('error', { hasRefreshToken: false, expiresAt: PAST }, NOW)).toBe('unknown');
   });
 
   test('the live 2026-07-25 incident is INDETERMINATE from the shallow probe alone', () => {
-    // The REAL shape, not a convenient variant: the maguireb workspace had a
-    // refresh token present and only ~25h old, and an access token that had
-    // expired ~48 minutes earlier. Linear rejected both, but the shallow probe
-    // only sees the access token, so it CANNOT tell this from a healthy idle
-    // workspace. Pinning it as `revoked` here (by passing hasRefreshToken:false)
-    // is what let the real bug hide: the check reported that workspace as needing
-    // no action while every one of its events was being dropped. The honest
-    // classification is indeterminate — and `verifyRefresh` is what settles it.
     const liveIncident = { hasRefreshToken: true, expiresAt: '2026-07-25T12:12:48.012Z' };
     expect(classifyAuthState('rejected', liveIncident, NOW)).toBe('expired_indeterminate');
-    // And critically: indeterminate must NOT be treated as healthy by the caller.
     expect(classifyAuthState('rejected', liveIncident, NOW)).not.toBe('active');
   });
 });
 
 describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
-  /** The live-incident secret: refresh token present, access token long expired. */
   const INDETERMINATE_SECRET = JSON.stringify({
     access_token: 'lin_dead',
     refresh_token: 'rt-present',
@@ -144,8 +122,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
   });
 
   test('WITH a verifier that rejects, the same workspace is reported REVOKED', async () => {
-    // This is the bug the review caught: previously this workspace read as
-    // "no action needed" while every one of its events was being dropped.
     ddbSend.mockResolvedValue({ Items: [row()] });
     const health = await checkLinearWorkspaceAuth({
       region: 'us-east-1',
@@ -180,8 +156,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
   });
 
   test('the verifier is NOT invoked for a workspace already known healthy', async () => {
-    // Rotating a live workspace's token merely to produce a report would be a
-    // side-effect nobody asked for.
     ddbSend.mockResolvedValue({ Items: [row()] });
     const verify = jest.fn<Promise<'refreshed'>, unknown[]>().mockResolvedValue('refreshed');
     const health = await checkLinearWorkspaceAuth({
@@ -195,8 +169,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
   });
 
   test('the registry scan is PAGINATED — a revoked workspace on page 2 is still reported', async () => {
-    // Past DynamoDB's 1MB page a single Scan silently truncates, and an omitted
-    // revoked workspace would make the whole report read as clean.
     ddbSend
       .mockResolvedValueOnce({ Items: [row({ linear_workspace_id: 'ws-page1' })], LastEvaluatedKey: { k: 'next' } })
       .mockResolvedValueOnce({ Items: [row({ linear_workspace_id: 'ws-page2', status: 'revoked' })] });
@@ -205,18 +177,12 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
       registryTableName: 'Reg',
       probe: async () => 'accepted',
     });
-    // Asserted on the workspace id, not the slug: for a live workspace the slug
-    // is taken from the stored secret, so it would not distinguish the two rows.
     expect(health.map((w) => w.workspaceId)).toEqual(['ws-page1', 'ws-page2']);
     expect(health[1].state).toBe('revoked');
-    // The second Scan must carry the continuation key.
     expect((ddbSend.mock.calls[1][0] as { input: Record<string, unknown> }).input.ExclusiveStartKey)
       .toEqual({ k: 'next' });
   });
   test('an ADMIN-REMOVED workspace is disabled, not revoked — removal is not an outage', async () => {
-    // `bgagent linear remove-workspace` revokes the row with reason admin_removed.
-    // Reporting that as REVOKED failed doctor and told the operator to re-authorize a
-    // workspace they had just removed on purpose (seen live after offboarding one).
     ddbSend.mockResolvedValueOnce({
       Items: [row({ status: 'revoked', revoked_reason: 'admin_removed', revoked_at: '2026-10-08T12:31:39Z' })],
     });
@@ -237,8 +203,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
   });
 
   test('a revoked workspace is sent to `setup`, the command that takes a registered workspace', async () => {
-    // Every workspace reported here has a registry row, and `add-workspace` refuses those —
-    // after the browser consent, which can replace the grant the workspace still holds.
     ddbSend.mockResolvedValueOnce({ Items: [row({ status: 'revoked', revoked_reason: 'refresh_token_rejected' })] });
     const health = await checkLinearWorkspaceAuth({
       region: 'us-east-1', registryTableName: 'Reg', probe: async () => 'accepted',
@@ -248,10 +212,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
   });
 
   describe('a vault-managed workspace must not be judged by an empty bundle', () => {
-    // A fresh vault onboarding deliberately stores NO access token — the vault holds
-    // the grant. Reading only the Secrets Manager bundle therefore reported every
-    // healthy vault workspace as `revoked`, and this report is precisely what an
-    // operator opens to decide whether a latched row is genuinely dead.
     const TOKENLESS_BUNDLE = JSON.stringify({
       access_token: '',
       refresh_token: '',
@@ -283,9 +243,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     });
 
     test('the RECORDED subject is what gets minted under, not a derived one', async () => {
-      // The subject is slug-derived and stored precisely because it cannot be derived
-      // from the organization UUID at onboarding time. Minting under the wrong one
-      // does not fail loudly — it returns no token, which reads as a dead workspace.
       ddbSend.mockResolvedValue({ Items: [vaultRow()] });
       const mint = jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_from_vault' });
       await checkLinearWorkspaceAuth({
@@ -313,10 +270,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
       ['AccessDeniedException'],
       ['ThrottlingException'],
     ])('a vault we could not ASK (%s) is unknown, NOT revoked', async (reason) => {
-      // The remedy attached to `revoked` is `bgagent linear setup`, and a re-consent can
-      // replace the Linear installation — so a throttled or unauthorized probe reported
-      // as revoked sends an operator to destroy a grant that is working. `platform doctor`
-      // renders revoked as a hard fail, unknown as a warn.
       ddbSend.mockResolvedValue({ Items: [vaultRow()] });
       const health = await checkLinearWorkspaceAuth({
         region: 'us-east-1',
@@ -330,8 +283,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     });
 
     test('a latch is NOT overturned by a vault we could not ask', async () => {
-      // The conservative direction: the row already says revoked, and a failed re-probe
-      // is no evidence against it. Only a minted token overturns the record.
       ddbSend.mockResolvedValue({
         Items: [vaultRow({ status: 'revoked', revoked_reason: 'vault_consent_required' })],
       });
@@ -345,8 +296,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     });
 
     test('with no way to query the vault the verdict is unknown, NOT revoked', async () => {
-      // Reporting `revoked` here would send an operator to re-authorize a workspace
-      // that is working. `unknown` is a warn, which is the honest signal.
       ddbSend.mockResolvedValue({ Items: [vaultRow()] });
       const health = await checkLinearWorkspaceAuth({
         region: 'us-east-1',
@@ -357,8 +306,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     });
 
     test('never reports expired_indeterminate — that would point at a refresh it cannot do', async () => {
-      // `--verify-refresh` only knows how to rotate a Secrets Manager bundle, which a
-      // vault-managed workspace does not have.
       ddbSend.mockResolvedValue({ Items: [vaultRow()] });
       const health = await checkLinearWorkspaceAuth({
         region: 'us-east-1',
@@ -371,9 +318,6 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     });
 
     test('a vault_consent_required latch is re-probed, and a live grant is reported STALE', async () => {
-      // That latch is an inference from a token-less vault response, not Linear
-      // refusing anything, and the resolver already re-probes it. Taking it at face
-      // value here is what makes a wrong latch look confirmed.
       ddbSend.mockResolvedValue({
         Items: [vaultRow({ status: 'revoked', revoked_reason: 'vault_consent_required', revoked_at: 'T0' })],
       });

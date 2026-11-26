@@ -36,7 +36,6 @@ import { DEFAULT_CONSOLE_ASSET_DIRECTORY, OperatorConsoleStack } from './stacks/
 import { NetworkStack, resolveNetworkTopology } from './stacks/network';
 import { DEFAULT_BUDGETS } from './synthesis/budgets';
 
-// for development, use account/region from cdk cli
 const devEnv = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: process.env.CDK_DEFAULT_REGION,
@@ -58,20 +57,12 @@ export interface BuildAppOptions {
   readonly blueprints?: readonly BlueprintDefinition[];
   /** Directory holding `abca.deployment.json`. @default the repository root */
   readonly profileRoot?: string;
-  /**
-   * Built operator console (`web/dist`). When set, the app adds the `<stack>-console` stack
-   * (opt out with `-c operatorConsole=false`). @default undefined — no console stack, so tests
-   * that synthesize the platform do not need a web build.
-   */
+  /** Built operator console (`web/dist`). @default undefined — no console stack */
   readonly operatorConsoleAssetDirectory?: string;
 }
 
 /**
  * Builds the fully wired `App` **without synthesizing**.
- *
- * Exported so tests can drive the real production wiring — the AZ resolution,
- * the diagnostics attachment, and the prop threading into `AgentStack` — rather
- * than a re-implementation of it in the test file.
  *
  * Async because AgentCore-supported availability zones are resolved from the
  * account's zone mapping at synth time (live `DescribeAvailabilityZones` +
@@ -80,8 +71,6 @@ export interface BuildAppOptions {
  */
 export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const app = new App(options.appProps);
-  // Never silently downgrade an explicitly configured migration prototype to
-  // the original Blueprint provider or guardrail implementation.
   for (const key of ['blueprintProvisioning', 'guardrailVersionMigration']) {
     if (app.node.tryGetContext(key) !== undefined) {
       throw new Error(
@@ -90,13 +79,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       );
     }
   }
-  // Apply to every parent and nested template, including newly extracted stacks.
   app.node.setContext('@aws-cdk/core:suppressTemplateIndentation', true);
   // Each AwsCustomResource calls AWS with the SDK of the Lambda runtime. The CDK default has
   // it npm-install the latest SDK at deploy time, on every cold start of its provider.
   app.node.setContext(AWS_CUSTOM_RESOURCE_LATEST_SDK_DEFAULT, false);
-  // Enforce the same ceiling on actual deploy inputs, including operator overrides
-  // outside the census. CDK applies this context to parent and nested stacks.
   const configuredLimit: unknown = app.node.tryGetContext(STACK_RESOURCE_LIMIT_CONTEXT);
   const resourceLimit = configuredLimit === undefined ? DEFAULT_BUDGETS.resources
     : typeof configuredLimit === 'string' ? Number(configuredLimit) : configuredLimit;
@@ -115,18 +101,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
   const networkTopology = resolveNetworkTopology(app.node.tryGetContext('networkTopology'));
   const blueprints = options.blueprints ?? resolveBlueprintDefinitions(app.node);
-  // One profile read for local and CI synthesis alike (ADR-024); context
-  // switches still override individual features.
   const profile = readDeploymentProfile(app.node, options.profileRoot);
   const features = resolveDeploymentFeatures(app.node, profile?.features);
-  // The profile's compute selection applies unless context chooses explicitly,
-  // so a plain `mise //cdk:deploy` keeps the backends `bgagent setup` deployed.
   if (profile?.compute && app.node.tryGetContext('compute_types') === undefined
     && app.node.tryGetContext('compute_type') === undefined) {
     app.node.setContext('compute_types', profile.compute.join(','));
   }
-  // Fail before any AWS lookup or network stack; AgentStack repeats the check
-  // for direct construction.
   assertCapabilitiesAvailable(features, options.region ?? devEnv.region);
 
   const env = {
@@ -134,14 +114,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     region: options.region ?? devEnv.region,
   };
 
-  // Preserve existing VPC placement across backend selection changes. The shared
-  // network continues to use the established AgentCore-compatible AZ policy.
-  // Auto-pin the VPC to AgentCore-supported AZs (or honor the validated
-  // `agentcore:availabilityZones` override). `zones` undefined => CDK default
-  // selection; `diagnostics` are attached to the stack below, because CDK only
-  // collects annotations that hang off a stack's tree — App-node metadata would
-  // be silently dropped, which is how a failed lookup used to pass unnoticed.
-  // Tag values allow '+', not ','; the tag records every deployed backend.
+  // Tag values allow '+', not ','.
   const computeType = resolveComputeBackends(
     app.node.tryGetContext('compute_types'), app.node.tryGetContext('compute_type')).join('+');
   const azResolution = await resolveAgentCoreAzs({
@@ -175,11 +148,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
 
   applyAgentCoreAzDiagnostics(network ?? stack, azResolution);
 
-  // Opt-in: a second top-level stack means `cdk deploy` needs `--all` (or stack names),
-  // which a bare `mise //cdk:deploy` and existing pipelines do not pass.
   const consoleContext = app.node.tryGetContext('operatorConsole');
   const consoleEnabled = consoleContext === true || consoleContext === 'true';
-  // `-c operatorConsoleDevOrigins=http://localhost:5173` lets a local `vite` sign in against this stack.
   const devOrigins = String(app.node.tryGetContext('operatorConsoleDevOrigins') ?? '')
     .split(',').map((o) => o.trim()).filter(Boolean);
   const consoleStack = options.operatorConsoleAssetDirectory && consoleEnabled
@@ -190,7 +160,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       repoTable: stack.repoTable.table,
       githubTokenSecret: stack.githubTokenSecret,
       repoGithubTokenSecretArns: blueprints.flatMap((b) => (b.credentials?.githubTokenSecretArn ? [b.credentials.githubTokenSecretArn] : [])),
-      // The console's Linear routes exist only when the profile deploys Linear (ADR-024).
       linear: stack.linearIntegration ? {
         projectMappingTable: stack.linearIntegration.projectMappingTable,
         workspaceRegistryTable: stack.linearIntegration.workspaceRegistryTable,
@@ -204,10 +173,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     })
     : undefined;
 
-  // Outbound SDK solution attribution (#319): set AWS_SDK_UA_APP_ID on every
-  // Lambda so the SDK emits `app/uksb-wt64nei4u6#{stackName}` natively. One
-  // Aspect covers current and future functions structurally. Override via
-  // `-c sdkUaAppId=...`; `-c sdkUaAppId=''` opts out (no app/ segment anywhere).
   const sdkUaAppIdOverride = app.node.tryGetContext('sdkUaAppId') as string | undefined;
   // Route53 Resolver resources where tag changes trigger replacement cascades.
   // Config: treats ANY property change (including tags) as requiring replacement.
@@ -236,7 +201,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
 
   const deploymentStacks: Stack[] = [network, stack, consoleStack].filter((s) => s !== undefined);
   for (const deploymentStack of deploymentStacks) {
-    // Keep the application deployment identity on every stack's SDK calls.
     Aspects.of(deploymentStack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
       priority: AspectPriority.MUTATING,
     });
@@ -255,13 +219,7 @@ export async function main(): Promise<void> {
   (await buildApp({ operatorConsoleAssetDirectory: DEFAULT_CONSOLE_ASSET_DIRECTORY })).synth();
 }
 
-// Only auto-run when executed as the app entrypoint, so importing this module
-// from a test drives `buildApp` without triggering a real synth.
-// Not reachable under jest, which only imports the module.
 if (require.main === module) {
-  // Surface any synth-time failure (e.g. a malformed `agentcore:availabilityZones`
-  // override) as a non-zero exit. `void` satisfies no-floating-promises; throwing
-  // from the handler triggers an unhandled rejection so the CDK CLI fails loudly.
   void main().catch((err: unknown) => {
     process.exitCode = 1;
     throw err;

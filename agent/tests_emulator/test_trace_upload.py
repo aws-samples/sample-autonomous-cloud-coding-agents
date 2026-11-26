@@ -1,13 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""The ``--trace`` upload half (design §10.1) against a real S3 API.
-
-``tests/test_trace_upload.py`` asserts the ``put_object`` arguments on a mock.
-Here the object is written to the emulator's S3 and read back, so the stored
-bytes, key and content headers are what a downloader would actually receive.
-"""
-
 from __future__ import annotations
 
 import gzip
@@ -33,7 +26,6 @@ def _task_config(task_id: str, user_id: str, *, trace: bool) -> TaskConfig:
 
 
 def _recorded_trajectory(task_id: str) -> _TrajectoryWriter:
-    """A trajectory with the events a short traced task accumulates."""
     trajectory = _TrajectoryWriter(task_id, accumulate=True)
     trajectory.write_turn(
         turn=1,
@@ -79,7 +71,7 @@ class TestTraceUploadReachesS3:
         assert uri == f"s3://{agent_env.trace_bucket}/traces/{user_id}/{task_id}.jsonl.gz"
         stored = _stored_trace(agent_env, user_id, task_id)
         assert stored["Body"].read() == artifact
-        # Described as gzip *content*, not as a gzip *encoding*: a client that saw
+        # An HTTP client that received the object with
         # Content-Encoding: gzip would decompress it behind the CLI's back.
         assert stored["ContentType"] == "application/gzip"
         assert "ContentEncoding" not in stored

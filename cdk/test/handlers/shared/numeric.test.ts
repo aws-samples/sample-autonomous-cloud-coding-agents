@@ -37,9 +37,6 @@ describe('coerceNumericOrNull', () => {
   });
 
   test('parses numeric strings (the shape the agent stores)', () => {
-    // The actual shape observed in Scenario 7-extended deploy
-    // validation: ``duration_s: "96.0"`` and
-    // ``cost_usd: "0.20939010000000002"``.
     const { logger, warnCalls } = mkLogger();
     expect(coerceNumericOrNull('96.0', { field: 'duration_s' }, logger)).toBe(96);
     expect(coerceNumericOrNull('0.20939010000000002', { field: 'cost_usd' }, logger))
@@ -56,9 +53,6 @@ describe('coerceNumericOrNull', () => {
   });
 
   test('non-finite coercion collapses to null AND emits a warn', () => {
-    // Corrupt input (non-numeric string, real NaN, Infinity) must
-    // surface in CloudWatch so writer bugs are visible rather than
-    // silently dropping data from the consumer's render.
     const { logger, warnCalls } = mkLogger();
 
     expect(coerceNumericOrNull('not-a-number', { field: 'cost_usd', task_id: 't-1' }, logger))
@@ -73,7 +67,6 @@ describe('coerceNumericOrNull', () => {
       expect(call.meta?.field).toBeDefined();
       expect(call.meta?.raw).toBeDefined();
     }
-    // The task_id context propagates through.
     expect(warnCalls[0].meta?.task_id).toBe('t-1');
   });
 
@@ -84,7 +77,6 @@ describe('coerceNumericOrNull', () => {
     expect(warnCalls[0].meta?.event_id).toBe('e-1');
   });
 
-  // A stored value can be as long as its record, and the warning repeats at every read.
   test.each([
     ['a value of 100 characters whole', 'x'.repeat(100), 100],
     ['the first 100 characters of a longer value', 'x'.repeat(101), 100],

@@ -25,7 +25,6 @@ import type { Scoreboard, ScoreboardPeriod } from '../../src/types';
 
 jest.mock('../../src/api-client');
 
-/** One task finished: it asked for a new pull request and delivered a verified one, which ABCA has not read on GitHub. */
 const PERIOD: ScoreboardPeriod = {
   from: '2026-11-13T12:00:00.000Z',
   to: '2026-11-20T12:00:00.000Z',
@@ -69,7 +68,6 @@ describe('stats command', () => {
     consoleSpy.mockRestore();
   });
 
-  // What the text says is in test/scoreboard.test.ts: here, that the command prints it for the response.
   test('asks for the last 30 days of every repository, and prints the scoreboard as text', async () => {
     await makeStatsCommand().parseAsync(['node', 'test']);
 
@@ -120,8 +118,6 @@ describe('stats command', () => {
       expect(consoleSpy).not.toHaveBeenCalled();
     });
 
-    // A stack from before `view` existed ignores it and answers with a page of tasks. --output json
-    // would print whatever came, as the scoreboard.
     test.each([
       ['a page of tasks', [{ task_id: '01KA4AGC0000000000000000B2', status: 'RUNNING' }]],
       ['nothing', undefined],

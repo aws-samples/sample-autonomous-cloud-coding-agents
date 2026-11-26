@@ -1,14 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""``nudge_reader`` against real DynamoDB semantics.
-
-``tests/test_nudge_reader.py`` hands the reader a MagicMock table, which returns
-the rows the test scripted whatever the expressions say. Here the service
-evaluates them: the filter on ``consumed``, the alias that reserved word needs,
-and the condition that lets a nudge be consumed only once.
-"""
-
 from __future__ import annotations
 
 import nudge_reader
@@ -16,7 +8,6 @@ from progress_writer import _generate_ulid
 
 
 def _nudge(task_id: str, message: str, *, consumed: bool) -> dict:
-    """A nudge row as ``cdk/src/handlers/nudge-task.ts`` writes it."""
     return {
         "task_id": task_id,
         "nudge_id": _generate_ulid(),
@@ -34,7 +25,6 @@ class TestNudgeDelivery:
         pending = _nudge(task_id, "use the v2 endpoint", consumed=False)
         table.put_item(Item=pending)
         table.put_item(Item=_nudge(task_id, "delivered earlier", consumed=True))
-        # The rate-limit counter of the same handler shares the table.
         table.put_item(
             Item={
                 "task_id": f"RATE#{task_id}",

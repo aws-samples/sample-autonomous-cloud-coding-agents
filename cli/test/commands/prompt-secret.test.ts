@@ -21,10 +21,6 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import { __resetPipedSecretStateForTest, promptLine, promptSecret } from '../../src/prompt-secret';
 
-/**
- * Stub stdin as a non-TTY readable stream. Each `promptSecret` call reads one
- * line (up to `\n`); leftover bytes stay on the stream for chained prompts.
- */
 function withPipedStdin(
   chunks: string[],
   run: () => Promise<void>,
@@ -56,7 +52,6 @@ function withPipedStdin(
   return done;
 }
 
-// Every test brings its own stdin: each starts with a reader that has read nothing.
 beforeEach(() => {
   __resetPipedSecretStateForTest();
 });
@@ -88,7 +83,6 @@ describe('promptSecret (non-TTY / piped stdin)', () => {
   });
 });
 
-/** Put `stdin` in the place of process.stdin and collect what the prompts write to stderr. */
 function replaceStdin(stdin: object): { written: () => string; restore: () => void } {
   const original = Object.getOwnPropertyDescriptor(process, 'stdin');
   Object.defineProperty(process, 'stdin', { value: stdin, configurable: true });
@@ -113,8 +107,6 @@ describe('promptLine (non-TTY / piped stdin)', () => {
 
   afterEach(() => io.restore());
 
-  // What is written starts with the label. When stderr is a terminal, as when this file is run
-  // from a shell, readline echoes the piped line after it.
   test('resolves the trimmed line', async () => {
     const answer = promptLine('Client ID');
     stdin.write('  cid-1  \n');
@@ -136,22 +128,14 @@ describe('promptLine (non-TTY / piped stdin)', () => {
   });
 
   test('rejects when the input ends without a line: no answer is not Enter', async () => {
-    // `linear link` and `remove-workspace` read their confirmation here. Resolving the default
-    // or an empty string at end of input would let them go on unconfirmed.
     const answer = promptLine('Continue? [Y/n]', 'y');
     stdin.end();
     await expect(answer).rejects.toThrow('No input provided.');
   });
 });
 
-/** Let the events of a stream that are already due be delivered. */
 const tick = (): Promise<void> => new Promise((resolve) => { setImmediate(resolve); });
 
-/**
- * What a prompt comes to within a short time: the line it resolves, the error it rejects with,
- * or neither. A prompt that never settles is how a command ends with exit code 0 in the middle
- * of its work: node runs out of things to wait for and exits.
- */
 function outcome(prompt: Promise<string>): Promise<string> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve('never settles'), 250);
@@ -164,11 +148,7 @@ function outcome(prompt: Promise<string>): Promise<string> {
   });
 }
 
-/**
- * Close the input the way a pipe on stdin closes: node reads the end of a pipe at once and
- * announces it, also while no prompt is listening. A stream of the test only does so when it
- * is read.
- */
+// A Node stream emits 'end' only once it is read.
 async function closePipe(stdin: PassThrough): Promise<void> {
   stdin.end();
   await tick();
@@ -177,9 +157,6 @@ async function closePipe(stdin: PassThrough): Promise<void> {
 }
 
 describe('a visible and a secret prompt on one piped input', () => {
-  // Real streams and the real readline: a script or an agent that answers the prompts of one
-  // command through a pipe. Both prompts take their lines from one reader of stdin, so that
-  // every line answers one prompt, in the order of the questions.
   let stdin: PassThrough;
   let io: ReturnType<typeof replaceStdin>;
 
@@ -190,7 +167,6 @@ describe('a visible and a secret prompt on one piped input', () => {
 
   afterEach(() => io.restore());
 
-  /** The prompt of one letter of an order: V a visible one, S a secret one. */
   const ask = (kind: string): Promise<string> => (kind === 'V' ? promptLine('Visible') : promptSecret('Secret: '));
 
   describe.each([
@@ -206,8 +182,6 @@ describe('a visible and a secret prompt on one piped input', () => {
     const expected = answers.map((answer) => `line ${JSON.stringify(answer)}`);
 
     test('each get their own line when all answers come in one write', async () => {
-      // A readline on stdin took the whole write and kept its first line, and what the reader
-      // of the secret prompt had taken was out of reach of a visible prompt.
       stdin.write(answers.map((answer) => `${answer}\n`).join(''));
 
       const outcomes: string[] = [];
@@ -219,9 +193,6 @@ describe('a visible and a secret prompt on one piped input', () => {
     });
 
     test('each get their own line when each answer is written while its prompt waits', async () => {
-      // A secret prompt after a visible one never answered: the visible prompt had left stdin
-      // paused. And a visible answer was read by two readers: the copy answered the next secret
-      // prompt, so that the site choice of `jira setup` was stored as its signing secret.
       const outcomes: string[] = [];
       for (const [i, kind] of kinds.entries()) {
         const result = outcome(ask(kind));
@@ -247,8 +218,6 @@ describe('a visible and a secret prompt on one piped input', () => {
     });
 
     test('a secret prompt after a visible one answers with no value when the pipe was closed between the two', async () => {
-      // `printf '\n' | bgagent linear add-workspace <slug>`: the end of the pipe arrives during
-      // the browser consent, when no prompt is waiting.
       stdin.write('cid-1\n');
       expect(await outcome(promptLine('Client ID'))).toBe('line "cid-1"');
       await closePipe(stdin);
@@ -285,8 +254,6 @@ describe('a visible and a secret prompt on one piped input', () => {
   });
 
   test('reads no further than the answers that were asked for: an input without end stays in the pipe', async () => {
-    // `yes | bgagent linear link <code>`. The reader stayed on stdin and took everything that
-    // arrived while the command did its work: with a slow API call, until node ran out of memory.
     stdin.write('y\n');
     expect(await outcome(promptLine('Continue? [Y/n]'))).toBe('line "y"');
 
@@ -299,7 +266,6 @@ describe('a visible and a secret prompt on one piped input', () => {
 
   describe('after another reader of stdin (a readline that was closed)', () => {
     test('a prompt reads on from a stdin that was left paused', async () => {
-      // A listener put on a paused stream does not start it again.
       stdin.pause();
       stdin.write('s3cret\n');
 
@@ -310,7 +276,6 @@ describe('a visible and a secret prompt on one piped input', () => {
       ['a secret prompt answers with no value', () => promptSecret('Secret: '), 'line ""'],
       ['a visible prompt rejects', () => promptLine('Client ID'), 'error: No input provided.'],
     ])('%s when stdin was read to its end before', async (_what, prompt, expected) => {
-      // The end of a stream is announced once: a listener that comes later is not told.
       await closePipe(stdin);
       expect(stdin.readableEnded).toBe(true);
 
@@ -332,7 +297,6 @@ describe('prompts on a terminal (raw mode)', () => {
 
   afterEach(() => io.restore());
 
-  /** Each argument arrives as one 'data' event, the way a key press or a paste does. */
   const type = (...keys: string[]): void => keys.forEach((key) => { tty.emit('data', Buffer.from(key)); });
 
   test('promptSecret echoes a star for each character and resolves the line on Enter', async () => {

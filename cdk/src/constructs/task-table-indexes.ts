@@ -19,15 +19,10 @@
 
 /**
  * GSI name for resolving Jira-origin tasks by tenant and issue key.
- *
- * Kept dependency-free because both CDK constructs and bundled Lambda handlers
- * use this deployment/runtime contract.
  */
 export const JIRA_ISSUE_INDEX_NAME = 'JiraIssueIndex';
 
 /**
- * GSI name for resolving Linear-origin tasks by Linear issue id. Dependency-free for
- * the same reason: handlers that imported it via the TaskTable construct bundled all
- * of aws-cdk-lib (tens of MB) and could run out of memory during Lambda init.
+ * GSI name for resolving Linear-origin tasks by Linear issue id.
  */
 export const LINEAR_ISSUE_INDEX_NAME = 'LinearIssueIndex';

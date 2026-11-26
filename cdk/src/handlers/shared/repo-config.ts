@@ -22,10 +22,6 @@ import type { ComputeBackend } from './compute-backend';
 import { logger } from './logger';
 import { makeDocClient } from './ua';
 
-/**
- * Per-repository configuration written by the Blueprint CDK construct
- * and read at runtime by the task API gate and the orchestrator.
- */
 export type ComputeType = ComputeBackend;
 
 export interface RepoConfig {
@@ -39,44 +35,38 @@ export interface RepoConfig {
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
   /**
-   * Token budget of the memory context that hydration loads for this repo
-   * (#447). Written by the Blueprint construct when ``agent.memoryTokenBudget``
-   * is supplied. When absent, hydration applies the platform default.
+   * Token budget of the memory context that hydration loads for this repo.
+   * When absent, hydration applies the platform default.
    */
   readonly memory_token_budget?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
   /**
-   * Per-repo build/lint verification commands (#1 build-gate fix). The agent
-   * runs these to gate build/lint regressions before opening a PR; default to
-   * ``mise run build`` / ``mise run lint`` when unset. Set for non-mise repos
-   * (e.g. ``npm run build``) so build-regression gating actually works.
+   * Per-repo build/lint verification commands. The agent runs these to gate
+   * build/lint regressions before opening a PR; default to
+   * ``mise run build`` / ``mise run lint`` when unset.
    */
   readonly build_command?: string;
   readonly lint_command?: string;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   /**
-   * Cedar HITL: per-blueprint override for the per-task approval-gate cap
-   * (design decision #13, §4 step 5). Written by the Blueprint construct
-   * when ``security.approvalGateCap`` is supplied. Read by
-   * ``create-task-core`` at submit-time and persisted onto the TaskRecord
-   * so mid-task blueprint edits do not shift the cap beneath a running
-   * task. Absent when the blueprint did not configure it — the submit
-   * path falls back to the platform default of 50.
+   * Cedar HITL: per-blueprint override for the per-task approval-gate cap.
+   * Read at submit-time and persisted onto the TaskRecord. When absent, the
+   * submit path falls back to the platform default.
    */
   readonly approval_gate_cap?: number;
   /**
-   * Registry (#246) ``registry://`` refs for MCP servers pinned by the
+   * Registry ``registry://`` refs for MCP servers pinned by the
    * blueprint. Resolved by the orchestrator at task start and merged into the
    * agent's ``.mcp.json``.
    */
   readonly mcp_servers?: string[];
-  /** Registry (#246) Cedar policy module refs; resolved cedar_text is merged
+  /** Registry Cedar policy module refs; resolved cedar_text is merged
    *  into the ``cedar_policies`` payload. */
   readonly cedar_policy_modules?: string[];
-  /** Registry (#246) skill refs; resolved prompt fragments append to the
+  /** Registry skill refs; resolved prompt fragments append to the
    *  system prompt. */
   readonly skills?: string[];
 }
@@ -91,48 +81,31 @@ export interface BlueprintConfig {
   readonly model_id?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
-  /** Per-repo memory token budget (#447) surfaced from RepoConfig; hydration applies the platform default when unset. */
+  /** Per-repo memory token budget; hydration applies the platform default when unset. */
   readonly memory_token_budget?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;
-  /** Per-repo build/lint verification commands (#1). Default mise when unset. The orchestrator threads these into the agent payload. */
+  /** Per-repo build/lint verification commands. Default mise when unset. */
   readonly build_command?: string;
   readonly lint_command?: string;
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   /**
-   * Cedar HITL: per-blueprint approval-gate cap override. Surfaced from
-   * RepoConfig so downstream consumers (admission, orchestrator payload)
-   * can reason about cap-aware dispatching without a second RepoTable
-   * GetItem. ``create-task-core`` is the authoritative resolver — this
-   * field is informational for the runtime path.
+   * Cedar HITL: per-blueprint approval-gate cap override. Informational for
+   * the runtime path: ``create-task-core`` is the authoritative resolver.
    */
   readonly approval_gate_cap?: number;
-  /**
-   * Registry (#246) MCP server ``registry://`` refs surfaced from RepoConfig so
-   * the orchestrator can resolve + merge them into the agent payload.
-   */
   readonly mcp_servers?: string[];
-  /** Registry (#246) Cedar policy module refs surfaced from RepoConfig. */
   readonly cedar_policy_modules?: string[];
-  /** Registry (#246) skill refs surfaced from RepoConfig. */
   readonly skills?: string[];
 }
 
 const ddb = makeDocClient();
 
 /**
- * Combined result of a single RepoTable GetItem used by the submit
- * path. ``onboarded`` mirrors the old ``checkRepoOnboarded`` contract
- * (true when a row exists with ``status=active``, false otherwise);
- * ``config`` is the full RepoConfig when onboarded, null otherwise.
- *
- * The submit flow previously issued TWO GetItems on the same key —
- * ``checkRepoOnboarded`` for the gate, then ``loadRepoConfig`` for
- * the blueprint cap. One call now covers both; the convenience
- * ``checkRepoOnboarded`` / ``loadRepoConfig`` helpers below delegate
- * to this so call sites that only want one answer stay readable.
+ * ``onboarded`` is true when a row exists with ``status=active``, false
+ * otherwise; ``config`` is the full RepoConfig when onboarded, null otherwise.
  */
 export interface RepoLookupResult {
   readonly onboarded: boolean;
@@ -140,10 +113,8 @@ export interface RepoLookupResult {
 }
 
 /**
- * Single-GetItem repo lookup used by the task submit path (design
- * §7.3). Returns both the onboarding verdict and the full RepoConfig
- * so create-task-core can gate AND resolve the blueprint
- * approval-gate cap without issuing a second read.
+ * Single-GetItem repo lookup. Returns both the onboarding verdict and the
+ * full RepoConfig.
  *
  * Semantics:
  *   - ``REPO_TABLE_NAME`` unset → ``{ onboarded: true, config: null }``
@@ -190,10 +161,6 @@ export async function lookupRepo(repo: string): Promise<RepoLookupResult> {
 
 /**
  * Check if a repository is onboarded (active) in the RepoTable.
- * Thin wrapper over ``lookupRepo`` for call sites that only need the
- * gate verdict (e.g. ``get-policies``). The submit path prefers
- * ``lookupRepo`` directly so it can reuse the RepoConfig payload
- * without a second GetItem.
  * @param repo - the "owner/repo" string.
  */
 export async function checkRepoOnboarded(repo: string): Promise<{ onboarded: boolean }> {
@@ -202,10 +169,8 @@ export async function checkRepoOnboarded(repo: string): Promise<{ onboarded: boo
 }
 
 /**
- * Load the full RepoConfig for a repository. Thin wrapper over
- * ``lookupRepo`` for call sites that only need the config (e.g. the
- * orchestrator). Returns null when the repo is not onboarded or the
- * table is unset; the submit path prefers ``lookupRepo`` directly.
+ * Load the full RepoConfig for a repository. Returns null when the repo
+ * is not onboarded or the table is unset.
  * @param repo - the "owner/repo" string.
  */
 export async function loadRepoConfig(repo: string): Promise<RepoConfig | null> {

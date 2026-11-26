@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-// --- Mocks ---
 const mockDdbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({ send: mockDdbSend })),
@@ -34,12 +33,6 @@ process.env.TASK_RETENTION_DAYS = '90';
 
 import { handler } from '../../src/handlers/reconcile-stranded-tasks';
 
-/**
- * Build a dynamodb AttributeValue map mimicking a TaskTable StatusIndex hit.
- * ``status_created_at`` (composite ``<STATUS>#<iso>``) is optional so tests
- * can exercise both the time-in-current-status anchor (#441) and the
- * created_at fallback for records missing/with a malformed value.
- */
 function mockTaskRow(opts: {
   task_id: string;
   user_id: string;
@@ -54,10 +47,6 @@ function mockTaskRow(opts: {
   };
 }
 
-/**
- * Run the handler after pre-seeding mockDdbSend with an array of responses.
- * Commands are popped in order; throw test-visible error if we run out.
- */
 function primeResponses(responses: unknown[]): void {
   mockDdbSend.mockReset();
   let idx = 0;
@@ -78,21 +67,19 @@ describe('reconcile-stranded-tasks', () => {
 
   test('no candidates → handler is a no-op with no writes', async () => {
     primeResponses([
-      { Items: [] }, // Query SUBMITTED
-      { Items: [] }, // Query HYDRATING
-      { Items: [] }, // Query AWAITING_APPROVAL (Cedar HITL, §13.6)
+      { Items: [] },
+      { Items: [] },
+      { Items: [] },
     ]);
 
     await handler();
 
-    // Exactly 3 queries (SUBMITTED / HYDRATING / AWAITING_APPROVAL), no updates.
     expect(mockDdbSend).toHaveBeenCalledTimes(3);
   });
 
   test('task older than 1200s → fails + emits events + decrements concurrency', async () => {
-    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString(); // 25 min ago
+    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
     primeResponses([
-      // Query SUBMITTED returns one stranded candidate.
       {
         Items: [mockTaskRow({
           task_id: 't-stranded',
@@ -100,17 +87,16 @@ describe('reconcile-stranded-tasks', () => {
           created_at: ancient,
         })],
       },
-      {}, // conditional UpdateItem → FAILED
-      {}, // PutItem task_stranded event
-      {}, // PutItem task_failed event
-      {}, // UpdateItem decrement concurrency
-      { Items: [] }, // Query HYDRATING
-      { Items: [] }, // Query AWAITING_APPROVAL
+      {},
+      {},
+      {},
+      {},
+      { Items: [] },
+      { Items: [] },
     ]);
 
     await handler();
 
-    // Capture the UpdateItem call that transitions status; assert condition.
     const transitionCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
       .find(([c]) => c._type === 'UpdateItem' && String(c.input.ConditionExpression).includes('= :expected'));
     expect(transitionCall).toBeDefined();
@@ -122,11 +108,9 @@ describe('reconcile-stranded-tasks', () => {
     expect(input.Key.task_id.S).toBe('t-stranded');
     expect(input.ExpressionAttributeValues[':failed'].S).toBe('FAILED');
     expect(input.ExpressionAttributeValues[':expected'].S).toBe('SUBMITTED');
-    // No orchestrator may be left to finalize this task, so the sweep stamps the retention ttl (90 days here).
     expect(input.UpdateExpression).toContain('#ttl = :ttl');
     expect(Number(input.ExpressionAttributeValues[':ttl'].N)).toBeGreaterThan(Date.now() / 1000 + 89 * 86400);
 
-    // Events written.
     const putCalls = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
       .filter(([c]) => c._type === 'PutItem');
     expect(putCalls).toHaveLength(2);
@@ -135,23 +119,16 @@ describe('reconcile-stranded-tasks', () => {
       return item.event_type.S;
     });
     expect(eventTypes).toEqual(expect.arrayContaining(['task_stranded', 'task_failed']));
-    // The task row expires with its events.
     expect(input.ExpressionAttributeValues[':ttl'].N).toBe((putCalls[0][0].input as { Item: { ttl: { N: string } } }).Item.ttl.N);
 
-    // Concurrency decrement.
     const decrementCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
       .find(([c]) => c._type === 'UpdateItem' && String(c.input.UpdateExpression).includes('active_count'));
     expect(decrementCall).toBeDefined();
   });
 
   test('#441: task with old created_at but FRESH status_created_at is NOT failed (freshly picked up from the queue)', async () => {
-    // A task can sit QUEUED for longer than the stranded timeout and then
-    // be picked up (QUEUED -> SUBMITTED): old created_at, fresh status
-    // entry. Aging by time-in-current-status must skip it so we don't kill
-    // it before its pipeline attaches. The GSI cutoff on created_at still
-    // returns it as a candidate, so the handler must filter it in-code.
-    const ancientCreate = new Date(Date.now() - 2 * 3600 * 1000).toISOString(); // 2h ago
-    const freshStatus = new Date(Date.now() - 30 * 1000).toISOString(); // 30s ago
+    const ancientCreate = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    const freshStatus = new Date(Date.now() - 30 * 1000).toISOString();
     primeResponses([
       {
         Items: [mockTaskRow({
@@ -161,19 +138,17 @@ describe('reconcile-stranded-tasks', () => {
           status_created_at: `SUBMITTED#${freshStatus}`,
         })],
       },
-      { Items: [] }, // HYDRATING
-      { Items: [] }, // AWAITING_APPROVAL
+      { Items: [] },
+      { Items: [] },
     ]);
 
     await handler();
 
-    // Only the 3 status queries — the fresh task is filtered in-code, so
-    // NO transition / event / decrement writes fire.
     expect(mockDdbSend).toHaveBeenCalledTimes(3);
   });
 
   test('#441: task with old created_at AND old status_created_at is still failed (genuinely stranded)', async () => {
-    const ancient = new Date(Date.now() - 2 * 3600 * 1000).toISOString(); // 2h ago
+    const ancient = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
     primeResponses([
       {
         Items: [mockTaskRow({
@@ -183,12 +158,12 @@ describe('reconcile-stranded-tasks', () => {
           status_created_at: `SUBMITTED#${ancient}`,
         })],
       },
-      {}, // conditional UpdateItem → FAILED
-      {}, // PutItem task_stranded event
-      {}, // PutItem task_failed event
-      {}, // UpdateItem decrement concurrency
-      { Items: [] }, // HYDRATING
-      { Items: [] }, // AWAITING_APPROVAL
+      {},
+      {},
+      {},
+      {},
+      { Items: [] },
+      { Items: [] },
     ]);
 
     await handler();
@@ -205,10 +180,7 @@ describe('reconcile-stranded-tasks', () => {
   });
 
   test('#441: malformed status_created_at falls back to created_at (pre-#441 behavior)', async () => {
-    // A record whose status_created_at has no parseable timestamp must not
-    // be treated as age 0 (which would let a genuinely stranded task live
-    // forever). The handler falls back to created_at.
-    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString(); // 25 min ago
+    const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
     primeResponses([
       {
         Items: [mockTaskRow({
@@ -218,12 +190,12 @@ describe('reconcile-stranded-tasks', () => {
           status_created_at: 'SUBMITTED#not-a-timestamp',
         })],
       },
-      {}, // conditional UpdateItem → FAILED
-      {}, // PutItem task_stranded event
-      {}, // PutItem task_failed event
-      {}, // UpdateItem decrement concurrency
-      { Items: [] }, // HYDRATING
-      { Items: [] }, // AWAITING_APPROVAL
+      {},
+      {},
+      {},
+      {},
+      { Items: [] },
+      { Items: [] },
     ]);
 
     await handler();
@@ -247,12 +219,11 @@ describe('reconcile-stranded-tasks', () => {
           created_at: ancient,
         })],
       },
-      conditionalErr, // UpdateItem transition rejected (task already advanced)
-      { Items: [] }, // HYDRATING query
-      { Items: [] }, // AWAITING_APPROVAL query
+      conditionalErr,
+      { Items: [] },
+      { Items: [] },
     ]);
 
-    // Must NOT throw; no events written, no concurrency decrement.
     await handler();
 
     const writes = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
@@ -262,32 +233,22 @@ describe('reconcile-stranded-tasks', () => {
   });
 
   test('AWAITING_APPROVAL stranded task additionally emits approval_stranded milestone', async () => {
-    // Chunk 10 (full-branch review B2): an AWAITING_APPROVAL task
-    // evicted before the user decides must produce a dashboard
-    // signal via the approval-metrics publisher. The publisher's
-    // event-source filter keys on ``event_type == 'agent_milestone'``
-    // only, so the existing ``task_stranded`` / ``task_failed`` events
-    // (``event_type`` == their own names) never reach it. This test
-    // pins the extra ``agent_milestone`` / ``approval_stranded`` emit
-    // that makes the stranded case visible on §11.3 widgets.
     const ancient = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
     primeResponses([
-      { Items: [] }, // SUBMITTED
-      { Items: [] }, // HYDRATING
-      // AWAITING_APPROVAL query returns one stranded candidate.
+      { Items: [] },
+      { Items: [] },
       { Items: [mockTaskRow({ task_id: 't-await', user_id: 'u-1', created_at: ancient })] },
-      {}, // conditional UpdateItem → FAILED
-      {}, // PutItem task_stranded event
-      {}, // PutItem task_failed event
-      {}, // PutItem approval_stranded milestone (Chunk 10 new)
-      {}, // UpdateItem decrement concurrency
+      {},
+      {},
+      {},
+      {},
+      {},
     ]);
 
     await handler();
 
     const putCalls = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
       .filter(([c]) => c._type === 'PutItem');
-    // task_stranded + task_failed + approval_stranded milestone
     expect(putCalls).toHaveLength(3);
 
     const milestonePut = putCalls.find(([c]) => {
@@ -308,26 +269,21 @@ describe('reconcile-stranded-tasks', () => {
   });
 
   test('SUBMITTED stranded task does NOT emit approval_stranded milestone (only AWAITING_APPROVAL does)', async () => {
-    // Guard: non-AWAITING_APPROVAL stranded tasks must keep the
-    // existing 2-event emission (task_stranded + task_failed)
-    // without the new approval_stranded milestone — otherwise the
-    // dashboard would double-count normal stranded events.
     const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
     primeResponses([
-      { Items: [mockTaskRow({ task_id: 't-sub', user_id: 'u-1', created_at: ancient })] }, // SUBMITTED
-      {}, // conditional UpdateItem → FAILED
-      {}, // PutItem task_stranded
-      {}, // PutItem task_failed
-      {}, // UpdateItem concurrency
-      { Items: [] }, // HYDRATING
-      { Items: [] }, // AWAITING_APPROVAL
+      { Items: [mockTaskRow({ task_id: 't-sub', user_id: 'u-1', created_at: ancient })] },
+      {},
+      {},
+      {},
+      {},
+      { Items: [] },
+      { Items: [] },
     ]);
 
     await handler();
 
     const putCalls = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
       .filter(([c]) => c._type === 'PutItem');
-    // No approval_stranded milestone.
     expect(putCalls).toHaveLength(2);
     const anyMilestone = putCalls.some(([c]) => {
       const item = (c.input as { Item: Record<string, { S?: string }> }).Item;
@@ -338,9 +294,9 @@ describe('reconcile-stranded-tasks', () => {
 
   test('SUBMITTED + HYDRATING + AWAITING_APPROVAL queries all run', async () => {
     primeResponses([
-      { Items: [] }, // SUBMITTED
-      { Items: [] }, // HYDRATING
-      { Items: [] }, // AWAITING_APPROVAL
+      { Items: [] },
+      { Items: [] },
+      { Items: [] },
     ]);
 
     await handler();
@@ -358,9 +314,6 @@ describe('reconcile-stranded-tasks', () => {
   });
 
   describe('final log severity escalation', () => {
-    // Spy on the logger module used by the handler. We import the logger
-    // directly and replace the three level methods with jest.fn before
-    // each test so we can assert exactly which level was called.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const loggerModule = require('../../src/handlers/shared/logger') as {
       logger: {
@@ -375,9 +328,9 @@ describe('reconcile-stranded-tasks', () => {
     let errorSpy: jest.SpyInstance;
 
     beforeEach(() => {
-      infoSpy = jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => { /* silence */ });
-      warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => { /* silence */ });
-      errorSpy = jest.spyOn(loggerModule.logger, 'error').mockImplementation(() => { /* silence */ });
+      infoSpy = jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => {});
+      warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => {});
+      errorSpy = jest.spyOn(loggerModule.logger, 'error').mockImplementation(() => {});
     });
 
     afterEach(() => {
@@ -386,11 +339,6 @@ describe('reconcile-stranded-tasks', () => {
       errorSpy.mockRestore();
     });
 
-    /**
-     * Find the final reconciler log line (i.e. the one whose message
-     * starts with 'Stranded-task reconciler finished') across all spies
-     * and return its [level, message, payload] triple.
-     */
     function findFinalLog(): { level: 'INFO' | 'WARN' | 'ERROR'; message: string; payload: Record<string, unknown> } {
       const match = (spy: jest.SpyInstance, level: 'INFO' | 'WARN' | 'ERROR') => {
         const call = spy.mock.calls.find(
@@ -403,23 +351,19 @@ describe('reconcile-stranded-tasks', () => {
     }
 
     test('test_logs_ERROR_with_RECONCILER_TOTAL_FAILURE_error_id_when_every_task_fails', async () => {
-      // Two candidates both hit an exception on the first DDB write
-      // (UpdateItem transition). None transition cleanly, so totalFailed=0,
-      // totalStranded=2, totalErrors=2 → systemic failure path.
       const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
       const ddbErr = Object.assign(new Error('DDB blew up'), { name: 'InternalServerError' });
       primeResponses([
-        // SUBMITTED query → two candidates.
         {
           Items: [
             mockTaskRow({ task_id: 't-fail-1', user_id: 'u-1', created_at: ancient }),
             mockTaskRow({ task_id: 't-fail-2', user_id: 'u-2', created_at: ancient }),
           ],
         },
-        ddbErr, // UpdateItem for t-fail-1 → throws
-        ddbErr, // UpdateItem for t-fail-2 → throws
-        { Items: [] }, // HYDRATING query
-        { Items: [] }, // AWAITING_APPROVAL query
+        ddbErr,
+        ddbErr,
+        { Items: [] },
+        { Items: [] },
       ]);
 
       await handler();
@@ -433,24 +377,22 @@ describe('reconcile-stranded-tasks', () => {
     });
 
     test('test_logs_WARN_with_RECONCILER_PARTIAL_FAILURE_when_some_tasks_fail', async () => {
-      // One success (4 writes), one failure (throws on UpdateItem).
       const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
       const ddbErr = Object.assign(new Error('DDB throttled'), { name: 'ProvisionedThroughputExceededException' });
       primeResponses([
-        // SUBMITTED query → two candidates.
         {
           Items: [
             mockTaskRow({ task_id: 't-ok', user_id: 'u-a', created_at: ancient }),
             mockTaskRow({ task_id: 't-fail', user_id: 'u-b', created_at: ancient }),
           ],
         },
-        {}, // UpdateItem t-ok (transition) → success
-        {}, // PutItem task_stranded event
-        {}, // PutItem task_failed event
-        {}, // UpdateItem decrement concurrency
-        ddbErr, // UpdateItem t-fail (transition) → throws
-        { Items: [] }, // HYDRATING query
-        { Items: [] }, // AWAITING_APPROVAL query
+        {},
+        {},
+        {},
+        {},
+        ddbErr,
+        { Items: [] },
+        { Items: [] },
       ]);
 
       await handler();
@@ -464,7 +406,6 @@ describe('reconcile-stranded-tasks', () => {
     });
 
     test('test_logs_INFO_on_full_success', async () => {
-      // Two candidates, both transition cleanly.
       const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
       primeResponses([
         {
@@ -473,10 +414,10 @@ describe('reconcile-stranded-tasks', () => {
             mockTaskRow({ task_id: 't-2', user_id: 'u-b', created_at: ancient }),
           ],
         },
-        {}, {}, {}, {}, // t-1: transition + 2 events + decrement
-        {}, {}, {}, {}, // t-2: transition + 2 events + decrement
-        { Items: [] }, // HYDRATING
-        { Items: [] }, // AWAITING_APPROVAL
+        {}, {}, {}, {},
+        {}, {}, {}, {},
+        { Items: [] },
+        { Items: [] },
       ]);
 
       await handler();
@@ -490,11 +431,10 @@ describe('reconcile-stranded-tasks', () => {
     });
 
     test('test_no_stranded_tasks_logs_INFO_not_ERROR', async () => {
-      // Empty-query case: totalStranded=0. Must NOT alarm.
       primeResponses([
-        { Items: [] }, // SUBMITTED
-        { Items: [] }, // HYDRATING
-        { Items: [] }, // AWAITING_APPROVAL
+        { Items: [] },
+        { Items: [] },
+        { Items: [] },
       ]);
 
       await handler();
@@ -509,13 +449,7 @@ describe('reconcile-stranded-tasks', () => {
 
   test('query paginates with ExclusiveStartKey when LastEvaluatedKey present', async () => {
     const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString();
-    // findStrandedCandidates paginates internally and returns ALL rows
-    // before the handler starts writing. So the call order is:
-    //   Query SUBMITTED page1 (with LEK) → Query SUBMITTED page2 (no LEK)
-    //   → 4 writes for page1 candidate → 4 writes for page2 candidate
-    //   → Query HYDRATING (empty).
     primeResponses([
-      // SUBMITTED page 1
       {
         Items: [mockTaskRow({
           task_id: 't-page1',
@@ -524,7 +458,6 @@ describe('reconcile-stranded-tasks', () => {
         })],
         LastEvaluatedKey: { task_id: { S: 't-page1' } },
       },
-      // SUBMITTED page 2
       {
         Items: [mockTaskRow({
           task_id: 't-page2',
@@ -532,12 +465,9 @@ describe('reconcile-stranded-tasks', () => {
           created_at: ancient,
         })],
       },
-      // Writes for both candidates (4 each = 8 total).
       {}, {}, {}, {},
       {}, {}, {}, {},
-      // HYDRATING
       { Items: [] },
-      // AWAITING_APPROVAL
       { Items: [] },
     ]);
 

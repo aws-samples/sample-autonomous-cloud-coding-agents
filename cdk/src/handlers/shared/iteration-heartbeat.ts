@@ -17,36 +17,10 @@
  *  SOFTWARE.
  */
 
-/**
- * Mid-run liveness heartbeat (pure core).
- *
- * Observed in practice: a comment-triggered iteration ran for 22 minutes showing
- * only "🤖 Starting on this issue", then a terminal ❌ — a total black box in
- * between. The platform already has the data to do better: an
- * iteration task carries its maturing-reply comment id in
- * ``channel_metadata.iteration_reply_comment_id`` and stamps ``created_at``; the
- * agent bumps ``agent_heartbeat_at`` every 45s while RUNNING.
- *
- * This module decides, for ONE RUNNING iteration task, whether a scheduled sweep
- * should edit its maturing reply to show liveness (elapsed + an optional progress
- * note) — and what the new body is. It edits the SAME existing reply comment in
- * place (no new comments — the user's explicit "don't clutter the Linear UI"
- * constraint), reusing the iteration reply's ``working`` state.
- *
- * Pure + deterministic (``now`` injected); all I/O lives in the sweep handler.
- */
-
 import { renderMaturingReply } from './iteration-reply';
 
-/**
- * Below this elapsed floor a RUNNING iteration is NOT heartbeat-updated — a task
- * that just started doesn't need a liveness nudge, and editing too early would
- * fight the trigger-time ack / pr_created edit. Matches the renderer's own
- * elapsed floor so the suffix is meaningful when we do edit.
- */
 const HEARTBEAT_MIN_ELAPSED_S = 90;
 
-/** The fields the sweep reads off a RUNNING task's record (already DDB-unmarshalled). */
 export interface HeartbeatTaskView {
   readonly taskId: string;
   readonly status: string;
@@ -54,43 +28,23 @@ export interface HeartbeatTaskView {
   readonly createdAt?: string;
   /** Trigger channel. Linear and Jira support maturing iteration comments. */
   readonly channelSource?: string;
-  /** Linear workspace id (for the per-workspace OAuth token). */
   readonly linearWorkspaceId?: string;
-  /** Jira cloud id (for the per-tenant OAuth token). */
   readonly jiraCloudId?: string;
-  /** The maturing reply comment id stamped at trigger time. */
   readonly iterationReplyCommentId?: string;
-  /** The human comment that triggered the iteration (reply parent). */
   readonly triggerCommentId?: string;
   /** The issue the trigger comment lives on (parent epic or sub-issue). */
   readonly triggerCommentIssueId?: string;
   /**
    * Whether this task carries the orchestration-iteration marker. NOT used for
-   * eligibility — both orchestration AND standalone @bgagent iterations have a
-   * maturing reply, and a STANDALONE iteration deliberately omits this marker
-   * (see where the webhook processor dispatches a standalone comment iteration).
-   * Eligibility keys on the reply fields below, so standalone iterations are
-   * covered too. Kept on the view for logging/diagnostics only.
+   * eligibility: a standalone iteration omits the marker.
    */
   readonly isIteration?: boolean;
-  /** PR number, when known (makes the working line name the PR). */
   readonly prNumber?: number | null;
-  /** PR url, when known (clickable PR reference). */
   readonly prUrl?: string | null;
-  /**
-   * Latest agent progress note (sanitized milestone detail).
-   *
-   * RESERVED — nothing populates this yet. The sweep's ``toView`` does not set it
-   * and there is no persisted progress-note attribute to read, so in production
-   * the heartbeat currently shows elapsed time only. Kept because the render path
-   * is written and tested; wiring it needs an agent-side progress write, which
-   * belongs with that work rather than here. Do not document it as a shipped
-   * capability until a producer exists.
-   */
+  /** Latest agent progress note (sanitized milestone detail). */
   readonly latestProgressNote?: string;
 }
 
-/** What the sweep should do for one task. */
 export interface HeartbeatPlan {
   readonly taskId: string;
   readonly channelSource: 'linear' | 'jira';
@@ -103,7 +57,6 @@ export interface HeartbeatPlan {
   readonly elapsedS: number;
 }
 
-/** Parse an ISO timestamp to epoch ms, or null if unusable. */
 function parseIso(ts: string | undefined): number | null {
   if (!ts) return null;
   const ms = Date.parse(ts);
@@ -120,12 +73,6 @@ export function planHeartbeat(task: HeartbeatTaskView, nowMs: number): Heartbeat
   const channelSource = task.channelSource ?? 'linear';
   if (channelSource !== 'linear' && channelSource !== 'jira') return null;
 
-  // Eligibility = "this task has a maturing Linear reply to keep alive". That's
-  // exactly the set of comment-triggered iterations — BOTH orchestration and
-  // STANDALONE @bgagent iterations (the latter omits the orchestration marker
-  // but still has the reply, and the black-box case observed was standalone). So we
-  // key on the reply-routing fields, NOT ``isIteration``. A first-run / non-PR
-  // task has no ``iteration_reply_comment_id`` and is correctly skipped.
   const {
     linearWorkspaceId,
     jiraCloudId,

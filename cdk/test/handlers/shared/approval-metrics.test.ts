@@ -31,8 +31,6 @@ import { BUILTIN_SOFT_DENY_POLICIES } from '../../../src/handlers/shared/builtin
 import { parseRules } from '../../../src/handlers/shared/cedar-policy';
 
 describe('approval-metrics: RULE_ID_ALLOWLIST', () => {
-  // Only a soft-deny rule asks for an approval. One the platform ships must keep its own
-  // name in the metric: listed nowhere, it would count as "other" and be logged as unknown.
   test('holds every soft-deny rule the platform ships', () => {
     const shipped = parseRules(BUILTIN_SOFT_DENY_POLICIES).filter((rule) => rule.tier === 'soft').map((rule) => rule.rule_id);
 
@@ -51,8 +49,6 @@ describe('approval-metrics: normalizeRuleId', () => {
     expect(normalizeRuleId(['user_custom_rule_42'])).toBe('other');
   });
 
-  // The engine lists the rules that matched a command in no fixed order, and these pairs match
-  // one command: the list's order decides, so a rule's events do not split between two values.
   test.each([
     ['a force push to main', ['force_push_any', 'force_push_main'], 'force_push_main'],
     ['a forced push to a protected branch', ['force_push_any', 'push_to_protected_branch'], 'force_push_any'],
@@ -108,12 +104,6 @@ describe('approval-metrics: outcomeFromMilestone', () => {
 
 describe('approval-metrics: APPROVAL_METRIC_MILESTONES allowlist', () => {
   test('contains all 8 supported milestones', () => {
-    // Guard against accidental renames that would silently remove a
-    // milestone from the dashboard. Chunk 10 full-branch review
-    // expanded this allowlist with 3 safety-critical milestones
-    // (cap / rate-limit / stranded) that had been producing zero
-    // dashboard signal — keep the size assertion strict so a
-    // future refactor dropping one is caught.
     expect(APPROVAL_METRIC_MILESTONES.has('approval_requested')).toBe(true);
     expect(APPROVAL_METRIC_MILESTONES.has('approval_granted')).toBe(true);
     expect(APPROVAL_METRIC_MILESTONES.has('approval_denied')).toBe(true);
@@ -160,7 +150,6 @@ describe('approval-metrics: buildEmfLine', () => {
 
     const parsed = JSON.parse(line);
     const emf = parsed._aws.CloudWatchMetrics[0];
-    // Dimension names are grouped into one set per metric.
     expect(emf.Dimensions).toEqual([['reason']]);
     expect(parsed.reason).toBe('rule_annotation');
     expect(parsed.ClippedApprovalCount).toBe(1);
@@ -185,7 +174,6 @@ describe('approval-metrics: buildEmfLine', () => {
 });
 
 describe('approval-metrics: classifyApprovalEvent', () => {
-  // Use a fixed time pair: request at T+0, decision at T+5s (5000ms)
   const CREATED_AT = '2026-05-08T12:00:00.000Z';
   const DECIDED_AT = '2026-05-08T12:00:05.000Z';
 
@@ -215,8 +203,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   });
 
   test('approval_timeout_capped with unknown reason collapses to "unknown" dim', () => {
-    // Keeps cardinality bounded when agent-side code adds a new reason
-    // value the dashboard doesn't know about yet.
     const result = classifyApprovalEvent({
       milestone: 'approval_timeout_capped',
       eventTimestampIso: CREATED_AT,
@@ -249,9 +235,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   });
 
   test('approval_granted missing created_at → skip, not emit value=0', () => {
-    // Critical: a silently-emitted latency=0 would poison the p50/p90
-    // percentile widgets. Chunk 8 silent-failure adversarial finding
-    // B1 / H2 / M3 require explicit skip-and-log on schema mismatch.
     const result = classifyApprovalEvent({
       milestone: 'approval_granted',
       eventTimestampIso: DECIDED_AT,
@@ -274,8 +257,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   });
 
   test('approval_granted with negative latency (clock skew) → skip', () => {
-    // decided_at BEFORE created_at is a clock-skew / replay bug; emit-0
-    // would be wrong. Skip and log instead.
     const result = classifyApprovalEvent({
       milestone: 'approval_granted',
       eventTimestampIso: CREATED_AT,
@@ -301,9 +282,7 @@ describe('approval-metrics: classifyApprovalEvent', () => {
     const latency = result.specs.find((s) => s.name === 'ApprovalDecisionLatencyMs');
     expect(latency?.value).toBe(5000);
     expect(latency?.dimensions).toEqual({ outcome: 'timed_out' });
-    // The breakdown twice: per rule, and without dimensions for the dashboard's
-    // p50/p90/p99 over all rules. CloudWatch does not aggregate a custom metric
-    // across dimensions, so the roll-up has to be published as its own metric.
+    // CloudWatch does not aggregate a custom metric across dimensions: the roll-up over all rules is its own metric.
     const breakdown = result.specs.filter((s) => s.name === 'TimedOutEffectiveTimeout');
     expect(breakdown.map((s) => s.dimensions)).toEqual([{ rule_id: 'force_push_any' }, {}]);
     expect(breakdown.map((s) => s.value)).toEqual([30, 30]);
@@ -341,8 +320,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   });
 
   test('approval_timed_out missing effective_timeout_s → latency emits, breakdown skips', () => {
-    // Partial-superset handling: one metric branch's input is
-    // present, the other isn't. Emit what we can, skip what we can't.
     const result = classifyApprovalEvent({
       milestone: 'approval_timed_out',
       eventTimestampIso: DECIDED_AT,
@@ -376,8 +353,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   });
 
   test('approval_timed_out with effective_timeout_s=0 is valid (emits 0)', () => {
-    // 0 is a legitimate effective timeout (degenerate rule annotation
-    // clipping to 0). Number.isFinite check must not reject it.
     const result = classifyApprovalEvent({
       milestone: 'approval_timed_out',
       eventTimestampIso: DECIDED_AT,
@@ -393,11 +368,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   });
 
   test('unknown milestone → empty result (classification miss)', () => {
-    // Handler upstream filters to APPROVAL_METRIC_MILESTONES, but
-    // the classifier must still cope with an unexpected milestone
-    // without throwing. ``approval_late_win`` is not in the
-    // allowlist (future work per full-branch review) so it reaches
-    // the default branch even if handed to the classifier directly.
     const result = classifyApprovalEvent({
       milestone: 'approval_late_win',
       eventTimestampIso: DECIDED_AT,
@@ -406,8 +376,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
     expect(result.specs).toEqual([]);
     expect(result.skipped).toEqual([]);
   });
-
-  // --- Chunk 10: safety-critical milestones added after full-branch review
 
   test('approval_cap_exceeded → ApprovalCapExceededCount (no dims)', () => {
     const result = classifyApprovalEvent({
@@ -433,9 +401,6 @@ describe('approval-metrics: classifyApprovalEvent', () => {
   });
 
   test('approval_stranded → ApprovalStrandedCount (no dims)', () => {
-    // Reconciler-emitted: an AWAITING_APPROVAL task was evicted
-    // before the user decided. Critical dashboard signal that was
-    // invisible pre-Chunk-10 (B2 full-branch finding).
     const result = classifyApprovalEvent({
       milestone: 'approval_stranded',
       eventTimestampIso: CREATED_AT,

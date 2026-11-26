@@ -17,29 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Scheduled handler: find and fail stranded tasks.
- *
- * A stranded task is one whose admission write landed in TaskTable but
- * whose pipeline never started — typically because the orchestrator
- * Lambda crashed between the TaskTable write and the InvokeAgentRuntime
- * call, or because the agent container crashed during startup before
- * writing its first heartbeat.
- *
- * RUNNING / FINALIZING tasks are handled separately by `pollTaskStatus`
- * in `orchestrator.ts` via the `agent_heartbeat_at` timeout path — this
- * reconciler targets `SUBMITTED`, `HYDRATING`, and `AWAITING_APPROVAL`.
- *
- * AWAITING_APPROVAL reconciliation (§13.6):
- *   If the agent container evicts mid-approval, neither the poll loop
- *   nor the resume transaction ever fires; the task sits in
- *   AWAITING_APPROVAL indefinitely while its approval row's TTL
- *   eventually reaps the row. This reconciler sweeps any
- *   AWAITING_APPROVAL task whose age exceeds the stranded timeout and
- *   transitions it to FAILED with a specific reason so the user sees
- *   a clear failure rather than a silent hang.
- */
-
 import {
   DynamoDBClient,
   QueryCommand,
@@ -55,25 +32,12 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
 const CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME!;
 
-/** Stranded-task timeout. The orchestrator Lambda is async-invoked and
- *  the agent runtime has a cold-start path; 1200 s covers Lambda retries
- *  + AgentCore container warm-up without false positives. */
 const STRANDED_TIMEOUT_SECONDS = Number(
   process.env.STRANDED_TIMEOUT_SECONDS ?? '1200',
 );
 
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 
-/**
- * Separate (longer) timeout for AWAITING_APPROVAL tasks — approvals
- * legitimately sit for an hour (the §7.3 ceiling for per-task approval
- * timeout). A task's approval row carries its own per-row TTL; this
- * sweep is the backstop for the case where the row gets reaped by DDB
- * TTL but the TaskTable row never gets unstuck.
- *
- * Default: 7200s (2 hours) — double the §7.3 1-hour ceiling + an hour
- * grace so this reconciler never races the happy-path timer.
- */
 const APPROVAL_STRANDED_TIMEOUT_SECONDS = Number(
   process.env.APPROVAL_STRANDED_TIMEOUT_SECONDS ?? '7200',
 );
@@ -86,13 +50,6 @@ interface StrandedCandidate {
   readonly age_seconds: number;
 }
 
-/**
- * Query TaskTable by (status, created_at) via the StatusIndex GSI and
- * return rows older than the stranded timeout.
- *
- * One query per status (SUBMITTED, HYDRATING) using a sort-key condition
- * `created_at < :cutoff`.
- */
 async function findStrandedCandidates(
   status: 'SUBMITTED' | 'HYDRATING' | 'AWAITING_APPROVAL',
   now: Date,
@@ -124,15 +81,6 @@ async function findStrandedCandidates(
       const createdAt = item.created_at?.S;
       if (!taskId || !userId || !createdAt) continue;
 
-      // Age by time-in-CURRENT-status, not creation time (#441). A task
-      // that waited in the admission queue longer than the stranded
-      // timeout and was then picked up (QUEUED -> SUBMITTED) has an old
-      // created_at but a fresh status entry — failing it here would kill
-      // it before its pipeline attaches. status_created_at is
-      // `<STATUS>#<iso>`; created_at <= status-entry time always, so the
-      // GSI cutoff on created_at remains a correct superset pre-filter.
-      // Records missing/with a malformed status_created_at fall back to
-      // created_at (pre-#441 behavior).
       const statusEnteredAt = item.status_created_at?.S?.split('#')[1];
       const ageAnchor = statusEnteredAt && !Number.isNaN(Date.parse(statusEnteredAt))
         ? statusEnteredAt
@@ -156,11 +104,6 @@ async function findStrandedCandidates(
   return matches;
 }
 
-/**
- * Transition a stranded task to FAILED, emit a task_stranded event, and
- * release its concurrency slot. Best-effort and idempotent — a concurrent
- * legitimate status transition wins (conditional check fails cleanly).
- */
 async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
   const now = new Date().toISOString();
   const errorMessage = task.status === 'AWAITING_APPROVAL'
@@ -172,10 +115,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
       + 'This usually means the orchestrator Lambda crashed before invoking '
       + 'the runtime, or the agent container crashed during startup.';
 
-  // 1. Conditional status transition — only if still in the stranded state.
-  //    The orchestrator that stamps the retention ttl at finalize may be gone
-  //    or may never have started, so it is stamped here; a finalize that still
-  //    comes overwrites it with its own.
   const ttl = Math.floor(Date.now() / 1000) + TASK_RETENTION_DAYS * 24 * 3600;
   try {
     await ddb.send(new UpdateItemCommand({
@@ -197,8 +136,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
     }));
   } catch (err: unknown) {
     if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
-      // The task advanced out of SUBMITTED/HYDRATING while we were looking
-      // at it — legit, no action needed.
       logger.info('Task advanced before transition — skipping', {
         task_id: task.task_id,
         reason: 'advanced_during_reconcile',
@@ -208,8 +145,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
     throw err;
   }
 
-  // 2. Emit task_stranded + task_failed events. Best-effort — loss of an
-  //    event is acceptable; the task record is the source of truth.
   try {
     await ddb.send(new PutItemCommand({
       TableName: EVENTS_TABLE,
@@ -254,15 +189,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
     });
   }
 
-  // Chunk 10 (full-branch review B2): when the stranded task was
-  // AWAITING_APPROVAL, also emit an ``agent_milestone`` with
-  // ``milestone: "approval_stranded"`` so the ApprovalMetricsPublisher
-  // Lambda picks it up (the publisher's event-source filter is keyed
-  // on ``event_type: agent_milestone`` — ``task_stranded`` events
-  // never reach it). Without this branch, a 100 %-eviction scenario
-  // looks identical to "no approval traffic" on the dashboard —
-  // invisible failure mode. Design §11.1 labels ``approval_stranded``
-  // as Reconciler-sourced, this wiring fulfills that.
   if (task.status === 'AWAITING_APPROVAL') {
     try {
       await ddb.send(new PutItemCommand({
@@ -290,8 +216,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
     }
   }
 
-  // 3. Release the concurrency slot. Best-effort; drift is later corrected
-  //    by the concurrency reconciler.
   try {
     await ddb.send(new UpdateItemCommand({
       TableName: CONCURRENCY_TABLE,
@@ -313,8 +237,6 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
         error: decrErr instanceof Error ? decrErr.message : String(decrErr),
       });
     }
-    // ConditionalCheckFailedException means the counter is already 0 —
-    // drift the concurrency reconciler will eventually catch.
   }
 
   return true;
@@ -373,29 +295,6 @@ export async function handler(): Promise<void> {
     }
   }
 
-  // Severity escalation for the final log line.
-  //
-  // Per-task failures upstream are caught and swallowed (logged at WARN)
-  // so one flaky DDB call doesn't abort the entire reconcile window. But
-  // a systemic failure — IAM outage, table-level throttling, schema
-  // corruption — can silently strand 100% of candidates while each
-  // individual WARN line looks ignorable. We classify the terminal log
-  // three ways so CloudWatch Log Insights / metric filters can alarm on
-  // the dedicated `error_id` strings:
-  //
-  //   1. totalStranded > 0 AND totalFailed == 0 AND totalErrors > 0
-  //      → SYSTEMIC failure. Every candidate hit an exception. Log ERROR
-  //        with error_id='RECONCILER_TOTAL_FAILURE' (alarm-worthy).
-  //   2. totalErrors > 0 AND totalFailed > 0
-  //      → PARTIAL failure. Some tasks transitioned, some didn't. Log
-  //        WARN with error_id='RECONCILER_PARTIAL_FAILURE' (dashboard
-  //        signal, not an alarm — expected under occasional DDB flakes).
-  //   3. Otherwise (no stranded, or all-success with zero errors)
-  //      → SUCCESS. Log INFO as before.
-  //
-  // We do NOT throw — the EventBridge schedule invocation should still
-  // complete "normally" (no retry storm against an already-degraded
-  // DDB). The log-level escalation IS the alarm signal.
   const finalPayload = {
     stranded: totalStranded,
     failed: totalFailed,

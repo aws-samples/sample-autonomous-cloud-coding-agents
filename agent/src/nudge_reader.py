@@ -3,29 +3,14 @@
 
 """Read pending user "nudges" from the TaskNudgesTable between agent turns.
 
-Phase 2 Nudge — short authoritative steering messages written by the REST API
-and injected as XML-tagged user messages into the agent's next turn.
-
-Design contract
----------------
-Table shape (owned by the REST API, not this module):
-  - PK ``task_id`` (STRING)
-  - SK ``nudge_id`` (STRING, ULID — lexicographic == chronological)
-  - ``message`` (STRING)
-  - ``created_at`` (STRING, ISO-8601)
-  - ``consumed`` (BOOL)
-  - ``consumed_at`` (STRING, optional, set when consumed)
-  - ``user_id`` (STRING)
-  - ``ttl`` (NUMBER, optional)
+Nudges are short steering messages written by the REST API and injected as
+XML-tagged user messages into the agent's next turn.
 
 Table name read from env var ``NUDGES_TABLE_NAME``.  If unset the reader
-silently returns ``[]`` and logs a single WARN (fail-open).
+returns ``[]`` and logs a single WARN.
 
-Resilience
-----------
-All DDB exceptions (network, throttling, validation) are caught and logged at
-WARN.  Callers receive ``[]`` or ``False`` — a nudge-table outage MUST NOT
-break the agent turn loop.
+All DDB exceptions are caught and logged at WARN.  Callers receive ``[]`` or
+``False``.
 """
 
 from __future__ import annotations
@@ -39,31 +24,18 @@ from task_state import _extract_error_code
 
 
 class PendingNudge(TypedDict):
-    """Shape of a single pending nudge returned by ``read_pending``."""
-
     nudge_id: str
     message: str
     created_at: str
 
 
-# Max items returned from a paginated ``read_pending`` scan.  The table's PK
-# is per-task, rate-limited to 10/min and TTL-retained for 30 days, so a
-# healthy task should not exceed this.  Truncating is preferable to
-# unbounded memory growth; a WARN log surfaces the condition.
 _MAX_PENDING_ITEMS = 100
 
-# Module-level cache for the boto3 Table resource — initialised lazily on
-# first read, reused across calls for the lifetime of the process.
 _TABLE_CACHE: Any = None
 _TABLE_NAME_WARNED = False
 
 
 def _get_table() -> Any | None:
-    """Return a cached boto3 DynamoDB Table resource, or None if unavailable.
-
-    Reads ``NUDGES_TABLE_NAME`` from the environment.  When unset, logs a
-    single WARN and returns None on every subsequent call.
-    """
     global _TABLE_CACHE, _TABLE_NAME_WARNED
 
     if _TABLE_CACHE is not None:
@@ -90,7 +62,6 @@ def _get_table() -> Any | None:
 
 
 def _reset_cache_for_tests() -> None:
-    """Test-only helper to clear module-level caches between test cases."""
     global _TABLE_CACHE, _TABLE_NAME_WARNED
     _TABLE_CACHE = None
     _TABLE_NAME_WARNED = False
@@ -102,12 +73,7 @@ def read_pending(task_id: str, table: Any | None = None) -> list[PendingNudge]:
     ULIDs sort chronologically, so ASC ordering == oldest-first.  Returns
     ``[]`` on any error or if the nudges table is not configured.
 
-    Paginates on ``LastEvaluatedKey`` — DDB Query returns at most 1 MB per
-    page, and ``FilterExpression`` is applied post-page, so a task with
-    many consumed rows could hide pending nudges behind the first page.
     Caps total items at ``_MAX_PENDING_ITEMS`` and logs a WARN if hit.
-
-    Each returned dict contains ``nudge_id``, ``message``, ``created_at``.
     """
     tbl = table if table is not None else _get_table()
     if tbl is None:
@@ -119,6 +85,8 @@ def read_pending(task_id: str, table: Any | None = None) -> list[PendingNudge]:
         items: list[dict[str, Any]] = []
         last_key: dict[str, Any] | None = None
         truncated = False
+        # DynamoDB applies ``FilterExpression`` after it reads a page (at most
+        # 1 MB), so pending nudges can sit behind a page of consumed rows.
         while True:
             kwargs: dict[str, Any] = {
                 "KeyConditionExpression": Key("task_id").eq(task_id),
@@ -148,9 +116,6 @@ def read_pending(task_id: str, table: Any | None = None) -> list[PendingNudge]:
             f"task {task_id}; older pending nudges were dropped",
         )
 
-    # Query with HASH key already returns items sorted by SK ASC, but filter
-    # expression is applied post-sort; be explicit so callers can rely on
-    # ordering regardless of how the table is queried.
     items.sort(key=lambda it: it.get("nudge_id", ""))
 
     return [
@@ -200,27 +165,16 @@ def mark_consumed(task_id: str, nudge_id: str, table: Any | None = None) -> bool
 
 
 def _xml_escape(text: str) -> str:
-    """Escape XML predefined entities for safe inclusion in text/attributes.
-
-    Prevents a user nudge from forging a closing ``</user_nudge>`` tag and
-    smuggling content out of the authoritative block.
-
-    We escape ``& < > "`` — all five XML entities minus ``'``.  Apostrophe
-    escaping (``&apos;``) is only needed inside single-quoted attribute
-    values, and we always emit double-quoted attributes; pasted user text
-    containing ``don't`` etc. stays readable in logs.
-    """
     return (
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )
 
 
 def format_as_user_message(nudges: list[PendingNudge]) -> str:
-    """Render a list of nudge dicts as authoritative ``<user_nudge>`` XML blocks.
+    """Render a list of nudge dicts as ``<user_nudge>`` XML blocks.
 
-    Each block is on its own line; multiple blocks are joined with a single
-    newline separator.  Attribute values and message body are XML-escaped so
-    a malicious nudge cannot escape the envelope.
+    Multiple blocks are joined with a single newline separator.  Attribute
+    values and message body are XML-escaped.
     """
     if not nudges:
         return ""

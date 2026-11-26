@@ -41,8 +41,6 @@ export interface MicrovmStartClaim {
   readonly closed: boolean;
 }
 
-// A local retry limit, NOT a claim about AWS's undocumented token retention.
-// After this window an unknown outcome requires investigation, never a fresh VM.
 export const MICROVM_START_REPLAY_WINDOW_MS = 120_000;
 
 const ddb = makeDocClient();
@@ -59,7 +57,6 @@ function recordedHandle(record: StartRecord): MicrovmHandle | undefined {
   const handle = record.microvm_start?.handle;
   if (handle?.strategyType === 'lambda-microvm' && handle.microvmId && handle.endpoint
     && handle.sessionId === handle.microvmId) return handle;
-  // Read handles written before start receipts existed, without starting again.
   const metadata = record.compute_metadata;
   if (record.compute_type === 'lambda-microvm' && record.session_id
     && metadata?.microvmId === record.session_id && metadata.endpoint) {
@@ -96,7 +93,6 @@ export async function claimMicrovmStart(
   userId: string,
   requestHash: string,
 ): Promise<MicrovmStartClaim> {
-  // The task ID is the RunMicrovm client token: one logical start per task.
   const clientToken = taskId;
   for (let attempt = 0; attempt < 2; attempt++) {
     const record = await readStartRecord(taskId, userId);
@@ -150,7 +146,6 @@ export async function claimMicrovmStart(
       return { clientToken, closed: false };
     } catch (err) {
       if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
-      // Re-read the winner, or observe cancellation, before any side effect.
     }
   }
   throw new Error('MICROVM_START_STATE_INVALID: start receipt changed while being claimed');

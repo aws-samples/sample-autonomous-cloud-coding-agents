@@ -63,7 +63,6 @@ describe('selectBaseBranch', () => {
   });
 
   test('predecessors missing a branch_name are ignored', () => {
-    // One real predecessor branch + one empty → degrades to linear on the real one.
     const sel = selectBaseBranch({ predecessors: [pred('A', 'feat-a'), pred('B', '')] });
     expect(sel.shape).toBe('linear');
     expect(sel.base_branch).toBe('feat-a');
@@ -75,7 +74,6 @@ describe('selectBaseBranch', () => {
   });
 
   test('two predecessors that share a branch collapse to a single (linear) merge', () => {
-    // After dedup, only one distinct branch → treated as linear, not diamond.
     const sel = selectBaseBranch({ predecessors: [pred('A', 'same'), pred('B', 'same')] });
     expect(sel.shape).toBe('linear');
     expect(sel.base_branch).toBe('same');

@@ -1,20 +1,6 @@
-// Jest globalSetup for the emulator-backed tests: runs once, before any test file is loaded, and
-// stops the run unless two things hold.
-//
-// 1. loopback-only.cjs is preloaded and refuses a connection that leaves this machine. The
-//    environment only says where AWS SDK calls go; that preload is what keeps everything else
-//    (and an SDK client a profile setting has pointed back at AWS) on this machine.
-// 2. The endpoint really is the AWS Emulator this environment belongs to. Only an emulator answers
-//    `ok` on /__admin/health, and only the one that wrote the certificate named by
-//    NODE_EXTRA_CA_CERTS passes the TLS handshake. A loopback address that is some other local
-//    service fails here instead of receiving a suite's CreateTable calls.
-//
-// Deliberately free of dependencies: this file belongs to no package.
-
 const https = require('node:https');
 const net = require('node:net');
 
-/** True when the preload is in force. Sends nothing either way: with the preload, connect throws before the name is resolved. */
 function loopbackOnly() {
   if (net.Socket.prototype.connect.name !== 'loopbackOnlyConnect') return false;
   const probe = new net.Socket();
@@ -47,7 +33,6 @@ module.exports = function requireEmulator() {
         else reject(refuse(`its health route answered ${response.statusCode}`));
       });
     });
-    // An endpoint that accepts and never answers fails in seconds, not at a test's timeout.
     request.on('timeout', () => request.destroy(new Error('no answer within 3 s')));
     request.on('error', (error) => reject(refuse(error.message)));
   });

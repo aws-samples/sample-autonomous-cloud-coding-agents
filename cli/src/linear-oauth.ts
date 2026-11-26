@@ -20,16 +20,12 @@
 import * as crypto from 'crypto';
 import { CliError } from './errors';
 
-/**
- * Linear OAuth endpoint URLs. Fixed across all workspaces.
- */
 export const LINEAR_AUTHORIZE_ENDPOINT = 'https://linear.app/oauth/authorize';
 export const LINEAR_TOKEN_ENDPOINT = 'https://api.linear.app/oauth/token';
 
 /**
- * Scopes for the agent install. `actor=app` is incompatible with `admin`,
- * so we deliberately exclude it. `app:assignable` + `app:mentionable` are
- * required for an Agent app install (Phase 2.0b spike, 2026-05-18).
+ * Scopes for the agent install. Linear rejects `admin` together with `actor=app`,
+ * and an Agent app install requires `app:assignable` and `app:mentionable`.
  */
 export const LINEAR_OAUTH_SCOPES = [
   'read',
@@ -40,9 +36,6 @@ export const LINEAR_OAUTH_SCOPES = [
 
 /**
  * Linear OAuth token response shape (RFC 6749 §5.1 + Linear's extensions).
- * Verified via direct curl 2026-05-19 — Linear returns `scope` as a
- * space-separated string for apps created after Dec 2023, with
- * `lin_oauth_…` access tokens and `lin_refresh_…` refresh tokens.
  */
 export interface LinearTokenResponse {
   readonly access_token: string;
@@ -55,15 +48,6 @@ export interface LinearTokenResponse {
 /**
  * Persisted form of a Linear OAuth credential. Stored as the JSON
  * `SecretString` of `bgagent-linear-oauth-<slug>` in Secrets Manager.
- *
- * `expires_at` is computed at write time as ISO-8601, so consumers can
- * compare against `new Date()` without depending on Linear's
- * `expires_in` (relative to issuance) being correct on the wall clock.
- *
- * `client_id` and `client_secret` are co-located so Lambda-side refresh
- * can hit Linear's `/oauth/token` without needing additional environment
- * variables — one secret per workspace contains everything the runtime
- * needs to renew the access token autonomously.
  */
 export interface StoredLinearOauthToken {
   readonly access_token: string;
@@ -72,11 +56,9 @@ export interface StoredLinearOauthToken {
   readonly expires_at: string;
   /** Space-separated scope string Linear returned (e.g. "read write app:..."). */
   readonly scope: string;
-  /** Linear OAuth app Client ID — needed for refresh. */
   readonly client_id: string;
-  /** Linear OAuth app Client Secret — needed for refresh. */
   readonly client_secret: string;
-  /** Linear organization UUID; webhook payloads carry this. */
+  /** Linear organization UUID. */
   readonly workspace_id: string;
   /** Linear urlKey; matches the suffix on the secret name. */
   readonly workspace_slug: string;
@@ -89,11 +71,6 @@ export interface StoredLinearOauthToken {
   /**
    * Per-workspace Linear webhook signing secret (`lin_wh_…`).
    *
-   * Linear generates a fresh signing secret per webhook subscription, and
-   * webhook subscriptions are workspace-scoped — so a single stack-wide
-   * signing secret can't verify events from multiple workspaces. The
-   * webhook receiver looks this up by orgId at verify time.
-   *
    * Optional for back-compat: tokens written before the per-workspace
    * signing flow won't have it, and the receiver falls back to the
    * stack-wide `LINEAR_WEBHOOK_SECRET_ARN` for those installs.
@@ -103,25 +80,17 @@ export interface StoredLinearOauthToken {
 
 /**
  * Common prefix for all per-workspace Linear OAuth secrets. The full
- * secret name is `${LINEAR_OAUTH_SECRET_PREFIX}<slug>`. Use this when
- * scanning Secrets Manager for every workspace install (e.g. the CLI's
- * `list-projects` command queries every workspace it can find).
+ * secret name is `${LINEAR_OAUTH_SECRET_PREFIX}<slug>`.
  */
 export const LINEAR_OAUTH_SECRET_PREFIX = 'bgagent-linear-oauth-';
 
-/**
- * Build the secret name for a given Linear workspace slug. Matches the
- * naming convention encoded in the runtime's IAM policy resource pattern,
- * so changes here MUST be matched by the IAM resource pattern in CDK.
- */
 export function linearOauthSecretName(workspaceSlug: string): string {
   return `${LINEAR_OAUTH_SECRET_PREFIX}${workspaceSlug}`;
 }
 
 /**
  * PKCE pair: a random `code_verifier` and the SHA-256 base64url digest
- * (`code_challenge`). Linear supports both `S256` and `plain`; we always
- * use `S256` because the wire-format cost is identical and stronger.
+ * (`code_challenge`).
  *
  * Returned `code_verifier` MUST be sent on the token-exchange POST to
  * complete PKCE. Without it, Linear rejects with `invalid_grant`.
@@ -139,13 +108,9 @@ export function generatePkce(): { codeVerifier: string; codeChallenge: string } 
  * Build the Linear authorization URL the CLI opens in the browser.
  * `actorApp: true` adds `actor=app` (the Agent install variant).
  *
- * ``forceConsent`` adds ``prompt=consent``, which Linear documents as showing
- * the consent screen "every time, even if all scopes were previously granted".
- * That is what makes RE-authorization possible: without it, an app already
- * installed in the workspace short-circuits with "already installed" and never
- * returns an authorization code — so the one command meant to recover a revoked
- * authorization could not recover it (live-caught 2026-07-25, where a workspace's
- * grant was revoked while the app install stayed active).
+ * `forceConsent` adds `prompt=consent`: Linear then shows the consent screen even when
+ * every scope was already granted. Without it an app already installed in the workspace
+ * returns no authorization code.
  */
 export function buildAuthorizationUrl(opts: {
   clientId: string;
@@ -159,9 +124,8 @@ export function buildAuthorizationUrl(opts: {
     client_id: opts.clientId,
     redirect_uri: opts.redirectUri,
     response_type: 'code',
-    // RFC 6749 §3.3: scope is a space-separated list. Linear rejects
-    // comma-separated scopes with "Invalid redirect_uri" — the error
-    // is misleading; verified by 2.0b smoke test 2026-05-19.
+    // RFC 6749 §3.3: scope is space-separated. Linear answers comma-separated
+    // scopes with a misleading "Invalid redirect_uri".
     scope: LINEAR_OAUTH_SCOPES.join(' '),
     state: opts.state,
     code_challenge: opts.codeChallenge,
@@ -178,12 +142,9 @@ export function buildAuthorizationUrl(opts: {
 
 /**
  * Exchange an authorization `code` for an access + refresh token by
- * POSTing to Linear's `/oauth/token` endpoint. Mirrors the curl shape
- * verified by the 2026-05-19 manual smoke test.
+ * POSTing to Linear's `/oauth/token` endpoint.
  *
- * Throws CliError with Linear's error_description on failure (the most
- * common cause of failure is `invalid_grant` from a reused/expired
- * code or `redirect_uri_mismatch`).
+ * Throws CliError with Linear's error_description on failure.
  */
 export async function exchangeAuthorizationCode(args: {
   code: string;
@@ -211,8 +172,7 @@ export async function exchangeAuthorizationCode(args: {
 }
 
 /**
- * Refresh an expiring access token. Linear's refresh tokens are
- * long-lived (no documented TTL) but rotate every refresh call —
+ * Refresh an expiring access token. Linear rotates the refresh token on every call:
  * always persist `refresh_token` from the response back to storage.
  */
 export async function refreshAccessToken(args: {
@@ -265,18 +225,8 @@ async function parseTokenResponse(
 }
 
 /**
- * Describe an off-contract token response WITHOUT echoing it.
- *
- * This message used to interpolate `JSON.stringify(body).slice(0, 200)`, and the first
- * 200 characters of a token response ARE the token. `isLinearTokenResponse` requires
- * `expires_in` and `scope`, so a 200 carrying a perfectly good `access_token` alongside,
- * say, a string `expires_in` failed the guard and printed the credential to the
- * operator's terminal — and into any CI log capturing stdout, where it outlives the
- * session that leaked it.
- *
- * Field names and types are what diagnoses a contract change; the values are exactly
- * what must not be shown. Reporting which required field is wrong is also more useful
- * than a truncated blob, so this is not a redaction that costs debuggability.
+ * Describe an off-contract token response by field names and types. Values are never
+ * included: one of them is the credential.
  */
 export function describeTokenShape(value: unknown): string {
   if (typeof value !== 'object' || value === null) {
@@ -291,7 +241,6 @@ export function describeTokenShape(value: unknown): string {
   ] as ReadonlyArray<readonly [string, string]>)
     .filter(([key, want]) => typeof obj[key] !== want)
     .map(([key, want]) => `${key} expected ${want}, got ${obj[key] === undefined ? 'absent' : typeof obj[key]}`);
-  // Key NAMES only. Never a value — one of them is the credential.
   return `${problems.join('; ')} (keys present: ${Object.keys(obj).sort().join(', ')})`;
 }
 
@@ -308,35 +257,19 @@ function isLinearTokenResponse(value: unknown): value is LinearTokenResponse {
 
 /**
  * Compute the `expires_at` ISO timestamp from `expires_in` (seconds).
- * Centralised so the CLI's initial-install path and the Lambda-side
- * refresh path agree on the timestamp shape.
  */
 export function computeExpiresAt(expiresInSeconds: number, now: Date = new Date()): string {
   return new Date(now.getTime() + expiresInSeconds * 1000).toISOString();
 }
 
 /**
- * Read this workspace's EXISTING `webhook_signing_secret` before `setup`
- * overwrites the OAuth bundle — FAIL CLOSED (#612 review B1).
+ * Read a workspace's stored `webhook_signing_secret` from its OAuth bundle.
+ * `fetchSecretString` fetches the per-workspace OAuth `SecretString`; `isNotFound`
+ * classifies its errors.
  *
- * `fetchSecretString` fetches the prior per-workspace OAuth `SecretString`
- * (typically a `SecretsManagerClient.send(GetSecretValueCommand)` wrapper). The
- * value decides whether `setup` keeps the stored secret or has to be given one
- * — so a wrong `undefined` here makes a workspace with a working secret look
- * like one that stores none. Therefore:
- *
- *   • secret missing (`ResourceNotFoundException`) → genuine first install,
- *     return undefined (nothing to preserve).
- *   • secret present with a valid `lin_wh_…` `webhook_signing_secret` → return it.
- *   • secret present but no/malformed secret → return undefined (nothing valid
- *     to preserve; the caller asks for one).
- *   • ANY OTHER error (AccessDenied, KMSAccessDenied, Throttling, network, or a
- *     corrupt-JSON bundle) → THROW. Swallowing it would leave undefined, and a
- *     bundle that could not be read would pass for one without a secret.
- *
- * `isNotFound` classifies the fetch error; callers pass an
- * `name === 'ResourceNotFoundException'` check. On a throw the caller re-raises
- * a CliError with an IAM/KMS hint (mirroring `readStackWideWebhookSecret`).
+ * Returns undefined when the secret does not exist, is empty, or holds no `lin_wh_…`
+ * `webhook_signing_secret`. Throws on any other fetch error and on a bundle that is
+ * not valid JSON.
  */
 export async function readExistingWebhookSecret(
   fetchSecretString: () => Promise<string | undefined>,
@@ -346,35 +279,22 @@ export async function readExistingWebhookSecret(
   try {
     raw = await fetchSecretString();
   } catch (err) {
-    if (isNotFound(err)) return undefined; // genuine first install
-    throw err; // fail closed — caller wraps with an actionable CliError
+    if (isNotFound(err)) return undefined;
+    throw err;
   }
   if (!raw) return undefined;
-  // A corrupt-but-present bundle must surface (JSON.parse throws → propagates),
-  // NOT silently become "nothing to preserve".
   const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
   return bundle.webhook_signing_secret?.startsWith('lin_wh_')
     ? bundle.webhook_signing_secret
     : undefined;
 }
 
-/** The four grant fields of a stored bundle — what a fresh token supplies and a
- *  preserved one substitutes for. */
 export type StoredGrantFields =
   Pick<StoredLinearOauthToken, 'access_token' | 'refresh_token' | 'expires_at' | 'scope'>;
 
 /**
  * Decide the grant fields to persist: a freshly issued token if there is one, else the
  * grant already stored, else empty.
- *
- * Extracted from `bgagent linear setup` so the PRECEDENCE is testable. Inline, it was
- * four `??` chains inside a long command handler, and getting one of them backwards is
- * silent and destructive: writing empty strings over a live grant is what turns the
- * documented Secrets-Manager fallback into a fiction, and nothing fails until the vault
- * is unreachable and there is no longer anything to fall back to.
- *
- * A vault onboarding issues no token of its own, which is why `preserved` exists at all
- * — see {@link readExistingOauthTokens}.
  */
 export function resolveStoredGrantFields(
   issued: LinearTokenResponse | undefined,
@@ -384,27 +304,15 @@ export function resolveStoredGrantFields(
   return {
     access_token: issued?.access_token ?? preserved?.access_token ?? '',
     refresh_token: issued?.refresh_token ?? preserved?.refresh_token ?? '',
-    // Recomputed from `expires_in` when freshly issued, because that value is relative
-    // to issuance; a preserved bundle already holds an absolute timestamp.
     expires_at: issued ? computeExpiresAt(issued.expires_in, now) : preserved?.expires_at ?? '',
     scope: issued?.scope ?? preserved?.scope ?? '',
   };
 }
 
 /**
- * The OAuth token fields of an existing bundle, or undefined when there is no
- * usable one.
- *
- * Used when a workspace MOVES onto the Identity vault. A fresh vault onboarding
- * has no Linear token to store, so the bundle is written without one — but a
- * workspace that already had a working Secrets-Manager token would have it
- * overwritten with empty strings, destroying the only credential that still works
- * if the vault later becomes unreachable. Carrying it forward keeps that fallback
- * real instead of vestigial.
- *
- * Same fail-closed contract as {@link readExistingWebhookSecret}: only a genuine
- * "no such secret" yields undefined; anything else throws so the caller can refuse
- * to proceed rather than silently discard a live credential.
+ * The OAuth token fields of an existing bundle, or undefined when the secret does not
+ * exist, is empty, or holds no refresh token. Throws on any other fetch error and on a
+ * bundle that is not valid JSON.
  */
 export async function readExistingOauthTokens(
   fetchSecretString: () => Promise<string | undefined>,
@@ -414,13 +322,11 @@ export async function readExistingOauthTokens(
   try {
     raw = await fetchSecretString();
   } catch (err) {
-    if (isNotFound(err)) return undefined; // genuine first install
+    if (isNotFound(err)) return undefined;
     throw err;
   }
   if (!raw) return undefined;
   const bundle = JSON.parse(raw) as Partial<StoredLinearOauthToken>;
-  // A refresh token is what makes the bundle usable on its own; without one there
-  // is nothing worth preserving.
   if (!bundle.refresh_token) return undefined;
   return {
     access_token: bundle.access_token ?? '',
@@ -431,21 +337,13 @@ export async function readExistingOauthTokens(
 }
 
 /**
- * Attempt a workspace's refresh and PERSIST the rotated token — the only way to
- * settle "is this expired token's grant still alive?" definitively.
+ * Refresh a workspace's token and write the rotated bundle through `writeSecret` in one
+ * step. Linear rotates the refresh token on every use, so the stored one is spent as
+ * soon as the refresh succeeds.
  *
- * Persistence is the whole safety property, not a convenience. Linear rotates the
- * refresh token on every use, so a caller that refreshes and discards the result
- * has silently consumed the workspace's only key: the stored token is now the
- * spent one, and the workspace is stranded exactly as if it had been revoked.
- * (That is not hypothetical — an ad-hoc probe did it to a healthy workspace on
- * 2026-07-25 and it had to be repaired by hand.) So this function refreshes and
- * writes in one step, and reports `error` rather than a verdict if the write
- * fails, because a rotation that happened but wasn't saved is the dangerous case
- * and must not be reported as health.
- *
- * `readSecret` / `writeSecret` are injected so this stays testable without
- * Secrets Manager and so the caller owns client construction.
+ * Returns `refreshed` when the rotated bundle was written; `rejected` when Linear
+ * answered `invalid_grant`, or the bundle lacks a refresh token or client credentials;
+ * `error` otherwise, including a rotation that succeeded but could not be written.
  */
 export async function verifyLinearRefreshAndPersist(args: {
   readSecret: () => Promise<string | undefined>;
@@ -462,8 +360,6 @@ export async function verifyLinearRefreshAndPersist(args: {
     return 'error';
   }
   if (!stored.refresh_token || !stored.client_id || !stored.client_secret) {
-    // Nothing to attempt: without these the grant cannot be renewed by anyone,
-    // which is a real dead end rather than an inconclusive probe.
     return 'rejected';
   }
 
@@ -476,9 +372,6 @@ export async function verifyLinearRefreshAndPersist(args: {
       ...(args.fetchImpl && { fetchImpl: args.fetchImpl }),
     });
   } catch (err) {
-    // Only Linear's own `invalid_grant` proves the grant is dead. A network
-    // blip, a 5xx, or a malformed body must NOT be reported as revoked — that
-    // would send an operator to re-authorize a working workspace.
     const message = err instanceof Error ? err.message : String(err);
     return message.includes('invalid_grant') ? 'rejected' : 'error';
   }
@@ -487,7 +380,6 @@ export async function verifyLinearRefreshAndPersist(args: {
   const next: StoredLinearOauthToken = {
     ...stored,
     access_token: refreshed.access_token,
-    // Persist the ROTATED refresh token; re-using the old one always fails.
     refresh_token: refreshed.refresh_token ?? stored.refresh_token,
     expires_at: computeExpiresAt(refreshed.expires_in, now),
     scope: refreshed.scope,
@@ -496,9 +388,6 @@ export async function verifyLinearRefreshAndPersist(args: {
   try {
     await args.writeSecret(JSON.stringify(next));
   } catch {
-    // The rotation HAPPENED but wasn't saved, so the stored token is now spent.
-    // Report `error`, never `refreshed`: the operator must see that this needs
-    // attention rather than a green tick over a workspace we just stranded.
     return 'error';
   }
   return 'refreshed';

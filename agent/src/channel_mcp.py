@@ -1,38 +1,12 @@
 """Channel-specific MCP configuration for the agent container.
 
-For inbound channel sources that have a hosted MCP we write (or merge into)
-``.mcp.json`` in the cloned repo ``cwd`` so the Claude Agent SDK — configured
-with ``setting_sources=["project"]`` — picks up the channel MCP at session
-start and exposes the server's tools.
+For inbound channel sources that have a hosted MCP, ``configure_channel_mcp``
+writes (or merges into) ``.mcp.json`` in the cloned repo ``cwd``, which the
+Claude Agent SDK loads with ``setting_sources=["project"]``. For all other
+channel sources it is a no-op.
 
-Currently wired channels:
-- ``jira``    → Atlassian Remote MCP entry — a NON-FUNCTIONAL placeholder. It
-  is written for forward-compatibility but cannot connect from a headless
-  agent (interactive OAuth 2.1 only); live outbound Jira comments go through
-  the REST shim in ``jira_reactions.py``. See ``JIRA_MCP_URL`` below + ADR-015.
-
-Linear is NOT written here: ABCA runs Linear 100% deterministically (ADR-016
-"Linear is fully deterministic"). There is no Linear MCP — issue text, recent
-comments, and attachments are pre-hydrated at the Lambda tier (the webhook
-processor + ``linear-attachments.ts`` / ``linear-feedback.fetchRecentComments``),
-and outbound reactions / state transitions go through direct GraphQL in
-``linear_reactions.py`` (which reads ``LINEAR_API_TOKEN`` set by config.py —
-independent of this module). The Linear MCP was removed after it proved
-non-functional against a single OAuth app (actor=user data reads error;
-actor=app can't re-consent an installed app).
-
-Beyond WRITING channel entries, this module also ENFORCES the Linear-no-MCP
-guarantee: {@link strip_linear_mcp_servers} removes any Linear MCP server a repo
-may have COMMITTED to its own ``.mcp.json`` before the SDK loads it (the prompt
-prohibition is not a security boundary — the SDK loads ``project`` settings and
-we export ``LINEAR_API_TOKEN``). The pipeline calls it after
-``configure_channel_mcp`` on every task with a repo.
-
-For all other channel sources ``configure_channel_mcp`` is a no-op: no MCP is
-written (though the scrub above still runs).
-
-See: cdk/src/handlers/{linear,jira}-webhook-processor.ts (inbound),
-runner.py (SDK invocation), ADR-016 (Linear determinism).
+``strip_linear_mcp_servers`` removes any Linear MCP server a repo committed to
+its own ``.mcp.json`` before the SDK loads it (ADR-016).
 """
 
 from __future__ import annotations
@@ -47,34 +21,17 @@ from shell import log
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# ─── Jira (Atlassian Remote MCP — NON-FUNCTIONAL PLACEHOLDER) ────────────────
-
-#: Atlassian Remote MCP endpoint — Streamable HTTP transport.
-#:
-#: IMPORTANT: this entry does NOT work from a headless agent and is retained
-#: only as a forward-looking placeholder. The hosted Atlassian MCP requires an
-#: interactive, browser-based OAuth 2.1 flow with dynamic client registration
-#: and will NOT accept the stored REST OAuth token as a Bearer header, so it
-#: fails to connect in the runtime (``claude mcp list`` → "Failed to connect").
-#:
-#: The LIVE outbound path is ``agent/src/jira_reactions.py``. It uses the
-#: signed Forge app proxy when configured and retains direct REST + OAuth only
-#: as a migration fallback. See ADR-015 and ``agent/src/prompt_builder.py``.
+#: The hosted Atlassian MCP requires an interactive, browser-based OAuth 2.1 flow
+#: with dynamic client registration and does not accept the stored REST OAuth
+#: token as a Bearer header. See ADR-015.
 JIRA_MCP_URL = "https://mcp.atlassian.com/v1/sse"
 
-#: Key name inside ``mcpServers``. Tools surface as ``mcp__jira-server__*``
-#: in the Agent SDK. If this changes the agent prompt's channel addendum
-#: must be updated in lockstep.
 JIRA_MCP_SERVER_KEY = "jira-server"
 
-#: Env var name the Jira MCP server entry reads via ``${JIRA_API_TOKEN}``
-#: placeholder expansion. Populated from the per-tenant OAuth secret by
-#: config.resolve_jira_oauth_token.
 JIRA_API_TOKEN_ENV = "JIRA_API_TOKEN"  # noqa: S105 — env var *name*, not a secret value
 
 
 def _jira_server_entry() -> dict[str, Any]:
-    """Build the `mcpServers` entry for Atlassian's Remote MCP."""
     return {
         "type": "http",
         "url": JIRA_MCP_URL,
@@ -84,12 +41,6 @@ def _jira_server_entry() -> dict[str, Any]:
     }
 
 
-# ─── Dispatch ────────────────────────────────────────────────────────────────
-
-#: Per-channel ``mcpServers`` entry builder. The channel_source values mirror
-#: ``ChannelSource`` in cdk/src/handlers/shared/types.ts. Sources that don't
-#: have a hosted MCP (api, webhook, slack) intentionally have no entry here —
-#: the gate in ``configure_channel_mcp`` short-circuits on missing keys.
 CHANNEL_MCP_BUILDERS: dict[str, tuple[str, Callable[[], dict[str, Any]]]] = {
     "jira": (JIRA_MCP_SERVER_KEY, _jira_server_entry),
 }
@@ -98,14 +49,10 @@ CHANNEL_MCP_BUILDERS: dict[str, tuple[str, Callable[[], dict[str, Any]]]] = {
 def read_existing_mcp_config(path: str) -> dict[str, Any]:
     """Return the parsed .mcp.json at ``path``, or an empty dict if absent/invalid.
 
-    Malformed JSON is logged and treated as absent — we prefer to overlay a
-    valid channel entry than to crash the agent because a user committed a
-    broken .mcp.json to their repo.
-
-    The file is decoded the way the Claude CLI decodes it, so that the scrub and
-    the merges see every server the CLI will load: a UTF-8 byte-order mark is
-    dropped, and a byte that is not UTF-8 (a file saved as Windows-1252) becomes
-    U+FFFD instead of raising.
+    Malformed JSON is logged and treated as absent. The file is decoded the way
+    the Claude CLI decodes it: a UTF-8 byte-order mark is dropped, and a byte
+    that is not UTF-8 (a file saved as Windows-1252) becomes U+FFFD instead of
+    raising.
     """
     if not os.path.isfile(path):
         return {}
@@ -120,28 +67,10 @@ def read_existing_mcp_config(path: str) -> dict[str, Any]:
     return {}
 
 
-#: Seconds allowed for each git call of ``_hide_edit_from_git``.
 _GIT_TIMEOUT_S = 15
 
 
 def _hide_edit_from_git(repo_dir: str) -> None:
-    """Make git ignore this session's edit of a ``.mcp.json`` the repository tracks.
-
-    What the two functions below write or remove is for this session only. The
-    post-hook safety net (``post_hooks.ensure_committed``) stages every changed
-    tracked file with ``git add -u`` and commits it, and the push that follows
-    puts the edit into the pull request: the team's Linear server removed, the
-    whole file deleted, or the Jira placeholder added. ``skip-worktree`` makes
-    git treat the file as unchanged, also when the scrub removed it.
-
-    An untracked file is left alone. ``git add -u`` never stages it, and an
-    index entry for it makes ``git stash``, ``git rebase`` and ``git merge``
-    fail for the agent (``registry.loader``, whose payload may hold secrets,
-    lists the file in the clone's exclude file instead).
-
-    Best-effort: a git failure is logged and the task goes on.
-    """
-
     def _git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", repo_dir, *args],
@@ -153,7 +82,7 @@ def _hide_edit_from_git(repo_dir: str) -> None:
 
     try:
         if _git("ls-files", "--error-unmatch", ".mcp.json").returncode != 0:
-            return  # not tracked: nothing the safety net could stage
+            return
         result = _git("update-index", "--skip-worktree", ".mcp.json")
         if result.returncode != 0:
             log(
@@ -185,14 +114,13 @@ def configure_channel_mcp(
       repo_dir: the cloned-repo working directory the SDK will use as ``cwd``.
       channel_source: inbound channel (``TaskConfig.channel_source``).
       channel_metadata: per-task channel metadata (``TaskConfig.channel_metadata``).
-        Currently unused by the wired channels (Jira's entry is static); retained
-        for call-site compatibility and future channel builders that need it.
+        Unused by the wired channels.
 
     Returns:
       True if a channel MCP entry was (re)written, False otherwise (channel
       unmapped, missing repo_dir, or write failure).
     """
-    _ = channel_metadata  # reserved for future channel builders (see docstring)
+    _ = channel_metadata
     builder_entry = CHANNEL_MCP_BUILDERS.get(channel_source)
     if builder_entry is None:
         return False
@@ -226,10 +154,6 @@ def configure_channel_mcp(
         f"{channel_source} MCP configured at {mcp_path} (server key: {server_key})",
     )
     if channel_source == "jira":
-        # The Jira MCP entry is a non-functional placeholder (see JIRA_MCP_URL
-        # docstring + ADR-015). Log it in-band so a "Failed to connect" line in
-        # the agent logs isn't mistaken for the cause of a missing comment —
-        # the live outbound path is the Forge/app-auth aware jira_reactions.py.
         log(
             "TASK",
             "jira MCP entry is a placeholder and is EXPECTED to fail to connect; "
@@ -239,30 +163,14 @@ def configure_channel_mcp(
     return True
 
 
-#: Substrings that mark an ``mcpServers`` entry as a Linear MCP server. Matched
-#: (case-insensitively) against the server KEY and, defensively, the JSON of its
-#: value (url / command / args / headers) so an entry named innocuously
-#: (``"specs": {url:"https://mcp.linear.app/sse"}``) or reading the token
-#: (``${LINEAR_API_TOKEN}``) is caught regardless of its key.
 _LINEAR_MCP_MARKERS = ("linear", "mcp.linear.app", "linear_api_token")
 
 
 def strip_linear_mcp_servers(repo_dir: str) -> int:
-    """Remove any Linear MCP server entry from the repo's ``.mcp.json``.
-
-    ADR-016 ENFORCEMENT (not just convention): Linear is 100% deterministic and
-    the agent must have NO Linear MCP tools. The prompt says so, but a prompt is
-    not a security boundary — a repo could COMMIT a ``.mcp.json`` with a
-    ``linear-server`` entry using ``${LINEAR_API_TOKEN}``; the SDK loads
-    ``project`` settings + we export ``LINEAR_API_TOKEN``, so under
-    ``bypassPermissions`` those tools would authenticate and run. This scrubs any
-    such entry from the on-disk config BEFORE the SDK reads it, on every task
-    with a repo, regardless of channel_source. Jira's own entry (written by
-    ``configure_channel_mcp`` for jira tasks) never matches these markers.
+    """Remove any Linear MCP server entry from the repo's ``.mcp.json`` (ADR-016).
 
     Returns the number of server entries removed (0 when none / no file).
-    Best-effort: a read/write failure logs and returns 0 (the prompt prohibition
-    + the absence of any platform-written Linear entry still hold).
+    Best-effort: a read/write failure logs and returns 0.
     """
     if not repo_dir or not os.path.isdir(repo_dir):
         return 0
@@ -284,12 +192,6 @@ def strip_linear_mcp_servers(repo_dir: str) -> int:
         del servers[k]
     config["mcpServers"] = servers
 
-    # If the Linear server(s) were the ONLY content, drop the whole file rather
-    # than leave an inert ``{"mcpServers": {}}`` behind — a repo that shipped a
-    # Linear-only .mcp.json ends up with no .mcp.json at all, which is the correct
-    # end state (the SDK then has nothing to load). Keep the file only when other
-    # MCP servers OR other top-level keys survive (a legit non-Linear server, or a
-    # Jira entry the platform just wrote for a jira task).
     other_top_level_keys = [k for k in config if k != "mcpServers"]
     try:
         if not servers and not other_top_level_keys:

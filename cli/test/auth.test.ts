@@ -25,10 +25,6 @@ import { changePassword, cognitoSubFromSession, getAuthToken, login } from '../s
 import { saveConfig, saveCredentials } from '../src/config';
 import { CliError } from '../src/errors';
 
-// Mock the Cognito SDK. Each command constructor tags its params with a
-// ``__command`` discriminator so tests can drive ``mockSend`` per command type
-// (InitiateAuth vs RespondToAuthChallenge vs ChangePassword) instead of relying
-// on brittle call-order alone.
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-cognito-identity-provider', () => ({
   CognitoIdentityProviderClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
@@ -39,7 +35,6 @@ jest.mock('@aws-sdk/client-cognito-identity-provider', () => ({
   ChallengeNameType: { NEW_PASSWORD_REQUIRED: 'NEW_PASSWORD_REQUIRED' },
 }));
 
-/** Build a base64url-encoded ID token carrying the given claims (no signature). */
 function fakeIdToken(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
@@ -86,7 +81,6 @@ describe('auth', () => {
       );
       expect(creds.id_token).toBe('id-token-123');
       expect(creds.refresh_token).toBe('refresh-token-123');
-      // ExpiresIn counts seconds: 3600 is one hour after the login.
       const expiry = Date.parse(creds.token_expiry);
       expect(expiry).toBeGreaterThanOrEqual(before + 3_600_000);
       expect(expiry).toBeLessThanOrEqual(after + 3_600_000);
@@ -114,13 +108,6 @@ describe('auth', () => {
     });
 
     test('maps NotAuthorizedException to an expired-temp-password hint (no secret leaked)', async () => {
-      // Invited users lapse into a dead temp password after Cognito's default
-      // 7-day window; Cognito answers with a bare NotAuthorizedException. The
-      // CLI should point at a remedy that WORKS for an existing account, not
-      // let the user retype a doomed password — and must not echo the attempted
-      // password. `reset-password`, not `invite-user`: the latter calls
-      // AdminCreateUser, which rejects an existing account, so naming it sends
-      // the admin to a command that refuses (#238 review N7).
       mockSend.mockRejectedValue(
         Object.assign(new Error('Incorrect username or password.'), { name: 'NotAuthorizedException' }),
       );
@@ -157,8 +144,6 @@ describe('auth', () => {
       await login('user@example.com', 'TempPass1!', prompt);
 
       expect(prompt).toHaveBeenCalledTimes(1);
-      // The challenge response must carry the challenged USERNAME + NEW_PASSWORD
-      // and echo the InitiateAuth Session.
       const challengeCall = mockSend.mock.calls
         .map((c) => c[0])
         .find((c: { __command: string }) => c.__command === 'RespondToAuthChallenge');
@@ -201,7 +186,6 @@ describe('auth', () => {
 
   describe('changePassword', () => {
     beforeEach(() => {
-      // A valid session is required; username comes from the ID token's email claim.
       saveCredentials({
         id_token: fakeIdToken({ email: 'user@example.com', sub: 'uuid-1' }),
         refresh_token: 'refresh-token',
@@ -231,7 +215,6 @@ describe('auth', () => {
         ProposedPassword: 'N3w$trongPass!',
       });
 
-      // The access token is used in-memory only, never written to disk.
       const creds = JSON.parse(fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'));
       expect(creds.access_token).toBeUndefined();
     });
@@ -306,7 +289,6 @@ describe('auth', () => {
   });
 
   describe('cognitoSubFromSession', () => {
-    /** A credentials file as `bgagent login` writes it, around the given ID token. */
     function session(idToken?: unknown): void {
       fs.writeFileSync(path.join(tmpDir, 'credentials.json'), JSON.stringify({
         id_token: idToken,
@@ -364,7 +346,6 @@ describe('auth', () => {
         token_expiry: futureExpiry,
       });
 
-      // getAuthToken returns the ID token used by the REST API.
       const token = await getAuthToken();
       expect(token).toBe('cached-id');
       expect(mockSend).not.toHaveBeenCalled();
@@ -378,9 +359,6 @@ describe('auth', () => {
         token_expiry: pastExpiry,
       });
 
-      // Make the refresh resolve only after we have fired both callers, so
-      // both observe the expired token and would each fire a refresh absent
-      // the in-flight memoization.
       let resolveSend: (value: unknown) => void = () => undefined;
       mockSend.mockImplementation(
         () =>
@@ -391,7 +369,6 @@ describe('auth', () => {
 
       const p1 = getAuthToken();
       const p2 = getAuthToken();
-      // Let both calls reach the (shared) refresh await.
       await Promise.resolve();
 
       resolveSend({
@@ -401,7 +378,6 @@ describe('auth', () => {
       const [t1, t2] = await Promise.all([p1, p2]);
       expect(t1).toBe('new-id');
       expect(t2).toBe('new-id');
-      // The load-bearing assertion: a single Cognito refresh round-trip.
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
@@ -426,9 +402,7 @@ describe('auth', () => {
       expect(token).toBe('new-id');
 
       const creds = JSON.parse(fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'));
-      // The answer above carries no refresh token: the cached one is kept.
       expect(creds.refresh_token).toBe('refresh-token');
-      // ExpiresIn counts seconds: 3600 is one hour after the refresh.
       const expiry = Date.parse(creds.token_expiry);
       expect(expiry).toBeGreaterThanOrEqual(before + 3_600_000);
       expect(expiry).toBeLessThanOrEqual(after + 3_600_000);
@@ -448,9 +422,6 @@ describe('auth', () => {
     });
 
     test('treats an unparseable token_expiry as expired (refreshes, not 401s)', async () => {
-      // A corrupt-but-valid-JSON expiry parses to NaN; every comparison
-      // with NaN is false, which used to classify the token as
-      // never-expiring — surfacing as an opaque 401 instead of a refresh.
       saveCredentials({
         id_token: 'old-id',
         refresh_token: 'refresh-token',
@@ -489,9 +460,6 @@ describe('auth', () => {
     });
 
     test('transient refresh failure does NOT claim the session expired', async () => {
-      // A network blip is not an auth rejection — telling the user to
-      // re-login is wrong advice, and with the shared in-flight refresh
-      // that message would reach every concurrent caller.
       const pastExpiry = new Date(Date.now() - 1000).toISOString();
       saveCredentials({
         id_token: 'old-token',

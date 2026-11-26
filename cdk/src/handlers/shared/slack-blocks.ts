@@ -19,31 +19,26 @@
 
 import { formatDuration, truncate } from './slack-format';
 
-/** Max length for task-failure reason text in Slack blocks. */
 const TASK_FAILED_REASON_MAX_LEN = 300;
 import type { TaskRecord } from './types';
 
-/** A Slack Block Kit mrkdwn text object. */
 interface MrkdwnText {
   readonly type: 'mrkdwn';
   readonly text: string;
 }
 
-/** A Slack Block Kit plain_text text object. */
 interface PlainText {
   readonly type: 'plain_text';
   readonly text: string;
   readonly emoji?: boolean;
 }
 
-/** Section block: a single line/paragraph of mrkdwn content. */
 export interface SectionBlock {
   readonly type: 'section';
   readonly text: MrkdwnText;
   readonly block_id?: string;
 }
 
-/** Link-out button: opens a URL in a new tab. No action_id needed. */
 export interface LinkButtonElement {
   readonly type: 'button';
   readonly text: PlainText;
@@ -51,7 +46,6 @@ export interface LinkButtonElement {
   readonly style?: 'primary' | 'danger';
 }
 
-/** Actionable button: triggers a Block Kit interaction callback via action_id. */
 export interface ActionButtonElement {
   readonly type: 'button';
   readonly text: PlainText;
@@ -67,34 +61,22 @@ export interface ActionButtonElement {
 
 export type ButtonElement = LinkButtonElement | ActionButtonElement;
 
-/** Actions block: a row of interactive elements (buttons, menus, etc.). */
 export interface ActionsBlock {
   readonly type: 'actions';
   readonly block_id: string;
   readonly elements: ReadonlyArray<ButtonElement>;
 }
 
-/** Any Block Kit block this module renders. */
 export type SlackBlock = SectionBlock | ActionsBlock;
 
-/** A Slack message payload suitable for chat.postMessage. */
 export interface SlackMessage {
   /** Fallback plain-text for notifications. */
   readonly text: string;
-  /** Block Kit blocks for rich rendering. */
   readonly blocks: SlackBlock[];
   /** If set, post as a threaded reply. */
   readonly thread_ts?: string;
 }
 
-/**
- * Render a task event as a Slack Block Kit message.
- *
- * @param eventType - the task event type (e.g. 'task_created', 'task_completed').
- * @param task - the task record with current state.
- * @param eventMetadata - optional metadata from the event record.
- * @returns a SlackMessage payload.
- */
 export function renderSlackBlocks(
   eventType: string,
   task: Pick<TaskRecord, 'task_id' | 'repo' | 'task_description' | 'pr_url' | 'error_message' | 'cost_usd' | 'duration_s' | 'status'>,
@@ -114,10 +96,6 @@ export function renderSlackBlocks(
     case 'task_timed_out':
       return taskTimedOutMessage(task);
     case 'task_stranded':
-      // Emitted by reconcile-stranded-tasks when a task's heartbeat
-      // stops. Operators see this on stranded Slack-origin tasks; the
-      // generic "Event: ..." fallback would be a UX regression
-      // (issue #64 review Cat 7).
       return taskStrandedMessage(task, eventMetadata);
     case 'agent_error':
       return agentErrorMessage(task, eventMetadata);
@@ -151,7 +129,7 @@ function taskCompletedMessage(
 
   const blocks: SlackBlock[] = [section(text)];
 
-  // "View PR" button — no inline link text, so Slack won't unfurl a big preview card.
+  // A button, not inline link text: Slack unfurls an inline link into a preview card.
   if (task.pr_url) {
     blocks.push(actions(task.task_id, [
       linkButton(`View PR ${prLabel(task.pr_url)}`, task.pr_url),
@@ -208,11 +186,6 @@ function taskStrandedMessage(
   task: Pick<TaskRecord, 'task_id' | 'repo'>,
   eventMetadata?: Record<string, unknown>,
 ): SlackMessage {
-  // The reconciler stamps ``code: STRANDED_NO_HEARTBEAT`` and
-  // ``prior_status`` on the event metadata (see
-  // handlers/reconcile-stranded-tasks.ts). Surface the prior status so
-  // operators can tell at a glance whether the task hung in HYDRATING
-  // vs RUNNING.
   const priorStatus = typeof eventMetadata?.prior_status === 'string'
     ? eventMetadata.prior_status
     : undefined;
@@ -228,9 +201,6 @@ function agentErrorMessage(
   task: Pick<TaskRecord, 'task_id' | 'repo'>,
   eventMetadata?: Record<string, unknown>,
 ): SlackMessage {
-  // ``agent/src/progress_writer.py::write_agent_error`` carries
-  // ``error_type`` and ``message_preview``. Render whichever is
-  // present without leaking the full preview if it's noisy.
   const errorType = typeof eventMetadata?.error_type === 'string'
     ? eventMetadata.error_type
     : undefined;

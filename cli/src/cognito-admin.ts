@@ -89,9 +89,6 @@ async function resolveConfigureBundle(
     return configured;
   }
 
-  // resolveConfigureBundleFromStack already guarantees a non-null user_pool_id
-  // (it returns null unless every configure output is present), so no fallback
-  // merge is needed here.
   return resolveConfigureBundleFromStack(region, stackName);
 }
 
@@ -99,7 +96,6 @@ export function cognitoClient(region: string): CognitoIdentityProviderClient {
   return makeClient(CognitoIdentityProviderClient, { region });
 }
 
-/** Permissive email-shape check — Cognito does the real validation. */
 export function assertLikelyEmail(email: string): void {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new CliError(
@@ -109,10 +105,9 @@ export function assertLikelyEmail(email: string): void {
 }
 
 /**
- * Invite a user with a *temporary* password (#238): the FORCE_CHANGE_PASSWORD
- * state it leaves them in forces a first-login rotation, so the admin-generated
- * string stops being a valid credential once the teammate sets their own. The
- * user is created with a verified email and the welcome email suppressed.
+ * Invite a user with a *temporary* password: the FORCE_CHANGE_PASSWORD state
+ * it leaves them in forces a first-login rotation. The user is created with a
+ * verified email and the welcome email suppressed.
  */
 export async function adminInviteUser(
   ctx: CognitoAdminContext,
@@ -222,7 +217,6 @@ export function displayUserIdentity(user: CognitoUserSummary): string {
   return user.email ?? user.username;
 }
 
-/** Map Cognito Username (often the task `user_id` / sub UUID) to email for operator display. */
 export async function buildCognitoEmailByUsername(
   ctx: CognitoAdminContext,
 ): Promise<Map<string, string>> {
@@ -236,7 +230,6 @@ export async function buildCognitoEmailByUsername(
   return byUsername;
 }
 
-/** Resolve a task/concurrency `user_id` to an operator-friendly email label. */
 export function resolveUserEmailForDisplay(
   userId: string,
   emailByUsername: ReadonlyMap<string, string>,
@@ -260,9 +253,7 @@ export async function resolveCognitoUsername(
     return emailOrUsername;
   }
 
-  // Guard the ListUsers Filter interpolation: double-quote and backslash are
-  // filter metacharacters (and never valid in an email). Command-level callers
-  // run assertLikelyEmail, but this is exported, so defend it independently.
+  // Double-quote and backslash are metacharacters in a Cognito ListUsers Filter.
   if (emailOrUsername.includes('"') || emailOrUsername.includes('\\')) {
     throw new CliError(
       `Invalid email '${emailOrUsername}': contains a quote or backslash character.`,

@@ -17,25 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Cedar cross-engine parity — CDK side (cedar-wasm).
- *
- * Loads every ``contracts/cedar-parity/*.json`` fixture, runs each
- * ``(policies, input)`` through ``@cedar-policy/cedar-wasm``'s
- * ``isAuthorized``, and asserts the observed ``(decision,
- * matching_rule_ids)`` equals the fixture's ``expected`` payload.
- *
- * The companion test ``agent/tests/test_cedar_parity.py`` runs the same
- * fixtures through ``cedarpy``. If either side disagrees with the
- * fixture, CI fails BEFORE deploy — satisfying the cross-engine parity
- * contract (decision #23, finding #1, §15.6 of
- * ``docs/design/CEDAR_HITL_GATES.md``).
- *
- * Fixture path resolution mirrors the pattern in
- * ``memory.test.ts::cross-language hash parity`` for
- * ``contracts/memory-hash-vectors.json``.
- */
-
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -106,10 +87,6 @@ function validateFixture(fixture: Fixture, filename: string): void {
   if (!('decision' in fixture.expected) || !('matching_rule_ids' in fixture.expected)) {
     throw new Error(`${filename}: expected missing decision/matching_rule_ids`);
   }
-  // Enforce lowercase canonical form — both engines report lowercase
-  // natively (cedar-wasm) or are normalized on read (cedarpy via .value.lower()).
-  // Rejecting case drift at load means one engine can't silently tolerate
-  // what the other rejects.
   if (!VALID_DECISIONS.has(fixture.expected.decision)) {
     throw new Error(
       `${filename}: decision must be lowercase in ${JSON.stringify([...VALID_DECISIONS])}, ` +
@@ -130,11 +107,6 @@ function loadFixtures(): Fixture[] {
     validateFixture(fixture, entry);
     fixtures.push(fixture);
   }
-  // Belt-and-braces: Jest's test.each([]) silently registers zero tests,
-  // so a future filter regression that eliminated all fixtures could make
-  // the parity suite pass without running anything. Throwing at load time
-  // turns that into a loud module-load failure.
-  // See silent-failure audit finding #2 (Chunk 1 review, 2026-05-07).
   if (fixtures.length === 0) {
     throw new Error(`no fixtures found under ${FIXTURE_DIR}; at least one golden file is required`);
   }
@@ -156,16 +128,7 @@ function buildIdMap(policies: string): Record<string, string> {
   return idMap;
 }
 
-/**
- * Map cedar-wasm positional policy IDs (policy0, ...) to @rule_id annotations.
- *
- * Enforces that EVERY matching policy carries a ``@rule_id`` annotation.
- * Dropping unannotated matches would silently hide genuine cross-engine
- * disagreement (e.g. one engine matching the base ``permit`` alongside a
- * ``forbid``) — the whole point of this test is to surface such drift,
- * not bury it. See silent-failure audit finding #1 (Chunk 1 review,
- * 2026-05-07).
- */
+// cedar-wasm reports a matching policy by its position in the policy text (policy0, policy1, ...), not by its @rule_id.
 function recoverRuleIds(policies: string, matchingPolicyIds: string[]): string[] {
   const idMap = buildIdMap(policies);
   const recovered: string[] = [];

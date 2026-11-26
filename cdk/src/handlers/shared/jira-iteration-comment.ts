@@ -32,7 +32,6 @@ import type { TaskRecord } from './types';
 
 const MAX_CONVERGENCE_ATTEMPTS = 4;
 
-/** Jira supports explicit ADF links without requiring Atlassian media storage. */
 export function jiraPreviewDocument(screenshotUrl: unknown, previewUrl: unknown): Record<string, unknown> | null {
   if (typeof screenshotUrl !== 'string' || !isAllowedScreenshotUrl(screenshotUrl)) {
     return null;
@@ -48,8 +47,6 @@ export function jiraPreviewDocument(screenshotUrl: unknown, previewUrl: unknown)
 function renderIterationComment(task: TaskRecord): Record<string, unknown> {
   const terminal = TERMINAL_STATUSES.includes(task.status);
   const saved = task.jira_iteration_status;
-  // Only build a fallback when no usable status was persisted. Runtime result
-  // metrics may be numeric strings, just as in the fan-out notification path.
   const metric = (field: 'cost_usd' | 'turns_attempted' | 'max_turns' | 'duration_s') =>
     coerceNumericOrNull(task[field], { field, task_id: task.task_id }, logger);
   const body = saved && (!terminal || saved.terminal) ? saved.body : terminal
@@ -63,8 +60,6 @@ function renderIterationComment(task: TaskRecord): Record<string, unknown> {
       taskId: task.task_id,
     }))
     : buildAdfDocument([[{ text: '🔄 Working…' }]]);
-  // Old tasks may have settled before this writer was deployed. A late preview
-  // must still show their outcome, never reset their status to working.
   const preview = jiraPreviewDocument(task.screenshot_url, task.screenshot_preview_url);
   return { ...body, content: [...((body.content ?? []) as unknown[]), ...((preview?.content ?? []) as unknown[])] };
 }
@@ -73,8 +68,7 @@ function renderIterationComment(task: TaskRecord): Record<string, unknown> {
  * All iteration comment writers converge from durable task state. Progress cannot
  * replace a terminal body. After each Jira PUT, a strongly consistent re-read
  * detects an overlapping preview/status write and attempts to repair our stale
- * PUT, bounded by four attempts and any supplied delivery deadline.
- * No Jira read/modify/write or external-image embedding is required.
+ * PUT, bounded by a fixed number of attempts and any supplied delivery deadline.
  */
 export async function updateJiraIterationComment(
   ddb: DynamoDBDocumentClient,

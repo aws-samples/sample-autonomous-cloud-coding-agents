@@ -143,7 +143,6 @@ function prompted(activity: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-/** DDB Get router: user mapping (linked unless overridden) + project mapping. */
 function ddbWith(opts: { linked?: boolean; mapping?: Record<string, unknown> | null } = {}): void {
   const linked = opts.linked ?? true;
   const mapping = opts.mapping === undefined
@@ -165,22 +164,14 @@ function ddbWith(opts: { linked?: boolean; mapping?: Record<string, unknown> | n
   });
 }
 
-/** Task id the (strongly consistent) session → task pointer names, if any. */
 let sessionPointer: string | null = null;
 
-/** Commands sent to one table, by type. */
 function sent(table: string, type: string): Array<{ input: Record<string, any> }> {
   return ddbSend.mock.calls.map((c) => c[0]).filter((c) => c.input.TableName === table && c._type === type);
 }
 
-/** Base-table rows the handler re-reads (ConsistentRead) after a GSI hit. */
 const taskRecords = new Map<string, Record<string, unknown>>();
 
-/**
- * Script the issue's newest task: the GSI hit plus the base-table row. Fields
- * are given in GSI shape (top-level `linear_workspace_id`); `session` sets the
- * row's `channel_metadata.linear_agent_session_id`.
- */
 function priorTask(task: Record<string, unknown> & { session?: string }): void {
   const { session, linear_workspace_id: ws, ...rest } = task;
   lookupTaskByLinearIssueMock.mockResolvedValue({ kind: 'found', task: { ...rest, linear_workspace_id: ws } });
@@ -275,7 +266,7 @@ describe('handleAgentSessionEvent — created', () => {
     priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1' });
     await handleAgentSessionEvent(prompted({ content: { body: 'also fix the footer' } }));
     expect(submitNudgeMock).not.toHaveBeenCalled();
-    // Session state follows the last activity: a thought keeps it "working".
+    // Linear derives the session state from its last activity: a thought keeps it "working".
     expect(activities().at(-1)).toEqual(expect.objectContaining({ type: 'thought' }));
     expect(activities().some((a) => a.type === 'error')).toBe(false);
   });
@@ -289,7 +280,6 @@ describe('handleAgentSessionEvent — created', () => {
   });
 
   test('the acknowledgement does not wait for the workspace marker', async () => {
-    // The marker write hangs until released; the ack must already be out.
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const route = ddbSend.getMockImplementation()!;
@@ -324,7 +314,6 @@ describe('handleAgentSessionEvent — created', () => {
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       const description = createTaskCoreMock.mock.calls[0][0].task_description;
       expect(description).not.toContain('## Linear session context');
-      // Falls back to the issue as fetched; createTaskCore screens that fail-closed.
       expect(description).toContain('Users cannot log in.');
       expect(activities().at(-1)).toEqual(expect.objectContaining({ type: 'action', action: 'Started coding task' }));
       expect(metrics).toEqual(countedFailures);
@@ -388,7 +377,6 @@ describe('handleAgentSessionEvent — created', () => {
     ddbWith({ linked: false });
     priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-other' });
     await handleAgentSessionEvent(created());
-    // This session will never hear t-1's outcome: a thought would leave it open forever.
     expect(activities().at(-1)).toEqual(expect.objectContaining({ type: 'response' }));
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
@@ -396,7 +384,6 @@ describe('handleAgentSessionEvent — created', () => {
   test('a task with no recorded workspace (older row) is still this issue\'s task', async () => {
     priorTask({ task_id: 't-old', status: 'RUNNING', user_id: 'platform-user-1' });
     await handleAgentSessionEvent(created());
-    // Treating it as "no task" would start a second run beside the live one.
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
@@ -581,18 +568,16 @@ describe('handleAgentSessionEvent — prompted', () => {
     cancelTaskMock.mockResolvedValue('cancelled');
     await handleAgentSessionEvent(prompted({ signal: 'stop', content: { body: 'Stop' } }));
 
-    // Transition and event are one call (one transaction), tagged as a session stop.
     expect(cancelTaskMock).toHaveBeenCalledWith(
       expect.objectContaining({ taskTableName: 'Tasks', taskEventsTableName: 'TaskEvents' }),
       't-1', 'platform-user-1', expect.any(String), { cancelled_via: SESSION_STOP_CANCELLED_VIA },
     );
-    // Same compute stop as DELETE /tasks/{id}, decided on the row as it was before the cancel.
     expect(stopTaskComputeMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ task_id: 't-1', status: 'RUNNING', session_id: 'runtime-session-1', compute_type: 'ecs' }),
       expect.any(String),
     );
-    // No "thought" ack before a stop: Linear requires no further actions, only the final confirmation.
+    // Linear's stop signal allows no further action, only the final confirmation.
     expect(activities()).toEqual([expect.objectContaining({ type: 'response' })]);
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
@@ -634,7 +619,6 @@ describe('handleAgentSessionEvent — prompted', () => {
     priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'someone-else', linear_workspace_id: 'org-1', ...(session && { session }) });
     await handleAgentSessionEvent(prompted({ signal: 'stop' }));
     expect(cancelTaskMock).not.toHaveBeenCalled();
-    // A stop must end on a response; this session hears nothing more about t-1.
     expect(activities()).toEqual([expect.objectContaining({ type: 'response' })]);
   });
 
@@ -673,7 +657,6 @@ describe('handleAgentSessionEvent — task created moments ago (issue index not 
   const justCreated = { task_id: 't-new', status: 'SUBMITTED', user_id: 'platform-user-1', created_at: '2026-11-20T10:00:05Z' };
 
   beforeEach(() => {
-    // The GSI has not seen the task yet; only the pointer names it.
     taskRecords.set('t-new', { ...justCreated, channel_metadata: { linear_workspace_id: 'org-1', linear_agent_session_id: 'session-1' } });
     sessionPointer = 't-new';
   });
@@ -760,7 +743,6 @@ describe('handleAgentSessionEvent — review regressions', () => {
   });
 
   test('status is decided on the base-table row, not the lagging index', async () => {
-    // Index still says RUNNING; the row already finished → a follow-up is new work, not a nudge.
     lookupTaskByLinearIssueMock.mockResolvedValue({ kind: 'found', task: { ...RUNNING } });
     taskRecords.set('t-1', { ...RUNNING, status: 'COMPLETED', repo: 'acme/web', channel_metadata: { linear_workspace_id: 'org-1' } });
     await handleAgentSessionEvent(prompted({ content: { body: 'one more thing' } }));

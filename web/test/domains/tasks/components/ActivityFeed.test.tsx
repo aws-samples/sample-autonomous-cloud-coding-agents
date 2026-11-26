@@ -26,7 +26,6 @@ const line = (id: string, at: string, text: string): ActivityLine => ({ id, at, 
 
 describe('ActivityFeed', () => {
   it('names the day of a line that falls on another day than the line before it', () => {
-    // Half past ten UTC is the same day a minute later in every time zone, and another day two days later.
     const merged = '2026-11-12T10:30:00Z';
     render(<ActivityFeed
       loading={false}
@@ -47,7 +46,6 @@ describe('ActivityFeed', () => {
   });
 
   it('goes by the reader\'s clock for the day, as it does for the time', () => {
-    // Half an hour either side of a midnight where the reader is. Away from UTC the two are one day in UTC.
     const before = new Date(2026, 10, 11, 23, 30).toISOString();
     const after = new Date(2026, 10, 12, 0, 30).toISOString();
     render(<ActivityFeed loading={false} live={false} lines={[line('a', before, 'Finished'), line('b', after, 'Pull request merged on GitHub')]} />);

@@ -20,20 +20,15 @@
 import { logger } from './logger';
 import { type LookupResult, lookupFailed, lookupFound } from './lookup-result';
 
-/** Slack API errors that should not count as failures for caller-side logging. */
 const BENIGN_SLACK_ERRORS = new Set(['already_reacted', 'no_reaction']);
 
 /**
  * POST to a Slack Web API method with a bot token.
  *
- * Logs errors at warn level rather than throwing — Slack reactions, replies, and
- * message cleanup are best-effort side-effects. Callers that need delivery to fail
- * the whole request (e.g. stream dispatchers) should inspect the return value
- * instead of relying on exceptions.
+ * Logs errors at warn level rather than throwing.
  *
  * @param botToken - xoxb-... bot token for the workspace.
  * @param method - Slack Web API method, e.g. 'chat.postMessage'.
- * @param body - JSON body to send.
  * @returns true if the call succeeded; false if the request failed at any layer.
  */
 export async function slackFetch(
@@ -75,18 +70,10 @@ export async function slackFetch(
 /**
  * POST to a Slack Web API method and return the message timestamp it produced.
  *
- * Distinct from {@link slackFetch} because a boolean is enough for fire-and-forget
- * reactions but NOT for a message the caller must edit later: Slack addresses a
- * message by its ``ts``, so a status panel that matures in place has to capture
- * the one it created.
- *
  * Returns a {@link LookupResult}: ``found`` with the ts, or ``failed`` on any
  * error layer (non-2xx, Slack ``ok: false``, a missing ``ts``, or a thrown
- * fetch). It never emits the ``absent`` state — a successful post always yields a
- * ts, so "no ts" is a failure, not an empty success. Callers that only need to
- * post-or-skip collapse this with ``lookupValueOr(result, null)``; the failure is
- * already logged at warn level here (best-effort contract), so a caller cannot
- * mistake an outage for "no message posted" (#756 Cat 2).
+ * fetch). It never emits the ``absent`` state. The failure is already logged
+ * at warn level here.
  */
 export async function slackFetchTs(
   botToken: string,
@@ -111,7 +98,6 @@ export async function slackFetchTs(
       logger.warn('Slack API returned error', { method, error: result.error });
       return lookupFailed(new Error(`Slack API ${method} error: ${result.error ?? 'unknown'}`));
     }
-    // chat.update echoes the ts it edited; chat.postMessage returns the new one.
     if (typeof result.ts === 'string') return lookupFound(result.ts);
     logger.warn('Slack API returned ok without a ts', { method });
     return lookupFailed(new Error(`Slack API ${method} succeeded but returned no ts`));

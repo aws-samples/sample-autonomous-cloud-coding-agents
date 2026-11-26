@@ -19,7 +19,6 @@
 
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 const mockWake = jest.fn();
 jest.mock('../../src/handlers/shared/microvm/approval-wake', () => ({
@@ -27,12 +26,6 @@ jest.mock('../../src/handlers/shared/microvm/approval-wake', () => ({
   wakeMicrovmAfterApproval: (...args: unknown[]) => mockWake(...args),
 }));
 
-// Construct a stub TransactionCanceledException that has the
-// `err.name` + `CancellationReasons` the handler reads, plus makes
-// `instanceof TransactionCanceledException` true. Real
-// `TransactionCanceledException` lives on `@aws-sdk/client-dynamodb`;
-// we mock that whole module here so we export a class the handler
-// can both throw and `instanceof`-check.
 class MockTransactionCanceledException extends Error {
   override name = 'TransactionCanceledException';
   CancellationReasons?: { Code?: string }[];
@@ -146,8 +139,6 @@ describe('approve-task — auth + validation', () => {
 
 describe('approve-task — happy path', () => {
   test('202 on successful approval, default scope this_call', async () => {
-    // Rate-limit UpdateItem succeeds, TransactWriteItems succeeds,
-    // audit PutItem succeeds.
     mockSend.mockResolvedValue({});
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(202);
@@ -190,7 +181,7 @@ describe('approve-task — happy path', () => {
 describe('approve-task — error classification', () => {
   test('404 REQUEST_NOT_FOUND when approvals row condition fails', async () => {
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(
         new MockTransactionCanceledException([
           { Code: 'ConditionalCheckFailed' },
@@ -205,7 +196,7 @@ describe('approve-task — error classification', () => {
 
   test('409 TASK_NOT_AWAITING_APPROVAL when task row condition fails', async () => {
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(
         new MockTransactionCanceledException([
           { Code: 'None' },
@@ -234,8 +225,8 @@ describe('approve-task — error classification', () => {
 
   test('audit write failure does NOT fail the request', async () => {
     mockSend
-      .mockResolvedValueOnce({}) // rate-limit
-      .mockResolvedValueOnce({}) // transaction
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error('ddb throttled on audit'));
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(202);

@@ -17,64 +17,20 @@
  *  SOFTWARE.
  */
 
-/**
- * Outbound AWS SDK User-Agent solution attribution (#319).
- *
- * Every AWS API call made by the Lambda handlers carries two ABCA
- * solution-attribution segments in the `User-Agent` header:
- *
- *     app/uksb-wt64nei4u6#{STACKNAME}   <- native AWS_SDK_UA_APP_ID env (no code here)
- *     md/uksb-wt64nei4u6#{COMPONENT}    <- static, baked once at construction
- *
- * **The `app/` segment is emitted by the SDK itself.** The JS v3 SDK reads
- * the `AWS_SDK_UA_APP_ID` environment variable natively (`util-user-agent-node`
- * `NODE_APP_ID_CONFIG_OPTIONS.environmentVariableSelector`) and renders it as
- * `app/{value}`. The app-id value charset *includes* `#` (`UA_VALUE_ESCAPE_REGEX`
- * permits it), so the `uksb-wt64nei4u6#{stack}` form survives verbatim. CDK
- * sets that env var on every Lambda, so this module contributes **nothing** to
- * `app/` — and a customer can suppress it by setting the env var to `''`.
- * (This is the key simplification over the original `/`-separated design,
- * which had to bypass the native field because `/` is not a legal app-id
- * character. Using `#` keeps it native.)
- *
- * This module owns only the **static `md/` segment** — a stable per-component
- * label baked once via `customUserAgent` at client construction. There is
- * intentionally no per-request trace handle and no middleware machinery:
- * module-level cached clients are never re-pinned, and request correlation is
- * owned by X-Ray / structured-log request ids (#245), not the User-Agent.
- *
- * Counterparts: `agent/src/ua.py` (Python agent runtime) and `cli/src/ua.ts`
- * (bgagent CLI). Solution id, wire format, and sanitization rules must stay
- * identical across all three.
- */
-
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
-/**
- * AWS solution-attribution id for ABCA. Deploy-time counterpart (#292) lives
- * in the CloudFormation stack description in `cdk/src/main.ts`. Per-surface
- * literal by design.
- */
+/** AWS solution-attribution id for ABCA. */
 export const SOLUTION_ID = 'uksb-wt64nei4u6';
 
-/**
- * Env var carrying the stable per-component label (`api`, `webhook`,
- * `orchestr`) — set per-Lambda by the CDK constructs. Shared handler modules
- * are bundled into multiple Lambdas, so identity must come from the
- * environment, not from code.
- */
 const COMPONENT_ENV = 'ABCA_COMPONENT';
 
-/** Default component label when ABCA_COMPONENT is absent (REST API surface). */
 const DEFAULT_COMPONENT = 'api';
 
 /**
- * RFC 7230 token charset (the UA product-token alphabet). `#` is the scheme's
- * structural separator and is deliberately excluded so a hostile label cannot
- * inject extra segments. Mirrors `_ALLOWED` in `agent/src/ua.py`. The `u` flag
- * matches by code point, as Python iterates a string, so a character outside
- * the Basic Multilingual Plane is one `-`, not two.
+ * RFC 7230 token charset (the UA product-token alphabet), without `#`: the SDK
+ * joins a user-agent pair as name#value. The `u` flag matches by code point, so
+ * a character outside the Basic Multilingual Plane is one `-`, not two.
  */
 const UA_TOKEN_SAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/gu;
 
@@ -83,7 +39,6 @@ export function sanitizeUaValue(raw: string): string {
   return raw.replace(UA_TOKEN_SAFE, '-');
 }
 
-/** The component label for this Lambda (from env, sanitized). */
 function componentLabel(): string {
   return sanitizeUaValue(process.env[COMPONENT_ENV]?.trim() || DEFAULT_COMPONENT);
 }
@@ -104,13 +59,10 @@ export function abcaUserAgent(): { customUserAgent: [string, string][] } {
 
 /**
  * The single attributed way to construct an AWS SDK v3 client. Composes the
- * static `md/` segment ({@link abcaUserAgent}) into the client config so
- * omission is impossible at the call site. Caller-supplied opts (region,
- * timeouts) are preserved — and a caller who supplies their own
- * `customUserAgent` pairs keeps them, with the ABCA `md/` pair appended rather
- * than overwritten (the SDK renders all pairs). No call site sets
- * `customUserAgent` today, so the merge is latent hardening; it keeps the
- * factory composable instead of clobbering. (#319)
+ * static `md/` segment ({@link abcaUserAgent}) into the client config.
+ * Caller-supplied opts (region, timeouts) are preserved, and a caller who
+ * supplies their own `customUserAgent` pairs keeps them, with the ABCA `md/`
+ * pair appended (the SDK renders all pairs).
  */
 export function makeClient<C>(
   Ctor: new (cfg: any) => C,

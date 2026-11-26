@@ -17,13 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Wire shapes, parsing and the feature gate for Linear ``AgentSessionEvent``
- * webhooks (ADR-018 Phase 2). Deliberately free of I/O dependencies so the
- * webhook receiver can route on it without loading the GraphQL / token stack;
- * the activity-emitting helpers live in ``linear-agent-session.ts``.
- */
-
 import { parseCommentTrigger } from './orchestration-comment-trigger';
 
 /**
@@ -36,7 +29,6 @@ export function isLinearAgentSessionsEnabled(): boolean {
   return process.env.LINEAR_AGENT_SESSIONS_ENABLED === 'true';
 }
 
-/** Webhook ``type`` for agent-session deliveries. */
 export const AGENT_SESSION_EVENT_TYPE = 'AgentSessionEvent';
 
 /** Actions ABCA acts on. Linear may add more; unknown actions are acked and ignored. */
@@ -148,18 +140,10 @@ export const SESSION_STOP_CANCELLED_VIA = 'linear_session_stop';
 /**
  * A leading mention as Linear stores it in ``comment.body``: the app user's
  * profile URL, bare or as a markdown link (``[@bgagent](https://linear.app/…)``),
- * optionally followed by punctuation. Anchored to the start, so a profile link
- * someone pastes mid-sentence is left alone.
+ * optionally followed by punctuation.
  */
 const LEADING_PROFILE_MENTION = /^(?:\[[^\]\n]*\]\(\s*https:\/\/linear\.app\/[^\s)]+\/profiles\/[^\s)]+\s*\)|<?https:\/\/linear\.app\/\S+\/profiles\/[^\s>]+>?)[,:]?\s*/i;
 
-/**
- * The instruction in a mention comment, with the mention itself removed — a
- * bare mention is no instruction at all. Linear stores a real mention as the
- * app user's profile URL, so that is stripped first; the ``@bgagent`` text form
- * goes through the comment trigger's parser so both channels read it the same
- * way.
- */
 function mentionDirective(body: string | undefined): string {
   const trimmed = (body ?? '').trim().replace(LEADING_PROFILE_MENTION, '').trim();
   const trigger = parseCommentTrigger(trimmed);

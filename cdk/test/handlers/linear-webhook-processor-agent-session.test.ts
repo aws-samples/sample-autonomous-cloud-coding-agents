@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// Processor routing for AgentSessionEvent deliveries (ADR-018 Phase 2). The
-// session behaviour itself is covered in linear-agent-session-handler.test.ts.
-
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: jest.fn() })) },

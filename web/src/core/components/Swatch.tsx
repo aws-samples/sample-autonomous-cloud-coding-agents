@@ -17,7 +17,6 @@
  *  SOFTWARE.
  */
 
-/** Color swatch beside a label: the label carries identity, the swatch links it to the chart. */
 export function Swatch({ color }: { color: string }) {
   return <span aria-hidden="true" style={{ display: 'inline-block', flex: 'none', width: 10, height: 10, borderRadius: 2, background: color, marginRight: 8 }} />;
 }

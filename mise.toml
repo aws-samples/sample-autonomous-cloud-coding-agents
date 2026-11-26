@@ -1,38 +1,13 @@
-# Root mise config: monorepo task discovery + shared tools.
-# See https://mise.jdx.dev/tasks/monorepo.html
-#
-# Cedar engine parity contract (see docs/design/CEDAR_HITL_GATES.md §15.6,
-# decision #23): both engines are pinned EXACTLY (no ^/~) and must move
-# together. Golden-file parity fixtures under contracts/cedar-parity/ fail
-# CI if the engines diverge on any (policy, input) pair.
-#   - agent:   cedarpy==4.12.2                 (agent/pyproject.toml)
-#   - cdk:     @cedar-policy/cedar-wasm@4.12.0  (cdk/package.json)
-#   Both build on the Cedar 4.12.0 core.
-# contracts/cedar-parity/engines/versions.json names that pair, and
-# cdk/test/constructs/cedar-wasm-layer.test.ts fails when a manifest pins
-# anything else.
 min_version = "2026.7.11"
 
 monorepo_root = true
 
 [tools]
-# An exact Node, here and in the cdk, cli, web and docs mise.toml: astro 7.4.10
-# declares node >=22.23.4 and yarn refuses to install on less, while `node = "22"`
-# keeps any older 22.x that is already installed. Bump the five by PR, like the
-# pins below.
+# Exact: astro 7.4.10 declares node >=22.23.4 and yarn refuses to install on less, while
+# `node = "22"` keeps any older 22.x that is already installed.
 node = "22.23.4"
-# Gate tools are pinned to exact versions so that a required check changes only
-# with a commit (#722, #540). Nothing bumps these automatically (Dependabot has
-# no mise ecosystem): bump by PR to a release at least 7 days old (the cooldown
-# in .github/dependabot.yml) and keep `uv` equal to agent/mise.toml and to the
-# uv image in agent/Dockerfile.
 prek = "0.5.10"
 gitleaks = "8.30.1"
-# uv must be declared so it is on PATH before semgrep installs: mise's
-# `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
-# present, avoiding the classic-pipx "Failed to upgrade shared libraries" path
-# that breaks under the mise 2026.6.x default `minimum_release_age`
-# (jdx/mise#10279; see #320).
 uv = "0.13.7"
 semgrep = "1.185.0"
 osv-scanner = "2.7.1"
@@ -43,42 +18,21 @@ shellcheck = "0.11.0"
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs", "web"]
 
-##################
-###### CORE ######
-##################
-
-# One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`, `web`).
-# `//cdk:install`, `//cli:install`, `//docs:install` and `//web:install` are thin wrappers around the same command.
 [tasks.install]
 description = "Yarn workspaces (cdk, cli, docs, web) + agent Python (uv) + prek git hooks when inside a Git repo whose core.hooksPath prek may use"
 run = [
   "yarn install --check-files",
   "cd agent && mise run install",
-  # prek refuses a core.hooksPath set only outside local or worktree scope (prek install.rs); skip it there, as outside a checkout
   '''bash -c 'git rev-parse --git-dir >/dev/null 2>&1 || exit 0; if git config --includes --get core.hooksPath >/dev/null && ! git config --includes --local --get core.hooksPath >/dev/null && ! git config --includes --worktree --get core.hooksPath >/dev/null 2>&1; then echo "install: git hooks not installed: core.hooksPath is set outside this repository (global, system or command line git config), so prek refuses to install them. Dependencies are installed. To get the hooks, see CONTRIBUTING.md, then run mise run hooks:install." >&2; exit 0; fi; prek install --prepare-hooks' ''',
 ]
 
-# Dependency upgrades for the scheduled upgrade-main workflow (and local use).
-# Upgrades stay WITHIN the ranges/pins declared in each manifest — no
-# range-widening flags (e.g. `yarn upgrade --latest`) — so exact pins are never
-# rewritten. This is what keeps the Cedar engine parity contract intact:
-# cedarpy (agent/pyproject.toml) and @cedar-policy/cedar-wasm (cdk/package.json)
-# are exact pins that must only ever move together, by hand, with refreshed
-# contracts/cedar-parity/ fixtures (CEDAR_HITL_GATES.md §15.6, decision #23).
 [tasks.upgrade]
 description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs, web) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
 run = [
-  # Regenerate the lockfile rather than `yarn upgrade`: Yarn 1 has a known bug
-  # where `yarn upgrade` copies `resolutions` entries into `dependencies` in
-  # package.json. A fresh resolve upgrades within declared ranges (and honors
-  # resolutions) without mutating any manifest.
+  # Not `yarn upgrade`: in Yarn 1 it copies `resolutions` entries into `dependencies` in package.json.
   "rm -f yarn.lock && yarn install",
   "cd agent && mise run upgrade",
 ]
-
-##################
-###### QUALITY ###
-##################
 
 [tasks.quality]
 description = "Monorepo quality checks: agent quality, then ESLint with --fix for cdk, cli and web, then the docs check"
@@ -90,15 +44,6 @@ run = [
   "mise //docs:check",
 ]
 
-# What an ABCA agent runs by default to verify lint before and after its change
-# (`mise run lint`, DEFAULT_LINT_COMMAND in agent/src/post_hooks.py). Check-only
-# on purpose: no `--fix` and no formatter rewrite, so a pass means the tree is
-# clean as committed and a failure names the file, line and rule. Use
-# `mise run quality` for the auto-fixing variant.
-# The two `typecheck` tasks are the only type check that test files get (jest
-# transpiles them without checking), so a type error there has to fail here too.
-# `//agent:lint:deadcode` is here because the build fails on it (through
-# `//agent:quality`): without it a pass here could still fail the build.
 [tasks.lint]
 description = "Non-mutating lint and type checks of agent, cdk, cli and web, and the agent's dead-code check (no docs check)"
 depends = [
@@ -116,14 +61,6 @@ depends = [
   "//web:typecheck",
 ]
 
-# The gate scripts are gates too: a typo in one (`errors.lenght > 0`) runs fine and
-# passes everything. `strict` plus the unused checks catch that class; the two
-# flags after them describe what `node --experimental-strip-types`, which runs
-# these scripts, can execute. The behaviour of each script is tested in
-# cdk/test/scripts/*.test.ts, which //cdk:test runs in the same build.
-# The compiler is named by path because the root `node_modules/.bin/tsc` link
-# belongs to whichever hoisted package claimed it, not to the `typescript` these
-# scripts import.
 [tasks."check:scripts"]
 description = "Type-check the gate scripts (scripts/*.ts) with the TypeScript they import"
 run = "node node_modules/typescript/bin/tsc --noEmit --strict --noUnusedLocals --noUnusedParameters --noImplicitReturns --erasableSyntaxOnly --verbatimModuleSyntax --skipLibCheck --target es2022 --module esnext --moduleResolution bundler --types node scripts/*.ts"
@@ -152,10 +89,6 @@ run = "npm test --prefix integrations/jira-forge-app"
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
 
-# knip is called by path, like eslint in the package tasks, not as `yarn knip`:
-# yarn applies the engines range of the root package.json to every root script,
-# so under an older Node (a login shell that finds the system Node first) it
-# refused to start knip, which needs no more than Node 22.12.
 [tasks."check:deadcode"]
 description = "Dead-code gate (#282): knip must report nothing in the TS/JS workspaces — no unused file, dependency, export or exported type, no unlisted or unresolved import. Zero tolerance, no baseline."
 run = '''
@@ -168,17 +101,9 @@ exit 1
 description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
 run = "node scripts/check-transitive-pin-sync.mjs"
 
-# The five generic hooks of .pre-commit-config.yaml over every tracked file. A commit
-# made without the hooks could otherwise bring an unparseable YAML or JSON file or
-# leftover conflict markers through the build.
 # One prek call per hook: given several ids, prek only warns about an id that matches
 # no hook and exits 0; given one, it fails. SKIP is unset because prek honours it and
 # reports a skipped hook as success.
-# The first two hooks fix what they find and fail when they did: keep the change and
-# run again.
-# `mise run install` already fetches the hook repository and builds its environment
-# (`prek install --prepare-hooks`), so this needs no network afterwards. Without that
-# step the first run fetches from github.com and PyPI, and fails if it cannot.
 [tasks."check:hygiene"]
 description = "File hygiene over all tracked files (the five generic prek hooks): trailing whitespace, final newline, merge-conflict markers, YAML syntax, JSON syntax"
 run = '''
@@ -190,16 +115,9 @@ done
 exit "$rc"
 '''
 
-# Shell scripts are code too: one is copied into the agent image and one deletes
-# CloudFormation stacks (#278). A tracked script that was deleted but not staged is
-# still listed by git: it is skipped.
-# --severity=warning: `error` alone would not report an unquoted command substitution
-# (SC2046) or a `cd` whose failure goes unnoticed (SC2164), which are warnings.
-# --norc and the unset: shellcheck would otherwise read a `.shellcheckrc` from the
-# checkout, from a directory above it or from the home directory, and options from
-# SHELLCHECK_OPTS. The only way to accept a finding is a directive in the script:
+# git still lists a tracked script that was deleted but not staged.
+# The only way to accept a finding is a directive in the script:
 # `# shellcheck disable=SC<code> # <reason>` on the line above the command.
-# With no script listed the task fails: `xargs` on macOS would run nothing and exit 0.
 # The script is POSIX sh, because mise runs it with `sh`, which is dash on the CI
 # runner: hence `xargs -0 sh -c` to read the NUL-separated list, not a `read -d ''` loop.
 [tasks."check:shell"]
@@ -237,17 +155,6 @@ run = [
 description = "Fast tier without a test run: the `lint` and `drift-prevention` tasks. Not check-only: drift-prevention fixes trailing whitespace and missing final newlines (and then fails) and regenerates the command stubs"
 depends = [":lint", ":drift-prevention"]
 
-##################
-#### EMULATOR ####
-##################
-
-# Emulator-backed integration tests (ADR-013 Tier 2a): ABCA's real handler, CLI and agent code
-# against a local AWS Emulator (https://github.com/aws/aws-emulator). Needs Docker and no AWS
-# account. `mise run build` runs none of these tasks, only the unit tests of the guard's refusals.
-# The emulator version is pinned once, in scripts/aws-emulator/Dockerfile. See
-# scripts/aws-emulator/README.md for the rules and the known differences from AWS, and
-# docs/research/aws-emulator-local-tests.md for the investigation behind the tier.
-
 [tasks."emulator:up"]
 description = "Start a fresh AWS Emulator on 127.0.0.1 (builds the pinned, signature-verified image on first use)"
 run = "scripts/aws-emulator/emulator.sh up"
@@ -256,17 +163,10 @@ run = "scripts/aws-emulator/emulator.sh up"
 description = "Stop the AWS Emulator (emulated state is in memory and is discarded)"
 run = "scripts/aws-emulator/emulator.sh down"
 
-# Arguments after `--` are the command, for one file while iterating. Run from the repository
-# root (these are root tasks); the parentheses keep the shell there:
-#   mise run emulator:run -- yarn --cwd cdk jest --config jest.emulator.config.js task-api
-#   (cd agent && ../scripts/aws-emulator/emulator.sh run uv run pytest --no-cov tests_emulator/test_secrets.py)
-# For programs that use an AWS SDK. Not for AWS CLI v1, which ignores the endpoint for some services.
 [tasks."emulator:run"]
 description = "Run a command against the running emulator with the AWS environment replaced by the emulator's (pass it after --)"
 run = "scripts/aws-emulator/emulator.sh run"
 
-# On failure the list stops and the emulator stays up for inspection (`docker logs`); the next
-# `emulator:up` replaces it, and it is started with an idle timeout of one hour.
 [tasks."test:integration"]
 description = "Tier 2a: emulator-backed integration tests (cdk, cli, agent) against a fresh AWS Emulator"
 run = [
@@ -277,63 +177,23 @@ run = [
   { task = "emulator:down" },
 ]
 
-##################
-#### SECURITY ####
-##################
-
 [tasks."security:secrets"]
 description = "Scan the checked-out history for secrets with gitleaks (scheduled sweep + pre-push)"
-# `gitleaks git` (history-aware) replaces the deprecated `gitleaks detect`
-# (removed from --help in v8.19.0).
-#
-# Scoped to `HEAD` rather than left bare (#721, decision ratified in #723).
-# Bare `gitleaks git .` walks EVERY fetched ref, so a secret in an unmerged,
-# no-PR branch reddens this scan for everyone — it trains reviewers to ignore a
-# red security gate, which is the worst outcome for one.
-#
-# `HEAD` is deliberate, and is NOT interchangeable with `main` here. HEAD is
-# relative: in the scheduled CI run it resolves to `main`, but on pre-push in a
-# feature worktree it also covers the commits being pushed. Pinning this to
-# `main` would skip the developer's own commits — the pre-push hook would stop
-# catching the secret you are about to publish.
-#
-# Do NOT "scope" this with a ref pattern like `--remotes=origin/main`: that
-# matches no ref in a plain worktree, walks 0 commits, and silently turns the
-# scan into a fail-OPEN no-op.
-#
-# Secrets introduced by a PR are independently caught at merge time by the
-# required range-scoped check (`security:secrets:range`, see security-pr.yml).
-#
-# `--config .gitleaks.toml` (here and in the two tasks below) names the rule
-# file instead of leaving gitleaks to look for it. When gitleaks finds no file
-# it scans with its built-in rules and exits 0: the aws-account-id rule and
-# every allowlist are gone and nothing says so. With the flag a missing or
-# unreadable file stops the scan with an error, and a GITLEAKS_CONFIG variable
-# in the environment cannot replace the rules.
-#
-# `--verbose` (here and in the two tasks below) prints rule, file and line for
-# each finding; without it gitleaks only prints a count. `--redact` keeps the
-# secret itself out of the output.
+# --log-opts: without it gitleaks walks every fetched ref; with a ref pattern that matches no ref
+# (`--remotes=origin/main` in a plain worktree) it walks 0 commits and exits 0 (#721, #723).
+# --config: when gitleaks finds no config file it scans with its built-in rules and exits 0.
 run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="HEAD"'
 
 [tasks."security:secrets:range"]
 description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD; unset or empty, it scans the history of HEAD"
-# Range-scoped scan: only the commits a branch/PR introduces, not full history.
-# The per-PR CI job sets GITLEAKS_RANGE (security-pr.yml).
-# The default is `HEAD`, as in security:secrets above. With an empty --log-opts
-# gitleaks walks every ref of the clone (#329). With `origin/main..HEAD` it scans
-# nothing on main or where origin/main is missing, and still exits 0.
 run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-HEAD}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
-# `gitleaks git --staged` replaces the deprecated `gitleaks protect --staged`.
 run = "gitleaks git . --config .gitleaks.toml --staged --no-banner --redact --verbose"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
-# No --quiet, and a last command that fails when semgrep loaded no rule: the
-# comment of security:sast:range below says why.
 run = [
   "mkdir -p test-reports && rm -f test-reports/semgrep-sast.sarif",
   "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --sarif-output=test-reports/semgrep-sast.sarif --error .",
@@ -342,19 +202,6 @@ run = [
 
 [tasks."security:sast:range"]
 description = "Registry SAST ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_SAST_BASELINE, e.g. origin/main."
-# The rule packs of security:sast (keep the two --config lists identical), but
-# --baseline-commit reports only findings a branch ADDS relative to the
-# baseline. A rule the registry adds or changes therefore cannot fail code a
-# pull request did not touch (#532, #540); the full scan stays in security.yml.
-# Defaults the baseline to origin/main so the task is safe to run anywhere; the
-# per-PR CI job sets SEMGREP_SAST_BASELINE to the PR base SHA.
-#
-# The packs are downloaded from semgrep.dev on every run, so the task must fail
-# when they do not arrive. Semgrep exits non-zero by itself when the registry is
-# unreachable or a pack cannot be loaded; there is no --quiet here because it
-# hides that error. A registry that answers with EMPTY packs leaves semgrep at
-# exit 0 with nothing checked, so the last command fails unless the SARIF
-# report lists at least one loaded rule.
 run = [
   "mkdir -p test-reports && rm -f test-reports/semgrep-sast-range.sarif",
   "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --baseline-commit \"${SEMGREP_SAST_BASELINE:-origin/main}\" --sarif-output=test-reports/semgrep-sast-range.sarif --error .",
@@ -363,9 +210,6 @@ run = [
 
 [tasks."security:sast:masking"]
 description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use an inline, justified suppression comment on the return line."
-# `semgrep test` validates the rules against their .semgrep/ fixtures first.
-# The scan excludes those fixtures (they trigger by design) and writes SARIF
-# to test-reports/ (gitignored) so findings stay agent-routable (CA-06).
 run = [
   "semgrep test .semgrep/",
   "node scripts/check-masking-suppression-placement.mjs",
@@ -375,17 +219,6 @@ run = [
 
 [tasks."security:sast:masking:range"]
 description = "Masking scan ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_MASKING_BASELINE, e.g. origin/main."
-# Ratchet, not a full scan: --baseline-commit reports only findings a branch
-# ADDS relative to the baseline, so the pre-existing findings on main (tracked
-# in #756) don't block PRs that don't touch them — while any NEW masking
-# regression fails here at PR time. Mirrors security:secrets:range. The full
-# blocking scan (security:sast:masking) runs next to it in the required per-PR
-# job, in security.yml and in the pre-push hook.
-# `semgrep test .semgrep/` runs first (as in the full task) so a PR that WEAKENS
-# the rule or breaks a fixture fails at PR time too — otherwise a rule-weakening
-# change would only be caught weekly / at pre-push (which is currently bypassable
-# with --no-verify). Defaults the baseline to origin/main so the task is safe to
-# run anywhere; the per-PR CI job sets SEMGREP_MASKING_BASELINE to the PR base SHA.
 run = [
   "semgrep test .semgrep/",
   "node scripts/check-masking-suppression-placement.mjs",
@@ -394,14 +227,11 @@ run = [
 
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
-# Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.
 run = "osv-scanner scan --lockfile agent/uv.lock --lockfile yarn.lock --lockfile integrations/jira-forge-app/package-lock.json"
 
 [tasks."security:grype"]
 description = "Run Grype on source files; generated/vendor dirs are excluded because lockfile, Retire, and image scans cover dependencies and runtime artifacts"
 run = [
-  # Dependency locks, node packages, and the built image have dedicated scans.
-  # Keep this filesystem scan focused on source files, not generated/vendor output.
   "grype . --fail-on high --exclude './cdk/cdk.out/**' --exclude './node_modules/**' --exclude './**/node_modules/**' --exclude './**/.venv/**' --exclude './docs/dist/**'"
 ]
 
@@ -411,16 +241,12 @@ run = "npx retire --path cdk --severity high --ignore \"node_modules/**,cdk.out/
 
 [tasks."security:gh-actions"]
 description = "Static analysis of GitHub Actions workflows (zizmor)"
-# Offline: no GitHub API for online-only rules; config in .github/zizmor.yml
 run = "zizmor --offline .github"
 
 [tasks.security]
 description = "Run security scans"
-# Every leg is a task reference, so `mise run --continue-on-error security` (the
-# weekly workflow) runs all of them and still exits non-zero when any fails. A
-# nested `mise //agent:security` shell call did not get the flag: a bandit
-# failure skipped the image scan. Without the flag the first failure still
-# stops the run, as before.
+# Task references, not shell calls: `mise run --continue-on-error security` does not pass
+# the flag on to a nested `mise` call.
 run = [
     { task = "security:secrets" },
     { task = "security:deps" },
@@ -432,10 +258,6 @@ run = [
     { task = "check:shell" },
     { task = "//agent:security" },
 ]
-
-##################
-##### HOOKS ######
-##################
 
 [tasks."hooks:install"]
 description = "Install or refresh prek git hooks (also runs at end of `mise run install` in a Git repo)"
@@ -468,12 +290,6 @@ run = [
   "mise run hooks:pre-push:tests",
 ]
 
-##################
-##### BUILD #####
-##################
-
-# All packages run in parallel via DAG. Each resolves its own internal dependencies.
-# Agent quality runs alongside CDK/CLI/docs — no sequential bottleneck.
 [tasks.build]
 description = "Monorepo build (agent, cdk, cli, web, docs in parallel)"
 depends = [
@@ -486,8 +302,7 @@ depends = [
   ":drift-prevention"
 ]
 
-# A `run` list, not `depends`: mise starts dependencies together, and the build must
-# not begin before the install has finished.
+# A `run` list, not `depends`: mise starts dependencies together.
 [tasks.default]
 description = "Install + build"
 run = [{ task = "install" }, { task = "build" }]

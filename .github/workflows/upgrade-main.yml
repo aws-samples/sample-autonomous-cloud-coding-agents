@@ -1,9 +1,4 @@
 name: upgrade-main
-# Scheduled dependency upgrade on main: `mise run upgrade` refreshes the Yarn
-# workspaces and the agent uv lockfile WITHIN declared ranges/pins (exact pins
-# — including the Cedar parity pair — are never rewritten; see mise.toml).
-# Changes are shipped as a PR labeled 'auto-approve' so the auto-approve
-# workflow approves it once the build workflow passes.
 on:
   workflow_dispatch: {}
   schedule:
@@ -46,7 +41,7 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
-          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
+          version: 2026.10.25
           cache: true
 
       - name: Setup Node.js
@@ -105,9 +100,7 @@ jobs:
 
       - name: Create Pull Request
         id: create-pr
-        # AUTOMATION_GITHUB_TOKEN is a PAT (contents + pull-requests write):
-        # PRs created with the default GITHUB_TOKEN do not trigger the build
-        # workflow, which branch protection requires before auto-approve merges.
+        # A PAT: PRs created with the default GITHUB_TOKEN do not trigger the build workflow.
         uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
         with:
           token: ${{ secrets.AUTOMATION_GITHUB_TOKEN }}

@@ -1,42 +1,3 @@
-"""Jira issue-comment and workflow-transition helpers for Jira-origin tasks.
-
-Posts a "starting" comment on the originating Jira issue at task start — the
-Jira analogue of ``linear_reactions`` (Linear uses emoji reactions; Jira's
-REST API has no lightweight reaction primitive, so comments are the right
-tool).
-
-It also moves the originating issue across its board as the task progresses
-(issue #572): To Do → In Progress on start, → In Review on PR, via the Jira
-transitions API. Like comments, transitions are best-effort — logged and
-swallowed on any failure, sharing the same auth circuit breaker — so the Jira
-board never gates the task. See the "Workflow transitions" section below.
-
-The *terminal* status comment is NOT posted from here: since issue #573 the
-deterministic fan-out plane (``cdk/src/handlers/fanout-task-events.ts``
-``dispatchToJira``) owns it, so it carries cost/turns/duration and fires even
-when this agent crashes before completing. This module only owns the start
-comment.
-
-Why a signed app proxy instead of MCP: Atlassian's Remote MCP
-(``mcp.atlassian.com``) requires an interactive, browser-based OAuth 2.1
-authorization flow with dynamic client registration — it does NOT accept the
-stored Jira REST OAuth token as a ``Bearer`` header, and a headless background
-agent cannot complete the interactive handshake. The MCP path therefore fails
-to connect in the runtime (``claude mcp list`` → "Failed to connect").
-Configured tenants call a narrow HMAC-authenticated Forge web trigger, which
-uses ``api.asApp().requestJira`` so Jira attributes writes to the app account.
-Tenants without Forge configuration retain the user-delegated OAuth REST path
-as an explicit migration fallback.
-
-Gating: every function is a no-op unless ``channel_source == 'jira'`` and the
-issue key + cloud id are present in ``channel_metadata``. All network / auth
-errors are logged and swallowed — a transient Jira API failure must never fail
-the task itself (comments are advisory UX, not load-bearing).
-
-See: ``agent/src/channel_mcp.py`` for the (non-functional) MCP gate, and
-``agent/src/linear_reactions.py`` for the parallel Linear shim.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -54,22 +15,13 @@ import requests
 from shared_constants import SHARED_CONSTANTS
 from shell import log
 
-#: Atlassian cross-region REST base. The ``{cloudId}`` segment scopes the
-#: call to the tenant; ``JIRA_API_TOKEN`` (populated by
-#: ``config.resolve_jira_oauth_token``) authorizes it.
 JIRA_API_BASE = "https://api.atlassian.com/ex/jira"
 _JIRA_APP_ACTOR_CONSTANTS = SHARED_CONSTANTS["jira_app_actor"]
 FORGE_WEBTRIGGER_SUFFIX = str(_JIRA_APP_ACTOR_CONSTANTS["forge_webtrigger_suffix"])
 APP_ACTOR_MIN_SECRET_LENGTH = int(_JIRA_APP_ACTOR_CONSTANTS["min_secret_length"])
 
-#: Request timeout — comments are fire-and-forget status UX; never block the
-#: task pipeline for more than a couple of seconds.
 REQUEST_TIMEOUT_SECONDS = 5.0
 
-#: Auth-failure circuit breaker. Mirrors ``linear_reactions``: after this many
-#: consecutive 401/403s the breaker opens and later calls short-circuit
-#: without hitting the network (avoids flooding CloudWatch when a token is
-#: revoked). A successful 2xx resets the counter.
 _AUTH_FAILURE_THRESHOLD = 3
 _consecutive_auth_failures: int = 0
 _auth_circuit_open: bool = False
@@ -93,19 +45,11 @@ _PROXY_ERROR_CODES = frozenset(
 
 
 def _circuit_open() -> bool:
-    """True if the auth circuit breaker is open (short-circuit further calls)."""
     with _auth_state_lock:
         return _auth_circuit_open
 
 
 def _note_auth_status(status_code: int) -> None:
-    """Feed a response status into the shared 401/403 circuit breaker.
-
-    A 401/403 increments the consecutive-failure counter and opens the breaker
-    once it hits ``_AUTH_FAILURE_THRESHOLD``; any other 2xx-ish success resets
-    it. Comments and transitions share this state so a revoked token trips the
-    breaker once for all outbound Jira calls in the container.
-    """
     global _consecutive_auth_failures, _auth_circuit_open
 
     if status_code in (401, 403):
@@ -138,12 +82,6 @@ def _enabled(
     channel_source: str,
     channel_metadata: dict[str, str] | None,
 ) -> tuple[str, str] | None:
-    """Return ``(cloud_id, issue_key)`` if comments should fire, else None.
-
-    Gating mirrors ``channel_mcp.configure_channel_mcp`` — the same
-    ``channel_source == 'jira'`` check, plus a metadata presence check so we
-    don't fire REST calls we can't address.
-    """
     if channel_source != "jira":
         return None
     if not channel_metadata:
@@ -156,7 +94,6 @@ def _enabled(
 
 
 def _adf(text: str) -> dict[str, Any]:
-    """Wrap plain text in a minimal Atlassian Document Format comment body."""
     return {
         "type": "doc",
         "version": 1,
@@ -167,14 +104,12 @@ def _adf(text: str) -> dict[str, Any]:
 
 
 def _app_actor_intended() -> bool:
-    """True once app setup has written any Forge app-actor field."""
     return os.environ.get("JIRA_APP_ACTOR_CONFIGURED") == "1" or bool(
         os.environ.get("JIRA_APP_ACTOR_PROXY_URL") or os.environ.get("JIRA_APP_ACTOR_SHARED_SECRET")
     )
 
 
 def _app_actor_credentials() -> tuple[str, str] | None:
-    """Return validated Forge proxy credentials, failing closed when malformed."""
     proxy_url = os.environ.get("JIRA_APP_ACTOR_PROXY_URL", "")
     shared_secret = os.environ.get("JIRA_APP_ACTOR_SHARED_SECRET", "")
     try:
@@ -209,7 +144,6 @@ def _app_actor_request(
     body: dict[str, Any] | None = None,
     transition_id: str | None = None,
 ) -> requests.Response | None:
-    """Call the signed, operation-allowlisted Forge app proxy."""
     credentials = _app_actor_credentials()
     if not credentials:
         return None
@@ -246,8 +180,6 @@ def _app_actor_request(
         )
         if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
             proxy_error = _proxy_error_code(response.text)
-            # The rule of jira-app-actor.ts: a 429 (Jira's rate limit, which the proxy
-            # passes through) and a 5xx are transient, the rest is refused for good.
             non_retryable = proxy_error == "proxy_not_configured" or (
                 response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
                 and response.status_code != HTTPStatus.TOO_MANY_REQUESTS
@@ -275,7 +207,6 @@ def _app_actor_request(
 
 
 def _proxy_error_code(raw_body: str) -> str | None:
-    """Return a known proxy error code without logging arbitrary response text."""
     try:
         payload = json.loads(raw_body)
     except (json.JSONDecodeError, TypeError):
@@ -288,13 +219,6 @@ def _proxy_error_code(raw_body: str) -> str | None:
 
 
 def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
-    """POST a comment to the issue. Return True on success, False on any failure.
-
-    Swallows network / auth / schema errors with a WARN log — comments are
-    advisory and never gate the pipeline. After ``_AUTH_FAILURE_THRESHOLD``
-    consecutive auth failures the module-level circuit breaker opens and later
-    calls short-circuit without hitting the network.
-    """
     if _circuit_open():
         log("DEBUG", "jira_reactions: auth circuit still open; short-circuiting call")
         return False
@@ -331,14 +255,12 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
             )
         except requests.RequestException as e:
             log("WARN", f"jira_reactions: request failed ({type(e).__name__}): {e}")
-            # Jira comments are best-effort on network blips
             return False
 
     if resp.status_code in (401, 403):
         _note_auth_status(resp.status_code)
         return False
 
-    # Jira returns 201 Created on a successful comment.
     if resp.status_code not in (200, 201):
         log("WARN", f"jira_reactions: HTTP {resp.status_code} from Jira: {resp.text[:200]}")
         return False
@@ -365,49 +287,20 @@ def comment_task_started(
     log("TASK", f"jira_reactions: comment_task_started issue={issue_key} ok={ok}")
 
 
-# NOTE: there is deliberately no ``comment_task_finished`` here. Since issue
-# #573 the deterministic fan-out plane
-# (``cdk/src/handlers/fanout-task-events.ts`` ``dispatchToJira``) owns the Jira
-# terminal comment — it carries cost/turns/duration and, crucially, fires even
-# when the agent crashes before completing (max-turns, OOM). The agent only
-# posts the *start* comment (``comment_task_started`` above); posting a terminal
-# comment here too would double-comment on the issue.
+# No terminal comment from here: ``dispatchToJira`` in
+# ``cdk/src/handlers/fanout-task-events.ts`` posts it (issue #573).
 
 
-# ── Workflow transitions (issue #572) ──────────────────────────────────────────
-#
-# Move the originating Jira card across its board as the task progresses so the
-# board reflects reality: To Do → In Progress on start, → In Review on PR. Jira
-# status can only change via the transitions API (``PUT issue`` ignores status),
-# and valid transition IDs are workflow- and current-status-specific, so we
-# resolve them per-issue at call time — never configure or hard-code IDs.
-#
-# Best-effort, exactly like comments: short timeout, errors logged and
-# swallowed, sharing the 401/403 circuit breaker above. A transition failure
-# must never fail, block, or retry the task.
+# Jira status can only change via the transitions API (``PUT issue`` ignores
+# status), and valid transition IDs are workflow- and current-status-specific
+# (issue #572).
 
-#: Jira ``statusCategory.key`` for the "In Progress" band. The start transition
-#: falls back to this category so standard workflows work with no per-project
-#: config. (Categories: ``new`` = To Do, ``indeterminate`` = In Progress,
-#: ``done`` = Done — the only three, and they are stable API values.)
 _IN_PROGRESS_CATEGORY = "indeterminate"
 
-#: Ordinal rank of the three status categories, low → high. Used to skip a
-#: transition that would move the card *backward* (e.g. a re-triggered task on
-#: an issue that's already In Review must not drag it back to In Progress).
 _CATEGORY_RANK = {"new": 0, "indeterminate": 1, "done": 2}
 
-#: Preferred destination *name* for the start transition (matched
-#: case-insensitively before the category fallback). Both ``In Progress`` and
-#: ``Blocked`` share the ``indeterminate`` category, so a name match is what
-#: keeps a category-only heuristic from landing on ``Blocked`` (#605).
 _START_STATUS_NAME = "in progress"
 
-#: Preferred destination names for the PR-opened transition, tried in order.
-#: Mirrors Linear's "In Review → In Progress" fallback while also matching
-#: common review-column names, so a "Code Review" column isn't silently skipped
-#: and a stock board (no review status) still advances to / stays at In Progress
-#: rather than no-opping (#605). Ends with In Progress as the safe fallback.
 _REVIEW_STATUS_NAMES = (
     "in review",
     "code review",
@@ -417,25 +310,13 @@ _REVIEW_STATUS_NAMES = (
     _START_STATUS_NAME,
 )
 
-#: Destination names the category fallback must never auto-pick. ``Blocked``
-#: shares the ``indeterminate`` category with ``In Progress``; a bare
-#: first-indeterminate heuristic could land there (#605), which is never what
-#: "move to In Progress" means. A configured override can still target it.
+# ``Blocked`` shares the ``indeterminate`` category with ``In Progress`` (#605).
 _CATEGORY_FALLBACK_DENY = ("blocked",)
 
 
 def _get_issue_transitions(
     cloud_id: str, issue_key: str, token: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-    """GET the issue's current status + the transitions valid from it.
-
-    Fetches ``?fields=status&expand=transitions`` so a single call yields both
-    the current ``status`` (to skip moving a card backward, #605) and the
-    ``transitions`` list. Returns ``(current_status, transitions)`` on success,
-    or ``None`` on any failure. An empty transitions list is normal — Jira
-    returns one when the OAuth user lacks the *Transition Issues* permission —
-    and callers treat it as "nothing to do", not an error.
-    """
     if _app_actor_intended():
         resp = _app_actor_request(cloud_id, "get_transitions", issue_key=issue_key)
         if resp is None:
@@ -473,10 +354,6 @@ def _get_issue_transitions(
         log("WARN", f"jira_reactions: issue GET returned non-JSON: {e}")
         # nosemgrep: py-silent-success-masking -- Jira transitions are best-effort on bad responses
         return None
-    # A well-formed response is a JSON object. Guard against valid-but-unexpected
-    # JSON (``null``, a bare list, a scalar) — ``.get`` would raise
-    # AttributeError, which is NOT best-effort: it propagates out of the pipeline
-    # hook and flips the task to FAILED (#605).
     if not isinstance(payload, dict):
         log("WARN", "jira_reactions: issue GET returned non-object JSON — skipping")
         return None
@@ -490,21 +367,15 @@ def _get_issue_transitions(
 
 
 def _to_name(t: dict[str, Any]) -> str:
-    """Lowercased destination status name of a transition, or ``""``."""
     return ((t.get("to") or {}).get("name") or "").strip().lower()
 
 
 def _to_category(t: dict[str, Any]) -> str | None:
-    """``statusCategory.key`` of a transition's destination, or ``None``."""
     return ((t.get("to") or {}).get("statusCategory") or {}).get("key")
 
 
 def _usable(t: dict[str, Any]) -> bool:
-    """A transition we can execute unattended.
-
-    ``hasScreen`` transitions may demand required fields we can't supply, so we
-    skip them — a missing field would 400 the POST.
-    """
+    """A ``hasScreen`` transition may demand fields; without them Jira answers the POST with 400."""
     return isinstance(t, dict) and not t.get("hasScreen", False)
 
 
@@ -515,24 +386,6 @@ def _select_transition(
     prefer_names: tuple[str, ...],
     fallback_category: str | None,
 ) -> dict[str, Any] | None:
-    """Pick a transition by the resolution ladder, or ``None`` if nothing fits.
-
-    Ladder (first match wins), mirroring the Linear reference this feature is
-    modeled on (``prompt_builder.py``):
-
-    1. ``override`` — a per-project configured status name, matched
-       case-insensitively against the destination name. An override that isn't
-       reachable is a deliberate skip (no fallback — the user asked for a
-       specific status).
-    2. ``prefer_names`` — preferred destination names in priority order (e.g.
-       ``In Progress`` on start; ``In Review`` → ``Code Review`` → … on PR).
-       This is what stops a category-only heuristic from landing on ``Blocked``
-       (which shares the ``indeterminate`` category with ``In Progress``).
-    3. ``fallback_category`` — any usable transition whose destination is in
-       this ``statusCategory`` (keeps stock boards working with no config).
-
-    Screen-gated transitions are skipped throughout.
-    """
     usable = [t for t in transitions if _usable(t)]
 
     if override:
@@ -558,7 +411,6 @@ def _select_transition(
 
 
 def _post_transition(cloud_id: str, issue_key: str, token: str, transition_id: str) -> bool:
-    """POST a transition. Return True on success (204), False on any failure."""
     if _app_actor_intended():
         resp = _app_actor_request(
             cloud_id,
@@ -586,13 +438,11 @@ def _post_transition(cloud_id: str, issue_key: str, token: str, transition_id: s
             )
         except requests.RequestException as e:
             log("WARN", f"jira_reactions: transition POST failed ({type(e).__name__}): {e}")
-            # advisory Jira transition write
             return False
 
     if resp.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
         _note_auth_status(resp.status_code)
         return False
-    # Jira returns 204 No Content on a successful transition.
     if resp.status_code != HTTPStatus.NO_CONTENT:
         log("WARN", f"jira_reactions: transition POST HTTP {resp.status_code}: {resp.text[:200]}")
         return False
@@ -611,16 +461,6 @@ def _transition(
     fallback_category: str | None,
     max_source_rank: int | None,
 ) -> None:
-    """Shared best-effort transition path. No-op for non-Jira tasks.
-
-    Resolves ``(cloud_id, issue_key)``, fetches the current status + valid
-    transitions, skips if the card is already at/past the target band
-    (``max_source_rank``), selects a transition via the resolution ladder (cut
-    at the card's own status when that is one of its names), and
-    POSTs it. Every failure mode — disabled, open circuit, missing token, empty
-    transition list, no match, network / HTTP error — is logged and swallowed
-    so the pipeline is never affected.
-    """
     target = _enabled(channel_source, channel_metadata)
     if not target:
         return
@@ -643,10 +483,6 @@ def _transition(
         return
     current_status, transitions = result
 
-    # Don't move the card backward. If the current status is already at or past
-    # the highest category this lifecycle point should advance to, skip — a
-    # re-triggered task on an already-In-Review issue must not drag it back to
-    # In Progress (mirrors Linear's "already in a later state" skip).
     if max_source_rank is not None:
         current_category = (current_status.get("statusCategory") or {}).get("key")
         current_rank = _CATEGORY_RANK.get(current_category)
@@ -659,7 +495,7 @@ def _transition(
             return
 
     if not transitions:
-        # [] (no permission / no transitions) — a normal skip.
+        # Jira returns [] when the user lacks the Transition Issues permission.
         log(
             "WARN",
             f"jira_reactions: no available transitions for {lifecycle} "
@@ -667,9 +503,6 @@ def _transition(
         )
         return
 
-    # A status that is itself a rung of the ladder ends the ladder there: the
-    # rungs below it and the category fallback would move the card backward or
-    # sideways (In Review to In Progress, In Progress to On Hold).
     current_name = str(current_status.get("name") or "").strip().lower()
     if current_name in prefer_names:
         prefer_names = prefer_names[: prefer_names.index(current_name)]
@@ -712,10 +545,6 @@ def transition_task_started(
     """
     metadata = channel_metadata or {}
     override = metadata.get("jira_status_on_start")
-    # An override is a deliberate instruction, so honor it regardless of current
-    # status. Not for an ``@bgagent`` iteration (``jira_prior_task_id``): the
-    # earlier task has moved the card already, and every comment would pull an
-    # In Review card back to the override status.
     from_any_status = bool(override) and not metadata.get("jira_prior_task_id")
     _transition(
         channel_source,
@@ -724,7 +553,6 @@ def transition_task_started(
         override=override,
         prefer_names=() if override else (_START_STATUS_NAME,),
         fallback_category=None if override else _IN_PROGRESS_CATEGORY,
-        # Skip if already In Progress (indeterminate) or Done.
         max_source_rank=None if from_any_status else _CATEGORY_RANK[_IN_PROGRESS_CATEGORY],
     )
 
@@ -737,10 +565,9 @@ def transition_pr_opened(
 
     Resolution: ``jira_status_on_pr`` override → a destination named
     ``In Review`` (or a common review-column synonym) → any
-    ``indeterminate``-category destination (Linear's In Review→In Progress
-    fallback, so a stock board isn't silently skipped, #605). Skips if the
-    issue is already Done; an issue that is on one of these names only moves to
-    a name that comes before it. Best-effort; no-op for non-Jira tasks.
+    ``indeterminate``-category destination. Skips if the issue is already
+    Done; an issue that is on one of these names only moves to a name that
+    comes before it. Best-effort; no-op for non-Jira tasks.
     """
     override = (channel_metadata or {}).get("jira_status_on_pr")
     _transition(
@@ -750,13 +577,11 @@ def transition_pr_opened(
         override=override,
         prefer_names=() if override else _REVIEW_STATUS_NAMES,
         fallback_category=None if override else _IN_PROGRESS_CATEGORY,
-        # Only skip if already Done — moving In Progress → In Review is forward.
         max_source_rank=None if override else _CATEGORY_RANK["done"],
     )
 
 
 def _reset_state_for_testing() -> None:
-    """Test-only: reset the auth circuit-breaker module state."""
     global _consecutive_auth_failures, _auth_circuit_open
     with _auth_state_lock:
         _consecutive_auth_failures = 0

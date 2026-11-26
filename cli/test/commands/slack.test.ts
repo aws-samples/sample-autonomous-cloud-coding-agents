@@ -39,14 +39,12 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
 
 const ddbSend = jest.fn();
 
-// CloudFormation — `setup` reads the app manifest and the three secret ARNs from stack outputs.
 const cfnSend = jest.fn();
 jest.mock('@aws-sdk/client-cloudformation', () => ({
   ...jest.requireActual('@aws-sdk/client-cloudformation'),
   CloudFormationClient: jest.fn(() => ({ send: cfnSend })),
 }));
 
-// Secrets Manager — `setup` stores the three credentials.
 const smSend = jest.fn();
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
   ...jest.requireActual('@aws-sdk/client-secrets-manager'),
@@ -123,8 +121,6 @@ describe('slack command', () => {
     beforeEach(() => {
       ddbSend.mockReset();
       errorSpy = jest.spyOn(console, 'error').mockImplementation();
-      // Make process.exit throw so the function stops like it would in the CLI,
-      // and the test can assert it was reached.
       exitSpy = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
         throw new Error(`process.exit:${code}`);
       }) as never);
@@ -190,14 +186,11 @@ describe('slack command', () => {
       loadConfigSpy.mockRestore();
     });
 
-    // With --team-id the installation table is not scanned: the mapping table is all that
-    // DynamoDB is asked about.
     const run = (repo: string) => makeSlackCommand().parseAsync([
       'node', 'test', 'onboard-channel', 'C0123ABCD', '--repo', repo, '--team-id', 'T0123ABC',
     ]);
 
     test('a second run keeps the first onboarded_at and moves updated_at', async () => {
-      // The mapping table, one row of it: a put stores the item, a get returns it.
       let row: Record<string, unknown> | undefined;
       ddbSend.mockImplementation(async (command: unknown) => {
         if (command instanceof PutCommand) {
@@ -206,7 +199,6 @@ describe('slack command', () => {
         }
         return { Item: row };
       });
-      // Only the clock is faked, so that the two runs are a month apart.
       jest.useFakeTimers({
         now: new Date('2026-01-02T03:04:05.000Z'),
         doNotFake: [
@@ -237,7 +229,6 @@ describe('slack command', () => {
         onboarded_at: '2026-01-02T03:04:05.000Z',
         updated_at: '2026-02-03T04:05:06.000Z',
       });
-      // Each run reads the row it is about to replace: by its key, and not from a stale copy.
       const reads = ddbSend.mock.calls
         .map(([command]) => command as unknown)
         .filter((command): command is GetCommand => command instanceof GetCommand)
@@ -247,7 +238,6 @@ describe('slack command', () => {
     });
 
     test('stops with the AWS error, before writing, when the mapping row cannot be read', async () => {
-      // Not a reason to take the row for new: the put would date the mapping from today.
       ddbSend.mockRejectedValueOnce(Object.assign(
         new Error('User is not authorized to perform: dynamodb:GetItem'),
         { name: 'AccessDeniedException' },
@@ -295,8 +285,6 @@ describe('slack command', () => {
     const printed = () => consoleSpy.mock.calls.map((c) => String(c[0])).join('\n');
 
     describe('with the Client ID read from a pipe', () => {
-      // The two secrets come from the hidden prompt, replaced here; the Client ID is not a
-      // secret and comes from the visible prompt, which reads the real stdin of the test.
       let stdin: PassThrough;
       let restore: () => void;
 
@@ -328,8 +316,6 @@ describe('slack command', () => {
       });
 
       test('fails, and stores nothing, when the input ends before the Client ID', async () => {
-        // The prompt this command had never answered at the end of the input: node then ran
-        // out of work and exited with code 0, as if the credentials had been stored.
         stdin.end();
 
         await expect(runSetup()).rejects.toThrow('No input provided.');
@@ -339,7 +325,6 @@ describe('slack command', () => {
 
     test('asks again until all three values look like Slack credentials', async () => {
       const promptLineSpy = jest.spyOn(promptSecretMod, 'promptLine');
-      // Round 1: a value is missing. Round 2: none has the right form. Round 3: all good.
       promptSecretSpy
         .mockResolvedValueOnce('').mockResolvedValueOnce(CLIENT_SECRET)
         .mockResolvedValueOnce('not-hex').mockResolvedValueOnce('too-short')
@@ -361,7 +346,6 @@ describe('slack command', () => {
           '✗ Client ID should be numeric (e.g. 12345.67890).',
           '\nCheck Basic Information → App Credentials and try again.\n',
         ]);
-        // Only the round that passed the checks is stored.
         expect(stored().map((s) => s.SecretString)).toEqual([SIGNING_SECRET, CLIENT_SECRET, '12345.67890']);
       } finally {
         promptLineSpy.mockRestore();

@@ -43,8 +43,6 @@ function fixture(addUnrelatedWildcard: boolean, concreteEnvironment: boolean) {
     workloadName: 'linear-audit', allowedReturnUrls: ['http://localhost/callback'],
   });
   const consumer = new iam.Role(stack, 'Consumer', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
-  // Force CDK to create overflow policies during prepare, after the grant helper
-  // runs. Distinct conditions prevent statement merging from hiding the split.
   for (let index = 0; index < 60; index++) {
     consumer.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject'],

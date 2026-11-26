@@ -28,10 +28,7 @@ describe('status command', () => {
   const mockGetStatusSnapshot = jest.fn();
 
   beforeEach(() => {
-    // The command under test sets process.exitCode; without resetting it,
-    // a test that legitimately asserts exitCode=1 leaks that value into
-    // the Jest process itself, which then exits 1 with green assertions.
-    // Same pattern as watch.test.ts.
+    // Jest's sandboxed `process` writes the real exitCode: a value left set becomes the exit code of a green in-band run.
     process.exitCode = undefined;
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     mockGetTask.mockReset();
@@ -50,9 +47,6 @@ describe('status command', () => {
   });
 
   afterEach(() => {
-    // Reset here too: beforeEach only covers between-tests; without this,
-    // the LAST test's exitCode (1) survives into the Jest worker's own
-    // exit, failing the test command with green assertions.
     process.exitCode = undefined;
     consoleSpy.mockRestore();
   });
@@ -91,7 +85,6 @@ describe('status command', () => {
     await cmd.parseAsync(['node', 'test', 'abc']);
 
     expect(mockGetStatusSnapshot).toHaveBeenCalledWith('abc');
-    // The raw ``getTask`` path is only used by ``--output json``.
     expect(mockGetTask).not.toHaveBeenCalled();
     const output = consoleSpy.mock.calls[0][0] as string;
     expect(output).toContain('Task abc — RUNNING');
@@ -106,16 +99,10 @@ describe('status command', () => {
     await cmd.parseAsync(['node', 'test', 'abc', '--output', 'json']);
 
     expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(taskData, null, 2));
-    // JSON consumers keep the existing ``TaskDetail`` contract — no snapshot fetch.
     expect(mockGetStatusSnapshot).not.toHaveBeenCalled();
   });
 
   test('--wait renders the SAME snapshot layout as the default path (no format bifurcation)', async () => {
-    // PR #52 UX carry-forward: pre-fix, ``--wait`` rendered a completely
-    // different ``formatTaskDetail`` view, confusing users who wondered
-    // why they had to add a blocking flag to see a richer output.
-    // The new contract: ``--wait`` is a pure blocking flag; same
-    // snapshot layout renders whether or not it was passed.
     const terminalTask = {
       task_id: 'abc',
       status: 'COMPLETED',
@@ -147,12 +134,9 @@ describe('status command', () => {
     const cmd = makeStatusCommand();
     await cmd.parseAsync(['node', 'test', 'abc', '--wait']);
 
-    // ``waitForTask`` polled the task (at least once) and the snapshot
-    // formatter was invoked — not the old ``formatTaskDetail`` split.
     const output = consoleSpy.mock.calls[0][0] as string;
     expect(output).toContain('Task abc — COMPLETED');
     expect(output).toContain('Repo:          owner/repo');
-    // Exit code reflects the terminal status.
     expect(process.exitCode).toBe(0);
   });
 
@@ -168,9 +152,6 @@ describe('status command', () => {
   });
 
   test('--wait --max-wait <seconds> overrides the 24h ceiling', async () => {
-    // A task stuck in RUNNING must trip the user-provided ceiling, not
-    // poll for the default 24h. (--max-wait 1 → ceiling check fires on
-    // the second loop iteration; the first poll resolves immediately.)
     jest.useFakeTimers();
     try {
       mockGetTask.mockResolvedValue({ task_id: 'abc', status: 'RUNNING' });
@@ -179,7 +160,6 @@ describe('status command', () => {
       const parsed = cmd.parseAsync(['node', 'test', 'abc', '--wait', '--max-wait', '1']);
       // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
       const assertion = expect(parsed).rejects.toThrow(/Timed out waiting/);
-      // Drain poll sleeps until the ceiling trips.
       for (let i = 0; i < 3; i += 1) {
         await Promise.resolve();
         jest.advanceTimersByTime(6_000);

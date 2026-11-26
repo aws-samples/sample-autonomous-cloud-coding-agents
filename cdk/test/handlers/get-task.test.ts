@@ -19,7 +19,6 @@
 
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -109,23 +108,12 @@ describe('get-task handler', () => {
     expect(body.data.status).toBe('RUNNING');
     expect(body.data.repo).toBe('org/repo');
     expect(body.data.branch_name).toBe('bgagent/task-1/fix');
-    // Null fields should be present
     expect(body.data.pr_url).toBeNull();
     expect(body.data.error_message).toBeNull();
-    // Provenance — surfaced so CLI / dashboard consumers can distinguish
-    // webhook-submitted tasks from api-submitted tasks without spelunking
-    // CloudWatch. Pre-fix this field was present on the DDB record but
-    // dropped by ``toTaskDetail``.
     expect(body.data.channel_source).toBe('api');
   });
 
   test('surfaces agent_heartbeat_at so the in-guest liveness signal is observable', async () => {
-    // ADR-021 P2r2-F11. The agent refreshes this every 45 s on AgentCore and Lambda MicroVMs,
-    // where the orchestrator reads it for hang detection, but `toTaskDetail` dropped it, so
-    // `bgagent status` showed `None` while DynamoDB held a 6-second-old value, and
-    // a live verification run concluded "heartbeats not observed" and blamed an
-    // unrelated defect. Exactly the class of bug the channel_source assertion above
-    // exists for.
     mockSend.mockReset();
     mockSend.mockResolvedValueOnce({
       Item: { ...TASK_RECORD, agent_heartbeat_at: '2025-03-15T10:30:45Z' },
@@ -138,15 +126,12 @@ describe('get-task handler', () => {
   });
 
   test('reports agent_heartbeat_at as null when the agent has not beaten yet', async () => {
-    // Present-but-null, not absent: scripts and the CLI branch on the field, so it
-    // must exist on every response (the TaskDetail contract is non-optional).
     const body = JSON.parse((await handler(makeEvent())).body);
     expect(body.data).toHaveProperty('agent_heartbeat_at');
     expect(body.data.agent_heartbeat_at).toBeNull();
   });
 
   test('surfaces the compute backend the session started on, and null before one starts', async () => {
-    // What a heartbeat says differs by backend, so the reader of one has to know which it is.
     expect(JSON.parse((await handler(makeEvent())).body).data.compute_type).toBeNull();
 
     mockSend.mockReset();
@@ -189,7 +174,7 @@ describe('get-task handler', () => {
     expect(body.data.queue_position).toBeNull();
     expect(body.data.estimated_wait_s).toBeNull();
     expect(body.data.queued_at).toBeNull();
-    expect(mockSend).toHaveBeenCalledTimes(1); // GetCommand only
+    expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
   test('QUEUED task returns 1-based FIFO position among the user\'s queued tasks (#441)', async () => {
@@ -203,7 +188,6 @@ describe('get-task handler', () => {
           queued_at: '2025-03-15T10:30:05Z',
         },
       })
-      // UserStatusIndex query: two tasks queued before ours, one after.
       .mockResolvedValueOnce({
         Items: [
           { task_id: 'older-1', created_at: '2025-03-15T10:28:00Z' },
@@ -216,17 +200,12 @@ describe('get-task handler', () => {
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body);
-    expect(body.data.queue_position).toBe(3); // 2 ahead + 1
-    expect(body.data.estimated_wait_s).toBe(600); // ceil(3/3) * 600
+    expect(body.data.queue_position).toBe(3);
+    expect(body.data.estimated_wait_s).toBe(600);
     expect(body.data.queued_at).toBe('2025-03-15T10:30:05Z');
   });
 
   test('same-millisecond tie breaks on task_id so co-queued tasks get distinct positions (#331/#441)', async () => {
-    // The #331 fan-out burst queues sibling children in the same instant,
-    // so several rows share `created_at`. The FIFO tiebreak
-    // (`item.task_id < record.task_id`) is the ONLY thing that keeps their
-    // positions distinct; without it both would report the same rank.
-    // TASK_RECORD.task_id is 'task-1' at created_at 2025-03-15T10:30:00Z.
     mockSend.mockReset();
     mockSend
       .mockResolvedValueOnce({
@@ -237,8 +216,6 @@ describe('get-task handler', () => {
           queued_at: '2025-03-15T10:30:05Z',
         },
       })
-      // All three share the target's created_at; only task_id disambiguates.
-      // 'task-0' < 'task-1' → ahead; 'task-2' > 'task-1' → behind.
       .mockResolvedValueOnce({
         Items: [
           { task_id: 'task-0', created_at: '2025-03-15T10:30:00Z' },
@@ -250,9 +227,7 @@ describe('get-task handler', () => {
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body);
-    // Exactly one same-instant sibling ranks ahead — not zero (tiebreak
-    // dropped) nor two (tiebreak ignored, both siblings counted).
-    expect(body.data.queue_position).toBe(2); // 1 ahead (task-0) + 1
+    expect(body.data.queue_position).toBe(2);
   });
 
   test('QUEUED task queue-position lookup fails open to null on GSI error', async () => {
@@ -264,7 +239,7 @@ describe('get-task handler', () => {
       .mockRejectedValueOnce(new Error('GSI throttled'));
 
     const result = await handler(makeEvent());
-    expect(result.statusCode).toBe(200); // GET still succeeds
+    expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body);
     expect(body.data.status).toBe('QUEUED');
     expect(body.data.queue_position).toBeNull();
@@ -277,7 +252,6 @@ describe('get-task handler', () => {
       .mockResolvedValueOnce({
         Item: { ...TASK_RECORD, status: 'QUEUED', status_created_at: 'QUEUED#2025-03-15T10:30:05Z' },
       })
-      // Query result no longer contains task-1 (picked up concurrently).
       .mockResolvedValueOnce({
         Items: [{ task_id: 'other', created_at: '2025-03-15T10:28:00Z' }],
       });

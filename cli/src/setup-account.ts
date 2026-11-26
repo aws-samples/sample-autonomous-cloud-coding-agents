@@ -17,18 +17,14 @@
  *  SOFTWARE.
  */
 
-/** Account preparation for `bgagent setup`. Decisions only; the wizard carries them out. */
-
 import type { ComputeBackend } from './deployment-profile';
 import { DEFAULT_STACK_NAME } from './operator-context';
 
 /**
- * Minimum ABCA bootstrap bundle this CLI deploys against. Mirrors
- * `BOOTSTRAP_VERSION` in `cdk/src/bootstrap/version.ts` (parity-tested).
+ * Minimum ABCA bootstrap bundle this CLI deploys against.
  */
 export const REQUIRED_BOOTSTRAP_VERSION = '1.12.0';
 
-/** ABCA's least-privilege bootstrap scopes its deploy role to these names (cdk/src/bootstrap/policies/*). */
 const BOOTSTRAP_STACK_NAME_PATTERN = new RegExp(`^${DEFAULT_STACK_NAME}(-[A-Za-z0-9-]+)?$`);
 
 /** One-time account changes a deploy needs, in execution order. */
@@ -58,7 +54,6 @@ export function planAccountPreparation(
   compute: readonly ComputeBackend[],
 ): { steps: AccountPreparation[]; computeTypes: ComputeBackend[]; standardBootstrap: boolean } {
   if (!bootstrap) {
-    // AgentCore stays in the list: Memory and the Gateway are AgentCore resources on every backend.
     const computeTypes = [...new Set<ComputeBackend>(['agentcore', ...compute])];
     return { steps: computeTypes.length > 1 ? ['bootstrap', 'computeTypes'] : ['bootstrap'], computeTypes, standardBootstrap: false };
   }

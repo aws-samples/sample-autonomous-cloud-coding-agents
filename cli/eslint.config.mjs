@@ -30,15 +30,13 @@ import { dirname, join } from 'node:path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Every TypeScript extension. ESLint skips a file that no `files` pattern matches
-// without a word, so a .mts or .cts file would sit outside every rule below.
+// ESLint silently skips a file that no `files` pattern matches.
 const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}'];
 
 const NO_MD5 = {
   selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
   message: 'Use the md5hash() function from the core library if you want md5',
 };
-// The name exception is this package's own REST client, which is not an SDK client.
 const NO_NAKED_SDK_CLIENT = {
   selector: 'NewExpression:matches([callee.name=/^(?!ApiClient$).*Client$/], [callee.property.name=/Client$/])',
   message: 'Build AWS SDK clients with makeClient(Ctor, cfg) or makeDocClient(cfg) from src/ua.ts: `new XxxClient()` drops the'
@@ -50,7 +48,6 @@ const NO_IMPORT_OUTSIDE_PACKAGE = 'The CLI ships only lib/, compiled from cli/sr
   + ' CDK declaration. Copy any other value into src and pin the copy with a parity test such as test/constants-parity.test.ts.';
 
 export default [
-  // Global ignores
   {
     ignores: [
       '**/*.js',
@@ -62,12 +59,9 @@ export default [
     ],
   },
 
-  // Correctness baselines: eslint:recommended and the typescript-eslint recommended
-  // set. They come before the package block so that block wins where both set a rule.
   { files: TS_FILES, rules: js.configs.recommended.rules },
   ...tseslint.configs['flat/recommended'].map((config) => ({ ...config, files: TS_FILES })),
 
-  // TypeScript source and test files
   {
     files: TS_FILES,
     languageOptions: {
@@ -102,13 +96,10 @@ export default [
       },
     },
     rules: {
-      // Stylistic rules
       '@stylistic/indent': ['error', 2],
       '@stylistic/quotes': ['error', 'single', { avoidEscape: true }],
       '@stylistic/comma-dangle': ['error', 'always-multiline'],
       '@stylistic/comma-spacing': ['error', { before: false, after: true }],
-      // The exceptions of the core rule this replaced: the plugin's own default also lets
-      // two spaces inside an import attribute pass.
       '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false, exceptions: { Property: true, ImportAttribute: false } }],
       '@stylistic/array-bracket-spacing': ['error', 'never'],
       '@stylistic/array-bracket-newline': ['error', 'consistent'],
@@ -143,7 +134,6 @@ export default [
         switches: 'never',
       }],
 
-      // Core ESLint rules
       'curly': ['error', 'multi-line', 'consistent'],
       'eqeqeq': ['error', 'always', { null: 'ignore' }],
       'no-shadow': ['off'],
@@ -151,37 +141,19 @@ export default [
       'dot-notation': ['error'],
       'no-bitwise': ['error'],
       'no-throw-literal': ['error'],
-      // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
-      // A function above it is split, not exempted. The eslint-disable-next-line
-      // directives in src mark the functions that were above it when it landed. The
-      // first number in the parenthesis of a directive is the record: the value the
-      // function had then, lowered whenever a change makes the function smaller. They
-      // must not grow, and test/eslint-config.test.ts holds each to its record. When a
-      // directive stops applying, as when its function comes to fit, the eslint task
-      // (--fix) deletes it and eslint:check reports it as unused.
       'complexity': ['error', { max: 40 }],
-      // These two core formatting rules stay on beside their @stylistic forks, which each
-      // leave checks out: the space in `catch (`, and the space after the comma of an
-      // array hole (`[, second]`) and at the trailing comma of a type parameter list.
+      // The @stylistic forks of these two rules leave checks out: the space in `catch (`, and the space
+      // after the comma of an array hole (`[, second]`) and at the trailing comma of a type parameter list.
       'comma-spacing': ['error', { before: false, after: true }],
       'keyword-spacing': ['error'],
       'eol-last': ['error', 'always'],
       'no-duplicate-imports': ['error'],
       'no-console': ['error'],
-      // A coverage-ignore comment takes code out of what the coverage floors measure:
-      // test the code, or leave it counted as uncovered. These are the spellings that
-      // jest (v8-to-istanbul) and vitest honour.
       'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'no-restricted-syntax': ['error', NO_MD5],
-      // Rules of the recommended sets that still have findings. Each one stays off
-      // until its findings are fixed; delete the line to turn the rule on.
       'no-useless-assignment': 'off',
       'preserve-caught-error': 'off',
 
-      // TypeScript rules
-      // Dead-code parity with Python ruff F401 (#282): unused imports/locals/params
-      // are errors. `^_` opts out an intentionally-unused binding. Base rule must be
-      // off so the typescript-eslint variant (type-aware) is the only one active.
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['error', {
         args: 'all',
@@ -192,16 +164,10 @@ export default [
         ignoreRestSiblings: true,
         destructuredArrayIgnorePattern: '^_',
       }],
-      // AI007 guard (#258): inline numeric literals should be named constants.
-      // Values shared across Python/TypeScript belong in contracts/constants.json
-      // (see contracts/constants.md).
       '@typescript-eslint/no-magic-numbers': ['error', {
         ignore: [
-          // Identity / trivial arithmetic
           -1, 0, 1, 2,
-          // Radix, percentages, and well-known unit conversions
           10, 24, 60, 100, 1000, 1024, 3600, 86400,
-          // HTTP status codes (600 = exclusive upper bound for 5xx checks)
           200, 201, 202, 204, 301, 302, 304,
           400, 401, 403, 404, 409, 422, 429,
           500, 502, 503, 504, 600,
@@ -232,7 +198,6 @@ export default [
         ],
       }],
       '@typescript-eslint/unbound-method': 'error',
-      // Promise and operator misuse that compiles (type-aware rules).
       '@typescript-eslint/await-thenable': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
       '@typescript-eslint/prefer-promise-reject-errors': 'error',
@@ -242,7 +207,6 @@ export default [
       '@typescript-eslint/no-unsafe-unary-minus': 'error',
       '@typescript-eslint/restrict-plus-operands': 'error',
 
-      // Import rules (import/ -> import-x/)
       'import-x/no-extraneous-dependencies': ['error', {
         devDependencies: ['**/test/**'],
         optionalDependencies: false,
@@ -254,31 +218,20 @@ export default [
         alphabetize: { order: 'asc', caseInsensitive: true },
       }],
       'import-x/no-duplicates': ['error'],
-      // Runtime import cycles; `import type` edges do not count.
       'import-x/no-cycle': ['error', { ignoreExternal: true }],
       'import-x/no-self-import': 'error',
       'import-x/no-useless-path-segments': 'error',
 
-      // License header
       'license-header/header': ['error', join(__dirname, 'header.js')],
 
-      // JSDoc rules
       'jsdoc/require-param-description': ['error'],
       'jsdoc/require-property-description': ['error'],
       'jsdoc/require-returns-description': ['error'],
       'jsdoc/check-alignment': ['error'],
 
-      // Jest rules
-      // A test must call expect() itself.
       'jest/expect-expect': 'error',
       'jest/no-conditional-expect': 'off',
-      // An expect() at the top level or in a describe body runs while the file is
-      // loaded, not as part of a test.
       'jest/no-standalone-expect': 'error',
-      // expect(x) without a matcher, and an async assertion nobody awaits, check
-      // nothing. One idiom is sound and still reported: keep the assertion promise,
-      // advance fake timers, then await it. Mark it with eslint-disable-next-line
-      // and the reason; the rule's autofix would await it on the spot and hang the test.
       'jest/valid-expect': 'error',
       'jest/valid-title': 'off',
       'jest/no-identical-title': 'error',
@@ -290,8 +243,6 @@ export default [
       'jest/no-duplicate-hooks': 'error',
       'jest/no-export': 'error',
       'jest/no-interpolation-in-snapshots': 'error',
-      // Jest has no `fail()`: the call is a ReferenceError, which the catch block of
-      // a try/fail/catch test swallows, so the test passes when nothing throws.
       'jest/no-jasmine-globals': 'error',
       'jest/no-mocks-import': 'error',
       'jest/no-test-prefixes': 'error',
@@ -303,13 +254,9 @@ export default [
   {
     files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
-      // Console output is the product.
       'no-console': 'off',
-      // Every AWS SDK client in src is built by the attributed factory (#319). The whole
-      // list again: a later block replaces a rule's options.
+      // The whole list again: a later block replaces a rule's options.
       'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
-      // The compiler (rootDir) refuses only a TypeScript source outside the package, not build
-      // output or a JSON file. The second zone is Yarn's workspace links, which the first lets pass.
       'import-x/no-restricted-paths': ['error', {
         basePath: __dirname,
         zones: [
@@ -320,7 +267,6 @@ export default [
     },
   },
 
-  // Override: tests legitimately use inline literals
   {
     files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {

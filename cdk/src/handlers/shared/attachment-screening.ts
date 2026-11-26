@@ -21,10 +21,6 @@ import { createHash } from 'crypto';
 import { ApplyGuardrailCommand, type BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { logger } from './logger';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 200;
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503]);
@@ -43,13 +39,8 @@ const PNG_IHDR_WIDTH_OFFSET = 16;
 const PNG_IHDR_HEIGHT_OFFSET = 20;
 const PNG_MIN_IHDR_LENGTH = 24;
 
-/** JPEGs above this size (MiB) must have readable dimensions (fail-closed otherwise). */
 const JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_MB = 5;
 const JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_BYTES = JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_MB * 1024 * 1024;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export interface ScreeningConfig {
   readonly guardrailId: string;
@@ -67,10 +58,6 @@ export interface ScreenedAttachment {
   readonly checksum: string;
   readonly screening: ScreeningOutcome;
 }
-
-// ---------------------------------------------------------------------------
-// Retry utility
-// ---------------------------------------------------------------------------
 
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
@@ -114,15 +101,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ---------------------------------------------------------------------------
-// Image screening
-// ---------------------------------------------------------------------------
-
 /**
  * Screen an image attachment through the Bedrock Guardrail.
  *
- * Only PNG and JPEG are accepted. Raw bytes are passed directly to Bedrock
- * (no re-encoding or metadata stripping required).
+ * Only PNG and JPEG are accepted.
  *
  * @returns ScreenedAttachment with original content and checksum.
  * @throws AttachmentScreeningError for unsupported formats or corrupt files.
@@ -139,7 +121,6 @@ export async function screenImage(
 
   const screeningFormat: 'png' | 'jpeg' = contentType === 'image/jpeg' ? 'jpeg' : 'png';
 
-  // Screen through Bedrock Guardrail with retry
   const result = await retryWithBackoff(
     () => config.bedrockClient.send(new ApplyGuardrailCommand({
       guardrailIdentifier: config.guardrailId,
@@ -175,10 +156,6 @@ export async function screenImage(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Text/file screening
-// ---------------------------------------------------------------------------
-
 /**
  * Screen a text-based file attachment through the Bedrock Guardrail.
  * Supports plain text, CSV, Markdown, JSON, and log files directly.
@@ -207,7 +184,6 @@ export async function screenTextFile(
     textToScreen = content.toString('utf-8');
   }
 
-  // Screen through Bedrock Guardrail with retry
   const result = await retryWithBackoff(
     () => config.bedrockClient.send(new ApplyGuardrailCommand({
       guardrailIdentifier: config.guardrailId,
@@ -238,49 +214,26 @@ export async function screenTextFile(
   };
 }
 
-// ---------------------------------------------------------------------------
-// PDF text extraction
-// ---------------------------------------------------------------------------
-
 const PDF_MAX_PAGES = 50;
-const PDF_MAX_TEXT_BYTES = 1024 * 1024; // 1 MB extracted text cap
+const PDF_MAX_TEXT_BYTES = 1024 * 1024;
 const PDF_EXTRACT_TIMEOUT_MS = 15_000;
 
 /**
- * pdf-parse v2 is built on pdfjs, which references browser DOM globals
- * (`DOMMatrix`/`ImageData`/`Path2D`) that don't exist in the Node Lambda runtime.
- * For TEXT extraction (our only use) these are never actually invoked — pdfjs only
- * touches them on its optional canvas RENDER path. But if they're merely *undefined*,
- * pdfjs tries to load the native `@napi-rs/canvas` binding to supply them, which
- * fails on Lambda (the cross-platform native binary isn't bundled) and cascades to
- * `DOMMatrix is not defined` → PDF screening unavailable (observed in practice).
- *
- * Defining them as inert no-op stubs makes pdfjs skip the native-canvas load path
- * entirely and extract text headless — no native binary, host-independent. Verified:
- * `getText` returns the full text with canvas absent + these three stubs present.
- * Idempotent + non-clobbering (only fills genuinely-missing globals).
+ * pdfjs (inside pdf-parse v2) takes `DOMMatrix`, `ImageData` and `Path2D` from the
+ * native `@napi-rs/canvas` package when the globals are missing, and that package
+ * is absent on Lambda. Text extraction does not call them.
  */
 function ensurePdfDomGlobals(): void {
   const g = globalThis as Record<string, unknown>;
-  if (typeof g.DOMMatrix === 'undefined') g.DOMMatrix = class { /* inert stub — text extraction never calls it */ };
-  if (typeof g.ImageData === 'undefined') g.ImageData = class { /* inert stub */ };
-  if (typeof g.Path2D === 'undefined') g.Path2D = class { /* inert stub */ };
+  if (typeof g.DOMMatrix === 'undefined') g.DOMMatrix = class {};
+  if (typeof g.ImageData === 'undefined') g.ImageData = class {};
+  if (typeof g.Path2D === 'undefined') g.Path2D = class {};
 }
 
 async function extractPdfText(content: Buffer, filename: string): Promise<string> {
-  // pdf-parse v2 (^2.4.5) exposes a `PDFParse` CLASS — `new PDFParse({ data }).getText()` —
-  // NOT the v1 callable default export. Three things made this fail before:
-  // (1) the code called the v1 `pdfParseFn(buf)` shape (undefined on v2); (2) the
-  // webhook processors esbuild-bundled pdf-parse instead of shipping it via `nodeModules`,
-  // mangling its pdfjs/native deps; and (3) pdfjs tried to load the native
-  // `@napi-rs/canvas` binding for its DOM globals — absent on Lambda — instead of just
-  // extracting text. `ensurePdfDomGlobals` fixes (3); the bundling change fixes (2).
   ensurePdfDomGlobals();
   let PDFParse;
   try {
-    // Destructure the class from the dynamic import and let TS infer its type from
-    // the value — a cross-mode `typeof import('pdf-parse').PDFParse` annotation trips
-    // the ESM-vs-CJS dual-`.d.ts` hazard under moduleResolution:nodenext.
     ({ PDFParse } = await import(/* webpackIgnore: true */ 'pdf-parse'));
   } catch (importErr) {
     logger.error('pdf-parse module could not be imported — PDF screening unavailable', {
@@ -294,28 +247,13 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
   }
 
   let timeoutId: ReturnType<typeof setTimeout>;
-  // Hand pdf-parse a COPY, not a view. It transfers ownership of whatever it is
-  // given to its worker, which DETACHES the underlying ArrayBuffer — and a
-  // `new Uint8Array(content.buffer, …)` view shares that buffer with the caller's
-  // Buffer. The caller stores the original bytes in S3 after screening returns, so
-  // sharing meant the upload read a detached buffer and threw "Cannot perform
-  // Construct on a detached ArrayBuffer". Fail-closed screening then rejected the
-  // task: every PDF attachment was refused with "could not be stored".
-  //
-  // The copy costs one extra allocation of an already size-capped payload, which is
-  // the right trade against silently breaking every PDF upload.
+  // pdfjs transfers the buffer it is given to its worker, which detaches it: the caller still reads `content`.
   const parser = new PDFParse({ data: Uint8Array.from(content) });
   try {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error('PDF extraction timed out')), PDF_EXTRACT_TIMEOUT_MS);
     });
 
-    // `first: N` parses only pages 1..N (the v2 page-cap knob). We cap pages +
-    // extracted-text bytes to bound cost/DoS — BUT the caller stores the WHOLE PDF
-    // and feeds it to the agent, so screening only a prefix while delivering the
-    // rest is a bypass (review #1 HIGH: injection on page 51 of a 51-page PDF).
-    // Fail CLOSED when the document exceeds what we can screen: reject rather than
-    // deliver unscreened pages. `result.total` is the PDF's full page count.
     const result = await Promise.race([
       parser.getText({ first: PDF_MAX_PAGES }),
       timeoutPromise,
@@ -330,8 +268,6 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
     }
     const text: string = result.text ?? '';
     if (Buffer.byteLength(text, 'utf-8') > PDF_MAX_TEXT_BYTES) {
-      // The screened pages produced more text than we screen — we'd be delivering
-      // bytes we didn't fully check. Fail closed rather than truncate-and-pass.
       throw new AttachmentScreeningError(
         `PDF "${filename}" contains more text than ABCA can fully screen (over ${PDF_MAX_TEXT_BYTES} bytes). ` +
         'Attach a smaller document so its full contents can be checked.',
@@ -339,17 +275,7 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
     }
     return text;
   } catch (err) {
-    // Our own over-limit / no-text rejections are already user-facing — don't
-    // re-wrap them as "corrupt PDF".
     if (err instanceof AttachmentScreeningError) throw err;
-    // A DEPLOYMENT bug and a genuinely-bad PDF both land here, and they look
-    // nothing alike to an operator. pdf-parse mangled by esbuild (a Lambda that
-    // reaches this path but lacks `nodeModules: ['pdf-parse']`) throws with a
-    // pdfjs/DOM signature — `DOMMatrix is not defined`, `Cannot find native
-    // binding`, `@napi-rs/canvas`. Detect that and log a LOUD, actionable
-    // diagnostic (with the fix) so it's not misread as "user's PDF is corrupt" —
-    // that misdiagnosis has cost a full debug loop before. The user-facing
-    // message stays generic.
     const msg = err instanceof Error ? err.message : String(err);
     const looksLikeBundlingBug = /DOMMatrix|ImageData|Path2D|napi-rs\/canvas|Cannot find native binding|pdfjs/i.test(msg);
     if (looksLikeBundlingBug) {
@@ -368,18 +294,10 @@ async function extractPdfText(content: Buffer, filename: string): Promise<string
     );
   } finally {
     clearTimeout(timeoutId!);
-    // Release the pdfjs worker/document (v2 holds native + worker handles).
-    await parser.destroy().catch(() => { /* best-effort teardown */ });
+    await parser.destroy().catch(() => {});
   }
 }
 
-// ---------------------------------------------------------------------------
-// Image validation helpers (pure buffer parsing — no native dependencies)
-// ---------------------------------------------------------------------------
-
-/**
- * Reject GIF and WebP — only PNG and JPEG are supported for image screening.
- */
 function assertSupportedImageFormat(contentType: string, filename: string): void {
   if (contentType === 'image/gif' || contentType === 'image/webp') {
     throw new AttachmentScreeningError(
@@ -459,16 +377,13 @@ export function readJpegDimensions(content: Buffer): { width: number; height: nu
       continue;
     }
     const marker = content[offset + 1];
-    // SOF0, SOF1, SOF2 markers
     if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
       if (offset + 9 > content.length) return undefined;
       const height = content.readUInt16BE(offset + 5);
       const width = content.readUInt16BE(offset + 7);
       return { width, height };
     }
-    // Skip non-SOF markers
     if (marker === 0xd9 || marker === 0xda) {
-      // End of image or start of scan — stop searching
       return undefined;
     }
     if (offset + 3 >= content.length) return undefined;
@@ -497,8 +412,6 @@ function assertImageDimensionsWithinLimits(
   } else if (contentType === 'image/jpeg') {
     dims = readJpegDimensions(content);
     if (!dims) {
-      // Fail-closed for large JPEGs where dimensions cannot be verified (> 5 MB).
-      // Smaller files are allowed through to Bedrock which will reject if oversized.
       if (content.length > JPEG_DIMENSION_VERIFY_SIZE_THRESHOLD_BYTES) {
         throw new AttachmentScreeningError(
           `Image "${filename}" is ${(content.length / (1024 * 1024)).toFixed(1)} MB and its dimensions ` +
@@ -523,10 +436,6 @@ function assertImageDimensionsWithinLimits(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function computeSha256(data: Buffer): string {
   return createHash('sha256').update(data).digest('hex');
 }
@@ -537,7 +446,6 @@ function extractBlockedCategories(
   const categories: string[] = [];
   if (assessments) {
     for (const assessment of assessments) {
-      // Extract topic/content/word/sensitive-info policy categories
       for (const policyResult of Object.values(assessment) as any[]) {
         if (Array.isArray(policyResult?.topics)) {
           for (const t of policyResult.topics) {
@@ -572,10 +480,6 @@ function extractBlockedCategories(
   }
   return categories as [string, ...string[]];
 }
-
-// ---------------------------------------------------------------------------
-// Error class
-// ---------------------------------------------------------------------------
 
 export class AttachmentScreeningError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {

@@ -20,8 +20,6 @@
 import { PutCommand, QueryCommand, type PutCommandInput, type UpdateCommand, type UpdateCommandInput } from '@aws-sdk/lib-dynamodb';
 import type { Context } from 'aws-lambda';
 
-// DynamoDB is the only AWS service the handler calls itself. GitHub is the `fetch` stub
-// below: the read of a pull request runs as it is, on answers as GitHub gives them.
 const sendMock = jest.fn();
 jest.mock('../../src/handlers/shared/ua', () => ({
   ...jest.requireActual('../../src/handlers/shared/ua'),
@@ -31,14 +29,12 @@ jest.mock('../../src/handlers/shared/ua', () => ({
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
-// Everything of the module but the call to Secrets Manager: the failures below are the resolver's own errors.
 const resolveGitHubTokenMock = jest.fn();
 jest.mock('../../src/handlers/shared/context-hydration', () => ({
   ...jest.requireActual('../../src/handlers/shared/context-hydration'),
   resolveGitHubToken: (...args: unknown[]) => resolveGitHubTokenMock(...args),
 }));
 
-// The handler reads its configuration when it loads.
 const TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:GitHubTokenSecret-AbCdEf';
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_STATUS_INDEX_NAME = 'StatusIndexOfTheStack';
@@ -55,29 +51,16 @@ import type { TaskRecord } from '../../src/handlers/shared/types';
 import { handler } from '../../src/handlers/sweep-pr-outcomes';
 
 const TOKEN = 'platform-token-value';
-/**
- * The hour of this time is a multiple of 60 since the epoch, so a run of up to six candidates
- * starts at the first of them by task id: the tests below can name the order of reads. A test
- * with more candidates asserts which pull requests were read, not in which order: the start is
- * then another one, and `task-100` sorts before `task-12`.
- */
 const NOW = Date.parse('2026-11-18T00:20:00.000Z');
 const SECOND_MS = 1000;
 const HOUR_MS = 3600 * SECOND_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-/** ISO time `ms` milliseconds before NOW, in whole seconds as GitHub writes one. */
 const ago = (ms: number): string => new Date(NOW - ms).toISOString().replace('.000Z', 'Z');
 
-/** What EventBridge sends on a schedule; the handler does not read it. */
 const EVENT = { 'source': 'aws.events', 'detail-type': 'Scheduled Event' };
-/** A Lambda context with five minutes left at every reading. */
 const context = { getRemainingTimeInMillis: () => 300_000 } as Context;
 
-/**
- * A whole task record, `task-<number>`: new work that ended in pull request `number` of its
- * repository, which nobody has read yet. The candidate query returns such records.
- */
 function task(number: number, overrides: Partial<TaskRecord> = {}): TaskRecord {
   const repo = overrides.repo ?? 'acme/widgets';
   return {
@@ -102,17 +85,11 @@ function task(number: number, overrides: Partial<TaskRecord> = {}): TaskRecord {
   };
 }
 
-/** An answer of GitHub's GraphQL endpoint: JSON, with the status. */
 const answer = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
 
 type Answer = () => Response;
 
-/**
- * The pull request of `task-<number>` as GitHub returns it: open, opened by ABCA's account
- * from the task's branch in the repository itself, not reviewed. `remaining` is what GitHub
- * says is left of the token's budget; null leaves it out of the answer.
- */
 const found = (number: number, fields: Record<string, unknown> = {}, remaining: number | null = 4990): Answer => () => answer({
   data: {
     ...(remaining !== null && { rateLimit: { remaining } }),
@@ -131,11 +108,9 @@ const found = (number: number, fields: Record<string, unknown> = {}, remaining: 
   },
 });
 
-/** A review as GitHub returns it, by an account that can push to the repository. */
 const review = (state: string, submittedAt: string, login: string) =>
   ({ state, submittedAt, authorCanPushToRepository: true, author: { login, __typename: 'User' } });
 
-/** Merged a day after the task was created, sent back once and then approved by one person. */
 const MERGED = {
   state: 'MERGED',
   mergedAt: '2026-11-17T10:00:00Z',
@@ -148,7 +123,6 @@ const MERGED = {
     ],
   },
 };
-/** What the final write of that merge leaves on the record. */
 const MERGED_FIELDS: Partial<TaskRecord> = {
   pr_state: 'merged',
   pr_closed_at: '2026-11-17T10:00:00Z',
@@ -180,10 +154,8 @@ const QUERY_FAILED: Answer = () => answer({
 });
 const BAD_CREDENTIALS: Answer = () =>
   answer({ message: 'Bad credentials', documentation_url: 'https://docs.github.com/graphql', status: '401' }, 401);
-/** A 200 that asks to wait, in a body that is no JSON: the header alone says it. */
 const ASKS_TO_WAIT: Answer = () =>
   new Response('<html><body>Please wait a few minutes before you try again.</body></html>', { status: 200, headers: { 'retry-after': '60' } });
-/** Three ways GitHub gives a read no usable answer: it gives up on the query, it does not answer in time, something else answers in its place. */
 const SERVER_ERROR: Answer = () => answer({
   data: null,
   errors: [{ message: 'Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug. Please include `C0DE:1F2E3D:4C5B6A:7F8E9D:691F0A2B` when reporting this issue.' }],
@@ -193,12 +165,9 @@ const NOT_JSON: Answer = () => new Response('<html><body>Sign in to the proxy of
 
 let fetchMock: jest.SpiedFunction<typeof fetch>;
 let stdout: jest.SpiedFunction<typeof process.stdout.write>;
-/** The answer of the table to each update; nothing by default, as an update that returns no values answers. */
 const updateMock = jest.fn();
-/** The answer of the events table to each event that is put there. */
 const eventMock = jest.fn();
 
-/** GitHub, as far as the sweep asks: an answer per pull-request number. A number without one gets no answer, as from a network that is down. */
 function github(answers: Record<number, Answer>): void {
   fetchMock.mockImplementation(async (_url, init) => {
     const { number } = JSON.parse(init?.body as string).variables as { number: number };
@@ -207,10 +176,8 @@ function github(answers: Record<number, Answer>): void {
   });
 }
 
-/** The pull-request numbers GitHub was asked about, in the order of the requests. */
 const asked = (): number[] => fetchMock.mock.calls.map(([, init]) => JSON.parse(init?.body as string).variables.number);
 
-/** The tables: the pages of the candidate query in turn, `updateMock` for every update and `eventMock` for every event. */
 function table(...pages: { Items: TaskRecord[]; ScannedCount: number; LastEvaluatedKey?: Record<string, unknown> }[]): void {
   const queue = [...pages];
   sendMock.mockImplementation(async (command: QueryCommand | UpdateCommand | PutCommand) => {
@@ -219,19 +186,14 @@ function table(...pages: { Items: TaskRecord[]; ScannedCount: number; LastEvalua
   });
 }
 
-/** A table whose candidate query returns `tasks` in one page. */
 const candidates = (...tasks: TaskRecord[]): void => table({ Items: tasks, ScannedCount: tasks.length });
 
-/** The inputs of the updates the run sent, in order. */
 const updates = (): UpdateCommandInput[] => updateMock.mock.calls.map(([input]) => input);
 
-/** The inputs of the events the run put, in order. */
 const events = (): PutCommandInput[] => eventMock.mock.calls.map(([input]) => input);
 
-/** A DynamoDB error as the SDK throws it: the name tells the kind. */
 const ddbError = (name: string): Error => Object.assign(new Error(name), { name });
 
-/** The run's summary line: its level and its fields. */
 function summary(): { level: string; data: Record<string, unknown> } {
   const lines = (['info', 'warn', 'error'] as const).flatMap((level) => loggerMock[level].mock.calls
     .filter(([message]) => message === 'PR outcome sweep summary')
@@ -240,7 +202,6 @@ function summary(): { level: string; data: Record<string, unknown> } {
   return lines[0];
 }
 
-/** The fields of a summary line of a run that found nothing to do, with `counts` in place. */
 const counted = (counts: Record<string, unknown>): Record<string, unknown> => ({
   scanned: 0,
   candidates: 0,
@@ -257,7 +218,6 @@ const counted = (counts: Record<string, unknown>): Record<string, unknown> => ({
   ...counts,
 });
 
-/** The metric lines the run wrote, parsed. */
 const lines = (): Record<string, unknown>[] => stdout.mock.calls.map(([chunk]) => JSON.parse(chunk as string));
 
 beforeEach(() => {
@@ -267,7 +227,6 @@ beforeEach(() => {
   resolveGitHubTokenMock.mockReset().mockResolvedValue(TOKEN);
   jest.spyOn(Date, 'now').mockReturnValue(NOW);
   stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
-  // A read without a stubbed answer fails here, and never reaches the network.
   fetchMock = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('no answer is stubbed'));
 });
 
@@ -281,7 +240,6 @@ describe('the candidates', () => {
     const secondKey = { task_id: 'task-800', status: 'COMPLETED', created_at: '2026-11-17T08:00:00.000Z' };
     table(
       { Items: [task(12)], ScannedCount: 400, LastEvaluatedKey: firstKey },
-      // A page whose records the filter all removed still has a next page.
       { Items: [], ScannedCount: 400, LastEvaluatedKey: secondKey },
       { Items: [task(13)], ScannedCount: 12 },
     );
@@ -304,7 +262,6 @@ describe('the candidates', () => {
       { ...firstPage, ExclusiveStartKey: firstKey },
       { ...firstPage, ExclusiveStartKey: secondKey },
     ]);
-    // What the read cannot do without: the key of the write, and where the pull request is.
     expect(firstPage.ExpressionAttributeNames).toMatchObject({ '#status': 'status', '#task_id': 'task_id', '#repo': 'repo', '#pr_url': 'pr_url', '#pr_number': 'pr_number', '#pr_state': 'pr_state' });
     expect(asked()).toEqual([12, 13]);
     expect(summary().data).toMatchObject({ scanned: 812, candidates: 2, read: 2 });
@@ -313,8 +270,6 @@ describe('the candidates', () => {
   test('are the pull requests the sweep follows, not every task the filter lets through: the others are neither read nor written', async () => {
     candidates(
       task(12),
-      // Finished tasks with a pull request of another kind: a follow-up on pull request 12,
-      // and the tasks of an orchestration, a sub-task whose build failed and the node that combines them.
       task(13, { resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' }, workflow_ref: undefined, pr_number: 12 }),
       task(14, { channel_metadata: { orchestration_id: 'orch_1', orchestration_sub_issue_id: 'issue-1' }, build_passed: false }),
       task(15, { channel_metadata: { orchestration_id: 'orch_1', orchestration_sub_issue_id: `issue-1${INTEGRATION_NODE_SUFFIX}` } }),
@@ -353,7 +308,6 @@ describe('the token', () => {
   test('is the platform token, taken once from the secret the environment names, and sent to GitHub as a bearer', async () => {
     candidates(task(12), task(13));
     github({ 12: found(12), 13: found(13) });
-    // As a secret holds it that was stored from a file: a byte-order mark in front, a line end after.
     resolveGitHubTokenMock.mockResolvedValue(`${String.fromCharCode(0xfeff)}${TOKEN}\n`);
 
     await handler(EVENT, context);
@@ -394,13 +348,10 @@ describe('the token', () => {
     ]);
   });
 
-  // An empty value is no token. `fetch` refuses the other three as a header before any request,
-  // and a run that got that far would read as GitHub being away.
   test.each([
     ['is empty but for white space', ' \n'],
     ['holds a second line', `${TOKEN}\nsecond-line`],
     ['holds a character that no header can carry', `${TOKEN}${String.fromCharCode(0)}`],
-    // Where printable ASCII ends: the delete character is the one after the tilde.
     ['holds the first character above those a token can have', `${TOKEN}${String.fromCharCode(0x7f)}`],
   ])('a secret whose value %s ends the run with an error that does not hold it, before any request', async (_what, secret) => {
     candidates(task(12), task(13));
@@ -419,10 +370,8 @@ describe('the token', () => {
     ]);
   });
 
-  /** A made-up token of a kind GitHub issues: its prefix and twenty characters, the fewest that read as one. */
   const madeUp = (prefix: string): string => `${prefix}Made_up_token_value9`;
 
-  // A token with something around it was meant to be one: a mistake to say, not a stack without a token.
   test.each([
     ['in quotes', `"${madeUp('ghp_')}"`],
     ['as a JSON object', `{"GITHUB_TOKEN":"${madeUp('github_pat_')}"}`],
@@ -447,13 +396,11 @@ describe('the token', () => {
     ]);
   });
 
-  // A stack that was never given a platform token: its secret holds the value it was created with.
   test.each([
     ['holds punctuation, as a generated value does', 'generated(value);with=punctuation'],
     ['holds a space', 'not a token'],
     ['holds a slash', 'path/like-value'],
     ['is a note someone left there', '<your token here>'],
-    // One character short of the twenty: the start of a token, and no token.
     ['holds a GitHub prefix with fewer characters after it than a token has', `"${madeUp('ghp_').slice(0, -1)}"`],
   ])('no GitHub token is a printable value that %s: the summary alone, as information, and no request', async (_what, secret) => {
     candidates(task(12), task(13));
@@ -490,7 +437,6 @@ describe('a pull request found open', () => {
 
     await handler(EVENT, context);
 
-    // The whole input: no `updated_at`, no `ttl`, no other attribute.
     expect(updates()).toEqual([{
       TableName: 'Tasks',
       Key: { task_id: 'task-12' },
@@ -543,12 +489,10 @@ describe('a pull request found merged or closed', () => {
   test('merged: the four fields are written once, and one line and one event are built from the record the write returns', async () => {
     candidates(task(12, { pr_state: 'open' }));
     github({ 12: found(12, MERGED) });
-    // What the candidate query does not project, and what a writer changed since: the line and the event have to come from here.
     updateMock.mockResolvedValueOnce({ Attributes: task(12, { ...MERGED_FIELDS, user_id: 'user-7', repo: 'Acme/Widgets' }) });
 
     await handler(EVENT, context);
 
-    // The whole input: no `updated_at`, no `ttl`, no other attribute.
     expect(updates()).toEqual([{
       TableName: 'Tasks',
       Key: { task_id: 'task-12' },
@@ -567,7 +511,6 @@ describe('a pull request found merged or closed', () => {
     const [written] = stdout.mock.calls[0] as [string];
     expect(written.endsWith('\n')).toBe(true);
     expect(written.indexOf('\n')).toBe(written.length - 1);
-    // The line itself is pinned where it is built (test/handlers/shared/scoreboard.test.ts).
     expect(JSON.parse(written)).toMatchObject({
       _aws: { Timestamp: Date.parse('2026-11-17T10:00:00Z') },
       PrOutcome: 'merged',
@@ -578,7 +521,6 @@ describe('a pull request found merged or closed', () => {
       repo: 'Acme/Widgets',
       workflow: 'coding/new-task-v1',
     });
-    // The whole event, as the platform's other writers put one: kept 90 days from the run, with what the write recorded.
     expect(events()).toEqual([{
       TableName: 'TaskEvents',
       Item: {
@@ -608,7 +550,7 @@ describe('a pull request found merged or closed', () => {
 
     await handler(EVENT, context);
 
-    // Strictly: the document client refuses a value that is undefined, so the first review is not named at all.
+    // toStrictEqual: the DynamoDB document client rejects a value that is undefined.
     expect(updates()).toStrictEqual([{
       TableName: 'Tasks',
       Key: { task_id: 'task-12' },
@@ -619,7 +561,6 @@ describe('a pull request found merged or closed', () => {
     }]);
     expect(lines()).toMatchObject([{ _aws: { Timestamp: NOW - HOUR_MS }, PrOutcome: 'closed', PullRequestsResolved: 1, task_id: 'task-12' }]);
     expect(lines()[0]).not.toHaveProperty('TimeToMergeSeconds');
-    // Strictly, for the same reason: the event names no first review either.
     expect(events().map((event) => event.Item?.metadata)).toStrictEqual([{ pr_state: 'closed', pr_closed_at: closedAt, pr_changes_requested: 0 }]);
     expect(summary().data).toMatchObject({ read: 1, closed: 1, merged: 0, not_emitted: 0 });
   });
@@ -669,7 +610,6 @@ describe('a pull request found merged or closed', () => {
     expect(updates()).toHaveLength(1);
     expect(updates()[0]).toMatchObject({ ExpressionAttributeValues: { ':state': 'merged', ':closed_at': mergedAt } });
     expect(stdout).not.toHaveBeenCalled();
-    // The event is stamped when it is put, which no age rule concerns.
     expect(events()).toMatchObject([{ Item: { task_id: 'task-12', metadata: { pr_state: 'merged', pr_closed_at: mergedAt } } }]);
     expect(summary()).toEqual({ level: 'info', data: counted({ scanned: 1, candidates: 1, read: 1, merged: 1, not_emitted: 1 }) });
   });
@@ -690,8 +630,6 @@ describe('a pull request found merged or closed', () => {
     ]);
   });
 
-  // The helper lives in the orchestrator's module, which this function does not bundle: the
-  // handler puts the item itself, and this holds the two together.
   test('the event is the item the platform\'s event helper puts for the same outcome: the same members, and none that is undefined', async () => {
     const closedAt = ago(HOUR_MS);
     candidates(task(12, { pr_state: 'open' }));
@@ -699,7 +637,6 @@ describe('a pull request found merged or closed', () => {
     updateMock.mockResolvedValueOnce({ Attributes: task(12, { pr_state: 'closed', pr_closed_at: closedAt, pr_changes_requested: 0 }) });
 
     await handler(EVENT, context);
-    // The same outcome through the helper, with the first review that this pull request does not have.
     await emitTaskEvent(
       'task-12',
       'pr_outcome_recorded',
@@ -708,7 +645,6 @@ describe('a pull request found merged or closed', () => {
     );
 
     const [mine, helpers] = events();
-    // Whole, apart from the id and the instant of the put, which no two events share: of those, that each is text.
     const comparable = ({ Item }: PutCommandInput) => ({ ...Item, event_id: typeof Item?.event_id, timestamp: typeof Item?.timestamp });
     expect(mine.TableName).toBe(helpers.TableName);
     expect(comparable(mine)).toStrictEqual(comparable(helpers));
@@ -718,7 +654,6 @@ describe('a pull request found merged or closed', () => {
     let clock = NOW;
     jest.spyOn(Date, 'now').mockImplementation(() => clock);
     candidates(task(12, { pr_state: 'open' }));
-    // The read takes a hundred seconds.
     github({
       12: () => {
         clock = NOW + 100 * SECOND_MS;
@@ -740,7 +675,6 @@ describe('a pull request found merged or closed', () => {
 
     await handler(EVENT, context);
 
-    // The metric line was written before the event, and the run went on to the next pull request.
     expect(lines()).toMatchObject([{ PrOutcome: 'merged', task_id: 'task-12' }]);
     expect(stdout.mock.invocationCallOrder[0]).toBeLessThan(eventMock.mock.invocationCallOrder[0]);
     expect(asked()).toEqual([12, 13]);
@@ -752,9 +686,7 @@ describe('a pull request found merged or closed', () => {
 });
 
 describe('a pull request that is not the task\'s', () => {
-  /** The line that names the task. */
   const NOT_THE_TASKS = 'PR outcome sweep: no pull request of the task under the recorded number';
-  /** The write that records it, whole: no `updated_at`, no `ttl`, no other attribute. */
   const RECORDED_NOT_FOUND = {
     TableName: 'Tasks',
     Key: { task_id: 'task-12' },
@@ -763,7 +695,6 @@ describe('a pull request that is not the task\'s', () => {
     ExpressionAttributeValues: { ':not_found': 'not_found' },
   };
 
-  // The task of the fixture finished two days before the run.
   test('is recorded as not found, once, and says which task, when GitHub has no pull request under the number: no line, no event', async () => {
     candidates(task(12));
     github({ 12: PULL_REQUEST_NOT_FOUND });
@@ -785,7 +716,6 @@ describe('a pull request that is not the task\'s', () => {
     ['merged', MERGED],
   ])('is recorded as not found, with a warning, when the %s pull request under the number was opened from the branch of another task', async (_state, fields) => {
     candidates(task(12));
-    // The record of task-12 names pull request 12, which task-13 opened.
     github({ 12: found(13, fields) });
 
     await handler(EVENT, context);
@@ -794,7 +724,6 @@ describe('a pull request that is not the task\'s', () => {
     expect(updates()).toEqual([RECORDED_NOT_FOUND]);
     expect(stdout).not.toHaveBeenCalled();
     expect(eventMock).not.toHaveBeenCalled();
-    // The branch is GitHub's text: the line says that it is another one, not which.
     expect(loggerMock.warn.mock.calls).toEqual([
       [NOT_THE_TASKS, { task_id: 'task-12', repo: 'acme/widgets', pr_number: 12, why: 'other_head_branch' }],
     ]);
@@ -852,7 +781,6 @@ describe('a repository GitHub does not show to the token', () => {
     candidates(
       task(12, { repo: 'acme/private' }),
       task(13),
-      // The same repository, as another task spells it.
       task(14, { repo: 'Acme/Private' }),
       task(15, { repo: 'acme/private' }),
       task(16),
@@ -861,7 +789,6 @@ describe('a repository GitHub does not show to the token', () => {
 
     await handler(EVENT, context);
 
-    // Each pull request is asked for in the repository of its own task.
     expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init?.body as string).variables)).toEqual([
       { owner: 'acme', name: 'private', number: 12 },
       { owner: 'acme', name: 'widgets', number: 13 },
@@ -902,7 +829,6 @@ describe('the failure of one pull request', () => {
       ['PR outcome sweep: a pull request failed', { task_id: 'task-13', error: 'ProvisionedThroughputExceededException' }],
       ['PR outcome sweep summary', counted({ scanned: 3, candidates: 3, read: 3, open: 1, failed: 2 })],
     ]);
-    // The merge of task-13 was not recorded: it is neither counted nor sent to CloudWatch.
     expect(stdout).not.toHaveBeenCalled();
     expect(updates().map((update) => update.Key)).toEqual([{ task_id: 'task-13' }, { task_id: 'task-14' }]);
   });
@@ -910,7 +836,6 @@ describe('the failure of one pull request', () => {
   test('of every pull request the run read makes its summary an error, though nothing stopped it', async () => {
     candidates(task(12), task(13));
     github({ 12: found(12), 13: found(13) });
-    // What a table that refuses every write does: no stop sees it.
     updateMock.mockRejectedValue(ddbError('AccessDeniedException'));
 
     await handler(EVENT, context);
@@ -954,7 +879,6 @@ describe('the run stops', () => {
     expect(summary()).toMatchObject({ level: 'info', data: { read: 2, stopped: 'none' } });
   });
 
-  // Which answers stop a run is the read's rule: here, what the run does with one of each kind.
   test('when GitHub refuses the token: an error that names the pull request it stopped on, and nothing more is read or written', async () => {
     candidates(task(12), task(13), task(14));
     github({ 12: found(12), 13: BAD_CREDENTIALS, 14: found(14, MERGED) });
@@ -998,9 +922,7 @@ describe('a read that GitHub gives no usable answer to', () => {
     expect(asked()).toEqual([12, 13, 14]);
     expect(updateMock).not.toHaveBeenCalled();
     expect(stdout).not.toHaveBeenCalled();
-    // Every read of the run failed, and its summary is a warning all the same: the stop says why.
     expect(loggerMock.error).not.toHaveBeenCalled();
-    // Each failed read with the status GitHub gave, where it gave one; then why the run stopped, and on which pull request.
     expect(loggerMock.warn.mock.calls).toEqual([
       ['PR outcome sweep: a pull request failed', { task_id: 'task-12', http_status: 502, error: 'GitHub answered HTTP 502' }],
       ['PR outcome sweep: a pull request failed', { task_id: 'task-13', error: 'GitHub gave no usable answer (TimeoutError)' }],
@@ -1010,7 +932,6 @@ describe('a read that GitHub gives no usable answer to', () => {
     ]);
   });
 
-  // GitHub is there when it answers, whatever the answer does to the one pull request.
   test.each<[string, Answer, Record<string, number>]>([
     ['an answer with an error about the pull request', QUERY_FAILED, { failed: 5 }],
     ['an answer that holds the pull request', found(14), { failed: 4, open: 2 }],
@@ -1027,14 +948,12 @@ describe('a read that GitHub gives no usable answer to', () => {
 });
 
 describe('a run with more candidates than it may ask GitHub about', () => {
-  /** 251 pull requests that were read as open before, numbered from 1000: the ids of their tasks sort as the numbers do. */
   const NUMBERS = Array.from({ length: 251 }, (_, index) => 1000 + index);
   const TASKS = NUMBERS.map((number) => task(number, { pr_state: 'open' }));
   const OPEN = Object.fromEntries(NUMBERS.map((number) => [number, found(number)]));
 
   test('asks about 250 of them, ends without a stop, and counts the rest as left out', async () => {
     candidates(...TASKS);
-    // The 250th answer says that the budget is low: the run has ended by then, and is not stopped by it.
     github({ ...OPEN, 1249: found(1249, {}, 999) });
 
     await handler(EVENT, context);
@@ -1045,7 +964,6 @@ describe('a run with more candidates than it may ask GitHub about', () => {
 
   test('is an error when every pull request it asked about failed, though it did not reach them all', async () => {
     candidates(...TASKS);
-    // An answer with an error fails its pull request and stops nothing.
     github(Object.fromEntries(NUMBERS.map((number) => [number, QUERY_FAILED])));
 
     await handler(EVENT, context);
@@ -1067,7 +985,6 @@ describe('a run with more candidates than it may ask GitHub about', () => {
     candidates(...TASKS);
     await handler(EVENT, context);
 
-    // A rotation that did not follow the clock would leave the same one out in every run, for good.
     expect(asked()).toHaveLength(250);
     expect(asked()).toContain(leftOut[0]);
   });
@@ -1083,7 +1000,6 @@ describe('a run with more candidates than it may ask GitHub about', () => {
 
     await handler(EVENT, context);
 
-    // One request says that the repository is hidden, and 100 read the others.
     expect(summary()).toEqual({
       level: 'info',
       data: counted({ scanned: 2100, candidates: 2100, read: 101, open: 100, repo_not_visible: 2000 }),
@@ -1102,7 +1018,6 @@ describe('what GitHub answers', () => {
       16: NOT_JSON,
       17: BAD_CREDENTIALS,
     });
-    // The write of task-13 records that its pull request is not there; the write of task-15 returns the record of the merge.
     updateMock.mockImplementation(async (input: UpdateCommandInput) => (input.Key?.task_id === 'task-15' ? { Attributes: task(15, MERGED_FIELDS) } : {}));
 
     await handler(EVENT, context);
@@ -1112,7 +1027,6 @@ describe('what GitHub answers', () => {
     const written = JSON.stringify([
       loggerMock.info.mock.calls, loggerMock.warn.mock.calls, loggerMock.error.mock.calls, stdout.mock.calls, updateMock.mock.calls, eventMock.mock.calls,
     ]);
-    // The token, the logins of the author and of a reviewer, and the words of whoever answered.
     for (const text of [
       TOKEN, 'abca-agent', 'octocat', 'Could not resolve', 'Something went wrong', 'C0DE:1F2E3D', 'Sign in to the proxy', 'Bad credentials', 'docs.github.com',
     ]) {

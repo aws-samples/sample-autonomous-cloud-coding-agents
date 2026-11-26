@@ -17,28 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * CDK-side workflow descriptors — the create-task boundary's view of the
- * first-party workflow files shipped under ``agent/workflows/`` (#248).
- *
- * The agent owns the authoritative YAML and the single cross-field validator
- * (``agent/src/workflow/validator.py``, Python). CDK cannot import that
- * validator, but admission control needs a few fields per workflow —
- * ``requires_repo``, ``read_only``, and the required-input contract — to
- * validate a ``CreateTaskRequest`` and resolve a ``workflow_ref`` to a pinned
- * ``{id, version}``. This module is that minimal mirror: one descriptor per
- * shipped file, kept in sync by hand until the registry (#246) serves them.
- *
- * Keep this table in lockstep with ``agent/workflows/**`` — a `tests` fixture
- * asserts the ids/versions match the YAML.
- */
-
 import { BEDROCK_GEO_REGIONS, DEFAULT_BEDROCK_MODEL_IDS } from './bedrock-model-constants';
 import { ResolvedWorkflow } from './types';
-// Bundle boundary: these come from the dependency-free constants module, NOT from
-// `constructs/bedrock-models.ts`. That module derives its geography list from an
-// alpha-CDK enum at runtime, which esbuild cannot tree-shake — importing it here put
-// all of `aws-cdk-lib` into every Lambda that reaches this file (6.8 KB → 57 MB).
 
 /** The required-input contract a workflow declares (mirrors the YAML). */
 export interface WorkflowRequiredInputs {
@@ -64,30 +44,20 @@ export interface WorkflowDescriptor {
    * The workflow's declared preferred Bedrock model (`agent_config.model.id` in
    * the YAML), if any. Validated against {@link WORKFLOW_MODEL_ALLOWLIST} at the
    * create-task boundary (WORKFLOWS.md rule 13). `undefined` ⇒ the workflow
-   * declared no model and inherits the Blueprint/platform default — always
-   * admitted. A declared id MUST be on the allow-list or admission fails (no
-   * silent downgrade). Keep in lockstep with the YAML's `agent_config.model.id`.
+   * declared no model and inherits the Blueprint/platform default. A declared
+   * id MUST be on the allow-list or admission fails.
    */
   readonly modelId?: string;
 }
 
 /**
  * Platform allow-list of Bedrock model ids a workflow may pin via
- * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection").
+ * `agent_config.model.id` (WORKFLOWS.md rule 13 / §"Model selection"): each
+ * granted model's bare id plus one form per geography.
  *
- * DERIVED from `DEFAULT_BEDROCK_MODEL_IDS`, not hand-maintained: each granted model's
- * bare id plus one form per geography. Adding a model to that list widens this
- * automatically, so the two cannot drift.
- *
- * Deliberately GEOGRAPHY-BLIND: it admits all seven geographies regardless of which one
- * the deploy grants, because the deployed geography is not available where a
- * module-level constant is built. A workflow pinning an undeployed geography therefore
- * passes admission and fails at turn 0 with AccessDenied — the one boundary in this
- * area that still resolves late. Tracked in #846; no shipped workflow pins a model
- * today, so nothing reaches it yet.
- *
- * The `repo onboard --model` path is NOT gated by this list; it checks the stack's
- * `BedrockModelIds` output instead, which is geography-aware.
+ * Geography-blind: it admits every geography regardless of which one the deploy
+ * grants, so a workflow pinning an undeployed geography passes admission and
+ * fails at turn 0 with AccessDenied. Tracked in #846.
  */
 export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = DEFAULT_BEDROCK_MODEL_IDS.flatMap(
   (bare) => [bare, ...BEDROCK_GEO_REGIONS.map((geo) => `${geo}.${bare}`)],
@@ -96,8 +66,8 @@ export const WORKFLOW_MODEL_ALLOWLIST: readonly string[] = DEFAULT_BEDROCK_MODEL
 /**
  * Validate a resolved workflow's declared model against the platform allow-list
  * (WORKFLOWS.md rule 13). Returns the offending id when the workflow pins a
- * model NOT on the allow-list (caller fails admission — no silent downgrade);
- * returns `null` when the workflow declares no model or its model is permitted.
+ * model NOT on the allow-list; returns `null` when the workflow declares no
+ * model or its model is permitted.
  */
 export function disallowedWorkflowModel(id: string): string | null {
   const modelId = DESCRIPTORS[id]?.modelId;
@@ -105,10 +75,6 @@ export function disallowedWorkflowModel(id: string): string | null {
   return WORKFLOW_MODEL_ALLOWLIST.includes(modelId) ? null : modelId;
 }
 
-/**
- * The shipped first-party workflows. The pr_* coding workflows mirror the
- * agent-side files authored in the same #248 cutover.
- */
 const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
   'coding/new-task-v1': {
     id: 'coding/new-task-v1',
@@ -131,9 +97,6 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: true,
     requiredInputs: { allOf: ['pr_number'] },
   },
-  // Re-stack: re-merge a changed predecessor branch into an existing stacked
-  // child PR. Writeable, repo-bound, and operates on an existing PR
-  // (``pr_number``). Platform-issued by the restack path, not user-facing.
   'coding/restack-v1': {
     id: 'coding/restack-v1',
     version: '1.0.0',
@@ -148,7 +111,6 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     readOnly: false,
     requiredInputs: { allOf: ['task_description'] },
   },
-  // Repo-less knowledge workflow (#248 Phase 3) — research → S3 artifact, no repo.
   'knowledge/web-research-v1': {
     id: 'knowledge/web-research-v1',
     version: '1.0.0',
@@ -163,34 +125,19 @@ export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
 
 /**
  * The disciplined coding workflow (clone → edit → commit → push → platform
- * opens the PR via ``ensure_pr``). A repo-bound task with no explicit
- * ``workflow_ref`` must run THIS, not the repo-less {@link DEFAULT_WORKFLOW_ID}
- * (which improvises against an empty local clone and records ``pr_url=null``).
- *
- * The channel processors (Linear/Jira/Slack) and the #247 orchestration release
- * path pin this explicitly at their ``createTaskCore`` call sites — see
- * ``jira-webhook-processor.ts`` (#546/#547, the first instance) — rather than
- * relying on a resolver-level default, so the "repo task ⇒ coding workflow"
- * decision lives at one visible place per channel and stays uniform across them.
+ * opens the PR via ``ensure_pr``).
  */
 export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
 /** The workflow that iterates on an existing pull request. */
 export const PR_ITERATION_WORKFLOW_ID = 'coding/pr-iteration-v1';
 
-// Fail at MODULE LOAD (deploy/import time), not at request time, if either
-// well-known id ever drifts out of DESCRIPTORS — e.g. a descriptor rename.
-// Without this a rename surfaces as an obscure runtime
-// ``TypeError: Cannot read properties of undefined (reading 'id')`` inside the
-// Lambda on the first affected task; TypeScript's ``Record<string, …>`` index
-// type will not catch it (N2).
 for (const requiredId of [DEFAULT_WORKFLOW_ID, CODING_WORKFLOW_ID]) {
   if (!DESCRIPTORS[requiredId]) {
     throw new Error(`Workflow descriptor "${requiredId}" is missing from DESCRIPTORS`);
   }
 }
 
-/** Pattern for a valid workflow ref: ``<domain>/<name>-vN[@<constraint>]``. */
 const WORKFLOW_REF_PATTERN = /^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*-v\d+(@[^\s]+)?$/;
 
 /**
@@ -206,7 +153,6 @@ export function isValidWorkflowRef(value: unknown): boolean {
   return WORKFLOW_REF_PATTERN.test(value);
 }
 
-/** Split a ``workflow_ref`` into its id and optional ``@constraint`` suffix. */
 function parseWorkflowRef(ref: string): { id: string; constraint?: string } {
   const at = ref.indexOf('@');
   if (at === -1) return { id: ref };
@@ -214,36 +160,23 @@ function parseWorkflowRef(ref: string): { id: string; constraint?: string } {
 }
 
 /**
- * Why an explicit ``workflow_ref`` could not be resolved — lets the caller emit
- * a precise 400 instead of a generic one.
+ * Why an explicit ``workflow_ref`` could not be resolved.
  *   - ``unknown_id``: the ``<domain>/<name>-vN`` id names no shipped workflow.
  *   - ``unsatisfiable_version``: the id exists but the ``@constraint`` pins a
- *     version the platform does not ship (Phase 1 ships exactly one version per
- *     id, so any constraint other than that version is unsatisfiable).
+ *     version the platform does not ship (exactly one version ships per id, so
+ *     any constraint other than that version is unsatisfiable).
  */
 export type WorkflowResolutionError = 'unknown_id' | 'unsatisfiable_version';
 
 /**
- * Resolve a ``workflow_ref`` to a pinned ``{id, version}``, applying the
- * resolution ladder (WORKFLOWS.md §"Replacing task types"):
- *   1. explicit ``workflow_ref`` (id + optional ``@constraint``);
- *   2. (Blueprint default — Phase 4, not yet wired);
- *   3. the repo-less platform default ``default/agent-v1``.
- *
- * NOTE: an absent ref falls back to the repo-less default here regardless of
- * whether the request carries a repo. A repo-bound channel task (Linear/Jira/
- * Slack/#247) must NOT rely on this fallback — it pins an explicit
- * ``workflow_ref: CODING_WORKFLOW_ID`` at its call site so a repo task runs the
- * disciplined coding workflow (commit + push + PR), not the repo-less agent
- * that records ``pr_url=null``. That decision lives at the call site, one per
- * channel, mirroring ``jira-webhook-processor.ts`` (#546/#547) — see
- * {@link CODING_WORKFLOW_ID}.
+ * Resolve a ``workflow_ref`` to a pinned ``{id, version}``: an explicit
+ * ``workflow_ref`` (id + optional ``@constraint``), else the repo-less platform
+ * default ``default/agent-v1``. An absent ref falls back to the repo-less
+ * default regardless of whether the request carries a repo.
  *
  * Returns ``null`` when an explicit ref cannot be resolved — either the id is
- * unknown OR an ``@constraint`` pins a version the platform does not ship. The
- * constraint is NO LONGER silently discarded (PR review #296 finding #6): a pin
- * like ``coding/new-task-v1@2.0.0`` fails admission rather than quietly running
- * ``1.0.0``. Use {@link resolveWorkflowRefError} for which case, to craft the 400.
+ * unknown OR an ``@constraint`` pins a version the platform does not ship. Use
+ * {@link resolveWorkflowRefError} for which case.
  */
 export function resolveWorkflowRef(ref?: string | null): ResolvedWorkflow | null {
   if (ref === undefined || ref === null || ref === '') {
@@ -253,8 +186,6 @@ export function resolveWorkflowRef(ref?: string | null): ResolvedWorkflow | null
   const { id, constraint } = parseWorkflowRef(ref);
   const descriptor = DESCRIPTORS[id];
   if (!descriptor) return null;
-  // Phase 1: exactly one shipped version per id. A constraint must match it
-  // exactly (semver ranges arrive with the registry in Phase 4, #246).
   if (constraint !== undefined && constraint !== descriptor.version) return null;
   return { id: descriptor.id, version: descriptor.version };
 }
@@ -285,16 +216,7 @@ export function workflowRequiresRepo(id: string): boolean {
 
 /**
  * Whether the resolved workflow runs read-only (drives preflight permissions).
- *
- * The unknown-id default is `false` (treat as writeable) ON PURPOSE: preflight
- * computes `needsWrite = !readOnly`, so `false` demands the *broader* token
- * permission set (contents:write), which is the conservative admission posture —
- * never under-checking the token. This is NOT the Cedar write-deny enforcement
- * axis (that is agent-side, keyed off `context.read_only`, and fails closed to
- * read-only for an unknown id in config.build_config); do not "align" this
- * default to `true` to match it — that would weaken the admission check.
- * Unknown ids are unreachable here anyway (create-task-core rejects unknown
- * refs with 400; orchestrate-task defaults a missing id to coding/new-task-v1).
+ * `false` (writeable) for an unknown id.
  */
 export function workflowIsReadOnly(id: string): boolean {
   return DESCRIPTORS[id]?.readOnly ?? false;

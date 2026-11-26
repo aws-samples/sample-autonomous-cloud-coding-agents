@@ -17,10 +17,6 @@
  *  SOFTWARE.
  */
 
-// POST /v1/tasks/{task_id}/confirm-uploads — confirms presigned uploads, screens
-// attachments, and transitions the task from PENDING_UPLOADS to SUBMITTED.
-// Tests: cdk/test/handlers/confirm-uploads.test.ts
-
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -57,10 +53,8 @@ if (!TABLE_NAME || !EVENTS_TABLE_NAME || !ATTACHMENTS_BUCKET || !CONCURRENCY_TAB
 const SCREENING_CONCURRENCY = 3;
 const HEAD_OBJECT_RETRIES = 3;
 const HEAD_OBJECT_RETRY_DELAY_MS = 1000;
-/** Safety margin before Lambda timeout: abort screening loop at this threshold. */
 const DEADLINE_MARGIN_MS = 15_000;
 
-/** Transient metadata from HeadObject, keyed by attachment_id. */
 interface S3ObjectMeta {
   readonly s3Key: string;
   readonly versionId?: string;
@@ -68,33 +62,24 @@ interface S3ObjectMeta {
 }
 
 /**
- * POST /v1/tasks/{task_id}/confirm-uploads
- *
- * Flow:
- *   1. Auth — verify caller owns the task.
- *   2. Short-circuit — if task is not PENDING_UPLOADS, return current state (idempotent).
- *   3. HeadObject per attachment — verify uploads exist in S3 (with retry for eventual consistency).
- *   4. Screen each attachment in parallel (bounded concurrency of 3).
- *   5. On all pass: conditional DDB write (status → SUBMITTED), invoke orchestrator.
- *   6. On any block: conditional DDB write (status → FAILED), cleanup S3.
+ * POST /v1/tasks/{task_id}/confirm-uploads — confirms presigned uploads, screens
+ * attachments, and transitions the task from PENDING_UPLOADS to SUBMITTED, or to
+ * FAILED when an attachment is blocked.
  */
 export async function handler(event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
 
   try {
-    // 1. Auth
     const callerUserId = extractUserId(event);
     if (!callerUserId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
-    // 2. Path parameter
     const taskId = event.pathParameters?.task_id;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
-    // 3. Read task record
     const taskResult = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { task_id: taskId },
@@ -106,12 +91,10 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
 
     const task = taskResult.Item as TaskRecord;
 
-    // Ownership check
     if (task.user_id !== callerUserId) {
       return errorResponse(404, ErrorCode.TASK_NOT_FOUND, 'Task not found.', requestId);
     }
 
-    // 4. Short-circuit: if not PENDING_UPLOADS, return current state (idempotent)
     if (task.status !== TaskStatus.PENDING_UPLOADS) {
       if (task.status === TaskStatus.QUEUED || ACTIVE_STATUSES.includes(task.status)) {
         return successResponse(200, toTaskDetail(task), requestId);
@@ -120,17 +103,14 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
         `Task is in status '${task.status}' and cannot accept upload confirmations.`, requestId);
     }
 
-    // 5. Validate attachments exist
     const attachments = task.attachments;
     if (!attachments || attachments.length === 0) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR,
         'Task has no attachments to confirm.', requestId);
     }
 
-    // A pending URL attachment is not an upload: hydration fetches and screens it.
     const pendingAttachments = attachments.filter(a => a.screening.status === 'pending' && a.type !== 'url');
 
-    // 6. HeadObject per pending attachment — verify uploads exist
     const s3Meta = new Map<string, S3ObjectMeta>();
     for (const att of pendingAttachments) {
       const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${task.user_id}/${taskId}/${att.attachment_id}/${att.filename}`;
@@ -147,17 +127,12 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
       });
     }
 
-    // 6b. Pre-check concurrency before expensive screening (fail-fast).
-    // The actual atomic increment happens in transitionToSubmitted after screening
-    // passes. This read-only check avoids wasting Bedrock calls when the user is
-    // already at their concurrency limit.
     const preCheckAdmitted = await preCheckConcurrency(task.user_id);
     if (!preCheckAdmitted) {
       return errorResponse(429, ErrorCode.RATE_LIMIT_EXCEEDED,
         'User concurrency limit reached. Wait for a running task to finish or cancel one, then retry.', requestId);
     }
 
-    // 7. Screen attachments in parallel with bounded concurrency
     const screeningConfig = await buildScreeningConfig();
     if (!screeningConfig) {
       return errorResponse(503, ErrorCode.ATTACHMENT_SCREENING_UNAVAILABLE,
@@ -166,13 +141,7 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
 
     const screenedAttachments: AttachmentRecord[] = [];
 
-    // Process in batches of SCREENING_CONCURRENCY.
-    // Deadline check: abort screening before the Lambda times out so we can
-    // return a graceful 503 + Retry-After instead of an opaque timeout error.
-    // On retry, already-screened attachments (status === 'passed' in DDB) are
-    // skipped, so retries make forward progress.
     for (let i = 0; i < pendingAttachments.length; i += SCREENING_CONCURRENCY) {
-      // Deadline check before starting a new batch
       if (context.getRemainingTimeInMillis() <= DEADLINE_MARGIN_MS) {
         const screened = screenedAttachments.length;
         const remaining = pendingAttachments.length - screened;
@@ -185,7 +154,6 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
           metric_type: 'confirm_uploads_deadline_exceeded',
         });
 
-        // Persist any already-screened results so retries skip them
         if (screenedAttachments.length > 0) {
           await persistPartialScreeningState(task, taskId, screenedAttachments, requestId);
         }
@@ -225,7 +193,6 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
               task_id: taskId,
               request_id: requestId,
             });
-            // Fail the entire task
             const transitioned = await failTaskOnScreening(task, taskId, att.filename, err.message, requestId);
             if (transitioned) {
               await cleanupAllAttachments(task, taskId, s3Meta);
@@ -234,7 +201,6 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
               `Attachment '${att.filename}' was rejected: ${err.message}`, requestId);
           }
 
-          // Non-screening error — fail-closed
           logger.error('Attachment screening failed during confirm-uploads (fail-closed)', {
             attachment_id: att.attachment_id,
             filename: att.filename,
@@ -247,23 +213,17 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
             'Attachment content screening is temporarily unavailable. Please try again later.', requestId);
         }
 
-        // Screening passed — record the result
         screenedAttachments.push(result.value);
       }
 
-      // One blocked attachment fails the whole task: screen no further batch, and
-      // never reach the deadline branch above with a blocked record to persist.
       if (screenedAttachments.some(a => a.screening.status === 'blocked')) break;
     }
 
-    // 8. Merge screened records with any already-screened ones
     const finalAttachments = attachments.map(existing => {
       const screened = screenedAttachments.find(s => s.attachment_id === existing.attachment_id);
       return screened ?? existing;
     });
 
-    // If any attachment was blocked via the result (not error), in this call or in
-    // an earlier one that stored it, handle that
     const blockedAtt = finalAttachments.find(a => a.screening.status === 'blocked');
     if (blockedAtt) {
       const categories = blockedAtt.screening.status === 'blocked'
@@ -277,12 +237,6 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
         `Attachment '${blockedAtt.filename}' was blocked by content policy (${categories}).`, requestId);
     }
 
-    // 8b. Aggregate-size ceiling ACROSS the fully-resolved set.
-    // At create-task time the presigned uploads were still `pending` with no known
-    // size, so create-task-core's total-size check couldn't count them — a client
-    // could presign N×10 MB files that individually pass but jointly blow the
-    // task-wide cap. Now that every upload is confirmed + screened its real
-    // size_bytes is known, so re-sum here and fail-closed before SUBMITTED.
     const totalBytes = finalAttachments.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);
     if (totalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
       logger.warn('Confirmed attachments exceed the task-wide size limit (fail-closed)', {
@@ -293,8 +247,6 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
         request_id: requestId,
         metric_type: 'attachment_total_size_exceeded',
       });
-      // Without its uploads the task can never be confirmed: fail it now, with the
-      // reason, instead of leaving it to expire as PENDING_UPLOADS.
       const message = `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`;
       const transitioned = await failTaskOnScreening(task, taskId, undefined, message, requestId);
       if (transitioned) {
@@ -303,7 +255,6 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, message, requestId);
     }
 
-    // 9. Transition to SUBMITTED
     return await transitionToSubmitted(task, finalAttachments, requestId);
   } catch (err) {
     logger.error('Unhandled error in confirm-uploads', {
@@ -315,10 +266,6 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
   }
 }
 
-// ---------------------------------------------------------------------------
-// Screen a single attachment: download from S3, screen, re-upload cleaned version
-// ---------------------------------------------------------------------------
-
 async function screenSingleAttachment(
   att: AttachmentRecord,
   _task: TaskRecord,
@@ -328,7 +275,6 @@ async function screenSingleAttachment(
 ): Promise<AttachmentRecord> {
   const { s3Key, versionId, sizeBytes } = meta;
 
-  // Download the object content for screening
   let getResult;
   try {
     getResult = await s3Client.send(new GetObjectCommand({
@@ -338,10 +284,6 @@ async function screenSingleAttachment(
     }));
   } catch (err: any) {
     if (err?.$metadata?.httpStatusCode !== 404) throw err;
-    // HeadObject found this upload a moment ago, and uploads are deleted only once their
-    // task has failed or expired: the task has ended in the meantime (another confirmation
-    // failed it, or the cleanup cancelled it). Say that, rather than report the screening
-    // as unavailable.
     throw new AttachmentScreeningError(
       `Upload for '${att.filename}' is no longer in storage. The uploads of a task are deleted ` +
       'when the task fails or its upload window expires; check the status of the task.',
@@ -362,8 +304,6 @@ async function screenSingleAttachment(
     );
   }
 
-  // The declared type is the client's claim: hold the bytes to it before screening,
-  // as the inline, URL, Linear and Jira paths do.
   if (!validateMagicBytes(content, att.content_type)) {
     throw new AttachmentScreeningError(
       `Upload for '${att.filename}' does not match its declared type '${att.content_type}'. ` +
@@ -371,7 +311,6 @@ async function screenSingleAttachment(
     );
   }
 
-  // Screen based on type
   const isImage = att.type === 'image';
   const screenResult = isImage
     ? await screenImage(content, att.content_type, att.filename, screeningConfig)
@@ -395,9 +334,6 @@ async function screenSingleAttachment(
     });
   }
 
-  // Screening passed — reuse existing S3 object (no transformation needed)
-
-  // Estimate token cost for images (using shared utility)
   let tokenEstimate: number | undefined;
   if (isImage) {
     tokenEstimate = estimateImageTokensFromBuffer(screenResult.content, att.content_type);
@@ -416,10 +352,6 @@ async function screenSingleAttachment(
     ...(tokenEstimate !== undefined && { token_estimate: tokenEstimate }),
   });
 }
-
-// ---------------------------------------------------------------------------
-// HeadObject with retry (S3 eventual consistency)
-// ---------------------------------------------------------------------------
 
 async function headObjectWithRetry(s3Key: string): Promise<{
   exists: boolean;
@@ -452,10 +384,6 @@ async function headObjectWithRetry(s3Key: string): Promise<{
   return { exists: false };
 }
 
-// ---------------------------------------------------------------------------
-// Transition to SUBMITTED (conditional write + orchestrator invoke)
-// ---------------------------------------------------------------------------
-
 async function transitionToSubmitted(
   task: TaskRecord,
   finalAttachments: AttachmentRecord[],
@@ -464,14 +392,12 @@ async function transitionToSubmitted(
   const now = new Date().toISOString();
   const taskId = task.task_id;
 
-  // Admission control — check concurrency before transitioning
   const admitted = await checkConcurrency(task.user_id);
   if (!admitted) {
     return errorResponse(429, ErrorCode.RATE_LIMIT_EXCEEDED,
       'User concurrency limit reached. Wait for a running task to finish or cancel one, then retry.', requestId);
   }
 
-  // Conditional DynamoDB write: status PENDING_UPLOADS → SUBMITTED
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
@@ -492,10 +418,7 @@ async function transitionToSubmitted(
     }));
   } catch (err: any) {
     if (err.name === 'ConditionalCheckFailedException') {
-      // Another caller already transitioned (e.g. cleanup Lambda cancelled
-      // the task). Roll back the concurrency counter we just incremented.
       await decrementConcurrency(task.user_id);
-      // Return current state (idempotent)
       const current = await ddb.send(new GetCommand({
         TableName: TABLE_NAME,
         Key: { task_id: taskId },
@@ -505,13 +428,10 @@ async function transitionToSubmitted(
       }
       return errorResponse(404, ErrorCode.TASK_NOT_FOUND, 'Task not found.', requestId);
     }
-    // Roll back concurrency counter on any other DDB error (throttling,
-    // network timeout, etc.) to prevent permanent slot leaks.
     await decrementConcurrency(task.user_id);
     throw err;
   }
 
-  // Write uploads_confirmed event (best-effort)
   try {
     await ddb.send(new PutCommand({
       TableName: EVENTS_TABLE_NAME,
@@ -535,7 +455,6 @@ async function transitionToSubmitted(
     });
   }
 
-  // Invoke orchestrator (fire-and-forget)
   let orchestratorInvokeFailed = false;
   if (lambdaClient && process.env.ORCHESTRATOR_FUNCTION_ARN) {
     try {
@@ -559,7 +478,6 @@ async function transitionToSubmitted(
     }
   }
 
-  // Return updated task
   const updatedTask: TaskRecord = {
     ...task,
     status: TaskStatus.SUBMITTED,
@@ -574,15 +492,6 @@ async function transitionToSubmitted(
   return successResponse(200, responseBody, requestId);
 }
 
-// ---------------------------------------------------------------------------
-// Fail task on screening failure (conditional write)
-// ---------------------------------------------------------------------------
-
-/**
- * `filename` is the attachment that was rejected. Without one the uploads were
- * rejected as a set (the size limit): `reason` is then the whole error message
- * and no attachment_blocked event is written.
- */
 async function failTaskOnScreening(
   _task: TaskRecord,
   taskId: string,
@@ -613,7 +522,6 @@ async function failTaskOnScreening(
     }));
   } catch (err: any) {
     if (err.name === 'ConditionalCheckFailedException') {
-      // Another caller already transitioned — skip
       logger.info('Task already transitioned during screening failure', {
         task_id: taskId,
         request_id: requestId,
@@ -625,7 +533,6 @@ async function failTaskOnScreening(
 
   if (!filename) return true;
 
-  // Write event (best-effort)
   try {
     await ddb.send(new PutCommand({
       TableName: EVENTS_TABLE_NAME,
@@ -650,23 +557,15 @@ async function failTaskOnScreening(
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Cleanup all S3 attachments for a task
-// ---------------------------------------------------------------------------
-
 async function cleanupAllAttachments(task: TaskRecord, taskId: string, s3Meta: Map<string, S3ObjectMeta>): Promise<void> {
   if (!task.attachments || task.attachments.length === 0) return;
 
-  // Include VersionId when available — in a versioned bucket, DeleteObjects
-  // without VersionId only creates a delete marker, leaving the actual content
-  // accessible until the 7-day noncurrent lifecycle runs.
+  // In a versioned bucket, DeleteObjects without VersionId only creates a delete
+  // marker, leaving the actual content accessible.
   const objects = task.attachments.map(att => ({
     Key: `${ATTACHMENT_OBJECT_KEY_PREFIX}${task.user_id}/${taskId}/${att.attachment_id}/${att.filename}`,
     ...(att.s3_version_id && att.s3_version_id !== 'unversioned' && { VersionId: att.s3_version_id }),
   }));
-  // The uploads this call looked at have no stored version id yet, so the entries above
-  // only add a delete marker for them. Name the version HeadObject reported as well: the
-  // bytes go now, and the marker still hides any other version posted to the same key.
   for (const { s3Key, versionId } of s3Meta.values()) {
     if (versionId) objects.push({ Key: s3Key, VersionId: versionId });
   }
@@ -693,23 +592,12 @@ async function cleanupAllAttachments(task: TaskRecord, taskId: string, s3Meta: M
   }
 }
 
-// ---------------------------------------------------------------------------
-// Persist partial screening state (for deadline-exceeded retries)
-// ---------------------------------------------------------------------------
-
-/**
- * Write already-screened attachment records back to DDB so retries skip them.
- * Uses a conditional write to only update if the task is still in PENDING_UPLOADS.
- * If this write fails (race with cleanup), the already-screened work is lost but
- * the task was already being cancelled, so the client will see the correct state.
- */
 async function persistPartialScreeningState(
   task: TaskRecord,
   taskId: string,
   screenedAttachments: AttachmentRecord[],
   requestId: string,
 ): Promise<void> {
-  // Merge screened results with existing attachment records
   const mergedAttachments = (task.attachments ?? []).map(existing => {
     const screened = screenedAttachments.find(s => s.attachment_id === existing.attachment_id);
     return screened ?? existing;
@@ -749,10 +637,6 @@ async function persistPartialScreeningState(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 let _bedrockClient: import('@aws-sdk/client-bedrock-runtime').BedrockRuntimeClient | undefined;
 
 async function buildScreeningConfig(): Promise<ScreeningConfig | undefined> {
@@ -768,11 +652,6 @@ async function buildScreeningConfig(): Promise<ScreeningConfig | undefined> {
   };
 }
 
-/**
- * Non-mutating read to check if the user is at their concurrency limit.
- * Used as a fast pre-check before expensive screening; the actual atomic
- * increment happens in checkConcurrency() during transitionToSubmitted.
- */
 async function preCheckConcurrency(userId: string): Promise<boolean> {
   try {
     const result = await ddb.send(new GetCommand({
@@ -782,8 +661,6 @@ async function preCheckConcurrency(userId: string): Promise<boolean> {
     const activeCount = (result?.Item?.active_count as number) ?? 0;
     return activeCount < MAX_CONCURRENT;
   } catch (err: any) {
-    // Only swallow DDB throttling errors — these are transient and the atomic
-    // check in transitionToSubmitted is the authoritative gate.
     const throttleErrors = ['ProvisionedThroughputExceededException', 'RequestLimitExceeded', 'ThrottlingException'];
     if (throttleErrors.includes(err?.name)) {
       logger.warn('Pre-check concurrency throttled — allowing request to proceed', {
@@ -792,8 +669,6 @@ async function preCheckConcurrency(userId: string): Promise<boolean> {
       });
       return true;
     }
-    // Non-throttling errors (misconfigured table, IAM, network partition)
-    // should propagate — no point running expensive screening if infra is broken.
     logger.error('Pre-check concurrency failed (non-throttling error)', {
       user_id: userId,
       error: err instanceof Error ? err.message : String(err),
@@ -845,11 +720,9 @@ async function decrementConcurrency(userId: string): Promise<void> {
       return;
     } catch (err: any) {
       if (err.name === 'ConditionalCheckFailedException') {
-        // Counter already at 0 or doesn't exist — nothing to roll back
         return;
       }
       if (attempt < maxAttempts - 1) {
-        // Retry transient DDB errors (throttling, network) with backoff
         await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempt)));
         continue;
       }

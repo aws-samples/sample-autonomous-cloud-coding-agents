@@ -130,7 +130,6 @@ describe('resolveOperatorRegion', () => {
   });
 
   test('throws when region cannot be resolved', () => {
-    // Both AWS_REGION and AWS_DEFAULT_REGION feed the fallback chain.
     delete process.env.AWS_REGION;
     delete process.env.AWS_DEFAULT_REGION;
     expect(() => resolveOperatorRegion({}, undefined)).toThrow(CliError);
@@ -181,7 +180,6 @@ describe('getStackOutputs', () => {
 
     expect(outputs).toEqual({ RepoTableName: 'RepoTable', MissingKey: null, ApiUrl: 'https://api.example/v1/' });
     expect(cfSend).toHaveBeenCalledTimes(1);
-    // Only `mise //cli:typecheck` checks the next line. Jest does not check types.
     const hasOnlyTheKeysAskedFor: keyof typeof outputs extends 'RepoTableName' | 'MissingKey' | 'ApiUrl' ? true : false = true;
     expect(hasOnlyTheKeysAskedFor).toBe(true);
   });

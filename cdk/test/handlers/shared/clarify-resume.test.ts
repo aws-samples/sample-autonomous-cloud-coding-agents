@@ -23,7 +23,6 @@ import {
   type ClarifyHoldRow,
 } from '../../../src/handlers/shared/clarify-resume';
 
-/** A canonical clarify-HOLD row: new-task-v1 that paused with a question. */
 function hold(overrides: Partial<ClarifyHoldRow> = {}): ClarifyHoldRow {
   return {
     resolved_workflow: { id: 'coding/new-task-v1' },
@@ -53,15 +52,11 @@ describe('isClarifyHold', () => {
   });
 
   test('rejects a no-op PR ITERATION (has a PR — the reconciler/fanout owns that reply)', () => {
-    // A pr-iteration-v1 that answered without changing code shares
-    // code_changed=false + answer_text, but it has a PR and a different
-    // workflow — must NOT be treated as a resumable clarify-hold.
     expect(isClarifyHold(hold({
       resolved_workflow: { id: 'coding/pr-iteration-v1' },
       pr_url: 'https://github.com/o/r/pull/7',
       pr_number: 7,
     }))).toBe(false);
-    // Even a new-task-v1 row with a PR is not a hold (it shipped something).
     expect(isClarifyHold(hold({ pr_url: 'https://github.com/o/r/pull/9' }))).toBe(false);
     expect(isClarifyHold(hold({ pr_number: 9 }))).toBe(false);
   });
@@ -84,7 +79,6 @@ describe('buildClarifyResumeDescription', () => {
       'Which environment — staging or prod?',
       'staging',
     );
-    // Original intent first so the agent reads "do the original thing, now resolved".
     expect(md.indexOf('Wire up the deploy button.')).toBeLessThan(md.indexOf('You asked:'));
     expect(md).toContain('You asked: Which environment — staging or prod?');
     expect(md).toContain('The reviewer answered: staging');
@@ -105,9 +99,6 @@ describe('buildClarifyResumeDescription', () => {
   });
 
   test('cuts an original that fills the description limit, never the exchange', () => {
-    // The label path fills the description to exactly 10,000 characters when
-    // project documents or comments overflow. createTaskCore refuses anything
-    // longer, so the original gives way from its end and the answer survives.
     const md = buildClarifyResumeDescription('x'.repeat(10_000), 'Which environment?', 'staging');
     expect(md.length).toBeLessThanOrEqual(10_000);
     expect(md.startsWith('xxx')).toBe(true);
@@ -117,8 +108,6 @@ describe('buildClarifyResumeDescription', () => {
   });
 
   test('keeps the answer of an earlier round when a second question is answered', () => {
-    // The description of a resumed task ends with the first exchange. Cutting
-    // it from its end would drop that answer to make room for the second one.
     const first = buildClarifyResumeDescription('x'.repeat(10_000), 'Which environment?', 'staging');
     const md = buildClarifyResumeDescription(first, 'Which region?', 'eu-west-1');
     expect(md.length).toBeLessThanOrEqual(10_000);
@@ -128,8 +117,6 @@ describe('buildClarifyResumeDescription', () => {
     expect(md).toContain('The reviewer answered: eu-west-1');
   });
 
-  // What buildFollowUpDescription (linear-webhook-processor.ts) appends when a
-  // reviewer comments on an issue whose last run ended without a pull request.
   const FOLLOW_UP = [
     '---',
     'An earlier run on this issue ended without a pull request.',
@@ -146,9 +133,6 @@ describe('buildClarifyResumeDescription', () => {
   test.each([10_000, 9_831])(
     'keeps the request of a follow-up comment whole (a description of %d characters)',
     (length) => {
-      // The description of a task that a follow-up comment started ends with
-      // that request. It is the reviewer's word, like an answer: without it the
-      // resumed run does the whole issue again. The issue text gives way.
       const description = `${'x'.repeat(length - FOLLOW_UP.length - 2)}\n\n${FOLLOW_UP}`;
       const md = buildClarifyResumeDescription(description, 'Which IdP?', 'Okta');
       expect(md.slice(md.indexOf('\n\n---\n'))).toBe(`\n\n${FOLLOW_UP}\n\n${EXCHANGE}`);
@@ -184,10 +168,6 @@ describe('buildClarifyResumeDescription', () => {
   });
 
   test('leaves exchanges that exceed the limit on their own whole, for createTaskCore to refuse', () => {
-    // A row without a stored description: the first resume is the exchange
-    // alone, and there is no issue text to give way. A shortened answer would
-    // go unnoticed; a description over the limit is refused, and the processor
-    // tells the commenter why.
     const first = buildClarifyResumeDescription(undefined, 'q'.repeat(2_000), 'a'.repeat(3_000));
     const md = buildClarifyResumeDescription(first, 'r'.repeat(2_000), 'b'.repeat(3_000));
     expect(md.startsWith(`${first}\n\n---\n`)).toBe(true);
@@ -198,8 +178,7 @@ describe('buildClarifyResumeDescription', () => {
     ['in the middle of an emoji', '', 9_999],
     ['between two emoji', 'x', 10_000],
   ])('never keeps half of a character when the cut falls %s', (_where, pad, length) => {
-    // An emoji is two UTF-16 code units, and the limit counts units. Half of
-    // one is not a character: it is stored as U+FFFD.
+    // Half of a UTF-16 surrogate pair is encoded to UTF-8 as U+FFFD.
     const md = buildClarifyResumeDescription(`${pad}${'😀'.repeat(5_000)}`, 'Which environment?', 'staging');
     expect(Buffer.from(md, 'utf8').toString('utf8') === md).toBe(true);
     expect(md.length).toBe(length);

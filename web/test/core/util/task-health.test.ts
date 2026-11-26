@@ -77,9 +77,7 @@ describe('hasStaleHeartbeat', () => {
   it.each([
     ['agentcore', true],
     ['lambda-microvm', true],
-    // A running task whose record names no backend was started before the field existed: the heartbeat counts.
     [null, true],
-    // On ECS the agent reports once, at its start: an old report says nothing, and the orchestrator does not go by it either.
     ['ecs', false],
   ] as const)('goes by the heartbeat of a task on %s: %s', (computeType, stale) => {
     expect(hasStaleHeartbeat(summary({ compute_type: computeType, agent_heartbeat_at: ago(3600) }), NOW)).toBe(stale);

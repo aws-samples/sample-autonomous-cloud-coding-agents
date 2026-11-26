@@ -34,7 +34,6 @@ process.env.SLACK_USER_MAPPING_TABLE_NAME = 'SlackMap';
 
 import { handler } from '../../src/handlers/slack-link';
 
-// The handler refuses a pending row whose ttl has passed, so live fixtures carry a future one.
 const FUTURE_TTL = Math.floor(Date.now() / 1000) + 600;
 
 function makeEvent(body: unknown, userId?: string): APIGatewayProxyEvent {
@@ -101,7 +100,7 @@ describe('slack-link handler', () => {
     });
     const result = await handler(makeEvent({ code: 'ABC123' }, 'cognito-user-1'));
     expect(result.statusCode).toBe(404);
-    expect(ddbSend).toHaveBeenCalledTimes(1); // the Get only: nothing written or deleted
+    expect(ddbSend).toHaveBeenCalledTimes(1);
   });
 
   test.each([['absent', undefined], ['a string', String(FUTURE_TTL)]])('404s when the pending row has no numeric ttl (%s)', async (_shape, ttl) => {
@@ -124,8 +123,8 @@ describe('slack-link handler', () => {
           slack_user_id: 'U_slack',
         },
       })
-      .mockResolvedValueOnce({}) // Put (confirmed mapping)
-      .mockResolvedValueOnce({}); // Delete (pending)
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
 
     const result = await handler(makeEvent({ code: 'abc123' }, 'cognito-user-1'));
     expect(result.statusCode).toBe(200);

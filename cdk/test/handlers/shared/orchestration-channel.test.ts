@@ -17,8 +17,6 @@
  *  SOFTWARE.
  */
 
-// Mock the per-surface feedback + graph helpers so the adapter tests exercise the
-// mapping (channel op → surface call) without any network.
 const linearPostIssueComment = jest.fn();
 const linearUpsertStatusComment = jest.fn();
 const linearReportIssueFailure = jest.fn();
@@ -85,12 +83,10 @@ describe('Linear channel adapter', () => {
     linearUpsertStatusComment.mockResolvedValue('cmt-99');
     const res = await ch.upsertComment(linearIssue, 'panel', { commentId: 'cmt-7' });
     expect(res).toEqual({ commentId: 'cmt-99' });
-    expect(linearUpsertStatusComment.mock.calls[0][3]).toBe('cmt-7'); // existing id passed through
+    expect(linearUpsertStatusComment.mock.calls[0][3]).toBe('cmt-7');
   });
 
   test('reactToComment ADDS a reaction without clearing existing ones', async () => {
-    // The receipt ack must not disturb other markers, so it maps to the
-    // add-only helper — never the swap helper, which deletes prior markers.
     await ch.reactToComment!({ commentId: 'c1' }, linearIssue, 'started');
     expect(linearAddCommentReaction.mock.calls[0][2]).toBe('eyes');
     expect(linearSwapCommentReaction).not.toHaveBeenCalled();
@@ -111,8 +107,6 @@ describe('Linear channel adapter', () => {
   });
 
   test('transitionState distinguishes running from awaiting-review by state name', async () => {
-    // Linear types both as `started`, so the preferred NAME is what separates
-    // them; dropping it would collapse the two intents into one move.
     await ch.transitionState!(linearIssue, 'started');
     expect(linearTransitionIssueState.mock.calls[0][2]).toBe('started');
     expect(linearTransitionIssueState.mock.calls[0][3]).toEqual(['In Progress']);
@@ -139,8 +133,6 @@ describe('Linear channel adapter', () => {
   });
 
   test('postThreadedReply carries both the issue and the parent comment', async () => {
-    // Linear rejects a reply that names only the parent comment, so the issue
-    // id must travel with it.
     linearReplyToComment.mockResolvedValue('reply-1');
     const res = await ch.postThreadedReply!(linearIssue, { commentId: 'parent-1' }, 'done');
     expect(res).toEqual({ commentId: 'reply-1' });
@@ -167,8 +159,6 @@ describe('Linear channel adapter', () => {
     expect(parentId).toBe('parent-1');
     expect(body).toBe('settled');
     expect(existingId).toBe('reply-9');
-    // The adapter forwards EVERY convergence flag explicitly, so the surface
-    // helper never has to guess a default.
     expect(options).toEqual({ preservePreview: true, skipIfSettled: false, repairIfOverwritten: false });
   });
 
@@ -242,8 +232,6 @@ describe('Jira channel adapter (capability-limited surface)', () => {
       { allowRegression: true },
     );
 
-    // Check presence via the key, not the bound method, so the engine's
-    // `if (channel.reactToComment)` capability guard is what's exercised.
     for (const capability of [
       'reactToComment',
       'replaceCommentReaction',
@@ -257,8 +245,6 @@ describe('Jira channel adapter (capability-limited surface)', () => {
   });
 
   test('still satisfies the required feedback contract every surface must support', () => {
-    // The point of the capability split: omitting the optional ops must not make
-    // Jira an incomplete Channel.
     expect(typeof ch.postComment).toBe('function');
     expect(typeof ch.upsertComment).toBe('function');
     expect(typeof ch.reportFailure).toBe('function');

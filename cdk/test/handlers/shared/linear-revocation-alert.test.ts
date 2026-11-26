@@ -17,16 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for the revoked-authorization announcement (#812).
- *
- * The latch — and therefore the dedup — lives in the resolver, which owns the
- * conditional write. This module is only the operator-facing message, so what
- * matters here is that the message is ACTIONABLE, and that failing to send it can
- * never escalate: it runs inside token resolution, where a throw would turn a
- * notification outage into a broken webhook handler.
- */
-
 const snsSend = jest.fn();
 jest.mock('@aws-sdk/client-sns', () => ({
   SNSClient: jest.fn(() => ({ send: snsSend })),
@@ -79,18 +69,10 @@ describe('announceRevocation', () => {
     expect(published().input.TopicArn).toBe(TOPIC);
     expect(published().input.Subject).toContain('acme');
     expect(published().input.Message).toContain('bgagent linear setup acme');
-    // Explains the consequence, so it is not merely a status ping.
     expect(published().input.Message).toMatch(/dropped|appear to do nothing/i);
   });
 
   test('the vault source names a remedy that EXISTS, and says it is the vault', async () => {
-    // Both failure shapes are repaired by the same command now that onboarding is one
-    // command; the message must still say WHICH credential died, or an operator
-    // cannot tell a dead vault consent from a rejected Secrets-Manager refresh.
-    //
-    // This test previously demanded `vault-setup`, which was removed when onboarding
-    // was consolidated — so it was pinning an instruction that would fail with an
-    // unknown command. A remedy nobody can run is worse than none.
     await announceRevocation(detail({ source: 'vault-consent-required' }), opts());
     const message = published().input.Message as string;
     expect(message).toContain('bgagent linear setup acme');
@@ -99,12 +81,6 @@ describe('announceRevocation', () => {
   });
 
   test('a failed publish REPORTS false rather than throwing', async () => {
-    // Not throwing, because this runs inside token resolution and an exception would
-    // turn a notification outage into a broken webhook handler. But not silent
-    // either: swallowing the failure and returning void made the caller believe the
-    // operator had been told, which — with the caller latching the row `revoked` and
-    // then never re-detecting the dead grant — meant permanent silence. The boolean
-    // is what lets the caller release its claim and retry on a later event.
     snsSend.mockRejectedValueOnce(new Error('KMSAccessDeniedException'));
     await expect(announceRevocation(detail(), opts())).resolves.toBe(false);
   });
@@ -123,10 +99,6 @@ describe('announceRevocation', () => {
     expect(published().input.Subject.length).toBeLessThanOrEqual(100);
   });
 
-  // The assertions above all use `toContain`, which cannot see a command rendered
-  // TWICE — and the vault branch did render it twice, appending an annotated copy
-  // under the plain one. These pin the shape of the message an operator reads, not
-  // just its substrings.
   test.each([
     ['secrets-manager-refresh'],
     ['vault-consent-required'],
@@ -137,10 +109,6 @@ describe('announceRevocation', () => {
   });
 
   test('paragraph breaks survive into the delivered message', async () => {
-    // The lines were assembled with `''` separators and then run through a
-    // `.filter(line => line !== '')`, which stripped every one of them — collapsing
-    // the whole email into an unreadable block. Invisible in the source; obvious the
-    // moment the message is rendered.
     await announceRevocation(detail(), opts());
     expect(published().input.Message as string).toContain('\n\n');
   });

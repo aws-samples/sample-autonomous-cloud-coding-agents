@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Durable guest pause checks; the coordinator retains lifecycle intent ownership."""
-
 from __future__ import annotations
 
 import os
@@ -47,7 +45,6 @@ def _record(park: ApprovalPark) -> tuple[ApprovalRecord, int | None]:
 def _read(
     park: ApprovalPark, action: Literal["suspend", "resume"]
 ) -> tuple[Any, str, str, dict, int | None]:
-    """Read current task/gate identity strongly; absence and mismatch fail closed."""
     from boto3.dynamodb.types import TypeDeserializer
 
     from aws_session import fast_fail_config, tenant_client
@@ -129,7 +126,6 @@ def _read(
 def _transaction_checks(
     park: ApprovalPark, task_table: str, approvals_table: str, intent: dict
 ) -> list[dict]:
-    """Recheck both rows atomically after validating their complete read shapes."""
     from boto3.dynamodb.types import TypeSerializer
 
     record, _ = _record(park)
@@ -207,8 +203,6 @@ def checkpoint_before_suspend(park: ApprovalPark) -> None:
         client, task_table, approvals_table, intent, deadline_ms = _read(park, "suspend")
     if park.deadline.remaining_s() <= 0:
         raise LifecycleUnavailable("Approval deadline elapsed before checkpoint")
-    # Never reuse an old transaction client token across HTTP requests: cached
-    # success must not bypass conditions after a concurrent approval/cancellation.
     with lifecycle_stage("checkpoint-transaction"):
         _ProgressWriter(
             park.task_id, user_id=record.user_id, repo=record.repo
@@ -233,9 +227,6 @@ def refresh_and_reconcile_after_resume(park: ApprovalPark) -> None:
         refresh_microvm_credentials(park.task_id)
     with lifecycle_stage("resume-identity-read"):
         client, task_table, approvals_table, intent, _ = _read(park, "resume")
-    # This transaction writes no task/approval state. It acknowledges that both
-    # identities still hold, including cancellation or intent changes after reads.
-    # A concurrent valid decision is allowed; the original loop observes it.
     with lifecycle_stage("resume-identity-transaction"):
         client.transact_write_items(
             TransactItems=[
@@ -243,6 +234,3 @@ def refresh_and_reconcile_after_resume(park: ApprovalPark) -> None:
                 for check in _transaction_checks(park, task_table, approvals_table, intent)
             ]
         )
-    # The existing approval loop checks its original stopwatch/UTC cap as soon
-    # as the barrier opens. Expiry enters its timeout/late-decision path; a timely
-    # approval already recorded must still win that conditional race.

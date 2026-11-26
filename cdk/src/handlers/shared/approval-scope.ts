@@ -17,32 +17,8 @@
  *  SOFTWARE.
  */
 
-/**
- * Validator for `ApprovalScope` strings (design §6.4, §7.3).
- *
- * Shared between `approve-task`, `create-task`, and (Chunk 6) the CLI
- * so the same rules apply on both ends of the wire. Enforces:
- *
- *   - The scope string is a known literal (`this_call`, `all_session`,
- *     `tool_type_session`, `tool_group_session`) OR has a known
- *     prefix (`tool_type:`, `tool_group:`, `bash_pattern:`,
- *     `write_path:`, `rule:`).
- *   - Value after the prefix is non-empty (§7.3 step 3).
- *   - Total length ≤ `INITIAL_APPROVALS_MAX_ENTRY_LENGTH` — keeps DDB
- *     rows small and avoids the Cedar `like`-expansion explosion.
- *   - Tool-type and tool-group values are from the known sets.
- *
- * Degenerate pattern detection (§7.4) is applied at submit time in
- * `create-task` rather than here, because degenerate-ness depends on
- * the `initial_approvals` context — `bash_pattern:*` is degenerate
- * when the user supplied it for broad permission, but NOT when the
- * pattern happens to be a single-char rule the allowlist is asked to
- * match. Keeping the check scoped to submit time avoids double-enforcement
- * confusion.
- */
 import { INITIAL_APPROVALS_MAX_ENTRY_LENGTH, type ApprovalScope } from './types';
 
-/** Known no-payload scopes. */
 const LITERAL_SCOPES = new Set<string>([
   'this_call',
   'all_session',
@@ -50,7 +26,6 @@ const LITERAL_SCOPES = new Set<string>([
   'tool_group_session',
 ]);
 
-/** Known scope prefixes. Exposed for error messages. */
 export const VALID_APPROVAL_SCOPE_PREFIXES: readonly string[] = [
   'tool_type:',
   'tool_group:',
@@ -59,12 +34,6 @@ export const VALID_APPROVAL_SCOPE_PREFIXES: readonly string[] = [
   'rule:',
 ];
 
-/**
- * Canonical set of tool names acceptable after `tool_type:`. Mirror of
- * the agent-side `ApprovalAllowlist._tool_types` set; out-of-band
- * tool names are rejected at submit time so the user sees a loud
- * error instead of a silently-never-matching scope.
- */
 export const VALID_TOOL_TYPES: readonly string[] = [
   'Bash',
   'Read',
@@ -76,7 +45,6 @@ export const VALID_TOOL_TYPES: readonly string[] = [
   'Task',
 ];
 
-/** Canonical tool groups. Mirror of `TOOL_GROUPS` in `agent/src/policy.py`. */
 export const VALID_TOOL_GROUPS: readonly string[] = ['file_write'];
 
 type ParseResult =
@@ -131,25 +99,15 @@ export function parseApprovalScope(scope: string): ParseResult {
       message: `unknown tool_group ${value}; valid: ${VALID_TOOL_GROUPS.join(', ')}`,
     };
   }
-  // `bash_pattern:`, `write_path:`, `rule:` — value format is free;
-  // rule existence check happens at submit time against the blueprint.
   return { ok: true, scope: `${prefix}${value}` as ApprovalScope };
 }
 
-/**
- * Degenerate-pattern detection per §7.4.
- *
- * A pattern is degenerate if it is:
- * - ≤ 2 chars total, OR
- * - consists only of `*`, `?`, whitespace, OR
- * - wildcard-to-literal ratio exceeds 50%.
- *
- * Used by `create-task` on `bash_pattern:` / `write_path:` scopes at
- * submit time; runtime allowlist evaluation does not re-check.
- */
-/** Wildcard-to-total-length ratio above which a pattern is degenerate (§7.4). */
 const DEGENERATE_WILDCARD_RATIO_THRESHOLD = 0.5;
 
+/**
+ * True when a pattern is degenerate: at most 2 chars, only `*`, `?` and
+ * whitespace, or more than 50% wildcards.
+ */
 export function isDegeneratePattern(pattern: string): boolean {
   const trimmed = pattern.trim();
   if (trimmed.length <= 2) return true;

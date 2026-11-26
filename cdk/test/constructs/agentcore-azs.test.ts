@@ -44,10 +44,6 @@ function nodeWithContext(context?: Record<string, unknown>) {
 }
 
 /**
- * Independent transcription of the AWS source table, kept separate from the
- * production constant on purpose: asserting the map against itself (its own key
- * list, its own shape) cannot detect drift or a mis-typed zone ID.
- *
  * Source: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html#agentcore-supported-azs
  */
 const EXPECTED_SUPPORTED_AZ_IDS: Record<string, string[]> = {
@@ -73,20 +69,18 @@ const EXPECTED_SUPPORTED_AZ_IDS: Record<string, string[]> = {
   'us-gov-west-1': ['usgw1-az1', 'usgw1-az2', 'usgw1-az3'],
 };
 
-/** Realistic us-east-1 mapping; supported IDs are use1-az1/az2/az4. */
 const US_EAST_1_ZONES: AvailabilityZoneInfo[] = [
-  { zoneName: 'us-east-1a', zoneId: 'use1-az2' }, // supported
-  { zoneName: 'us-east-1b', zoneId: 'use1-az4' }, // supported
-  { zoneName: 'us-east-1c', zoneId: 'use1-az6' }, // unsupported
-  { zoneName: 'us-east-1d', zoneId: 'use1-az1' }, // supported
-  { zoneName: 'us-east-1e', zoneId: 'use1-az3' }, // unsupported
-  { zoneName: 'us-east-1f', zoneId: 'use1-az5' }, // unsupported
+  { zoneName: 'us-east-1a', zoneId: 'use1-az2' },
+  { zoneName: 'us-east-1b', zoneId: 'use1-az4' },
+  { zoneName: 'us-east-1c', zoneId: 'use1-az6' },
+  { zoneName: 'us-east-1d', zoneId: 'use1-az1' },
+  { zoneName: 'us-east-1e', zoneId: 'use1-az3' },
+  { zoneName: 'us-east-1f', zoneId: 'use1-az5' },
 ];
 
 const okAccount: ResolveCallerAccountFn = async () => ACCOUNT;
 const okZones: DescribeAzsFn = async () => US_EAST_1_ZONES;
 
-/** Resolve with concrete env and injected lookups (no AWS access). */
 function resolveConcrete(overrides: {
   context?: Record<string, unknown>;
   region?: string;
@@ -105,20 +99,14 @@ function resolveConcrete(overrides: {
 
 describe('AGENTCORE_SUPPORTED_AZ_IDS', () => {
   it('matches the AWS source table exactly (drift detector)', () => {
-    // Deep-equal against an independently transcribed literal: catches a wrong
-    // zone ID ('us-east-1': ['usw2-az1']) and a dropped/added region, neither of
-    // which a self-referential assertion can see.
     expect(AGENTCORE_SUPPORTED_AZ_IDS).toEqual(EXPECTED_SUPPORTED_AZ_IDS);
   });
 
   it('covers the regions AWS publishes, including the ones that skip -az3', () => {
-    // ca-central-1, us-east-1 and ap-northeast-1 use az4 rather than az3, so the
-    // sets cannot be derived as az1..az3.
     expect(AGENTCORE_SUPPORTED_AZ_IDS['ca-central-1']).toContain('cac1-az4');
     expect(AGENTCORE_SUPPORTED_AZ_IDS['ca-central-1']).not.toContain('cac1-az3');
     expect(AGENTCORE_SUPPORTED_AZ_IDS['us-east-1']).toContain('use1-az4');
     expect(AGENTCORE_SUPPORTED_AZ_IDS['ap-northeast-1']).toContain('apne1-az4');
-    // Regions the earlier revision of this map omitted entirely.
     for (const region of [
       'ap-northeast-2', 'ap-southeast-5', 'ap-southeast-7', 'ca-central-1',
       'eu-west-2', 'eu-west-3', 'eu-north-1', 'eu-south-1', 'eu-south-2', 'sa-east-1',
@@ -145,9 +133,6 @@ describe('AGENTCORE_SUPPORTED_AZ_IDS', () => {
 
 describe('AUTO_PIN_AZ_COUNT', () => {
   it('equals the AgentVpc default zone count (topology stays unchanged)', () => {
-    // The coupling the constants' comments claim, asserted rather than trusted:
-    // a default AgentVpc must produce exactly AUTO_PIN_AZ_COUNT zones, i.e.
-    // AUTO_PIN_AZ_COUNT * 2 subnets (one public + one private per zone).
     const stack = new Stack(new App(), 'DefaultVpcStack');
     new AgentVpc(stack, 'AgentVpc');
     Template.fromStack(stack).resourceCountIs('AWS::EC2::Subnet', AUTO_PIN_AZ_COUNT * 2);
@@ -188,7 +173,6 @@ describe('resolveAgentCoreAzOverride', () => {
   });
 
   it('throws when fewer than two DISTINCT zones are listed', () => {
-    // Duplicates previously satisfied the HA check: 4 subnets, 1 real zone.
     expect(() =>
       resolveAgentCoreAzOverride(nodeWithContext({ [AGENTCORE_AZS_CONTEXT_KEY]: ['us-east-1b', 'us-east-1b'] })),
     ).toThrow(/at least 2 distinct zones/);
@@ -197,8 +181,6 @@ describe('resolveAgentCoreAzOverride', () => {
   });
 
   it('rejects zone IDs with a message pointing at the name/ID mix-up', () => {
-    // `describe-availability-zones` prints ZoneName then ZoneId; copying column 2
-    // used to synthesize as AvailabilityZone: "use1-az2".
     expect(() =>
       resolveAgentCoreAzOverride(nodeWithContext({ [AGENTCORE_AZS_CONTEXT_KEY]: ['use1-az2', 'use1-az4'] })),
     ).toThrow(/is a zone \*ID\*, not a zone \*name\*/);
@@ -221,8 +203,6 @@ describe('resolveAgentCoreAzOverride', () => {
 
 describe('selectSupportedAzNames', () => {
   it('returns supported zone names in deterministic sorted order', () => {
-    // Deliberately unsorted input: DescribeAvailabilityZones contracts no order,
-    // and an unstable pin would replace every subnet on a later synth.
     const shuffled = [...US_EAST_1_ZONES].reverse();
     expect(selectSupportedAzNames('us-east-1', shuffled)).toEqual(['us-east-1a', 'us-east-1b', 'us-east-1d']);
     expect(selectSupportedAzNames('us-east-1', US_EAST_1_ZONES))
@@ -230,7 +210,6 @@ describe('selectSupportedAzNames', () => {
   });
 
   it('returns an empty array for a region with no known constraint', () => {
-    // A region genuinely absent from the map — NOT eu-north-1, which is supported.
     expect(selectSupportedAzNames('me-central-1', US_EAST_1_ZONES)).toEqual([]);
   });
 
@@ -281,8 +260,6 @@ describe('resolveAgentCoreAzs', () => {
   });
 
   it('honors the override BEFORE the env-agnostic guard', async () => {
-    // Reordering these two checks would silently disable the only pinning
-    // mechanism an assembly synthesized without credentials has.
     const result = await resolveAgentCoreAzs({
       node: nodeWithContext({ [AGENTCORE_AZS_CONTEXT_KEY]: ['us-east-1b', 'us-east-1c'] }),
       account: undefined,
@@ -323,7 +300,6 @@ describe('resolveAgentCoreAzs', () => {
         throw new Error('AccessDenied');
       },
     });
-    // The escape hatch must keep working when the lookup cannot.
     expect(result.zones).toEqual(['us-east-1a', 'us-east-1b']);
     expect(result.diagnostics).toHaveLength(1);
     expect(result.diagnostics[0].level).toBe('warning');
@@ -347,13 +323,10 @@ describe('resolveAgentCoreAzs', () => {
   });
 
   it('treats an unresolved token account as env-agnostic', async () => {
-    // Defensive guard for a future caller passing stack.account.
     const result = await resolveAgentCoreAzs({
       node: nodeWithContext(),
       account: '${Token[AWS.AccountId.1]}',
       region: 'us-east-1',
-      // Both injected so that dropping the token guard cannot reach AWS from a
-      // unit test — it fails the assertion below instead.
       describeAzs: async () => {
         throw new Error('must not be called');
       },
@@ -385,8 +358,6 @@ describe('resolveAgentCoreAzs', () => {
     expect(result.diagnostics).toHaveLength(1);
     expect(result.diagnostics[0].level).toBe('error');
     expect(result.diagnostics[0].message).toContain('Could not resolve AgentCore-supported availability zones');
-    // Error identity only — the authz message echoes the caller ARN, and this
-    // string lands in cdk.out, which CI uploads as an artifact.
     expect(result.diagnostics[0].message).not.toContain('arn:aws:iam::');
   });
 
@@ -400,7 +371,6 @@ describe('resolveAgentCoreAzs', () => {
     expect(result.diagnostics).toHaveLength(1);
     expect(result.diagnostics[0].level).toBe('error');
     expect(result.diagnostics[0].message).toContain('resolve to account 999999999999');
-    // Must not read a mapping from the wrong account.
     expect(describeAzs).not.toHaveBeenCalled();
   });
 

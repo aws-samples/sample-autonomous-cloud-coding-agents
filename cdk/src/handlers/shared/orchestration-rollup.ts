@@ -17,19 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * The epic panel: the single comment on the PARENT issue of an orchestration.
- *
- * The fan-out plane posts a final-status comment on each CHILD's
- * sub-issue. The PARENT issue has no task, so its panel is rendered and
- * written here, for the callers that hold the orchestration snapshot (the
- * reconciler, the seed and the retry paths). ONE comment, edited in place,
- * that shows the full DAG and matures from in-progress → complete and back to
- * in-progress on an extend/revision. The renderer is pure (unit-testable);
- * ``upsertEpicPanel`` writes it best-effort (a failed comment must never
- * fail the reconcile — gating is the source of truth).
- */
-
 import { logger } from './logger';
 import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound } from './lookup-result';
 import type { Channel, IssueRef } from './orchestration-channel';
@@ -43,17 +30,15 @@ const STATUS_ICON: Record<string, string> = {
   failed: '❌',
   skipped: '⏭️',
   released: '🔄',
-  releasing: '🔄', // transient flip-then-create claim — mid-launch
+  releasing: '🔄',
   ready: '🔄',
   blocked: '⏳',
 };
 
-/** Per-sub-issue view for the maturing panel. */
 export interface EpicPanelRow {
   readonly sub_issue_id: string;
   readonly display_id?: string;
   readonly title?: string;
-  /** Persisted orchestration status: blocked | ready | released | succeeded | failed | skipped. */
   readonly child_status: string;
   /** The sub-issue's current PR url, when one exists yet (omitted for a not-yet-PR'd first run). */
   readonly pr_url?: string;
@@ -66,10 +51,7 @@ export interface EpicPanelRow {
   readonly updatingReason?: string;
   /**
    * SHORT one-line reason for a ❌ failed row, rendered as an indented sub-line:
-   * WHAT failed + WHERE to read it (CloudWatch by task
-   * id). Critical for the synthetic integration node, which has no Linear
-   * sub-issue / comment-iteration reply and would otherwise surface as a bare
-   * "❌ … — failed" with no diagnostic. Composed by
+   * WHAT failed + WHERE to read it (CloudWatch by task id). Composed by
    * {@link renderPanelFailureReason}; absent for non-failed rows.
    */
   readonly failureReason?: string;
@@ -96,9 +78,7 @@ export interface EpicPanelParams {
   readonly combinedPreviewUrl?: string;
   /**
    * The project's resolved trigger label, for the retry hint's fallback line.
-   * The label is per-project configurable, so this must NOT be hardcoded: a hint
-   * naming a label the webhook does not filter on sends the user to do something
-   * that silently does nothing. Absent → the platform default.
+   * Absent → the platform default.
    */
   readonly labelFilter?: string;
 }
@@ -108,10 +88,8 @@ const PANEL_FOOTER = '_One live panel — updates in place as the epic progresse
 /**
  * SHORT friendly name for a node, used where a node is NAMED inside prose (e.g.
  * the cascade reason "updating to include <X>'s change"). The integration node
- * gets the friendly "the integration" rather than its raw stored title, so a
- * possessive reads cleanly ("the integration's change") instead of leaking the
- * clumsy synthetic title. Prefers the Linear identifier (ENG-42) for real
- * nodes. (Observed in practice: the raw synthetic title read badly in prose.)
+ * gets the friendly "the integration" rather than its raw stored title. Prefers
+ * the Linear identifier (ENG-42) for real nodes.
  */
 export function cascadeNodeLabel(
   subIssueId: string,
@@ -122,7 +100,6 @@ export function cascadeNodeLabel(
   return linearIdentifier ?? title ?? 'a predecessor';
 }
 
-/** Friendly label for a row — Linear identifier + title, or 'Integration — combined result' for the synthetic node. */
 function panelLabel(row: EpicPanelRow): string {
   if (isIntegrationNode(row.sub_issue_id)) return 'Integration — combined result';
   if (row.display_id) return row.title ? `${row.display_id}: ${row.title}` : row.display_id;
@@ -144,7 +121,6 @@ export function renderEpicPanel(params: EpicPanelParams): string {
   const { rows, inProgress, combinedPrUrl, combinedScreenshotUrl, combinedPreviewUrl } = params;
   const triggerLabel = params.labelFilter?.trim() || DEFAULT_LABEL_FILTER;
   const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
-  // "done" counts settled rows that are NOT mid-update (an updating row is back in flight).
   const done = rows.filter((r) => terminal(r.child_status) && !r.updatingReason).length;
   const anyBad = rows.some((r) => r.child_status === 'failed' || r.child_status === 'skipped');
 
@@ -157,16 +133,12 @@ export function renderEpicPanel(params: EpicPanelParams): string {
     heading = '✅ **ABCA orchestration complete**';
   }
 
-  // Issue order: by the number in the identifier (ENG-9 before ENG-10), and the
-  // integration row last. It has no identifier, and its id (orch_<hash>…) would
-  // otherwise place it by the team key: after ENG-1, before WEB-1.
   const lines = [...rows]
     .sort((a, b) => Number(isIntegrationNode(a.sub_issue_id)) - Number(isIntegrationNode(b.sub_issue_id))
       || (a.display_id ?? a.sub_issue_id).localeCompare(b.display_id ?? b.sub_issue_id, undefined, { numeric: true }))
     .map((r) => {
       const label = panelLabel(r);
       const pr = r.pr_url ? ` — [PR](${r.pr_url})` : '';
-      // A mid-update row: 🔄 + the reason, regardless of persisted status.
       if (r.updatingReason) {
         return `- 🔄 ${label} — updating ${r.updatingReason}${pr}`;
       }
@@ -176,29 +148,12 @@ export function renderEpicPanel(params: EpicPanelParams): string {
           : r.child_status === 'blocked' ? 'blocked'
             : r.child_status;
       const line = `- ${icon} ${label} — ${word}${pr}`;
-      // A failed row carries a diagnostic sub-line (what failed + the
-      // CloudWatch task to read). Indented continuation so it reads as a
-      // detail of the row, not a sibling bullet. Only when a reason was
-      // resolved (the integration node is the prime beneficiary — no sub-issue
-      // comment carries this anywhere else).
       if (r.child_status === 'failed' && r.failureReason) {
         return `${line}\n    ↳ ${r.failureReason}`;
       }
       return line;
     });
 
-  // A SETTLED epic that finished with failures tells the user how to retry. Names
-  // ONE way, deliberately: re-applying the label is a different gesture that only
-  // happens to retry in this one state — the same label re-apply also means "add
-  // the sub-issues I just created", "nothing to do, still running", or "already
-  // complete", inferred from the graph rather than from what the user meant. So an
-  // epic with both a new sub-issue and a failure does two things on a re-label and
-  // one on a retry, which is why the previous "either way" wording was wrong.
-  // Commenting is also the more reliable of the two: a label change only triggers
-  // when the webhook reports the label set as having changed, whereas a comment is
-  // an unambiguous event. The label is offered as a fallback, not an equal.
-  // Only when the epic is terminal (not inProgress) AND something failed/skipped
-  // (nothing to retry otherwise). One line so the panel stays scannable.
   const retryHint = (!inProgress && anyBad)
     ? ['', '↻ **To retry:** reply `@bgagent retry` on this epic — it re-runs only the '
       + 'failed/skipped sub-issues and keeps the ones that succeeded. '
@@ -208,17 +163,6 @@ export function renderEpicPanel(params: EpicPanelParams): string {
   const callout = combinedPrUrl
     ? ['', `🔗 **Combined PR (all sub-issues merged):** [${combinedPrUrl}](${combinedPrUrl})`]
     : [];
-  // When we know the live preview-deploy URL, render the embedded
-  // screenshot as a clickable linked image + a plain "Open the combined
-  // preview" link, so a reviewer can open the running combined site, not just
-  // see a static PNG. The preview URL is payload-derived (came from the deploy
-  // webhook) — percent-encode its parens so a crafted path can't break out of
-  // the markdown link. The CloudFront screenshot URL is our own key (no
-  // parens) so it's interpolated as-is.
-  //
-  // "Combined" only when an integration node merged several leaves. On a chain the
-  // preview comes from the final node, and calling that "combined" would tell the
-  // reviewer several branches were merged when none were.
   const previewLabel = combinedPrUrl ? 'Combined preview' : 'Preview';
   let shot: string[] = [];
   if (combinedScreenshotUrl) {
@@ -274,12 +218,7 @@ export interface UpsertEpicPanelParams {
   readonly prUrls?: Readonly<Record<string, string>>;
   /** sub_issue_id → human reason, for rows a cascade is currently rebuilding. */
   readonly updating?: Readonly<Record<string, string>>;
-  /**
-   * sub_issue_id → one-line failure reason for a ❌ row. Resolved by the
-   * reconciler from the failed child task's record (build-gate vs agent-crash +
-   * CloudWatch task id). The integration node's entry is the one that matters
-   * most — it's the only place its combined-build failure can be surfaced.
-   */
+  /** sub_issue_id → one-line failure reason for a ❌ row. */
   readonly failureReasons?: Readonly<Record<string, string>>;
   readonly combinedPrUrl?: string;
   readonly combinedScreenshotUrl?: string;
@@ -301,9 +240,7 @@ export interface UpsertEpicPanelParams {
   readonly mirrorParentState?: boolean;
   /**
    * The project's resolved trigger label, forwarded to {@link renderEpicPanel}
-   * for the retry hint. Absent → the platform default. Pass the project
-   * mapping's ``label_filter`` when the caller has it, so the hint never names a
-   * label that project renamed.
+   * for the retry hint. Absent → the platform default.
    */
   readonly labelFilter?: string;
 }
@@ -315,20 +252,14 @@ export interface UpsertEpicPanelParams {
  *
  * Returns a {@link LookupResult}: ``found`` with the panel comment id (new or
  * existing), ``absent`` when the surface accepted the upsert but handed back no
- * usable id (nothing to persist — the next edit would address a comment that
- * doesn't exist), or ``failed`` when the upsert threw. The failure used to
- * collapse into the same ``null`` as "no id" (#756 Cat 2); callers persist only a
- * ``found`` id, so they collapse this with ``lookupValueOr(result, null)`` — the
- * failure is already logged at source and never overwrites a stored id.
+ * usable id (nothing to persist), or ``failed`` when the upsert threw (already
+ * logged at source).
  *
  * - Edits ``statusCommentId`` in place when given; else posts a fresh comment.
  * - Header/rows via {@link renderEpicPanel}; ``inProgress`` derived if omitted.
  * - On settle (not in progress): advance parent state → awaiting review (clean)
  *   + ✅; on failures, leave the state and let ❌ convey it. On in-progress (a
  *   revision re-opened it): back to running + 👀.
- * - Sequential, not concurrent: each mirror step fans out into several surface
- *   reads, and firing them together self-throttled the request budget so a
- *   transition silently no-op'd and left the epic stuck.
  * Best-effort: a surface hiccup never throws out of the reconcile.
  */
 export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<LookupResult<string>> {
@@ -353,9 +284,6 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<Lo
       body,
       params.statusCommentId ? { commentId: params.statusCommentId } : undefined,
     );
-    // A surface that can't hand back a real comment id reports an empty one.
-    // Treat that as "no panel id" rather than persisting a blank id the next
-    // edit would try (and fail) to address.
     commentId = ref?.commentId || null;
   } catch (err) {
     logger.warn('Epic panel upsert threw (non-fatal)', {
@@ -365,24 +293,16 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<Lo
     return lookupFailed(err);
   }
 
-  // Mirror parent state + reaction, sequentially (see the note above).
   if (params.mirrorParentState !== false) {
     const anyBad = rows.some((r) => r.child_status === 'failed' || r.child_status === 'skipped');
     try {
       if (inProgress) {
-        // Re-opened (or running): back to running + 👀. This is a deliberate
-        // move backward within the same state category — a settled epic sits in
-        // "awaiting review", and re-opening it must be allowed explicitly or the
-        // adapter's backward-move guard drops it silently. A parent a human
-        // already marked done stays done; that guard still applies.
         await channel.transitionState?.(parent, 'started', { allowRegression: true });
         await channel.replaceIssueReaction?.(parent, 'started');
       } else if (!anyBad) {
-        // Clean completion: work done, awaiting human merge → in review + ✅.
         await channel.transitionState?.(parent, 'in_review');
         await channel.replaceIssueReaction?.(parent, 'succeeded');
       } else {
-        // Finished with failures: leave the state; the ❌ reaction conveys it.
         await channel.replaceIssueReaction?.(parent, 'failed');
       }
     } catch (err) {

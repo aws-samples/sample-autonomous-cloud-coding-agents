@@ -17,48 +17,20 @@
  *  SOFTWARE.
  */
 
-/**
- * Numeric coercion helpers for the DynamoDB / Document-client boundary.
- *
- * Rationale: the Python agent stores ``cost_usd``, ``duration_s`` and the
- * turn counters on the task row as DynamoDB String attributes
- * (``agent/src/task_state.py::write_terminal`` passes them through
- * ``str()``), and the Document client returns a String attribute as a
- * JavaScript ``string``; only a Number attribute comes back as a ``number``.
- * A caller that goes on to call ``.toFixed()`` on such a field fails
- * with ``TypeError: input.costUsd.toFixed is not a function``, and
- * ``+`` concatenates instead of adding (Scenario 7-extended deploy
- * validation uncovered the first in the GitHub fan-out dispatcher).
- *
- * Use these helpers at any boundary that passes those fields on to
- * numeric consumers. ``TaskRecord`` declares them ``number | string``,
- * so ``.toFixed()`` or arithmetic on the raw field does not compile.
- */
-
 export interface CoerceContext {
   readonly field: string;
   readonly task_id?: string;
   readonly event_id?: string;
 }
 
-/** Minimal logger shape used by the coercion helper. Structural so the
- *  shared ``logger`` export and test mocks both satisfy it without an
- *  explicit interface import. */
 export interface CoerceLogger {
   warn(message: string, meta?: Record<string, unknown>): void;
 }
 
-/**
- * How much of a value that is not a number the warning quotes. The value is
- * read from storage, where it can be as long as its record, and the warning
- * repeats at every read: the first characters are enough to tell what a
- * writer stored.
- */
 const RAW_LOG_CHARS = 100;
 
 /**
  * Coerce a value that should be a number but may arrive as a string
- * (the agent stores some task fields as DynamoDB String attributes)
  * into a finite ``number`` or ``null``.
  *
  * Rules:
@@ -67,12 +39,7 @@ const RAW_LOG_CHARS = 100;
  *   - Finite number (either a real ``number`` or a parseable string)
  *     → that number.
  *   - Non-finite coercion (``NaN``, ``Infinity``) → ``null`` AND emits
- *     a warn via the provided logger so writer bugs surface in
- *     CloudWatch rather than silently dropping the consumer's render.
- *
- * The logger argument keeps this helper free of a direct import of
- * ``./logger`` so the same shape is usable from tests without a full
- * mock.
+ *     a warn via the provided logger.
  */
 export function coerceNumericOrNull(
   value: number | string | null | undefined,

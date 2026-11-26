@@ -1,11 +1,3 @@
-/**
- * Tests for `markdown-lint.mjs`, the structural Markdown lint.
- *
- * Every test builds a throwaway git repository in a temp dir and runs the real `lint()`
- * against it, with the real rules and the installed markdownlint. Nothing else of this
- * repository is read, and nothing is changed.
- */
-
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -15,7 +7,6 @@ import test, { after } from 'node:test';
 import { lint } from './markdown-lint.mjs';
 
 const CLEAN = '# Doc\n\n## Part\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![diagram](d.png)\n';
-/** Twelve clean files: eleven sources and the hand-written home page. */
 const SOURCES = {
   ...Object.fromEntries(Array.from({ length: 11 }, (_, n) => [`docs/guides/doc${n}.md`, CLEAN])),
   'docs/src/content/docs/index.md': '---\ntitle: Home\n---\n\n## What\n',
@@ -26,7 +17,6 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !n
 const roots = [];
 after(() => roots.forEach((root) => fs.rmSync(root, { recursive: true, force: true })));
 
-/** Lints a repository that tracks `tracked` and also holds `untracked`. */
 async function run(tracked = SOURCES, untracked = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'markdown-lint-'));
   roots.push(root);
@@ -58,7 +48,6 @@ test('each structural rule fails with the file, the line and the rule', async ()
     'docs/guides/repeat.md': '# T\n\n## Same\n\n## Same\n',
     'docs/guides/skip.md': '# T\n\n### Too deep\n',
     'docs/src/content/docs/index.md': '---\ntitle: Home\n---\n\n# Home again\n',
-    // A generated mirror is not linted: its source is.
     'docs/src/content/docs/using/Mirror.md': '# One\n\n# Two\n',
   });
   assert.equal(status, 1);

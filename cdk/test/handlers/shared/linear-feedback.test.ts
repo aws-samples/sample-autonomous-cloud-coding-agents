@@ -23,7 +23,6 @@ jest.mock('../../../src/handlers/shared/linear-oauth-resolver', () => ({
 }));
 
 const fetchMock = jest.fn();
-// `fetch` is a global on Node 24; reassign for test isolation.
 (globalThis as unknown as { fetch: jest.Mock }).fetch = fetchMock;
 
 import {
@@ -82,7 +81,6 @@ describe('linear-feedback', () => {
       expect(url).toBe('https://api.linear.app/graphql');
       expect(init.method).toBe('POST');
       expect(init.headers).toMatchObject({
-        // OAuth access tokens are sent with the Bearer prefix.
         'Authorization': `Bearer ${TOKEN}`,
         'Content-Type': 'application/json',
       });
@@ -179,7 +177,6 @@ describe('linear-feedback', () => {
       const init = fetchMock.mock.calls[0][1];
       const body = JSON.parse(init.body as string) as { query: string; variables: { commentId: string; emoji: string } };
       expect(body.query).toContain('reactionCreate');
-      // The variable is commentId — NOT issueId (reacts on the comment, not the issue).
       expect(body.variables.commentId).toBe('comment-77');
       expect(body.variables.emoji).toBe('eyes');
     });
@@ -216,9 +213,6 @@ describe('linear-feedback', () => {
       const init = fetchMock.mock.calls[0][1];
       const body = JSON.parse(init.body as string) as { query: string; variables: { issueId: string; parentId: string; body: string } };
       expect(body.query).toContain('commentCreate');
-      // CONTRACT (verified against the live Linear API): commentCreate REQUIRES
-      // issueId even for a threaded reply — parentId alone fails argument
-      // validation. Pin BOTH so the missing-issueId regression can't return.
       expect(body.variables.issueId).toBe(ISSUE_ID);
       expect(body.variables.parentId).toBe('comment-77');
       expect(body.variables.body).toBe('✅ Updated — PR #178');
@@ -229,8 +223,6 @@ describe('linear-feedback', () => {
       await replyToComment(CTX, ISSUE_ID, 'comment-77', 'body');
       const init = fetchMock.mock.calls[0][1];
       const query = (JSON.parse(init.body as string) as { query: string }).query;
-      // The GraphQL op must pass issueId INTO commentCreate's input — not just
-      // accept it as a variable. Catches a half-fix that drops it from input.
       expect(query).toMatch(/commentCreate\(\s*input:\s*\{[^}]*issueId:\s*\$issueId/);
     });
 
@@ -268,7 +260,6 @@ describe('linear-feedback', () => {
     });
 
     test('does not throw when one leg fails (partial-success semantics)', async () => {
-      // First call (comment) fails; second (reaction) succeeds.
       fetchMock
         .mockResolvedValueOnce(jsonResponse({}, 500))
         .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
@@ -289,9 +280,9 @@ describe('linear-feedback', () => {
 
     test('👀 present → deletes it and adds the target (✅)', async () => {
       fetchMock
-        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }])) // query
-        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // delete 👀
-        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } })); // add ✅
+        .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
       const ok = await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
       expect(ok).toBe(true);
       const deleteVars = JSON.parse(fetchMock.mock.calls[1][1].body).variables;
@@ -306,10 +297,9 @@ describe('linear-feedback', () => {
           { id: 'r-eyes', emoji: 'eyes' },
           { id: 'r-check', emoji: 'white_check_mark' },
         ]))
-        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })); // delete 👀 only
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }));
       const ok = await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
       expect(ok).toBe(true);
-      // 1 query + 1 delete (the 👀); no create (✅ already there).
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables).toEqual({ id: 'r-eyes' });
     });
@@ -318,15 +308,15 @@ describe('linear-feedback', () => {
       fetchMock
         .mockResolvedValueOnce(reactionsResp([
           { id: 'r-eyes', emoji: 'eyes' },
-          { id: 'r-tada', emoji: 'tada' }, // human reaction — must survive
+          { id: 'r-tada', emoji: 'tada' },
         ]))
-        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // delete 👀
-        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } })); // add ✅
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
       await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark');
       const deletedIds = fetchMock.mock.calls
         .filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'))
         .map((c) => JSON.parse(c[1].body).variables.id);
-      expect(deletedIds).toEqual(['r-eyes']); // only the bgagent marker, never r-tada
+      expect(deletedIds).toEqual(['r-eyes']);
     });
 
     test('no existing markers → just adds the target', async () => {
@@ -335,28 +325,24 @@ describe('linear-feedback', () => {
         .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
       const ok = await swapIssueReaction(CTX, ISSUE_ID, 'eyes');
       expect(ok).toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(2); // query + create, no deletes
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     test('a TRANSIENT delete failure is retried once, and then succeeds', async () => {
-      // Observed in practice: a 5s request timeout aborted the 👀 removal, so the
-      // comment kept 👀 beside ❓. No caller inspects this result and nothing
-      // revisits the item, so that contradiction was permanent — one retry
-      // covers the blip.
       fetchMock
         .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
-        .mockResolvedValueOnce(jsonResponse({}, 503)) // delete: transient
-        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } })) // retry wins
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
       expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(true);
       const deletes = fetchMock.mock.calls.filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'));
-      expect(deletes).toHaveLength(2); // the failed attempt plus one retry
+      expect(deletes).toHaveLength(2);
     });
 
     test('a TERMINAL delete failure is NOT retried — a resend cannot change the answer', async () => {
       fetchMock
         .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
-        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] })) // terminal
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'not found' }] }))
         .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
       expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
       const deletes = fetchMock.mock.calls.filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'));
@@ -373,15 +359,11 @@ describe('linear-feedback', () => {
     });
 
     test('a delete that FAILS is reported as failure, even though the target was added', async () => {
-      // Returning only the add's result would claim the promised single marker
-      // while the issue still shows 👀 beside ✅ — the contradictory state this
-      // swap exists to prevent, and what a caller checks the result to rule out.
       fetchMock
         .mockResolvedValueOnce(reactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
-        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] })) // delete 👀 fails
+        .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] }))
         .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
       expect(await swapIssueReaction(CTX, ISSUE_ID, 'white_check_mark')).toBe(false);
-      // The target is still attempted — one correct marker beats only a stale one.
       expect(fetchMock).toHaveBeenCalledTimes(3);
     });
 
@@ -413,11 +395,8 @@ describe('linear-feedback', () => {
         .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
       const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
       expect(ok).toBe(true);
-      // query targets the COMMENT
       expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual({ commentId: 'comment-77' });
-      // delete the stale 👀
       expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables).toEqual({ id: 'r-eyes' });
-      // create the ✅ via reactionCreate(commentId)
       const createVars = JSON.parse(fetchMock.mock.calls[2][1].body).variables;
       expect(createVars).toEqual({ commentId: 'comment-77', emoji: 'white_check_mark' });
     });
@@ -431,13 +410,10 @@ describe('linear-feedback', () => {
         .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }));
       const ok = await swapCommentReaction(CTX, 'comment-77', 'white_check_mark');
       expect(ok).toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(2); // query + delete 👀; ✅ already present
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     test('the COMMENT swap retries a transient removal too', async () => {
-      // The failure this covers was seen on a comment: 👀 + ❓ both left on a
-      // disambiguation reply, because the removal timed out and nothing ever
-      // tried again.
       fetchMock
         .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
         .mockResolvedValueOnce(jsonResponse({}, 503))
@@ -447,8 +423,6 @@ describe('linear-feedback', () => {
     });
 
     test('a delete that FAILS on the comment is reported as failure too', async () => {
-      // Both swaps implement one interface method, so they must report the same
-      // all-or-nothing result; a caller cannot branch per surface.
       fetchMock
         .mockResolvedValueOnce(commentReactionsResp([{ id: 'r-eyes', emoji: 'eyes' }]))
         .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'nope' }] }))
@@ -460,7 +434,7 @@ describe('linear-feedback', () => {
       fetchMock
         .mockResolvedValueOnce(commentReactionsResp([
           { id: 'r-eyes', emoji: 'eyes' },
-          { id: 'r-heart', emoji: 'heart' }, // human — must survive
+          { id: 'r-heart', emoji: 'heart' },
         ]))
         .mockResolvedValueOnce(jsonResponse({ data: { reactionDelete: { success: true } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { reactionCreate: { success: true } } }));
@@ -468,7 +442,7 @@ describe('linear-feedback', () => {
       const deletedIds = fetchMock.mock.calls
         .filter((c) => JSON.parse(c[1].body).query.includes('reactionDelete'))
         .map((c) => JSON.parse(c[1].body).variables.id);
-      expect(deletedIds).toEqual(['r-eyes']); // never r-heart
+      expect(deletedIds).toEqual(['r-eyes']);
     });
 
     test('no token → false, no fetch', async () => {
@@ -485,7 +459,6 @@ describe('linear-feedback', () => {
       );
       const id = await upsertStatusComment(CTX, ISSUE_ID, 'body');
       expect(id).toBe('cmt-new');
-      // create mutation carries issueId + body
       const vars = JSON.parse(fetchMock.mock.calls[0][1].body).variables;
       expect(vars).toEqual({ issueId: ISSUE_ID, body: 'body' });
     });
@@ -536,7 +509,6 @@ describe('linear-feedback', () => {
   });
 
   describe('transitionIssueState', () => {
-    // Mirrors a typical Linear team's workflow states (by type + position).
     const TEAM_STATES = [
       { id: 's-backlog', type: 'backlog', name: 'Backlog', position: 0 },
       { id: 's-todo', type: 'unstarted', name: 'Todo', position: 1 },
@@ -550,11 +522,10 @@ describe('linear-feedback', () => {
 
     test('Backlog → In Progress: picks the named started state, issues issueUpdate', async () => {
       fetchMock
-        .mockResolvedValueOnce(statesResp(cur('s-backlog'))) // team-states query
+        .mockResolvedValueOnce(statesResp(cur('s-backlog')))
         .mockResolvedValueOnce(jsonResponse({ data: { issueUpdate: { success: true } } }));
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress']);
       expect(ok).toBe(true);
-      // second call is the mutation with the resolved stateId
       const mutationVars = JSON.parse(fetchMock.mock.calls[1][1].body).variables;
       expect(mutationVars).toEqual({ issueId: ISSUE_ID, stateId: 's-inprogress' });
     });
@@ -572,7 +543,7 @@ describe('linear-feedback', () => {
       fetchMock.mockResolvedValueOnce(statesResp(cur('s-inreview')));
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);
       expect(ok).toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(1); // only the query, no mutation
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('never moves backward: Done (completed) is not demoted to In Review', async () => {
@@ -582,14 +553,11 @@ describe('linear-feedback', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
-    // The parent rollup's re-open (In Review → In Progress — BOTH of type
-    // 'started') was silently blocked by the same-type position tiebreak, so
-    // both directions of that tiebreak are pinned below.
     test('same-type regression In Review → In Progress is BLOCKED by default', async () => {
       fetchMock.mockResolvedValueOnce(statesResp(cur('s-inreview')));
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress']);
-      expect(ok).toBe(false); // In Progress (pos 2) < In Review (pos 1002) → backward
-      expect(fetchMock).toHaveBeenCalledTimes(1); // no mutation
+      expect(ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('same-type regression In Review → In Progress SUCCEEDS with allowSameTypeRegression (rollup re-open)', async () => {
@@ -604,7 +572,7 @@ describe('linear-feedback', () => {
     test('allowSameTypeRegression does NOT permit a cross-type demotion (Done → In Progress still blocked)', async () => {
       fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Progress'], true);
-      expect(ok).toBe(false); // completed → started is cross-type; still refused
+      expect(ok).toBe(false);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -661,7 +629,7 @@ describe('linear-feedback', () => {
       fetchMock.mockResolvedValueOnce(statesResp(cur('s-done')));
       const ok = await revertIssueToNotStarted(CTX, ISSUE_ID);
       expect(ok).toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(1); // query only, no mutation
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('no-op when the issue is already in a not-started (backlog) state', async () => {
@@ -676,14 +644,12 @@ describe('linear-feedback', () => {
     const COMMENT_ID = 'reply-cmt-1';
 
     test('reads the body and appends the line when the marker is absent', async () => {
-      // 1st fetch = read body; 2nd = commentUpdate.
       fetchMock
         .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u). _$0.1_' } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
       const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](https://cdn/x.png)', '[preview]');
       expect(ok).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      // The update carries the original body + the appended line.
       const updateBody = JSON.parse(fetchMock.mock.calls[1][1].body);
       expect(updateBody.variables.body).toBe('✅ Updated — [PR #5](u). _$0.1_\n · [preview](https://cdn/x.png)');
       expect(updateBody.variables.id).toBe(COMMENT_ID);
@@ -695,7 +661,7 @@ describe('linear-feedback', () => {
       );
       const ok = await appendOnceToComment(CTX, COMMENT_ID, ' · [preview](https://cdn/y.png)', '[preview]');
       expect(ok).toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(1); // read only, NO update
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('missing comment body → no update, returns false', async () => {
@@ -718,37 +684,27 @@ describe('linear-feedback', () => {
     const BLOCK = '[![preview](https://cdn/screenshots/x.png)](https://app.vercel.app)';
 
     test('terminal edit carries an already-landed preview thumbnail from the current body', async () => {
-      // The screenshot webhook appended the clickable thumbnail block first; this
-      // terminal re-render reads the current body and re-attaches it, so the
-      // two writers converge instead of one dropping the other's content.
       fetchMock
         .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `✅ Updated.\n\n${BLOCK}` } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
       const newBody = '✅ Updated — [PR #5](u). _$0.2 · 35s_';
       const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', newBody, REPLY_ID, { preservePreview: true });
       expect(id).toBe(REPLY_ID);
-      expect(fetchMock).toHaveBeenCalledTimes(2); // read body, then update
+      expect(fetchMock).toHaveBeenCalledTimes(2);
       const updateBody = JSON.parse(fetchMock.mock.calls[1][1].body);
       expect(updateBody.variables.body).toBe(`${newBody}\n\n${BLOCK}`);
     });
 
     test('skipIfSettled REFUSES a progress edit over an already-settled reply', async () => {
-      // The failure this fixes: a stream-delivered "working" milestone landed
-      // AFTER the terminal settle and overwrote "✅ Updated", so the reply
-      // contradicted both the trigger comment's ✅ reaction and reality.
       fetchMock.mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '✅ Updated — [PR #5](u).' } } }));
       const id = await upsertThreadedReply(
         CTX, ISSUE_ID, 'parent-1', '🔄 Working — updating PR #5…', REPLY_ID, { skipIfSettled: true },
       );
-      // Reports the reply id (the caller's intent is satisfied — it IS up to date)
-      // but performs NO update mutation.
       expect(id).toBe(REPLY_ID);
-      expect(fetchMock).toHaveBeenCalledTimes(1); // the body read only
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('skipIfSettled still allows a progress edit while the reply is un-settled', async () => {
-      // The common case: the reply is at "On it" and this is the first progress
-      // tick. Suppressing here would freeze the reply and re-create the black box.
       fetchMock
         .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '👀 On it — reading the PR…' } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
@@ -762,16 +718,13 @@ describe('linear-feedback', () => {
     });
 
     test('a TERMINAL edit never sets skipIfSettled, so an outcome can always overwrite progress', async () => {
-      // Direction matters: progress yields to an outcome, never the reverse.
       fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
       const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);
       expect(id).toBe(REPLY_ID);
-      expect(fetchMock).toHaveBeenCalledTimes(1); // straight update, no read
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('both options together read the body ONCE', async () => {
-      // The terminal settle asks for preview preservation; a progress edit asks
-      // for the settle check. Neither should double-read.
       fetchMock
         .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `👀 On it…\n\n${BLOCK}` } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
@@ -779,14 +732,14 @@ describe('linear-feedback', () => {
         CTX, ISSUE_ID, 'parent-1', '🔄 Working…', REPLY_ID,
         { preservePreview: true, skipIfSettled: true },
       );
-      expect(fetchMock).toHaveBeenCalledTimes(2); // one read + one update
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     test('without preservePreview the edit does NOT read the body (single update)', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
       const id = await upsertThreadedReply(CTX, ISSUE_ID, 'parent-1', '✅ Updated.', REPLY_ID);
       expect(id).toBe(REPLY_ID);
-      expect(fetchMock).toHaveBeenCalledTimes(1); // straight update, no read
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -796,15 +749,10 @@ describe('linear-feedback', () => {
     const OUTCOME = '✅ Updated — [PR #5](u). _$0.2 · 35s_';
 
     test('restores the outcome when a racing progress edit overwrote it', async () => {
-      // Why the progress writer's own body check is not enough: it reads, then
-      // writes, and a settle landing in between is still overwritten. Linear's
-      // comment update takes only an id and a body — no version to condition on —
-      // so the interleaving cannot be prevented, only detected and undone by the
-      // writer that knows which body matters.
       fetchMock
-        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } })) // settle write
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '🔄 Working — updating PR #5…' } } }))
-        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } })); // repair
+        .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }));
 
       const id = await upsertThreadedReply(
         CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
@@ -816,8 +764,6 @@ describe('linear-feedback', () => {
     });
 
     test('the repair carries over a preview appended during the race', async () => {
-      // The screenshot webhook is a third writer of this reply; restoring the
-      // outcome must not drop a thumbnail that landed while the race resolved.
       fetchMock
         .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: `🔄 Working…\n\n${BLOCK}` } } }))
@@ -840,12 +786,10 @@ describe('linear-feedback', () => {
       );
 
       expect(id).toBe(REPLY_ID);
-      expect(fetchMock).toHaveBeenCalledTimes(2); // write + verify read, no second write
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     test('a DIFFERENT terminal body is left alone — never fight a later outcome', async () => {
-      // A failure reply superseding a success, or a second iteration's settle, is
-      // newer and correct. Re-asserting our own would undo real information.
       fetchMock
         .mockResolvedValueOnce(jsonResponse({ data: { commentUpdate: { success: true } } }))
         .mockResolvedValueOnce(jsonResponse({ data: { comment: { body: '❌ The build failed.' } } }));
@@ -854,7 +798,7 @@ describe('linear-feedback', () => {
         CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
       );
 
-      expect(fetchMock).toHaveBeenCalledTimes(2); // no repair write
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     test('an unreadable body is left alone rather than guessed at', async () => {
@@ -866,7 +810,6 @@ describe('linear-feedback', () => {
         CTX, ISSUE_ID, 'parent-1', OUTCOME, REPLY_ID, { repairIfOverwritten: true },
       );
 
-      // The settle itself succeeded, so report success; the verify is advisory.
       expect(id).toBe(REPLY_ID);
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
@@ -878,7 +821,7 @@ describe('linear-feedback', () => {
         CTX, ISSUE_ID, 'parent-1', '🔄 Working…', REPLY_ID, { repairIfOverwritten: true },
       );
 
-      expect(fetchMock).toHaveBeenCalledTimes(1); // no verify read at all
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     test('a failed settle is reported as failed and never repaired', async () => {

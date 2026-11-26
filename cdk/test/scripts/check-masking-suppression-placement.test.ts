@@ -17,26 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for `scripts/check-masking-suppression-placement.mjs` — the guard over
- * semgrep suppression comments.
- *
- * WHY THESE EXIST: the guard used to check one thing, that a masking suppression
- * sits near the word `return`. A suppression with no reason, a bare one that
- * names no rule, one above a line that merely mentions `return`, and one that no
- * longer suppresses anything all passed it. So did a bare one written in any
- * way but the conventional one, which semgrep honours all the same.
- *
- * HOW: same as `preflight-log-delivery.test.ts` — the script is spawned in a
- * throwaway repo root with a fake `semgrep` on PATH that replays the findings a
- * case declares. The real semgrep run is what `mise run security:sast:masking`
- * does on the real tree; these cases pin what the script makes of its answer.
- *
- * The suppression word is assembled from two halves throughout: the guard scans
- * test files too, and a line of this file that spelled it would have to be a
- * well-formed suppression itself.
- */
-
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -52,30 +32,20 @@ interface RunResult {
   readonly status: number;
   readonly stdout: string;
   readonly stderr: string;
-  /** The arguments the script passed to semgrep. */
   readonly semgrepArgs: string[];
 }
 
-/** A finding as semgrep reports it with suppressions ignored. */
 type Finding = readonly [file: string, line: number, rule: string];
 
 interface Options {
-  /** `missing`: no semgrep on PATH. `fails`: it exits 2. `scans-nothing`: it reports no scanned file. */
   readonly semgrep?: 'missing' | 'fails' | 'scans-nothing';
-  /** The files semgrep reports as scanned; every file of the case unless given. */
   readonly scanned?: readonly string[];
-  /** Leave the root without a git repository. */
   readonly noGit?: boolean;
-  /** Symbolic links to make before `git add`: path of the link -> its target. */
   readonly links?: Record<string, string>;
 }
 
-/** Run the script in a temp repo holding `files`, with a fake semgrep that reports `findings`. */
 function run(files: Record<string, string>, findings: readonly Finding[], options: Options = {}): RunResult {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-masking-guard-'));
-  // The repo holds the case's files and nothing else: the script reads every
-  // tracked file, so it runs from its real location, and the fake
-  // semgrep lives beside the repo, not in it.
   const root = path.join(work, 'repo');
   const bin = path.join(work, 'bin');
   try {
@@ -96,7 +66,6 @@ function run(files: Record<string, string>, findings: readonly Finding[], option
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, 'args.json'), '[]');
     if (options.semgrep !== 'missing') {
-      // Started by the node that runs this suite, not by whichever `node` PATH holds.
       fs.writeFileSync(
         path.join(bin, 'semgrep'),
         `#!${process.execPath}
@@ -113,13 +82,8 @@ process.stdout.write(${JSON.stringify(JSON.stringify(report))});
       );
     }
 
-    // No inherited GIT_* variable: under a git hook they point at the real
-    // repository, and both `git init` here and `git ls-files` in the script
-    // would act on it instead of on the temp root.
+    // Git exports GIT_* variables to its hooks, and a child git that inherits them acts on the hook's repository.
     const inherited = Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'));
-    // The fake semgrep is first on PATH, so the real one never answers for it. Only
-    // the "missing" case has to take the real one away, and it does so by dropping
-    // every directory that holds it — with whatever else lives there, so no other case does.
     const inheritedPath = (process.env.PATH ?? '').split(path.delimiter);
     const realPath = options.semgrep === 'missing'
       ? inheritedPath.filter((dir) => !fs.existsSync(path.join(dir, 'semgrep')))
@@ -148,12 +112,10 @@ process.stdout.write(${JSON.stringify(JSON.stringify(report))});
   }
 }
 
-/** A catch block holding `lines` (the first of them is line 5 of the file). */
 function tsCatchWith(lines: readonly string[]): string {
   return ['export function f(): string | null {', '  try {', '    return g();', '  } catch {', ...lines.map((line) => `    ${line}`), '  }', '}', ''].join('\n');
 }
 
-/** A catch block whose return carries `comment` (the finding is on line 5). */
 function tsCatch(comment: string): string {
   return tsCatchWith([`return null;${comment}`]);
 }
@@ -167,14 +129,12 @@ describe('check-masking-suppression-placement', () => {
         'src/inline.ts': tsCatch(` // ${WORD}: ${TS_RULE} -- a missing record is this lookup's null contract`),
         'src/above.py': ['def f():', '    try:', '        return g()', '    except KeyError:', `        # ${WORD}: ${PY_RULE} -- absent key means not configured`, '        return None', ''].join('\n'),
         'src/other-rule.ts': `const p = join(root, name); // ${WORD}: path-join-resolve-traversal -- name is checked against an allowlist above\n`,
-        // The false-positive side: the same letters inside a longer word are not the word.
         'src/other-word.ts': 'export function diagnoseMemory(): number {\n  return 1;\n}\n',
       },
       [['src/inline.ts', 5, TS_RULE], ['src/above.py', 6, PY_RULE]],
     );
 
     expect(result.status).toBe(0);
-    // The counts are the anti-vacuity assertion: a guard that read nothing also exits 0.
     expect(result.stdout).toContain('3 semgrep suppressions in 4 files name a rule and a reason');
     expect(result.stdout).toContain('all 2 silent-success-masking suppressions bind to one of 2 findings');
   });
@@ -219,7 +179,6 @@ describe('check-masking-suppression-placement', () => {
     });
 
     test('reads a file semgrep scanned although its name is not a source file name', () => {
-      // semgrep picks its files by more than the name; the fake reports every file of the case as scanned.
       const tool = `#!/usr/bin/env node\n${tsCatch(` // ${WORD}`)}`;
       const result = run({ 'src/a.ts': 'export const x = 1;\n', 'bin/tool': tool }, [['bin/tool', 6, TS_RULE]]);
 
@@ -228,13 +187,10 @@ describe('check-masking-suppression-placement', () => {
     });
 
     describe('reads the tracked files that the masking rules do not', () => {
-      // The registry scan reads workflows, Dockerfiles, shell scripts and configuration
-      // as well, and semgrep honours a suppression in each of them (measured against
-      // the pinned one). The masking rules read none of these: only src/a.ts is scanned.
+      // semgrep honours a suppression in workflows, Dockerfiles, shell scripts and configuration as well.
       const names = ['.github/workflows/build.yml', 'agent/Dockerfile', 'scripts/ci-build.sh', 'agent/pyproject.toml', 'docs/src/components/Search.astro'];
       const files = {
         'src/a.ts': 'export const x = 1;\n',
-        // The bare word, on line 2 of each.
         ...Object.fromEntries(names.map((name) => [name, `# what follows is not for review\n# ${WORD}\n`])),
       };
       let result: RunResult;
@@ -269,8 +225,7 @@ describe('check-masking-suppression-placement', () => {
     });
 
     test('reads a Markdown file that semgrep scanned', () => {
-      // The pinned semgrep reads an executable file that starts with a script line
-      // for the masking rules, whatever its name, and honours the suppression in it.
+      // semgrep reads an executable file that starts with a script line, whatever its name, and honours the suppression in it.
       const tool = `#!/usr/bin/env node\n${tsCatch(` // ${WORD}`)}`;
       const result = run(
         { 'src/a.ts': 'export const x = 1;\n', 'tools/release.md': tool },
@@ -295,8 +250,7 @@ describe('check-masking-suppression-placement', () => {
     });
 
     test('reads a file that holds a NUL byte', () => {
-      // The pinned semgrep reads a source file that holds one and honours the
-      // suppression in it, so no file is taken for a binary one and left out.
+      // semgrep reads a source file that holds a NUL byte and honours the suppression in it.
       const source = ['def f():', '    try:', '        return g()', '    except KeyError:', `        return None  # ${WORD}`, `BLOB = "${String.fromCharCode(0)}"`, ''].join('\n');
       const result = run({ 'src/a.py': source }, [['src/a.py', 5, PY_RULE]]);
 
@@ -305,10 +259,7 @@ describe('check-masking-suppression-placement', () => {
     });
 
     describe('finds the word the way semgrep does', () => {
-      // Each entry is the body of a catch block that the pinned semgrep treats as
-      // suppressed (measured against it, not guessed), written some other way than
-      // the convention. The word sits on line 5 of its file in every one. The
-      // entries are data on purpose: what they have in common is in the guard.
+      // The pinned semgrep treats each of these catch bodies as suppressed.
       const UPPER = WORD.toUpperCase();
       const SHORT = 'NOSE' + 'M';
       const tsBodies: ReadonlyArray<readonly string[]> = [
@@ -324,7 +275,6 @@ describe('check-masking-suppression-placement', () => {
         [`// _${WORD}`, 'return null;'],
         [`// The ${WORD} comment on this return is explained elsewhere.`, 'return null;'],
         [`/* ${SHORT}:${TS_RULE} */ return null; // ${WORD}: other-rule -- the reason given for another rule`],
-        // The two below hold a well-formed text that is not what semgrep acts on.
         [`return null; // ${SHORT} x${WORD}: other-rule -- the reason given for another rule`],
         [`return null; //${WORD}: other-rule -- the reason given for another rule ${SHORT}`],
       ];
@@ -339,7 +289,6 @@ describe('check-masking-suppression-placement', () => {
         ...Object.fromEntries(tsBodies.map((lines, i) => [`src/v${i}.ts`, tsCatchWith(lines)])),
         ...Object.fromEntries(pyBodies.map((lines, i) => [`src/p${i}.py`, pyExcept(lines)])),
       };
-      // All of them share one run; each case then asserts its own line.
       let result: RunResult;
       beforeAll(() => {
         result = run(files, []);
@@ -392,7 +341,6 @@ describe('check-masking-suppression-placement', () => {
     });
 
     test('rejects a suppression that also names a masking rule it has no finding for', () => {
-      // Every masking rule on the line is held to a finding, not only the first.
       const result = run(
         { 'src/a.ts': tsCatch(` // ${WORD}: ${TS_RULE} -- the agent does the same under ${PY_RULE}`) },
         [['src/a.ts', 5, TS_RULE]],
@@ -404,8 +352,7 @@ describe('check-masking-suppression-placement', () => {
     });
 
     describe('counts a suppression as a masking one however its rule id is written', () => {
-      // Comments the pinned semgrep accepts as naming the masking rule (measured
-      // against it), other than the documented one. Data on purpose, as above.
+      // The pinned semgrep accepts each of these comments as naming the masking rule.
       const comments = [
         ` // ${WORD}: semgrep.${TS_RULE} -- missing record is the null contract`,
         ` // ${WORD}: other-rule -- missing record is the null contract, ${TS_RULE}`,

@@ -31,26 +31,16 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { TaskTable } from './task-table';
 
-/**
- * Sweep Lambda timeout (minutes). A full run asks GitHub as often as the handler's cap
- * allows (`PR_SWEEP_MAX_PULL_REQUESTS`), one request at a time, at about a second each;
- * the handler stops reading shortly before this runs out.
- */
 const SWEEP_TIMEOUT_MINUTES = 5;
 
-/** Sweep Lambda memory (MB). */
 const SWEEP_MEMORY_MB = 256;
 
-/** How long the event of a recorded final state is kept, when a stack sets no `taskRetentionDays`. */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
-/** Properties for the PrOutcomeSweep construct. */
 export interface PrOutcomeSweepProps {
   /** TaskTable: the sweep queries its StatusIndex for COMPLETED tasks, and updates the ones whose pull request it reads. */
   readonly taskTable: dynamodb.ITable;
-  /** TaskEventsTable: the sweep puts one event there for each final state it records. */
   readonly taskEventsTable: dynamodb.ITable;
-  /** The secret of the platform GitHub token, which the sweep reads pull requests with. */
   readonly githubTokenSecret: secretsmanager.ISecret;
   /**
    * How long the event of a recorded final state is kept (days).
@@ -82,7 +72,6 @@ export class PrOutcomeSweep extends Construct {
       timeout: Duration.minutes(SWEEP_TIMEOUT_MINUTES),
       memorySize: SWEEP_MEMORY_MB,
       environment: {
-        // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_STATUS_INDEX_NAME: TaskTable.STATUS_INDEX,
@@ -95,11 +84,6 @@ export class PrOutcomeSweep extends Construct {
       },
     });
 
-    // The function holds a GitHub token that can write, so it gets the three table actions it
-    // uses, each on the one resource it uses it on. The tables' grants are wider: the read and
-    // write grants add Scan, the creation and deletion of tasks and the change and deletion of
-    // events, and each grant, `grant` with a single action too, adds every index of a table
-    // that has one (`index/*`).
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:Query'],
       resources: [`${props.taskTable.tableArn}/index/${TaskTable.STATUS_INDEX}`],
@@ -114,15 +98,11 @@ export class PrOutcomeSweep extends Construct {
     }));
     props.githubTokenSecret.grantRead(fn);
 
-    // Hourly, and not configurable: the handler moves through its candidates by the hour, and
-    // takes a close for final once it is an hour old.
     const rule = new events.Rule(this, 'SweepSchedule', {
       schedule: events.Schedule.rate(Duration.hours(1)),
     });
-    // The next hour is the retry. The default two async retries would each repeat the whole read.
     rule.addTarget(new targets.LambdaFunction(fn, { retryAttempts: 0 }));
 
-    // A throw or a timeout writes no summary, so the scoreboard looks like a quiet hour.
     this.errorAlarm = new cloudwatch.Alarm(this, 'SweepErrorAlarm', {
       metric: fn.metricErrors({ period: Duration.hours(1) }),
       threshold: 1,

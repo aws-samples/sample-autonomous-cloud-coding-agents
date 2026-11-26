@@ -40,19 +40,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
   const requestId = ulid();
 
   try {
-    // 1. Extract authenticated user
     const userId = extractUserId(event);
     if (!userId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
-    // 2. Extract task_id from path
     const taskId = event.pathParameters?.task_id;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
-    // 3. Get current task state
     const result = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { task_id: taskId },
@@ -63,19 +60,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(404, ErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found.`, requestId);
     }
 
-    // 4. Ownership check
     const record = result.Item as TaskRecord;
     if (record.user_id !== userId) {
       return errorResponse(403, ErrorCode.FORBIDDEN, 'You do not have access to this task.', requestId);
     }
 
-    // 5. Check if already terminal
     if (TERMINAL_STATUSES.includes(record.status)) {
       return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} is already in terminal state ${record.status}.`, requestId);
     }
 
-    // 6. Cancel: CANCELLED transition + task_cancelled event in one transaction,
-    // conditioned on the task not having reached a terminal state first.
     const now = new Date().toISOString();
     const cancelTables = {
       ddb,
@@ -87,7 +80,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} transitioned to a terminal state.`, requestId);
     }
 
-    // 7. Stop the compute session so the container winds down (best-effort)
     await stopTaskCompute(cancelTables, record, now, requestId);
 
     logger.info('Task cancelled', { task_id: taskId, user_id: userId, request_id: requestId });

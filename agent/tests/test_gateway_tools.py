@@ -1,13 +1,3 @@
-"""Unit tests for the in-process AgentCore Gateway MCP bridge (ADR-019 P1).
-
-Covers the feature gate (URL absent → no server), the tool-result shaping,
-SigV4 request signing, federated-tool name matching, and the graceful
-error-to-tool-error path. The network round-trip itself (``_call_gateway``) is
-mocked — these are unit tests, not an integration test against a live Gateway.
-One test (``TestRealMcpTypes``) runs ``_call_gateway`` through mcp's real client
-over an in-process HTTP transport, so that a renamed mcp API fails here.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +15,6 @@ def _run(coro):
 
 class TestBuildGatewayServer:
     def test_returns_none_when_gateway_url_unset(self, monkeypatch):
-        # Feature off (no --context enableToolGateway=true) → nothing offered.
         monkeypatch.delenv(gw.GATEWAY_URL_ENV, raising=False)
         assert gw.build_gateway_server() is None
 
@@ -42,8 +31,6 @@ class TestBuildGatewayServer:
         assert server["name"] == gw.GATEWAY_SERVER_NAME
 
     def test_falls_back_to_aws_default_region(self, monkeypatch):
-        # AWS_DEFAULT_REGION-only is a common Lambda/ECS combination; the bridge
-        # must build, not silently disable, when only that var is set.
         monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
@@ -52,9 +39,6 @@ class TestBuildGatewayServer:
         assert server["name"] == gw.GATEWAY_SERVER_NAME
 
     def test_returns_none_and_warns_when_url_set_but_no_region(self, monkeypatch, capfd):
-        # N3 region guard: URL set (feature opted in) but no region resolvable is
-        # a deployment misconfig. Disable the bridge with a WARN rather than
-        # letting it surface later as an opaque SigV4 signing error.
         monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
@@ -62,8 +46,6 @@ class TestBuildGatewayServer:
         assert "no AWS region is resolvable" in capfd.readouterr().out
 
     def test_server_name_is_neutral_no_linear(self):
-        # The scrubber strip_linear_mcp_servers deletes any entry containing
-        # "linear"; the federated bridge must never collide with that marker.
         assert "linear" not in gw.GATEWAY_SERVER_NAME.lower()
 
 
@@ -101,7 +83,6 @@ class TestRepoConfigImpl:
             gw._repo_config_impl("https://gw/mcp", "us-west-2", {"repo": "  aws-samples/x  "})
         )
 
-        # Trimmed repo forwarded to the federated tool by suffix.
         assert captured["arguments"] == {"repo": "aws-samples/x"}
         assert captured["tool_suffix"] == gw.REMOTE_REPO_CONFIG_TOOL
         assert captured["region"] == "us-west-2"
@@ -120,8 +101,6 @@ class TestRepoConfigImpl:
         assert "gateway unreachable" in result["content"][0]["text"]
 
     def test_expected_transport_error_logs_warn_not_error(self, monkeypatch, capfd):
-        # A TimeoutError is an EXPECTED federation hiccup → WARN, tool error,
-        # and (crucially) NOT routed through the loud log_error_cw path.
         loud = []
         monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
 
@@ -131,12 +110,10 @@ class TestRepoConfigImpl:
         monkeypatch.setattr(gw, "_call_gateway", _timeout)
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
         assert result["is_error"] is True
-        assert loud == []  # expected error must not page operators
+        assert loud == []
         assert "WARN" in capfd.readouterr().out
 
     def test_unexpected_error_is_logged_loudly(self, monkeypatch):
-        # An AttributeError (unexpected response shape / coding bug) must reach
-        # log_error_cw so it surfaces in APPLICATION_LOGS, still without raising.
         loud = []
         monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
 
@@ -154,7 +131,7 @@ class TestRepoConfigImpl:
         self, monkeypatch, capfd
     ):
         # The MCP client runs in anyio task groups, which raise every failure inside
-        # an ExceptionGroup, once per nested context manager. The cause decides.
+        # an ExceptionGroup, once per nested context manager.
         loud = []
         monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
 
@@ -172,7 +149,6 @@ class TestRepoConfigImpl:
         assert "WARN" in capfd.readouterr().out
 
     def test_unexpected_error_inside_an_exception_group_is_logged_with_its_cause(self, monkeypatch):
-        # The one message that names a deployment fault must survive the wrapping.
         loud = []
         monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
         cause = "Gateway exposes no 'abca_repo_config' tool (available: other)"
@@ -248,8 +224,6 @@ class TestMatchRemoteTool:
 
 
 class _AsyncCM:
-    """Minimal async-context-manager wrapper around a fixed enter value."""
-
     def __init__(self, value):
         self._value = value
 
@@ -304,16 +278,11 @@ class TestCallGateway:
             gw._call_gateway("https://gw/mcp", "us-east-1", "abca_repo_config", {"repo": "o/r"})
         )
 
-        # The session runs over an HTTP client that signs with SigV4 and keeps the
-        # timeouts the bridge had on mcp 1.x: 20 s to connect, 300 s to read a stream.
         assert calls["http_client"] == ("AUTH", 20.0, 300.0)
         assert calls["transport"] == ("https://gw/mcp", "HTTP")
         assert calls["session_args"] == ("READ", "WRITE")
         assert calls["initialized"] is True
-        # Matched the target-prefixed federated tool name and forwarded args.
         assert calls["call"] == ("abca-repo-config___abca_repo_config", {"repo": "o/r"})
-        # One round-trip is capped at 20 s, and the cap is the session's: it holds
-        # for the handshake and the listing as well as for the call.
         assert calls["read_timeout_seconds"] == 20.0
         assert result.structured_content == {"ok": True}
 
@@ -323,7 +292,6 @@ class TestSigV4Auth:
         import httpx2
         from botocore.credentials import Credentials
 
-        # Deterministic static credentials — no real AWS lookup.
         creds = Credentials("AKIDEXAMPLE", "secret", "sessiontoken")
         fake_session = SimpleNamespace(get_credentials=lambda: creds)
         monkeypatch.setattr("botocore.session.get_session", lambda: fake_session)
@@ -336,7 +304,6 @@ class TestSigV4Auth:
         assert "Authorization" in signed.headers
         assert signed.headers["Authorization"].startswith("AWS4-HMAC-SHA256")
         assert "gw.example" in signed.headers.get("host", signed.headers.get("Host", ""))
-        # The session token must ride along for temporary (assumed-role) creds.
         assert signed.headers.get("X-Amz-Security-Token") == "sessiontoken"
         assert "X-Amz-Date" in signed.headers
 
@@ -348,18 +315,8 @@ class TestSigV4Auth:
 
 
 class TestRealMcpTypes:
-    """The bridge against mcp's own client and types instead of stand-ins.
-
-    Every test above stubs the transport, the session, the tool result and the
-    errors, so a rename in the dependency passes them all: mcp 2 renamed
-    ``structuredContent`` / ``isError`` to ``structured_content`` / ``is_error``
-    and ``McpError`` to ``MCPError``, and code that read the old names returned an
-    empty, successful result without failing.
-    """
-
     @staticmethod
     def _serve(monkeypatch, handler) -> None:
-        """Answer the bridge's HTTP requests with ``handler`` and give it keys to sign with."""
         import httpx2
         from botocore.credentials import Credentials
 
@@ -400,18 +357,11 @@ class TestRealMcpTypes:
         import httpx2
         from mcp.shared.exceptions import MCPError
 
-        # Both are looked up inside try/except ImportError: a renamed class drops
-        # out of the tuple silently and its errors are then logged as unexpected.
         expected = gw._expected_gateway_errors()
         assert httpx2.HTTPError in expected
         assert MCPError in expected
 
     def test_call_gateway_runs_over_the_real_mcp_client(self, monkeypatch):
-        """``_call_gateway`` with nothing of mcp stubbed; only the HTTP layer is.
-
-        The answers below are what a Streamable-HTTP MCP server sends, in the
-        wire spelling (camelCase). Nothing leaves the process.
-        """
         import httpx2
         from mcp.types import CallToolResult
 
@@ -453,21 +403,18 @@ class TestRealMcpTypes:
             gw._call_gateway("https://gw/mcp", "us-east-1", "abca_repo_config", {"repo": "o/r"})
         )
 
-        # mcp's own result type, read through the names the bridge uses.
         assert isinstance(result, CallToolResult)
         assert result.is_error is True
         assert result.structured_content == {
             "called": {"name": remote_tool, "arguments": {"repo": "o/r"}}
         }
         assert json.loads(gw._result_to_text(result)) == result.structured_content
-        # The handshake, the listing and the call, in that order ...
         assert [rpc for verb, rpc, _ in seen if verb == "POST"] == [
             "initialize",
             "notifications/initialized",
             "tools/list",
             "tools/call",
         ]
-        # ... and every request of the session signed, the session's close included.
         assert {verb for verb, _, _ in seen} >= {"POST", "DELETE"}
         for _verb, _rpc, headers in seen:
             assert headers["authorization"].startswith("AWS4-HMAC-SHA256")
@@ -476,7 +423,6 @@ class TestRealMcpTypes:
     def test_refused_connection_is_an_expected_error_reported_with_its_cause(
         self, monkeypatch, capfd
     ):
-        """mcp hands a transport failure over inside an ExceptionGroup; the cause counts."""
         import httpx2
 
         def _refuse(request: httpx2.Request) -> httpx2.Response:
@@ -496,11 +442,10 @@ class TestRealMcpTypes:
         assert "WARN" in capfd.readouterr().out
 
     def test_gateway_that_never_answers_the_handshake_is_given_up_on(self, monkeypatch):
-        """The round-trip deadline covers every request of the session, the first included."""
         import httpx2
 
         async def _stall(request: httpx2.Request) -> httpx2.Response:
-            await asyncio.sleep(2)  # cut short when the bridge gives up
+            await asyncio.sleep(2)
             return httpx2.Response(503)
 
         self._serve(monkeypatch, _stall)
@@ -513,9 +458,7 @@ class TestRealMcpTypes:
 
 
 class TestThroughTheSdk:
-    """``repo_config`` as the SDK serves it to the CLI, not ``_repo_config_impl`` alone.
-
-    The SDK reads the error flag of a handler's result under ``is_error``. A result
+    """The SDK reads the error flag of a handler's result under ``is_error``. A result
     that carries it under another name reaches the CLI, and so the model, as a success.
     """
 
@@ -574,8 +517,6 @@ class TestThroughTheSdk:
         server = gw.build_gateway_server()
 
         async def _call_tool():
-            # The server that the SDK connects the CLI to, over mcp's own client
-            # and the handshake the SDK's bridge performs.
             async with Client(server["instance"], mode="legacy") as client:
                 return await client.call_tool("repo_config", arguments)
 

@@ -36,31 +36,16 @@ import { makeClient } from '../handlers/shared/ua';
  * aliased per-account. Note `ca-central-1` and `us-east-1` / `ap-northeast-1`
  * skip `-az3`: the sets are not uniformly `az1..az3`, so they cannot be derived.
  *
- * ## Documented update path (this list rots by design)
- *
- * When AWS changes a region's supported set, or adds a region:
- *
- *   1. Re-read the source table (below) and edit the entry here — this is the
- *      ONLY place the mapping is declared; do not copy it.
- *   2. Update {@link AGENTCORE_SUPPORTED_AZ_IDS_SNAPSHOT_DATE}.
- *   3. Ship it. A region absent from this map is not pinned (auto-pin emits a
- *      warning and leaves CDK's default selection), and operators can always
- *      pin explicitly via the {@link AGENTCORE_AZS_CONTEXT_KEY} override — so a
- *      stale list is a friction bug, never a hard block.
- *
  * Source: "Supported Availability Zones" in the Amazon Bedrock AgentCore
  * developer guide —
  * https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html#agentcore-supported-azs
  */
 export const AGENTCORE_SUPPORTED_AZ_IDS: Readonly<Record<string, readonly string[]>> = {
-  // North America
   'us-east-1': ['use1-az1', 'use1-az2', 'use1-az4'],
   'us-east-2': ['use2-az1', 'use2-az2', 'use2-az3'],
   'us-west-2': ['usw2-az1', 'usw2-az2', 'usw2-az3'],
   'ca-central-1': ['cac1-az1', 'cac1-az2', 'cac1-az4'],
-  // South America
   'sa-east-1': ['sae1-az1', 'sae1-az2', 'sae1-az3'],
-  // Europe
   'eu-west-1': ['euw1-az1', 'euw1-az2', 'euw1-az3'],
   'eu-west-2': ['euw2-az1', 'euw2-az2', 'euw2-az3'],
   'eu-west-3': ['euw3-az1', 'euw3-az2', 'euw3-az3'],
@@ -68,7 +53,6 @@ export const AGENTCORE_SUPPORTED_AZ_IDS: Readonly<Record<string, readonly string
   'eu-north-1': ['eun1-az1', 'eun1-az2', 'eun1-az3'],
   'eu-south-1': ['eus1-az1', 'eus1-az2', 'eus1-az3'],
   'eu-south-2': ['eus2-az1', 'eus2-az2', 'eus2-az3'],
-  // Asia Pacific
   'ap-south-1': ['aps1-az1', 'aps1-az2', 'aps1-az3'],
   'ap-northeast-1': ['apne1-az1', 'apne1-az2', 'apne1-az4'],
   'ap-northeast-2': ['apne2-az1', 'apne2-az2', 'apne2-az3'],
@@ -76,57 +60,38 @@ export const AGENTCORE_SUPPORTED_AZ_IDS: Readonly<Record<string, readonly string
   'ap-southeast-2': ['apse2-az1', 'apse2-az2', 'apse2-az3'],
   'ap-southeast-5': ['apse5-az1', 'apse5-az2', 'apse5-az3'],
   'ap-southeast-7': ['apse7-az1', 'apse7-az2', 'apse7-az3'],
-  // GovCloud
   'us-gov-west-1': ['usgw1-az1', 'usgw1-az2', 'usgw1-az3'],
 };
 
 /**
  * Date {@link AGENTCORE_SUPPORTED_AZ_IDS} was last reconciled with the AWS
- * source table. Bump it whenever the map is edited.
+ * source table.
  */
 export const AGENTCORE_SUPPORTED_AZ_IDS_SNAPSHOT_DATE = '2026-08-11';
 
 /**
  * CDK context key whose value (a JSON array of AZ **names**, e.g.
  * `["us-east-1b", "us-east-1c"]`) overrides the auto-selected zones.
- *
- * This is the ONLY mechanism that works for an env-agnostic assembly (one
- * synthesized without credentials), because auto-pin needs a bound account
- * to resolve the name -> zone-ID mapping. Set it in `cdk/cdk.json` `context` or
- * via `-c 'agentcore:availabilityZones=["us-east-1b","us-east-1c"]'` at synth time.
- *
- * Note `cdk/cdk.context.json` is gitignored, so it is not a durable place to
- * set this.
  */
 export const AGENTCORE_AZS_CONTEXT_KEY = 'agentcore:availabilityZones';
 
 /**
  * High-availability floor: AgentCore guidance is "at least two private subnets
- * in different Availability Zones". Used to validate an operator override and
- * to decide whether auto-pin found enough supported zones to be useful.
+ * in different Availability Zones".
  */
 export const MIN_AGENTCORE_AZS = 2;
 
 /**
  * How many zones auto-pin selects when more are supported.
- *
- * Kept equal to `AgentVpc`'s default `maxAzs` so enabling auto-pin does not
- * silently widen an account that deploys fine today (3 supported zones would
- * otherwise mean 6 subnets instead of 4). The coupling to `AgentVpc` is
- * asserted in `test/constructs/agentcore-azs.test.ts`.
  */
 export const AUTO_PIN_AZ_COUNT = 2;
 
-/** Physical zone-ID shape, e.g. `use1-az1`, `apse5-az2`, `usgw1-az3`. */
 const ZONE_ID_SHAPE = /^[a-z]+[0-9]+-az[0-9]+$/;
 
-/** Timeouts so a blackholed endpoint cannot hang every synth indefinitely. */
 const LOOKUP_TIMEOUT_MS = 5_000;
 
-/** Total attempts for the AZ lookup (1 retry). */
 const LOOKUP_MAX_ATTEMPTS = 2;
 
-/** A single Availability Zone's name and its stable physical zone ID. */
 export interface AvailabilityZoneInfo {
   /** Account-aliased zone name, e.g. `us-east-1a`. */
   readonly zoneName: string;
@@ -134,13 +99,10 @@ export interface AvailabilityZoneInfo {
   readonly zoneId: string;
 }
 
-/** Signature for the injectable `DescribeAvailabilityZones` lookup. */
 export type DescribeAzsFn = (region: string) => Promise<AvailabilityZoneInfo[]>;
 
-/** Signature for the injectable caller-account lookup (`sts:GetCallerIdentity`). */
 export type ResolveCallerAccountFn = (region: string) => Promise<string | undefined>;
 
-/** Severity of an {@link AgentCoreAzDiagnostic}. */
 export type AgentCoreAzDiagnosticLevel = 'error' | 'warning';
 
 /**
@@ -157,7 +119,6 @@ export interface AgentCoreAzDiagnostic {
   readonly message: string;
 }
 
-/** Result of {@link resolveAgentCoreAzs}. */
 export interface AgentCoreAzResolution {
   /**
    * AZ names to pass to `ec2.Vpc({ availabilityZones })`, or `undefined` to keep
@@ -168,7 +129,6 @@ export interface AgentCoreAzResolution {
   readonly diagnostics: readonly AgentCoreAzDiagnostic[];
 }
 
-/** Options for {@link resolveAgentCoreAzs}. */
 export interface ResolveAgentCoreAzsOptions {
   /** Node used to read CDK context (the `App`'s node). */
   readonly node: Node;
@@ -192,9 +152,7 @@ export interface ResolveAgentCoreAzsOptions {
  * Attaches {@link AgentCoreAzResolution.diagnostics} to a construct inside the
  * **stack** being synthesized.
  *
- * `error`-level diagnostics fail synth (fail closed): every one of them means
- * "the zones could not be verified", and a clean synth in that state produces a
- * template that looks pinned but is not — which is the original bug.
+ * `error`-level diagnostics fail synth.
  */
 export function applyAgentCoreAzDiagnostics(scope: Construct, resolution: AgentCoreAzResolution): void {
   const annotations = Annotations.of(scope);
@@ -207,31 +165,20 @@ export function applyAgentCoreAzDiagnostics(scope: Construct, resolution: AgentC
   }
 }
 
-/** Prefix shared by every diagnostic so operators can grep one token. */
 const DIAG = '[AgentCore AZs]';
 
-/** Standard tail pointing at the escape hatch. */
 const OVERRIDE_HINT = `Pin zones explicitly via CDK context '${AGENTCORE_AZS_CONTEXT_KEY}' `
   + '(see docs/guides/DEPLOYMENT_GUIDE.md — "AgentCore unsupported Availability Zones").';
 
 /**
  * Validates and returns the optional {@link AGENTCORE_AZS_CONTEXT_KEY} override.
  *
- * Mirrors the loud-fail contract of `resolveBedrockModelIds` (bedrock-models.ts):
- * a malformed override fails synth with a clear message naming the key and the
- * expected JSON shape, rather than silently pinning nothing or pinning something
- * that only looks right.
- *
  * Shape and content rules, all of which fail synth:
  *  - must be a JSON array (the `-c key=value` string form is parsed first);
  *  - entries must be non-empty strings;
- *  - at least {@link MIN_AGENTCORE_AZS} **distinct** entries (`["a","a"]` is a
- *    single-AZ deploy wearing a two-AZ costume);
- *  - entries must be zone *names*, not zone *IDs* — `use1-az2` is the value
- *    `describe-availability-zones` prints in column 2 and is a common
- *    transcription slip that CDK would otherwise accept verbatim;
- *  - when `region` is known, entries must be prefixed by it, which catches
- *    wrong-region names.
+ *  - at least {@link MIN_AGENTCORE_AZS} **distinct** entries;
+ *  - entries must be zone *names*, not zone *IDs* (e.g. `use1-az2`);
+ *  - when `region` is known, entries must be prefixed by it.
  *
  * @param node - node to read context from.
  * @param region - target region when known, enabling the prefix check.
@@ -242,11 +189,7 @@ export function resolveAgentCoreAzOverride(node: Node, region?: string): string[
   if (raw === undefined || raw === null) {
     return undefined;
   }
-  // `cdk.json` / `cdk.context.json` deliver a real array, but `-c key=value` on
-  // the CLI (the documented mid-rollback recovery path) delivers a raw string.
-  // Parse the string form so both behave identically. A non-JSON string — a true
-  // typo — is left as-is and fails the Array.isArray check below with the same
-  // clear, key-named error.
+  // The CDK CLI's `-c key=value` delivers a raw string where `cdk.json` delivers an array.
   let override: unknown = raw;
   if (typeof raw === 'string') {
     try {
@@ -298,12 +241,8 @@ export function resolveAgentCoreAzOverride(node: Node, region?: string): string[
  * Pure selection: given the account's AZ (name, id) pairs, returns the zone
  * *names* whose physical zone IDs are AgentCore-supported for `region`.
  *
- * Sorted by name so the pin is deterministic. `DescribeAvailabilityZones` does
- * not contract a response order, and unlike CDK's `availability-zones` context
- * provider this lookup is not cached into `cdk.context.json` — an unstable order
- * would let a later synth pick different zones, and `Subnet.AvailabilityZone` is
- * create-only, so that means replacing every subnet (and route tables, NAT/EIP,
- * endpoints) on an existing stack.
+ * Sorted by name: `DescribeAvailabilityZones` does not contract a response
+ * order, and `Subnet.AvailabilityZone` is create-only.
  *
  * Returns an empty array when the region has no known constraint (absent from
  * {@link AGENTCORE_SUPPORTED_AZ_IDS}) or none of the account's zones match.
@@ -320,19 +259,6 @@ export function selectSupportedAzNames(region: string, zones: readonly Availabil
     .sort((a, b) => a.localeCompare(b));
 }
 
-/**
- * Live `DescribeAvailabilityZones` lookup (default {@link DescribeAzsFn}).
- *
- * `@aws-sdk/client-ec2` is imported dynamically so it is only loaded when
- * auto-pin actually runs (concrete env, no override) — not during env-agnostic
- * synth or in unit tests, which inject their own lookup.
- *
- * Note on packaging: this and `@aws-sdk/client-sts` are declared in
- * `dependencies`, not `devDependencies`, even though they are only used at synth
- * time. `import-x/no-extraneous-dependencies` only permits devDependencies under
- * `test/` and `scripts/`, and this module lives in `src/`; moving them would
- * mean widening that allowlist for a file that is genuinely part of the app.
- */
 async function defaultDescribeAzs(region: string): Promise<AvailabilityZoneInfo[]> {
   const { EC2Client, DescribeAvailabilityZonesCommand } = await import('@aws-sdk/client-ec2');
   const client = makeClient(EC2Client, {
@@ -343,9 +269,7 @@ async function defaultDescribeAzs(region: string): Promise<AvailabilityZoneInfo[
   const response = await client.send(
     new DescribeAvailabilityZonesCommand({
       Filters: [
-        // Standard AZs only — exclude Local Zones / Wavelength / Outposts.
         { Name: 'zone-type', Values: ['availability-zone'] },
-        // An impaired/unavailable zone must not become a pin target.
         { Name: 'state', Values: ['available'] },
       ],
     }),
@@ -360,15 +284,9 @@ async function defaultDescribeAzs(region: string): Promise<AvailabilityZoneInfo[
 }
 
 /**
- * Live `sts:GetCallerIdentity` (default {@link ResolveCallerAccountFn}).
- *
- * Needed because the CDK CLI passes only `CDK_DEFAULT_ACCOUNT` /
- * `CDK_DEFAULT_REGION` to the app process — **not** credentials and not
- * `--profile`. So `cdk deploy --profile prod` can leave this process resolving
- * the *default* profile's credentials while the deploy targets `prod`. Zone
- * names are region-uniform, so every other guard would pass while the mapping
- * came from the wrong account, yielding a confident pin into physically
- * unsupported zones. `GetCallerIdentity` requires no IAM permission.
+ * The CDK CLI passes only `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION` to the
+ * app process — not credentials and not `--profile` — so `cdk deploy --profile
+ * prod` can leave this process on the default profile's credentials.
  */
 async function defaultResolveCallerAccount(region: string): Promise<string | undefined> {
   const { STSClient, GetCallerIdentityCommand } = await import('@aws-sdk/client-sts');
@@ -381,7 +299,6 @@ async function defaultResolveCallerAccount(region: string): Promise<string | und
   return identity.Account;
 }
 
-/** Error identity without the message — authz failures echo caller ARNs. */
 function errorLabel(err: unknown): string {
   if (err instanceof Error) {
     const code = (err as { name?: string }).name;
@@ -412,13 +329,9 @@ export async function resolveAgentCoreAzs(options: ResolveAgentCoreAzsOptions): 
   const { node, account, region } = options;
   const diagnostics: AgentCoreAzDiagnostic[] = [];
 
-  // `Token.isUnresolved` is defensive: today's caller passes plain strings from
-  // the CLI environment, but a future caller passing `stack.account` would hand
-  // over an unresolved token that must not be treated as a real account id.
   const envAgnostic = !account || !region || Token.isUnresolved(account) || Token.isUnresolved(region);
   const concreteRegion = envAgnostic ? undefined : region;
 
-  // 1. Explicit, validated override wins (throws loudly if malformed).
   const override = resolveAgentCoreAzOverride(node, concreteRegion);
   if (override) {
     if (concreteRegion && AGENTCORE_SUPPORTED_AZ_IDS[concreteRegion]) {
@@ -427,9 +340,6 @@ export async function resolveAgentCoreAzs(options: ResolveAgentCoreAzsOptions): 
     return { zones: override, diagnostics };
   }
 
-  // 2. Env-agnostic synth cannot resolve the mapping — this is the CI-built
-  //    assembly, and it is exactly where the original failure was reported, so
-  //    say so rather than reporting nothing.
   if (envAgnostic) {
     diagnostics.push({
       level: 'warning',
@@ -440,7 +350,6 @@ export async function resolveAgentCoreAzs(options: ResolveAgentCoreAzsOptions): 
     return { zones: undefined, diagnostics };
   }
 
-  // 3. No published constraint for this region — don't guess, but don't be silent.
   if (!AGENTCORE_SUPPORTED_AZ_IDS[region!]) {
     diagnostics.push({
       level: 'warning',
@@ -455,11 +364,6 @@ export async function resolveAgentCoreAzs(options: ResolveAgentCoreAzsOptions): 
   return autoPin(options, region!, diagnostics);
 }
 
-/**
- * Cross-checks an operator override against the account's real mapping.
- * Best-effort: an unusable lookup downgrades to a warning, because the override
- * is a deliberate escape hatch and must keep working when the lookup cannot.
- */
 async function verifyOverride(
   options: ResolveAgentCoreAzsOptions,
   region: string,
@@ -506,11 +410,6 @@ async function verifyOverride(
   return diagnostics;
 }
 
-/**
- * Auto-pin path: confirm the credential account, resolve the mapping, intersect
- * with the supported set. Any failure to *complete* this is an error-level
- * diagnostic, never a silent fallback.
- */
 async function autoPin(
   options: ResolveAgentCoreAzsOptions,
   region: string,
@@ -519,8 +418,6 @@ async function autoPin(
   const describeAzs = options.describeAzs ?? defaultDescribeAzs;
   const resolveCallerAccount = options.resolveCallerAccount ?? defaultResolveCallerAccount;
 
-  // Confirm ambient credentials belong to the target account before trusting
-  // any name -> zone-ID mapping they return.
   let callerAccount: string | undefined;
   try {
     callerAccount = await resolveCallerAccount(region);

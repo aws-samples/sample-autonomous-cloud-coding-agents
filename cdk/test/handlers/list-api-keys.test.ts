@@ -124,7 +124,6 @@ describe('list-api-keys handler', () => {
     });
 
     test('returns 400 for a next_token that cannot be decoded', async () => {
-      // Taken for no token, it restarted the list at the first page with status 200.
       const cut = Buffer.from('{"key_id":"k').toString('base64');
       const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
 
@@ -134,7 +133,6 @@ describe('list-api-keys handler', () => {
     });
 
     test('a single page short of the limit reports has_more=false with no token', async () => {
-      // Fewer active items than requested, table exhausted (no LastEvaluatedKey).
       mockDdbSend.mockResolvedValueOnce({ Items: [makeRecord(1), makeRecord(2)] });
       const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
       const body = JSON.parse(result.body);
@@ -145,9 +143,7 @@ describe('list-api-keys handler', () => {
     });
 
     test('keeps querying past filtered-out pages until the page is full', async () => {
-      // Page 1: Limit applied before filter yields 0 active but a cursor remains.
       mockDdbSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { key_id: 'k0' } });
-      // Page 2: enough active keys to fill limit=2 plus one extra.
       mockDdbSend.mockResolvedValueOnce({
         Items: [makeRecord(3), makeRecord(2), makeRecord(1)],
         LastEvaluatedKey: { key_id: 'k1' },
@@ -172,21 +168,16 @@ describe('list-api-keys handler', () => {
       const body = JSON.parse(result.body);
 
       const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
-      // Boundary is the last item actually returned (k2), so k1 is not skipped.
       expect(decoded).toEqual({ key_id: 'k2', user_id: 'owner-1', created_at: makeRecord(2).created_at });
     });
 
     test('stops after the page cap and still advances the raw cursor', async () => {
-      // Every page filters to nothing but keeps returning a cursor.
       mockDdbSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { key_id: 'kX' } });
       const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
       const body = JSON.parse(result.body);
 
-      expect(mockDdbSend).toHaveBeenCalledTimes(10); // MAX_QUERY_PAGES
+      expect(mockDdbSend).toHaveBeenCalledTimes(10);
       expect(body.data).toHaveLength(0);
-      // We bailed on the cap with a scan cursor still pending, so hand it back
-      // rather than falsely reporting the list is complete. No boundary record
-      // exists (nothing returned), so we fall through to DynamoDB's raw cursor.
       expect(body.pagination.has_more).toBe(true);
       const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
       expect(decoded).toEqual({ key_id: 'kX' });

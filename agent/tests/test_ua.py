@@ -1,5 +1,3 @@
-"""Unit + wire-capture tests for ua.py (#319, simplified app-id design)."""
-
 import contextlib
 import json
 from pathlib import Path
@@ -11,8 +9,6 @@ from botocore.config import Config
 
 import ua
 
-# Shared with cdk/test/handlers/shared/ua.test.ts and cli/test/ua.test.ts: the three
-# UA modules must agree on the solution id and on what the sanitiser lets through.
 _VECTORS = json.loads(
     (Path(__file__).resolve().parents[2] / "contracts" / "ua-vectors.json").read_text(
         encoding="utf-8"
@@ -27,8 +23,6 @@ class TestSolutionId:
 
 class TestSanitize:
     def test_contract_has_vectors(self):
-        # An empty vector list is a collection error already (empty_parameter_set_mark
-        # in pyproject.toml); this assert keeps the requirement if that setting goes.
         assert _VECTORS["sanitize"]
 
     @pytest.mark.parametrize("vector", _VECTORS["sanitize"], ids=lambda vector: vector["note"])
@@ -38,8 +32,6 @@ class TestSanitize:
 
 class TestStaticUserAgentExtra:
     def test_is_static_md_segment_only(self):
-        # The app/ segment is the SDK's job (native AWS_SDK_UA_APP_ID); this
-        # module emits only the md/ component segment.
         assert ua.static_user_agent_extra() == "md/uksb-wt64nei4u6#agent"
 
     def test_no_app_segment_built_here(self):
@@ -78,8 +70,6 @@ class TestWireCapture:
 
         client.meta.events.register("before-send.sts.*", _grab)
         with contextlib.suppress(Exception):
-            # The short-circuit stub returns an empty body, so parsing fails;
-            # we only need the header captured by _grab before that.
             client.get_caller_identity()
         return captured["ua"]
 
@@ -91,7 +81,6 @@ class TestWireCapture:
     def test_app_segment_omitted_when_env_unset(self, monkeypatch):
         ua_header = self._capture_ua(monkeypatch, None)
         assert "app/uksb-wt64nei4u6" not in ua_header
-        # md/ still present — it does not depend on the env var
         assert "md/uksb-wt64nei4u6#agent" in ua_header
 
     def test_app_segment_omitted_when_env_empty(self, monkeypatch):

@@ -38,23 +38,18 @@ export function parseCommentTrigger(body: string | undefined | null): CommentTri
     return { triggered: false, instruction: '' };
   }
 
-  // The same mention as the Linear parser (orchestration-comment-trigger.ts),
-  // plus the look-behind that keeps `foo@bgagent` out.
   const mention = / ?(?<![\w.])@bgagent(?!\w|\.\w)\.* ?/gi;
   if (!mention.test(body)) {
     return { triggered: false, instruction: '' };
   }
 
-  // replace() restarts a global pattern from index 0, whatever test() left.
   return { triggered: true, instruction: body.replace(mention, ' ').trim() };
 }
 
 /**
- * ABCA-authored Jira comments use stable leading markers. Reject them before
- * mention parsing so rendered help/examples can never create a self-trigger
- * loop. Jira comments posted through 3LO are attributed to the authorizing
- * Atlassian user rather than an app account, so author.accountType alone is
- * insufficient as a loop guard.
+ * True when the body starts with a marker of an ABCA-authored comment. Jira
+ * comments posted through 3LO are attributed to the authorizing Atlassian user
+ * rather than an app account, so author.accountType alone is no loop guard.
  */
 export function isKnownAbcaComment(body: string): boolean {
   const prefixes = [
@@ -64,19 +59,14 @@ export function isKnownAbcaComment(body: string): boolean {
     '❌ ABCA ',
     '⚠️ Shipped a PR but stopped early',
     '👀 ABCA ',
-    // The orchestration panel: its rows repeat sub-issue titles and its retry
-    // hint spells out the mention.
     '🔄 ABCA orchestration',
     '⚠️ ABCA orchestration',
     '✅ ABCA orchestration',
   ];
-  // The panel heading is bold after its emoji. An ADF body loses that mark on
-  // the way here; a wiki-text body still has it as an asterisk.
   const trimmed = body.trimStart().replace(/^(\S+ )\*/, '$1');
   return prefixes.some((prefix) => trimmed.startsWith(prefix));
 }
 
-/** Build the instruction passed to the PR-iteration workflow. */
 export function buildIterationInstruction(trigger: CommentTrigger): string {
   return trigger.instruction || 'Address the latest review feedback on this pull request.';
 }

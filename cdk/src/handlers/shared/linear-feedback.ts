@@ -23,33 +23,16 @@ import { logger } from './logger';
 import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound, lookupValueOr } from './lookup-result';
 import { isBotAuthoredComment } from './orchestration-comment-trigger';
 
-/**
- * Lambda-side helper for posting comments and reactions onto Linear issues
- * via direct GraphQL. Used by the webhook processor to give users feedback
- * on pre-container failures (guardrail block, concurrency cap, unmapped
- * project, etc.) — paths where the agent never starts, so the agent-side
- * `linear_reactions.py` (its only Linear I/O — there is no Linear MCP) can't run.
- *
- * All calls are best-effort. Errors are logged at WARN and swallowed —
- * Linear feedback is advisory and must never gate task-rejection logic.
- */
-
 const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 
 const REQUEST_TIMEOUT_MS = 5000;
 
 /**
- * Reaction emoji short-codes. Match the agent-side child markers in
- * ``agent/src/linear_reactions.py`` so the PARENT epic shows the same
- * status signal as its sub-issues: 👀 at start, ✅/❌ at completion.
+ * Reaction emoji short-codes: 👀 at start, ✅/❌ at completion.
  */
 export const EMOJI_STARTED = 'eyes';
 export const EMOJI_SUCCESS = 'white_check_mark';
 export const EMOJI_FAILURE = 'x';
-// A comment on a parent epic that we could NOT route to one specific sub-issue is
-// a QUESTION, not work-in-progress — leaving the 👀 (EMOJI_STARTED) on it makes it
-// look like the agent is still working. Swap to ❓ so the reaction matches the
-// "I need you to clarify / pick a sub-issue" disambiguation reply.
 export const EMOJI_NEEDS_INPUT = 'question';
 
 const COMMENT_CREATE_MUTATION = `
@@ -60,7 +43,6 @@ mutation CreateComment($issueId: String!, $body: String!) {
 }
 `.trim();
 
-/** Create a comment and return its id (for later edit-in-place). */
 const COMMENT_CREATE_RETURNING_ID_MUTATION = `
 mutation CreateCommentReturningId($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {
@@ -70,8 +52,6 @@ mutation CreateCommentReturningId($issueId: String!, $body: String!) {
 }
 `.trim();
 
-/** Edit an existing comment in place — this is what makes one comment able to
- *  serve as a live, self-updating status block instead of a stream of new ones. */
 const COMMENT_UPDATE_MUTATION = `
 mutation UpdateComment($id: String!, $body: String!) {
   commentUpdate(id: $id, input: { body: $body }) {
@@ -80,7 +60,6 @@ mutation UpdateComment($id: String!, $body: String!) {
 }
 `.trim();
 
-/** Delete a comment — used to reposition the epic panel by delete-and-repost. */
 const COMMENT_DELETE_MUTATION = `
 mutation DeleteComment($id: String!) {
   commentDelete(id: $id) { success }
@@ -88,20 +67,9 @@ mutation DeleteComment($id: String!) {
 `.trim();
 
 /**
- * Fetch comments with the author metadata needed to tell a human turn from a
- * bot/integration one. All Linear I/O is deliberately platform-side and
- * deterministic (ADR-016), so the agent cannot read the thread at runtime — it is
- * fetched here and pre-hydrated into the task context instead.
  * ``user`` is the human author (null when a comment
  * was posted by an OAuth app / integration); ``botActor`` is present precisely
- * for those app/integration comments — so @bgagent's own progress and ack
- * comments carry a ``botActor`` and no ``user``. ``createdAt`` orders the thread.
- *
- * We fetch the first 100 and sort +
- * slice to the most recent human comments CLIENT-SIDE, so the result is
- * independent of Linear's connection sort direction. 100 covers every realistic
- * issue thread; the rare over-100 issue simply may miss the oldest turns, which
- * is acceptable for advisory context.
+ * for those app/integration comments.
  */
 const RECENT_COMMENTS_QUERY = `
 query RecentComments($issueId: String!) {
@@ -120,17 +88,10 @@ query RecentComments($issueId: String!) {
 `.trim();
 
 /**
- * Post a THREADED REPLY beneath an existing comment, so the agent's response to a
- * request lands under that request rather than as a new top-level comment.
- * ``parentId`` is the comment being replied to; the reply notifies and reads
- * as a conversation turn under it. Returns the new reply's id (for a possible
- * later edit), distinct from a top-level comment.
- *
- * IMPORTANT (verified against the live API): Linear's ``commentCreate`` requires
+ * Linear's ``commentCreate`` requires
  * ``issueId`` to be present EVEN for a threaded reply — ``parentId`` alone
  * fails ``commentCreate`` argument validation ("Exactly one of …issueId must
- * be defined"). So the reply carries BOTH the parent comment id and its
- * issue id.
+ * be defined").
  */
 const COMMENT_REPLY_RETURNING_ID_MUTATION = `
 mutation ReplyToComment($issueId: String!, $parentId: String!, $body: String!) {
@@ -149,11 +110,6 @@ mutation ReactIssue($issueId: String!, $emoji: String!) {
 }
 `.trim();
 
-/**
- * React to a specific COMMENT (not the issue) — the instant "on it" ack on an
- * ``@bgagent`` comment. (Verified against the live API: ``reactionCreate`` input
- * accepts ``commentId``.)
- */
 const REACTION_CREATE_ON_COMMENT_MUTATION = `
 mutation ReactComment($commentId: String!, $emoji: String!) {
   reactionCreate(input: { commentId: $commentId, emoji: $emoji }) {
@@ -168,42 +124,30 @@ mutation UnreactIssue($id: String!) {
 }
 `.trim();
 
-/** Read an issue's reactions (id + emoji) — to swap one bgagent marker for another. */
 const ISSUE_REACTIONS_QUERY = `
 query IssueReactions($issueId: String!) {
   issue(id: $issueId) { reactions { id emoji } }
 }
 `.trim();
 
-/** Read a COMMENT's reactions (id + emoji) — to swap the comment's bgagent marker. */
 const COMMENT_REACTIONS_QUERY = `
 query CommentReactions($commentId: String!) {
   comment(id: $commentId) { reactions { id emoji } }
 }
 `.trim();
 
-/** Read a COMMENT's current body — to append to it (e.g. the deploy-preview link
- *  that arrives after the reply has already settled). */
 const COMMENT_BODY_QUERY = `
 query CommentBody($commentId: String!) {
   comment(id: $commentId) { body }
 }
 `.trim();
 
-/**
- * The bgagent status-marker emojis we manage on the PARENT epic. Mirrors
- * ``_BGAGENT_EMOJIS`` in ``agent/src/linear_reactions.py``. Only these are
- * ever deleted by {@link swapReaction}. They are matched by emoji alone, not
- * by who reacted: a person's own reaction with one of them counts as a marker.
- */
 const BGAGENT_EMOJIS: ReadonlySet<string> = new Set([
   EMOJI_STARTED, EMOJI_SUCCESS, EMOJI_FAILURE, EMOJI_NEEDS_INPUT,
 ]);
 
 /**
- * Fetch the workflow states for the TEAM that owns ``issueId``, so we can
- * resolve a target state by its semantic ``type`` (Linear state IDs are
- * per-team UUIDs, not knowable a priori). ``type`` values:
+ * Linear state IDs are per-team UUIDs. ``type`` values:
  * ``backlog`` | ``unstarted`` (Todo) | ``started`` (In Progress / In Review) |
  * ``completed`` (Done) | ``canceled``.
  */
@@ -236,13 +180,7 @@ interface TeamState {
  * Returns a {@link LookupResult}: ``found`` with the ``data`` payload, ``absent``
  * when the call succeeded but carried no ``data`` (an anomalous but non-error
  * shape), or ``failed`` on any error layer (non-2xx, GraphQL errors, a thrown
- * fetch/timeout). The failure used to collapse into the same ``null`` as a
- * genuinely-empty payload (#756 Cat 2); encoding it in the type lets a caller
- * that cares distinguish the two. The many best-effort/fail-open callers here
- * deliberately collapse it back with ``lookupValueOr(result, null)`` — an
- * explicit choice at the call site, not a swallowed catch — because their
- * documented contract is to proceed on any failure (advisory context, cosmetic
- * cleanup, a skipped transition). Never throws.
+ * fetch/timeout). Never throws.
  */
 export async function graphqlData(
   accessToken: string,
@@ -283,9 +221,6 @@ export async function graphqlData(
  * failures (network error, request timeout, HTTP 5xx/429) — where a
  * retry may genuinely succeed — from terminal ones (auth rejection,
  * GraphQL validation errors, unregistered workspace) where it cannot.
- * Callers with a retry mechanism (the fan-out dispatcher's
- * partial-batch path) escalate retryable failures; purely best-effort
- * callers can branch on ``ok`` alone.
  */
 export type LinearPostResult =
   | { readonly ok: true }
@@ -302,9 +237,6 @@ export async function graphqlRequest(
     const resp = await fetch(LINEAR_GRAPHQL_URL, {
       method: 'POST',
       headers: {
-        // OAuth tokens use Bearer; a legacy personal API key was sent as the bare
-        // value. Every token stored in Secrets Manager is now an OAuth bearer
-        // token, so we always Bearer-prefix.
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
@@ -312,24 +244,17 @@ export async function graphqlRequest(
       signal: controller.signal,
     });
     if (!resp.ok) {
-      // 5xx is a Linear-side outage and 429 a rate limit — both may
-      // clear on retry. Any other non-2xx (401/403/404…) is terminal:
-      // re-sending the same request cannot change the answer.
       const retryable = resp.status >= 500 || resp.status === 429;
       logger.warn('Linear feedback GraphQL non-2xx', { status: resp.status, retryable });
       return { ok: false, retryable };
     }
     const body = (await resp.json()) as { errors?: unknown };
     if (body.errors) {
-      // GraphQL-level errors (bad issue id, missing scope) are
-      // request-shape problems, not infrastructure — terminal.
       logger.warn('Linear feedback GraphQL errors', { errors: body.errors });
       return { ok: false, retryable: false };
     }
     return { ok: true };
   } catch (err) {
-    // fetch rejection: DNS/connect failure or the AbortController
-    // timeout above — transient by nature.
     logger.warn('Linear feedback request failed', {
       error: err instanceof Error ? err.message : String(err),
     });
@@ -339,16 +264,9 @@ export async function graphqlRequest(
   }
 }
 
-/**
- * Workspace-scoped feedback context. Resolved once per task by the
- * caller (webhook processor / orchestrator) and threaded through to
- * the post-comment / add-reaction helpers, so the resolver runs once
- * per task instead of once per Linear API call.
- */
 export interface LinearFeedbackContext {
   /** Linear organization UUID — registry key. */
   readonly linearWorkspaceId: string;
-  /** Name of LinearWorkspaceRegistryTable, from CDK stack output. */
   readonly registryTableName: string;
 }
 
@@ -367,17 +285,7 @@ export async function resolveToken(ctx: LinearFeedbackContext): Promise<string |
 
 /**
  * Post a comment onto a Linear issue. Never throws — returns a
- * {@link LinearPostResult} so callers can distinguish transient failures
- * (worth a retry) from terminal ones (auth, bad issue id) without this
- * helper ever gating task-rejection logic.
- *
- * Token-resolution failure is classified terminal: ``resolveLinearOauthToken``
- * deliberately collapses every failure cause (registry miss, revoked
- * workspace, unreadable secret, and also transient DDB throttles) into
- * ``null`` as part of its graceful no-op contract, so there is no signal
- * left here to tell a throttle from an unregistered workspace. Splitting
- * that contract is a resolver-level refactor — see ``getRegistryRowStrict``
- * for the precedent.
+ * {@link LinearPostResult}. A token-resolution failure is reported as terminal.
  */
 export async function postIssueComment(
   ctx: LinearFeedbackContext,
@@ -390,13 +298,11 @@ export async function postIssueComment(
 }
 
 /**
- * Upsert the orchestration's live status block — ONE comment on the parent epic
- * that is rewritten as the run progresses, rather than a new comment per
- * transition. If ``existingCommentId`` is given, EDIT that comment in place; otherwise
- * CREATE a fresh comment and return its id so the caller can persist it and
- * edit on the next transition. Returns the comment id on success (the
+ * Upsert the orchestration's live status comment on the parent epic. If
+ * ``existingCommentId`` is given, EDIT that comment in place; otherwise
+ * CREATE a fresh comment. Returns the comment id on success (the
  * existing id on update, the new id on create), or null on any failure.
- * Best-effort — never throws; the status block is advisory.
+ * Never throws.
  */
 export async function upsertStatusComment(
   ctx: LinearFeedbackContext,
@@ -408,8 +314,6 @@ export async function upsertStatusComment(
   if (!token) return null;
 
   if (existingCommentId) {
-    // graphqlRequest now returns a LinearPostResult — read .ok (an object is
-    // always truthy, so a bare `ok ?` would wrongly report success).
     const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, { id: existingCommentId, body })).ok;
     return ok ? existingCommentId : null;
   }
@@ -419,11 +323,7 @@ export async function upsertStatusComment(
   return created?.success && created.comment?.id ? created.comment.id : null;
 }
 
-/**
- * Delete a comment — used to remove the old epic panel when a retry posts it
- * again below the retry note. Best-effort: returns true on success, false on any
- * failure (a second panel left behind is a cosmetic nit, never a breakage).
- */
+/** Delete a comment. Best-effort: returns true on success, false on any failure. */
 export async function deleteComment(
   ctx: LinearFeedbackContext,
   commentId: string,
@@ -433,15 +333,12 @@ export async function deleteComment(
   return (await graphqlRequest(token, COMMENT_DELETE_MUTATION, { id: commentId })).ok;
 }
 
-/** A rendered issue comment folded into the task context (mirrors the Jira
- *  ``RenderedComment`` shape so the two processors read alike). */
 export interface RenderedComment {
   readonly author: string;
   readonly createdAt: string;
   readonly markdown: string;
 }
 
-/** Default cap on recent human comments folded into the task context. */
 const DEFAULT_MAX_RECENT_COMMENTS = 20;
 
 interface RawLinearComment {
@@ -454,16 +351,14 @@ interface RawLinearComment {
 
 /**
  * Fetch the most recent HUMAN-authored comments on an issue, rendered to
- * markdown oldest-first, for pre-hydrating the task context (the agent has no
- * Linear tooling of its own to read the thread at runtime). Best-effort / fail-open: any
- * failure (token, GraphQL error, malformed body) logs a WARN and returns ``[]``
- * so the task still proceeds — comments are advisory context, not a gate.
+ * markdown oldest-first. Fail-open: any failure (token, GraphQL error,
+ * malformed body) logs a WARN and returns ``[]``.
  *
- * "Human" excludes app/integration comments two ways (belt and suspenders):
+ * "Human" excludes app/integration comments two ways:
  *   1. ``botActor`` present, or ``user`` absent → posted by an OAuth app /
- *      integration (this is how @bgagent's own comments are marked);
+ *      integration;
  *   2. the body starts with one of the bot's own rendered-comment markers
- *      ({@link isBotAuthoredComment}) — catches anything mis-attributed to a user.
+ *      ({@link isBotAuthoredComment}).
  */
 export async function fetchRecentComments(
   ctx: LinearFeedbackContext,
@@ -478,13 +373,9 @@ export async function fetchRecentComments(
 
   const human: RenderedComment[] = [];
   for (const node of nodes) {
-    // Skip app/integration comments (bgagent + other bots): they carry a
-    // botActor and no human user.
     if (node.botActor || !node.user) continue;
     const body = (node.body ?? '').trim();
     if (!body) continue;
-    // Belt and suspenders: drop anything that reads as one of our own rendered
-    // comments even if it slipped through as a "user" comment.
     if (isBotAuthoredComment(body)) continue;
     human.push({
       author: node.user.displayName?.trim() || node.user.name?.trim() || 'Unknown',
@@ -493,9 +384,6 @@ export async function fetchRecentComments(
     });
   }
 
-  // Order oldest-first so the thread reads naturally, then keep the most recent
-  // ``maxComments`` (sort is client-side — independent of Linear's connection
-  // sort direction). Comments without a timestamp sort last (treated as newest).
   human.sort((a, b) => (a.createdAt || '￿').localeCompare(b.createdAt || '￿'));
   const recent = human.length > maxComments ? human.slice(human.length - maxComments) : human;
 
@@ -510,9 +398,8 @@ export async function fetchRecentComments(
 }
 
 /**
- * Add an emoji reaction onto a Linear issue. Defaults to ❌ — the failure marker
- * the agent uses on the success/failure side. Same result contract as
- * {@link postIssueComment}.
+ * Add an emoji reaction onto a Linear issue. Defaults to ❌. Same result
+ * contract as {@link postIssueComment}.
  */
 export async function addIssueReaction(
   ctx: LinearFeedbackContext,
@@ -524,13 +411,7 @@ export async function addIssueReaction(
   return graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji });
 }
 
-/**
- * React to a specific Linear COMMENT. Used as the
- * instant "on it" acknowledgement when a human ``@bgagent``s a comment —
- * 👀 ({@link EMOJI_STARTED}) lands immediately, before the iteration task is
- * even created, so the human knows the agent saw their request with zero
- * comment clutter. Best-effort; returns true on success.
- */
+/** React to a specific Linear COMMENT. Defaults to 👀. Best-effort; returns true on success. */
 export async function reactToComment(
   ctx: LinearFeedbackContext,
   commentId: string,
@@ -538,18 +419,13 @@ export async function reactToComment(
 ): Promise<boolean> {
   const token = await resolveToken(ctx);
   if (!token) return false;
-  // graphqlRequest returns a LinearPostResult (an object, so always truthy);
-  // this best-effort helper just needs the success bool off it.
   return (await graphqlRequest(token, REACTION_CREATE_ON_COMMENT_MUTATION, { commentId, emoji })).ok;
 }
 
 /**
- * Post a THREADED REPLY beneath a Linear comment. Used
- * when the agent's work on an ``@bgagent`` comment lands ("✅ Updated — PR #N")
- * or fails ("❌ …"). Unlike an edit, a reply NOTIFIES and reads as a
- * conversation turn under the original request, keeping the thread contextual.
- * Returns the new reply's comment id (for a possible later edit) or null on any
- * failure. Best-effort — never throws.
+ * Post a THREADED REPLY beneath a Linear comment.
+ * Returns the new reply's comment id or null on any
+ * failure. Never throws.
  *
  * ``issueId`` is the issue the parent comment lives on — Linear requires it on
  * ``commentCreate`` even for a reply (see {@link COMMENT_REPLY_RETURNING_ID_MUTATION}).
@@ -572,15 +448,8 @@ export async function replyToComment(
 /**
  * The MATURING THREADED REPLY for a comment-iteration.
  * If ``existingReplyId`` is given, EDIT that reply in place; otherwise CREATE a
- * new reply threaded under ``parentCommentId`` and return its id. Mirrors
- * {@link upsertStatusComment} but as a THREADED reply (carries ``parentId``) so
- * one iteration shows a single reply that matures 👀→🔄→✅/💬 instead of N
- * top-level comments. Returns the reply id (existing on edit, new on create),
- * or null on any failure. Best-effort — never throws.
- *
- * Linear requires ``issueId`` even for a threaded reply (parentId alone fails
- * commentCreate validation — verified against the live API), so the create
- * carries both.
+ * new reply threaded under ``parentCommentId``. Returns the reply id
+ * (existing on edit, new on create), or null on any failure. Never throws.
  */
 export async function upsertThreadedReply(
   ctx: LinearFeedbackContext,
@@ -595,38 +464,20 @@ export async function upsertThreadedReply(
 
   if (existingReplyId) {
     let finalBody = body;
-    // Both options below need the CURRENT body, so read it once.
     let current: string | undefined;
     if (options?.preservePreview || options?.skipIfSettled) {
       const data = lookupValueOr(await graphqlData(token, COMMENT_BODY_QUERY, { commentId: existingReplyId }), null);
       current = (data?.comment as { body?: string } | undefined)?.body;
     }
-    // A PROGRESS edit must never overwrite an outcome. The terminal settle and the
-    // (stream-driven, so possibly delayed) progress milestone edit the same
-    // comment, and the body is the ground truth about which has landed — a
-    // task-record marker is stamped slightly BEFORE the render it announces, so
-    // checking the body is what closes that window. Yield rather than clobber:
-    // losing a progress edit is cosmetic, losing the outcome is not.
-    //
-    // This check is a read followed by a separate write, so it NARROWS the window
-    // rather than closing it: a settle landing in between is still overwritten.
     // Linear's comment update takes only an id and a body — there is no version
-    // or etag to make the write conditional on what was read (verified against
-    // the live schema) — so no amount of care here makes it atomic. The terminal
-    // writer therefore verifies its own body afterwards; see
-    // ``repairIfOverwritten`` below, which is what actually recovers the outcome.
+    // or etag to make the write conditional on what was read, so this check is
+    // not atomic.
     if (options?.skipIfSettled && isTerminalMaturingReply(current)) {
       logger.info('Skipping a progress edit — the reply already shows a terminal outcome', {
         comment_id: existingReplyId,
       });
       return existingReplyId;
     }
-    // The deploy-preview link is appended by a SEPARATE async path (the
-    // screenshot webhook), so a terminal-settle re-render here can clobber a
-    // preview that already landed — this was observed live, the preview appended
-    // and then wiped by the terminal edit ~14 seconds later. When asked, carry an
-    // existing `[preview]` segment onto the new body so the two writers converge
-    // regardless of which one runs last.
     if (options?.preservePreview) {
       finalBody = preservePreviewSuffix(body, current);
     }
@@ -645,35 +496,14 @@ export async function upsertThreadedReply(
   return created?.success && created.comment?.id ? created.comment.id : null;
 }
 
-/**
- * After writing an OUTCOME, check it is still there, and put it back if a
- * concurrently-delivered progress edit landed on top of it.
- *
- * Why this exists rather than a conditional write: the progress writers avoid
- * clobbering by reading the body and refusing when it already shows an outcome,
- * but read-then-write is not atomic and Linear's comment update accepts only an
- * id and a body — there is no version or etag to condition on (verified against
- * the live schema), so the interleaving cannot be prevented at the surface. It
- * can, however, be detected and undone by the writer that knows which body
- * matters, and only the outcome is worth that extra round trip.
- *
- * Deliberately narrow. It re-asserts only when the body has regressed to a
- * NON-terminal render, so it never fights a later legitimate outcome (a failure
- * reply superseding a success, or a second iteration's settle) and never touches
- * an unrecognised body a human may have edited. One repair attempt, no loop: if
- * it loses again the next progress edit will itself observe the terminal body and
- * yield. Best-effort throughout — a failed repair is logged, never thrown.
- */
 async function repairOverwrittenOutcome(
   accessToken: string,
   commentId: string,
   outcomeBody: string,
 ): Promise<void> {
-  if (!isTerminalMaturingReply(outcomeBody)) return; // only outcomes are worth defending
+  if (!isTerminalMaturingReply(outcomeBody)) return;
   const data = lookupValueOr(await graphqlData(accessToken, COMMENT_BODY_QUERY, { commentId }), null);
   const current = (data?.comment as { body?: string } | undefined)?.body;
-  // Unreadable → leave it alone: acting on an unknown body could overwrite
-  // something newer, and the reply most likely still holds the outcome.
   if (typeof current !== 'string') return;
   if (current === outcomeBody || isTerminalMaturingReply(current)) return;
 
@@ -681,8 +511,6 @@ async function repairOverwrittenOutcome(
     event: 'iteration_reply.outcome_restored',
     comment_id: commentId,
   });
-  // Re-assert the outcome, carrying over any preview the screenshot webhook may
-  // have appended in the meantime so the repair doesn't drop it.
   const restored = preservePreviewSuffix(outcomeBody, current);
   const ok = (await graphqlRequest(accessToken, COMMENT_UPDATE_MUTATION, { id: commentId, body: restored })).ok;
   if (!ok) {
@@ -696,12 +524,8 @@ async function repairOverwrittenOutcome(
 /**
  * Append a one-line suffix to an existing comment, idempotently.
  * Reads the comment's current body, and if it does NOT already contain
- * ``marker``, appends ``\n``+``line`` and updates. Used by the screenshot webhook
- * to add the ``· [preview](url)`` link to the iteration's settle reply once the
- * (async) capture finishes — the reply has usually already rendered ✅ + cost by
- * then, so the link arrives a few seconds later as an in-place edit rather than a
- * new comment. ``marker`` is a stable substring (e.g. ``[preview]``) so a webhook
- * redelivery doesn't append twice. Best-effort; returns true only if appended.
+ * ``marker``, appends ``\n``+``line`` and updates. Best-effort; returns true
+ * only if appended.
  */
 export async function appendOnceToComment(
   ctx: LinearFeedbackContext,
@@ -714,27 +538,13 @@ export async function appendOnceToComment(
   const data = lookupValueOr(await graphqlData(token, COMMENT_BODY_QUERY, { commentId }), null);
   const current = (data?.comment as { body?: string } | undefined)?.body;
   if (typeof current !== 'string') return false;
-  if (current.includes(marker)) return false; // already appended (idempotent)
+  if (current.includes(marker)) return false;
   const ok = (await graphqlRequest(token, COMMENT_UPDATE_MUTATION, {
     id: commentId, body: `${current}\n${line}`,
   })).ok;
   return ok;
 }
 
-/**
- * Delete one of our own status markers, retrying ONCE on a transient failure.
- *
- * A marker we fail to remove is not cosmetic: it leaves two of our reactions on
- * the same item ("saw it" beside "done"), no caller inspects the swap's result
- * but the settle of a failed sub-issue (step 1b of `reconcileTerminalChild`),
- * and nothing else ever revisits it — so the contradiction is permanent. That is
- * exactly what happened live: a 5s request timeout aborted one delete and the
- * pair stayed. One retry costs a single call and covers the blip; anything
- * terminal (auth, a marker another writer already removed) is not retried,
- * because re-sending cannot change the answer.
- *
- * Returns true when the marker is gone.
- */
 async function deleteOwnMarker(accessToken: string, reactionId: string): Promise<boolean> {
   const first = await graphqlRequest(accessToken, REACTION_DELETE_MUTATION, { id: reactionId });
   if (first.ok) return true;
@@ -745,13 +555,10 @@ async function deleteOwnMarker(accessToken: string, reactionId: string): Promise
 
 /**
  * Leave ONE bgagent status marker on an issue or on a comment (👀 → ✅/❌/❓).
- * The markers are added across SEPARATE lambda invocations (👀 at seed or at
- * receipt, the outcome at completion), so no reaction id is at hand: query the
- * target's reactions, delete every marker emoji EXCEPT the wanted one, then add
- * the wanted one if absent. A reaction with any other emoji is never touched.
- * Idempotent (a redelivery re-converges to the same single marker). Best-effort;
- * returns true only when the wanted marker is present AND no stale marker was
- * left behind — two markers at once is the state this prevents.
+ * Deletes every marker emoji EXCEPT the wanted one, then adds the wanted one
+ * if absent. A reaction with any other emoji is never touched. Idempotent.
+ * Best-effort; returns true only when the wanted marker is present AND no
+ * stale marker was left behind.
  */
 async function swapReaction(
   ctx: LinearFeedbackContext,
@@ -768,7 +575,6 @@ async function swapReaction(
     await graphqlData(token, onIssue ? ISSUE_REACTIONS_QUERY : COMMENT_REACTIONS_QUERY, idVariable), null);
   const reactions = ((data?.[target] as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
 
-  // Delete our stale markers (any bgagent emoji that isn't the target).
   let targetPresent = false;
   let staleLeft = 0;
   for (const r of reactions) {
@@ -778,10 +584,6 @@ async function swapReaction(
     }
   }
 
-  // A marker we could not remove means the issue or comment still shows two of
-  // our own reactions at once ("saw it" beside "done"), which is the
-  // contradictory state this swap exists to prevent — so don't report the
-  // promised single marker.
   if (staleLeft > 0) {
     logger.warn(`Could not remove a stale status marker from the ${target}`, {
       event: `linear_feedback.${target}_reaction_swap_incomplete`,
@@ -789,36 +591,23 @@ async function swapReaction(
       stale_count: staleLeft,
     });
   }
-  if (targetPresent) return staleLeft === 0; // already present; the deletes decide
+  if (targetPresent) return staleLeft === 0;
   const added = (await graphqlRequest(
     token, onIssue ? REACTION_CREATE_MUTATION : REACTION_CREATE_ON_COMMENT_MUTATION, { ...idVariable, emoji })).ok;
   return added && staleLeft === 0;
 }
 
-/**
- * Swap the PARENT epic's status marker — see {@link swapReaction}. The children
- * capture their reaction id in-process and delete it; the parent's 👀 is added
- * at seed and its ✅/❌ at completion.
- */
+/** Swap an issue's status marker — see {@link swapReaction}. */
 export function swapIssueReaction(ctx: LinearFeedbackContext, issueId: string, emoji: string): Promise<boolean> {
   return swapReaction(ctx, 'issue', issueId, emoji);
 }
 
-/**
- * Swap the status marker on a COMMENT — see {@link swapReaction}. The 👀 lands
- * at receipt ({@link reactToComment}); when the iteration settles it becomes
- * ✅/❌, so the trigger comment itself reads done at a glance, not just the
- * threaded reply.
- */
+/** Swap the status marker on a COMMENT — see {@link swapReaction}. */
 export function swapCommentReaction(ctx: LinearFeedbackContext, commentId: string, emoji: string): Promise<boolean> {
   return swapReaction(ctx, 'comment', commentId, emoji);
 }
 
-/**
- * Convenience: post a feedback comment **and** drop a ❌ reaction in one call.
- * Both calls run in parallel; both are best-effort. Returns void — callers
- * never branch on the result.
- */
+/** Post a feedback comment and add a ❌ reaction, in parallel; both are best-effort. */
 export async function reportIssueFailure(
   ctx: LinearFeedbackContext,
   issueId: string,
@@ -830,13 +619,6 @@ export async function reportIssueFailure(
   ]);
 }
 
-/**
- * Pick the target workflow state by semantic preference. ``preferredNames``
- * (case-insensitive) is tried first so e.g. "In Review" wins over "In
- * Progress" when both share Linear ``type: started``; falls back to the
- * lowest-``position`` state of ``type``. Returns null if the team has no
- * state of that type.
- */
 function pickState(
   states: readonly TeamState[],
   type: string,
@@ -853,17 +635,9 @@ function pickState(
 
 /**
  * Transition a Linear issue to a workflow state chosen by semantic ``type``
- * (+ optional name preference). Used by the orchestration reconciler to move the
- * PARENT epic through its lifecycle — ``In Progress`` when the orchestration
- * seeds, ``In Review`` when all children succeed — since the parent spawns no
- * task and Linear's GitHub automation (which moves the children on PR-open)
- * never touches it.
- *
- * Best-effort, like the rest of this module: resolves the team's states,
- * picks the target, and issues ``issueUpdate``. Returns true only on a
+ * (+ optional name preference). Returns true only on a
  * confirmed transition. Skips (returns false) if the issue is already in the
- * target state or moving backward (we never demote, e.g. a human already
- * pushed the epic to Done). Never throws.
+ * target state or moving backward. Never throws.
  */
 export async function transitionIssueState(
   ctx: LinearFeedbackContext,
@@ -872,12 +646,8 @@ export async function transitionIssueState(
   preferredNames: readonly string[] = [],
   /**
    * Allow a WITHIN-TYPE regression (e.g. In Review → In Progress, both
-   * ``started``). By default the backward-move guard blocks it — correct for most
-   * callers, but it silently no-op'd the orchestration rollup's deliberate
-   * re-open (a settled epic that gains a new or re-run child must go back from In
-   * Review to In Progress, and since both are ``started`` type the
-   * position-tiebreak blocked it). Cross-TYPE demotion (completed → started) is
-   * still ALWAYS blocked — this only relaxes the same-type position tiebreak.
+   * ``started``). Cross-TYPE demotion (completed → started) is
+   * still ALWAYS blocked.
    */
   allowSameTypeRegression = false,
 ): Promise<boolean> {
@@ -902,16 +672,11 @@ export async function transitionIssueState(
 
   const current = issue?.state;
   if (current?.id === target.id) {
-    // Already there — idempotent no-op (e.g. reconciler re-fires).
     return false;
   }
-  // Never move backward. Order by state TYPE first (the lifecycle:
-  // backlog → unstarted → started → completed/canceled), then by position
-  // within the same type. Raw position is NOT lifecycle order — e.g. Done
+  // Linear's raw position is NOT lifecycle order — e.g. Done
   // (completed, position 3) sorts numerically before In Review (started,
-  // position 1002), so a position-only guard would wrongly demote a
-  // human-completed epic back to In Review. We never demote across types
-  // (a human/automation advanced it) nor backward within a type.
+  // position 1002).
   if (current) {
     const TYPE_RANK: Record<string, number> = {
       backlog: 0, unstarted: 1, started: 2, completed: 3, canceled: 3, triage: 0,
@@ -920,10 +685,6 @@ export async function transitionIssueState(
     const tgtRank = TYPE_RANK[target.type] ?? 0;
     const crossTypeDemotion = curRank > tgtRank;
     const sameTypeRegression = curRank === tgtRank && current.position >= target.position;
-    // Cross-type demotion (e.g. completed → started) is NEVER allowed — a human
-    // or automation advanced it. A same-type regression (In Review → In Progress)
-    // is allowed ONLY when the caller opts in, which is how the orchestration
-    // rollup deliberately re-opens a settled epic.
     const backward = crossTypeDemotion || (sameTypeRegression && !allowSameTypeRegression);
     if (backward) {
       logger.info('Linear state transition: skipping backward move', {
@@ -949,17 +710,8 @@ export async function transitionIssueState(
 
 /**
  * Move an issue BACKWARD to a not-started state
- * (``unstarted`` "Todo", else ``backlog``), used when a planning
- * run finishes and the issue is now awaiting the reviewer's approve. The webhook
- * moved it to In Progress at dispatch (so the board showed the ~1-2 min planning
- * WAS happening — {@link transitionIssueState}); once the plan is posted and
- * nothing is running, "In Progress" would lie ("looks like work started while
- * it's just a pending plan"). So we revert it.
- *
- * This is the ONE sanctioned backward move, and it's tightly guarded to avoid
- * clobbering a human: it ONLY fires when the issue is CURRENTLY in a ``started``
- * state (i.e. still the In Progress we set) — if a human already pushed it to
- * Done/Canceled, or pulled it back to Backlog themselves, we leave it. Prefers a
+ * (``unstarted`` "Todo", else ``backlog``). ONLY fires when the issue is
+ * CURRENTLY in a ``started`` state. Prefers a
  * "Todo" then "Backlog" target name; falls back to the lowest-position
  * unstarted/backlog state. Best-effort, never throws.
  */
@@ -978,8 +730,6 @@ export async function revertIssueToNotStarted(
   const current = issue?.state;
   if (states.length === 0 || !current) return false;
 
-  // Only revert OUR "In Progress" — never demote a human-advanced (completed/
-  // canceled) or a human-pulled-back (already backlog/unstarted) issue.
   if (current.type !== 'started') {
     logger.info('Revert-to-not-started: issue not in a started state — leaving it', {
       issue_id: issueId, current_state: current.name, current_type: current.type,
@@ -987,8 +737,6 @@ export async function revertIssueToNotStarted(
     return false;
   }
 
-  // Prefer an unstarted "Todo" (the natural "not started, waiting" state); fall
-  // back to backlog. Within a type, prefer the named state, else lowest position.
   const target = pickState(states, 'unstarted', ['Todo', 'To Do'])
     ?? pickState(states, 'backlog', ['Backlog', 'Triage']);
   if (!target) {

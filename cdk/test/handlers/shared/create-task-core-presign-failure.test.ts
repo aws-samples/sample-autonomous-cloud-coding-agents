@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// create-task-core reads ATTACHMENTS_BUCKET_NAME when it loads, and create-task-core.test.ts
-// loads it without a bucket, so the presigned-upload branch needs a file of its own.
-
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -63,7 +60,6 @@ describe('createTaskCore when presigning an upload fails', () => {
     expect(UpdateExpression).toContain('#ttl = :ttl');
     expect(values[':sca']).toBe(`FAILED#${values[':now']}`);
     expect(names['#ttl']).toBe('ttl');
-    // Epoch seconds, a retention period ahead: a value in milliseconds would never expire.
     const nowSeconds = Date.now() / 1000;
     expect(values[':ttl']).toBeGreaterThan(nowSeconds);
     expect(values[':ttl']).toBeLessThan(nowSeconds + 91 * 86_400);

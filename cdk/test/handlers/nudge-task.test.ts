@@ -19,7 +19,6 @@
 
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -106,15 +105,12 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   };
 }
 
-/**
- * Set up the happy-path mock sequence: Get (task) → Update (rate-limit) → Put (nudge).
- */
 function primeHappyPath(task = RUNNING_TASK): void {
   mockSend.mockReset();
   mockSend
-    .mockResolvedValueOnce({ Item: task }) // GetCommand (task)
-    .mockResolvedValueOnce({}) // UpdateCommand (rate-limit counter)
-    .mockResolvedValueOnce({}); // PutCommand (nudge record)
+    .mockResolvedValueOnce({ Item: task })
+    .mockResolvedValueOnce({})
+    .mockResolvedValueOnce({});
 }
 
 beforeEach(() => {
@@ -141,7 +137,6 @@ describe('nudge-task handler — happy path', () => {
     await handler(makeEvent());
     const after = Math.floor(Date.now() / 1000);
 
-    // Third DDB call is the PutCommand for the nudge.
     const putCall = mockSend.mock.calls[2][0];
     expect(putCall._type).toBe('Put');
     expect(putCall.input.TableName).toBe('Nudges');
@@ -166,10 +161,8 @@ describe('nudge-task handler — happy path', () => {
     const updateCall = mockSend.mock.calls[1][0];
     expect(updateCall._type).toBe('Update');
     expect(updateCall.input.TableName).toBe('Nudges');
-    // Synthetic PK/SK
     expect(updateCall.input.Key.task_id).toBe('RATE#task-1');
     expect(updateCall.input.Key.nudge_id).toMatch(/^MINUTE#\d{12}$/);
-    // Counter + TTL + conditional max
     expect(updateCall.input.UpdateExpression).toContain('ADD #count :one');
     expect(updateCall.input.UpdateExpression).toContain('SET #ttl = :ttl');
     expect(updateCall.input.ConditionExpression).toContain('#count < :max');
@@ -319,15 +312,14 @@ describe('nudge-task handler — rate limiting', () => {
     const condErr = new Error('Condition not met');
     condErr.name = 'ConditionalCheckFailedException';
     mockSend
-      .mockResolvedValueOnce({ Item: RUNNING_TASK }) // Get (task)
-      .mockRejectedValueOnce(condErr); // Update (rate-limit) — fails
+      .mockResolvedValueOnce({ Item: RUNNING_TASK })
+      .mockRejectedValueOnce(condErr);
 
     const result = await handler(makeEvent());
 
     expect(result.statusCode).toBe(429);
     expect(JSON.parse(result.body).error.code).toBe('RATE_LIMIT_EXCEEDED');
     expect(JSON.parse(result.body).error.message).toContain('10');
-    // Nudge must NOT have been persisted
     expect(mockSend).toHaveBeenCalledTimes(2);
   });
 
@@ -364,11 +356,8 @@ describe('nudge-task handler — guardrail screening', () => {
     const body = JSON.parse(result.body);
     expect(body.error.code).toBe('VALIDATION_ERROR');
     expect(body.error.message.toLowerCase()).toContain('content policy');
-    // Nudge must NOT have been persisted
     const putCalls = mockSend.mock.calls.filter(c => c[0]._type === 'Put');
     expect(putCalls).toHaveLength(0);
-    // Guardrail-blocked messages must NOT consume a rate-limit slot
-    // (guardrail runs before rate-limit — see handler docstring).
     const updateCalls = mockSend.mock.calls.filter(c => c[0]._type === 'Update');
     expect(updateCalls).toHaveLength(0);
   });
@@ -401,7 +390,7 @@ describe('nudge-task handler — error paths', () => {
     mockSend.mockReset();
     mockSend
       .mockResolvedValueOnce({ Item: RUNNING_TASK })
-      .mockResolvedValueOnce({}) // rate-limit ok
+      .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error('Put failed'));
 
     const result = await handler(makeEvent());

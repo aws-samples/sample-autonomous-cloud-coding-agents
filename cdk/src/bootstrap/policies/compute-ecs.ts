@@ -21,9 +21,6 @@ import { aws_iam as iam } from 'aws-cdk-lib';
 
 /**
  * Returns the IAM PolicyDocument for the IaCRole-ABCA-Compute-ECS role.
- *
- * Covers: ECS cluster and task definition management for the Fargate
- * compute backend.
  */
 export function computeEcsPolicy(): iam.PolicyDocument {
   return new iam.PolicyDocument({

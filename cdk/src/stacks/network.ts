@@ -25,7 +25,6 @@ import { DnsFirewall } from '../constructs/dns-firewall';
 
 export type NetworkTopology = 'inline' | 'split';
 
-/** Existing deployments keep their resource ownership until explicitly migrated. */
 export function resolveNetworkTopology(value: unknown): NetworkTopology {
   if (value === undefined || value === 'inline') return 'inline';
   if (value === 'split') return 'split';
@@ -48,7 +47,6 @@ export class NetworkStack extends Stack implements AgentNetwork {
 
   constructor(scope: Construct, id: string, props: NetworkStackProps) {
     super(scope, id, props);
-    // Keep construct IDs below the stack unchanged for explicit ownership moves.
     const network = new AgentVpc(this, 'AgentVpc', {
       resourcePath: `${props.applicationStackName}/AgentVpc`,
       ...(props.agentCoreAvailabilityZones?.length
@@ -63,18 +61,12 @@ export class NetworkStack extends Stack implements AgentNetwork {
       observationMode: true,
     });
 
-    // Export the complete interface even when a backend does not use every
-    // value. Otherwise switching AgentCore <-> ECS/MicroVM tries to remove an
-    // export while the old application still imports it, blocking the deploy.
-    // AZ removal additionally needs an application-only deployment to release
-    // imports, with networkReservedAzs preserving the remaining subnet CIDRs.
-    // See the split-network AZ reduction procedure in DEPLOYMENT_GUIDE.md.
+    // CloudFormation rejects the removal of an export that another stack still imports,
+    // so every value is exported even when the selected backend does not use it.
     this.exportValue(this.vpc.vpcId);
     this.exportValue(this.runtimeSecurityGroup.securityGroupId);
     for (const subnet of this.vpc.privateSubnets) this.exportValue(subnet.subnetId);
 
-    // DNS fail-open configuration uses the CDK AwsCustomResource singleton.
-    // Scope these framework exceptions to its role/function, as in AgentStack.
     NagSuppressions.addResourceSuppressionsByPath(this, [
       `${this.node.path}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
       `${this.node.path}/AWS679f53fac002430cb0da5b7982bd2287/Resource`,

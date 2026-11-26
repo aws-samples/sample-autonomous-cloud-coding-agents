@@ -105,8 +105,6 @@ export async function sendWebhookTestRequest(
   }
 
   if (!json || typeof json !== 'object') {
-    // A 2xx with a missing/non-JSON body means the gateway did not return the
-    // documented envelope — surface it instead of reporting a hollow success.
     throw new ApiError(
       response.status,
       'WEBHOOK_TEST_MALFORMED_RESPONSE',
@@ -123,7 +121,6 @@ export async function sendWebhookTestRequest(
   };
 }
 
-/** Default dry-run-safe sample payload for connectivity testing. */
 export function buildSampleWebhookPayload(repo: string): WebhookTestPayload {
   return {
     repo,

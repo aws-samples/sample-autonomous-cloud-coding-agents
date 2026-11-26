@@ -1,11 +1,3 @@
-"""Tests for the workflow-runner seam in pipeline._execute_agent_step (#248).
-
-Post-cutover (task 8) the workflow runner is the sole agentic path: the single
-``run_agent`` step is dispatched through ``workflow.run_workflow`` (driven by the
-resolved workflow id), while clone/context/post-hooks stay inline. These tests
-pin that path without standing up the full pipeline.
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -36,9 +28,6 @@ def _setup() -> RepoSetup:
 
 class TestExecuteAgentStep:
     def test_routes_through_runner_and_threads_result(self):
-        # The run_agent step runs through the workflow runner; the agent result
-        # threads back via ctx.agent_result. run_agent is lazily imported inside
-        # the handler from the top-level `runner` module, so patch it there.
         expected = AgentResult(status="success", session_id="wf-session")
 
         async def fake(_p, _s, _c, cwd=None, trajectory=None):
@@ -51,9 +40,6 @@ class TestExecuteAgentStep:
         assert out is expected
 
     def test_only_runs_agent_step_not_post_hooks(self):
-        # The seam restricts the runner to the run_agent step: deterministic
-        # post-hook handlers (ensure_pr/verify_build) must NOT fire here — the
-        # inline path owns them.
         expected = AgentResult(status="success")
 
         async def fake(_p, _s, _c, cwd=None, trajectory=None):
@@ -70,11 +56,6 @@ class TestExecuteAgentStep:
         mock_build.assert_not_called()
 
     def test_run_agent_failure_reraises_to_preserve_error_contract(self):
-        # When the run_agent step's handler raises, run_workflow captures it into
-        # a failed StepOutcome (does not propagate). _execute_agent_step must
-        # RE-RAISE so run_task's `except` block restores full error fidelity
-        # (log_error_cw mirror + real text) — not silently downgrade to a generic
-        # AgentResult. The original error text must be carried in the raise.
         async def boom(_p, _s, _c, cwd=None, trajectory=None):
             raise RuntimeError("SDK session expired")
 
@@ -86,24 +67,13 @@ class TestExecuteAgentStep:
 
 
 def _git(repo, *args) -> str:
-    """Run git for real in *repo*, a directory under ``tmp_path``."""
     done = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
     return done.stdout.strip()
 
 
 class TestCommitTrailersOfAWorkflowRun:
-    """The commits of a task name the workflow and the step they were made in (#560).
-
-    The runner, the workflow file, the commit hook and git are the real ones. Only
-    the agent is replaced: by one that commits a change and leaves another one
-    uncommitted, for the safety-net commit ``run_task`` makes after the step."""
-
     @pytest.fixture
     def repo(self, tmp_path, monkeypatch):
-        """A repository with the hook installed, and the environment ``run_task``
-        has prepared when it reaches the agent step: the committer identity, the
-        task and the prompt version. The two workflow variables hold what an
-        earlier run in this process left in them."""
         repo = tmp_path / "repo"
         repo.mkdir()
         # Not the ignore file of the host: git would refuse to add a file it names.
@@ -135,7 +105,6 @@ class TestCommitTrailersOfAWorkflowRun:
         with patch("runner.run_agent", side_effect=agent):
             _execute_agent_step("p", "s", _config(), setup, None, None, None)
         of_the_agent_commit = _git(repo, "log", "-1", "--format=%(trailers)").splitlines()
-        # What run_task does next, before the steps the workflow declares after the agent step.
         assert ensure_committed(str(repo)) is True
 
         trailers = [

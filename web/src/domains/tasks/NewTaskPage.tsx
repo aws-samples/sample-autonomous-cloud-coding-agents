@@ -37,7 +37,6 @@ import { BUDGET_LIMIT_USD, CODING_WORKFLOW_ID, TURN_LIMIT } from '../../core/api
 import { repoHref, taskHref } from '../../core/util/format';
 import { useCreateTask, useLinearIssues, useRepoIssues, useStartLinearIssue, useTaskList } from './hooks';
 
-/** Same rule as the API (`cdk/src/handlers/shared/validation.ts`). */
 const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
 const MAX_DESCRIPTION_LENGTH = 10_000;
 
@@ -51,14 +50,12 @@ interface Errors {
   readonly maxBudget?: string;
 }
 
-/** Linear issue the form will hand over: its id plus the project it belongs to. */
 interface LinearChoice {
   readonly issueId: string;
   readonly projectId: string;
   readonly label: string;
 }
 
-/** Blank means "use the repository's setting"; otherwise the number the API will accept, or NaN. */
 function parseLimit(value: string, integer: boolean): number | undefined {
   const text = value.trim().replace(/^\$/, '');
   if (!text) return undefined;
@@ -121,7 +118,6 @@ export function NewTaskPage() {
 
   const repoLooksValid = REPO_PATTERN.test(repo.trim());
   const issues = useRepoIssues(repo.trim(), mode === 'issue' && repoLooksValid);
-  // null data: this deployment has no console API, so fall back to typing the number.
   const pickerAvailable = issues.data !== null;
   const issueOptions = (issues.data?.issues ?? []).map((i) => ({
     value: String(i.number),
@@ -147,8 +143,6 @@ export function NewTaskPage() {
     setShowErrors(true);
     if (Object.keys(errors).length > 0 || create.isPending || startLinear.isPending) return;
     if (mode === 'linear' && chosenLinear) {
-      // Same path as adding the label in Linear: the agent comments there, and the task
-      // appears on the repository page once Linear's webhook arrives.
       startLinear.mutate({ issueId: chosenLinear.issueId, projectId: chosenLinear.projectId }, { onSuccess: () => void navigate(repoHref(repo.trim())) });
       return;
     }
@@ -157,7 +151,6 @@ export function NewTaskPage() {
         repo: repo.trim(),
         workflow_ref: CODING_WORKFLOW_ID,
         ...(mode === 'issue' ? { issue_number: Number(issue.trim()) } : {}),
-        // With an issue, the text box is optional extra guidance on top of the issue.
         ...(description.trim() ? { task_description: description.trim() } : {}),
         ...limitFields(maxTurns, maxBudget),
         ...(fullDetails && { trace: true }),

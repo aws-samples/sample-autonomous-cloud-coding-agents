@@ -1,13 +1,4 @@
-"""The ``prepare-commit-msg`` hook, run by git in a repository under ``tmp_path``.
-
-The agent installs the hook into every repository it works on (``repo.py``). It
-puts a ``Task-Id`` and a ``Prompt-Version`` trailer on each commit, and a
-``Workflow-Id`` and a ``Workflow-Step`` trailer on a commit made while a workflow
-step is named in the environment. Git reads the trailers of a message from its
-LAST paragraph only, so where the hook writes its own decides whether the trailers
-the message already ends with, such as ``Co-Authored-By``, are still trailers
-afterwards.
-"""
+"""Git reads the trailers of a message from its last paragraph only."""
 
 import os
 import subprocess
@@ -36,7 +27,6 @@ def _git(repo, *args, **env) -> str:
 
 @pytest.fixture
 def repo(tmp_path):
-    """An empty repository with the hook installed the way the agent installs it."""
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "--local", "user.email", "abca-test@example.invalid")
     _git(tmp_path, "config", "--local", "user.name", "ABCA Test")
@@ -45,8 +35,6 @@ def repo(tmp_path):
 
 
 def _commit(repo, *args, prompt_version="1c9c10e027a2", workflow_id="", workflow_step="") -> None:
-    """Commit as the agent does: the task and the prompt version are in the
-    environment, and so are the workflow and its step while a step runs."""
     _git(
         repo,
         "commit",
@@ -65,7 +53,6 @@ def _message(repo) -> str:
 
 
 def _trailers(repo) -> list[str]:
-    """The trailers git itself finds on the last commit."""
     return _git(repo, "log", "-1", "--format=%(trailers)").strip().splitlines()
 
 
@@ -76,7 +63,6 @@ def test_trailers_the_message_ends_with_stay_trailers(repo):
 
 
 def test_message_without_trailers_gets_a_block_of_its_own(repo):
-    # A Conventional Commits subject has the shape of a trailer. It is the title.
     _commit(repo, "-m", "fix: handle empty input", prompt_version="")
 
     assert _message(repo) == f"fix: handle empty input\n\n{_TASK_ID}"

@@ -33,12 +33,8 @@ import type { ApprovalStatus } from '../handlers/shared/types';
  *
  * QUEUED (#441) is a pre-active state for tasks that hit the per-user
  * admission cap: the admission slot was NOT acquired, so no compute is
- * allocated and no concurrency slot is consumed. The admission-queue
- * pickup Lambda re-attempts admission in FIFO order (by ``created_at``)
- * as slots free up, transitioning QUEUED -> SUBMITTED and re-invoking
- * the orchestrator. A pickup that loses the admission race simply
- * re-queues (SUBMITTED -> QUEUED); FIFO position is preserved because
- * ``created_at`` never changes.
+ * allocated and no concurrency slot is consumed. Admission is
+ * re-attempted in FIFO order (by ``created_at``) as slots free up.
  *
  * AWAITING_APPROVAL is the Cedar-HITL soft-deny gate surface: the
  * task is alive but paused on a human decision. See
@@ -75,14 +71,8 @@ export const ApprovalStatusValue = {
 /** Every approval-row status, in declaration order. */
 export const APPROVAL_STATUSES: readonly ApprovalStatus[] = Object.values(ApprovalStatusValue);
 
-/**
- * Union type of all valid task status values.
- */
 export type TaskStatusType = typeof TaskStatus[keyof typeof TaskStatus];
 
-/**
- * Terminal states that indicate a task has finished processing.
- */
 export const TERMINAL_STATUSES: readonly TaskStatusType[] = [
   TaskStatus.COMPLETED,
   TaskStatus.FAILED,
@@ -93,22 +83,13 @@ export const TERMINAL_STATUSES: readonly TaskStatusType[] = [
 /**
  * Pre-active states where the task exists but has not entered the
  * orchestration pipeline. No compute resources are allocated and no
- * concurrency slot is consumed. QUEUED belongs here (#441): admission
- * explicitly did NOT acquire a slot, so counting it as active would
- * deadlock the queue (queued tasks would hold the very slots they
- * are waiting for).
+ * concurrency slot is consumed.
  */
 export const PRE_ACTIVE_STATUSES: readonly TaskStatusType[] = [
   TaskStatus.PENDING_UPLOADS,
   TaskStatus.QUEUED,
 ];
 
-/**
- * Active (non-terminal) states that indicate a task is still in progress.
- * AWAITING_APPROVAL counts as active — the task is alive, just paused
- * waiting on a human decision. PENDING_UPLOADS is NOT here — it is
- * pre-active and does not consume a concurrency slot.
- */
 export const ACTIVE_STATUSES: readonly TaskStatusType[] = [
   TaskStatus.SUBMITTED,
   TaskStatus.HYDRATING,
@@ -119,18 +100,9 @@ export const ACTIVE_STATUSES: readonly TaskStatusType[] = [
 
 /**
  * Valid state transitions. Maps each state to the set of states it can transition to.
- * Derived from the transition table in ORCHESTRATOR.md + §10.3 of the
- * Cedar HITL gates design (AWAITING_APPROVAL entries) + ATTACHMENTS.md
- * (PENDING_UPLOADS entries).
  */
 export const VALID_TRANSITIONS: Readonly<Record<TaskStatusType, readonly TaskStatusType[]>> = {
-  // PENDING_UPLOADS: presigned-upload task awaiting client file uploads.
-  // Transitions to SUBMITTED on confirm-uploads success, FAILED on
-  // screening failure, CANCELLED on user cancel or 30-min auto-cancel.
   [TaskStatus.PENDING_UPLOADS]: [TaskStatus.SUBMITTED, TaskStatus.FAILED, TaskStatus.CANCELLED],
-  // QUEUED (#441): admission-capped task awaiting a free concurrency
-  // slot. SUBMITTED on pickup (orchestrator retries admission), CANCELLED on user
-  // cancel, FAILED only via the queue-stranded backstop.
   [TaskStatus.QUEUED]: [TaskStatus.SUBMITTED, TaskStatus.CANCELLED, TaskStatus.FAILED],
   [TaskStatus.SUBMITTED]: [TaskStatus.QUEUED, TaskStatus.HYDRATING, TaskStatus.FAILED, TaskStatus.CANCELLED],
   [TaskStatus.HYDRATING]: [
@@ -146,9 +118,6 @@ export const VALID_TRANSITIONS: Readonly<Record<TaskStatusType, readonly TaskSta
     TaskStatus.TIMED_OUT,
     TaskStatus.FAILED,
   ],
-  // AWAITING_APPROVAL transitions back to RUNNING on approve or denial
-  // resume; CANCELLED on user cancel mid-approval; FAILED on infrastructure
-  // loss, an exhausted supervisor window or stranded-approval reconciliation.
   [TaskStatus.AWAITING_APPROVAL]: [
     TaskStatus.RUNNING,
     TaskStatus.CANCELLED,

@@ -17,20 +17,10 @@
  *  SOFTWARE.
  */
 
-// The ONE AWS Agent Registry implementation of the `RegistryClient` port (#246).
-// This is the only file upstream of the port that imports the AWS SDK. It owns
-// the substrate-specific decisions established by the live spikes:
-//
-//   - namespace-in-`name` encoding (Option A): Agent Registry has no namespace, so we
-//     fold `kind/namespace/name` into the record `name` and split on read.
-//   - native-vs-CUSTOM storage: purist native descriptors (MCP/SKILL) by default,
-//     each carrying the ABCA runtime config where its format has room for it: MCP in
-//     a `_meta` block of server.json, SKILL in the `x-abca-runtime` frontmatter key
-//     of SKILL.md. `custom:true` stores a verbatim CUSTOM body instead.
-//   - 3-call publish: CreateRegistryRecord is async and lands in DRAFT even with
-//     registry autoApproval. Create and submit always run, so the record reaches
-//     PENDING_APPROVAL; `autoApprove` gates only the third call, the approval.
-//   - resolve ranks semver in code (Agent Registry stores a plain version string).
+// AWS Agent Registry (#246):
+//   - Agent Registry has no namespace.
+//   - CreateRegistryRecord is async and lands in DRAFT even with registry autoApproval.
+//   - Agent Registry stores a plain version string.
 
 import {
   AgentRegistryControlClient,
@@ -70,15 +60,8 @@ import {
 
 const NAME_SEP = '/';
 const RECORD_CREATE_POLL_MS = 2000;
-// 20 s of waiting. The publish Lambda, the only caller, has 28 s for this wait and
-// the calls around it (REGISTRY_PUBLISH_TIMEOUT_SECONDS in constructs/registry-api.ts).
-// A wait the function cannot outlive ends in a gateway error that names no record,
-// instead of the RegistryPublishIncompleteError below.
 const RECORD_CREATE_MAX_POLLS = 10;
 
-/** True when a runtime payload is a non-empty object — the fail-closed gate that
- *  keeps `resolve` from returning a record whose runtime is missing/`{}` (which
- *  would let a task load nothing while the audit claims the pin was honored). */
 function isNonEmptyRuntime(runtime: unknown): boolean {
   return (
     typeof runtime === 'object' &&
@@ -88,8 +71,6 @@ function isNonEmptyRuntime(runtime: unknown): boolean {
   );
 }
 
-/** Coordinates read straight from the record envelope (name/version/status),
- *  which stay readable even when the descriptor payload does not parse. */
 interface RecordCoords {
   readonly kind: string;
   readonly namespace: string;
@@ -98,11 +79,6 @@ interface RecordCoords {
   readonly status: RegistryStatus;
 }
 
-/** A record whose envelope is readable but whose descriptor payload failed to
- *  parse — any {@link MalformedReason}: SKILL.md frontmatter, an `x-abca-runtime`
- *  value, or a CUSTOM/MCP JSON body. Identity comes from the envelope, so the read
- *  paths can skip it (browse) or reject it (resolve/getRecord) precisely,
- *  without trusting the erased payload (#791). */
 interface MalformedRecordEntry {
   readonly malformed: true;
   readonly coords: RecordCoords;
@@ -116,7 +92,6 @@ function isMalformed(entry: RecordEntry): entry is MalformedRecordEntry {
   return (entry as MalformedRecordEntry).malformed === true;
 }
 
-/** Coordinates of an entry regardless of whether it parsed. */
 function entryCoords(entry: RecordEntry): RecordCoords {
   return isMalformed(entry)
     ? entry.coords
@@ -129,19 +104,16 @@ function entryCoords(entry: RecordEntry): RecordCoords {
     };
 }
 
-/** Kinds that map onto a native Agent Registry record type. */
 const NATIVE_RECORD_TYPE_BY_KIND: Record<string, 'MCP' | 'SKILL'> = {
   mcp_server: 'MCP',
   skill: 'SKILL',
 };
 
-/** Frontmatter key carrying the ABCA runtime payload (JSON) inside a native
- *  SKILL record's SKILL.md — the Agent Skills validator requires Markdown
- *  frontmatter (not JSON), so the MCP `_meta` convention can't be reused here. */
+/** The Agent Skills validator requires Markdown frontmatter (not JSON) in SKILL.md. */
 const SKILL_RUNTIME_FM_KEY = 'x-abca-runtime';
 const SKILL_NAME_MAX = 64;
 
-/** Derive a SKILL.md `name` from namespace/name: the Agent Skills validator
+/** For a SKILL.md `name` the Agent Skills validator
  *  requires 1-64 lowercase alphanumerics + single hyphens (no slash, no
  *  leading/trailing/consecutive hyphens). */
 function skillNameSlug(namespace: string, name: string): string {
@@ -154,8 +126,6 @@ function skillNameSlug(namespace: string, name: string): string {
     .replace(/-$/, '');
 }
 
-/** Build a valid SKILL.md (frontmatter + body) carrying discovery metadata and
- *  the ABCA runtime payload in the `x-abca-runtime` frontmatter key. */
 function buildSkillMd(input: {
   namespace: string;
   name: string;
@@ -167,13 +137,7 @@ function buildSkillMd(input: {
   const description = String(
     input.discovery.description ?? input.discovery.summary ?? `${input.namespace}/${input.name} skill`,
   ).slice(0, 100);
-  // Base64-encode the runtime JSON so the value is quote/newline/apostrophe-safe.
   const runtimeB64 = Buffer.from(JSON.stringify(input.runtime), 'utf-8').toString('base64');
-  // Serialize the frontmatter with a real YAML emitter rather than concatenating
-  // lines. Hand-built lines let a caller-controlled `description` containing a
-  // newline smuggle a second `x-abca-runtime:` key that shadows the validated
-  // one on read, bypassing publish-time validation (#246 review B1/B2). `yaml.dump`
-  // quotes/escapes any newline in a value, so no discovery field can inject a key.
   const frontmatter: Record<string, unknown> = {
     name: skillNameSlug(input.namespace, input.name),
     description,
@@ -192,17 +156,7 @@ function buildSkillMd(input: {
   ].join('\n');
 }
 
-/** Extract and YAML-parse the frontmatter block (between the first `---`/`---`
- *  pair) into an object. Returns {} when there is *no* block at all (a record
- *  legitimately without frontmatter). A block that is present but fails to parse
- *  throws {@link RegistryRecordMalformedError} — it must NOT collapse to `{}`,
- *  which would erase the publisher/runtime and make a malformed record look
- *  empty (#791). Parsing the whole block as one YAML document (rather than a
- *  per-line regex) means a newline-bearing value stays inside its value instead
- *  of being read as a second key — but the injection defense proper is on the
- *  write side (`buildSkillMd` quotes/escapes via the YAML dumper). Note a
- *  *duplicate* key does not raise under `json: true` (last value wins), so this
- *  parse does not itself reject duplicate-key documents. */
+/** js-yaml: a *duplicate* key does not raise under `json: true` (last value wins). */
 function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
   const m = skillMd.match(/^---\n([\s\S]*?)\n---/);
   if (!m) return {};
@@ -210,7 +164,7 @@ function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
   try {
     // `loadAll` plus a count rather than `load`: since js-yaml 5, `load` throws on a block
     // with no document in it (empty, blank lines, only comments), which 4.x answered with
-    // undefined. Such a block is handled below; several documents remain an error.
+    // undefined.
     const documents = yaml.loadAll(m[1], { json: true });
     if (documents.length > 1) {
       throw new Error('expected a single document in the stream, but found more');
@@ -223,12 +177,7 @@ function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
       err,
     );
   }
-  // An empty block (`---\n\n---`) is a record legitimately without frontmatter.
   if (parsed === null || parsed === undefined) return {};
-  // A block that parses to a non-mapping (a sequence `- a\n- b`, or a bare scalar)
-  // is corrupt: collapsing it to `{}` would erase the publisher/runtime and let
-  // `show`/`list` surface it as an ordinary healthy record while attribution is
-  // silently gone. Reject it as MALFORMED, same as an unparseable block (#791).
   if (typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new RegistryRecordMalformedError(
       'MALFORMED_FRONTMATTER',
@@ -238,35 +187,19 @@ function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-/** Read a publisher (Cognito sub) field. Absent stays absent, but a *present but
- *  wrong-typed* value (`123`, `["sub"]`) is a MALFORMED descriptor — coercing it
- *  to `undefined` would silently erase attribution while the record stays
- *  APPROVED and loadable, which is #791's vulnerability verbatim. */
 function readPublisherField(value: unknown, reason: MalformedReason): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value === 'string') return value;
   throw new RegistryRecordMalformedError(reason, 'publisher field is present but not a string');
 }
 
-/** Recover the publisher (Cognito sub) from the parsed SKILL.md frontmatter. */
 function parseSkillPublisher(skillMd: string): string | undefined {
   return readPublisherField(parseSkillFrontmatter(skillMd)[PUBLISHER_FM_KEY], 'MALFORMED_FRONTMATTER');
 }
 
-/** Recover the ABCA runtime payload from a SKILL.md's `x-abca-runtime`
- *  frontmatter key (base64-encoded JSON). Mirrors
- *  ``agent/src/registry/agent_registry_client.py``. Also accepts the legacy
- *  single-quoted-JSON form so records published before the base64 switch still
- *  resolve. Reads the key from the YAML-parsed frontmatter object, so a
- *  caller-controlled discovery field cannot inject a shadowing key. */
 function parseSkillRuntime(skillMd: string): unknown {
   const raw = parseSkillFrontmatter(skillMd)[SKILL_RUNTIME_FM_KEY];
   if (typeof raw !== 'string') return {};
-  // Legacy form: raw JSON (YAML has already unwrapped its single-quoting, so the
-  // value arrives starting with `{`). New form: base64-encoded JSON. A present
-  // but undecodable value must NOT slip out as a raw SyntaxError: box it as
-  // MALFORMED so `loadRecordById` carries it as a marker and the read paths
-  // skip/reject it precisely, exactly as they do for bad frontmatter (#791).
   const trimmed = raw.trim();
   try {
     if (trimmed.startsWith('{')) {
@@ -282,14 +215,6 @@ function parseSkillRuntime(skillMd: string): unknown {
   }
 }
 
-/** JSON.parse a descriptor body into an object, boxing any failure as a MALFORMED
- *  marker (rather than a raw SyntaxError/TypeError) so a corrupt CUSTOM/MCP body
- *  funnels through the same skip/reject read paths as bad SKILL.md frontmatter
- *  (#791). `JSON.parse` succeeds on non-objects too (`"null"`, `"[1,2]"`, `"123"`,
- *  `"\"s\""`), and the callers immediately dereference the result — so a
- *  successful parse that is not a plain object is rejected here rather than
- *  crashing the next line with an unboxed `TypeError` that would escape `resolve`
- *  as an opaque 500 and take down the whole namespace listing (#837 review). */
 function parseDescriptorJson(data: string, what: string): Record<string, unknown> {
   let parsed: unknown;
   try {
@@ -324,12 +249,8 @@ export class AgentRegistryClient implements RegistryClient {
 
   constructor(opts: AgentRegistryClientOptions) {
     this.registryId = opts.registryId;
-    // makeClient attaches the ABCA solution UA segment (#319); the injection
-    // seam (opts.client) is preserved for tests.
     this.client = opts.client ?? makeClient(AgentRegistryControlClient);
   }
-
-  // --- name (Option A) encode/decode ------------------------------------------
 
   private encodeName(kind: string, namespace: string, name: string): string {
     return [kind, namespace, name].join(NAME_SEP);
@@ -340,17 +261,10 @@ export class AgentRegistryClient implements RegistryClient {
     return { kind, namespace, name: rest.join(NAME_SEP) };
   }
 
-  // --- publish (3-call) -------------------------------------------------------
-
   async publish(input: PublishInput): Promise<RegistryRecord> {
     const useCustom = input.custom || !(input.kind in NATIVE_RECORD_TYPE_BY_KIND);
     const name = this.encodeName(input.kind, input.namespace, input.name);
 
-    // Immutability: reject a re-publish of the same coordinates. `getRecord`
-    // throws RegistryRecordMalformedError when a corrupt record already occupies
-    // them — that is still an occupied slot, so treat it as a conflict (409) with
-    // a corruption hint rather than letting it fall through to an opaque 500 that
-    // names neither the conflict nor the corruption (#837 review).
     let existing: RegistryRecord | null;
     try {
       existing = await this.getRecord(input.kind, input.namespace, input.name, input.version);
@@ -385,18 +299,9 @@ export class AgentRegistryClient implements RegistryClient {
     );
     const recordId = this.idFromArn(res.recordArn!);
 
-    // The record now exists on the substrate. Any failure past this point leaves
-    // a partial (DRAFT/PENDING_APPROVAL) record that immutability will block a
-    // clean retry of — so surface the recordId in a typed error rather than a
-    // bare 500, and log it, so an operator can approve or delete the orphan.
     try {
-      // CreateRegistryRecord is async — wait until it leaves CREATING.
       await this.waitPastCreating(recordId);
 
-      // Always submit for approval so a normal publish lands in PENDING_APPROVAL —
-      // otherwise the record sits in DRAFT, which no ABCA surface can resolve or
-      // promote (there is no standalone submit endpoint). Only the final APPROVED
-      // transition is gated on autoApprove.
       await this.client.send(
         new SubmitRegistryRecordForApprovalCommand({ registryId: this.registryId, recordId }),
       );
@@ -413,9 +318,6 @@ export class AgentRegistryClient implements RegistryClient {
 
       const entry = await this.loadRecordById(recordId);
       if (!entry) throw new Error(`published record ${recordId} not readable after write`);
-      // The record we just serialized should always parse; if it doesn't, the
-      // write produced a corrupt descriptor — surface it (the catch below wraps
-      // it as a stranded-record error) rather than returning it.
       if (isMalformed(entry)) throw entry.error;
       return entry;
     } catch (err) {
@@ -434,8 +336,6 @@ export class AgentRegistryClient implements RegistryClient {
     }
   }
 
-  // --- get / list -------------------------------------------------------------
-
   async getRecord(
     kind: string,
     namespace: string,
@@ -443,23 +343,17 @@ export class AgentRegistryClient implements RegistryClient {
     version: string,
   ): Promise<RegistryRecord | null> {
     // Agent Registry keys records by opaque id, not our coordinates, and List is
-    // eventually consistent — so scan the (small) record set and match.
+    // eventually consistent.
     const entries = await this.loadEntries({ kind, namespace, name });
     const match = entries.find(
       (e) => entryCoords(e).name === name && entryCoords(e).version === version,
     );
     if (!match) return null;
-    // Fail closed on the targeted record: a malformed descriptor erased its
-    // publisher/runtime, so hand back the parse failure rather than a record
-    // with silently-dropped attribution (#791).
     if (isMalformed(match)) throw match.error;
     return match;
   }
 
   async listRecords(filter?: ListFilter): Promise<readonly RegistryRecord[]> {
-    // Browse tolerates a poisoned record: skip a malformed one (with a loud
-    // warning) so one corrupt SKILL.md can't break listing an entire namespace.
-    // The trust-critical paths (resolve/getRecord) still reject it precisely.
     const entries = await this.loadEntries(filter);
     const out: RegistryRecord[] = [];
     for (const entry of entries) {
@@ -480,9 +374,6 @@ export class AgentRegistryClient implements RegistryClient {
   }
 
   async listBrowseEntries(filter?: ListFilter): Promise<readonly RegistryBrowseEntry[]> {
-    // Unlike listRecords, keep malformed records as envelope-only markers so
-    // `show` can surface a corrupt version (flagged) instead of dropping it and
-    // making an all-malformed asset look absent (#791).
     const entries = await this.loadEntries(filter);
     return entries.map((entry) => {
       if (isMalformed(entry)) {
@@ -493,13 +384,6 @@ export class AgentRegistryClient implements RegistryClient {
     });
   }
 
-  /** Load every record matching `filter` as an entry that is either a parsed
-   *  record or a malformed marker. O(n): List + one GetRegistryRecord per
-   *  summary that passes the filter (the summary carries the record name, so a
-   *  record of another kind, namespace or asset costs no round trip), and every
-   *  read path (resolve/show/getRecord) funnels through here.
-   *  Fine at MVP catalog sizes; revisit with a secondary coordinate index if
-   *  large catalogs make the per-record round trips material. */
   private async loadEntries(filter?: ListFilter): Promise<RecordEntry[]> {
     const out: RecordEntry[] = [];
     let nextToken: string | undefined;
@@ -526,17 +410,11 @@ export class AgentRegistryClient implements RegistryClient {
     return out;
   }
 
-  // --- resolve ----------------------------------------------------------------
-
   async resolve(ref: ParsedRef): Promise<ResolvedAsset> {
     const refStr = `registry://${ref.kind}/${ref.namespace}/${ref.name}@${ref.constraint.raw}`;
-    // Consider malformed entries as candidates too: a malformed record still has
-    // a readable version/status from its envelope, so if it is the winning
-    // version we must reject it rather than silently downgrade to a lower one.
     const all = await this.loadEntries({ kind: ref.kind, namespace: ref.namespace, name: ref.name });
     const forName = all.filter((e) => entryCoords(e).name === ref.name);
 
-    // Only APPROVED / DEPRECATED are resolution candidates.
     const candidates = forName.filter((e) => {
       const status = entryCoords(e).status;
       return status === 'APPROVED' || status === 'DEPRECATED';
@@ -553,17 +431,7 @@ export class AgentRegistryClient implements RegistryClient {
       );
     }
     const winner = candidates.find((e) => entryCoords(e).version === winningVersion)!;
-    // Fail closed: the resolved winner's descriptor is unparseable, so its
-    // publisher/runtime were erased. Reject rather than trust an empty payload
-    // or silently pick a different version (#791).
     if (isMalformed(winner)) {
-      // Keep the parser text (which can echo a fragment of the raw descriptor —
-      // a token in a `url` query string, an `Authorization` header value) out of
-      // the client-facing 422 body: resolve/list/show are open to any
-      // authenticated caller (REGISTRY.md §10), and the resolve handler returns
-      // this message verbatim, bypassing `redactRuntimeForResponse`. Surface only
-      // the coordinates + the `MalformedReason` discriminator; log the detail for
-      // the operator (#837 review).
       logger.error('resolve rejected a malformed winner', {
         recordId: winner.recordId,
         kind: winner.coords.kind,
@@ -579,11 +447,6 @@ export class AgentRegistryClient implements RegistryClient {
         `resolved ${winner.coords.kind}/${winner.coords.namespace}/${winner.coords.name}@${winner.coords.version} has a malformed descriptor (${winner.error.reason})`,
       );
     }
-    // Fail closed: an otherwise-resolvable record whose runtime payload is
-    // empty must NOT resolve to `{}` — that would let a task run with a
-    // missing/substituted asset while the audit claims the pin was honored
-    // (REGISTRY.md §8). A record can reach this state via an out-of-band write;
-    // a corrupt descriptor is caught above as MALFORMED.
     if (!isNonEmptyRuntime(winner.runtime)) {
       throw new RegistryResolutionError(
         'REMOVED',
@@ -602,17 +465,13 @@ export class AgentRegistryClient implements RegistryClient {
     };
   }
 
-  // --- internals --------------------------------------------------------------
-
   private idFromArn(arn: string): string {
     return arn.includes('/') ? arn.split('/').pop()! : arn;
   }
 
   /**
-   * CreateRegistryRecord is async, so `publish` waits until the record leaves `CREATING`.
-   *
-   * Not-found, `CREATING` and a missing status are transient right after the create.
-   * Reading one as success returns 201 for a record that never became usable (#246).
+   * CreateRegistryRecord is async. Not-found, `CREATING` and a missing status are
+   * transient right after the create.
    */
   private async waitPastCreating(recordId: string): Promise<void> {
     for (let i = 0; i < RECORD_CREATE_MAX_POLLS; i++) {
@@ -626,10 +485,8 @@ export class AgentRegistryClient implements RegistryClient {
             `record ${recordId} entered ${status}${rec.statusReason ? `: ${rec.statusReason}` : ''}`,
           );
         }
-        if (status && status !== 'CREATING') return; // past CREATING: DRAFT for a new record
+        if (status && status !== 'CREATING') return;
       } catch (err) {
-        // Transient right after CreateRegistryRecord — the record may not be
-        // readable yet. Keep polling rather than declaring success.
         if (!(err instanceof ResourceNotFoundException)) throw err;
       }
       await sleep(RECORD_CREATE_POLL_MS);
@@ -647,7 +504,7 @@ export class AgentRegistryClient implements RegistryClient {
       );
     } catch (err) {
       if (err instanceof ResourceNotFoundException) {
-        return null; // service 404 is the port's absent-record contract
+        return null;
       }
       throw err;
     }
@@ -663,9 +520,6 @@ export class AgentRegistryClient implements RegistryClient {
     try {
       payload = this.extractPayload(raw);
     } catch (err) {
-      // A malformed descriptor payload keeps its envelope identity but its
-      // publisher/runtime are unreadable — carry it as a marker so the read
-      // paths can skip (browse) or reject (resolve/getRecord) it precisely.
       if (err instanceof RegistryRecordMalformedError) {
         return { malformed: true, coords, recordId, error: err };
       }
@@ -681,9 +535,6 @@ export class AgentRegistryClient implements RegistryClient {
     };
   }
 
-  /** Pull the ABCA runtime payload back out of the descriptor: the `_meta` block of
-   *  a native MCP server.json, the `x-abca-runtime` frontmatter key of a native
-   *  SKILL.md, or the verbatim CUSTOM body. */
   private extractPayload(raw: Pick<GetRegistryRecordCommandOutput, 'recordType' | 'descriptors'>): {
     runtime: RuntimePayload;
     storageMode: StorageMode;
@@ -700,8 +551,6 @@ export class AgentRegistryClient implements RegistryClient {
       };
     }
     if (raw.recordType === 'SKILL') {
-      // SKILL.md is Markdown frontmatter, not JSON — recover the runtime from
-      // the `x-abca-runtime` frontmatter key.
       const skillMd = raw.descriptors?.agentSkillsDefinition?.additionalData?.skillMd?.data ?? '';
       return {
         runtime: parseSkillRuntime(skillMd) as RuntimePayload,
@@ -710,7 +559,6 @@ export class AgentRegistryClient implements RegistryClient {
         publisher: parseSkillPublisher(skillMd),
       };
     }
-    // MCP: JSON server.json with the runtime in a `_meta` block.
     const inline = raw.descriptors?.mcpServer?.data ?? '{}';
     const body = parseDescriptorJson(inline, 'MCP server.json body');
     const meta = body._meta && typeof body._meta === 'object' && !Array.isArray(body._meta)
@@ -735,12 +583,8 @@ export class AgentRegistryClient implements RegistryClient {
 
   private nativeDescriptors(input: PublishInput): Descriptors {
     if (NATIVE_RECORD_TYPE_BY_KIND[input.kind] === 'MCP') {
-      // MCP: embed the runtime + publisher in a `_meta` block on the validated
-      // server.json. A valid server.json may legitimately carry its own `_meta`
-      // (the MCP spec reserves it for arbitrary metadata), so merge our ABCA keys
-      // into the caller's block rather than replacing it — clobbering it would
-      // silently drop the publisher's metadata, and a future reorder could drop
-      // our runtime on read (extractPayload reads `_meta[RUNTIME_META_KEY]`).
+      // A valid server.json may legitimately carry its own `_meta`
+      // (the MCP spec reserves it for arbitrary metadata).
       const callerMeta =
         input.discovery._meta && typeof input.discovery._meta === 'object' && !Array.isArray(input.discovery._meta)
           ? (input.discovery._meta as Record<string, unknown>)
@@ -750,8 +594,6 @@ export class AgentRegistryClient implements RegistryClient {
       const withMeta = { ...input.discovery, _meta: meta };
       return { mcpServer: { data: JSON.stringify(withMeta) } };
     }
-    // SKILL: the validator requires Markdown frontmatter (not JSON), so
-    // the runtime rides in an `x-abca-runtime` frontmatter key inside SKILL.md.
     const skillMd = buildSkillMd({
       namespace: input.namespace,
       name: input.name,

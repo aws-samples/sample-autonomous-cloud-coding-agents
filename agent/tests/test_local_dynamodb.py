@@ -1,11 +1,4 @@
-"""The DynamoDB Local helpers, run with an ``aws`` stand-in first on PATH.
-
-``mise //agent:local:up`` creates the tables with ``scripts/create-local-tables.sh``
-and ``mise //agent:local:events`` reads the progress events back. Both call the AWS
-CLI and have to work with either major version of it. ``--no-cli-pager`` is a flag
-of v2 that v1 refuses before it sends anything, so the stand-in refuses it too. The
-AWS CLI of the machine is not called and nothing has to listen on the endpoint.
-"""
+"""``--no-cli-pager`` is a flag of AWS CLI v2 that v1 refuses before it sends anything."""
 
 import os
 import subprocess

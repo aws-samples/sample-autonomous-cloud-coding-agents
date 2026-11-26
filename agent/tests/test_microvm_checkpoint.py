@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Guest durable-state checks; optional DynamoDB Local cases execute conditions."""
-
 from __future__ import annotations
 
 import asyncio
@@ -272,7 +270,6 @@ def local_tables(monkeypatch):
     import boto3
     from botocore.config import Config
 
-    # Never let an accidentally set endpoint create tables in an AWS account.
     endpoint = urlsplit(LOCAL_ENDPOINT)
     assert endpoint.scheme == "http" and endpoint.hostname == "127.0.0.1"
     client = boto3.client(

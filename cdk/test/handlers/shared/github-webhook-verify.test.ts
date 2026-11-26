@@ -66,9 +66,6 @@ describe('verifyGitHubSignature', () => {
     expect(verifyGitHubSignature(SECRET_VALUE, sig, '{"hello":"WORLD"}')).toBe(false);
   });
 
-  // Empty-secret fail-open guard at the headline check.
-  // HMAC('', body) was previously accepted by `crypto.createHmac` and would
-  // pass `timingSafeEqual` if the attacker computed the same HMAC.
   test('rejects empty webhookSecret even with a syntactically-valid signature', () => {
     const body = '{"hello":"world"}';
     const empty = 'sha256=' + crypto.createHmac('sha256', '').update(body).digest('hex');
@@ -115,8 +112,6 @@ describe('getGitHubWebhookSecret', () => {
     expect(smSend).toHaveBeenCalledTimes(2);
   });
 
-  // Empty-secret fails closed at the fetch layer, not just the verify layer.
-  // An operator who wrote `""` out of band must not have it cached and used.
   test('returns null when SecretString is the empty string', async () => {
     smSend.mockResolvedValueOnce({ SecretString: '' });
     expect(await getGitHubWebhookSecret(SECRET_ID)).toBeNull();
@@ -176,7 +171,6 @@ describe('verifyGitHubRequest (cache + transparent re-fetch)', () => {
       .mockResolvedValueOnce({ SecretString: '' })
       .mockResolvedValueOnce({ SecretString: '' });
     const body = '{"event":"deployment_status"}';
-    // An attacker who knows the secret is empty would compute HMAC('', body).
     const forged = 'sha256=' + crypto.createHmac('sha256', '').update(body).digest('hex');
     expect(await verifyGitHubRequest(SECRET_ID, forged, body)).toBe(false);
   });

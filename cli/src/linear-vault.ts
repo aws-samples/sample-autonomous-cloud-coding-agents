@@ -17,16 +17,6 @@
  *  SOFTWARE.
  */
 
-// Helpers for onboarding a Linear workspace through the AgentCore Identity
-// Token Vault (RFC #249 Phase 1). Linear is not a built-in vault vendor, so it
-// uses a CustomOauth2 credential provider (verified by the Phase-0 spike);
-// these functions create that provider from the workspace's Linear OAuth app
-// credentials and drive the one 3LO (USER_FEDERATION) consent round-trip that
-// mints + caches the first token in the vault.
-//
-// The provider is created once per workspace and named deterministically from
-// the slug (mirrors the Secrets-Manager secret name), so re-running setup is
-// idempotent (create → fall back to update).
 import {
   BedrockAgentCoreClient,
   CompleteResourceTokenAuthCommand,
@@ -49,39 +39,26 @@ import { makeClient } from './ua';
 /** Consent-time parameters. Part of the vault's cache key, so every resolve must
  *  send the identical set or a live grant reads as "needs consent". */
 const LINEAR_VAULT_CUSTOM_PARAMS: Record<string, string> = { actor: 'app', prompt: 'consent' };
-/** Exported for the contract-parity test only — see contracts/constants.json linear_vault. */
 export const LINEAR_VAULT_CUSTOM_PARAMS_FOR_TEST = LINEAR_VAULT_CUSTOM_PARAMS;
 
-/** Linear OAuth issuer, for the CustomOauth2 discovery metadata. */
 const LINEAR_ISSUER = 'https://linear.app';
 
 /**
  * Vault credential-provider name for a workspace. Deterministic from the slug
- * so setup is idempotent and the runtime resolvers can recompute it. Matches
- * the `bgagent-linear-oauth-<slug>` shape used for the SM secret, keeping the
- * two names aligned in operator output.
+ * so setup is idempotent and the runtime resolvers can recompute it.
  */
 export function linearVaultProviderName(workspaceSlug: string): string {
   return `bgagent-linear-oauth-${workspaceSlug}`;
 }
 
 /** Subject for workspaces onboarded before `vault_user_id` was recorded on the
- *  registry row. Fresh installs use {@link linearVaultUserIdForSlug}. Must match
- *  the runtime fallbacks: `legacyWorkspaceUserId` (linear-vault-token.ts) and the
- *  inlined form in `agent/src/config.py`. */
+ *  registry row. Fresh installs use {@link linearVaultUserIdForSlug}. */
 export function linearVaultUserId(linearWorkspaceId: string): string {
   return `linear-workspace-${linearWorkspaceId}`;
 }
 
 /**
  * Vault subject derived from the workspace SLUG rather than its organization UUID.
- *
- * The UUID is only knowable once a Linear token exists, so binding the grant to it
- * forces two consents during onboarding: one to learn the organization, a second to
- * bind the vault. The slug is known from the command line, so a slug-derived
- * subject lets a single consent onboard a workspace. The chosen id is recorded on
- * the registry row (`vault_user_id`) because it is no longer derivable at runtime.
- *
  * Distinct prefix from {@link linearVaultUserId} so the two forms can never collide.
  */
 export function linearVaultUserIdForSlug(workspaceSlug: string): string {
@@ -91,13 +68,11 @@ export function linearVaultUserIdForSlug(workspaceSlug: string): string {
 /**
  * Create (or update, if it already exists) the CustomOauth2 credential provider
  * for a Linear workspace. Returns the provider name + the fixed callback URL the
- * operator must register as the Linear OAuth app's redirect_uri (spike F6).
+ * operator must register as the Linear OAuth app's redirect_uri.
  *
- * `created` distinguishes the first run from every later one, which matters
- * because the callback URL ends in an id AgentCore mints here. On a first run that
- * URL cannot yet be registered on the Linear app, so consent is guaranteed to fail
- * with "Invalid redirect_uri" — the caller should print it and stop rather than
- * open a browser to a dead end.
+ * `created` is true only on the run that created the provider. The callback URL ends in
+ * an id AgentCore mints at creation, so on that run it is not yet registered on the
+ * Linear app and consent fails with "Invalid redirect_uri".
  */
 export async function upsertLinearCredentialProvider(args: {
   region: string;
@@ -134,8 +109,6 @@ export async function upsertLinearCredentialProvider(args: {
     return { providerName, callbackUrl: created.callbackUrl ?? '', created: true };
   } catch (err) {
     if (!isAlreadyExistsError(err)) throw err;
-    // Provider exists (re-run) — update the client credentials in place so a
-    // rotated Linear app secret is picked up, then re-read the callback URL.
     await control.send(
       new UpdateOauth2CredentialProviderCommand({
         name: providerName,
@@ -151,17 +124,9 @@ export async function upsertLinearCredentialProvider(args: {
 }
 
 /**
- * Outcome of reading an EXISTING provider's callback URL — the vault path's Linear
- * `redirect_uri`, which `linear app-template` prints so the operator need not find it.
- *
- * Read-only and never throws: on a first run the provider does not exist yet and the
- * operator may have no credentials at all, and a template command must still work.
- *
- * `absent` and `unreadable` used to be one `null`, which was harmless while every
- * caller rendered the same text either way. They no longer do: `app-template` tells an
- * operator to leave Linear's Redirect URIs field EMPTY when no provider exists, and that
- * advice is wrong for a workspace whose provider exists but could not be read (expired
- * credentials, wrong region). So the caller has to be able to tell them apart.
+ * Outcome of reading an existing provider's callback URL, the vault path's Linear
+ * `redirect_uri`. `absent`: no provider exists. `unreadable`: the read failed for any
+ * other reason (expired credentials, wrong region). The probe never throws.
  */
 export type VaultCallbackProbe =
   | { readonly kind: 'found'; readonly callbackUrl: string }
@@ -186,15 +151,8 @@ export async function probeLinearVaultCallbackUrl(args: {
 }
 
 /**
- * True when a create failed only because the provider already exists, so the
- * caller can fall back to update-in-place and stay idempotent across re-runs.
- *
- * AgentCore reports a duplicate provider name as a **`ValidationException`**
- * ("Credential provider with name: <name> already exists"), NOT the
- * `ConflictException` the name suggests — live-caught when a second
- * onboarding run aborted instead of updating. `ConflictException` is still
- * accepted in case the service tightens this later, and the message check keeps
- * genuine validation errors (bad endpoints, malformed config) surfacing.
+ * AgentCore reports a duplicate provider name as a `ValidationException`
+ * ("Credential provider with name: <name> already exists"), not a `ConflictException`.
  */
 function isAlreadyExistsError(err: unknown): boolean {
   if (err instanceof ConflictException) return true;
@@ -207,46 +165,18 @@ function isAlreadyExistsError(err: unknown): boolean {
  * True when a vault call failed because AgentCore Identity is not usable here —
  * as opposed to the service answering and rejecting our input.
  *
- * The distinction matters because the two demand opposite handling: unusable means
- * fall back to Secrets Manager and onboard anyway (AgentCore Identity is
- * region-limited, and a sample has to work where it is absent), while a rejected
- * request means the operator gave us something wrong — bad client credentials, a
- * malformed name — and silently switching substrate would bury that behind a
- * second, unrelated failure.
- *
- * `ValidationException` and `ConflictException` are the service talking, so they
- * surface. Everything else (endpoint resolution, no such service in region,
- * credentials, network, throttling) is treated as unusable.
+ * `ValidationException`, `ConflictException`, `AccessDeniedException` and
+ * `UnauthorizedException` are the service answering, so they yield false. Everything
+ * else (endpoint resolution, no such service in the region, network, throttling) yields
+ * true.
  */
 export function isVaultUnavailableError(err: unknown): boolean {
   const name = (err as { name?: string } | undefined)?.name ?? '';
-  // The service REJECTING our input — surface it, the vault is plainly there.
   if (name === 'ValidationException' || name === 'ConflictException') return false;
-  // Nor is a permissions problem an availability problem. Reporting it as one tells a
-  // first-time operator "AgentCore Identity not available in <region>" when the real
-  // cause is a missing `CreateOauth2CredentialProvider` on their own principal — they
-  // then go looking at regional availability instead of at their IAM policy, and the
-  // onboarding silently completes on Secrets Manager as though the vault were absent.
   if (name === 'AccessDeniedException' || name === 'UnauthorizedException') return false;
   return true;
 }
 
-/**
- * Mint a Linear token from an EXISTING vault grant.
- *
- * Read-only: no `forceAuthentication`, so it can never open a browser or start a
- * consent. That is what makes it safe for ordinary CLI commands — they want a
- * token, not an onboarding flow.
- *
- * Needed because a workspace onboarded onto the vault has no usable Secrets
- * Manager token (deliberately, for a fresh onboarding — and any preserved one dies
- * with the app it was issued for). Without this, every CLI command that calls
- * Linear fails with a bare 401 on exactly the workspaces the vault is managing.
- *
- * The return URL is NOT part of the vault's cache key — verified against a
- * workspace consented through the hosted page and minted with the loopback URL —
- * so callers do not have to know which one consent used.
- */
 export type VaultMintResult =
   | { readonly kind: 'token'; readonly accessToken: string }
   /** The vault answered with an authorization URL: this grant needs a fresh consent. */
@@ -254,6 +184,15 @@ export type VaultMintResult =
   /** The vault could not be asked (permissions, throttle, not in this region). */
   | { readonly kind: 'unavailable'; readonly reason: string };
 
+/**
+ * Mint a Linear token from an EXISTING vault grant.
+ *
+ * Read-only: no `forceAuthentication`, so it can never open a browser or start a
+ * consent.
+ *
+ * The return URL is not part of the vault's cache key, so it need not be the one
+ * consent used.
+ */
 export async function mintLinearTokenFromVault(args: {
   region: string;
   workloadName: string;
@@ -273,21 +212,12 @@ export async function mintLinearTokenFromVault(args: {
         scopes: [...LINEAR_OAUTH_SCOPES],
         oauth2Flow: 'USER_FEDERATION',
         resourceOauth2ReturnUrl: CALLBACK_URL,
-        // Must match what consent sent: customParameters are part of the vault's
-        // cache key, so omitting them reports "needs consent" despite a live grant.
         customParameters: { ...LINEAR_VAULT_CUSTOM_PARAMS },
       }),
     );
     if (resp.accessToken) return { kind: 'token', accessToken: resp.accessToken };
-    // An authorizationUrl with no token means the grant needs re-consent, which a
-    // non-interactive command cannot drive.
     return { kind: 'consent-required' };
   } catch (err) {
-    // Distinguished, not collapsed. `bgagent platform doctor` turns a verdict into a
-    // hard `fail` whose remedy is `bgagent linear setup`, and a re-consent can replace
-    // the Linear installation — so reporting a throttle or a missing permission as
-    // "revoked" tells an operator to destroy a grant that is working. Mirrors the
-    // cdk-side `VaultTokenResult` for the same reason.
     return {
       kind: 'unavailable',
       reason: (err as { name?: string } | undefined)?.name ?? 'unknown_error',
@@ -298,12 +228,6 @@ export async function mintLinearTokenFromVault(args: {
 /**
  * What `beginVaultConsent` found: either the grant is already good, or a browser
  * round-trip is required.
- *
- * Tagged rather than a flat record with empty-string sentinels. Under the old shape
- * "already consented" was `authorizationUrl: ''` and callers branched on truthiness,
- * so a partially-populated step — a URL with no session, or a session with no URL —
- * was a constructable value that read as valid. The consent fields now exist only on
- * the arm that has them, which is the same reason `VaultTokenResult` is a union.
  */
 export type VaultConsentStep =
   | {
@@ -322,14 +246,9 @@ export type VaultConsentStep =
 /**
  * Finalize a consented federation session so the vault mints + caches the token.
  *
- * **This step is mandatory and easy to miss.** The browser flow is:
- * Linear consent → AgentCore's own callback (AWS exchanges the code for a token)
- * → AgentCore redirects the browser to `resourceOauth2ReturnUrl?session_id=…`.
- * Until `CompleteResourceTokenAuth` is called with that `session_id`, the session
- * stays open and `GetResourceOauth2Token` keeps returning an `authorizationUrl`
- * as if consent never happened — so a caller that only polls waits forever.
- * Live-caught: the first implementation skipped this and hung on the poll while the
- * browser 404'd on an unlistened return URL.
+ * After consent AgentCore redirects the browser to
+ * `resourceOauth2ReturnUrl?session_id=…`. Until `CompleteResourceTokenAuth` is called
+ * with that `session_id`, `GetResourceOauth2Token` keeps returning an `authorizationUrl`.
  */
 export async function finalizeVaultConsent(args: {
   region: string;
@@ -350,13 +269,12 @@ export async function finalizeVaultConsent(args: {
  * Begin the 3LO consent flow: request a token for the workspace's user identity.
  * When no cached grant exists the vault returns an `authorizationUrl` (a PAR
  * that redirects to Linear's authorize endpoint with actor=app + prompt=consent
- * forwarded via customParameters — spike F1). After the operator consents, the
+ * forwarded via customParameters). After the operator consents, the
  * returned `poll` closure re-requests the token; it returns the access token
  * once the session completes, or null while consent is still pending.
  *
- * The return URL is required by USER_FEDERATION (spike F7) and must be on the
- * workload identity's allowlist. The CLI localhost loopback is always
- * registered by the LinearIdentityVault construct.
+ * The return URL is required by USER_FEDERATION and must be on the
+ * workload identity's allowlist.
  */
 export async function beginVaultConsent(args: {
   region: string;
@@ -388,10 +306,6 @@ export async function beginVaultConsent(args: {
         scopes: [...LINEAR_OAUTH_SCOPES],
         oauth2Flow: 'USER_FEDERATION',
         resourceOauth2ReturnUrl: args.returnUrl,
-        // Forward the agent-install params onto Linear's authorize URL (spike F1).
-        // From the shared constant, not inlined: this is the call that DEFINES the
-        // cache key every resolver is required to reproduce, so a divergence here
-        // silently turns every later resolve into a cache miss.
         customParameters: { ...LINEAR_VAULT_CUSTOM_PARAMS },
         ...(forceAuth ? { forceAuthentication: true } : {}),
       }),
@@ -402,10 +316,6 @@ export async function beginVaultConsent(args: {
     };
   }
 
-  // Try the CACHED grant first (no forceAuthentication). A re-run on a healthy
-  // workspace then costs nothing and needs no browser — forcing unconditionally
-  // would drag the operator through consent again just to re-record a provider
-  // name. Only when there is no usable grant do we force a fresh authorization.
   const cached = await requestToken(false);
   if (cached.token) {
     return { kind: 'already-consented', poll: async () => cached.token };
@@ -413,7 +323,6 @@ export async function beginVaultConsent(args: {
 
   const first = await requestToken(true);
   if (first.token) {
-    // Raced with another consent between the two calls — take the token.
     return { kind: 'already-consented', poll: async () => first.token };
   }
   if (!first.authUrl) {

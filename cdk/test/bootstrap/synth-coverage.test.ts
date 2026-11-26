@@ -31,7 +31,6 @@ import {
 import { AgentRegistryStack } from '../../src/constructs/registry';
 import { AgentStack } from '../../src/stacks/agent';
 
-/** Resource types across a stack and ALL of its nested stacks, at any depth (#757). */
 function typesIncludingNested(stack: Stack): Set<string> {
   const stacks: Stack[] = [stack, ...stack.node.findAll().filter((c): c is NestedStack => c instanceof NestedStack)];
   return new Set(stacks.flatMap((s) =>
@@ -74,8 +73,6 @@ describe('Bootstrap policy synth coverage', () => {
   });
 
   it('maps every custom resource type to the invoke of its provider alone', () => {
-    // The provider's Lambda makes the AWS calls under its own role. When the bundle already
-    // holds a surplus action listed for a `Custom::*` type, no other test here fails.
     const customTypes = Object.keys(RESOURCE_ACTION_MAP).filter((cfnType) => cfnType.startsWith('Custom::'));
     expect(customTypes.length).toBeGreaterThan(0);
     for (const cfnType of customTypes) {
@@ -141,10 +138,6 @@ describe('Bootstrap policy synth coverage', () => {
   });
 
   it('maps the context-gated tool-gateway CFN types (ADR-019, not in default synth)', () => {
-    // The default synth above never instantiates the ToolGateway construct, so
-    // its two CFN types would slip past the coverage loop. Synthesize the gated
-    // path explicitly and assert both types are mapped AND fully covered by the
-    // bootstrap policy bundle — the same guarantee the loop gives default types.
     const app = new App({ context: { enableToolGateway: true } });
     const gatedTemplate = Template.fromStack(
       new AgentStack(app, 'GatewayCoverageStack', {
@@ -168,10 +161,6 @@ describe('Bootstrap policy synth coverage', () => {
   });
 
   it('maps the context-gated Linear identity vault custom resource (#249 P1, not in default synth)', () => {
-    // The default synth never instantiates LinearIdentityVault, so its custom
-    // resource type would slip past the coverage loop. Synthesize the gated path
-    // explicitly and assert the type is present, mapped, AND fully covered by the
-    // bootstrap policy bundle — same guarantee the loop gives default types.
     const app = new App({ context: { enableLinearIdentityVault: true } });
     const gatedTemplate = Template.fromStack(
       new AgentStack(app, 'LinearVaultCoverageStack', {
@@ -184,18 +173,12 @@ describe('Bootstrap policy synth coverage', () => {
       ).map((r) => r.Type),
     );
 
-    // The vault's own custom resource lives in the ROOT template.
     for (const cfnType of ['Custom::LinearWorkloadIdentity']) {
       expect(gatedTypes.has(cfnType)).toBe(true);
       expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
       expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
     }
 
-    // The hosted consent page sits in a NESTED stack (to stay clear of the root's
-    // 500-resource ceiling), so its types are not in the root template — but CFN
-    // still creates them with the same execution role, so they need the same
-    // bootstrap coverage. Walk the nested stack explicitly; a nested resource that
-    // slips past the map fails deploy exactly like a root one.
     const gatedStack = new AgentStack(new App({ context: { enableLinearIdentityVault: true } }), 'LinearVaultNestedStack', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -214,7 +197,6 @@ describe('Bootstrap policy synth coverage', () => {
       expect(nestedTypes.has(cfnType)).toBe(true);
     }
 
-    // Nothing the gated path adds — root OR nested — may slip past unmapped.
     const unmapped = [...gatedTypes, ...nestedTypes].filter(
       (t) => !CFN_TYPES_WITHOUT_EXEC_ROLE_IAM.has(t) && !(t in RESOURCE_ACTION_MAP),
     );
@@ -239,9 +221,6 @@ describe('Bootstrap policy synth coverage', () => {
   });
 
   it('lets the execution role pass itself to CloudFormation when nested stacks are present (#865)', () => {
-    // Action-level coverage above cannot see this: `iam:PassRole` is already granted
-    // by IAMPassRole, but only for application roles and other services. Creating a
-    // nested stack passes the cfn-exec-role ITSELF to cloudformation.amazonaws.com.
     expect(allTypes.has('AWS::CloudFormation::Stack')).toBe(true);
     type Stmt = { Effect: string; Action: string | string[]; Resource?: string | string[]; Condition?: Record<string, Record<string, string | string[]>> };
     const list = (v: string | string[] | undefined) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
@@ -251,7 +230,6 @@ describe('Bootstrap policy synth coverage', () => {
       st.Effect === 'Allow'
       && list(st.Action).includes('iam:PassRole')
       && list(st.Resource).some((r) => r.includes('cfn-exec-role'))
-      // Exact service-principal match (an array element compare, not a URL substring check).
       && list(st.Condition?.StringEquals?.['iam:PassedToService']).some((svc) => svc === 'cloudformation.amazonaws.com'));
     expect(covered).toBe(true);
   });

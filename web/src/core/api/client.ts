@@ -53,7 +53,7 @@ export class ApiError extends Error {
 
 /**
  * A request that never got a response (offline, DNS, or blocked by the browser's CORS check)
- * surfaces as a bare TypeError ("Failed to fetch"); say what that means instead.
+ * surfaces as a bare TypeError ("Failed to fetch").
  */
 async function sendOrExplain(send: () => Promise<Response>): Promise<Response> {
   try {
@@ -110,7 +110,7 @@ export interface ApiClientOptions {
   readonly baseUrl: string;
   /** Console-only API (issue picker); optional. */
   readonly consoleBaseUrl?: string;
-  /** Returns a current Cognito ID token. Sent raw in `Authorization`, matching the CLI. */
+  /** Returns a current Cognito ID token. Sent raw in `Authorization`. */
   readonly getToken: () => Promise<string>;
   readonly fetchImpl?: typeof fetch;
 }
@@ -129,7 +129,6 @@ export function createApiClient({ baseUrl, consoleBaseUrl, getToken, fetchImpl }
   async function request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, options: RequestOptions = {}): Promise<T> {
     const { query, body: payload, headers = {}, base = root } = options;
     const qs = query && query.toString() ? `?${query.toString()}` : '';
-    // Resolve fetch per request so instrumentation installed later (tests, mock mode) applies.
     const doFetch = fetchImpl ?? globalThis.fetch;
     const token = await getToken();
     const res = await sendOrExplain(() => doFetch(`${base}${path}${qs}`, {

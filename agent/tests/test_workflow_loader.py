@@ -1,10 +1,3 @@
-"""Unit tests for the workflow models + loader (#248).
-
-Covers shape validation against the JSON Schema, YAML/file loading, the
-domain-derived ``requires_repo`` default, id/path agreement, and path-traversal
-defense. Cross-field rules are tested separately against the golden corpus.
-"""
-
 from __future__ import annotations
 
 import textwrap
@@ -28,7 +21,6 @@ if TYPE_CHECKING:
 
 
 def _valid_new_task() -> dict:
-    """A minimal valid ``coding`` workflow body (mirrors the WORKFLOWS.md example)."""
     return {
         "id": "coding/new-task-v1",
         "version": "1.0.0",
@@ -95,8 +87,6 @@ class TestParseWorkflow:
             parse_workflow(body)
 
     def test_reserved_empty_post_hooks_loads(self):
-        # The schema reserves `post_hooks` and pins it to empty. A file the
-        # validator accepts must also load.
         body = _valid_new_task()
         body["post_hooks"] = []
         assert validate_workflow(body) == []
@@ -108,9 +98,7 @@ class TestParseWorkflow:
         assert [e["type"] for e in exc.value.errors()] == ["too_long"]
 
     def test_model_rejection_is_a_workflow_validation_error(self):
-        # A step may carry extra keys, but the model takes string keys only,
-        # and YAML reads a bare `on:` as the boolean true. Callers catch
-        # WorkflowValidationError, so the model's refusal has to be one.
+        # YAML reads a bare `on:` as the boolean true.
         body = _valid_new_task()
         body["steps"][2][True] = "push"
         with pytest.raises(WorkflowValidationError, match="model validation: steps/2/"):
@@ -118,14 +106,13 @@ class TestParseWorkflow:
 
     def test_bad_id_pattern_rejected(self):
         body = _valid_new_task()
-        body["id"] = "CodingNewTask"  # no domain/name-vN structure
+        body["id"] = "CodingNewTask"
         with pytest.raises(WorkflowValidationError):
             parse_workflow(body)
 
     def test_read_only_must_exclude_write_edit_via_schema(self):
-        """The schema's allOf conditional enforces rule 4's shape half."""
         body = _valid_new_task()
-        body["read_only"] = True  # still lists Write/Edit -> schema rejection
+        body["read_only"] = True
         with pytest.raises(WorkflowValidationError, match="allowed_tools"):
             parse_workflow(body)
 
@@ -282,10 +269,9 @@ class TestRequiresRepoDefault:
 
 class TestValidateShape:
     def test_collects_all_errors(self):
-        body = {"id": "BAD", "domain": "nope"}  # multiple violations
+        body = {"id": "BAD", "domain": "nope"}
         with pytest.raises(WorkflowValidationError) as exc:
             validate_shape(body)
-        # at least the missing-required and bad-enum errors surface together
         assert ";" in str(exc.value)
 
 

@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// Fetches the deployed console's /config.json so `vite` can run against your real API
-// and Cognito sign-in: `mise //web:dev:live`. Values in that file are public
-// identifiers (API URL, user pool and app client ids, login domain), never secrets.
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

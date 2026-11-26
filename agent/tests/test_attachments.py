@@ -1,5 +1,3 @@
-"""Unit tests for attachments.py — download and integrity verification."""
-
 import hashlib
 import os
 import subprocess
@@ -18,7 +16,6 @@ def _make_config(
     filename: str = "test.txt",
     attachment_id: str = "ATT001",
 ) -> tuple[AttachmentConfig, bytes]:
-    """Create an AttachmentConfig with matching checksum."""
     checksum = hashlib.sha256(content).hexdigest()
     config = AttachmentConfig(
         attachment_id=attachment_id,
@@ -113,7 +110,6 @@ class TestDownloadAttachments:
         content = b"hello world"
         checksum = hashlib.sha256(content).hexdigest()
 
-        # Config says size is 5, but content is 11 bytes
         config = AttachmentConfig(
             attachment_id="ATT001",
             type="file",
@@ -156,15 +152,12 @@ class TestDownloadAttachments:
 
         result = download_attachments([config], str(tmp_path))
 
-        # File should be under .attachments/<attachment_id>/<filename>
         local_path = Path(result[0].local_path)
         assert local_path.parent.name == config.attachment_id
         assert local_path.parent.parent.name == ATTACHMENTS_DIR
 
     @patch("boto3.client")
     def test_downloads_are_not_picked_up_by_git(self, mock_client, tmp_path):
-        """The workspace is the clone the pull request is made from: a broad
-        ``git add`` there must leave the user's uploads alone."""
         config, content = _make_config()
 
         mock_s3 = MagicMock()
@@ -187,9 +180,6 @@ class TestDownloadAttachments:
     def test_exclude_file_without_a_final_newline_keeps_its_last_pattern(
         self, mock_client, tmp_path
     ):
-        """Appended directly behind ``*.swp``, the entry would make that line
-        ``*.swp/.attachments/``: neither the clone's own pattern nor the entry
-        would match, and a broad ``git add`` would take the uploads."""
         config, content = _make_config()
 
         mock_s3 = MagicMock()
@@ -218,7 +208,6 @@ class TestDownloadAttachments:
 
         mock_s3 = MagicMock()
         mock_client.return_value = mock_s3
-        # Return different content for each call
         mock_s3.get_object.side_effect = [
             {"Body": MagicMock(read=lambda: configs_and_contents[0][1])},
             {"Body": MagicMock(read=lambda: configs_and_contents[1][1])},
@@ -231,13 +220,11 @@ class TestDownloadAttachments:
 
     @patch("boto3.client")
     def test_partial_failure_cleans_up_attachments_dir(self, mock_client, tmp_path):
-        """When download fails mid-loop, already-downloaded files are removed."""
         config_ok, content_ok = _make_config(b"good content", "good.txt", "ATT001")
         config_bad, _ = _make_config(b"bad content", "bad.txt", "ATT002")
 
         mock_s3 = MagicMock()
         mock_client.return_value = mock_s3
-        # First attachment succeeds, second returns tampered content (checksum mismatch)
         mock_s3.get_object.side_effect = [
             {"Body": MagicMock(read=lambda: content_ok)},
             {"Body": MagicMock(read=lambda: b"tampered")},
@@ -248,5 +235,4 @@ class TestDownloadAttachments:
         with pytest.raises(RuntimeError, match="integrity check failed"):
             download_attachments([config_ok, config_bad], str(tmp_path))
 
-        # The entire .attachments directory should be cleaned up
         assert not attachments_dir.exists()

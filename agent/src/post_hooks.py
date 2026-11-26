@@ -1,5 +1,3 @@
-"""Post-agent hooks: build/lint verification, commit, push, PR creation."""
-
 from __future__ import annotations
 
 import os
@@ -14,22 +12,9 @@ from shell import log, run_cmd
 if TYPE_CHECKING:
     from models import AgentResult, RepoSetup, TaskConfig
 
-# Default verification commands. A repo that uses mise gets these for free; a
-# non-mise repo sets ``pipeline.buildCommand`` / ``lintCommand`` in its
-# blueprint (threaded to the agent as build_command / lint_command) so gating
-# runs the repo's real command.
 DEFAULT_BUILD_COMMAND = "mise run build"
 DEFAULT_LINT_COMMAND = "mise run lint"
 
-# Wall-clock ceiling for a single build/lint verification subprocess. The old
-# hardcoded 600s (run_cmd's default) was too low for a real CI-parity build
-# (install + compile + full test suite + synth) — a heavy repo's legitimate
-# build exceeded it and was reported as a build FAILURE, which is the wrong
-# diagnosis (the build didn't fail, it didn't finish in time). Raised to 30min
-# and made env-overridable; well under the orchestrator's 9h durable ceiling.
-# When the ceiling IS hit we now surface a distinct "timed out" reason (see
-# VerifyOutcome.timed_out → pipeline error_message → platform failure copy)
-# rather than a generic "build failed".
 BUILD_VERIFY_TIMEOUT_S = int(os.environ.get("BUILD_VERIFY_TIMEOUT_S") or 1800)
 
 
@@ -37,27 +22,12 @@ BUILD_VERIFY_TIMEOUT_S = int(os.environ.get("BUILD_VERIFY_TIMEOUT_S") or 1800)
 class VerifyOutcome:
     """Result of a build/lint verification run.
 
-    ``passed`` drives gating exactly as the old bare-bool return did. The two
-    other flags distinguish WHY a not-passed result happened, so the platform
-    can report an honest, actionable reason instead of a blanket "build failed":
-
     - ``timed_out`` — the command exceeded ``BUILD_VERIFY_TIMEOUT_S`` and was
       killed (a build that never finished, not a build that failed).
     - ``inert`` — the command could not RUN at all: exit 127 (command not
-      found, e.g. ``yarn`` missing) or mise "no such task". This is a CONFIG
-      problem (the gate isn't actually verifying anything), NOT the agent's
-      code being broken. Without this, an inert exit-127 gate was silently
-      reported as ``build_passed=False`` — a false "your code is broken" for a
-      repo we never managed to build. ``is_verify_command_inert`` already
-      existed but was only consulted at repo SETUP; now the post-agent gate
-      consults it too.
-
+      found, e.g. ``yarn`` missing) or mise "no such task".
     - ``infra_failed`` — the command was KILLED by an environment fault (the
-      build box ran out of disk/ENOSPC or memory/OOM), so the build could not
-      complete on this host. Like ``inert`` this is NOT the agent's code being
-      broken — it's an infrastructure fault that a retry (fresh host) or more
-      capacity clears. This was a real failure mode: concurrent builds filled
-      the Fargate root fs → ENOSPC mid-build → bogus ``build_passed=False``.
+      build box ran out of disk/ENOSPC or memory/OOM).
 
     A timeout / inert / infra_failed result still counts as not-passed for
     gating, but the pipeline surfaces each as its own reason.
@@ -69,35 +39,22 @@ class VerifyOutcome:
     infra_failed: bool = False
 
 
-# POSIX shell exit code for "command not found" — an inert build signal (the
-# configured verify command isn't installed), not a genuine build failure.
 SHELL_COMMAND_NOT_FOUND = 127
 
-# What mise says, lower-cased, when a task it was asked for does not exist. The wording
-# depends on what else the repository defines. ``\S+`` keeps the search linear in a long line.
 _MISE_NO_SUCH_TASK = re.compile(r"not found|no task \S+ found|unknown command")
 
 
 def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     """True when a verify command did not actually RUN (vs ran-and-failed).
 
-    Distinguishes the inert-gate state — the build/lint command isn't
-    runnable in this repo, so gating is effectively OFF — from a genuine red
-    build (command executed, exited non-zero), which IS meaningful signal.
-
-    Heuristics (conservative — only the unambiguous "couldn't run" signals):
-      - exit 127: shell "command not found" (e.g. ``gradle`` not installed).
-        mise exits with the status of the task that failed, so a tool missing
-        inside a task is a 127 as well.
-      - mise "no tasks defined" / "no task named", or one of mise's own error
-        lines that says a task does not exist (``_MISE_NO_SUCH_TASK``): the
-        configured (or default ``mise run build``) task does not exist in the
-        repo. The same words anywhere else in the log are no signal: a build
-        log names mise, a failed test is titled "... is not found", and mise
-        itself warns "no task <name> found, but a non-executable file exists"
-        before it makes that file executable and runs it.
-    A repo that genuinely fails its build returns some other non-zero code with
-    real compiler/test output, which this does NOT flag.
+    - exit 127: shell "command not found" (e.g. ``gradle`` not installed).
+      mise exits with the status of the task that failed, so a tool missing
+      inside a task is a 127 as well.
+    - mise "no tasks defined" / "no task named", or one of mise's own error
+      lines that says a task does not exist (``_MISE_NO_SUCH_TASK``). The
+      same words anywhere else in the log are no signal: mise itself warns
+      "no task <name> found, but a non-executable file exists" before it
+      makes that file executable and runs it.
     """
     if returncode == SHELL_COMMAND_NOT_FOUND:
         return True
@@ -109,8 +66,6 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     )
 
 
-# Exit code for a process killed by SIGKILL (128 + 9) — how the OOM-killer and
-# some disk-full kills surface. Paired with the ENOSPC/OOM stderr signatures.
 SIGKILL_EXIT = 137
 
 
@@ -118,50 +73,18 @@ def is_infra_failure(returncode: int, stderr: str) -> bool:
     """True when a verify command was killed by an ENVIRONMENT fault, not a real
     build failure — the build box ran out of disk or memory.
 
-    Distinct from :func:`is_verify_command_inert` (the command isn't runnable —
-    a CONFIG problem) and from a genuine red build (command ran, tests failed).
-    An out-of-disk / OOM kill means the build *couldn't complete on this host*,
-    so reporting ``build_passed=False`` is a false "your code is broken" — it's
-    an infrastructure fault a retry (on a fresh host) or more capacity clears.
-    This was a real failure mode: concurrent builds filled the Fargate root fs →
-    ``ENOSPC: no space left on device`` mid-build → bogus build-fail.
-
     A bare SIGKILL (137) with no accompanying signature is ALSO treated as infra:
     the container-runtime / cgroup OOM-killer delivers SIGKILL and writes its
-    "Killed process …" line to the KERNEL log, not the build process's own stderr,
-    so an OOM'd `mise run build` frequently exits 137 with NO "killed"/"out of
-    memory" string captured (observed: a post-agent build OOM at 137 fell through
-    to the inert heuristic and was mislabeled "command not found"; a 137 with
-    plain build output would fall through to a GENUINE build FAILURE → a false
-    gate on healthy code). SIGKILL is never something a healthy
-    `mise run build` does to itself — a real test failure exits with the runner's
-    own non-zero code (1/2), not 137. So 137 ⇒ resource kill ⇒ infra, and this is
-    checked BEFORE the inert/genuine-failure paths in ``_run_verify``.
+    "Killed process …" line to the KERNEL log, not the build process's own stderr.
     """
     s = (stderr or "").lower()
     disk_full = "no space left on device" in s or "enospc" in s or "errno 28" in s
     oom = "out of memory" in s or "oomkilled" in s or "cannot allocate memory" in s
-    # A SIGKILL (137) is a resource/OOM kill by the runtime, not a build result —
-    # infra regardless of what (if anything) reached the captured stderr.
     return disk_full or oom or returncode == SIGKILL_EXIT
 
 
-# Shell metacharacters that mean the command can't be a single argv exec and
-# must run through a shell to behave as written. Without this, a configured
-# ``npm ci && npm run lint && npm test`` was shlex-split into one ``npm`` call
-# with ``&&``/``npm``/… as bogus args — ``npm ci`` ran, ignored the rest, exited
-# 0, and the chain's lint/test NEVER ran, so a broken build reported "OK".
 _SHELL_OPERATORS = ("&&", "||", "|", ";", ">", "<", "$(", "`")
 
-# A leading ``VAR=value`` env-assignment prefix (one or more) is shell syntax:
-# ``MISE_EXPERIMENTAL=1 mise //cdk:eslint`` only sets the env when run through a
-# shell. Exec'd directly (shlex-split), the FIRST token ``MISE_EXPERIMENTAL=1``
-# is treated as the program name → ``FileNotFoundError``. Detect it so such a
-# command is routed through ``bash -lc`` like the operator case. NAME must be a
-# valid POSIX env identifier so a plain arg like ``a=b`` in a real program's
-# args (unusual as a leading token, but be precise) is matched only when it truly
-# leads. Without this, a configured ``lint_command`` of ``MISE_EXPERIMENTAL=1 mise
-# //cdk:eslint`` crashed the whole task at exit 1 before the build ran.
 _ENV_ASSIGN_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -172,10 +95,7 @@ def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     args (``npm run build``) is ``shlex``-split and exec'd directly. A command
     that needs a shell to behave as written — it contains shell operators (``&&``,
     ``|``, ``;``, redirects, command substitution) OR begins with a ``VAR=value``
-    env-assignment prefix — is wrapped as ``bash -lc '<command>'``; otherwise the
-    operators/assignment are passed as literal args to (or AS) the first program
-    and mis-run (chained build commands would silently no-op; an env-prefixed
-    lint command would exec ``VAR=value`` as the binary and crash).
+    env-assignment prefix — is wrapped as ``bash -lc '<command>'``.
 
     A command that ``shlex`` cannot split, one with a quote that is never closed
     or with a trailing backslash, is wrapped the same way.
@@ -187,19 +107,10 @@ def resolve_verify_argv(command: str | None, default: str) -> list[str]:
     try:
         return shlex.split(cmd)
     except ValueError:
-        # An exception here ends the task, after the agent's work when the gate resolves the
-        # command. The shell gets the text as written, and its exit status is the gate's result.
         return ["bash", "-lc", cmd]
 
 
 def _run_verify(repo_dir: str, command: str, default: str, label: str) -> VerifyOutcome:
-    """Run a configured verify command and classify the outcome.
-
-    Returns a :class:`VerifyOutcome` so callers can distinguish a TIMEOUT (the
-    command exceeded ``BUILD_VERIFY_TIMEOUT_S`` and was killed — the build did
-    not *fail*, it did not *finish*) from a genuine non-zero exit. Both are
-    not-passed for gating, but the pipeline surfaces them as different reasons.
-    """
     argv = resolve_verify_argv(command, default)
     log("POST", f"Running post-agent {label} ({' '.join(argv)})...")
     try:
@@ -209,8 +120,6 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
             cwd=repo_dir,
             check=False,
             timeout=BUILD_VERIFY_TIMEOUT_S,
-            # Stream the build/lint output live → full log reaches CloudWatch
-            # verbatim (a buffered summary would hide which sub-task failed).
             stream=True,
         )
     except subprocess.TimeoutExpired:
@@ -221,23 +130,10 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
         )
         return VerifyOutcome(passed=False, timed_out=True)
     except OSError as exc:
-        # A command without shell operators is exec'd directly, and the exec
-        # itself fails when its program is not installed or not executable.
-        # Classify that as what a shell reports for it, exit 127, with the error
-        # as the output: the gate is then inert like the same command inside
-        # ``bash -lc``, and an exec that failed for lack of memory is still an
-        # infrastructure fault.
         log("WARN", f"Post-agent {label} could not be started: {exc}")
         result = subprocess.CompletedProcess(argv, SHELL_COMMAND_NOT_FOUND, "", str(exc))
     if result.returncode != 0:
         stderr = getattr(result, "stderr", "") or ""
-        # An ENVIRONMENT fault (out of disk / OOM) means the build couldn't
-        # complete on this host — NOT that the code is broken. Check this BEFORE
-        # the inert/genuine-failure paths: it's the most specific signal, and a
-        # disk-full mid-build otherwise looks like a random non-zero exit and gets
-        # mis-reported as "build/tests failed" (concurrent builds filling the
-        # Fargate root fs → ENOSPC → bogus build-fail). Surface as infra so the
-        # platform reports "retry / needs more capacity", not the agent's code.
         if is_infra_failure(result.returncode, stderr):
             log(
                 "WARN",
@@ -246,10 +142,6 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
                 "not a build failure",
             )
             return VerifyOutcome(passed=False, infra_failed=True)
-        # Distinguish "couldn't RUN" (exit 127 / no-such-task → the gate is
-        # inert, a config problem) from "ran and failed" (real red build). An
-        # inert gate verified nothing, so reporting it as a build FAILURE is a
-        # false "your code is broken" — surface it as inert instead.
         if is_verify_command_inert(result.returncode, stderr):
             log(
                 "WARN",
@@ -264,11 +156,7 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
 
 
 def verify_build(repo_dir: str, command: str = "") -> VerifyOutcome:
-    """Run the configured build command (default ``mise run build``) to verify the build.
-
-    Returns a :class:`VerifyOutcome` (``.passed`` for gating, ``.timed_out`` to
-    distinguish "exceeded the time limit" from "ran and failed").
-    """
+    """Run the configured build command (default ``mise run build``) to verify the build."""
     return _run_verify(repo_dir, command, DEFAULT_BUILD_COMMAND, "verify-build-post")
 
 
@@ -280,9 +168,7 @@ def verify_lint(repo_dir: str, command: str = "") -> VerifyOutcome:
 def ensure_committed(repo_dir: str) -> bool:
     """Safety net: commit any uncommitted tracked changes before finalization.
 
-    This catches work the agent wrote but forgot to commit (e.g. due to turn
-    limit or timeout). Only stages tracked-but-modified files (git add -u) to
-    avoid accidentally committing temp files or build artifacts.
+    Only stages tracked-but-modified files (git add -u).
 
     Returns True if a safety-net commit was created, False if nothing to commit
     or if git operations fail.
@@ -303,7 +189,6 @@ def ensure_committed(repo_dir: str) -> bool:
             return False
 
         log("POST", "Uncommitted changes detected — creating safety-net commit")
-        # Stage tracked-but-modified files only (not untracked files)
         add_result = subprocess.run(
             ["git", "add", "-u"],
             cwd=repo_dir,
@@ -316,7 +201,6 @@ def ensure_committed(repo_dir: str) -> bool:
             log("WARN", f"git add -u failed (exit {add_result.returncode}): {stderr}")
             return False
 
-        # Check if there's anything staged after add -u
         staged = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
             cwd=repo_dir,
@@ -324,7 +208,6 @@ def ensure_committed(repo_dir: str) -> bool:
             timeout=30,
         )
         if staged.returncode == 0:
-            # Nothing staged (changes were only untracked files) — skip
             log("POST", "No tracked file changes to commit")
             return False
 
@@ -336,9 +219,6 @@ def ensure_committed(repo_dir: str) -> bool:
             timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        # `git commit` runs the repository's commit hooks (lint, tests), which
-        # can outlast its timeout. The pipeline goes on with the commits that
-        # exist: what is not committed here is not in the pull request.
         log("WARN", f"Safety-net commit not made ({type(exc).__name__}: {exc})")
         return False
     if commit_result.returncode == 0:
@@ -349,7 +229,6 @@ def ensure_committed(repo_dir: str) -> bool:
 
 
 def _current_branch(repo_dir: str) -> str | None:
-    """Return the checked-out branch name, or None if detached / git fails."""
     try:
         res = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -370,12 +249,8 @@ def _current_branch(repo_dir: str) -> str | None:
 
 
 def _lists_a_commit(repo_dir: str, *revisions: str) -> bool:
-    """True when ``git rev-list <revisions>`` lists a commit, or cannot say.
-
-    ``--ignore-missing`` leaves a revision that does not exist (``origin/HEAD``
-    in a repository that was not cloned) out of the question. The closing
-    ``--`` is for a branch named like a file of the work tree (``docs``), which
-    git otherwise refuses as ambiguous."""
+    """The closing ``--`` is for a branch named like a file of the work tree
+    (``docs``), which git otherwise refuses as ambiguous."""
     listed = subprocess.run(
         ["git", "rev-list", "--ignore-missing", "-1", *revisions, "--"],
         cwd=repo_dir,
@@ -391,50 +266,24 @@ def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
     """Make delivery tolerant of the agent switching off the platform-provided
     branch.
 
-    The platform checks out ``branch`` (``config.branch_name``, e.g.
-    ``bgagent/<task_id>/<slug>``) BEFORE the agent runs, and every delivery git op
-    (ensure_committed / ensure_pr's commit-diff / ensure_pushed) is keyed to it.
-    But the agent doesn't always stay there: it sometimes ran
-    ``git checkout -b <its-own-short-branch>``, committed + opened its own PR
-    there, and left the platform branch empty. ensure_pr then saw no commits on
-    ``branch`` → skipped → the task looked delivered-nothing, and for a stacked
-    child the successor had no branch to stack on. It is NON-deterministic (the
-    same task succeeds on a retry when the agent happens to stay put), so a
-    prompt tweak alone can't be relied on.
-
-    This reconciles deterministically: if HEAD is on a DIFFERENT branch than the
-    platform ``branch`` and that HEAD carries commits, fast-forward the platform
-    branch to the agent's HEAD (``git branch -f`` + checkout) so all downstream
-    delivery runs against the branch the platform tracks. The agent's commits are
-    preserved verbatim — we only re-point the platform branch label at them.
+    If HEAD is on a DIFFERENT branch than the platform ``branch``, the platform
+    branch is re-pointed at the agent's HEAD (``git branch -f`` + checkout). The
+    agent's commits are preserved verbatim.
 
     The label stays where it is when moving it would drop commits for nothing:
     the platform branch has commits that HEAD lacks, and HEAD has no commit of
     its own (one that is neither on the platform branch nor on origin's default
-    branch). That is an agent which committed on the platform branch and then
-    switched away (``git checkout main``): the platform branch is checked out
-    again, with its commits. When git refuses that checkout (uncommitted edits
-    it would overwrite), HEAD is adopted after all, as for any other HEAD.
+    branch). The platform branch is then checked out again, with its commits.
+    When git refuses that checkout (uncommitted edits it would overwrite), HEAD
+    is adopted after all, as for any other HEAD.
 
     Returns True if it moved the platform branch, False otherwise (already on it,
     detached HEAD with no branch to adopt, a move that would only drop commits,
-    or a git failure — all handled by the existing ensure_committed/ensure_pr/
-    delivery-gate chain). Best-effort: never raises, so a reconcile failure
-    degrades to the pre-existing behavior."""
+    or a git failure). Never raises."""
     head_branch = _current_branch(repo_dir)
     if head_branch is None or head_branch == branch:
-        # On the platform branch already (the common, healthy case) or detached
-        # with nothing to adopt — nothing to reconcile.
         return False
     try:
-        # Re-pointing the platform branch drops the commits on it that HEAD does
-        # not contain. HEAD is adopted all the same when it has a commit of its
-        # own, one that is neither on the platform branch nor on origin's default
-        # branch: an agent that rewrites its commits on its own branch (amend,
-        # rebase) leaves the two diverged, and HEAD is its latest state. A HEAD
-        # without one is not adopted: the agent committed on the platform branch
-        # and then switched away, say to the default branch to compare, and the
-        # move would drop its commits and gain nothing.
         drops_commits = _lists_a_commit(repo_dir, branch, "--not", "HEAD")
         own_commit = _lists_a_commit(repo_dir, "HEAD", "--not", branch, "origin/HEAD")
         if drops_commits and not own_commit:
@@ -451,10 +300,6 @@ def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
             )
             if back.returncode == 0:
                 return False
-            # git does not go back over uncommitted edits that the switch would
-            # overwrite. HEAD is adopted then, as before: left on the other
-            # branch, its edits would be committed and built there, and this
-            # branch pushed and described under their name.
             log("WARN", f"reconcile: cannot go back to '{branch}' — adopting HEAD instead")
         log(
             "POST",
@@ -462,9 +307,6 @@ def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
             f"'{branch}'. Reconciling the platform branch to the agent's commits so "
             "the work is delivered on the tracked branch.",
         )
-        # Re-point the platform branch at the agent's HEAD (forced: see above),
-        # then check it out so ensure_committed / ensure_pr / ensure_pushed all
-        # operate on the tracked branch.
         force_res = run_cmd(
             ["git", "branch", "-f", branch, "HEAD"],
             label="reconcile-branch-force",
@@ -496,7 +338,6 @@ def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
 
 
 def ensure_pushed(repo_dir: str, branch: str) -> bool:
-    """Push the branch if there are unpushed commits."""
     result = subprocess.run(
         ["git", "log", f"origin/{branch}..HEAD", "--oneline"],
         cwd=repo_dir,
@@ -504,7 +345,6 @@ def ensure_pushed(repo_dir: str, branch: str) -> bool:
         text=True,
         timeout=60,
     )
-    # If the remote branch doesn't exist or there are unpushed commits
     if result.returncode != 0 or result.stdout.strip():
         log("POST", "Pushing unpushed commits...")
         try:
@@ -515,9 +355,6 @@ def ensure_pushed(repo_dir: str, branch: str) -> bool:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            # `git push` runs the repository's pre-push hooks (its test suites),
-            # which can outlast the timeout, and run_cmd raises on a timeout
-            # whatever ``check`` says. Not pushed, like a push that was refused.
             log("WARN", f"Push not completed ({exc})")
             return False
         return push_result.returncode == 0
@@ -533,21 +370,6 @@ _UNPUSHED_COMMITS_NOTE = (
 
 
 def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> None:
-    """Post a PR comment warning that follow-up commits failed to push.
-
-    Best-effort surface for a failed push to a PR that already exists (the
-    ``push_resolve`` strategy, or a PR the agent opened itself): the PR URL
-    is still returned (the PR exists) but it no longer reflects the agent's
-    latest work, so the reviewer must be told. Failure to post the comment is
-    logged but not fatal — the WARN log line emitted by the caller is the
-    fallback signal.
-
-    ``check=False`` means ``run_cmd`` does NOT raise on a non-zero ``gh``
-    exit, so the returncode is inspected explicitly — otherwise a failed
-    ``gh pr comment`` (missing scope, rate limit, not-a-PR) is a silent
-    no-op and the reviewer never learns the PR is stale. The ``except``
-    below only covers OS-level failures (gh missing, timeout).
-    """
     try:
         result = run_cmd(
             [
@@ -578,13 +400,6 @@ def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> No
 
 
 def _gh_pr_field(repo_dir: str, branch: str, repo_url: str, field: str) -> str | None:
-    """Read one field of the pull request of ``branch`` with ``gh pr view``.
-
-    None when the branch has no pull request, the field is empty, or gh exits
-    non-zero, times out or cannot be started. No caller can do more with a pull
-    request it cannot read than with one that is not there, so a slow GitHub
-    does not fail a task whose work is already delivered.
-    """
     value = None
     try:
         result = subprocess.run(
@@ -597,8 +412,6 @@ def _gh_pr_field(repo_dir: str, branch: str, repo_url: str, field: str) -> str |
         if result.returncode == 0:
             value = result.stdout.strip() or None
         else:
-            # Most often "no pull requests found"; whether that is a problem is
-            # for the caller to say.
             stderr_msg = result.stderr.strip()[:200] if result.stderr else "(no stderr)"
             log("POST", f"gh pr view '{branch}' (rc={result.returncode}): {stderr_msg}")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -607,33 +420,8 @@ def _gh_pr_field(repo_dir: str, branch: str, repo_url: str, field: str) -> str |
 
 
 def _reconcile_pr_base(repo_dir: str, branch: str, config: TaskConfig, expected_base: str) -> None:
-    """Deterministically retarget an existing PR onto ``expected_base``.
-
-    The PR is created by the AGENT (its own ``gh pr create`` in the prompt
-    workflow), so the ``--base`` it chose is a model judgment call, not the
-    orchestrator's. Observed on a stacked-chain stress test: a stacked child
-    that branched off its predecessor's branch STILL opened its PR against
-    ``main`` — the agent reasoned "this was based off the predecessor branch,
-    let me open the PR against main" — and even a root whose
-    ``detect_default_branch`` correctly returned a non-``main`` default was
-    pointed at ``main``. Wrong base ⇒ the PR shows the whole default-branch
-    divergence (100s of files) instead of the child's real delta, and a stacked
-    child's PR merges onto the wrong branch.
-
-    ``expected_base`` is ``setup.default_branch`` — which is the orchestrator's
-    ``base_branch`` for a stacked child (the predecessor's branch, or ``main``
-    for a diamond) and ``detect_default_branch`` for a root. This post-hook
-    reads the PR's current base and, if it disagrees, retargets it via
-    ``gh pr edit --base`` — removing the agent's discretion without forbidding
-    it from opening the PR (which keeps the agent-authored title/body).
-
-    Best-effort: any failure is logged, never fatal — a mis-based PR is a
-    presentation/merge-target defect, not a reason to fail the whole task.
-    """
     current_base = _gh_pr_field(repo_dir, branch, config.repo_url, "baseRefName")
     if current_base is None or current_base == expected_base:
-        # No PR / unreadable base (creation path handles the no-PR case; a
-        # transient read error just leaves the base as-is), or nothing to change.
         return
     log(
         "POST",
@@ -665,8 +453,7 @@ def ensure_pr(
 ) -> str | None:
     """Realize the PR per the workflow's ``ensure_pr`` strategy.
 
-    Strategy (provider-neutral, from the workflow step — replaces the former
-    ``task_type`` self-inspection):
+    Strategy:
 
     - ``create``: create a new PR if one doesn't exist; if the agent has opened
       it already, push the commits made since (the new_task path).
@@ -684,16 +471,10 @@ def ensure_pr(
     branch = setup.branch
     default_branch = setup.default_branch
 
-    # push_resolve / resolve: skip PR creation — just resolve the existing URL.
     if strategy in ("push_resolve", "resolve"):
         push_failed = False
         if strategy == "push_resolve":
             if not ensure_pushed(repo_dir, branch):
-                # Surface the failure rather than silently returning the stale
-                # PR URL as success: the local follow-up commits never reached
-                # the remote, so the PR the caller resolves below does NOT
-                # reflect the agent's latest work. We note this on the PR
-                # itself (below) so the reviewer is not misled.
                 push_failed = True
                 log("WARN", "Failed to push commits before resolving PR URL")
         else:
@@ -708,27 +489,17 @@ def ensure_pr(
         log("WARN", "Could not resolve existing PR URL")
         return None
 
-    # Check if the agent already created a PR for this branch
     log("POST", "Checking for existing PR...")
     pr_url = _gh_pr_field(repo_dir, branch, config.repo_url, "url")
     if pr_url:
         log("POST", f"PR already exists: {pr_url}")
-        # The agent may have gone on working after it opened this PR: the commits
-        # it made after its last push, and the safety-net commit, are local only.
         if not ensure_pushed(repo_dir, branch):
             log("WARN", "Failed to push the commits made after the PR was opened")
-            # The reviewer is told only when a commit is missing: a branch that
-            # holds nothing origin lacks (the session ended on another branch of
-            # origin, and the branch was re-pointed at it) is refused as well.
             if _lists_a_commit(repo_dir, branch, "--not", "--remotes=origin"):
                 _note_unpushed_commits(repo_dir, branch, config)
-        # The agent opened this PR and picked its own --base; correct it to the
-        # orchestrator-supplied / detected base if it disagrees (stacked-child
-        # + root wrong-base fix).
         _reconcile_pr_base(repo_dir, branch, config, default_branch)
         return pr_url
 
-    # Check if there are any commits on this branch beyond the default branch
     diff_result = subprocess.run(
         ["git", "log", f"origin/{default_branch}..HEAD", "--oneline"],
         cwd=repo_dir,
@@ -740,10 +511,8 @@ def ensure_pr(
         log("POST", "No commits to create PR from — skipping PR creation")
         return None
 
-    # Ensure all commits are pushed
     ensure_pushed(repo_dir, branch)
 
-    # Collect commit messages for the PR body
     log_result = subprocess.run(
         ["git", "log", f"origin/{default_branch}..HEAD", "--pretty=format:%s%n%b---"],
         cwd=repo_dir,
@@ -753,7 +522,6 @@ def ensure_pr(
     )
     commits = log_result.stdout.strip() if log_result.returncode == 0 else ""
 
-    # Derive PR title from first commit message
     first_commit = subprocess.run(
         ["git", "log", f"origin/{default_branch}..HEAD", "--pretty=format:%s", "--reverse"],
         cwd=repo_dir,
@@ -767,18 +535,15 @@ def ensure_pr(
         else f"chore: bgagent/{config.task_id}"
     )
 
-    # Build PR body
     task_source = ""
     if config.issue_number:
         task_source = f"Resolves #{config.issue_number}\n\n"
     elif config.task_description:
         task_source = f"**Task:** {config.task_description}\n\n"
 
-    # None: the build command could not run (exit 127, no such task), so nothing was built.
     build_statuses = {True: "PASS", False: "FAIL", None: "NOT RUN (command could not run)"}
     build_status = build_statuses[build_passed]
     lint_status = "PASS" if lint_passed else "FAIL"
-    # Show the actual commands run (default mise), not a hardcoded label.
     build_label = (config.build_command or DEFAULT_BUILD_COMMAND).strip()
     lint_label = (config.lint_command or DEFAULT_LINT_COMMAND).strip()
 
@@ -786,9 +551,6 @@ def ensure_pr(
     if agent_result and agent_result.cost_usd is not None:
         cost_line = f"- Agent cost: **${agent_result.cost_usd:.4f}**\n"
 
-    # When build-regression gating is inert (no runnable build command, none
-    # configured), say so plainly, with the way to enable it: a status line
-    # that says the build did not run explains neither.
     gate_warning = ""
     if getattr(setup, "build_gate_inert", False):
         gate_warning = (
@@ -844,15 +606,9 @@ def ensure_pr(
 
 
 def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str | None:
-    """Extract the "## Agent notes" section from the PR body.
-
-    Checks the existing PR body via `gh pr view`. Returns the text content
-    of the "## Agent notes" section, or None if not found.
-    """
     body = _gh_pr_field(repo_dir, branch, config.repo_url, "body")
     if not body:
         return None
-    # Find "## Agent notes" section
     match = re.search(
         r"##\s*Agent\s*notes\s*\n(.*?)(?=\n##\s|\Z)",
         body,

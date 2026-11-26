@@ -119,10 +119,6 @@ describe('slack-oauth-callback handler', () => {
   });
 
   test('uses credentials stored since the previous callback', async () => {
-    // The operator pasted a wrong client secret, saw the install fail, stored
-    // the right values and opened the install link again. The same warm
-    // container answers: it must read the secrets again, not reuse the ones
-    // it cached a moment ago.
     const stored = { clientId: 'old-id', clientSecret: 'old-secret' };
     smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
       if (cmd._type !== 'GetSecretValue') return Promise.resolve({});
@@ -160,17 +156,15 @@ describe('slack-oauth-callback handler', () => {
         authed_user: { id: 'U_installer' },
       }),
     });
-    // First call: UpdateSecret → RNF; then CreateSecret succeeds
-    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-id-123' })); // GetSecretValue for CLIENT_ID
-    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-secret-xyz' })); // GetSecretValue for CLIENT_SECRET
-    smSend.mockImplementationOnce(() => Promise.reject(new MockResourceNotFoundException())); // UpdateSecret
-    smSend.mockImplementationOnce(() => Promise.resolve({})); // CreateSecret
-    ddbSend.mockResolvedValueOnce({}); // Put installation
+    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-id-123' }));
+    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-secret-xyz' }));
+    smSend.mockImplementationOnce(() => Promise.reject(new MockResourceNotFoundException()));
+    smSend.mockImplementationOnce(() => Promise.resolve({}));
+    ddbSend.mockResolvedValueOnce({});
 
     const result = await handler(makeEvent('goodcode'));
     expect(result.statusCode).toBe(200);
     expect(result.body).toContain('New Team');
-    // Installation record was written
     const putCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Put');
     expect(putCall).toBeTruthy();
     expect(putCall![0].input.Item.team_id).toBe('T_new');
@@ -186,12 +180,11 @@ describe('slack-oauth-callback handler', () => {
         team: { id: 'T_re', name: 'Re Team' },
       }),
     });
-    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-id-123' })); // CLIENT_ID
-    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-secret-xyz' })); // CLIENT_SECRET
-    // UpdateSecret throws InvalidRequestException with "marked for deletion"
+    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-id-123' }));
+    smSend.mockImplementationOnce(() => Promise.resolve({ SecretString: 'client-secret-xyz' }));
     smSend.mockImplementationOnce(() => Promise.reject(new MockInvalidRequestException('Secret is marked for deletion')));
-    smSend.mockImplementationOnce(() => Promise.resolve({})); // RestoreSecret
-    smSend.mockImplementationOnce(() => Promise.resolve({})); // UpdateSecret (second try)
+    smSend.mockImplementationOnce(() => Promise.resolve({}));
+    smSend.mockImplementationOnce(() => Promise.resolve({}));
     ddbSend.mockResolvedValueOnce({});
 
     const result = await handler(makeEvent('code'));

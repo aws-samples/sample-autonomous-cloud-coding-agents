@@ -21,7 +21,6 @@ import { App, NestedStack, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AgentStack } from '../../src/stacks/agent';
 
-/** MicroVM resources live in a nested stack, so count across the whole assembly. */
 function assemblyResources(stack: Stack, type: string): Array<{ Properties?: Record<string, unknown> } & Record<string, unknown>> {
   const templates = [stack, ...stack.node.findAll().filter(child => NestedStack.isNestedStack(child))]
     .map(scope => Template.fromStack(scope as Stack));
@@ -131,10 +130,8 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
     expect(trust.includes('LambdaMicrovmComputeExecutionRole')).toBe(backend === 'lambda-microvm');
     expect(trust).toContain('sts:TagSession');
     const prefix = backend === 'agentcore' ? 'RuntimeExecutionRole' : backend === 'ecs' ? 'EcsAgentClusterTaskRole' : 'LambdaMicrovmComputeExecutionRole';
-    // Audit the role's inline policy AND its managed-policy overflow. CDK splits a
-    // role's default policy into `AWS::IAM::ManagedPolicy` chunks once the inline
-    // document exceeds the IAM size limit; the Bedrock grant list (#953) pushed the
-    // AgentCore runtime role past it, so a statement can legitimately live in either.
+    // CDK splits a role's default policy into `AWS::IAM::ManagedPolicy` chunks once
+    // the inline document exceeds the IAM size limit.
     const policies = JSON.stringify([
       ...Object.entries(template.findResources('AWS::IAM::Policy')),
       ...Object.entries(template.findResources('AWS::IAM::ManagedPolicy')),
@@ -173,7 +170,6 @@ describe.each([
     template.resourceCountIs('AWS::BedrockAgentCore::Runtime', backends.includes('agentcore') ? 1 : 0);
     expect(assemblyResources(stack, 'AWS::Lambda::NetworkConnector')).toHaveLength(backends.includes('lambda-microvm') ? 2 : 0);
     template.resourceCountIs('AWS::ECS::Cluster', backends.includes('ecs') ? 1 : 0);
-    // Existing CLIs parse a comma list here on non-exclusive stacks.
     template.hasOutput('ComputeSubstrate', { Value: backends.join(',') });
     template.hasOutput('ComputeTypes', { Value: backends.join(',') });
     template.hasOutput('ComputeDeploymentMode', { Value: 'additive' });

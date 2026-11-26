@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Real botocore objects and loopback HTTP exercise the credential boundary."""
-
 from __future__ import annotations
 
 import asyncio
@@ -151,8 +149,6 @@ class TestRetainedCredentials:
             config = make_client.call_args.kwargs["config"]
             assert config.connect_timeout == (2 if microvm else 60)
             assert config.read_timeout == (2 if microvm else 60)
-            # Every client carries the retry mode the module names; the MicroVM
-            # budget adds its single attempt to it.
             expected = {"mode": aws_session.RETRY_MODE}
             if microvm:
                 expected["total_max_attempts"] = 1

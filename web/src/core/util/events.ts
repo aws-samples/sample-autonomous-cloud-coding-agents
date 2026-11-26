@@ -43,9 +43,8 @@ export function eventTypeLabel(eventType: string): string {
 }
 
 /**
- * One-line, human-readable summary of an event, using the same metadata
- * fields the CLI's `status`/`watch` views read. Unknown event types fall
- * back to their scalar metadata so nothing is silently hidden.
+ * One-line, human-readable summary of an event. Unknown event types fall
+ * back to their scalar metadata.
  */
 export function summarizeEvent(event: TaskEvent): string {
   const meta = event.metadata ?? {};
@@ -63,8 +62,6 @@ export function summarizeEvent(event: TaskEvent): string {
       return output ? `${prefix}${oneLine(output)}` : `${prefix}(no output)`;
     }
     case 'agent_turn': {
-      // The agent numbers the model's answers, which is what the turn limit counts. An answer
-      // can arrive as several messages, each an event of its own that carries the same number.
       const turn = num(meta, 'turn');
       const said = str(meta, 'text_preview');
       if (said) return `Said: ${oneLine(said)}`;

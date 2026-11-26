@@ -35,8 +35,6 @@ export function makeReplayCommand(): Command {
     )
     .option('-f, --force', 'Overwrite the output file if it already exists')
     .action(async (taskId: string, opts: { json?: boolean; output?: string; force?: boolean }) => {
-      // Refuse to clobber an existing --output file (mirrors `trace download`),
-      // before the network round trip so the refusal is cheap.
       if (opts.output && !opts.force && existsSync(opts.output)) {
         throw new CliError(
           `Refusing to overwrite existing file ${opts.output}. Pass --force to overwrite.`,
@@ -46,9 +44,6 @@ export function makeReplayCommand(): Command {
       const client = new ApiClient();
       const bundle = await client.getReplay(taskId);
 
-      // --output always writes JSON (the bundle is a machine artifact when
-      // persisted); --json toggles stdout format. Writing to a file emits the
-      // confirmation on stderr so stdout stays clean for piping.
       if (opts.output) {
         writeSecretFile(opts.output, formatJson(bundle));
         console.error(`Wrote replay bundle to ${opts.output}`);

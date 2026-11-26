@@ -23,8 +23,6 @@ const ALL_STATUSES: TaskStatusType[] = Object.values(TaskStatus);
 
 describe('TaskStatus', () => {
   test('defines exactly 11 states', () => {
-    // 8 original + AWAITING_APPROVAL (Cedar HITL gates, §10.3)
-    // + PENDING_UPLOADS (attachments) + QUEUED (admission queue, #441).
     expect(ALL_STATUSES).toHaveLength(11);
   });
 
@@ -63,16 +61,12 @@ describe('TERMINAL_STATUSES', () => {
   });
 
   test('AWAITING_APPROVAL is NOT terminal', () => {
-    // Tasks in AWAITING_APPROVAL are alive — just paused on a human
-    // decision. Classifying it as terminal would break cancel semantics
-    // and `bgagent list` active-task filtering.
     expect(TERMINAL_STATUSES).not.toContain(TaskStatus.AWAITING_APPROVAL);
   });
 });
 
 describe('ACTIVE_STATUSES', () => {
   test('contains exactly 5 active states', () => {
-    // SUBMITTED, HYDRATING, RUNNING, AWAITING_APPROVAL, FINALIZING.
     expect(ACTIVE_STATUSES).toHaveLength(5);
   });
 
@@ -99,9 +93,6 @@ describe('PRE_ACTIVE_STATUSES', () => {
   });
 
   test('QUEUED is NOT in ACTIVE_STATUSES (#441 — counting it as active would deadlock the queue)', () => {
-    // The concurrency reconciler recomputes active_count from
-    // ACTIVE_STATUSES. If QUEUED counted as active, queued tasks would
-    // hold the very slots they are waiting for.
     expect(ACTIVE_STATUSES).not.toContain(TaskStatus.QUEUED);
   });
 
@@ -163,9 +154,6 @@ describe('VALID_TRANSITIONS', () => {
   });
 
   test('AWAITING_APPROVAL can resume to RUNNING', () => {
-    // The resume transition lands here when ApproveTaskFn / DenyTaskFn
-    // (Chunk 5) flips the approval row and the agent confirms the
-    // cross-table TransactWriteItems.
     expect(VALID_TRANSITIONS[TaskStatus.AWAITING_APPROVAL]).toContain(TaskStatus.RUNNING);
   });
 
@@ -178,9 +166,6 @@ describe('VALID_TRANSITIONS', () => {
   });
 
   test('AWAITING_APPROVAL cannot skip RUNNING on the way to FINALIZING', () => {
-    // §10.3: approval resume always lands back at RUNNING. FINALIZING
-    // is only reachable from RUNNING, preventing an approve-during-cleanup
-    // race from confusing the orchestrator.
     expect(VALID_TRANSITIONS[TaskStatus.AWAITING_APPROVAL]).not.toContain(TaskStatus.FINALIZING);
   });
 
@@ -190,9 +175,6 @@ describe('VALID_TRANSITIONS', () => {
   });
 
   test('HYDRATING can enter AWAITING_APPROVAL (rare but allowed, §10.3)', () => {
-    // Rare: a PreToolUse hook that fires during HYDRATING's hydration
-    // step (e.g. the first Bash for `git clone`). Kept valid so the
-    // gate can still fire; §10.3 explicitly lists it.
     expect(VALID_TRANSITIONS[TaskStatus.HYDRATING]).toContain(TaskStatus.AWAITING_APPROVAL);
   });
 

@@ -30,17 +30,11 @@ import { decodePaginationToken, encodePaginationToken, parseLimit } from './shar
 const ddb = makeDocClient();
 const TABLE_NAME = process.env.WEBHOOK_TABLE_NAME!;
 
-/** Default page size when the caller omits ``?limit=``. */
 const DEFAULT_PAGE_LIMIT = 20;
 
-/** Hard page-size ceiling. */
 const MAX_PAGE_LIMIT = 100;
 
-/**
- * Cap on DynamoDB `Query` round-trips per request. `Limit` is applied to items read,
- * before `FilterExpression`, so filtering out revoked webhooks can leave a page short;
- * we page until it is full. The cap bounds what one request reads; the token still advances.
- */
+// DynamoDB applies `Limit` to the items it reads, before `FilterExpression`: a filtered page can come back short.
 const MAX_QUERY_PAGES = 10;
 
 /**
@@ -70,8 +64,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       expressionAttributeValues[':active'] = 'active';
     }
 
-    // Accumulate until the page is full or the index is exhausted; over-fetch one
-    // so a full page can tell whether another webhook follows.
     const items: WebhookRecord[] = [];
     for (let page = 0; page < MAX_QUERY_PAGES; page += 1) {
       const result = await ddb.send(new QueryCommand({
@@ -93,9 +85,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     const pageItems = items.slice(0, limit);
 
-    // Trimmed: resume after the last webhook returned (LastEvaluatedKey lies past the
-    // over-fetched one). Otherwise the raw cursor, which is only set when the page cap
-    // stopped the loop.
     const last = pageItems[pageItems.length - 1];
     const nextToken = items.length > limit
       ? encodePaginationToken({ webhook_id: last.webhook_id, user_id: last.user_id, created_at: last.created_at })

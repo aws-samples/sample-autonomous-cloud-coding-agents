@@ -72,7 +72,6 @@ export const COUNTERS: readonly Counter[] = [
     count: (tasks) => tasks.filter((t) => isActive(t.status)).length,
   },
   {
-    // Not "in line": a task that waits for its files is counted too, and no limit holds that one back.
     label: 'Waiting to start',
     href: '/tasks?view=queued',
     explanation: {
@@ -111,7 +110,6 @@ export const COUNTERS: readonly Counter[] = [
     count: (tasks, _pendingApprovals, now) => tasks.filter((t) => hasStaleHeartbeat(t, now)).length,
   },
   {
-    // Both statuses in the name: "Failed" alone is one of them everywhere else in the console.
     label: 'Failed or ran out of time (24h)',
     href: '/tasks?view=unsuccessful',
     explanation: {

@@ -23,7 +23,6 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { OperationalAlerts } from '../../src/constructs/operational-alerts';
 
-/** Builds a throwaway DLQ-depth alarm to exercise ``addAlarmActions``. */
 function makeDlqAlarm(stack: Stack, id: string): cloudwatch.Alarm {
   const queue = new sqs.Queue(stack, `${id}Queue`);
   return new cloudwatch.Alarm(stack, `${id}Alarm`, {
@@ -80,10 +79,7 @@ describe('OperationalAlerts', () => {
   test('creates a KMS-encrypted SNS topic with key rotation', () => {
     template.resourceCountIs('AWS::SNS::Topic', 1);
     template.resourceCountIs('AWS::KMS::Key', 1);
-    // The topic must reference THIS construct's CMK by GetAtt — asserting
-    // Match.anyValue() would pass even for the literal `alias/aws/sns`,
-    // the exact AWS-managed-key state the construct exists to prevent
-    // (CloudWatch can't publish through it). Pin the GetAtt to the Key.
+    // CloudWatch alarms cannot publish to a topic encrypted with the AWS-managed alias/aws/sns key.
     template.hasResourceProperties('AWS::SNS::Topic', {
       KmsMasterKeyId: {
         'Fn::GetAtt': [Match.stringLikeRegexp('AlertsKey'), 'Arn'],
@@ -95,8 +91,6 @@ describe('OperationalAlerts', () => {
   });
 
   test('CMK key policy grants CloudWatch decrypt + generate-data-key', () => {
-    // Encrypted delivery needs this KMS grant in addition to the topic's
-    // SNS publish permission asserted above.
     template.hasResourceProperties('AWS::KMS::Key', {
       KeyPolicy: {
         Statement: Match.arrayWith([
@@ -162,9 +156,6 @@ describe('OperationalAlerts', () => {
     });
 
     test('retains both the topic and the key', () => {
-      // Regression guard: removalPolicy previously reached only the key,
-      // leaving the topic on CDK's implicit default — key and topic could
-      // diverge on stack deletion.
       retainedTemplate.hasResource('AWS::SNS::Topic', { DeletionPolicy: 'Retain' });
       retainedTemplate.hasResource('AWS::KMS::Key', { DeletionPolicy: 'Retain' });
     });

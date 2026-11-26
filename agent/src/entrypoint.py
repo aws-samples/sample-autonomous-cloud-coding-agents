@@ -1,13 +1,7 @@
-"""Re-export shim for backward compatibility.
-
-Existing callers (tests) that import from ``entrypoint`` continue
-to work. New code should import from the specific module directly.
-"""
+"""Re-export shim for callers (tests) that import from ``entrypoint``."""
 
 import importlib as _importlib
 
-# Reload config so that ``importlib.reload(entrypoint)`` picks up env changes
-# (e.g. AGENT_WORKSPACE) — needed for backward-compatible test patterns.
 import config as _config
 
 _importlib.reload(_config)

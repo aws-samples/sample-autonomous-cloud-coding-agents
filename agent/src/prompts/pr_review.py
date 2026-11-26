@@ -1,5 +1,3 @@
-"""Workflow section for pr_review (review an existing PR without modifying code)."""
-
 PR_REVIEW_WORKFLOW = """\
 ## Rules override
 

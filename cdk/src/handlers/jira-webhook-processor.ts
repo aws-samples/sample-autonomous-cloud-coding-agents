@@ -88,14 +88,8 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10')
 const DEFAULT_LABEL_FILTER = 'bgagent';
 const COMMENT_ACK_TTL_SECONDS = 86_400;
 
-/** Max length of the idempotency key (matches validation's IDEMPOTENCY_KEY_PATTERN). */
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
-// Attachment enrichment (#577). The processor downloads Jira `media` file
-// attachments, screens them through the Bedrock Guardrail, and uploads the
-// cleaned bytes to S3 before creating the task. All three must be configured;
-// when they aren't, an issue carrying supported file attachments is rejected
-// (fail-closed) rather than silently dropping them.
 const ATTACHMENTS_BUCKET = process.env.ATTACHMENTS_BUCKET_NAME;
 const GUARDRAIL_ID = process.env.GUARDRAIL_ID;
 const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION;
@@ -106,11 +100,6 @@ const screeningConfig: ScreeningConfig | undefined =
     ? { bedrockClient, guardrailId: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VERSION }
     : undefined;
 
-/**
- * Post a Jira comment without ever propagating an error. Mirrors the
- * Linear `safeReportIssueFailure` contract — feedback is best-effort,
- * advisory, and must never gate task-rejection logic.
- */
 async function safeReportIssueFailure(
   issueIdOrKey: string,
   cloudId: string | undefined,
@@ -143,19 +132,10 @@ async function safeReportIssueFailure(
   }
 }
 
-/**
- * Feedback for a tenant whose OAuth token could not be resolved or refreshed.
- * Posting it needs an outbound identity that still works: a site that writes
- * as the Forge app gets the comment, an unregistered or inactive site none.
- */
 const JIRA_TOKEN_UNAVAILABLE_MESSAGE =
   "❌ ABCA couldn't get a Jira access token for this site, so nothing was started. "
   + 'Try again in a few minutes; if it keeps failing, ask an ABCA admin to re-run `bgagent jira setup`.';
 
-/**
- * Subset of the Jira Cloud `jira:issue_*` webhook payload we depend on.
- * Undocumented fields are tolerated.
- */
 interface JiraIssueEvent {
   readonly webhookEvent: 'jira:issue_created' | 'jira:issue_updated' | 'comment_created' | string;
   readonly timestamp?: number;
@@ -169,9 +149,8 @@ interface JiraIssueEvent {
     readonly key: string;
     readonly fields?: {
       readonly summary?: string;
-      readonly description?: unknown; // ADF document
+      readonly description?: unknown;
       readonly labels?: string[];
-      /** Jira `media` file attachments. Shape validated in jira-attachments.ts. */
       readonly attachment?: unknown[];
       readonly creator?: { readonly accountId?: string };
       readonly reporter?: { readonly accountId?: string };
@@ -203,32 +182,15 @@ interface JiraIssueEvent {
 
 interface ProcessorEvent {
   readonly raw_body: string;
-  /**
-   * True when the receiver verified this delivery against the stack-wide
-   * fallback secret rather than a per-tenant signing secret. The stack-wide
-   * secret is not bound to any `cloudId`, so a body-supplied `cloudId` on
-   * such a delivery is untrusted — the processor ignores it and binds the
-   * event to the sole active tenant instead (dropping when that's ambiguous).
-   * Absent/false means the signature was per-tenant, so `payload.cloudId`
-   * is trustworthy for routing.
-   */
   readonly verified_via_stack_wide?: boolean;
 }
 
 /**
- * Async processor for verified Jira webhooks.
- *
- * Responsibilities:
- * - Parse the issue payload.
- * - Detect whether the configured trigger label was added on creation OR
- *   added by an `issue_updated` event whose changelog shows a `labels`
- *   diff with the label newly present (Atlassian's label diff format
- *   differs from Linear's).
- * - Resolve `(cloudId, projectKey)` → repo mapping.
- * - Resolve `(cloudId, accountId)` → platform user mapping.
- * - Call `createTaskCore` with `channelSource: 'jira'` and metadata the
- *   agent uses to address the originating issue via the Jira REST v3 API
- *   (`jira_reactions.py`; see ADR-015 for why outbound is REST, not MCP).
+ * Async processor for verified Jira webhooks. Creates a task through
+ * `createTaskCore` (`channelSource: 'jira'`) when the configured trigger label
+ * is on a created issue or newly added by an `issue_updated` event, for the
+ * repo mapped to `(cloudId, projectKey)` and the platform user mapped to
+ * `(cloudId, accountId)`.
  */
 // eslint-disable-next-line complexity -- predates the ceiling (115, down from 116 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
@@ -262,17 +224,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  // Resolve the tenant `cloudId`, honoring the signature's trust boundary:
-  //
-  // - Per-tenant signature (`verified_via_stack_wide` false/absent): the
-  //   sender proved knowledge of *this* tenant's secret, so the body-supplied
-  //   `payload.cloudId` is trustworthy. Fall back to the sole-active-tenant
-  //   lookup only when the body omits it (Settings-UI webhooks).
-  // - Stack-wide fallback signature: the secret is not bound to any tenant,
-  //   so a body-supplied `cloudId` is attacker-controllable. We IGNORE it and
-  //   bind the delivery to the sole active tenant; `resolveSoleActiveJiraTenant`
-  //   returns undefined (→ drop) when zero or multiple tenants are active, so
-  //   a stack-wide secret can never steer an event at a chosen tenant.
   let cloudId: string | undefined;
   if (event.verified_via_stack_wide) {
     cloudId = await resolveSoleActiveJiraTenant(ddb, WORKSPACE_REGISTRY_TABLE);
@@ -315,10 +266,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   }
 
   if (!cloudId) {
-    // No cloudId in the payload AND the single-tenant fallback couldn't
-    // resolve one (zero or multiple active tenants). Without it we can't
-    // look up the project mapping (composite PK is `{cloudId}#{projectKey}`)
-    // or post feedback. Log and drop.
     logger.warn('Jira webhook missing cloudId and no sole active tenant — cannot resolve tenant', {
       issue_key: issue.key,
       project_key: projectKey,
@@ -392,8 +339,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  // Convert the ADF description to markdown once and reuse it for both the
-  // task body and image-attachment extraction.
   const descriptionMarkdown = extractDescriptionMarkdown(issue.fields?.description);
 
   const channelMetadata: Record<string, string> = {
@@ -403,10 +348,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     jira_issue_key: issue.key,
   };
 
-  // Optional per-project workflow-transition overrides (issue #572). When an
-  // admin configured `bgagent jira map ... --status-on-start/--status-on-pr`,
-  // stamp them so the agent's best-effort transition helpers prefer these
-  // status names over the built-in statusCategory / "In Review" heuristics.
   const statusOnStart = mapping.status_on_start as string | undefined;
   const statusOnPr = mapping.status_on_pr as string | undefined;
   if (statusOnStart) {
@@ -416,11 +357,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     channelMetadata.jira_status_on_pr = statusOnPr;
   }
 
-  // Stash the resolved OAuth secret ARN on the task so the agent runtime
-  // doesn't have to re-do the registry lookup. Also blocks tasks from
-  // tenants that only verified via the stack-wide fallback (workspace
-  // unknown to the registry) — we'd burn agent quota with no resolvable
-  // Jira OAuth token for the outbound REST progress comments.
   let resolvedJira: Awaited<ReturnType<typeof resolveJiraOauthToken>> = null;
   if (WORKSPACE_REGISTRY_TABLE) {
     const resolved = await resolveOauthTokenForAdmission(cloudId, WORKSPACE_REGISTRY_TABLE, issue.key);
@@ -440,12 +376,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   let orchestrationChildren: readonly SubIssueNode[] | undefined;
   let existingOrchestration = false;
   if (ORCHESTRATION_TABLE && resolvedJira) {
-    // Re-read an existing orchestration's authored graph so genuinely-new Jira
-    // subtasks can be appended. The flag also prevents parent attachments from
-    // being uploaded again below: the meta row already pins the first seed's S3
-    // versions, and replacing them would eventually expire those pinned objects.
-    // The id hashes the bare issue key, so rows that another Jira site left
-    // under the same key are not this issue's graph.
     const existing = await loadOrchestration(
       ddb,
       ORCHESTRATION_TABLE,
@@ -490,36 +420,21 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     }
   }
 
-  // Embedded HTTPS image URLs from the description (unchanged, #577 preserves).
   const urlAttachments = extractImageUrlAttachments(descriptionMarkdown);
 
-  // Mint the task ID up front so pre-screened attachment S3 keys match the
-  // eventual task record (createTaskCore honors context.taskId, #577).
   const taskId = ulid();
 
-  // Context enrichment (#577). Both need the workspace registry to resolve an
-  // OAuth token. Comments are fail-open (advisory); attachments are
-  // fail-closed (a selected-but-unscreenable attachment rejects the task).
   let comments: RenderedComment[] = [];
   let preScreenedAttachments: PassedAttachmentRecord[] = [];
   if (WORKSPACE_REGISTRY_TABLE && !existingOrchestration) {
     const tenantCtx = { cloudId, registryTableName: WORKSPACE_REGISTRY_TABLE };
 
-    // Recent human comments — advisory context, never gate task creation.
     const fetchedComments = await fetchRecentHumanComments(tenantCtx, issue.key);
-    // Fail-OPEN on comment content policy: comments are third-party text the
-    // reporter didn't write, so a policy-tripping comment must not fail the
-    // reporter's task. Screen the rendered comment section on its own and drop
-    // it (not the task) if the guardrail intervenes. (createTaskCore separately
-    // screens the description, which the reporter authored.)
     comments = await screenCommentsOrDrop(fetchedComments, issue.key, cloudId);
 
     const rawAttachments = issue.fields?.attachment;
     if (Array.isArray(rawAttachments) && rawAttachments.length > 0) {
       if (!s3Client || !ATTACHMENTS_BUCKET || !screeningConfig) {
-        // Fail-closed: the issue has attachments but the processor can't
-        // screen/store them. Don't silently drop selected context — reject
-        // with a clear comment so the operator can fix configuration.
         logger.error('Jira issue has attachments but screening/storage is not configured (fail-closed)', {
           issue_key: issue.key,
           jira_cloud_id: cloudId,
@@ -533,7 +448,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         );
         return;
       }
-      // Combined cap: URL image attachments already consume slots.
       const remainingSlots = 10 - urlAttachments.length;
       try {
         preScreenedAttachments = await downloadScreenAndStoreJiraAttachments(
@@ -679,10 +593,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     if (discovery.kind === 'extended') {
-      // Attachments are stored only when the preflight read found no
-      // orchestration, so having some here means a concurrent replay seeded
-      // between that read and the seed condition. The shared discovery path
-      // returns that race as an extend; this invocation's objects are duplicates.
       if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
         await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
       }
@@ -729,8 +639,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 
         if (WORKSPACE_REGISTRY_TABLE) {
           try {
-            // Unlike seed, extension already has a durable snapshot. Refresh the
-            // panel from it even if a post-release read is temporarily unavailable.
             const commentId = lookupValueOr(await upsertEpicPanel({
               channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
               parent: {
@@ -784,9 +692,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     {
       repo,
       task_description: taskDescription,
-      // Explicit coding workflow: a label-triggered Jira task always targets a
-      // mapped repo, so it must not fall through the resolution ladder to the
-      // repo-less default/agent-v1 (which never commits or opens a PR). #546
       workflow_ref: CODING_WORKFLOW_ID,
       ...(urlAttachments.length > 0 && { attachments: urlAttachments }),
     },
@@ -795,10 +700,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       channelSource: 'jira',
       channelMetadata,
       taskId,
-      // Deterministic key so an async re-delivery of the same trigger event
-      // dedupes instead of minting a second task (and re-downloading every
-      // attachment). Keyed on issue + webhook timestamp, matching the
-      // receiver's dedup key shape.
       idempotencyKey: buildIdempotencyKey(issue.key, payload.timestamp),
       ...(preScreenedAttachments.length > 0 && { preScreenedAttachments }),
     },
@@ -806,11 +707,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   );
 
   if (result.statusCode === 200) {
-    // Idempotent replay: this is a duplicate delivery of the same trigger event
-    // (createTaskCore matched the deterministic idempotency key to an existing
-    // task). Not a failure — but the attachments we re-downloaded and uploaded
-    // this round are keyed on a fresh taskId the replayed task doesn't
-    // reference, so delete them rather than orphan them. No ❌ comment.
     logger.info('Jira-triggered task was an idempotent replay (duplicate delivery)', {
       issue_key: issue.key,
       request_id: requestId,
@@ -827,8 +723,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       body: result.body,
       issue_key: issue.key,
     });
-    // Don't orphan the attachment objects we uploaded before this call failed —
-    // createTaskCore only rolls back its own inline uploads, not ours.
     if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
       await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
     }
@@ -848,14 +742,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   });
 }
 
-/**
- * Handle `comment_created` independently of the label-trigger path.
- *
- * When Jira supplies project.key, the caller establishes that its mapping is
- * active. Otherwise the prior task supplies the project key and this handler
- * revalidates that mapping before producing feedback or creating a task.
- * Comments do not require the trigger label to remain present.
- */
 async function handleCommentTrigger(
   payload: JiraIssueEvent,
   issue: NonNullable<JiraIssueEvent['issue']>,
@@ -868,9 +754,6 @@ async function handleCommentTrigger(
     return;
   }
 
-  // Native app users are never human reviewers. ABCA's own 3LO comments are
-  // attributed to the authorizing Atlassian user, so parseCommentTrigger also
-  // rejects ABCA's stable rendered prefixes to prevent self-trigger loops.
   if (comment.author?.accountType?.toLowerCase() === 'app') {
     logger.info('Ignoring Jira app-authored comment', {
       issue_key: issue.key,
@@ -904,8 +787,6 @@ async function handleCommentTrigger(
       await safeReportIssueFailure(
         issue.key,
         cloudId,
-        // Starts with a marker parseCommentTrigger rejects: a site that writes
-        // with the OAuth token gets this comment back as a human's, mention and all.
         '❌ ABCA can only retry an orchestration for a linked ABCA user. '
           + 'Link your Jira account first, then comment `@bgagent retry` again.',
       );
@@ -1090,11 +971,6 @@ async function handleCommentTrigger(
   });
 }
 
-/**
- * Retry a terminal Jira parent orchestration without requiring the parent to
- * have its own task or PR. Successful children remain untouched; only failed
- * and transitively skipped nodes are reset and released.
- */
 async function handleJiraEpicRetry(
   parentIssueKey: string,
   cloudId: string,
@@ -1109,11 +985,6 @@ async function handleJiraEpicRetry(
     || snapshot.meta.credentials_ref !== cloudId
   ) return false;
 
-  // A subtask is started from the summary and description stored on its row.
-  // Read the subtasks again first, as re-applying the trigger label does, so
-  // that one that was refused for its text and then reworded is sent as it is
-  // now. A read that fails does not hold the retry up: it sends the stored text.
-  // In front of the claim, so that a delivery that fails here is tried again.
   const resolved = WORKSPACE_REGISTRY_TABLE
     ? await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE)
     : null;
@@ -1272,8 +1143,6 @@ function buildIterationChannelMetadata(
     jira_oauth_secret_arn: oauthSecretArn,
     jira_site_url: siteUrl,
     jira_trigger_comment_id: commentId,
-    // The agent tells an iteration from a first run by this key
-    // (transition_task_started in agent/src/jira_reactions.py).
     jira_prior_task_id: priorTask.task_id,
     trigger_comment_id: commentId,
     trigger_comment_issue_id: issue.key,
@@ -1281,16 +1150,12 @@ function buildIterationChannelMetadata(
 
   const projectKey = issue.fields?.project?.key ?? previous.jira_project_key;
   if (projectKey) metadata.jira_project_key = projectKey;
-  // The status names of the project mapping as it is now, as a task that the
-  // trigger label starts takes them: the earlier task may predate a change.
   let statusOnStart = mapping.status_on_start;
   let statusOnPr = mapping.status_on_pr;
   if (previous.orchestration_id && previous.orchestration_sub_issue_id) {
     metadata.orchestration_id = previous.orchestration_id;
     metadata.orchestration_sub_issue_id = previous.orchestration_sub_issue_id;
     metadata.orchestration_iteration = 'true';
-    // A subtask of an orchestration keeps the names recorded with it: the
-    // reconciler moves that issue by them after the iteration.
     statusOnStart = previous.jira_status_on_start;
     statusOnPr = previous.jira_status_on_pr;
   }
@@ -1384,16 +1249,6 @@ function buildCommentIdempotencyKey(
   return `jira-iterate-${digest}`;
 }
 
-/**
- * Decide whether a Jira issue event should trigger a task.
- *
- * Two trigger paths:
- * - `jira:issue_created` with the trigger label already present.
- * - `jira:issue_updated` whose `changelog.items[]` contains a labels
- *   change where the trigger label is in `toString` but NOT in
- *   `fromString` (i.e. it was newly added). Atlassian's label diff is
- *   delivered as space-separated strings, not arrays, so we tokenize.
- */
 function shouldTrigger(payload: JiraIssueEvent, labelFilter: string): boolean {
   const filter = labelFilter.toLowerCase();
   const currentLabels = (payload.issue?.fields?.labels ?? []).map((l) => l.toLowerCase());
@@ -1406,15 +1261,12 @@ function shouldTrigger(payload: JiraIssueEvent, labelFilter: string): boolean {
   if (payload.webhookEvent === 'jira:issue_updated') {
     if (!hasLabel) return false;
     const items = payload.changelog?.items ?? [];
-    // Match the labels change item. Atlassian uses `field === 'labels'`
-    // (or sometimes `fieldId === 'labels'`) for the labels system field.
     const labelsItem = items.find(
       (i) => i?.field === 'labels' || i?.fieldId === 'labels',
     );
     if (!labelsItem) return false;
     const previous = tokenizeLabelString(labelsItem.fromString);
     const next = tokenizeLabelString(labelsItem.toString);
-    // Trigger only if the label is newly present.
     return next.includes(filter) && !previous.includes(filter);
   }
 
@@ -1423,8 +1275,7 @@ function shouldTrigger(payload: JiraIssueEvent, labelFilter: string): boolean {
 
 /**
  * Atlassian delivers the labels-field change as a space-separated string
- * (e.g. `"bug" → "bug bgagent"`). Tokenize and lowercase for comparison.
- * Empty / null inputs return an empty list.
+ * (e.g. `"bug" → "bug bgagent"`).
  */
 function tokenizeLabelString(value: string | null | undefined): string[] {
   if (!value) return [];
@@ -1434,10 +1285,6 @@ function tokenizeLabelString(value: string | null | undefined): string[] {
     .filter(Boolean);
 }
 
-/**
- * Translate a `createTaskCore` non-201 response into a user-facing Jira
- * comment. Mirrors the Linear-side helper.
- */
 function buildCreateTaskFailureMessage(
   statusCode: number,
   rawBody: string,
@@ -1486,24 +1333,17 @@ function buildTaskDescription(
   }
   const core = parts.join('\n');
 
-  // Fold recent human comments in (oldest-first, already rendered to markdown)
-  // under a clear heading so the agent can tell them from the description
-  // (#577). Comments are ADVISORY and must stay fail-open: they must never grow
-  // the description past MAX_TASK_DESCRIPTION_LENGTH and turn createTaskCore's
-  // length check into a hard rejection. Only append what fits the remaining
-  // budget (reserving a small margin), truncating the section if needed.
   if (comments.length === 0) return core;
   const commentSection = renderCommentSection(comments);
   const separator = '\n';
   const budget = MAX_TASK_DESCRIPTION_LENGTH - core.length - separator.length;
-  if (budget <= 0) return core; // description already fills the budget — drop comments
+  if (budget <= 0) return core;
   const fitted = commentSection.length <= budget
     ? commentSection
     : truncateCommentSection(commentSection, budget);
   return fitted ? core + separator + fitted : core;
 }
 
-/** Notice appended when the comment section is truncated to fit the budget. */
 const COMMENT_TRUNCATION_NOTICE = '\n\n_(recent comments truncated)_';
 
 function renderCommentSection(comments: readonly RenderedComment[]): string {
@@ -1517,26 +1357,12 @@ function renderCommentSection(comments: readonly RenderedComment[]): string {
   return lines.join('\n');
 }
 
-/**
- * Trim a rendered comment section to at most `budget` characters, leaving room
- * for a truncation notice. Returns '' if even the heading + notice can't fit,
- * so the caller cleanly drops the section.
- */
 function truncateCommentSection(section: string, budget: number): string {
   const room = budget - COMMENT_TRUNCATION_NOTICE.length;
   if (room <= 0) return '';
   return section.slice(0, room) + COMMENT_TRUNCATION_NOTICE;
 }
 
-/**
- * Screen the rendered comment block through the Bedrock Guardrail on its own,
- * so third-party comment content that trips the policy is DROPPED (fail-open)
- * rather than gating the reporter's task. Returns the comments unchanged when
- * they pass, and `[]` when the guardrail intervenes or is unavailable — the
- * task still proceeds with the reporter-authored summary/description (which
- * createTaskCore screens separately). This keeps the comment-enrichment
- * contract fail-open end to end (issue #577 review, item 4).
- */
 async function screenCommentsOrDrop(
   comments: RenderedComment[],
   issueKey: string,
@@ -1544,8 +1370,6 @@ async function screenCommentsOrDrop(
 ): Promise<RenderedComment[]> {
   if (comments.length === 0) return comments;
   if (!bedrockClient || !GUARDRAIL_ID || !GUARDRAIL_VERSION) {
-    // No guardrail configured — drop unscreened third-party text rather than
-    // route it, unscreened, into the agent context.
     logger.warn('Dropping Jira comments: guardrail not configured to screen them', {
       issue_key: issueKey,
       jira_cloud_id: cloudId,
@@ -1569,7 +1393,6 @@ async function screenCommentsOrDrop(
     }
     return comments;
   } catch (err) {
-    // Fail-open on a screening outage too — comments are advisory.
     emitWebhookScreeningFailedMetric('jira-comments');
     logger.warn('Dropping Jira comments: screening unavailable (task still proceeds)', {
       issue_key: issueKey,
@@ -1580,13 +1403,6 @@ async function screenCommentsOrDrop(
   }
 }
 
-/**
- * Deterministic idempotency key for a trigger event: `<issueKey>#<timestamp>`,
- * sanitized to the allowed key charset (`[A-Za-z0-9_-]{1,128}`). A webhook
- * re-delivery of the same event yields the same key so createTaskCore dedupes
- * instead of creating a duplicate task (and re-downloading attachments). Falls
- * back to undefined if we can't form a stable key, preserving prior behavior.
- */
 function buildIdempotencyKey(issueKey: string, timestamp: number | undefined): string | undefined {
   if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return undefined;
   const raw = `jira-${issueKey}-${timestamp}`;
@@ -1594,10 +1410,6 @@ function buildIdempotencyKey(issueKey: string, timestamp: number | undefined): s
   return sanitized || undefined;
 }
 
-/**
- * Extract image URLs from the rendered description markdown. Same limits
- * as the Linear processor: HTTPS only, capped at 10.
- */
 function extractImageUrlAttachments(description: string | undefined): Attachment[] {
   if (!description) return [];
 
@@ -1638,10 +1450,6 @@ async function lookupPlatformUser(cloudId: string, accountId: string): Promise<s
   return platformUserId;
 }
 
-/**
- * A failed registry read throws, and Lambda retries the asynchronous invocation
- * (#734). A row that was read is cached, so the resolver does not query it again.
- */
 async function resolveOauthTokenForAdmission(
   cloudId: string,
   registryTableName: string,
@@ -1681,8 +1489,6 @@ async function getActiveProjectMapping(
     ConsistentRead: true,
   }));
   if (!mapping.Item || mapping.Item.status !== 'active') {
-    // Jira admin-console webhooks fire site-wide. An unmapped project has not
-    // opted into ABCA, so it must remain a true no-op for every event type.
     logger.info('Jira project is not onboarded or is removed — skipping silently', {
       jira_project_identity: projectIdentity,
       issue_key: issueKey,

@@ -27,39 +27,19 @@ import { RegistryResolutionError } from './shared/registry/types';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { RegistryResolveResponse } from './shared/types';
 
-/**
- * Project a runtime payload down to its known-safe discovery fields before
- * returning it on the human-facing resolve response. This endpoint is open to
- * any authenticated caller (resolve/read is not group-gated, REGISTRY.md §10),
- * and the runtime is an open `Record<string, unknown>` — a publisher can attach
- * arbitrary keys (`api_key`, `env`, a token in a `url` query string, …). A
- * denylist over a few field names is therefore fail-open by construction, so we
- * fail closed with an **allowlist**: only fields that are structurally
- * non-secret for the given kind are returned, everything else is dropped
- * (#246 review B1/B2). The orchestrator does NOT go through this handler — it
- * resolves via the `RegistryClient` port directly and receives the full,
- * unredacted payload it needs to connect.
- */
 function redactRuntimeForResponse(
   kind: string,
   runtime: Record<string, unknown>,
 ): Record<string, unknown> {
   if (kind === 'cedar_policy_module') {
-    // Cedar policy source is not a secret (it is authored policy text).
     return typeof runtime.cedar_text === 'string' ? { cedar_text: runtime.cedar_text } : {};
   }
   if (kind === 'skill') {
-    // Skills are prompt text + advisory tool hints — no secret surface.
     const out: Record<string, unknown> = {};
     if (typeof runtime.prompt_fragment === 'string') out.prompt_fragment = runtime.prompt_fragment;
     if (Array.isArray(runtime.tool_hints)) out.tool_hints = runtime.tool_hints;
     return out;
   }
-  // mcp_server: return only the discovery-safe shape. transport/type + tool_prefix
-  // are safe; `url` is reduced to its origin (scheme+host) so a token embedded in
-  // the query string or path is never disclosed; header *keys* are retained as a
-  // discovery signal with values masked; command/args and every other key (env,
-  // api_key, …) are dropped.
   const out: Record<string, unknown> = {};
   if (typeof runtime.transport === 'string') out.transport = runtime.transport;
   if (typeof runtime.type === 'string') out.type = runtime.type;

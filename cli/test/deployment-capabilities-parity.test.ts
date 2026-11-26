@@ -25,11 +25,6 @@ import { REQUIRED_BOOTSTRAP_VERSION } from '../src/setup-account';
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
-/**
- * The CLI cannot import ``contracts/`` at runtime (outside the published
- * ``lib`` files), so it carries literal copies. These tests turn drift between
- * the contract, the CDK resolver and the CLI into a CI failure.
- */
 describe('deployment capability parity', () => {
   test('the CLI catalog equals contracts/deployment-capabilities.json', () => {
     const contract = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'contracts', 'deployment-capabilities.json'), 'utf-8'));

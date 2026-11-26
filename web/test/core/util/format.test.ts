@@ -21,7 +21,6 @@ import { describe, expect, it } from 'vitest';
 import { aboutLabel, formatCost, formatCount, formatDuration, formatDurationShort, formatRelativeTime, shortId, taskTitle } from '../../../src/core/util/format';
 
 const NOW = new Date('2026-10-23T12:00:00.000Z');
-/** Between the two units of a short duration, which therefore stay on one line. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 
 describe('formatRelativeTime', () => {
@@ -103,7 +102,6 @@ describe('formatCost, formatCount and shortId', () => {
 describe('aboutLabel', () => {
   it('names the "i" of a label, lowering its first letter only', () => {
     expect(aboutLabel('Waited in line')).toBe('About waited in line');
-    // A name inside the label keeps its capitals.
     expect(aboutLabel('Not reworked through ABCA, so far')).toBe('About not reworked through ABCA, so far');
   });
 });

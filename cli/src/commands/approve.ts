@@ -23,14 +23,6 @@ import { ApiError, CliError, mapApiError } from '../errors';
 import { formatJson } from '../format';
 import type { ApprovalScope } from '../types';
 
-/**
- * `bgagent approve <task-id> <request-id> [--scope <scope>]` —
- * approve a pending Cedar HITL gate (design §8.1).
- *
- * Scope defaults to `this_call` server-side when omitted. `all_session`
- * is the only scope that normally requires interactive confirmation;
- * pass `--yes` to bypass.
- */
 export function makeApproveCommand(): Command {
   return new Command('approve')
     .description('Approve a pending Cedar HITL approval gate')
@@ -50,7 +42,6 @@ export function makeApproveCommand(): Command {
     .action(async (taskId: string, requestId: string, opts) => {
       const scope = opts.scope as string;
 
-      // all_session is the nuclear option — require --yes.
       if (scope === 'all_session' && !opts.yes) {
         throw new CliError(
           'Scope "all_session" grants the agent blanket approval for every subsequent gate.\n'
@@ -78,7 +69,6 @@ export function makeApproveCommand(): Command {
     });
 }
 
-/** Map approve-specific API errors to user-facing CLI messages. */
 function mapApproveError(err: ApiError): CliError {
   return mapApiError(err, {
     400: (e) => `Approval rejected: ${e.message}`,

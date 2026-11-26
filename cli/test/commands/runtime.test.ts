@@ -181,7 +181,6 @@ describe('runtime status command', () => {
     await makeRuntimeCommand().parseAsync(['node', 'test', 'status', '--region', 'us-east-1']);
 
     expect(getStackOutputs).toHaveBeenCalledTimes(1);
-    // Every per-key answer came from that one batch: no output was read on its own.
     expect(getStackOutput).toHaveBeenCalledTimes((getStackOutputs as jest.Mock).mock.calls[0][2].length);
   });
 

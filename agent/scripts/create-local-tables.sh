@@ -1,29 +1,14 @@
 #!/usr/bin/env bash
-# Create DynamoDB tables in DynamoDB Local for local agent testing.
-#
-# Prerequisites:
-#   docker compose up -d   (starts DynamoDB Local on port 8000)
-#   AWS CLI installed
-#
-# Usage:
-#   ./agent/scripts/create-local-tables.sh
 
 set -euo pipefail
 
 ENDPOINT="http://localhost:8000"
 REGION="us-east-1"
 
-# Common args for all commands. No --no-cli-pager: AWS CLI v1 rejects that flag, and
-# v2 starts no pager for the calls below, whose output goes to /dev/null.
 DDB_ARGS=(--endpoint-url "$ENDPOINT" --region "$REGION")
 
 echo "Creating local DynamoDB tables..."
 
-# ---------------------------------------------------------------------------
-# TaskEventsTable — matches cdk/src/constructs/task-events-table.ts
-#   PK: task_id (S), SK: event_id (S, ULID)
-#   TTL: ttl
-# ---------------------------------------------------------------------------
 if aws dynamodb describe-table --table-name TaskEventsTable "${DDB_ARGS[@]}" >/dev/null 2>&1; then
   echo "  TaskEventsTable already exists — skipping"
 else
@@ -40,12 +25,6 @@ else
   echo "  TaskEventsTable created"
 fi
 
-# ---------------------------------------------------------------------------
-# TaskTable — matches cdk/src/constructs/task-table.ts
-#   PK: task_id (S)
-#   TTL: ttl
-#   GSIs omitted (not needed for local agent testing)
-# ---------------------------------------------------------------------------
 if aws dynamodb describe-table --table-name TaskTable "${DDB_ARGS[@]}" >/dev/null 2>&1; then
   echo "  TaskTable already exists — skipping"
 else

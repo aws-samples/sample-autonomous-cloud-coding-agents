@@ -1,17 +1,3 @@
-"""Reproduce and verify the subprocess-in-background-thread issue.
-
-Simulates the exact server.py → entrypoint.py architecture:
-  - Main thread runs an asyncio event loop (like uvicorn)
-  - Background thread runs sync work, then async subprocess I/O
-
-Tests both Python and Node.js child processes (the actual Claude Code CLI
-is Node.js, whose stdout buffering behaviour may differ from Python).
-
-Run locally:     python agent/scripts/diagnostics/test_subprocess_threading.py
-Run in Docker:   docker run --rm -v $PWD/agent:/app python:3.13-slim \
-                 python /app/scripts/diagnostics/test_subprocess_threading.py
-"""
-
 import asyncio
 import json
 import shutil
@@ -19,11 +5,6 @@ import subprocess
 import sys
 import threading
 
-# ---------------------------------------------------------------------------
-# Child process scripts
-# ---------------------------------------------------------------------------
-
-# Python child: writes JSON lines with delays + flushes (best case)
 _PYTHON_CHILD = """\
 import json, sys, time
 print(json.dumps({"type": "init", "index": 0}), flush=True)
@@ -34,7 +15,6 @@ for i in range(1, 6):
 print(json.dumps({"type": "result", "index": 6}), flush=True)
 """
 
-# Node.js child: writes JSON lines with delays (tests Node.js pipe buffering)
 _NODE_CHILD = """\
 const delays = [0, 300, 300, 300, 300, 300, 0];
 let index = 0;
@@ -49,16 +29,10 @@ function writeNext() {
 writeNext();
 """
 
-EXPECTED_COUNT = 7  # 1 init + 5 assistant + 1 result
-
-
-# ---------------------------------------------------------------------------
-# Subprocess reader (mirrors SDK's SubprocessCLITransport pattern)
-# ---------------------------------------------------------------------------
+EXPECTED_COUNT = 7
 
 
 async def _read_subprocess(cmd: list[str]) -> list[dict]:
-    """Spawn a child process and read JSON messages from its stdout."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -82,13 +56,7 @@ async def _read_subprocess(cmd: list[str]) -> list[dict]:
     return messages
 
 
-# ---------------------------------------------------------------------------
-# Test wrappers
-# ---------------------------------------------------------------------------
-
-
 def _run_in_bg_thread_asyncio_run(cmd: list[str]) -> dict:
-    """asyncio.run() in a background thread (current broken pattern)."""
     result: dict = {"messages": [], "error": None}
 
     def worker():
@@ -106,7 +74,6 @@ def _run_in_bg_thread_asyncio_run(cmd: list[str]) -> dict:
 
 
 def _run_in_bg_thread_threadsafe(cmd: list[str], loop: asyncio.AbstractEventLoop) -> dict:
-    """run_coroutine_threadsafe on main loop (the fix)."""
     result: dict = {"messages": [], "error": None}
 
     def worker():
@@ -125,18 +92,12 @@ def _run_in_bg_thread_threadsafe(cmd: list[str], loop: asyncio.AbstractEventLoop
 
 
 def _run_in_main_thread(cmd: list[str]) -> dict:
-    """asyncio.run() in the main thread (baseline)."""
     result: dict = {"messages": [], "error": None}
     try:
         result["messages"] = asyncio.run(_read_subprocess(cmd))
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
     return result
-
-
-# ---------------------------------------------------------------------------
-# Test runner
-# ---------------------------------------------------------------------------
 
 
 def _print_result(label: str, result: dict) -> int:
@@ -163,7 +124,6 @@ async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version
 
     results: dict[str, int] = {}
 
-    # --- Python child tests ---
     print("Python child process:")
     r = await loop.run_in_executor(None, _run_in_bg_thread_asyncio_run, py_cmd)
     results["py_bg_run"] = _print_result("bg thread + asyncio.run()", r)
@@ -172,7 +132,6 @@ async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version
     results["py_bg_safe"] = _print_result("bg thread + run_coroutine_threadsafe()", r)
     print()
 
-    # --- Node.js child tests ---
     if node_cmd:
         print("Node.js child process:")
         r = await loop.run_in_executor(None, _run_in_bg_thread_asyncio_run, node_cmd)
@@ -182,7 +141,6 @@ async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version
         results["node_bg_safe"] = _print_result("bg thread + run_coroutine_threadsafe()", r)
         print()
 
-    # --- Summary ---
     all_pass = all(v == EXPECTED_COUNT for v in results.values())
     any_fail = any(v < EXPECTED_COUNT for v in results.values())
 
@@ -212,12 +170,10 @@ async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version
 
 
 if __name__ == "__main__":
-    # Prepare commands
     py_cmd = [sys.executable, "-c", _PYTHON_CHILD]
     node_bin = shutil.which("node")
     node_cmd = ["node", "-e", _NODE_CHILD] if node_bin else None
 
-    # Baseline: main thread, Python child
     print("Baseline: asyncio.run() in main thread, Python child")
     baseline = _run_in_main_thread(py_cmd)
     count = _print_result("main thread + asyncio.run()", baseline)
@@ -225,7 +181,6 @@ if __name__ == "__main__":
         print("  Baseline FAILED — subprocess I/O broken even on main thread!")
         sys.exit(2)
 
-    # Baseline: main thread, Node.js child
     if node_cmd:
         print()
         print("Baseline: asyncio.run() in main thread, Node.js child")
@@ -236,7 +191,6 @@ if __name__ == "__main__":
             sys.exit(2)
     print()
 
-    # Threaded tests. The version probe blocks, so it runs here, before the event loop.
     node_version = ""
     if node_cmd:
         node_version = subprocess.run(
@@ -245,5 +199,4 @@ if __name__ == "__main__":
             text=True,
             timeout=5,
         ).stdout.strip()
-    # A threaded test that printed FAIL must fail the script, as the baselines above do.
     sys.exit(0 if asyncio.run(_run_tests(py_cmd, node_cmd, node_version)) else 1)

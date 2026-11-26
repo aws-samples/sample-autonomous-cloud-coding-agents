@@ -31,8 +31,6 @@ jest.mock('../../src/api-client');
 jest.mock('../../src/config');
 jest.mock('../../src/stack-outputs', () => {
   const actual = jest.requireActual('../../src/stack-outputs');
-  // Keep resolveOperatorRegion real (operator-context depends on it); only stub
-  // the network-touching getStackOutput.
   return { ...actual, getStackOutput: jest.fn() };
 });
 jest.mock('../../src/repo-lookup');
@@ -191,7 +189,6 @@ describe('webhook command', () => {
     });
 
     test('follows next_token when a page holds fewer webhooks than asked for', async () => {
-      // The API reads a bounded number of rows per request: revoked ones can take all of them.
       mockListWebhooks
         .mockResolvedValueOnce({ data: [], pagination: { next_token: 'T1', has_more: true } })
         .mockResolvedValueOnce({ data: [webhook('wh-0')], pagination: { next_token: null, has_more: false } });
@@ -216,7 +213,6 @@ describe('webhook command', () => {
 
       expect(mockListWebhooks).toHaveBeenCalledTimes(2);
       expect(mockListWebhooks).toHaveBeenLastCalledWith({ includeRevoked: undefined, limit: 2, nextToken: 'T1' });
-      // No webhook is dropped, so the last token resumes right after the last one printed.
       expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify({
         data: [webhook('wh-1'), webhook('wh-2'), webhook('wh-3')],
         pagination: { next_token: 'T2', has_more: true },
@@ -282,7 +278,6 @@ describe('webhook command', () => {
       const output = consoleSpy.mock.calls[0][0] as string;
       expect(output).toContain('wh-1');
       expect(output).toContain('revoked');
-      // Confirmation message
       const calls = consoleSpy.mock.calls.map(c => c[0]);
       expect(calls.some((c: string) => c.includes('revoked'))).toBe(true);
     });

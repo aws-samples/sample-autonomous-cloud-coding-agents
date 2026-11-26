@@ -21,10 +21,6 @@ import * as path from 'path';
 import { formatScoreboard } from '../src/scoreboard';
 import type { DurationSummary, Flagged, Fraction, Scoreboard, ScoreboardPeriod } from '../src/types';
 
-/**
- * A period with every outcome in it: 8 tasks finished, 7 of them asked for a new pull request, 2
- * delivered a verified one. Of its 3 new pull requests one is merged, one open and one not read.
- */
 const CURRENT: ScoreboardPeriod = {
   from: '2026-10-20T12:00:00.000Z',
   to: '2026-11-19T12:00:00.000Z',
@@ -48,7 +44,6 @@ const CURRENT: ScoreboardPeriod = {
   first_review_s: { p50: 21600, p90: 21600, count: 1 },
 };
 
-/** The period before it: 2 tasks finished, one of them with a verified pull request, which is merged. */
 const PREVIOUS: ScoreboardPeriod = {
   from: '2026-09-20T12:00:00.000Z',
   to: '2026-10-20T12:00:00.000Z',
@@ -72,7 +67,6 @@ const PREVIOUS: ScoreboardPeriod = {
   first_review_s: { p50: 7200, p90: 7200, count: 1 },
 };
 
-/** Both periods, and one pull request that has been open for more than 7 days. */
 const BOARD: Scoreboard = {
   range: '30d',
   truncated: false,
@@ -83,7 +77,6 @@ const BOARD: Scoreboard = {
 
 const NOTHING: Fraction = { count: 0, total: 0 };
 
-/** A period in which no task finished. */
 const EMPTY: ScoreboardPeriod = {
   from: CURRENT.from,
   to: CURRENT.to,
@@ -107,17 +100,14 @@ const EMPTY: ScoreboardPeriod = {
   first_review_s: null,
 };
 
-/** The board above with members of its current period replaced, and members of the response. */
 function board(current: Partial<ScoreboardPeriod> = {}, response: Partial<Scoreboard> = {}): Scoreboard {
   return { ...BOARD, ...response, current: { ...CURRENT, ...current } };
 }
 
-/** What is printed from the first heading to the last outcome: the numbers, without the lines above and below them. */
 function numbers(text: string): string {
   return text.slice(text.indexOf('\nSpeed\n') + 1, text.lastIndexOf('\n\n'));
 }
 
-/** The rows as printed, in order: each with its label, its number, then the lines under it. A heading is a row of its own. */
 function rows(text: string): string[][] {
   const printed: string[][] = [];
   for (const line of numbers(text).split('\n')) {
@@ -127,7 +117,6 @@ function rows(text: string): string[][] {
   return printed;
 }
 
-/** A row as printed: its number, then the lines under it. */
 function row(text: string, label: string): string[] {
   const found = rows(text).find(([printed]) => printed === label);
   if (!found) throw new Error(`no row "${label}" in:\n${text}`);
@@ -203,7 +192,6 @@ These numbers cover your own tasks. Numbers for every user are on the CloudWatch
   });
 });
 
-/** The console's module of the page, as far as this suite uses it. */
 interface Page {
   readonly SECTIONS: readonly { readonly title: string; readonly tiles: readonly PageTile[] }[];
   contextLine(response: Scoreboard): string;
@@ -218,35 +206,16 @@ interface PageTile {
   readonly tasks?: (period: ScoreboardPeriod, response: Scoreboard) => Flagged | null;
 }
 
-/**
- * The command's text is held to the page's: the page's own module is loaded, and what it shows is
- * compared with what the command prints. When the comparison fails, the page has renamed, added,
- * removed, moved or reworded something, or changed a threshold or a rounding: src/scoreboard.ts
- * has to say the same.
- *
- * What the load rests on, so that a failure of the load reads as what it is:
- * - jest transpiles each file on its own (`isolatedModules` in tsconfig.jest.json): the page's
- *   module runs here without the console's types, and src/ still imports nothing of the console;
- * - that module imports only types and `./format`, which imports nothing. Whatever else it comes
- *   to import is loaded here as well, by this package's jest, which has no JSX and no bundler: a
- *   component fails the load with "Jest encountered an unexpected token", at the import in
- *   web/src/core/util/scoreboard.ts and before anything is compared;
- * - it exports the five names of {@link Page}. The test names the one that is gone.
- */
 describe('the numbers of the console page', () => {
   let page: Page;
   beforeAll(() => {
-    // By a computed path: no import for the compiler of this package, or its dead-code check, to follow into the console.
     page = jest.requireActual(path.join(__dirname, '..', '..', 'web', 'src', 'core', 'util', 'scoreboard'));
   });
 
-  // The two places where the command's text differs from the page's on purpose: the page keeps the two
-  // units of a duration on one line with a no-break space, and sets the kinds of touchpoint apart with a middle dot.
   const asPrinted = (text: string): string => text.split(String.fromCharCode(0xa0)).join(' ').split(` ${String.fromCharCode(0xb7)} `).join(', ');
   const tasksLine = ({ count, task_ids: ids }: Flagged): string | null =>
     (ids.length === 0 ? null : `Tasks: ${ids.join(', ')}${count > ids.length ? ` and ${(count - ids.length).toLocaleString('en-US')} more` : ''}`);
 
-  /** What the page shows for a response, as the rows the command prints for it. */
   function pageRows(shown: Scoreboard): string[][] {
     const period = shown.current;
     const tiles = page.SECTIONS.flatMap((section) => [[section.title], ...section.tiles.map((tile) => {
@@ -258,7 +227,6 @@ describe('the numbers of the console page', () => {
     return [...tiles, ['Tasks finished'], ...outcomes];
   }
 
-  /** A generator of numbers from 0 to 1 that gives the same ones in every run (Park and Miller's). */
   function generator(seed: number): () => number {
     let state = seed;
     return () => {
@@ -267,7 +235,6 @@ describe('the numbers of the console page', () => {
     };
   }
 
-  /** A response of the API, with the values at which a sentence changes: none, one, two, ten, thousands, the edges of a unit of time. */
   function response(random: () => number): Scoreboard {
     const pick = <T>(...values: T[]): T => values[Math.floor(random() * values.length)];
     const count = (): number => pick(0, 0, 1, 1, 2, 3, 9, 10, 11, 37, 1204, 2140);
@@ -335,10 +302,8 @@ describe('the numbers of the console page', () => {
       const text = formatScoreboard(any);
       const [, , first, second] = text.split('\n');
       if (second === undefined) {
-        // Nothing to show: one sentence in place of the numbers, on the page too.
         expect(first).toBe(page.nothingFinished(any));
       } else {
-        // The page says the populations and its two rules in one paragraph; the command gives the rules a line of their own.
         expect(`${first} ${second}`).toBe(page.contextLine(any));
         expect(rows(text)).toEqual(pageRows(any));
       }
@@ -351,7 +316,6 @@ describe('a caller with nothing finished', () => {
     ['none is waiting from the period before', { count: 0, task_ids: [] }],
     ['the count of those waiting is not known', null],
   ])('is told so, in place of the numbers, when %s', (_case, waiting) => {
-    // Under the line that says whose tasks and which period.
     expect(formatScoreboard({ ...BOARD, current: EMPTY, previous: EMPTY, open_over_7d: waiting }).split('\n').slice(1))
       .toEqual(['', 'No tasks finished in the last 30 days. The scoreboard fills in as your tasks finish.']);
   });
@@ -360,7 +324,6 @@ describe('a caller with nothing finished', () => {
     const text = formatScoreboard({ ...BOARD, current: EMPTY, previous: EMPTY, open_over_7d: { count: 2, task_ids: ['01M4C', '01M4D'] } });
 
     expect(text.split('\n')[2]).toBe('0 tasks finished in the last 30 days: 0 asked for a new pull request, 0 delivered a verified one.');
-    // The period before has no number either: no row has a line for it.
     expect(numbers(text)).toBe(`
 Speed
   Time to verified pull request                    -

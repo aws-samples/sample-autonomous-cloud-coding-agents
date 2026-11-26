@@ -17,37 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Scheduled handler: admission-queue deferred pickup (see #441).
- *
- * Tasks that hit the per-user concurrency cap are parked in QUEUED by the
- * orchestrator instead of being FAILED (see `queueTask` in
- * `shared/orchestrator.ts`). This handler drains that queue: every cycle it
- * queries QUEUED tasks in FIFO order (StatusIndex GSI, sorted by
- * ``created_at``), and for each user with free capacity flips the oldest
- * QUEUED tasks back to SUBMITTED and re-invokes the orchestrator.
- *
- * Division of authority — this handler does a READ-ONLY capacity check
- * against the concurrency table; the orchestrator's `admissionControl`
- * (atomic conditional increment) remains the single writer of the
- * concurrency counter. A pickup that loses the admission race (another
- * task admitted between our read and the orchestrator's increment) is
- * harmless: the orchestrator re-queues the task (SUBMITTED -> QUEUED),
- * `created_at` never changes, so FIFO position is preserved for the next
- * cycle. This at-most-bounces-once-per-cycle design avoids a second
- * writer on the counter (the #331 class of drift bugs).
- *
- * Cancel semantics: the QUEUED -> SUBMITTED flip is conditional on the
- * task still being QUEUED, so a user cancel between the query and the
- * flip cleanly wins and the task is skipped.
- *
- * Backstop: a task QUEUED longer than ``QUEUE_MAX_AGE_SECONDS`` is failed
- * (QUEUED -> FAILED) with an explanatory message so the queue can never
- * accumulate unbounded zombies (e.g. a user's slots wedged by a
- * counter-drift bug that the concurrency reconciler hasn't corrected yet).
- * No concurrency slot is released — QUEUED tasks never held one.
- */
-
 import {
   DynamoDBClient,
   GetItemCommand,
@@ -60,9 +29,6 @@ import { ulid } from 'ulid';
 import { logger } from './shared/logger';
 import { makeClient } from './shared/ua';
 
-// Construct through the attributed factory so every outbound call carries the
-// ABCA solution-attribution `md/` segment (#319). A naked `new XxxClient({})`
-// would silently drop it.
 const ddb = makeClient(DynamoDBClient);
 const lambdaClient = makeClient(LambdaClient);
 
@@ -73,11 +39,6 @@ const ORCHESTRATOR_FUNCTION_ARN = process.env.ORCHESTRATOR_FUNCTION_ARN!;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '10');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 
-/**
- * Maximum time a task may sit QUEUED before the backstop fails it.
- * Default 24h — far above any legitimate queue wait (tasks run minutes
- * to a few hours), so tripping it indicates wedged capacity, not load.
- */
 const QUEUE_MAX_AGE_SECONDS = Number(process.env.QUEUE_MAX_AGE_SECONDS ?? '86400');
 
 interface QueuedTask {
@@ -88,42 +49,19 @@ interface QueuedTask {
   readonly admission_attempts: number;
 }
 
-/** Result counters for the final log line / test assertions. */
 export interface PickupSummary {
   queued_seen: number;
   picked_up: number;
   expired: number;
   skipped_no_capacity: number;
   skipped_race: number;
-  /**
-   * Orchestrator re-invoke failures after a successful QUEUED -> SUBMITTED
-   * flip. Counted separately from benign cancel races (`skipped_race`) so a
-   * systemic invoke outage (bad ARN / throttle / perms) — which fails every
-   * pickup — trips the `level='error'` escalation instead of hiding at INFO.
-   * Each such task is conditionally re-queued for the next cycle (with the
-   * stranded-task reconciler as the final backstop); this counter exists for
-   * visibility into the outage.
-   */
+  /** Orchestrator re-invoke failures after a successful QUEUED -> SUBMITTED flip. */
   invoke_failed: number;
   errors: number;
 }
 
-/**
- * Outcome of a single QUEUED -> SUBMITTED pickup attempt.
- * - `picked_up`: flip succeeded and the orchestrator was re-invoked.
- * - `race`: the conditional flip lost to a concurrent transition (user
- *   cancel / another pickup instance) — benign.
- * - `invoke_failed`: the flip succeeded but the orchestrator re-invoke
- *   failed; the task was conditionally re-queued (SUBMITTED -> QUEUED)
- *   so the next cycle retries promptly rather than waiting a full
- *   stranded-task timeout.
- */
 type PickupOutcome = 'picked_up' | 'race' | 'invoke_failed';
 
-/**
- * Query ALL QUEUED tasks in global FIFO order (StatusIndex GSI: PK
- * ``status``, SK ``created_at`` — ascending scan gives oldest-first).
- */
 async function listQueuedTasks(now: Date): Promise<QueuedTask[]> {
   const tasks: QueuedTask[] = [];
   let lastKey: Record<string, unknown> | undefined;
@@ -160,7 +98,6 @@ async function listQueuedTasks(now: Date): Promise<QueuedTask[]> {
   return tasks;
 }
 
-/** Read a user's current active_count (0 when the row does not exist). */
 async function readActiveCount(userId: string): Promise<number> {
   const resp = await ddb.send(new GetItemCommand({
     TableName: CONCURRENCY_TABLE,
@@ -170,7 +107,6 @@ async function readActiveCount(userId: string): Promise<number> {
   return Number(resp.Item?.active_count?.N ?? '0');
 }
 
-/** Best-effort TaskEvents write — event loss is acceptable, the task record is the source of truth. */
 async function emitEvent(taskId: string, eventType: string, metadata: Record<string, { S: string } | { N: string }>): Promise<void> {
   const ttl = Math.floor(Date.now() / 1000) + TASK_RETENTION_DAYS * 24 * 3600;
   try {
@@ -193,19 +129,6 @@ async function emitEvent(taskId: string, eventType: string, metadata: Record<str
   }
 }
 
-/**
- * Restore a task to QUEUED after a failed orchestrator re-invoke, so the
- * next pickup cycle retries it instead of leaving a stranded SUBMITTED row
- * that only the stranded-task reconciler (a full timeout away) would sweep.
- *
- * The flip is conditional on the task still being SUBMITTED, so a user
- * cancel that raced in between cleanly wins and we leave the task alone.
- * ``created_at`` is untouched, so FIFO position is preserved. ``queued_at``
- * / ``admission_attempts`` are likewise left as-is (best-effort restore).
- * A failure here is swallowed: the task is already SUBMITTED-with-no-
- * pipeline, which the stranded-task reconciler still sweeps as the final
- * backstop.
- */
 async function requeueAfterInvokeFailure(taskId: string): Promise<void> {
   const now = new Date().toISOString();
   try {
@@ -223,9 +146,6 @@ async function requeueAfterInvokeFailure(taskId: string): Promise<void> {
       },
     }));
   } catch (err: unknown) {
-    // ConditionalCheckFailed: the task left SUBMITTED (e.g. user cancel) —
-    // fine, nothing to restore. Anything else: leave it SUBMITTED for the
-    // stranded-task reconciler; do not let a restore failure abort the loop.
     if (!(err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException')) {
       logger.warn('Failed to re-queue task after invoke failure — leaving for stranded-task reconciler', {
         task_id: taskId,
@@ -235,14 +155,6 @@ async function requeueAfterInvokeFailure(taskId: string): Promise<void> {
   }
 }
 
-/**
- * Flip one task QUEUED -> SUBMITTED and re-invoke the orchestrator.
- * Returns `'race'` when the conditional flip lost to a concurrent
- * transition (user cancel / another pickup instance), `'invoke_failed'`
- * when the flip succeeded but the orchestrator re-invoke failed (the task
- * is then conditionally re-queued for the next cycle), and `'picked_up'`
- * on success.
- */
 async function pickUpTask(task: QueuedTask): Promise<PickupOutcome> {
   const now = new Date().toISOString();
   try {
@@ -272,9 +184,6 @@ async function pickUpTask(task: QueuedTask): Promise<PickupOutcome> {
     admission_attempts: { N: String(task.admission_attempts) },
   });
 
-  // Async re-invoke. The payload carries a per-pickup nonce so no layer
-  // (Lambda async dedup, durable-execution idempotency) can mistake the
-  // re-invoke for a replay of the original create-task invocation.
   try {
     await lambdaClient.send(new InvokeCommand({
       FunctionName: ORCHESTRATOR_FUNCTION_ARN,
@@ -285,10 +194,6 @@ async function pickUpTask(task: QueuedTask): Promise<PickupOutcome> {
       })),
     }));
   } catch (invokeErr) {
-    // The task is now SUBMITTED with no pipeline attached. Conditionally
-    // restore it to QUEUED so the next cycle retries promptly and FIFO
-    // position is preserved (created_at unchanged); the stranded-task
-    // reconciler remains the final backstop if the restore also fails.
     logger.error('Orchestrator re-invoke failed after queue pickup — re-queuing for next cycle', {
       task_id: task.task_id,
       error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
@@ -305,10 +210,6 @@ async function pickUpTask(task: QueuedTask): Promise<PickupOutcome> {
   return 'picked_up';
 }
 
-/**
- * Backstop: fail a task that has been QUEUED past the max age. No
- * concurrency release — QUEUED tasks never hold a slot.
- */
 async function expireQueuedTask(task: QueuedTask): Promise<boolean> {
   const now = new Date().toISOString();
   const errorMessage =
@@ -379,7 +280,6 @@ export async function handler(): Promise<PickupSummary> {
     return summary;
   }
 
-  // Group per user, preserving the global FIFO order within each group.
   const byUser = new Map<string, QueuedTask[]>();
   for (const task of queued) {
     const list = byUser.get(task.user_id);
@@ -391,7 +291,6 @@ export async function handler(): Promise<PickupSummary> {
   }
 
   for (const [userId, userTasks] of byUser) {
-    // Expire over-age tasks first so they never block capacity math.
     const live: QueuedTask[] = [];
     for (const task of userTasks) {
       if (task.age_seconds > QUEUE_MAX_AGE_SECONDS) {
@@ -431,9 +330,6 @@ export async function handler(): Promise<PickupSummary> {
       continue;
     }
 
-    // Oldest-first pickup, bounded by free capacity. The orchestrator's
-    // atomic admissionControl is still the final arbiter — an optimistic
-    // over-pick simply re-queues.
     for (const task of live.slice(0, available)) {
       try {
         switch (await pickUpTask(task)) {
@@ -441,9 +337,6 @@ export async function handler(): Promise<PickupSummary> {
             summary.picked_up++;
             break;
           case 'invoke_failed':
-            // Flip succeeded but the re-invoke did not — the task is a
-            // stranded SUBMITTED row. Count it distinctly so a systemic
-            // invoke outage pages instead of masquerading as cancel races.
             summary.invoke_failed++;
             break;
           case 'race':
@@ -461,12 +354,6 @@ export async function handler(): Promise<PickupSummary> {
     summary.skipped_no_capacity += Math.max(0, live.length - available);
   }
 
-  // Escalate to ERROR when the cycle made no forward progress despite a
-  // non-empty queue AND something went wrong — either raw exceptions
-  // (`errors`) or orchestrator re-invoke failures (`invoke_failed`). The
-  // latter is the systemic-outage signal the counter was added for: a bad
-  // ARN / throttle / perms failure strands every pickup, leaving
-  // picked_up === 0 with invoke_failed > 0.
   const failed = summary.errors + summary.invoke_failed;
   const level = failed > 0 && summary.picked_up === 0 && summary.queued_seen > 0 ? 'error' : 'info';
   logger[level]('Admission-queue pickup finished', { ...summary });

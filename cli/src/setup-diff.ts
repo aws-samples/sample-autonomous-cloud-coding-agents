@@ -19,7 +19,6 @@
 
 import { componentForPath, stripAnsi } from './setup-ui';
 
-/** Resource types whose deletion, replacement or orphaning loses data, installations or ownership. */
 const STATE_BEARING_TYPES: ReadonlyMap<string, string> = new Map([
   ['AWS::DynamoDB::Table', 'table'],
   ['AWS::DynamoDB::GlobalTable', 'table'],

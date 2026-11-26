@@ -73,8 +73,6 @@ export type SaveLifecycleResult =
   | { readonly status: 'saved'; readonly intent: MicrovmLifecycleIntent }
   | { readonly status: 'stale' | 'ineligible' };
 
-// Per request/read sequence. A write plus lost-reply recovery can take two such
-// budgets; the caller must also bound its whole reconciliation cycle.
 const MICROVM_LIFECYCLE_STORE_TIMEOUT_MS = 5_000;
 const ddb = makeDocClient();
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
@@ -113,7 +111,6 @@ function parseApproval(row: Record<string, unknown> | undefined, taskId: string,
     || !timestamp(row.timeout_s) || (row.timeout_s as number) <= 0) return { kind: 'invalid' };
   const createdAtMs = Date.parse(row.created_at);
   const canonical = row.created_at.includes('.') ? row.created_at : row.created_at.replace('Z', '.000Z');
-  // Approval windows are bounded (30 s – 1 h): every gate has a wall-clock deadline.
   const deadlineMs = createdAtMs + row.timeout_s * 1000;
   if (!timestamp(createdAtMs) || new Date(createdAtMs).toISOString() !== canonical
     || !timestamp(deadlineMs)) return { kind: 'invalid' };
@@ -151,8 +148,6 @@ export async function readMicrovmLifecycleSnapshot(
     throw new Error('MicroVM lifecycle intent is malformed or has an unsupported version');
   }
   let approval: LifecycleApproval = { kind: 'none' };
-  // Cancellation/terminal writers can retain the old gate pointer. They need
-  // cleanup, not another approval read or a wake, so preserve that identity only.
   if (task.status === TaskStatus.AWAITING_APPROVAL && requestId !== null) {
     try {
       const response = await ddb.send(new GetCommand({
@@ -163,8 +158,6 @@ export async function readMicrovmLifecycleSnapshot(
       abortSignal.throwIfAborted();
       approval = parseApproval(response.Item, taskId, userId, requestId);
     } catch (error) {
-      // This explicit observation forbids suspend and permits conservative wake.
-      // The caller must count/report the failure; no raw SDK message is retained.
       const name = (error as { name?: unknown })?.name;
       approval = { kind: 'unavailable', errorType: typeof name === 'string' && /^[A-Za-z0-9_]{1,100}$/.test(name) ? name : 'Error' };
     }
@@ -219,8 +212,6 @@ export async function saveMicrovmLifecycleIntent(
   if (!timestamp(nowMs)) throw new Error('MicroVM lifecycle time must be epoch milliseconds');
   if (!eligible(snapshot, action, nowMs)) return { status: 'ineligible' };
   const sameGate = intentMatchesGate(snapshot);
-  // Repeated requests retain their original age/generation, so polling cannot
-  // reset the eventual recovery budget. A new gate/action gets a new generation.
   const intent: MicrovmLifecycleIntent = sameGate && snapshot.intent?.action === action ? snapshot.intent : {
     version: 1,
     generation: randomUUID(),
@@ -297,32 +288,22 @@ export async function saveMicrovmLifecycleIntent(
     const failure = error as { name?: string; CancellationReasons?: { Code?: string }[] };
     if (failure?.name === 'TransactionCanceledException'
       && failure.CancellationReasons?.some(reason => reason.Code === 'ConditionalCheckFailed')) return { status: 'stale' };
-    // Lost committed reply: observe exactly our generation and unchanged task
-    // identity before reporting success. Unknown/unreadable outcomes stay errors.
     const current = await readMicrovmLifecycleSnapshot(snapshot.taskId, snapshot.userId, options);
     if (current?.intent?.generation === intent.generation) {
       if (current.status === snapshot.status && current.requestId === snapshot.requestId
         && current.handle.microvmId === snapshot.handle.microvmId && current.handle.endpoint === snapshot.handle.endpoint
         && eligible(current, action, Date.now())) return { status: 'saved', intent: current.intent };
-      // Our write committed, but cancellation/a decision moved the task on.
       return { status: 'stale' };
     }
     throw error;
   }
 }
 
-/** Newest events read per page, and pages read, when looking for a guest checkpoint. */
 const CHECKPOINT_PAGE_SIZE = 50;
 const CHECKPOINT_MAX_PAGES = 4;
 
 /**
  * Whether the guest recorded its suspend checkpoint for this intent generation.
- *
- * The guest writes the checkpoint before answering `/suspend` with 200. When it
- * declines instead (another tool is still running), it answers 200 without a
- * checkpoint, yet the service still freezes the VM. So a SUSPENDED worker with no
- * checkpoint for its intent declined and must be woken. A frozen guest writes
- * nothing afterwards, so its checkpoint sits among the newest events.
  *
  * `unavailable` means the read failed: that is not evidence either way.
  */

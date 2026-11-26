@@ -1,8 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Unit tests for observability helpers (#515 otel_trace_id capture)."""
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -18,7 +16,6 @@ import observability
 
 @pytest.fixture
 def finished_spans(monkeypatch):
-    """Give ``task_span`` a tracer of the real SDK; return the exporter its spans end in."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -28,10 +25,6 @@ def finished_spans(monkeypatch):
 
 
 class TestTaskSpan:
-    """A phase that raises ends its span with status ERROR and the exception on it once.
-    The tracer's own context manager does both; an ``exception`` event that ``task_span``
-    adds itself is a second one, and every count of failures in the trace doubles."""
-
     def test_exception_is_recorded_once_on_each_span_it_leaves(self, finished_spans):
         with (
             pytest.raises(RuntimeError, match="clone failed"),
@@ -57,10 +50,6 @@ class TestTaskSpan:
 
 
 class TestCurrentOtelTraceId:
-    """``current_otel_trace_id`` returns a 32-hex id for a valid span context,
-    and ``None`` (graceful-missing) when there is no recording span — so the
-    replay bundle can treat it as a nullable correlation field."""
-
     def test_returns_32_hex_for_valid_context(self):
         span = MagicMock()
         ctx = MagicMock()
@@ -69,7 +58,6 @@ class TestCurrentOtelTraceId:
         span.get_span_context.return_value = ctx
         with patch.object(observability.trace, "get_current_span", return_value=span):
             tid = observability.current_otel_trace_id()
-        # 128-bit id rendered as zero-padded lowercase 32-char hex.
         assert tid == "1a2b3c4d5e6f70819293a4b5c6d7e8f9"
         assert len(tid) == 32
 
@@ -92,19 +80,12 @@ class TestCurrentOtelTraceId:
             assert observability.current_otel_trace_id() is None
 
     def test_degrades_to_none_when_tracer_raises(self):
-        # A broken/misconfigured tracer must not propagate: callers read this
-        # inside DDB-write try-blocks, where a raise would be misclassified as a
-        # DDB failure and trip the shared progress circuit breaker (#245 review).
         with patch.object(
             observability.trace, "get_current_span", side_effect=RuntimeError("tracer boom")
         ):
             assert observability.current_otel_trace_id() is None
 
     def test_logs_the_tracer_fault_rather_than_degrading_silently(self, capfd):
-        # The degrade is justified but must not be invisible (#756): a tracer
-        # fault and "no recording span" both return None, so the WARN line is the
-        # only surviving evidence of which one happened. capfd (not capsys)
-        # because ``shell.log`` writes at the fd level — see its docstring.
         with patch.object(
             observability.trace, "get_current_span", side_effect=RuntimeError("tracer boom")
         ):
@@ -115,10 +96,6 @@ class TestCurrentOtelTraceId:
         assert "tracer boom" in out
 
     def test_does_not_log_when_there_is_simply_no_recording_span(self, capfd):
-        # The common, uninteresting case: tracing disabled locally. An invalid
-        # span context is not a fault, so it must stay quiet — otherwise every
-        # progress event in a non-traced run emits a WARN and the real fault
-        # signal above becomes noise.
         span = MagicMock()
         ctx = MagicMock()
         ctx.is_valid = False
@@ -129,9 +106,6 @@ class TestCurrentOtelTraceId:
 
 
 class TestPropagateCorrelationContext:
-    """``propagate_correlation_context`` propagates the correlation envelope
-    (#245) via OTEL baggage, setting only the fields that are present."""
-
     def test_sets_all_envelope_fields_when_present(self):
         with (
             patch.object(observability, "baggage") as bag,
@@ -139,13 +113,11 @@ class TestPropagateCorrelationContext:
         ):
             bag.set_baggage.return_value = "CTX"
             observability.propagate_correlation_context("sess-1", user_id="user-1", repo="org/repo")
-        # Baggage-key ordering is not part of the contract — compare as a set.
         keys = {c.args[0] for c in bag.set_baggage.call_args_list}
         assert keys == {"session.id", "user.id", "repo.url"}
         ctx.attach.assert_called_once()
 
     def test_omits_absent_fields(self):
-        # Empty user_id and None repo → only session.id is set on the baggage.
         with patch.object(observability, "baggage") as bag, patch.object(observability, "context"):
             bag.set_baggage.return_value = "CTX"
             observability.propagate_correlation_context("sess-1")
@@ -153,8 +125,6 @@ class TestPropagateCorrelationContext:
         assert keys == {"session.id"}
 
     def test_empty_session_id_is_not_stamped(self):
-        # Reachable via server.py's widened trigger (user_id known, no session):
-        # an empty session_id must not write an empty-string session.id baggage.
         with patch.object(observability, "baggage") as bag, patch.object(observability, "context"):
             bag.set_baggage.return_value = "CTX"
             observability.propagate_correlation_context("", user_id="user-1")

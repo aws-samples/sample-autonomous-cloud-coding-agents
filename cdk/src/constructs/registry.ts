@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-// Provisions the standalone AWS Agent Registry that backs the agent asset registry.
-//
-// Create/Delete are asynchronous and there is no CDK L1/L2 construct yet, so
-// this wraps the CDK Provider framework: an `onEvent` Lambda starts the mutation
-// and an `isComplete` Lambda is polled until the registry reaches a stable state.
 import * as path from 'path';
 import { CfnResource, CustomResource, Duration, NestedStack, type NestedStackProps, Stack, Token } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -31,28 +26,23 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-// On Delete a handler deletes registry records for up to 30 of these seconds
-// (RECORD_DELETION_BUDGET_MS in handlers/registry-provisioning/index.ts).
 const PROVISION_TIMEOUT_SECONDS = 60;
 const PROVISION_MEMORY_MB = 256;
-// Registry create observed at ~70s; poll generously and cap the total wait.
 const POLL_INTERVAL_SECONDS = 10;
 const TOTAL_TIMEOUT_MINUTES = 15;
 const POLL_INTERVAL = Duration.seconds(POLL_INTERVAL_SECONDS);
 const TOTAL_TIMEOUT = Duration.minutes(TOTAL_TIMEOUT_MINUTES);
-/** Step Functions' hard limit on a state machine name. */
 const STATE_MACHINE_NAME_MAX = 80;
 
 export interface AgentRegistryProps {
   /** Registry name — unique per account, alphanumerics + underscores. */
   readonly registryName: string;
-  /** Optional human description stored on the registry. */
   readonly description?: string;
 }
 
 /**
- * The Agent Registry resource. Exposes {@link registryId} / {@link registryArn}
- * for handlers and the `RegistryClient` adapter to target.
+ * Provisions the AWS Agent Registry through a custom resource and exposes
+ * its id and ARN.
  */
 export class AgentRegistry extends Construct {
   public readonly registryId: string;
@@ -62,8 +52,6 @@ export class AgentRegistry extends Construct {
     super(scope, id);
 
     const entry = path.join(__dirname, '..', 'handlers', 'registry-provisioning', 'index.ts');
-    // The Agent Registry control-plane SDK is not in the Lambda runtime, so
-    // it must be bundled (the repo default externalizes @aws-sdk/*, which we override).
     const bundling = { externalModules: [] as string[] };
 
     const commonFnProps = {
@@ -72,8 +60,6 @@ export class AgentRegistry extends Construct {
       timeout: Duration.seconds(PROVISION_TIMEOUT_SECONDS),
       memorySize: PROVISION_MEMORY_MB,
       bundling,
-      // Names this component in the solution UA segment (#319) instead of
-      // falling through to the generic `api` default.
       environment: { ABCA_COMPONENT: 'registry-provisioning' },
     };
 
@@ -88,14 +74,12 @@ export class AgentRegistry extends Construct {
       handler: 'isComplete',
     });
 
-    // CreateRegistry needs `*`: at call time the target resource does not exist.
     const createPolicy = new iam.PolicyStatement({
       actions: ['agent-registry:CreateRegistry'],
       resources: ['*'],
     });
-    // DeleteRegistry is refused while the registry holds a record, so Delete lists the
-    // records and deletes them first. `registry/*` also matches the ARN of a record,
-    // `registry/<registry id>/record/<record id>`: `*` matches `/` as well.
+    // DeleteRegistry is refused while the registry holds a record. `registry/*` also
+    // matches the ARN of a record, `registry/<registry id>/record/<record id>`.
     const registryPolicy = new iam.PolicyStatement({
       actions: [
         'agent-registry:GetRegistry',
@@ -122,12 +106,7 @@ export class AgentRegistry extends Construct {
       },
     });
     // Agent Registry calls these AgentCore workload-identity APIs using the
-    // caller's credentials during CreateRegistry and DeleteRegistry. Keep the
-    // bedrock-agentcore namespace: this is an intentional cross-service
-    // dependency, not a missed rename or migration residue. Without these
-    // actions, creation fails with "Unable to create workload identity because
-    // access was denied"; deletion can fail the same way when the Provider
-    // waiter re-drives DeleteRegistry.
+    // caller's credentials during CreateRegistry and DeleteRegistry.
     const workloadIdentityPolicy = new iam.PolicyStatement({
       actions: [
         'bedrock-agentcore:CreateWorkloadIdentity',
@@ -156,20 +135,8 @@ export class AgentRegistry extends Construct {
       totalTimeout: TOTAL_TIMEOUT,
     });
 
-    // Name the Provider's waiter state machine under the ROOT stack's prefix.
-    //
-    // The least-privilege bootstrap grants the CloudFormation execution role
-    // `states:CreateStateMachine` only on `stateMachine:<stack>-*`. Left
-    // unnamed, CloudFormation names a state machine `<LogicalId>-<random>` —
-    // no stack prefix at all — so the framework's waiter fell outside the grant
-    // and the whole update rolled back (live: AccessDenied on
-    // `AgentRegistryProviderwaiterstatemachine…`, bundle 1.7.0). Widening the
-    // policy to that logical-id shape would pin it to a construct-path hash;
-    // naming the resource keeps the "everything is <stack>-*" invariant intact.
-    //
-    // Root, not `Stack.of(this)`: inside the NestedStack that is a token for
-    // the ~100-char generated nested-stack name, over Step Functions' 80-char
-    // limit. The root stack's name is concrete and short.
+    // CloudFormation names an unnamed state machine `<LogicalId>-<random>`,
+    // without the stack name.
     const root = Stack.of(this).nestedStackParent ?? Stack.of(this);
     const waiter = provider.node
       .findAll()
@@ -191,9 +158,6 @@ export class AgentRegistry extends Construct {
 
     const resource = new CustomResource(this, 'Resource', {
       serviceToken: provider.serviceToken,
-      // Changing the resource type forces replacement from the retired preview
-      // namespace; an old preview registry id cannot be updated through the
-      // standalone API.
       resourceType: 'Custom::AgentRegistry',
       properties: {
         RegistryName: props.registryName,
@@ -225,9 +189,6 @@ export class AgentRegistry extends Construct {
       true,
     );
 
-    // The CDK Provider framework synthesizes its own waiter state machine and
-    // framework Lambdas (onEvent/isComplete/onTimeout) that we do not author.
-    // These findings are on framework-managed resources.
     NagSuppressions.addResourceSuppressions(
       provider,
       [
@@ -254,14 +215,8 @@ export class AgentRegistry extends Construct {
 }
 
 /**
- * NestedStack wrapper for {@link AgentRegistry} (#246).
- *
- * The registry + its Provider framework (custom-resource Lambdas, IAM roles,
- * Step Functions waiter) contribute ~20 resources. Nesting them keeps the root
- * ``AgentStack`` under CloudFormation's hard 500-resource-per-stack limit — the
- * nested stack gets its own budget. ``registryId``/``registryArn`` are surfaced
- * so the parent can thread them into the orchestrator + TaskApi exactly as
- * before (CDK auto-wires the cross-stack export/import).
+ * NestedStack wrapper for {@link AgentRegistry}: its resources count against
+ * the nested stack's 500-resource CloudFormation limit, not the root's.
  */
 export class AgentRegistryStack extends NestedStack {
   public readonly registryId: string;

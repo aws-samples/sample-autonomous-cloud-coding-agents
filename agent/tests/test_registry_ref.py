@@ -1,14 +1,3 @@
-"""Unit tests for registry.ref on inputs where Python and JavaScript differ.
-
-``parse_ref`` has to give the verdict of its TypeScript mirror
-(``cdk/src/handlers/shared/registry/ref.ts``) for every string. The parity corpus
-(``contracts/registry-resolution/cases.json``) holds the cases both parsers run,
-among them three of the inputs below: the U+0662 digit, a trailing CR and a
-trailing U+2028. The inputs here are ones on which the two regular-expression
-dialects or the two number types differ. The expected reasons are what
-``parseRef`` answers.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -35,11 +24,10 @@ class TestSameVerdictAsTheTypeScriptParser:
     )
     def test_a_trailing_line_terminator_is_a_bad_ref_not_a_bad_constraint(self, terminator):
         # In JavaScript the dot matches none of the four line terminators; in Python
-        # it stops at the line feed only, so the constraint used to swallow these.
+        # it stops at the line feed only.
         assert _reason(_REF + "1.0.0" + terminator) == "INVALID_REGISTRY_REF"
 
     def test_a_component_too_long_for_int_is_a_bad_constraint(self):
-        # int() refuses a string of more than 4300 digits with a plain ValueError,
-        # which carries no reason. In JavaScript the component is Infinity, not a
-        # safe integer.
+        # int() refuses a string of more than 4300 digits with a ValueError. In
+        # JavaScript the component is Infinity, not a safe integer.
         assert _reason(_REF + "1." + "9" * 4301 + ".0") == "INVALID_CONSTRAINT"

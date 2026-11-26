@@ -32,10 +32,6 @@ describe('TaskApprovalsTable', () => {
   });
 
   test('creates a DynamoDB table with task_id PK and request_id SK', () => {
-    // §10.1 — PK matches TaskTable.task_id; SK is the ULID minted by
-    // the agent. Hard-coding the names here locks the wire contract
-    // the Python agent (``task_state.transact_write_approval_request``)
-    // and future Lambdas agree on.
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       KeySchema: [
         { AttributeName: 'task_id', KeyType: 'HASH' },
@@ -59,8 +55,6 @@ describe('TaskApprovalsTable', () => {
   });
 
   test('uses ttl attribute for row expiry', () => {
-    // The agent writes TTL as ``created_at + timeout_s + 120s``. DDB
-    // needs the attribute name here to enable the TTL reaper.
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       TimeToLiveSpecification: {
         AttributeName: 'ttl',
@@ -70,18 +64,12 @@ describe('TaskApprovalsTable', () => {
   });
 
   test('does NOT enable DynamoDB streams (§11.2)', () => {
-    // Streams deliberately off: TaskEventsTable already carries the
-    // audit fan-out. Adding streams here would double-dispatch on
-    // every approval transition.
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       StreamSpecification: Match.absent(),
     });
   });
 
   test('creates user_id-status-index GSI', () => {
-    // GSI schema locked by §10.1 / finding #8 — GET /v1/pending does
-    // Query by user_id + status=PENDING. Changing this GSI breaks
-    // bgagent pending under load.
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       GlobalSecondaryIndexes: Match.arrayWith([
         Match.objectLike({
@@ -101,11 +89,6 @@ describe('TaskApprovalsTable', () => {
               'reason',
               'created_at',
               'timeout_s',
-              // Cedar HITL: surfaced by ``bgagent pending`` so users
-              // can see which rule(s) fired on each gate. Projection
-              // change after creation is destructive (see construct
-              // comment) — locking this into the test prevents a
-              // silent regression.
               'matching_rule_ids',
             ]),
           },
@@ -115,11 +98,6 @@ describe('TaskApprovalsTable', () => {
   });
 
   test('GSI does not include deny-sensitive attributes', () => {
-    // ``deny_reason``, ``scope``, ``tool_input_sha256`` are deliberately
-    // absent from the GSI projection so a GET /v1/pending response does
-    // not leak reasons / hashes of already-resolved gates (the list
-    // endpoint only surfaces PENDING rows, but a projection leak would
-    // cost bytes for no UX gain).
     const tableResource = template.findResources('AWS::DynamoDB::Table');
     const tableProps = Object.values(tableResource)[0].Properties;
     const gsi = tableProps.GlobalSecondaryIndexes.find(
@@ -131,17 +109,10 @@ describe('TaskApprovalsTable', () => {
   });
 
   test('exposes the GSI name via an exported constant', () => {
-    // Callers that Query the GSI should reference
-    // ``USER_STATUS_INDEX_NAME`` (not a string literal) so a rename
-    // in the construct fails compile-time rather than silently at
-    // runtime.
     expect(USER_STATUS_INDEX_NAME).toBe('user_id-status-index');
   });
 
   test('sets DESTROY removal policy by default', () => {
-    // Matches task-nudges / task-events convention for sample
-    // teardowns. Production callers override to RETAIN per
-    // §10.1 recommendation.
     template.hasResource('AWS::DynamoDB::Table', {
       DeletionPolicy: 'Delete',
       UpdateReplacePolicy: 'Delete',
@@ -176,9 +147,6 @@ describe('TaskApprovalsTable', () => {
   });
 
   test('exposes the userStatusIndexName field on the construct', () => {
-    // Tests `new TaskApprovalsTable(...).userStatusIndexName` exposes
-    // the same constant so handlers with a construct ref do not need
-    // to import the module-level export separately.
     const app = new App();
     const stack = new Stack(app, 'FieldStack');
     const approvals = new TaskApprovalsTable(stack, 'TaskApprovalsTable');

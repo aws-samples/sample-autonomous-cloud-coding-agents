@@ -17,11 +17,6 @@
  *  SOFTWARE.
  */
 
-// The hint tells the agent what the issue references and the task does NOT
-// carry. A paperclip uploaded to Linear is downloaded, screened and attached by
-// the webhook processor (or the task is rejected), so the hint must not name it:
-// it would tell the agent that a file it holds is missing.
-
 import {
   probeLinearIssueContext,
   renderIssueContextHint,
@@ -57,7 +52,6 @@ describe('probeLinearIssueContext — the hint names only what the task does not
     const probe = await probeLinearIssueContext('tok', 'issue-1');
 
     expect(probe.attachmentTitles).toEqual(['Figma board']);
-    // Both still go to the processor: it fetches the uploaded one.
     expect(probe.attachments).toEqual([
       { title: 'spec.pdf', url: UPLOADED.url },
       { title: 'Figma board', url: LINKED.url },

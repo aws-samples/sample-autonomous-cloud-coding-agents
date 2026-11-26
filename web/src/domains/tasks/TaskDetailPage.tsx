@@ -111,7 +111,6 @@ function OutcomeBanner({ task, outcome, onMessage }: { task: TaskDetail; outcome
 
 const REPO_DEFAULT = 'Repository default';
 
-/** "5 of 60" while it runs; the platform's own count once it has finished. */
 function turnsValue(task: TaskDetail, turnsSoFar: number): string {
   const turns = isTerminal(task.status) && task.turns_completed !== null ? task.turns_completed : turnsSoFar;
   if (turns === 0) return '-';
@@ -130,7 +129,6 @@ function timeValue(task: TaskDetail, now: Date): string {
   return Number.isNaN(started) || isTerminal(task.status) ? '-' : formatDuration(Math.max(0, Math.round((now.getTime() - started) / 1000)));
 }
 
-/** Where it is and the numbers people check first. */
 function TaskProgress({ task, events, live }: { task: TaskDetail; events: readonly TaskEvent[]; live: boolean }) {
   const states = useMemo(() => stepStates(task, events), [task, events]);
   const turnCount = useMemo(() => buildTurns(events).length, [events]);
@@ -202,7 +200,6 @@ function TaskProgress({ task, events, live }: { task: TaskDetail; events: readon
   );
 }
 
-/** What it was asked to do, the limits it ran under, and the identifiers to look it up by. */
 function TaskSettings({ task }: { task: TaskDetail }) {
   const issueUrl = task.issue_number && task.repo ? `https://github.com/${task.repo}/issues/${task.issue_number}` : null;
   return (

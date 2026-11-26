@@ -1,5 +1,3 @@
-"""Unit tests for pure functions in task_state.py."""
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,7 +9,6 @@ from task_state import TaskFetchError, _now_iso
 class TestNowIso:
     def test_format(self):
         result = _now_iso()
-        # ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ
         assert len(result) == 20
         assert result[4] == "-"
         assert result[10] == "T"
@@ -19,13 +16,6 @@ class TestNowIso:
 
 
 class TestGetTask:
-    """Verify the NotFound vs FetchFailed distinction.
-
-    Callers must be able to tell "record doesn't exist" (``None``) from
-    "couldn't read it" (``TaskFetchError``). Collapsing the two to ``None``
-    would let a transient DDB blip look like a legitimate absence.
-    """
-
     def test_returns_none_when_no_table(self, monkeypatch):
         monkeypatch.setattr(task_state, "_get_table", lambda: None)
         assert task_state.get_task("t-any") is None
@@ -60,8 +50,6 @@ class TestGetTask:
 
 
 class TestWriteSessionInfo:
-    """Rev-5 OBS-4: interactive path writes session_id + agent_runtime_arn."""
-
     def test_writes_session_id_and_arn(self, monkeypatch):
         calls: list[dict] = []
 
@@ -116,8 +104,6 @@ class TestWriteSessionInfo:
 
         monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
 
-        # Must NOT raise — the conditional failure is expected when the
-        # task has already transitioned past SUBMITTED/HYDRATING.
         task_state.write_session_info("t-raced", "sess-x", "arn:x")
 
     def test_writes_only_session_when_arn_missing(self, monkeypatch):
@@ -136,13 +122,6 @@ class TestWriteSessionInfo:
 
 
 class TestWriteRunningMaintainsStatusCreatedAt:
-    """Regression guard: ``write_running`` must rewrite ``status_created_at``
-    so the ``UserStatusIndex`` GSI sort key reflects the current status.
-    Its readers rely on that: the queue-position lookup in ``get-task``
-    selects on the prefix, and the stranded-task sweep and
-    ``bgagent ops stuck-tasks`` age a task by the timestamp.
-    """
-
     def test_writes_status_created_at_with_running_prefix(self, monkeypatch):
         calls: list[dict] = []
 
@@ -158,14 +137,11 @@ class TestWriteRunningMaintainsStatusCreatedAt:
         assert "status_created_at = :sca" in call["UpdateExpression"]
         sca = call["ExpressionAttributeValues"][":sca"]
         assert sca.startswith("RUNNING#")
-        # The timestamp after the '#' matches _now_iso()'s ISO-Z format.
         ts = sca.split("#", 1)[1]
         assert ts.endswith("Z")
         assert len(ts) == 20
 
     def test_stores_no_logs_url(self, monkeypatch):
-        """Nothing returns a ``logs_url`` (not the API, the CLI or the console), so
-        none is stored, whether or not a log group is configured."""
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         monkeypatch.setenv("LOG_GROUP_NAME", "/aws/vendedlogs/runtime/APP")
         calls: list[dict] = []
@@ -212,9 +188,6 @@ class TestWriteTerminalMaintainsStatusCreatedAt:
         assert sca.startswith("FAILED#")
 
     def test_sca_and_completed_at_share_timestamp(self, monkeypatch):
-        """The SCA timestamp and completed_at should match so operators can
-        cross-reference the GSI row against the base table without wondering
-        which write happened first."""
         calls: list[dict] = []
 
         class _FakeTable:
@@ -231,10 +204,6 @@ class TestWriteTerminalMaintainsStatusCreatedAt:
 
 
 class TestApprovalTransitionsMaintainStatusCreatedAt:
-    """The stranded-approval sweep ages a paused task by the timestamp inside
-    ``status_created_at``. Both approval transitions must rewrite it, or the
-    sweep's two-hour limit runs from the start of RUNNING."""
-
     def test_approval_request_stamps_awaiting_approval(
         self, approval_tables_env, approval_row, monkeypatch
     ):
@@ -261,11 +230,6 @@ class TestApprovalTransitionsMaintainStatusCreatedAt:
 
 
 class TestStatusWritesStampUpdatedAt:
-    """``updated_at`` is when the status last changed. The API returns it, and the
-    console takes "Updated", a repository's last activity and its 24-hour counters
-    from it. Every status write of the platform sets it. The agent's must too, or
-    a task the agent finishes keeps the timestamp of the moment it started."""
-
     @staticmethod
     def _capture(monkeypatch):
         calls: list[dict] = []
@@ -318,9 +282,8 @@ class TestStatusWritesStampUpdatedAt:
 
 
 class TestFailedStatusWriteNamesTheError:
-    """A status write is best-effort: when it fails, the log line is all that is
-    left. botocore raises ``ClientError`` for every service error, so the class
-    name alone cannot tell a denied write from a throttled or a malformed one."""
+    """botocore raises ``ClientError`` for every service error, so the class name
+    alone cannot tell a denied write from a throttled or a malformed one."""
 
     @staticmethod
     def _refuse_writes(monkeypatch):
@@ -357,11 +320,6 @@ class TestFailedStatusWriteNamesTheError:
 
 
 class TestWriteTerminalTraceS3Uri:
-    """``write_terminal`` persists ``trace_s3_uri`` from
-    the result dict so the ``get-trace-url`` handler (which reads the
-    field off the TaskRecord) sees a consistent view the moment the
-    task reaches terminal."""
-
     def test_trace_s3_uri_written_when_present_in_result(self, monkeypatch):
         calls: list[dict] = []
 
@@ -418,10 +376,6 @@ class TestWriteTerminalTraceS3Uri:
 
 
 class TestWriteTerminalArtifactUri:
-    """#248 Phase 3 — write_terminal persists artifact_uri so a repo-less task's
-    delivered S3 artifact is discoverable via TaskDetail. Regression guard: the
-    field was previously dropped by the write_terminal allowlist."""
-
     def test_artifact_uri_written_when_present(self, monkeypatch):
         calls: list[dict] = []
 
@@ -454,10 +408,6 @@ class TestWriteTerminalArtifactUri:
 
 
 class TestWriteTerminalReplayFields:
-    """#515 — write_terminal persists the verification verdict and otel_trace_id
-    so the replay bundle carries them. Regression guard: build_passed/lint_passed
-    were historically present on TaskResult but dropped by the write allowlist."""
-
     @staticmethod
     def _capture(monkeypatch):
         calls: list[dict] = []
@@ -480,7 +430,6 @@ class TestWriteTerminalReplayFields:
         assert values[":lp"] is False
 
     def test_build_passed_false_is_written_not_dropped(self, monkeypatch):
-        # `is not None` guard, not truthiness — a failing build must persist.
         calls = self._capture(monkeypatch)
         task_state.write_terminal("t-fail", "FAILED", {"build_passed": False})
         assert calls[0]["ExpressionAttributeValues"][":bp"] is False
@@ -500,9 +449,6 @@ class TestWriteTerminalReplayFields:
         assert "otel_trace_id" not in calls[0]["UpdateExpression"]
 
     def test_build_lint_omitted_when_none(self, monkeypatch):
-        # Repo-less / crash tasks leave build_passed/lint_passed as None (the
-        # gate did not run). They must be OMITTED, so the replay bundle reports
-        # verification:null rather than a fictional build_passed:false.
         calls = self._capture(monkeypatch)
         task_state.write_terminal(
             "t-repoless", "COMPLETED", {"build_passed": None, "lint_passed": None}
@@ -516,15 +462,6 @@ class TestWriteTerminalReplayFields:
         monkeypatch,
         capfd,
     ):
-        """When ``write_terminal``'s precondition
-        fails (typically: concurrent cancel) and a ``trace_s3_uri`` was
-        already uploaded, the orphaned S3 object needs a dedicated log
-        line — otherwise the generic ``skipped: precondition not met``
-        message hides silently-lost trace URIs.
-
-        Extension: after the orphan log prints, the self-heal
-        ``write_trace_uri_conditional`` fires; when the second
-        UpdateItem succeeds, the self-heal log also prints."""
         from botocore.exceptions import ClientError
 
         class _FakeTable:
@@ -533,8 +470,6 @@ class TestWriteTerminalReplayFields:
 
             def update_item(self, **_kwargs):
                 self.calls += 1
-                # First call (write_terminal) raises CCF.
-                # Second call (self-heal) succeeds.
                 if self.calls == 1:
                     raise ClientError(
                         {"Error": {"Code": "ConditionalCheckFailedException", "Message": "!"}},
@@ -550,14 +485,10 @@ class TestWriteTerminalReplayFields:
             {"trace_s3_uri": "s3://bucket/traces/u-1/t-orphan.jsonl.gz"},
         )
         out = capfd.readouterr().out
-        # Generic skip message still prints (benign-case compatibility).
         assert "write_terminal skipped" in out
-        # And the specific orphan log calls out the URI + actionable
-        # detail (7-day lifecycle) so operators can reason about cost.
         assert "orphaned by ConditionalCheckFailed" in out
         assert "s3://bucket/traces/u-1/t-orphan.jsonl.gz" in out
         assert "7-day lifecycle" in out
-        # L4: self-heal fired (second update_item call) and logged success.
         assert fake.calls == 2
         assert "self-healed" in out
 
@@ -566,10 +497,6 @@ class TestWriteTerminalReplayFields:
         monkeypatch,
         capfd,
     ):
-        """The orphan diagnostic must NOT fire on the common
-        benign-cancel case (where no S3 write happened) — otherwise
-        operators get log noise that blunts the signal of a real
-        orphan."""
         from botocore.exceptions import ClientError
 
         class _FakeTable:
@@ -587,10 +514,6 @@ class TestWriteTerminalReplayFields:
 
 
 class TestWriteTerminalIterationOutcome:
-    """What the reply to an iteration on a pull request, and the resume of a task
-    that was held for a question, are decided from: whether the branch moved, the
-    agent's answer when it did not, and the commit the run ended on."""
-
     def test_answer_of_a_run_that_changed_nothing_is_written(self, monkeypatch):
         calls: list[dict] = []
 
@@ -609,24 +532,13 @@ class TestWriteTerminalIterationOutcome:
         assert "code_changed = :cc" in expr
         assert "answer_text = :ans" in expr
         assert "head_sha = :hsha" in expr
-        # False is a value here, not an absence: the platform reads it as
-        # "answered, nothing changed", and an absent attribute as "updated".
         assert values[":cc"] is False
         assert values[":ans"] == "It is in src/login.py"
         assert values[":hsha"] == "a" * 40
 
 
 class TestWriteTraceUriConditional:
-    """L4 item 1a — ``write_trace_uri_conditional`` persists
-    ``trace_s3_uri`` on an already-terminal record as a self-heal
-    after ``write_terminal`` loses a race with cancel / reconciler.
-
-    The helper is scoped to ``attribute_not_exists(trace_s3_uri) AND
-    status IN (CANCELLED, COMPLETED, FAILED, TIMED_OUT)`` so it cannot
-    clobber an existing URI or write on a non-terminal record."""
-
     def test_happy_path_writes_uri_and_returns_true(self, monkeypatch):
-        """Status=COMPLETED, no existing trace_s3_uri → write succeeds."""
         calls: list[dict] = []
 
         class _FakeTable:
@@ -643,23 +555,18 @@ class TestWriteTraceUriConditional:
         kwargs = calls[0]
         assert kwargs["Key"] == {"task_id": "t-heal"}
         assert kwargs["UpdateExpression"] == "SET trace_s3_uri = :ts3"
-        # ConditionExpression must be scoped to both "URI not set" and
-        # "status terminal" — either one alone would be unsafe.
         cond = kwargs["ConditionExpression"]
         assert "attribute_not_exists(trace_s3_uri)" in cond
         assert "#s IN" in cond
         assert kwargs["ExpressionAttributeNames"] == {"#s": "status"}
         values = kwargs["ExpressionAttributeValues"]
         assert values[":ts3"] == "s3://bucket/traces/u-1/t-heal.jsonl.gz"
-        # All four terminal-status literals must appear in the IN-list
-        # (the helper's contract is terminal-agnostic).
         assert values[":cancelled"] == "CANCELLED"
         assert values[":completed"] == "COMPLETED"
         assert values[":failed"] == "FAILED"
         assert values[":timed_out"] == "TIMED_OUT"
 
     def test_uri_already_present_returns_false_and_logs_info(self, monkeypatch, capfd):
-        """``ConditionalCheckFailedException`` → returns False, INFO log (benign)."""
         from botocore.exceptions import ClientError
 
         class _FakeTable:
@@ -679,7 +586,6 @@ class TestWriteTraceUriConditional:
         assert "t-already" in out
 
     def test_non_terminal_status_returns_false(self, monkeypatch):
-        """Non-terminal status raises CCF (status IN clause rejects) → False."""
         from botocore.exceptions import ClientError
 
         class _FakeTable:
@@ -696,7 +602,6 @@ class TestWriteTraceUriConditional:
         assert healed is False
 
     def test_transient_ddb_error_returns_false_and_logs_warn(self, monkeypatch, capfd):
-        """A non-CCF ClientError (e.g., throttling) → returns False, WARN log."""
         from botocore.exceptions import ClientError
 
         class _FakeTable:
@@ -718,11 +623,9 @@ class TestWriteTraceUriConditional:
         assert healed is False
         out = capfd.readouterr().out
         assert "write_trace_uri_conditional failed" in out
-        # Log surfaces the exception type name to aid triage.
         assert "ClientError" in out
 
     def test_empty_uri_is_a_noop(self, monkeypatch):
-        """Guard: empty URI → no DDB call, returns False."""
         calls: list[dict] = []
 
         class _FakeTable:
@@ -735,7 +638,6 @@ class TestWriteTraceUriConditional:
         assert calls == []
 
     def test_empty_task_id_is_a_noop(self, monkeypatch):
-        """Guard: empty task_id → no DDB call, returns False."""
         calls: list[dict] = []
 
         class _FakeTable:
@@ -748,26 +650,12 @@ class TestWriteTraceUriConditional:
         assert calls == []
 
     def test_no_table_returns_false(self, monkeypatch):
-        """When ``_get_table`` returns None (TASK_TABLE_NAME unset) → False."""
         monkeypatch.setattr(task_state, "_get_table", lambda: None)
         healed = task_state.write_trace_uri_conditional("t-x", "s3://b/x.gz")
         assert healed is False
 
 
-# ---------------------------------------------------------------------------
-# Chunk 3: TaskApprovalsTable + AWAITING_APPROVAL transition primitives
-# ---------------------------------------------------------------------------
-
-
 class _FakeClientError(Exception):
-    """Minimal ClientError-shaped exception for the task_state tests.
-
-    ``_extract_error_code`` / ``_extract_cancellation_reasons`` duck-type on
-    ``exc.response``, so a plain class that carries a response dict lets us
-    simulate ``TransactionCanceledException`` /
-    ``ConditionalCheckFailedException`` without pulling in botocore.
-    """
-
     def __init__(self, code: str, cancellation_reasons: list | None = None):
         super().__init__(code)
         self.response: dict = {"Error": {"Code": code}}
@@ -777,7 +665,6 @@ class _FakeClientError(Exception):
 
 @pytest.fixture()
 def approval_tables_env(monkeypatch):
-    """Set both approval-related env vars so _require_tables passes."""
     monkeypatch.setenv("TASK_TABLE_NAME", "task-table")
     monkeypatch.setenv("TASK_APPROVALS_TABLE_NAME", "approvals-table")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
@@ -785,7 +672,6 @@ def approval_tables_env(monkeypatch):
 
 @pytest.fixture()
 def approval_row():
-    """A §10.1-shaped approval row for the happy-path write test."""
     return {
         "task_id": "01KTASK",
         "request_id": "01KREQ",
@@ -823,7 +709,6 @@ class TestTransactWriteApprovalRequest:
         items = call.kwargs["TransactItems"]
         assert len(items) == 2
 
-        # Item 1 — Put on approvals table with attribute_not_exists(request_id)
         put = items[0]["Put"]
         assert put["TableName"] == "approvals-table"
         assert put["ConditionExpression"] == "attribute_not_exists(request_id)"
@@ -833,7 +718,6 @@ class TestTransactWriteApprovalRequest:
         assert put["Item"]["matching_rule_ids"] == {"L": [{"S": "force_push_any"}]}
         assert put["Item"]["timeout_s"] == {"N": "300"}
 
-        # Item 2 — Update on task table with RUNNING precondition
         upd = items[1]["Update"]
         assert upd["TableName"] == "task-table"
         assert upd["Key"] == {"task_id": {"S": "01KTASK"}}
@@ -869,11 +753,6 @@ class TestTransactWriteApprovalRequest:
 
     def test_unsupported_row_type_rejected(self, approval_tables_env):
         client = MagicMock()
-        # Deliberately malformed row — verifies the runtime guard in
-        # ``_py_to_ddb_attr``. The static cast through ``Any`` is needed
-        # because ``ApprovalRow`` is a TypedDict (S7); without it ``ty``
-        # rejects the malformed dict at compile time, which would
-        # defeat the runtime-check this test exists to pin.
         from typing import Any
 
         bad_row: Any = {"task_id": "01K", "request_id": "01R", "extra": 3.14}
@@ -882,48 +761,27 @@ class TestTransactWriteApprovalRequest:
         client.transact_write_items.assert_not_called()
 
     def test_exact_condition_expressions_pinned(self, approval_tables_env, approval_row):
-        """I5 — pin the exact ConditionExpression strings on both
-        transact items so a future refactor that loosens the
-        fail-closed enforcement layer fails here. The condition
-        guards are the only thing standing between a stale-state
-        request and a falsely-recorded approval; their strings
-        deserve dedicated assertions, not just call-arg snooping
-        in a happy-path test.
-        """
         client = MagicMock()
         client.transact_write_items.return_value = {}
 
         task_state.transact_write_approval_request("01KTASK", "01KREQ", approval_row, client=client)
 
         items = client.transact_write_items.call_args.kwargs["TransactItems"]
-        # 1. Approval row must be created exactly once per request_id
-        #    — collision => the duplicate write is rejected at DDB.
         put_cond = items[0]["Put"]["ConditionExpression"]
         assert put_cond == "attribute_not_exists(request_id)"
 
-        # 2. Task row precondition is the exact RUNNING check (the
-        #    transition can only fire from RUNNING; AWAITING_APPROVAL
-        #    or terminal statuses must reject the write).
         upd = items[1]["Update"]
         cond = upd["ConditionExpression"]
         assert "#s = :running" in cond
-        # Defensive: the condition must NOT accept AWAITING_APPROVAL
-        # as a precondition for *initial* gate-write — that would
-        # let a runaway gate cascade re-pause an already-paused task.
         assert ":awaiting" not in cond
 
     def test_condition_failed_reason_includes_both_branches(
         self, approval_tables_env, approval_row
     ):
-        """When TransactWriteItems is cancelled, both branches'
-        cancellation reasons must propagate to the caller so the
-        hook can distinguish "request_id collision" from "task
-        already moved past RUNNING".
-        """
         client = MagicMock()
         reasons = [
-            {"Code": "ConditionalCheckFailed"},  # approvals row collision
-            {"Code": "ConditionalCheckFailed"},  # task row no longer RUNNING
+            {"Code": "ConditionalCheckFailed"},
+            {"Code": "ConditionalCheckFailed"},
         ]
         client.transact_write_items.side_effect = _FakeClientError(
             "TransactionCanceledException", cancellation_reasons=reasons
@@ -933,8 +791,6 @@ class TestTransactWriteApprovalRequest:
             task_state.transact_write_approval_request(
                 "01KTASK", "01KREQ", approval_row, client=client
             )
-        # Both branches of the cancellation must surface — the hook's
-        # error-classification logic depends on inspecting both.
         assert len(exc_info.value.cancellation_reasons) == 2
         assert all(
             r.get("Code") == "ConditionalCheckFailed" for r in exc_info.value.cancellation_reasons
@@ -945,7 +801,6 @@ class TestTransactResumeFromApproval:
     def test_resume_refreshes_heartbeat_in_the_same_conditional_write(
         self, approval_tables_env, monkeypatch
     ):
-        """A poll immediately after a long approval wait must see a fresh heartbeat."""
         monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-09-13T12:05:00Z")
         client = MagicMock()
 
@@ -961,7 +816,6 @@ class TestTransactResumeFromApproval:
         assert update["ConditionExpression"] == (
             "#s = :awaiting AND awaiting_approval_request_id = :rid"
         )
-        # An independent write would leave the old heartbeat visible after RUNNING.
         client.update_item.assert_not_called()
 
     def test_env_missing_raises(self, monkeypatch):
@@ -995,13 +849,6 @@ class TestTransactResumeFromApproval:
             task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
 
     def test_resume_condition_pins_joint_invariant(self, approval_tables_env):
-        """I5 — pin the joint condition expression so a refactor that
-        forgets the ``awaiting_approval_request_id = :rid`` half
-        (e.g. allowing resume on ANY AWAITING_APPROVAL row, not
-        just the one matching the decided request_id) fails here.
-        Mismatching that half would let an out-of-order
-        approve_other_request decision resume the wrong gate.
-        """
         client = MagicMock()
         client.transact_write_items.return_value = {}
 
@@ -1009,13 +856,9 @@ class TestTransactResumeFromApproval:
 
         upd = client.transact_write_items.call_args.kwargs["TransactItems"][0]["Update"]
         cond = upd["ConditionExpression"]
-        # Both halves must be present and joined by AND.
         assert "#s = :awaiting" in cond
         assert "awaiting_approval_request_id = :rid" in cond
         assert "AND" in cond
-        # The cleared-on-resume column must be REMOVE'd, not just
-        # overwritten — otherwise the next ``transact_write_approval_request``
-        # would see a stale request_id pointing at a finished gate.
         assert "REMOVE awaiting_approval_request_id" in upd["UpdateExpression"]
 
 
@@ -1033,7 +876,6 @@ class TestBestEffortUpdateApprovalStatus:
         assert call.kwargs["TableName"] == "approvals-table"
         assert call.kwargs["ConditionExpression"] == "#s = :pending"
         assert call.kwargs["ExpressionAttributeValues"][":new"] == {"S": "TIMED_OUT"}
-        # Default: no reason attr is added when caller omits it.
         assert "deny_reason" not in call.kwargs["UpdateExpression"]
 
     def test_reason_optional_attached(self, approval_tables_env):
@@ -1049,7 +891,6 @@ class TestBestEffortUpdateApprovalStatus:
         assert call.kwargs["ExpressionAttributeValues"][":reason"] == {"S": "no prod pushes"}
 
     def test_conditional_check_failed_returns_false(self, approval_tables_env):
-        """IMPL-24 — this is the VM-throttle race signal the hook re-reads on."""
         client = MagicMock()
         client.update_item.side_effect = _FakeClientError("ConditionalCheckFailedException")
 
@@ -1127,11 +968,6 @@ class TestGetApprovalRow:
 
 
 class TestIncrementApprovalGateCountInDdb:
-    """Chunk 7: best-effort persistence of ``approval_gate_count`` so a
-    container restart (§13.6) resumes the cumulative gate budget instead
-    of resetting to 0.
-    """
-
     def test_happy_path_returns_true_and_issues_add(self, approval_tables_env):
         client = MagicMock()
         client.update_item.return_value = {}
@@ -1140,22 +976,13 @@ class TestIncrementApprovalGateCountInDdb:
 
         assert ok is True
         call = client.update_item.call_args
-        # Writes to TaskTable (not approvals-table) — survival of the
-        # TASK-owned counter, not of the approval row.
         assert call.kwargs["TableName"] == "task-table"
         assert call.kwargs["Key"] == {"task_id": {"S": "01KTASK"}}
-        # Atomic ADD (not SET) so concurrent hooks never clobber the counter
-        # and the CreateTaskFn seed of ``approval_gate_count: 0`` (which
-        # initializes the attribute) is still respected.
         assert call.kwargs["UpdateExpression"] == "ADD approval_gate_count :one"
         assert call.kwargs["ExpressionAttributeValues"] == {":one": {"N": "1"}}
-        # No ConditionExpression — the counter is monotonic; we never gate
-        # the bump on any read-modify-write state.
         assert "ConditionExpression" not in call.kwargs
 
     def test_env_missing_returns_false_best_effort(self, monkeypatch):
-        # §13.6: counter persistence is a safety bound, not a correctness
-        # bound. A missing TASK_TABLE_NAME must not block the gate.
         monkeypatch.delenv("TASK_TABLE_NAME", raising=False)
         monkeypatch.delenv("TASK_APPROVALS_TABLE_NAME", raising=False)
 
@@ -1167,8 +994,6 @@ class TestIncrementApprovalGateCountInDdb:
         client = MagicMock()
         client.update_item.side_effect = _FakeClientError("ProvisionedThroughputExceededException")
 
-        # Best-effort: swallow the error so the hook proceeds with the
-        # session-scoped counter as authoritative within the container.
         ok = task_state.increment_approval_gate_count_in_ddb("01KTASK", client=client)
 
         assert ok is False

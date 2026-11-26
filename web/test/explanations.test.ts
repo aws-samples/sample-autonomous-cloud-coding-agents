@@ -24,7 +24,6 @@ import { outcomeParts, SECTIONS } from '../src/core/util/scoreboard';
 import { COUNTERS } from '../src/domains/overview/OverviewPage';
 import { mockScoreboard } from '../src/mocks/fixtures';
 
-/** Everything the console explains in a bubble: a new metric or graph part joins through the list it is defined in. */
 const EXPLAINED: readonly (readonly [string, Explanation])[] = [
   ...SECTIONS.flatMap((section) => section.tiles).map((tile) => [`Scoreboard, ${tile.label}`, tile.explanation] as const),
   ...outcomeParts(mockScoreboard('30d', new Date()).current).map((part) => [`Scoreboard, the bar part ${part.label}`, part.explanation] as const),
@@ -32,7 +31,6 @@ const EXPLAINED: readonly (readonly [string, Explanation])[] = [
   ...COUNTERS.map((counter) => [`Overview, ${counter.label}`, counter.explanation] as const),
 ];
 
-/** The most words each answer may have: a bubble is read in passing. */
 const MOST_WORDS = { what: 25, why: 45, how: 70 } as const;
 
 const ANSWERS = EXPLAINED.flatMap(([where, explanation]) => (

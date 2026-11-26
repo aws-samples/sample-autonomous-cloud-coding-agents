@@ -17,15 +17,7 @@
  *  SOFTWARE.
  */
 
-/**
- * The agent stores each tool call's arguments as a Python dict repr
- * (`{'command': "ls -a", 'description': 'List files'}`), cut to a fixed length
- * with `...` appended. These helpers read it back as best they can.
- */
-
-/** The marker the agent appends when it shortens a preview. */
 const CUT_MARKER = '...';
-/** Shortest preview the agent shortens: 200 characters plus the marker. */
 const SHORTEST_CUT_LENGTH = 200 + CUT_MARKER.length;
 
 export interface ToolInput {
@@ -46,7 +38,6 @@ export function isCutOff(preview: string): boolean {
 
 const ESCAPES: Readonly<Record<string, string>> = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', '0': '\0' };
 
-/** Reads a quoted Python string starting after its opening quote. */
 function readQuoted(text: string, start: number, quote: string): { value: string; end: number | null } {
   let value = '';
   for (let i = start; i < text.length; i += 1) {
@@ -70,7 +61,6 @@ function readQuoted(text: string, start: number, quote: string): { value: string
   return { value, end: null };
 }
 
-/** Reads an unquoted value (number, `True`, a list…) up to the next top-level comma or brace. */
 function readBare(text: string, start: number): { value: string; end: number | null } {
   let depth = 0;
   for (let i = start; i < text.length; i += 1) {
@@ -119,10 +109,7 @@ export function parseToolInput(preview: string | null | undefined): ToolInput {
   return { fields, cutOff, cutOffField: null };
 }
 
-/**
- * One argument from a preview. A value the cut landed in is returned only when
- * `partial` is set, since half a description reads worse than none.
- */
+/** One argument from a preview. A value the cut landed in is returned only when `partial` is set. */
 export function previewField(preview: string | null, key: string, { partial = false } = {}): string | null {
   const input = parseToolInput(preview);
   const value = input.fields[key];

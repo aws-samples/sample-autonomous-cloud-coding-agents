@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-// The image identifier MUST be a full ARN — RunMicrovm rejects a bare name
-// ("Malformed ARN - doesn't start with 'arn:'"), and the live run observed the
-// colon form (`microvm-image:<name>`), which is what the construct derives.
 const IMAGE_IDENTIFIER = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
 const IMAGE_VERSION = '7';
 const EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMicrovmExecution';
@@ -31,22 +28,12 @@ const PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
 
-// --- platform_config (ADR-021 P2) ---
-// Set only the required platform fields for the main cases. Optional fields
-// are tested separately so ambient environment cannot change payload size.
 const TASK_TABLE_NAME = 'abca-task-table';
 const TASK_EVENTS_TABLE_NAME = 'abca-task-events-table';
 const GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 const AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
 
-// Set env vars BEFORE import — LambdaMicrovmComputeStrategy reads them as
-// module-level constants (same pattern as ecs-strategy). The top-of-file import
-// is the FULLY-CONFIGURED substrate; the missing-config describe block below
-// re-imports under jest.isolateModules with vars deleted, and the ingress block
-// re-imports with a REAL ingress connector configured. Ingress is deliberately
-// absent here so the default (explicit NO_INGRESS fallback) assertions are
-// hermetic; AWS_REGION is set because that fallback derives the ARN from it.
 process.env.MICROVM_IMAGE_IDENTIFIER = IMAGE_IDENTIFIER;
 process.env.MICROVM_IMAGE_VERSION = IMAGE_VERSION;
 process.env.MICROVM_EXECUTION_ROLE_ARN = EXECUTION_ROLE_ARN;
@@ -93,8 +80,6 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   GetMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovm', input })),
   GetMicrovmImageVersionCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovmImageVersion', input })),
   TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
-  // Mirrors the real SDK's const-object enum so the strategy's switch keys on
-  // the same literals the service returns.
   MicrovmState: {
     PENDING: 'PENDING',
     RUNNING: 'RUNNING',
@@ -112,15 +97,10 @@ jest.mock('@aws-sdk/client-s3', () => ({
   DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
 }));
 
-// The real logger writes JSON to process.stdout/stderr, so level assertions need
-// the module mocked rather than console spied (see repo-config.test.ts).
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), child: jest.fn() };
 jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 
 import sharedConstants from '../../../../../contracts/constants.json';
-// The REAL classifier, not a mock: review B2's whole point is that the message
-// assertions passed while the classification was wrong, so only the real patterns
-// can prove the fix.
 import { classifyError } from '../../../../src/handlers/shared/error-classifier';
 import type { BlueprintConfig } from '../../../../src/handlers/shared/repo-config';
 import {
@@ -138,10 +118,6 @@ import {
 
 const BLUEPRINT: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn: '' };
 
-/**
- * The `platform_config` block every startSession in this file's main describes
- * must produce, given the module-level environment above.
- */
 const EXPECTED_PLATFORM_CONFIG = {
   task_table_name: TASK_TABLE_NAME,
   task_events_table_name: TASK_EVENTS_TABLE_NAME,
@@ -149,16 +125,6 @@ const EXPECTED_PLATFORM_CONFIG = {
   agent_session_role_arn: AGENT_SESSION_ROLE_ARN,
 };
 
-/**
- * Build a payload whose serialized `{"agent_payload": …, "platform_config": …}`
- * envelope is EXACTLY `targetBytes` long, so the 4 KB boundary can be probed on
- * both sides.
- *
- * `platform_config` is part of the counted envelope (ADR-021 P2), so its bytes are
- * subtracted from the payload's budget here. Asserts its own arithmetic — if the
- * envelope shape or the platform block ever changes, this fails loudly rather than
- * silently testing the wrong boundary.
- */
 function payloadWithEnvelopeBytes(targetBytes: number): Record<string, unknown> {
   const overhead = Buffer.byteLength(
     JSON.stringify({ agent_payload: { p: '' }, platform_config: EXPECTED_PLATFORM_CONFIG }),
@@ -184,7 +150,6 @@ function runMicrovmOk() {
   });
 }
 
-/** The handle shape pollSession/stopSession expect. */
 const makeHandle = () => ({
   sessionId: MICROVM_ID,
   strategyType: 'lambda-microvm' as const,
@@ -192,12 +157,6 @@ const makeHandle = () => ({
   endpoint: ENDPOINT,
 });
 
-/**
- * Run `body` with only the given Region env vars set, restoring both afterwards.
- *
- * `noIngressConnectorArn()` reads the Region at CALL time (not import time), so
- * the NO_INGRESS fallback tests need no module reload — just a scoped env.
- */
 function withRegion(env: { AWS_REGION?: string; AWS_DEFAULT_REGION?: string }, body: () => void): void {
   const saved = {
     AWS_REGION: process.env.AWS_REGION,
@@ -217,7 +176,6 @@ function withRegion(env: { AWS_REGION?: string; AWS_DEFAULT_REGION?: string }, b
   }
 }
 
-/** {@link withRegion} for an async body. */
 async function withRegionAsync(
   env: { AWS_REGION?: string; AWS_DEFAULT_REGION?: string },
   body: () => Promise<void>,
@@ -240,14 +198,6 @@ async function withRegionAsync(
   }
 }
 
-/**
- * Run `body` with the named environment variables DELETED, restoring them after.
- *
- * `buildMicrovmPlatformConfig` reads the environment at CALL time (unlike the
- * `MICROVM_*` substrate constants, which are frozen at import), so a missing
- * platform identifier needs no `jest.isolateModules` module reload — which is
- * exactly why it is written that way.
- */
 async function withoutEnvAsync(keys: string[], body: () => Promise<void>): Promise<void> {
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   try {
@@ -261,7 +211,6 @@ async function withoutEnvAsync(keys: string[], body: () => Promise<void>): Promi
   }
 }
 
-/** {@link withoutEnvAsync}'s inverse: run `body` with extra env vars SET. */
 async function withEnvAsync(env: Record<string, string>, body: () => Promise<void>): Promise<void> {
   const saved = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   try {
@@ -424,9 +373,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       });
 
       const input = mockSend.mock.calls[0][0].input;
-      // Absence, not `undefined`/falsy: all three idlePolicy fields are required
-      // when the block is present, so omission is the unambiguous disabled state.
-      // Traffic-based auto-suspend would freeze the outbound-only agent mid-build.
       expect(Object.keys(input)).not.toContain('idlePolicy');
       expect('idlePolicy' in input).toBe(false);
     });
@@ -442,10 +388,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       });
 
       const input = mockSend.mock.calls[0][0].input;
-      // NOT omitted: a RunMicrovm call with no ingressNetworkConnectors comes
-      // back with the AWS-managed PUBLIC HTTP_INGRESS connector attached and a
-      // public *.lambda-microvm.<region>.on.aws endpoint (live-observed). "No
-      // inbound" is a control we have to request.
+      // RunMicrovm attaches the public HTTP_INGRESS connector when ingressNetworkConnectors is omitted.
       expect('ingressNetworkConnectors' in input).toBe(true);
       expect(input.ingressNetworkConnectors).toEqual([NO_INGRESS_CONNECTOR_ARN]);
       expect(JSON.stringify(input)).not.toContain('HTTP_INGRESS');
@@ -453,8 +396,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('derives the NO_INGRESS fallback ARN from the running Region', () => {
-      // Region-derived rather than hardcoded so the fallback is right in all five
-      // supported Regions; partition follows the Region prefix for aws-cn/-gov.
       expect(microvmNoIngressConnectorArnForRegion()).toBe(NO_INGRESS_CONNECTOR_ARN);
     });
 
@@ -464,10 +405,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       ['cn-north-1', 'aws-cn'],
       ['us-gov-west-1', 'aws-us-gov'],
     ])('the NO_INGRESS fallback uses the right partition in %s', (region, partition) => {
-      // A wrong partition would make the connector ARN unresolvable and the
-      // launch would fail — which is safer than a public endpoint, but still a
-      // hard outage in aws-cn / aws-us-gov if we ever ship there. The Region is
-      // read at CALL time (not import time), so no module reload is needed.
       withRegion({ AWS_REGION: region }, () => {
         expect(microvmNoIngressConnectorArnForRegion()).toBe(
           `arn:${partition}:lambda:${region}:aws:network-connector:aws-network-connector:NO_INGRESS`,
@@ -483,19 +420,12 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('the NO_INGRESS fallback never splices `undefined` into the ARN', () => {
-      // Neither var set is impossible in Lambda (the runtime always injects
-      // AWS_REGION), but a Region-less ARN must still be a well-formed string the
-      // service can reject cleanly rather than `arn:aws:lambda:undefined:...`.
       withRegion({}, () => {
         expect(microvmNoIngressConnectorArnForRegion()).not.toContain('undefined');
       });
     });
 
     test('the fallback reaches the RunMicrovm INPUT, per-Region, not just the helper', async () => {
-      // Outcome-level assertion for the fallback path: what matters is the ARN the
-      // service actually receives. Asserting only the helper would let a wiring
-      // regression (field omitted, wrong variable) pass while every agent MicroVM
-      // silently got the service-default PUBLIC endpoint.
       runMicrovmOk();
 
       await withRegionAsync({ AWS_REGION: 'eu-west-1' }, async () => {
@@ -526,9 +456,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
       expect(envelope.agent_payload).toEqual({ repo_url: 'org/repo', prompt: 'Fix the bug', max_turns: 50 });
       expect(envelope.agent_payload_s3_uri).toBeUndefined();
-      // The MicroVM's substitute for the env block the other two backends get at
-      // deploy time — a snapshot must not bake it in (ADR-021 sub-decision 3), so
-      // it rides the envelope alongside the payload.
       expect(envelope.platform_config).toEqual(EXPECTED_PLATFORM_CONFIG);
     });
 
@@ -544,34 +471,24 @@ describe('LambdaMicrovmComputeStrategy', () => {
         blueprintConfig: BLUEPRINT,
       });
 
-      // Same key shape as the ECS payload bucket: <task_id>/payload.json
       expect(mockS3Send).toHaveBeenCalledTimes(1);
       const put = mockS3Send.mock.calls[0][0];
       expect(put._type).toBe('PutObject');
       expect(put.input.Bucket).toBe(PAYLOAD_BUCKET);
       expect(put.input.Key).toBe('TASK001/payload.json');
       expect(put.input.ContentType).toBe('application/json');
-      // The S3 object carries the payload with platform_config merged in at the top
-      // level, so an agent that resolves the pointer gets the config with it.
       expect(JSON.parse(put.input.Body)).toEqual({ ...big, platform_config: EXPECTED_PLATFORM_CONFIG });
 
       const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
       const envelope = JSON.parse(runHookPayload);
       expect(envelope.agent_payload_s3_uri).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
       expect(envelope.agent_payload).toBeUndefined();
-      // ...and ALSO inline on the pointer envelope, deliberately duplicated: the
-      // agent must be able to read its platform configuration whether it takes it
-      // off the hook body before fetching S3 or out of the fetched object.
       expect(envelope.platform_config).toEqual(EXPECTED_PLATFORM_CONFIG);
-      // The whole point: the hook body must sit far under the 4 KB cap.
       expect(Buffer.byteLength(runHookPayload, 'utf8')).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     });
 
     test('the inline/S3 branch point IS the 4096-byte service cap, with no headroom', () => {
-      // Live-measured, NOT read off the SDK docs (which say 16,384): the service
-      // rejects 4097 with "Member must have length less than or equal to 4096".
-      // Unlike ECS (whose 8192-byte cap is shared with env vars + command, so it
-      // needs a margin), runHookPayload is the entire counted string.
+      // The service rejects 4097 bytes ("Member must have length less than or equal to 4096"); the SDK docs say 16,384.
       expect(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES).toBe(4_096);
     });
 
@@ -585,7 +502,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
         blueprintConfig: BLUEPRINT,
       });
 
-      // Boundary is `<=`: 4096 passed the service's length validation live.
       expect(mockS3Send).not.toHaveBeenCalled();
       const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
       expect(Buffer.byteLength(runHookPayload, 'utf8')).toBe(4_096);
@@ -613,8 +529,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockS3Send.mockResolvedValueOnce({});
       runMicrovmOk();
 
-      // Regression guard for the live-verification fix: anything from 4,097 to
-      // 16,384 bytes used to be inlined and would be REJECTED by the service.
       await new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
@@ -632,8 +546,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockS3Send.mockResolvedValueOnce({});
       runMicrovmOk();
 
-      // 3-byte UTF-8 characters: 2000 chars is ~6 KB of bytes but only 2 KB of
-      // chars, so measuring String.length would have wrongly inlined this.
       const payload = { prompt: '\u4f60'.repeat(2_000) };
       expect(JSON.stringify({ agent_payload: payload, platform_config: EXPECTED_PLATFORM_CONFIG }).length)
         .toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
@@ -675,9 +587,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('MARKS the incomplete-response throw so the classifier can see the backend', async () => {
-      // Unmarked, this landed in error-classifier's generic `Session start failed`
-      // bucket, whose remedy is "Check AgentCore Runtime or ECS cluster health" —
-      // the wrong substrate entirely.
       mockSend.mockResolvedValueOnce({ endpoint: ENDPOINT, state: 'PENDING' });
 
       await expect(
@@ -693,11 +602,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('platform_config COUNTS toward the 4 KB boundary — an otherwise-inlineable payload goes to S3', async () => {
-      // The regression this locks: measuring `{agent_payload}` alone and then
-      // sending `{agent_payload, platform_config}` would inline an envelope the
-      // service rejects outright. So the branch decision has to be made on the
-      // FULL envelope. This payload is exactly 4 096 bytes WITHOUT the platform
-      // block — i.e. the old code would have inlined it — and must now upload.
       mockS3Send.mockResolvedValueOnce({});
       runMicrovmOk();
 
@@ -721,11 +625,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('fails BEFORE the upload when even the POINTER envelope cannot fit (no orphan object)', async () => {
-      // The one shape with no smaller fallback: the payload has already been moved
-      // to S3, so if `{pointer + platform_config}` still exceeds 4 096 bytes there
-      // is nothing left to shed. Only a pathological identifier length can cause it
-      // — hence the check, and hence its placement BEFORE the PutObject so a
-      // misconfiguration cannot leave objects behind for the lifecycle rule to reap.
       await withEnvAsync({ LOG_GROUP_NAME: `/aws/${'x'.repeat(5_000)}` }, async () => {
         const start = new LambdaMicrovmComputeStrategy().startSession({
           taskId: 'TASK001',
@@ -746,9 +645,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('REAPS the MicroVM when the response carries an id but no endpoint', async () => {
-      // The one orphan window the orchestrator cannot cover: startSession never
-      // returns a handle, so nothing downstream knows the id. A MicroVM is already
-      // running and nothing self-terminates on this substrate.
       mockSend
         .mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'RUNNING' })
         .mockResolvedValueOnce({});
@@ -806,8 +702,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
           const start = new LambdaMicrovmComputeStrategy().startSession({
             taskId: 'TASK001',
             userId: 'cognito-test',
-            // Oversized on purpose: the guard must fire before the payload upload,
-            // or a misconfiguration leaves orphan objects in the payload bucket.
             payload: { prompt: 'x'.repeat(20_000) },
             blueprintConfig: BLUEPRINT,
           });
@@ -833,16 +727,10 @@ describe('LambdaMicrovmComputeStrategy', () => {
       const started = mockLogger.info.mock.calls
         .find(([message]) => message === 'Lambda MicroVM session started')!;
       expect(started[1].platform_config_keys).toEqual(Object.keys(EXPECTED_PLATFORM_CONFIG));
-      // Key names are the diagnostic; values are not, and one of them is a secret
-      // ARN. Nothing resembling a value may appear on the log line.
       expect(JSON.stringify(started[1])).not.toContain(GITHUB_TOKEN_SECRET_ARN);
     });
   });
 
-  // --- finalize-time payload delete (review NB3 / ayushtr nit 2) ---
-  //
-  // Finalize revokes the single-object link and removes its private replay
-  // record; worker credentials already deny direct task-object reads.
   describe('deleteMicrovmPayload — closes the cross-task payload-read window', () => {
     test('deletes the task\'s own object from the payload bucket', async () => {
       await deleteMicrovmPayload('TASK001');
@@ -860,8 +748,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockS3Send.mockRejectedValueOnce(new Error('AccessDenied'));
 
       await expect(deleteMicrovmPayload('TASK001')).resolves.toBeUndefined();
-      // Not silent: the lifecycle rule is the backstop, but an operator must be
-      // able to see the delete is failing.
       expect(mockLogger.warn).toHaveBeenCalledWith(
         'Failed to delete MicroVM payload object (non-fatal)',
         expect.objectContaining({ task_id: 'TASK001', error: 'AccessDenied' }),
@@ -869,7 +755,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('deletes ONLY the given task\'s key — never a prefix or the bucket', async () => {
-      // The delete must not become a cleanup that can reach another task's object.
       await deleteMicrovmPayload('TASK001');
 
       const { input } = mockS3Send.mock.calls[0][0];
@@ -907,8 +792,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     test('reports SUSPENDED as suspended without inspecting task state', async () => {
       mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'SUSPENDED' });
 
-      // No task id, no DDB read — the strategy cannot see the task row at all,
-      // which is exactly why the health rules live in the orchestrator.
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
       expect(result).toEqual({ status: 'suspended', microvmState: 'SUSPENDED' });
     });
@@ -946,13 +829,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       ).rejects.toThrow('pollSession called with non-lambda-microvm handle');
     });
 
-    // --- stateReason pass-through (review B1) ---
-    //
-    // The substrate's own account of WHY is the difference between a usable failure
-    // report and a fabricated one. `TERMINATED → completed` has no error slot, so
-    // discarding `stateReason` made the DOMINANT runtime failure — a /run hook 4xx,
-    // reaped in ~12 s — render as the bare "substrate state completed".
-
     test('carries stateReason through on a terminal state', async () => {
       const reason = 'Run lifecycle hook returned HTTP status 400. Please check your hook endpoint '
         + 'and application logs for more details.';
@@ -976,8 +852,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('normalizes the service\'s "Success." away rather than appending noise', async () => {
-      // Every cleanly-terminated MicroVM reports `Success.`; carrying it would put
-      // "(Success.)" on the detail string of every healthy task.
       mockSend.mockResolvedValueOnce({
         microvmId: MICROVM_ID, state: 'TERMINATED', stateReason: 'Success.',
       });
@@ -989,9 +863,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
     });
 
     test('omits reason entirely when the substrate supplies none', async () => {
-      // `undefined` must be OMITTED, not present-as-undefined: the orchestrator's
-      // detail string tests `substrate.reason` for truthiness and a live-verified
-      // hung MicroVM reports no reason at all.
       mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'RUNNING' });
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
@@ -1080,9 +951,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
   });
 
   describe('error marking — every escaping error carries the MicroVM marker', () => {
-    // The marker is what lets error-classifier scope its bare AWS exception-name
-    // patterns to THIS backend, so an unmarked escape is a silent classification
-    // hole: the error would fall through to UNKNOWN ("Unexpected error").
     const markerRe = new RegExp(`${MICROVM_ERROR_MARKER} [\\w ]+failed`);
 
     test('the marker constant matches the pattern shape the classifier anchors on', () => {
@@ -1103,8 +971,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       });
 
       await expect(start).rejects.toThrow(markerRe);
-      // The exception NAME must appear: err.message alone omits it, and the
-      // classifier keys on `<marker> … <ExceptionName>`.
       await expect(start).rejects.toThrow('MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded');
     });
 
@@ -1144,7 +1010,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       });
 
       await expect(start).rejects.toThrow('MicroVM payload upload failed: AccessDenied: Access Denied');
-      // Never reaches RunMicrovm — no half-started MicroVM on an upload fault.
       expect(mockSend).not.toHaveBeenCalled();
     });
 
@@ -1166,9 +1031,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
   });
 });
 
-// The env-var guard reads module-level constants, so the missing-config case
-// needs a fresh module graph with the vars deleted (same isolateModules pattern
-// ecs-strategy's #502 tests use).
 describe('LambdaMicrovmComputeStrategy without the MicroVM substrate deployed', () => {
   function loadStrategyWithout(missing: string[]): typeof LambdaMicrovmComputeStrategy {
     let Strategy!: typeof LambdaMicrovmComputeStrategy;
@@ -1202,14 +1064,11 @@ describe('LambdaMicrovmComputeStrategy without the MicroVM substrate deployed', 
       blueprintConfig: BLUEPRINT,
     });
 
-    // Names the root cause AND both remedies — an admin must not have to
-    // reverse-engineer this from a bare env-var list.
     await expect(start).rejects.toThrow(/compute_type=lambda-microvm/);
     await expect(start).rejects.toThrow(/deployed without the Lambda MicroVMs substrate/);
     await expect(start).rejects.toThrow(/--context compute_type=lambda-microvm/);
     await expect(start).rejects.toThrow(/--compute-type agentcore/);
     await expect(start).rejects.toThrow(new RegExp(envVar));
-    // Fails BEFORE any AWS call — no half-started MicroVM, no orphan S3 object.
     expect(mockSend).not.toHaveBeenCalled();
     expect(mockS3Send).not.toHaveBeenCalled();
   });
@@ -1247,9 +1106,6 @@ describe('LambdaMicrovmComputeStrategy with ingress connectors configured', () =
       blueprintConfig: BLUEPRINT,
     });
 
-    // Comma-separated, whitespace-trimmed — same parsing as ECS_SUBNETS. A
-    // configured value WINS over the NO_INGRESS default (that is how #391
-    // operator shell access lands without a strategy change).
     expect(mockSend.mock.calls[0][0].input.ingressNetworkConnectors).toEqual([
       INGRESS_CONNECTOR_ARN,
       `${INGRESS_CONNECTOR_ARN}-b`,
@@ -1273,8 +1129,6 @@ describe('LambdaMicrovmComputeStrategy with ingress connectors configured', () =
       blueprintConfig: BLUEPRINT,
     });
 
-    // A blank/misconfigured value must not fall back to the service default,
-    // which is a PUBLIC endpoint on every agent MicroVM.
     expect(mockSend.mock.calls[0][0].input.ingressNetworkConnectors)
       .toEqual([NO_INGRESS_CONNECTOR_ARN]);
   });
@@ -1303,16 +1157,12 @@ describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
     const start = new Strategy().startSession({
       taskId: 'TASK001',
       userId: 'cognito-test',
-      // Oversized on purpose: the guard must fire before the payload upload, or a
-      // misconfiguration leaves orphan objects in the payload bucket.
       payload: { prompt: 'x'.repeat(20_000) },
       blueprintConfig: BLUEPRINT,
     });
 
     await expect(start).rejects.toThrow(/must be a full MicroVM image ARN/);
-    // Names the service's own error text so an operator can match the two up.
     await expect(start).rejects.toThrow(/Malformed ARN/);
-    // ...and the remedy.
     await expect(start).rejects.toThrow(/--context compute_type=lambda-microvm/);
     expect(mockSend).not.toHaveBeenCalled();
     expect(mockS3Send).not.toHaveBeenCalled();
@@ -1334,7 +1184,6 @@ describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
 });
 
 describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-time env block', () => {
-  /** A fully-populated orchestrator environment: all thirteen keys present. */
   const FULL_ENV: NodeJS.ProcessEnv = {
     TASK_TABLE_NAME: 'tasks',
     TASK_EVENTS_TABLE_NAME: 'events',
@@ -1356,21 +1205,11 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   };
 
   test('sources the wire key allow-list from the cross-language contract', () => {
-    // The pin is MECHANICAL, not this test: both this producer and
-    // `agent/src/server.py`'s consumer read
-    // `contracts/constants.json → microvm_platform_config`, and
-    // `scripts/check-constants-sync.ts` validates its shape and rejects a
-    // Python-side literal re-declaration. What this asserts is that the CDK side
-    // really is reading it (a local copy would pass every other test in this file)
-    // and, below, that its contents are what review approved — a contract edit is
-    // a wire-format change on both sides, so it must not slip through unnoticed.
     expect([...MICROVM_PLATFORM_CONFIG_KEYS])
       .toEqual(Object.keys(sharedConstants.microvm_platform_config.env_by_key));
     expect([...MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS])
       .toEqual(sharedConstants.microvm_platform_config.required);
 
-    // Order is part of the contract: it is the serialization order, which the 4 KB
-    // inline/S3 branch decision is computed against.
     expect([...MICROVM_PLATFORM_CONFIG_KEYS]).toEqual([
       'task_table_name',
       'task_events_table_name',
@@ -1385,19 +1224,12 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'agent_session_role_arn',
       'aws_sdk_ua_app_id',
       'anthropic_default_haiku_model',
-      // The MAIN model. Absent until now, and silently so: the two substrates that
-      // inject the model straight into a runtime env (the AgentCore runtime block,
-      // the ECS task definitions) were unaffected, so every synth assertion passed
-      // while MicroVM fell back to the `global.`-prefixed literal in
-      // `agent/src/config.py` — wrong on any deployment whose geography is not
-      // `global`, and wrong in a way that surfaces only as AccessDenied at turn 0.
       'anthropic_model',
       'tool_gateway_url',
       'linear_vault_enabled',
       'linear_workload_identity_name',
     ]);
     expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(17);
-    // snake_case on the wire, matching every other key in the /run envelope.
     for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
       expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
     }
@@ -1410,8 +1242,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'github_token_secret_arn',
       'agent_session_role_arn',
     ]);
-    // Every required key must be a real wire key, or the guard would demand
-    // something the producer never emits.
     for (const key of MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS) {
       expect(MICROVM_PLATFORM_CONFIG_KEYS).toContain(key);
     }
@@ -1424,10 +1254,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     expect(config.nudges_table_name).toBe('nudges');
     expect(config.agent_session_role_arn).toBe('arn:aws:iam::123456789012:role/SessionRole');
     expect(config.anthropic_default_haiku_model).toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
-    // The MAIN model, asserted BY VALUE rather than presence. This is the whole
-    // point of the key: the agent's fallback is a `global.`-prefixed literal, so on
-    // a `us` deployment a missing value is not an error anywhere — it is a wrong
-    // model that the IAM grant does not cover, surfacing as AccessDenied at turn 0.
     expect(config.anthropic_model).toBe('us.anthropic.claude-opus-5');
     expect(config.tool_gateway_url).toBe('https://gateway.example/mcp');
     expect(config.linear_vault_enabled).toBe('true');
@@ -1442,8 +1268,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/SessionRole',
     });
 
-    // Omitted, not present-and-undefined: the agent's `key in platform_config`
-    // checks must mean what they say, and a `"k":null` costs bytes against 4 KB.
     expect(Object.keys(config)).toEqual([
       'task_table_name',
       'task_events_table_name',
@@ -1455,8 +1279,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   });
 
   test('treats an EMPTY value as absent', () => {
-    // CloudFormation renders an unresolved optional value as ''. A nameless table
-    // is worse than a missing one — the agent would build a request against it.
     const config = buildMicrovmPlatformConfig({ ...FULL_ENV, NUDGES_TABLE_NAME: '' });
     expect('nudges_table_name' in config).toBe(false);
   });
@@ -1464,9 +1286,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   test('is a closed map: an environment variable outside the allow-list can never leak', () => {
     const config = buildMicrovmPlatformConfig({
       ...FULL_ENV,
-      // The reason this matters: the envelope is written to an S3 object and echoed
-      // into MicroVM logs on a hook failure. Secret VALUES must never be reachable
-      // from this producer, only the ARNs that name them.
       GITHUB_TOKEN: 'ghp_averysecrettokenvalue',
       ANTHROPIC_API_KEY: 'dummy-anthropic-credential-do-not-log',
       AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI',
@@ -1489,26 +1308,16 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     const env = { ...FULL_ENV };
     delete env[envVar];
 
-    // The message must carry the wire key, its env var, and the remedy — an
-    // operator reading a failed task should not have to open this file.
     expect(() => buildMicrovmPlatformConfig(env)).toThrow(new RegExp(`${wireKey} <- ${envVar}`));
     expect(() => buildMicrovmPlatformConfig(env)).toThrow(/redeploy the stack/);
     expect(() => buildMicrovmPlatformConfig(env)).toThrow(/ADR-021 sub-decision 3/);
   });
 
   test('names EVERY missing required key at once, not just the first', () => {
-    // One redeploy should fix all of them; reporting one per attempt turns a
-    // misconfiguration into four round-trips.
     expect(() => buildMicrovmPlatformConfig({})).toThrow(
       /task_table_name.*task_events_table_name.*github_token_secret_arn.*agent_session_role_arn/s,
     );
   });
-
-  // --- CLASSIFICATION, not just message text (review B2) ---
-  //
-  // The message assertions above passed both before and after the marker was added,
-  // which is exactly how the misclassification slipped through. These assert what an
-  // operator actually receives.
 
   test('the throw carries the MicroVM marker so the classifier can scope it', () => {
     expect(() => buildMicrovmPlatformConfig({})).toThrow(
@@ -1517,11 +1326,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   });
 
   test('classifies as a non-retryable CONFIG fault, NOT a transient compute one', () => {
-    // Without the marker this fell to the generic `/Session start failed/i`
-    // catch-all: `errorClass: TRANSIENT`, `retryable: true`, and the remedy "Check
-    // AgentCore Runtime or ECS cluster health / the service quota may be
-    // exhausted" — the wrong substrate AND advice that cannot possibly work for a
-    // hand-edited orchestrator environment.
     let thrown: unknown;
     try {
       buildMicrovmPlatformConfig({});
@@ -1536,16 +1340,11 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     expect(classification!.errorClass).toBe('service');
     expect(classification!.category).toBe('config');
     expect(classification!.title).toBe('The orchestrator is missing MicroVM platform configuration');
-    // The remedy must not send an operator to the wrong substrate.
     expect(classification!.remedy).not.toMatch(/AgentCore Runtime or ECS cluster health/);
     expect(classification!.remedy).toMatch(/redeploy the stack/i);
   });
 
   test('survives the `Session start failed:` prefix the failure path adds', () => {
-    // `failTask` persists `Session start failed: <raw>`, and `failure-reply.ts`
-    // re-classifies THAT string — which is where the TRANSIENT misclassification
-    // actually reached the user. The marker has to win against the catch-all even
-    // with the prefix attached.
     let raw = '';
     try {
       buildMicrovmPlatformConfig({});
@@ -1580,15 +1379,11 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   });
 
   test('defaults to process.env when no environment is passed', () => {
-    // The production call site passes nothing; this is the path that actually runs.
     const config = buildMicrovmPlatformConfig();
     expect(config).toEqual(EXPECTED_PLATFORM_CONFIG);
   });
 
   test('the full thirteen-key block fits the pointer envelope inside the 4 KB cap', () => {
-    // The one shape with no smaller fallback: if the pointer envelope itself
-    // exceeded 4 096 bytes there would be nothing left to move to S3. This asserts
-    // the design has real headroom rather than relying on the guard.
     const pointerEnvelope = JSON.stringify({
       agent_payload_s3_uri: `s3://${PAYLOAD_BUCKET}/TASK001/payload.json`,
       platform_config: buildMicrovmPlatformConfig(FULL_ENV),

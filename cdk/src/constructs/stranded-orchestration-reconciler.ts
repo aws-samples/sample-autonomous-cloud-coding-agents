@@ -27,44 +27,25 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-/**
- * Properties for StrandedOrchestrationReconciler construct.
- */
 export interface StrandedOrchestrationReconcilerProps {
-  /** OrchestrationTable — read DAG state, write recovered child statuses. */
   readonly orchestrationTable: dynamodb.ITable;
-  /** TaskTable — read released children's task status (terminal? built?) + createTaskCore writes. */
   readonly taskTable: dynamodb.ITable;
-  /** TaskEventsTable — createTaskCore writes task_created events. */
   readonly taskEventsTable: dynamodb.ITable;
-  /** Orchestrator function ARN — releaseChild → createTaskCore async-invokes it. */
   readonly orchestratorFunctionArn?: string;
   /**
-   * Sweep cadence. Long enough to amortise the scan; short enough to
-   * clear a lost-event stall in a reasonable user-facing time.
+   * Sweep cadence.
    * @default Duration.minutes(10)
    */
   readonly schedule?: Duration;
 }
 
-/**
- * Scheduled backstop for sub-issue orchestration.
- *
- * The live ``OrchestrationReconciler`` reacts to TaskTable-stream terminal
- * events to release dependency-unblocked children. If it is unavailable
- * when an event fires (deploy/throttle/OOM/DLQ-parked record) that event
- * is lost and the orchestration stalls. This scheduled sweep re-derives
- * gating truth from persisted state and recovers stranded children
- * (see ``handlers/reconcile-stranded-orchestrations.ts``).
- *
- * Mirrors ``StrandedTaskReconciler``. Grants match the live reconciler
- * because it runs the same ``createTaskCore`` release path in-process.
- */
-
-/** Sweep Lambda timeout (minutes) — matches the live reconciler's createTaskCore
- *  + Bedrock/S3 SDK bundle cold-start + release work. */
 const SWEEP_TIMEOUT_MINUTES = 5;
 
+/**
+ * Scheduled backstop for sub-issue orchestration: re-derives gating truth
+ * from persisted state and recovers children stranded by a lost
+ * TaskTable-stream event.
+ */
 export class StrandedOrchestrationReconciler extends Construct {
   public readonly fn: lambda.NodejsFunction;
 
@@ -79,8 +60,6 @@ export class StrandedOrchestrationReconciler extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(SWEEP_TIMEOUT_MINUTES),
-      // 512 MB to match the live reconciler — same createTaskCore +
-      // Bedrock/S3 SDK bundle (see OrchestrationReconciler memory note).
       memorySize: 512,
       environment: {
         ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
@@ -92,10 +71,7 @@ export class StrandedOrchestrationReconciler extends Construct {
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
-        // Imports createTaskCore (releases children, which can carry attachments) —
-        // its transitive attachment-screening PDF path needs pdf-parse unbundled.
-        // Kept in lockstep with the other attachment-screening constructs; see the
-        // //:check:pdf-parse-bundling guard that enforces this.
+        // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled.
         nodeModules: ['pdf-parse'],
       },
     });

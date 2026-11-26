@@ -35,7 +35,6 @@ const TABLE_NAME = process.env.SLACK_INSTALLATION_TABLE_NAME!;
 const SIGNING_SECRET_ARN = process.env.SLACK_SIGNING_SECRET_ARN!;
 const PROCESSOR_FUNCTION_NAME = process.env.SLACK_COMMAND_PROCESSOR_FUNCTION_NAME;
 
-/** Secret recovery window for revoked installations. */
 const SECRET_RECOVERY_DAYS = 7;
 
 interface SlackEventPayload {
@@ -54,15 +53,6 @@ interface SlackEventPayload {
   };
 }
 
-/**
- * POST /v1/slack/events — Handle Slack Events API requests.
- *
- * Handles:
- * - `url_verification` challenge (Slack sends this when the event URL is configured)
- * - `app_uninstalled` event (mark installation revoked, delete bot token)
- * - `tokens_revoked` event (same cleanup)
- */
-/** Event types where retries are idempotent and must be re-processed. */
 const RETRY_ALLOWED_EVENT_TYPES = new Set(['app_uninstalled', 'tokens_revoked']);
 
 /**
@@ -80,16 +70,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Request body is required' });
     }
 
-    // Verify Slack signing secret for every request — including url_verification.
-    // Slack signs all requests; skipping verification exposes the endpoint.
-    // The only reason to bypass is initial setup before the signing secret is populated.
     const signature = event.headers['X-Slack-Signature'] ?? event.headers['x-slack-signature'] ?? '';
     const timestamp = event.headers['X-Slack-Request-Timestamp'] ?? event.headers['x-slack-request-timestamp'] ?? '';
     const signingSecret = await getSlackSecret(SIGNING_SECRET_ARN);
 
     if (!signingSecret) {
-      // Secret hasn't been populated yet — allow url_verification so the Slack App can be
-      // wired up during initial setup, but reject anything else.
       logger.warn('Slack signing secret not populated — bypassing verification for url_verification only');
       const payload: SlackEventPayload = JSON.parse(event.body);
       if (payload.type === 'url_verification' && payload.challenge) {
@@ -105,24 +90,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const payload: SlackEventPayload = JSON.parse(event.body);
 
-    // URL verification challenge — Slack sends this when configuring the event URL.
     if (payload.type === 'url_verification' && payload.challenge) {
       return jsonResponse(200, { challenge: payload.challenge });
     }
 
-    // Slack retries events if we don't respond within 3 seconds. Ack retries
-    // immediately for user-facing events (mentions, DMs) to prevent duplicate task
-    // creation — the idempotency cost of processing the same app_mention twice is
-    // a double-submit. For security-critical revocation events, we MUST process
-    // retries so a transient failure on first delivery doesn't leave the workspace
-    // with a live bot token after uninstall.
-    //
-    // One retry of a user-facing event is processed: the first one, when Slack says
-    // the first delivery failed rather than timed out. This handler answers a
-    // mention with a non-2xx status only when it did not invoke the processor, so
-    // nothing was submitted, and acknowledging the retry would lose the request
-    // without any feedback. Later retries stay acknowledged: their reason describes
-    // only the attempt before them, so the first delivery may have been processed.
     const retryNum = event.headers['X-Slack-Retry-Num'] ?? event.headers['x-slack-retry-num'];
     const retryReason = event.headers['X-Slack-Retry-Reason'] ?? event.headers['x-slack-retry-reason'];
     const firstDeliveryFailed = retryNum === '1' && FAILED_DELIVERY_RETRY_REASONS.has(retryReason ?? '');
@@ -132,7 +103,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true });
     }
 
-    // Dispatch by event type.
     if (payload.type === 'event_callback' && payload.event) {
       const teamId = payload.team_id;
 
@@ -141,7 +111,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else if (eventType === 'app_mention' && teamId) {
         await handleAppMention(payload.event, teamId);
       } else if (eventType === 'message' && teamId && payload.event.channel_type === 'im') {
-        // DMs to the bot — skip bot's own messages to avoid loops.
         if (!payload.event.bot_id) {
           await handleAppMention(payload.event, teamId);
         }
@@ -179,7 +148,6 @@ async function handleAppMention(
     return;
   }
 
-  // Strip the @mention prefix (e.g. "<@U12345> fix the bug" → "fix the bug").
   const text = rawText.replace(/<@[A-Z0-9]+>/g, '').trim();
 
   if (!text) {
@@ -187,18 +155,8 @@ async function handleAppMention(
     return;
   }
 
-  // Build a payload compatible with the command processor.
-  // Use source: 'mention' so the processor knows there's no response_url —
-  // it should use chat.postMessage with the bot token instead.
-  //
-  // The text is forwarded as the user wrote it, line breaks included. Which
-  // word of "@Shoof fix the bug in org/repo#42" is the repo, or whether the
-  // channel's onboarded default repo applies (`bgagent slack onboard-channel`),
-  // is decided in one place, the processor: it can ask what is onboarded, and
-  // a slash alone ("CI/CD", "and/or", a file path) does not make a repo.
   const commandText = `submit ${text}`;
 
-  // Extract file references from the Slack event (if any attached)
   const rawFiles = Array.isArray(event.files) ? event.files as Array<Record<string, unknown>> : [];
   const files: SlackFileRef[] = rawFiles
     .filter(f => typeof f.url_private_download === 'string' && typeof f.name === 'string')
@@ -210,9 +168,6 @@ async function handleAppMention(
       url_private_download: String(f.url_private_download),
     }));
 
-  // Two timestamps: replies go to the thread, reactions on the mention itself.
-  // They differ when the mention is a reply inside a thread, whose first
-  // message may be somebody else's and may carry the reactions of other tasks.
   const mentionTs = messageTs ?? threadTs;
   const mentionPayload: MentionEvent = {
     text: commandText,
@@ -225,7 +180,6 @@ async function handleAppMention(
     ...(files.length > 0 && { files }),
   };
 
-  // React with :eyes: immediately so the user knows the bot saw their message.
   if (mentionTs) {
     const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
     if (botToken) {
@@ -249,8 +203,6 @@ async function handleAppMention(
     logger.error('Failed to invoke command processor for app_mention', {
       error: err instanceof Error ? err.message : String(err),
     });
-    // Mirror the no-repo-found failure UX: swap :eyes: to :x: and reply in thread
-    // so the user isn't left staring at a stuck :eyes: reaction forever.
     const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
     if (botToken && mentionTs) {
       await slackFetch(botToken, 'reactions.remove', { channel: channelId, timestamp: mentionTs, name: 'eyes' });
@@ -267,10 +219,6 @@ async function handleAppMention(
 async function revokeInstallation(teamId: string): Promise<void> {
   const now = new Date().toISOString();
 
-  // Mark the installation record as revoked FIRST. If this fails we must not
-  // delete the bot token, or the DB will still show status=active while the
-  // token is gone — every subsequent Slack call would then fail with "secret
-  // not found." Let Slack retry the revocation event in that case.
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
@@ -287,9 +235,6 @@ async function revokeInstallation(teamId: string): Promise<void> {
     throw err;
   }
 
-  // Schedule the bot token secret for deletion. Failure here is recoverable
-  // on retry (the DDB row is already revoked, so the next delivery just re-tries
-  // this step).
   try {
     await sm.send(new DeleteSecretCommand({
       SecretId: `${SLACK_SECRET_PREFIX}${teamId}`,

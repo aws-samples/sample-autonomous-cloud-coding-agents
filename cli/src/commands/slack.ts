@@ -62,12 +62,9 @@ export function makeSlackCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
 
-        // Step 1: Fetch the manifest JSON from stack outputs.
         console.log('Fetching Slack App manifest from stack outputs...\n');
         const manifestJson = await findStackOutput(region, opts.stackName, 'SlackAppManifestJson');
 
-        // Deploying happens through `bgagent setup`, which shows the diff and
-        // guards data loss; a bare deploy here would follow whatever the profile says.
         if (!manifestJson) throw featureNotDeployedError('slack', opts.stackName);
 
         if (manifestJson) {
@@ -76,13 +73,10 @@ export function makeSlackCommand(): Command {
           console.log(`  ${createUrl}\n`);
         }
 
-        // Step 2: Fetch secret ARNs from stack outputs (CDK creates the placeholders).
         const arns = await fetchSecretArns(region, opts.stackName);
 
-        // Step 3: Prompt for credentials and store.
         const clientId = await promptAndStoreCredentials(region, arns);
 
-        // Step 4: Next steps.
         const hasEvents = manifestJson?.includes('event_subscriptions') ?? false;
         const hasInteractivity = manifestJson?.includes('interactivity') ?? false;
 
@@ -115,7 +109,6 @@ export function makeSlackCommand(): Command {
           console.log('     - Click Save Changes\n');
           step++;
         }
-        // Build the OAuth install URL using the client ID and redirect URI from the manifest.
         const redirectMatch = manifestJson?.match(/"redirect_urls":\["([^"]+)"\]/);
         const redirectUri = redirectMatch ? redirectMatch[1] : '';
         const scopes = 'app_mentions:read,commands,chat:write,chat:write.public,channels:read,groups:read,im:history,im:write,users:read,reactions:write';
@@ -155,26 +148,18 @@ export function makeSlackCommand(): Command {
           process.exit(1);
         }
 
-        // Slack channel IDs start with C (public), G (private/group), or D (DM).
         if (!/^[CGD][A-Z0-9]+$/.test(channelId)) {
           console.error(`Invalid channel ID: ${channelId}. Expected a Slack channel ID like C0123ABCD.`);
           console.error('Right-click the channel in Slack → "Copy link" → the last path segment is the channel ID.');
           process.exit(1);
         }
 
-        // The mapping key is composite ({team_id}#{channel_id}) so it stays unique
-        // across workspaces. Resolve the team_id from the installation table when
-        // the operator didn't pass one — the common single-workspace case needs
-        // no flag; multi-workspace deployments must disambiguate with --team-id.
         const installationTable = await findStackOutput(region, opts.stackName, 'SlackInstallationTableName');
         const teamId = await resolveSlackTeamId(region, installationTable, opts.teamId);
 
         const now = new Date().toISOString();
         const ddb = makeDocClient({ region });
         const key = { channel_id: `${teamId}#${channelId}` };
-        // The put replaces the row, so read the date the channel was first
-        // mapped and write it back. A read that fails stops the command:
-        // taking the row for new would date the mapping from today.
         const existing = await ddb.send(new GetCommand({
           TableName: tableName,
           Key: key,
@@ -244,8 +229,6 @@ export async function resolveSlackTeamId(
   return teamIds[0];
 }
 
-// ─── Shared credential logic ─────────────────────────────────────────────────
-
 interface SecretArns {
   signingSecretArn: string;
   clientSecretArn: string;
@@ -296,7 +279,6 @@ async function promptAndStoreCredentials(region: string, arns: SecretArns): Prom
       continue;
     }
 
-    // Store in Secrets Manager.
     console.log('');
     const sm = makeClient(SecretsManagerClient, { region });
 

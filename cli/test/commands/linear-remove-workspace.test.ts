@@ -32,7 +32,6 @@ function installMockClient() {
   }) as unknown as ApiClient);
 }
 
-/** Run `bgagent linear remove-workspace ...`. */
 async function runRemove(args: string[]): Promise<void> {
   const cmd = makeLinearCommand();
   await cmd.parseAsync(['node', 'test', 'remove-workspace', ...args]);
@@ -40,8 +39,6 @@ async function runRemove(args: string[]): Promise<void> {
 
 describe('linear remove-workspace command', () => {
   let logSpy: jest.SpiedFunction<typeof console.log>;
-  // The confirmation is read through readline only when stdin is not a terminal, which it is
-  // when this file is run from a shell. Pinned, so that the tests do not wait for keys.
   const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 
   beforeEach(() => {
@@ -97,8 +94,6 @@ describe('linear remove-workspace command', () => {
   });
 
   test('does not claim any project-mapping cleanup in the success output', async () => {
-    // Mapping cleanup was dropped (rows carry no workspace id); the command
-    // must not report a mapping count or a checkmark implying it ran.
     mockRemove.mockResolvedValue({
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
@@ -123,17 +118,9 @@ describe('linear remove-workspace command', () => {
     await runRemove(['acme', '--yes']);
     const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(out).toContain('already absent');
-    // `absent` means teardown IS finished — no vault follow-up must appear.
     expect(out).not.toContain('delete-oauth2-credential-provider');
   });
 
-  // ─── Vault-managed teardown is incomplete (the B1 bug) ──────────────────
-  // `secret: 'absent'` and `secret: 'not_applicable'` both mean "no secret was
-  // deleted", but only the first means the workspace is fully torn down. When a
-  // provider name comes back, an AgentCore credential provider outside
-  // CloudFormation still holds the Linear client secret and a live refresh
-  // grant, and the operator has to delete it by hand. Collapsing the two into
-  // one boolean is what hid that.
   test('prints the AgentCore follow-up command for a vault-managed workspace', async () => {
     mockRemove.mockResolvedValue({
       workspace_slug: 'acme',
@@ -153,9 +140,6 @@ describe('linear remove-workspace command', () => {
   });
 
   test('echoes the returned provider name verbatim rather than deriving it from the slug', async () => {
-    // The provider name is minted at onboarding and the response is the only
-    // authority on it — a CLI that rebuilt `<prefix><slug>` would print a
-    // command that silently no-ops if the convention ever changes.
     mockRemove.mockResolvedValue({
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
@@ -168,14 +152,9 @@ describe('linear remove-workspace command', () => {
     const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(out).toContain('--name legacy-linear-provider-acme-7f3a');
     expect(out).not.toContain('--name bgagent-linear-oauth-acme');
-    // A vault row can also have had its own secret deleted; the follow-up is
-    // driven by `provider_name`, not by the secret outcome.
     expect(out).toContain('✓ OAuth secret deleted');
   });
 
-  // ─── Confirmation prompt (the destructive-command safety rail) ──────────
-  // Without --yes the command reads a slug via promptLine and must abort on
-  // mismatch. Under Jest, promptLine takes the non-TTY readline branch.
   function mockPromptLine(returned: string) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const readline = require('readline') as typeof import('readline');
@@ -218,10 +197,6 @@ describe('linear remove-workspace command', () => {
   });
 
   describe('with the confirmation read from a pipe, through the real readline', () => {
-    // `printf 'acme\n' | bgagent linear remove-workspace acme`. The prompt closed its reader
-    // before it kept the line it had read, and closing rejects a prompt that has no answer
-    // yet: every answer that did not come from a terminal ended in "No input provided.".
-    // The double of the two tests above has a close() that emits nothing, so it hid that.
     let stdin: PassThrough;
     let restore: () => void;
 

@@ -17,14 +17,6 @@
  *  SOFTWARE.
  */
 
-/**
- * Tests for tasks of the root `mise.toml` whose commands are written in the file
- * itself, so that no script with a suite of its own stands behind them.
- *
- * Same placement rationale as `check-constants-sync.test.ts`: `cdk/test/` is the
- * Jest tree that can reach the repository root.
- */
-
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -32,7 +24,6 @@ import * as path from 'node:path';
 
 const LINES = fs.readFileSync(path.resolve(__dirname, '../../../mise.toml'), 'utf-8').split('\n');
 
-/** The lines of one task table, without its comments. */
 function task(name: string): string[] {
   const start = LINES.findIndex((line) => line === `[tasks.${name}]` || line === `[tasks."${name}"]`);
   if (start < 0) {
@@ -55,10 +46,7 @@ describe('the SAST scans with the rule packs of the semgrep registry', () => {
     expect(range).toEqual(whole);
   });
 
-  // semgrep downloads the packs from semgrep.dev on every run. When the registry answers with
-  // empty packs, semgrep checks nothing and exits 0: the command after the scan reads the
-  // report semgrep wrote and has to fail unless it lists a loaded rule. --quiet would keep
-  // what semgrep says about the registry out of the log.
+  // When the registry answers with empty packs, semgrep checks nothing and exits 0.
   test.each(TASKS)('%s fails when semgrep loaded no rule, and does not silence semgrep', (name) => {
     const commands = task(name);
     const [, report] = /--sarif-output=(\S+)/.exec(scan(name)) ?? [];
@@ -72,7 +60,6 @@ describe('the SAST scans with the rule packs of the semgrep registry', () => {
       try {
         fs.mkdirSync(path.join(cwd, path.dirname(report)), { recursive: true });
         fs.writeFileSync(path.join(cwd, report), JSON.stringify({ runs: [{ tool: { driver: { rules } } }] }));
-        // The command names `node`: the one that runs this suite.
         const PATH = `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`;
         return spawnSync('sh', ['-c', guard], { cwd, encoding: 'utf-8', env: { ...process.env, PATH } });
       } finally {
@@ -94,7 +81,6 @@ describe('the secret scans with gitleaks', () => {
     if (command === undefined) {
       throw new Error(`${name}: its command is not one gitleaks call`);
     }
-    // An undefined value takes a GITLEAKS_RANGE that this process inherited out of the environment.
     const env = { ...process.env, GITLEAKS_RANGE: range };
     return spawnSync('sh', ['-c', `gitleaks() { printf '%s\\n' "$@"; }\n${command}`], { encoding: 'utf-8', env }).stdout.trimEnd().split('\n');
   };
@@ -119,9 +105,7 @@ describe('the secret scans with gitleaks', () => {
 });
 
 describe('the default task, which `mise run` without a task name runs', () => {
-  // mise starts the entries of `depends` together, and `build` does not depend on `install`:
-  // as dependencies, the build began on a checkout whose packages were still being installed.
-  // The entries of a `run` list run one after the other.
+  // mise starts the entries of `depends` together, and runs the entries of a `run` list one after the other.
   test('installs, then builds', () => {
     expect(task('default').filter((line) => /^(depends|run) /.test(line))).toEqual([
       'run = [{ task = "install" }, { task = "build" }]',
@@ -208,7 +192,6 @@ describe('the git hooks step of the install task', () => {
 });
 
 describe('the shell script lint', () => {
-  /** `task` ends a table at a line that starts with `[`, so no line of the script may start with a `[ ... ]` test. */
   const script = (): string => {
     const lines = task('check:shell');
     const start = lines.indexOf("run = '''");
@@ -221,7 +204,6 @@ describe('the shell script lint', () => {
 
   type Files = Record<string, string>;
 
-  /** Runs the script the way mise runs an inline task. */
   const run = (
     tracked: Files,
     { untracked = {}, deleted = [], shellcheckStatus = 0 }: { untracked?: Files; deleted?: string[]; shellcheckStatus?: number } = {},
@@ -242,8 +224,7 @@ require('node:fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify(call)
 process.exit(${shellcheckStatus});
 `, { mode: 0o755 });
 
-      // No inherited GIT_* variable: under a git hook they point at the real repository.
-      // SHELLCHECK_OPTS holds an option that the script must keep from shellcheck.
+      // Git exports GIT_* variables to its hooks, and a child git that inherits them acts on the hook's repository.
       const env: NodeJS.ProcessEnv = {
         ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
         PATH: `${bin}${path.delimiter}${process.env.PATH}`,
@@ -271,12 +252,9 @@ process.exit(${shellcheckStatus});
     );
 
     expect(result.status).toBe(0);
-    // Sorted: git lists the new files before the tracked ones.
     expect(result.call?.args.filter((argument) => !argument.startsWith('-')).sort()).toEqual(['new script.sh', 'scripts/a.sh']);
   });
 
-  // shellcheck reads a `.shellcheckrc` in the checkout, in a directory above it or in the home directory, and the options in
-  // SHELLCHECK_OPTS. The answer would depend on the machine, and a committed dotfile would change what the build enforces.
   test('asks for errors and warnings, and lets neither an rc file nor SHELLCHECK_OPTS change that', () => {
     expect(run({ 'a.sh': '' }).call).toEqual({ args: ['--norc', '--severity=warning', '--', 'a.sh'], opts: null });
   });
@@ -288,8 +266,7 @@ process.exit(${shellcheckStatus});
     expect(result.status).not.toBe(0);
   });
 
-  // `xargs` on macOS runs nothing for an empty list and exits 0: a pathspec that matches no file
-  // would pass with nothing checked.
+  // `xargs` on macOS runs nothing for an empty list and exits 0.
   test('fails when git lists no shell script, and does not call shellcheck', () => {
     const result = run({ 'notes.txt': '' });
 
@@ -309,7 +286,6 @@ process.exit(${shellcheckStatus});
     expect(hook).toMatch(/^ +files: \\\.sh\$$/m);
     expect(hook).toMatch(/^ +stages: \[pre-commit\]$/m);
     expect(hook).not.toMatch(/^ +exclude: /m);
-    // An exact version: a missing or floating pin would let a runner's own shellcheck answer.
     expect(fs.readFileSync(path.resolve(__dirname, '../../../mise.toml'), 'utf-8')).toMatch(/^shellcheck = "\d+\.\d+\.\d+"$/m);
   });
 });

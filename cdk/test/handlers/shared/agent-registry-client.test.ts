@@ -35,19 +35,12 @@ import {
 
 const RUNTIME_META_KEY = 'dev.abca.runtime';
 
-/** A tiny in-memory fake of the Agent Registry control-plane client. Records are
- *  keyed by an opaque id; List returns summaries, Get returns the full record. */
 class FakeClient {
   private records = new Map<string, Record<string, unknown>>();
   private seq = 0;
   public sent: string[] = [];
-  /** Status a CREATING record settles into on the first Get. `'CREATING'`
-   *  simulates a record that never settles (poll-budget timeout). */
   public settleStatus = 'DRAFT';
-  /** Optional statusReason surfaced alongside a *_FAILED settle. */
   public settleReason?: string;
-  /** When true, SubmitRegistryRecordForApproval throws — simulates a post-create
-   *  failure that strands a DRAFT record. */
   public failSubmit = false;
 
   seed(record: Record<string, unknown>): string {
@@ -69,9 +62,6 @@ class FakeClient {
         };
         recordVersion?: string;
       };
-      // Mirror the real SKILL validator: SKILL.md must be Markdown
-      // frontmatter (start with '---'), not JSON. This guards the adapter's
-      // skill descriptor build against regressing to JSON (the original bug).
       if (input.recordType === 'SKILL') {
         const md =
           input.descriptors?.agentSkillsDefinition?.additionalData?.skillMd?.data ?? '';
@@ -98,9 +88,6 @@ class FakeClient {
     if (cmd instanceof GetRegistryRecordCommand) {
       const id = (cmd.input as { recordId: string }).recordId;
       const rec = this.records.get(id);
-      // Simulate async settle: first Get after create flips CREATING → the
-      // configured settle status (DRAFT by default; CREATE_FAILED or a stuck
-      // CREATING for the failure/timeout tests).
       if (rec && rec.status === 'CREATING' && this.settleStatus !== 'CREATING') {
         rec.status = this.settleStatus;
         if (this.settleReason) rec.statusReason = this.settleReason;
@@ -156,7 +143,6 @@ describe('AgentRegistryClient', () => {
     expect(record.status).toBe('APPROVED');
     expect(record.storageMode).toBe('native');
     expect(record.runtime).toEqual(runtime);
-    // discovery body carried the runtime under _meta (spike-verified shape)
     expect((record.discovery as Record<string, unknown>)._meta).toMatchObject({ [RUNTIME_META_KEY]: runtime });
   });
 
@@ -180,7 +166,6 @@ describe('AgentRegistryClient', () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
     const runtime = { prompt_fragment: 'Always add a trailing note when editing.', tool_hints: ['Edit'] };
-    // Would throw in FakeClient if the adapter emitted JSON instead of frontmatter.
     const record = await client.publish({
       kind: 'skill',
       namespace: 'acme',
@@ -198,8 +183,6 @@ describe('AgentRegistryClient', () => {
   test('publish (native skill) round-trips a prompt_fragment containing an apostrophe', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // The exact case that broke single-quoted YAML frontmatter (#246 review):
-    // js-yaml rejected `x-abca-runtime: '{"prompt_fragment":"Don't…"}'`.
     const runtime = { prompt_fragment: "Don't skip tests; it's required.", tool_hints: ["Don't"] };
     const record = await client.publish({
       kind: 'skill',
@@ -211,18 +194,14 @@ describe('AgentRegistryClient', () => {
       autoApprove: true,
     });
     expect(record.runtime).toEqual(runtime);
-    // The stored frontmatter value must be base64 (no raw apostrophe/JSON), so
-    // the SKILL.md stays valid YAML for native descriptor validation.
     const skillMd = (record.discovery as { skillMd: string }).skillMd;
     const line = skillMd.split('\n').find((l) => l.startsWith('x-abca-runtime:'))!;
-    expect(line).not.toContain('prompt_fragment'); // it's encoded, not raw JSON
+    expect(line).not.toContain('prompt_fragment');
   });
 
   test('publish (native skill) — a newline-bearing description cannot inject a shadowing runtime key (#246 B1)', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // Attacker smuggles a second x-abca-runtime line via the discovery description,
-    // trying to shadow the validated runtime on read (the B1 bypass).
     const injectedB64 = Buffer.from(JSON.stringify({ prompt_fragment: 'INJECTED-EXFIL' }), 'utf-8').toString('base64');
     const record = await client.publish({
       kind: 'skill',
@@ -233,7 +212,6 @@ describe('AgentRegistryClient', () => {
       runtime: { prompt_fragment: 'THE VALIDATED BENIGN FRAGMENT' },
       autoApprove: true,
     });
-    // The round-tripped runtime must be the validated one, never the injected payload.
     expect(record.runtime).toEqual({ prompt_fragment: 'THE VALIDATED BENIGN FRAGMENT' });
     expect(JSON.stringify(record.runtime)).not.toContain('INJECTED-EXFIL');
   });
@@ -286,7 +264,6 @@ describe('AgentRegistryClient', () => {
       version: '1.0.0',
       discovery: { name: 'acme/pdf-tools', description: 'd', version: '1.0.0' },
       runtime: { transport: 'http' as const, url: 'https://x' },
-      // autoApprove omitted → must still reach PENDING_APPROVAL, never approve.
     });
     expect(fake.sent).toEqual(['create', 'submit']);
     expect(record.status).toBe('PENDING_APPROVAL');
@@ -297,9 +274,6 @@ describe('AgentRegistryClient', () => {
     fake.settleStatus = 'CREATE_FAILED';
     fake.settleReason = 'descriptor rejected by substrate';
     const client = makeClient(fake);
-    // The record was created before waitPastCreating saw CREATE_FAILED, so the
-    // failure surfaces as a RegistryPublishIncompleteError carrying the orphan's
-    // recordId; the underlying CREATE_FAILED reason rides on `cause`.
     const err = await client.publish({
       kind: 'mcp_server',
       namespace: 'acme',
@@ -311,7 +285,6 @@ describe('AgentRegistryClient', () => {
     expect(err).toBeInstanceOf(RegistryPublishIncompleteError);
     expect((err as RegistryPublishIncompleteError).recordId).toBeTruthy();
     expect(String((err as RegistryPublishIncompleteError).cause)).toMatch(/CREATE_FAILED.*descriptor rejected/);
-    // Never advanced past create — no submit/approve on a failed record.
     expect(fake.sent).toEqual(['create']);
   });
 
@@ -328,10 +301,8 @@ describe('AgentRegistryClient', () => {
       runtime: { transport: 'http' as const, url: 'https://x' },
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RegistryPublishIncompleteError);
-    // The orphan's id is surfaced so an operator can find + delete/approve it.
     expect((err as RegistryPublishIncompleteError).recordId).toBeTruthy();
     expect((err as RegistryPublishIncompleteError).message).toContain('approve or delete it before retrying');
-    // Create + submit were attempted; submit failed before approve.
     expect(fake.sent).toEqual(['create', 'submit']);
   });
 
@@ -339,7 +310,7 @@ describe('AgentRegistryClient', () => {
     jest.useFakeTimers();
     try {
       const fake = new FakeClient();
-      fake.settleStatus = 'CREATING'; // never settles
+      fake.settleStatus = 'CREATING';
       const client = makeClient(fake);
       const startedAt = Date.now();
       const p = client.publish({
@@ -350,8 +321,6 @@ describe('AgentRegistryClient', () => {
         discovery: { name: 'acme/pdf-tools', description: 'd', version: '1.0.0' },
         runtime: { transport: 'http' as const, url: 'https://x' },
       });
-      // A timeout after create also strands a record, so it surfaces as
-      // RegistryPublishIncompleteError with the underlying reason on `cause`.
       // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
       const assertion = expect(p).rejects.toBeInstanceOf(RegistryPublishIncompleteError);
       const causeAssertion = p.catch((e: unknown) => {
@@ -361,10 +330,6 @@ describe('AgentRegistryClient', () => {
       await assertion;
       await causeAssertion;
       expect(fake.sent).toEqual(['create']);
-      // The wait must be over while the publish function is still running: it has
-      // 28 s (registry-api.test.ts) for this wait and the calls around it. When the
-      // wait outlasts the function, none of the above reaches the caller, who gets
-      // a gateway error that names no record.
       expect(Date.now() - startedAt).toBeLessThanOrEqual(25_000);
     } finally {
       jest.useRealTimers();
@@ -386,7 +351,7 @@ describe('AgentRegistryClient', () => {
     seedMcp('1.4.1', 'APPROVED');
     seedMcp('1.9.9', 'APPROVED');
     seedMcp('2.0.0', 'APPROVED');
-    seedMcp('1.9.10', 'DRAFT'); // higher but not approved → excluded
+    seedMcp('1.9.10', 'DRAFT');
 
     const parsed = parseRef('registry://mcp_server/acme/pdf-tools@^1.4.1');
     if (!parsed.ok) throw new Error('fixture ref should parse');
@@ -434,9 +399,6 @@ describe('AgentRegistryClient', () => {
   test('resolve fails closed (REMOVED) when an APPROVED record has an empty runtime', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // APPROVED, but the server.json carries no `_meta` runtime block at all —
-    // extractPayload would yield an empty runtime. Fail closed instead of
-    // resolving to {} (REGISTRY.md §8).
     fake.seed({
       name: 'mcp_server/acme/pdf-tools',
       recordType: 'MCP',
@@ -450,9 +412,6 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).rejects.toBeInstanceOf(RegistryResolutionError);
   });
 
-  // A SKILL.md whose frontmatter block is present but not valid YAML (unterminated
-  // flow sequence). A parse failure must reject the record, not collapse to `{}` —
-  // which would erase the publisher (attribution) and runtime (#791).
   const seedMalformedSkill = (fake: FakeClient, status = 'APPROVED'): string =>
     fake.seed({
       name: 'skill/acme/readme-helper',
@@ -479,8 +438,6 @@ describe('AgentRegistryClient', () => {
   test('resolve rejects a malformed winner rather than downgrading to a lower valid version', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // A valid lower version exists, but the highest matching version is malformed.
-    // Silently picking the lower one would mask that the pinned version is corrupt.
     fake.seed({
       name: 'skill/acme/readme-helper',
       recordType: 'SKILL',
@@ -513,18 +470,12 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
   });
 
-  // Corruption past the frontmatter YAML: the block parses as valid YAML, but the
-  // descriptor value inside is undecodable. These must classify as MALFORMED too —
-  // #791's browse-tolerance / show-flagging / resolve-reject guarantees have to
-  // hold for every descriptor parse point, not just the YAML block (PR #837 review).
   const seedCorruptRuntimeSkill = (fake: FakeClient, status = 'APPROVED'): string =>
     fake.seed({
       name: 'skill/acme/readme-helper',
       recordType: 'SKILL',
       descriptors: {
         agentSkillsDefinition: {
-          // Valid YAML frontmatter, but x-abca-runtime base64-decodes to a
-          // non-JSON string ("not json"), so JSON.parse throws.
           additionalData: {
             skillMd: {
               data: `---\nname: acme-readme-helper\nx-abca-runtime: ${Buffer.from('not json').toString('base64')}\n---\n# body`,
@@ -585,8 +536,6 @@ describe('AgentRegistryClient', () => {
   test('listRecords tolerates a corrupt CUSTOM/MCP/runtime record (skips, does not abort the namespace)', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // Three differently-corrupt records + one healthy MCP. Before the fix, any of
-    // the corrupt three threw a raw SyntaxError that aborted the whole listing.
     seedCorruptRuntimeSkill(fake);
     seedCorruptCustom(fake);
     seedCorruptMcp(fake);
@@ -637,8 +586,6 @@ describe('AgentRegistryClient', () => {
   });
 
   test('listBrowseEntries keeps a malformed record as an envelope-only marker', async () => {
-    // Unlike listRecords, browse entries retain the malformed record so `show`
-    // can surface a corrupt version instead of 404-ing the asset (#791).
     const fake = new FakeClient();
     const client = makeClient(fake);
     seedMalformedSkill(fake);
@@ -683,11 +630,8 @@ describe('AgentRegistryClient', () => {
       autoApprove: true,
     });
     const meta = (record.discovery as Record<string, unknown>)._meta as Record<string, unknown>;
-    // ABCA runtime rides under its key AND the caller's own _meta key survives.
     expect(meta).toMatchObject({ [RUNTIME_META_KEY]: runtime, 'io.example.custom': { keep: true } });
   });
-
-  // --- publisher preservation (the property this PR is named after) -----------
 
   const seedHealthyMcp = (fake: FakeClient, meta: Record<string, unknown>, status = 'APPROVED'): string =>
     fake.seed({
@@ -711,19 +655,13 @@ describe('AgentRegistryClient', () => {
     const client = makeClient(fake);
     seedHealthyMcp(fake, { 'dev.abca.publisher': 'cognito-sub-999' });
     const record = await client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0');
-    // If PUBLISHER_META_KEY/parse regresses, attribution silently drops from every
-    // healthy record — this pins it.
     expect(record?.publisher).toBe('cognito-sub-999');
   });
 
-  // A publisher that is *present but wrong-typed* must fail closed as MALFORMED:
-  // coercing it to `undefined` would leave the record APPROVED and loadable while
-  // attribution is silently erased — #791's vulnerability verbatim (#837 review).
   test.each([
     ['a number', 123],
     ['an array', ['cognito-sub']],
     ['an object', { sub: 'x' }],
-    // An explicit null is present, not absent.
     ['null', null],
   ])('getRecord rejects a healthy record whose publisher is %s (MALFORMED, not silent drop)', async (_label, badPublisher) => {
     const fake = new FakeClient();
@@ -734,12 +672,6 @@ describe('AgentRegistryClient', () => {
     );
   });
 
-  // --- one asset is read without fetching the rest of its namespace -----------
-
-  // The list summary carries the record name, so only the records of the asset that
-  // was asked for need a GetRegistryRecord. Fetching every record of the kind and
-  // namespace made resolve and the publish pre-check slower with each asset published
-  // beside the one in question.
   const seedNeighbours = (fake: FakeClient): void => {
     for (const name of ['other-a', 'other-b', 'other-c']) {
       fake.seed({
@@ -793,11 +725,6 @@ describe('AgentRegistryClient', () => {
     expect(recordsFetched(send)).toBe(1);
   });
 
-  // --- wrong-shape descriptors (valid JSON, not an object) --------------------
-
-  // JSON.parse succeeds on these, so the pre-#837 boxing (catch SyntaxError only)
-  // walked them straight through and the next line dereferenced a non-object,
-  // escaping resolve as an opaque 500 across the whole namespace (#837 review).
   test.each([
     ['null', 'null'],
     ['a number', '123'],
@@ -850,8 +777,6 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
   });
 
-  // --- frontmatter block without a document, or with more than one ------------
-
   const seedSkillMd = (fake: FakeClient, skillMd: string): string =>
     fake.seed({
       name: 'skill/acme/readme-helper',
@@ -861,10 +786,7 @@ describe('AgentRegistryClient', () => {
       status: 'APPROVED',
     });
 
-  // A block that holds no YAML document is a record without frontmatter, as it is for
-  // the agent's reader (`yaml.safe_load` gives None there). It is not corrupt, so it must
-  // not be reported as MALFORMED; with no runtime it still cannot resolve. js-yaml 4
-  // returned undefined for such a block and js-yaml 5 throws on it.
+  // js-yaml 5 throws on a block that holds no YAML document; PyYAML's safe_load returns None for it.
   test.each([
     ['is empty', '---\n\n---\n# body'],
     ['has only blank lines', '---\n  \n\n---\n# body'],
@@ -907,7 +829,6 @@ describe('AgentRegistryClient', () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
     const b64 = (runtime: unknown): string => Buffer.from(JSON.stringify(runtime)).toString('base64');
-    // js-yaml under `json: true` keeps the last value of a repeated key, and so does PyYAML.
     seedSkillMd(fake, [
       '---',
       'name: acme-readme-helper',
@@ -924,9 +845,6 @@ describe('AgentRegistryClient', () => {
     expect(record?.publisher).toBe('second-sub');
   });
 
-  // --- an absent payload is an empty record, not a corrupt one ----------------
-
-  // The agent's reader gives every row the same answer, so both adapters reject a pin of such a record as REMOVED (#781).
   test.each([
     ['CUSTOM', 'descriptors is null', null],
     ['CUSTOM', 'custom is null', { custom: null }],
@@ -949,7 +867,6 @@ describe('AgentRegistryClient', () => {
   ])('%s record whose %s reads as an empty record and fails to resolve as REMOVED', async (recordType, _what, descriptors) => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // The adapter goes by the record type, so one name serves every row.
     fake.seed({ name: 'mcp_server/acme/pdf-tools', recordType, descriptors, recordVersion: '1.0.0', status: 'APPROVED' });
 
     const record = await client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0');
@@ -962,8 +879,6 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'REMOVED' });
   });
 
-  // `??` stands in for null and undefined only, so an empty string, 0 and false reach JSON.parse.
-  // JSON.parse rejects NaN and Infinity, which the agent's reader has to be told to refuse.
   test.each([
     ['CUSTOM', 'is an empty string', { custom: { data: '' } }],
     ['MCP', 'is an empty string', { mcpServer: { data: '' } }],
@@ -993,8 +908,6 @@ describe('AgentRegistryClient', () => {
     if (!parsed.ok) throw new Error('fixture ref should parse');
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
   });
-
-  // --- what else is in the namespace does not decide a healthy record ---------
 
   const healthyMcp = (version: string, status: string): Record<string, unknown> => ({
     name: 'mcp_server/acme/pdf-tools',
@@ -1058,13 +971,10 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).resolves.toMatchObject({ version: '1.0.0' });
   });
 
-  // --- 422 body must not echo raw descriptor bytes ----------------------------
-
   test('resolve MALFORMED message carries the discriminator, never the raw descriptor bytes', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // An unterminated JSON body embedding a secret-looking token; Node's parser
-    // error quotes a window around the failure position that could include it.
+    // The message of Node's JSON.parse error quotes the input around the failure position.
     fake.seed({
       name: 'mcp_server/acme/pdf-tools',
       recordType: 'MCP',
@@ -1080,12 +990,9 @@ describe('AgentRegistryClient', () => {
     expect((err as RegistryResolutionError).message).not.toContain('SUPERSECRETTOKEN');
   });
 
-  // --- publish over a corrupt slot is a conflict (409), not an opaque 500 -----
-
   test('publish over coordinates holding a malformed record throws ConflictException (not a bare 500)', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    // A corrupt record already occupies mcp_server/acme/pdf-tools@1.0.0.
     fake.seed({
       name: 'mcp_server/acme/pdf-tools',
       recordType: 'MCP',
@@ -1102,7 +1009,6 @@ describe('AgentRegistryClient', () => {
       runtime: { transport: 'http' as const, url: 'https://x' },
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ConflictException);
-    // Never attempted to create over the occupied (corrupt) slot.
     expect(fake.sent).toEqual([]);
   });
 });

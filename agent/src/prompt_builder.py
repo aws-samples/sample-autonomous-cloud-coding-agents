@@ -1,5 +1,3 @@
-"""System prompt construction and project config discovery."""
-
 from __future__ import annotations
 
 import glob
@@ -27,7 +25,6 @@ def build_system_prompt(
     hydrated_context: HydratedContext | None,
     overrides: str,
 ) -> str:
-    """Assemble the system prompt with task-specific values and memory context."""
     workflow_id = (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
     system_prompt = get_system_prompt(workflow_id)
     system_prompt = system_prompt.replace("{repo_url}", config.repo_url)
@@ -36,15 +33,10 @@ def build_system_prompt(
     system_prompt = system_prompt.replace("{branch_name}", setup.branch)
     system_prompt = system_prompt.replace("{default_branch}", setup.default_branch)
     system_prompt = system_prompt.replace("{max_turns}", str(config.max_turns))
-    # The commands setup_repo and the post-agent gate run: the Blueprint's, else
-    # the mise defaults (blank counts as unset, as in resolve_verify_argv).
     build_command = config.build_command.strip() or DEFAULT_BUILD_COMMAND
     lint_command = config.lint_command.strip() or DEFAULT_LINT_COMMAND
     system_prompt = system_prompt.replace("{build_command}", build_command)
     system_prompt = system_prompt.replace("{lint_command}", lint_command)
-    # Clarify-before-spend (UX #4): the new_task workflow references this marker
-    # in its "ask instead of guess" branch. Harmless no-op for prompts that don't
-    # contain the placeholder.
     system_prompt = system_prompt.replace("{needs_input_marker}", NEEDS_INPUT_MARKER)
     setup_notes = (
         "\n".join(f"- {n}" for n in setup.notes)
@@ -53,7 +45,6 @@ def build_system_prompt(
     )
     system_prompt = system_prompt.replace("{setup_notes}", setup_notes)
 
-    # Inject memory context from orchestrator hydration
     memory_context_text = _render_memory_context(
         hydrated_context,
         heading="Repository knowledge",
@@ -61,7 +52,6 @@ def build_system_prompt(
     )
     system_prompt = system_prompt.replace("{memory_context}", memory_context_text)
 
-    # Substitute PR-specific placeholders
     pr_number_val = config.pr_number
     if pr_number_val:
         system_prompt = system_prompt.replace("{pr_number}", str(pr_number_val))
@@ -77,13 +67,12 @@ def build_repoless_system_prompt(
     hydrated_context: HydratedContext | None,
     overrides: str,
 ) -> str:
-    """Assemble the system prompt for a repo-less workflow (#248 Phase 3).
+    """Assemble the system prompt for a repo-less workflow.
 
-    The repo-bound :func:`build_system_prompt` requires a ``RepoSetup`` (branch,
-    default_branch, setup notes); a repo-less task has none. This builds the
-    repo-less template (no git/branch/PR placeholders), substituting only
-    task_id/workspace/max_turns and the rendered memory context, then appends the
-    same Blueprint overrides + channel guidance as the repo-bound path.
+    This builds the repo-less template (no git/branch/PR placeholders),
+    substituting only task_id/workspace/max_turns and the rendered memory context,
+    then appends the same Blueprint overrides + channel guidance as the
+    repo-bound path.
     """
     workflow_id = (config.resolved_workflow or {}).get("id", REPO_LESS_DEFAULT_WORKFLOW_ID)
     system_prompt = get_system_prompt(workflow_id, repo_less=True)
@@ -97,22 +86,14 @@ def build_repoless_system_prompt(
 
 
 def _append_task_sections(system_prompt: str, config: TaskConfig, overrides: str) -> str:
-    """Append what follows the template in both prompts: overrides, channel, skills."""
-    # Append Blueprint system_prompt_overrides after all placeholder
-    # substitutions (avoids double-substitution if overrides contain
-    # template placeholders like {repo_url}).
     if overrides:
         system_prompt += f"\n\n## Additional instructions\n\n{overrides}"
         log("TASK", f"Applied system prompt overrides ({len(overrides)} chars)")
 
-    # Channel-specific guidance (appended last so channel instructions sit
-    # close to the end of the prompt, where the model weights recency).
     channel_addendum = _channel_prompt_addendum(config)
     if channel_addendum:
         system_prompt += channel_addendum
 
-    # Registry skill assets (#246, PR 3): append resolved prompt fragments. Placed
-    # after channel guidance so operator-attached skills sit at the recency end.
     if config.resolved_assets:
         from registry.loader import build_skill_prompt_fragment
 
@@ -127,7 +108,6 @@ def _render_memory_context(
     heading: str = "Prior knowledge",
     empty: str = "(No previous knowledge available.)",
 ) -> str:
-    """Render the memory-context block shared by repo-bound and repo-less prompts."""
     if not (hydrated_context and hydrated_context.memory_context):
         return empty
     mc = hydrated_context.memory_context
@@ -142,37 +122,8 @@ def _render_memory_context(
 
 
 def _channel_prompt_addendum(config: TaskConfig) -> str:
-    """Return channel-specific prompt guidance, or empty string.
-
-    Linear-origin tasks (ADR-016 "Linear is fully deterministic"): the agent has
-    NO Linear MCP and NO Linear write access. All Linear I/O is handled by the
-    platform, not the agent:
-      * inbound context — the issue title/description, recent human comments,
-        project wiki-document CONTENT, and attachments are ALREADY pre-hydrated
-        into the task description + ``attachments`` at admission time
-        (linear-webhook-processor + linear-attachments.ts +
-        linear-feedback.fetchRecentComments + linear-issue-context-probe's doc
-        fetch). There is nothing to fetch at runtime.
-      * outbound status — 👀/✅/❌ reactions and Backlog→In Progress→In Review
-        state transitions are posted deterministically by ``linear_reactions.py``;
-        the "🤖 Starting" and PR-opened comments are posted at the Lambda tier;
-        the terminal ✅/⚠️/❌ summary (cost/turns/PR link) is posted by the
-        fan-out plane. So the addendum's whole job now is to tell the agent to
-        do the code work and NOT attempt any Linear calls.
-
-    Jira-origin tasks intentionally get NO addendum: Atlassian's Remote MCP
-    requires an interactive OAuth flow a headless agent can't complete, so the
-    MCP tools never load. Instructing the agent to use them just wastes turns.
-    Jira progress comments are posted out-of-band by ``jira_reactions`` through
-    the configured Forge app actor (or the legacy OAuth migration fallback),
-    not by the coding agent.
-    """
     if config.channel_source != "linear":
         return ""
-    # A synthetic orchestration integration node (#247) has NO real Linear
-    # sub-issue — `linear_issue_id` is intentionally omitted from its
-    # channel_metadata (see orchestration-release.ts). Without a target issue
-    # there is nothing issue-specific to say; the parent panel is the surface.
     if not config.channel_metadata.get("linear_issue_id"):
         return ""
     issue_identifier = config.channel_metadata.get("linear_issue_identifier") or ""
@@ -212,25 +163,20 @@ def discover_project_config(repo_dir: str) -> dict[str, list[str]]:
     """
     project_config: dict[str, list[str]] = {}
     try:
-        # CLAUDE.md instructions
         for md in ["CLAUDE.md", os.path.join(".claude", "CLAUDE.md")]:
             if os.path.isfile(os.path.join(repo_dir, md)):
                 project_config.setdefault("instructions", []).append(md)
-        # .claude/rules/*.md
         rules_dir = os.path.join(repo_dir, ".claude", "rules")
         if os.path.isdir(rules_dir):
             for p in glob.glob(os.path.join(rules_dir, "*.md")):
                 project_config.setdefault("rules", []).append(os.path.relpath(p, repo_dir))
-        # .claude/settings.json
         settings = os.path.join(repo_dir, ".claude", "settings.json")
         if os.path.isfile(settings):
             project_config["settings"] = [".claude/settings.json"]
-        # .claude/agents/*.md
         agents_dir = os.path.join(repo_dir, ".claude", "agents")
         if os.path.isdir(agents_dir):
             for p in glob.glob(os.path.join(agents_dir, "*.md")):
                 project_config.setdefault("agents", []).append(os.path.relpath(p, repo_dir))
-        # .mcp.json
         mcp = os.path.join(repo_dir, ".mcp.json")
         if os.path.isfile(mcp):
             project_config["mcp_servers"] = [".mcp.json"]

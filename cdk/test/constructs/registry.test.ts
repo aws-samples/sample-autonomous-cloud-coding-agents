@@ -49,7 +49,6 @@ function policyStatementsForRole(
 describe('AgentRegistry construct', () => {
   test('creates onEvent and isComplete Lambda handlers plus the provider framework', () => {
     const template = createStack();
-    // onEvent + isComplete + the provider framework's own onEvent Lambda.
     const fns = template.findResources('AWS::Lambda::Function');
     expect(Object.keys(fns).length).toBeGreaterThanOrEqual(3);
     template.hasResourceProperties('AWS::Lambda::Function', {
@@ -59,9 +58,6 @@ describe('AgentRegistry construct', () => {
   });
 
   test('names the Provider waiter state machine under the stack prefix (least-privilege bootstrap)', () => {
-    // The bootstrap policy allows states:CreateStateMachine only on
-    // `stateMachine:<stack>-*`; an unnamed state machine gets `<LogicalId>-<random>`
-    // from CloudFormation and is denied. Live-observed as a full rollback.
     const template = createStack();
     const machines = template.findResources('AWS::StepFunctions::StateMachine');
     expect(Object.keys(machines)).toHaveLength(1);
@@ -71,9 +67,7 @@ describe('AgentRegistry construct', () => {
   });
 
   test('uses the ROOT stack name for the waiter when placed in a NestedStack', () => {
-    // Inside a NestedStack, Stack.of(construct).stackName is a token for a
-    // ~100-char generated name — over the 80-char state-machine limit and, more
-    // importantly, not the prefix the bootstrap policy is scoped to.
+    // A NestedStack's stackName is a token for a generated name longer than the 80-character state-machine name limit.
     const app = new App();
     const parent = new Stack(app, 'backgroundagent-dev');
     const nested = new AgentRegistryStack(parent, 'AgentRegistryStack', { registryName: 'abca_test' });
@@ -179,8 +173,7 @@ describe('AgentRegistry construct', () => {
   });
 
   test('lets both Provider handlers list and delete the records of a registry', () => {
-    // AWS refuses DeleteRegistry while the registry holds a record, so Delete removes the
-    // records first, from onEvent and from every isComplete poll.
+    // AWS refuses DeleteRegistry while the registry holds a record.
     const template = createStack();
 
     for (const role of [

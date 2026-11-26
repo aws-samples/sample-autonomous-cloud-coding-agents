@@ -19,9 +19,6 @@
 
 import type { APIGatewayProxyResult } from 'aws-lambda';
 
-/**
- * Machine-readable error codes matching the API contract.
- */
 export const ErrorCode = {
   VALIDATION_ERROR: 'VALIDATION_ERROR',
   UNAUTHORIZED: 'UNAUTHORIZED',
@@ -54,13 +51,9 @@ export const ErrorCode = {
   ATTACHMENT_UPLOAD_MISSING: 'ATTACHMENT_UPLOAD_MISSING',
   UPLOADS_NOT_PENDING: 'UPLOADS_NOT_PENDING',
   SCREENING_DEADLINE_EXCEEDED: 'SCREENING_DEADLINE_EXCEEDED',
-  // Cedar HITL (§7.1 / §7.2 / §7.3). REQUEST_NOT_FOUND collapses "row
-  // missing" and "wrong caller" into a single 404 response so the API
-  // surface does not function as an existence oracle (§7.1 finding #6).
   REQUEST_NOT_FOUND: 'REQUEST_NOT_FOUND',
   REQUEST_ALREADY_DECIDED: 'REQUEST_ALREADY_DECIDED',
   TASK_NOT_AWAITING_APPROVAL: 'TASK_NOT_AWAITING_APPROVAL',
-  // Agent asset registry (#246).
   REGISTRY_VERSION_EXISTS: 'REGISTRY_VERSION_EXISTS',
   REGISTRY_RESOLUTION_FAILED: 'REGISTRY_RESOLUTION_FAILED',
   REGISTRY_RECORD_NOT_FOUND: 'REGISTRY_RECORD_NOT_FOUND',
@@ -74,12 +67,9 @@ const COMMON_HEADERS = {
 
 /**
  * Build a success response with `{ data: ... }` envelope.
- * @param statusCode - HTTP status code.
- * @param data - the response payload.
  * @param requestId - unique request ID for the X-Request-Id header.
  * @param extraHeaders - optional additional response headers. Cannot override Content-Type,
  *   Access-Control-Allow-Origin, or X-Request-Id (common headers always take precedence).
- * @returns the API Gateway proxy result.
  */
 export function successResponse(
   statusCode: number,
@@ -96,10 +86,8 @@ export function successResponse(
 
 /**
  * Build a paginated list response with `{ data: [...], pagination: { ... } }` envelope.
- * @param data - the list of items.
  * @param nextToken - pagination token for the next page, or null if no more pages.
  * @param requestId - unique request ID for the X-Request-Id header.
- * @returns the API Gateway proxy result.
  */
 export function paginatedResponse(
   data: unknown[],
@@ -121,11 +109,7 @@ export function paginatedResponse(
 
 /**
  * Build an error response with `{ error: { ... } }` envelope.
- * @param statusCode - HTTP status code.
- * @param code - machine-readable error code.
- * @param message - human-readable error message.
  * @param requestId - unique request ID for the X-Request-Id header.
- * @returns the API Gateway proxy result.
  */
 export function errorResponse(
   statusCode: number,

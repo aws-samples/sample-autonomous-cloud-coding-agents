@@ -55,7 +55,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(400, { error: 'Request body is required' });
     }
 
-    // Verify Slack signing secret (re-fetches if the cached value was rotated out).
     const signingSecret = await getSlackSecret(SIGNING_SECRET_ARN);
     if (!signingSecret) {
       logger.error('Slack signing secret not found');
@@ -70,7 +69,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(401, { error: 'Invalid signature' });
     }
 
-    // Parse the payload — Slack sends it as URL-encoded `payload=<json>`.
     const params = new URLSearchParams(event.body);
     const payloadStr = params.get('payload');
     if (!payloadStr) {
@@ -87,13 +85,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       }
     }
 
-    // Slack expects a 200 response within 3 seconds.
     return jsonResponse(200, {});
   } catch (err) {
     logger.error('Slack interaction handler failed', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return jsonResponse(200, {}); // Still return 200 to avoid Slack retries.
+    return jsonResponse(200, {});
   }
 }
 
@@ -102,7 +99,6 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
   const teamId = payload.user.team_id;
   const userId = payload.user.id;
 
-  // Look up platform user.
   const mappingResult = await ddb.send(new GetCommand({
     TableName: USER_MAPPING_TABLE,
     Key: { slack_identity: `${teamId}#${userId}` },
@@ -115,7 +111,6 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
 
   const platformUserId = mappingResult.Item.platform_user_id as string;
 
-  // Load the task.
   const taskResult = await ddb.send(new GetCommand({
     TableName: TASK_TABLE,
     Key: { task_id: taskId },
@@ -131,11 +126,7 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
     return;
   }
 
-  // Attempt to cancel. QUEUED (#441) is cancellable — it removes the
-  // task from the admission queue (no compute or concurrency to release).
   const CANCELLABLE_STATUSES = ['PENDING_UPLOADS', 'QUEUED', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'];
-  // Terminal attributes as in cancel-task.ts, minus the ttl: the orchestrator
-  // stamps it when it finalizes the started task this button belongs to.
   const now = new Date().toISOString();
   try {
     await ddb.send(new UpdateCommand({
@@ -158,8 +149,6 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
       },
     }));
 
-    // Instant feedback: replace the Cancel button message with "Cancelling..."
-    // then clean up all intermediate messages.
     const channelMeta = taskResult.Item.channel_metadata as Record<string, string> | undefined;
     const channelId = payload.channel?.id ?? channelMeta?.slack_channel_id;
     if (channelMeta && channelId) {

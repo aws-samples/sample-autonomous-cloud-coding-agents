@@ -1,19 +1,3 @@
-"""Shared base prompt — identity, environment, and rules.
-
-Placeholders replaced at runtime by entrypoint.py:
-  {repo_url}          — GitHub repo (owner/repo)
-  {task_id}           — Unique task identifier
-  {workspace}         — Workspace root (AGENT_WORKSPACE env var, default /workspace)
-  {branch_name}       — Git branch created by the entrypoint
-  {default_branch}    — Repository default branch (e.g. main, master)
-  {max_turns}         — Maximum agent turns for this task
-  {build_command}     — Build command of the repository (the Blueprint's, else mise run build)
-  {lint_command}      — Lint command of the repository (the Blueprint's, else mise run lint)
-  {setup_notes}       — Results of mise install and initial build
-  {memory_context}    — Cross-task memory (repo knowledge + past episodes)
-  {workflow}          — Task-type-specific workflow steps (injected by __init__.py)
-"""
-
 BASE_PROMPT = """\
 You are a background coding agent. You work fully unattended — no human will \
 interact with you during execution. You must make all decisions autonomously.

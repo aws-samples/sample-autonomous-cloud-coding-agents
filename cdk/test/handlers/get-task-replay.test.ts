@@ -21,7 +21,6 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -95,7 +94,6 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   };
 }
 
-/** Default: GetCommand returns the task, QueryCommand returns the events page. */
 function wireHappyPath(): void {
   mockSend.mockImplementation((cmd: { _type: string }) => {
     if (cmd._type === 'Get') return Promise.resolve({ Item: TASK_RECORD });
@@ -118,14 +116,14 @@ describe('get-task-replay handler', () => {
     expect(data.workflow_ref).toBe('coding/new-task-v1');
     expect(data.resolved_workflow).toEqual({ id: 'coding/new-task-v1', version: '1' });
     expect(data.prompt_version).toBe('coding/new-task-v1@1');
-    expect(data.cost_usd).toBe(0.1234); // coerced from the string the agent persists
+    expect(data.cost_usd).toBe(0.1234);
     expect(data.otel_trace_id).toBe('abcdef0123456789abcdef0123456789');
     expect(data.session_id).toBe('sess-1');
     expect(data.trace_uri).toBe('s3://trace-bucket/traces/user-123/task-1.jsonl.gz');
     expect(data.verification).toEqual({ build_passed: true, lint_passed: false });
     expect(data.events).toHaveLength(2);
     expect(data.events[0].event_type).toBe('task_started');
-    expect(data.events_truncation).toBeNull(); // full list fit
+    expect(data.events_truncation).toBeNull();
     expect(typeof data.collected_at).toBe('string');
   });
 
@@ -178,18 +176,12 @@ describe('get-task-replay handler', () => {
   });
 
   test('caps events at MAX_REPLAY_EVENTS and stops paging despite more pages', async () => {
-    // Each page returns a full Limit-sized chunk AND a LastEvaluatedKey, i.e. an
-    // unbounded stream. The loop must stop at the cap (not run forever / not
-    // overshoot) and shrink each page's Limit so the total never exceeds it.
-    // logger.warn writes to stdout (see shared/logger.ts), so spy there.
     const stdoutSpy = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
     const limits: number[] = [];
     mockSend.mockImplementation((cmd: { _type: string; input?: { Limit?: number } }) => {
       if (cmd._type === 'Get') return Promise.resolve({ Item: TASK_RECORD });
       const limit = cmd.input?.Limit ?? 0;
       limits.push(limit);
-      // Return a full page so the cap is reached in one query (fast), with a
-      // surviving key to prove the loop stops on the cap, not on exhaustion.
       const items = Array.from({ length: limit }, (_, i) => ({
         task_id: 'task-1', event_id: `e${i}`, event_type: 'x', timestamp: 't',
       }));
@@ -199,10 +191,8 @@ describe('get-task-replay handler', () => {
     const result = await handler(makeEvent());
     const { data } = JSON.parse(result.body);
 
-    expect(data.events).toHaveLength(MAX_REPLAY_EVENTS); // capped, did not overshoot
-    expect(limits[0]).toBe(MAX_REPLAY_EVENTS); // first page requests the full cap
-    // Truncation must be observable — both in the logs AND in the bundle itself,
-    // so the operator reading the bundle (not just CloudWatch) sees the clip.
+    expect(data.events).toHaveLength(MAX_REPLAY_EVENTS);
+    expect(limits[0]).toBe(MAX_REPLAY_EVENTS);
     expect(data.events_truncation).toEqual({ reason: 'max_events', returned_events: MAX_REPLAY_EVENTS });
     const warned = stdoutSpy.mock.calls.some(c => String(c[0]).includes('truncated'));
     stdoutSpy.mockRestore();
@@ -210,11 +200,8 @@ describe('get-task-replay handler', () => {
   });
 
   test('caps events at MAX_REPLAY_EVENT_BYTES before the count cap (6 MB Lambda limit)', async () => {
-    // #523: trace-mode events carry ~8-9 KB of previews, so the count cap alone
-    // permits a bundle well past Lambda's 6 MB response limit. A running byte
-    // bound must stop paging (+ WARN) well before MAX_REPLAY_EVENTS is reached.
     const stdoutSpy = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
-    const bigPreview = 'x'.repeat(9000); // ~9 KB per event, as in trace mode
+    const bigPreview = 'x'.repeat(9000);
     mockSend.mockImplementation((cmd: { _type: string; input?: { Limit?: number } }) => {
       if (cmd._type === 'Get') return Promise.resolve({ Item: TASK_RECORD });
       const limit = cmd.input?.Limit ?? 0;
@@ -231,16 +218,10 @@ describe('get-task-replay handler', () => {
     const result = await handler(makeEvent());
     const { data } = JSON.parse(result.body);
 
-    // Stopped on bytes, far short of the count cap.
     expect(data.events.length).toBeLessThan(MAX_REPLAY_EVENTS);
-    // The serialized events are right at the byte cap (± one 9 KB event; the
-    // handler counts each raw event with its quotes escaped once more, as the
-    // Lambda response carries it, and the response omits stripped task_id/ttl,
-    // so they land just under) and comfortably below Lambda's 6 MB limit.
     const bytes = Buffer.byteLength(JSON.stringify(data.events), 'utf8');
     expect(bytes).toBeGreaterThan(MAX_REPLAY_EVENT_BYTES - 20000);
     expect(bytes).toBeLessThan(MAX_REPLAY_EVENT_BYTES + 20000);
-    // The bundle flags the byte-cap clip so a consumer can't read it as complete.
     expect(data.events_truncation).toEqual({ reason: 'max_bytes', returned_events: data.events.length });
     const warned = stdoutSpy.mock.calls.some(c => String(c[0]).includes('truncated'));
     stdoutSpy.mockRestore();
@@ -248,10 +229,6 @@ describe('get-task-replay handler', () => {
   });
 
   test('keeps the Lambda response under 6 MB when the previews are JSON (quotes escaped once more)', async () => {
-    // Lambda's limit applies to the proxy result as the runtime serializes it:
-    // `body` is a string in there, so each quote and backslash of the bundle is
-    // escaped a second time. A preview of JSON (`gh api`, a package.json, an MCP
-    // tool result) is full of them; the worst case is a preview of only quotes.
     const stdoutSpy = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
     const jsonPreview = '"'.repeat(4000);
     mockSend.mockImplementation((cmd: { _type: string; input?: { Limit?: number } }) => {
@@ -305,7 +282,6 @@ describe('get-task-replay handler', () => {
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(403);
     expect(JSON.parse(result.body).error.code).toBe('FORBIDDEN');
-    // Must NOT have queried events for a task the caller can't see.
     expect(mockSend.mock.calls.some(c => c[0]._type === 'Query')).toBe(false);
   });
 
@@ -330,9 +306,6 @@ describe('assembleBundle', () => {
   });
 
   test('normalizes events to the /events feed shape (strip task_id/ttl, default metadata)', () => {
-    // #523: consumers moving between the events feed and the bundle must see the
-    // same event shape — task_id/ttl stripped, metadata always present — so
-    // `event.metadata.x` never throws on an event that stored no metadata.
     const base = { task_id: 't', user_id: 'u' } as unknown as TaskRecord;
     const evs = [
       { task_id: 't', event_id: '01A', event_type: 'task_started', timestamp: 'ts', ttl: 123 },
@@ -347,9 +320,7 @@ describe('assembleBundle', () => {
   test('passes through the correlation envelope (#245) per-event, omitting absent fields', () => {
     const base = { task_id: 't', user_id: 'u' } as unknown as TaskRecord;
     const evs = [
-      // task_created predates the envelope → no correlation fields.
       { task_id: 't', event_id: '01A', event_type: 'task_created', timestamp: 'ts' },
-      // agent event carries the full envelope.
       {
         task_id: 't',
         event_id: '01B',
@@ -369,9 +340,6 @@ describe('assembleBundle', () => {
 });
 
 describe('replay-bundle.example.json fixture (#515 AC: example fixture in cdk/test/)', () => {
-  // Validates the documented example matches the ReplayBundle schema so the
-  // fixture can't drift from the type. The assignment is the structural check;
-  // a missing/renamed field fails `tsc`.
   test('conforms to the ReplayBundle shape', () => {
     const raw = readFileSync(join(__dirname, '../fixtures/replay-bundle.example.json'), 'utf8');
     const bundle: ReplayBundle = JSON.parse(raw) as ReplayBundle;

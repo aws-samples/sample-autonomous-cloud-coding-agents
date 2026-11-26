@@ -28,54 +28,31 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { TERMINAL_STATUSES } from './task-status';
 
-/**
- * Properties for OrchestrationReconciler construct.
- */
 export interface OrchestrationReconcilerProps {
-  /**
-   * TaskTable — MUST have a stream enabled (NEW_IMAGE). This construct is
-   * the table's stream consumer; the reconciler reacts to child tasks
-   * reaching terminal status.
-   */
+  /** TaskTable. Must have a stream enabled (NEW_IMAGE): this construct consumes it. */
   readonly taskTable: dynamodb.ITable;
 
-  /** OrchestrationTable — the reconciler reads the DAG + writes child statuses. */
   readonly orchestrationTable: dynamodb.ITable;
 
-  /** Orchestrator function ARN — releaseChild → createTaskCore invokes it. */
   readonly orchestratorFunctionArn?: string;
 
-  /** Forwarded so released child tasks land in the right tables. */
   readonly taskEventsTable: dynamodb.ITable;
 
   /**
    * Monthly budget config/rollup table. When set, terminal task costs roll up here,
-   * and the scoreboard claims each finished task with a marker here. The claim is
-   * not a write on the task table, so the stream does not deliver it again.
+   * and the scoreboard claims each finished task with a marker here.
    */
   readonly budgetTable?: dynamodb.ITable;
 }
 
-/**
- * TaskTable terminal-record consumer. It first drives parent/sub-issue
- * orchestration for records that belong to a graph, then rolls up every positive
- * task cost into monthly user/team budgets, and last writes one scoreboard metric
- * line per finished task. Orchestration before the rollup prevents a budget-table
- * outage from stranding a graph, at the cost of allowing one dependency wave to
- * be admitted before the completed parent's spend is visible. The metric line
- * holds back neither of the other two: its failure is logged and never reported
- * for retry.
- *
- * Stream-source rationale: TaskEventsTable's stream is at its 2-consumer
- * limit (FanOutConsumer + ApprovalMetricsPublisher); TaskTable had no
- * stream, so this combined consumer has zero contention with the fan-out plane
- * and leaves one DynamoDB Streams consumer slot available.
- */
-
-/** DLQ message retention (days) — long enough for an operator to inspect a
- *  poison stream record before it ages out. */
 const DLQ_RETENTION_DAYS = 14;
 
+/**
+ * TaskTable terminal-record consumer. Drives parent/sub-issue orchestration
+ * for records that belong to a graph, then rolls up each positive task cost
+ * into monthly user/team budgets, then writes one scoreboard metric line per
+ * finished task.
+ */
 export class OrchestrationReconciler extends Construct {
   public readonly fn: lambda.NodejsFunction;
   public readonly dlq: sqs.Queue;
@@ -91,11 +68,6 @@ export class OrchestrationReconciler extends Construct {
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
       timeout: Duration.minutes(2),
-      // 512 MB (not 256): the reconciler bundles createTaskCore, which
-      // pulls in the Bedrock guardrail + S3 attachment-screening SDK
-      // stack. At 256 MB it OOMs during init on every stream event
-      // (Max Memory Used 255/256 MB) and never releases children. The
-      // LinearIntegration webhook processor runs the same code at 512 MB.
       memorySize: 512,
       environment: {
         ORCHESTRATION_TABLE_NAME: props.orchestrationTable.tableName,
@@ -111,44 +83,21 @@ export class OrchestrationReconciler extends Construct {
       bundling: {
         externalModules: ['@aws-sdk/*'],
         // pdf-parse (v2, pdfjs-based) can't be esbuild-bundled — its pdfjs/native
-        // deps break at import. The reconciler screens the parent issue's PDF
-        // attachments, so ship pdf-parse
-        // unbundled to resolve natively at runtime. MUST match the webhook
-        // processors' attachment-screening bundling — a Lambda that CALLS
-        // attachment-screening but omits this carve-out fails every PDF at
-        // runtime while passing every unit test — a failure mode observed in
-        // practice on the attachment path.
+        // deps break at import.
         nodeModules: ['pdf-parse'],
       },
     });
 
-    // DLQ for poison stream records (a record that repeatedly fails the
-    // reconcile). Fan-out uses the same pattern; without it a bad record
-    // would block the shard.
     this.dlq = new sqs.Queue(this, 'ReconcilerDlq', {
       retentionPeriod: Duration.days(DLQ_RETENTION_DAYS),
       enforceSSL: true,
     });
 
-    // Orchestration child creation/gating reads + writes the DAG table,
-    // reads/writes TaskTable (createTaskCore), and writes task events. The
-    // scoreboard reads the task and writes its claim on the budget table.
     props.orchestrationTable.grantReadWriteData(this.fn);
     props.taskTable.grantReadWriteData(this.fn);
     props.taskEventsTable.grantReadWriteData(this.fn);
     props.budgetTable?.grantReadWriteData(this.fn);
 
-    // Subscribe to the TaskTable stream. LATEST: we only care about
-    // tasks transitioning to terminal from here on. bisectBatchOnError +
-    // DLQ so one poison record can't wedge the shard.
-    //
-    // FilterCriteria: the handler ignores every non-terminal status
-    // (parseTerminalTaskRecord returns null unless status ∈ TERMINAL), so the
-    // stream itself filters to terminal statuses. This keeps RUNNING/HYDRATING/
-    // heartbeat/progress writes — the bulk of TaskTable churn platform-wide —
-    // from ever invoking this 512MB reconciler. Behavior-preserving: the records
-    // dropped here are exactly the ones the handler already discarded. One filter
-    // pattern per terminal status (FilterCriteria ORs the array).
     const terminalFilters = TERMINAL_STATUSES.map((s) => FilterCriteria.filter({
       dynamodb: { NewImage: { status: { S: FilterRule.isEqual(s) } } },
     }));
@@ -159,15 +108,6 @@ export class OrchestrationReconciler extends Construct {
       bisectBatchOnError: true,
       onFailure: new SqsDlq(this.dlq),
       filters: terminalFilters,
-      // Partial-batch reporting. Without this, the handler
-      // returning void meant ANY thrown record failed the WHOLE batch — a single
-      // poison/throttled record re-drove all its siblings (re-reconciling
-      // healthy children) until it aged out. With reportBatchItemFailures the
-      // handler returns the sequence numbers of the records whose orchestration
-      // or budget step failed, and Lambda retries from the first of them on: the
-      // records before it commit, and the batch is bisected there toward the
-      // DLQ. The records after it are re-driven as well, which is why a failed
-      // scoreboard metric line is never reported.
       reportBatchItemFailures: true,
     }));
 

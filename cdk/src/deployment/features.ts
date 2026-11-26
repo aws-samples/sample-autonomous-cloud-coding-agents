@@ -22,7 +22,7 @@ import * as path from 'path';
 import { Node } from 'constructs';
 import { ComputeBackend, resolveComputeBackend } from '../handlers/shared/compute-backend';
 
-/** Optional modules selectable per deployment (#836). Core governance is never optional. */
+/** Optional modules selectable per deployment. */
 export const DEPLOYMENT_FEATURES = [
   'slack', 'linear', 'jira', 'deployPreviewScreenshots', 'agentRegistry', 'toolGateway',
 ] as const;
@@ -103,8 +103,6 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
   const result = {} as Record<DeploymentFeature, boolean>;
   for (const feature of DEPLOYMENT_FEATURES) {
     const value = selection[feature];
-    // Every feature is explicit: a missing key would otherwise inherit a default
-    // that differs between new and legacy installations.
     if (typeof value !== 'boolean') fail(`features.${feature} must be true or false`);
     result[feature] = value as boolean;
   }
@@ -123,15 +121,13 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
   return { features: result, compute: backends };
 }
 
-/** Stack the shared `abca.deployment.json` belongs to; mirrors `DEFAULT_STACK_NAME` in the CLI. */
 const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 
 /**
  * The profile file for a stack. Additional deployments from one checkout each get
- * `abca.deployment.<stackName>.json`. There is no fallback to the shared file: it
- * belongs to the default stack, and inheriting it would let one deployment's profile
- * delete another's modules (ADR-024 rule 3).
+ * `abca.deployment.<stackName>.json`. There is no fallback to the shared file
+ * (ADR-024 rule 3).
  */
 export function deploymentProfileCandidates(stackName: unknown): string[] {
   return typeof stackName === 'string' && stackName !== DEFAULT_PROFILE_STACK_NAME && STACK_NAME_PATTERN.test(stackName)
@@ -156,7 +152,6 @@ export function readDeploymentProfile(node: Node, repoRoot: string = REPO_ROOT):
       text = fs.readFileSync(file, 'utf-8');
       break;
     } catch (err) {
-      // Only the implicit repository profiles are optional; an explicit path must exist.
       if (configured === undefined && (err as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new Error(`Cannot read deployment profile ${file}: ${(err as Error).message}`, { cause: err });
     }
@@ -189,9 +184,6 @@ export function resolveDeploymentFeatures(node: Node, profile?: DeploymentFeatur
   for (const feature of DEPLOYMENT_FEATURES) {
     result[feature] = contextBoolean(node, FEATURE_CONTEXT_KEYS[feature]) ?? base[feature];
   }
-  // The vault is a Linear sub-option; accepting it alone would deploy an
-  // identity nothing can use.
-  // Same lenient reading AgentStack has always applied to this switch.
   const vault: unknown = node.tryGetContext('enableLinearIdentityVault');
   if ((vault === true || vault === 'true') && !result.linear) {
     throw new Error('enableLinearIdentityVault requires the linear feature; enable Linear or drop the vault switch');

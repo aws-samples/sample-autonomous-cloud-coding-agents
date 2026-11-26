@@ -1,10 +1,3 @@
-/**
- * Tests for `sync-starlight.mjs`, the generator of the Starlight mirrors.
- *
- * Every test builds a throwaway repository in a temp dir and runs the real `sync()` against
- * it with a small plan, then reads the generated tree. Nothing touches the real mirrors.
- */
-
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -29,7 +22,6 @@ const PLAN = [
   { dir: 'docs/decisions', to: 'decisions' },
 ];
 
-/** The smallest repository that satisfies PLAN; tests override the files they care about. */
 const SOURCES = {
   'docs/guides/GUIDE.md': '# Guide\n\nIntro text.\n\n## First\n\nFirst text.\n',
   'docs/guides/START.mdx': '---\ntitle: Start\n---\n\n# Start\n\nStart text.\n',
@@ -53,10 +45,6 @@ function repo(files = {}) {
   return root;
 }
 
-/**
- * A directory that belongs to no throwaway repository, with a file that no sync may touch. The
- * file is in `imgs/` so that it is below the link whether a test links a tree or `docs/public`.
- */
 function outside() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-starlight-outside-'));
   roots.push(dir);
@@ -67,7 +55,6 @@ function outside() {
 
 const page = (root, target) => fs.readFileSync(path.join(root, CONTENT, target), 'utf8');
 
-/** The lines of a generated page that start with a link or an image, in Markdown or HTML. */
 const links = (root, target) =>
   page(root, target)
     .split('\n')
@@ -97,7 +84,6 @@ test('splits a guide into one page per ## section', () => {
       'Moved text.',
       '',
     ].join('\n'),
-    // Only the Markdown files of a mirrored directory become pages.
     'docs/design/notes.txt': 'Not a page.\n',
   });
   sync(root, PLAN);
@@ -130,7 +116,6 @@ test('every ## section is published; an introduction that is only the H1 is not'
     ['guide/Contributing.md', 'guide/Empty.md', 'guide/Overview.md', 'guide/Prerequisites.md'],
   );
   assert.equal(page(root, 'guide/Prerequisites.md'), '---\ntitle: "Prerequisites"\n---\n\n- One bullet');
-  // Without an introduction page, links to the guide land on its first section.
   assert.deepEqual(links(root, 'architecture/Api.md'), [`[guide](${BASE}/guide/overview) [title](${BASE}/guide/overview)`]);
 });
 
@@ -149,7 +134,6 @@ test('a heading line inside a code fence is code: it starts no page and is no ti
     '',
     'After the fences.',
   ].join('\n');
-  // Like the quick start: the title is in the front matter, the shell comments are in code blocks.
   const start = '---\ntitle: Start\n---\n\n```bash\n# a comment, not a title\n```\n\nStart text.\n';
   const root = repo({
     'docs/guides/GUIDE.md': `# Guide\n\n## First\n\n${section}\n\n## Second\n\nText.\n`,
@@ -191,13 +175,11 @@ test('mirrors and images without a source are pruned; hand-authored pages are ke
   });
   sync(root, PLAN);
   assert.ok(pages(root).includes('guide/Old-name.md') && pages(root).includes('architecture/Extra.md'));
-  // The first sync removed the stray page, and said so.
   assert.deepEqual(
     warn.mock.calls.map((call) => call.arguments[0].split(': ')[1]),
     [`removed ${CONTENT}/stray/Hand-made.md`],
   );
 
-  // Rename a heading, delete a source file and an image, then sync again.
   fs.writeFileSync(path.join(root, 'docs/guides/GUIDE.md'), '# Guide\n\n## New name\n\nText.\n');
   fs.rmSync(path.join(root, 'docs/design/EXTRA.md'));
   fs.rmSync(path.join(root, 'docs/imgs/old.png'));
@@ -254,7 +236,6 @@ test('a generated tree that is reached through a link fails the sync and is not 
     fs.mkdirSync(path.dirname(path.join(root, link)), { recursive: true });
     fs.symlinkSync(elsewhere, path.join(root, link), 'dir');
 
-    // The message names the tree at both ends; between them is the path the link resolves to.
     assert.throws(
       () => sync(root, PLAN),
       ({ message }) =>
@@ -265,7 +246,6 @@ test('a generated tree that is reached through a link fails the sync and is not 
   };
   refused(CONTENT, CONTENT);
   refused('docs/public/imgs', 'docs/public/imgs');
-  // The link may also be a directory above the tree.
   refused('docs/public', 'docs/public/imgs');
 });
 
@@ -303,9 +283,7 @@ test('the source H1 becomes the quoted title and the only H1 of the page', () =>
     page(root, 'decisions/Adr-001-first.md'),
     '---\ntitle: "ADR-001: A \\"quoted\\" title: with colons"\n---\n\nDecision text.\n\n## Context\n',
   );
-  // No H1 in the source: the file name is the fallback, and a `##` stays where it is.
   assert.equal(page(root, 'architecture/Api.md'), '---\ntitle: "Api"\n---\n\nNo top-level heading.\n\n## A section\n');
-  // A source with its own frontmatter keeps it; its H1 would be a second one.
   assert.equal(
     page(root, 'start/Start.mdx'),
     "---\ntitle: Start\n---\n\nimport { Tabs } from '@astrojs/starlight/components';\n\nStart text.\n",
@@ -395,9 +373,7 @@ test('links to files that are not published point at GitHub; images are served f
     `[agents](${GITHUB}/blob/main/AGENTS.md) [setup](${GITHUB}/blob/main/agent/README.md#setup) [fixtures](${GITHUB}/tree/main/contracts/parity)`,
     `![architecture](${BASE}/imgs/nested/arch.png)`,
     `<img src="${BASE}/imgs/nested/arch.png" width="200"> <a href='${GITHUB}/blob/main/AGENTS.md'>agents</a>`,
-    // Left as written: a URL or an absolute path is not a file of the repository.
     '![external](https://example.com/logo.png) <img src="/elsewhere/logo.png">',
-    // Left as written: the link checks report a target that does not exist.
     '[dangling](./GONE.md) [outside](../../../elsewhere.md)',
   ]);
   assert.equal(fs.readFileSync(path.join(root, 'docs/public/imgs/nested/arch.png'), 'utf8'), 'png');
@@ -408,7 +384,6 @@ test('an image that is not a file in docs/imgs fails the sync and leaves the mir
   sync(root, PLAN);
   const before = pages(root).map((target) => page(root, target));
 
-  // The guide is written before the design document that shows the image.
   fs.writeFileSync(path.join(root, 'docs/guides/GUIDE.md'), '# Guide\n\nChanged.\n\n## First\n\nChanged.\n');
   fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n![flow](../diagrams/flow.svg)\n');
   assert.throws(
@@ -423,11 +398,9 @@ test('an image that is not a file in docs/imgs fails the sync and leaves the mir
   fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n![gone](../imgs/gone.png)\n');
   assert.throws(() => sync(root, PLAN), /docs\/design\/API\.md shows the image \.\.\/imgs\/gone\.png, which is not a file in docs\/imgs\//);
 
-  // An HTML image is an image too, in whatever case its tag is written.
   fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n<IMG SRC="../diagrams/flow.svg" WIDTH="200">\n');
   assert.throws(() => sync(root, PLAN), /docs\/design\/API\.md shows the image \.\.\/diagrams\/flow\.svg, which is not a file in docs\/imgs\//);
 
-  // A link to the same file is not an image: it goes to GitHub.
   fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n[flow](../diagrams/flow.svg)\n');
   sync(root, PLAN);
   assert.deepEqual(links(root, 'architecture/Api.md'), [`[flow](${GITHUB}/blob/main/docs/diagrams/flow.svg)`]);
@@ -475,16 +448,13 @@ test('anchors into a split guide land on the page that holds the heading (#765)'
 
   assert.deepEqual(links(root, 'architecture/Api.md'), [
     `[guide](${BASE}/guide/introduction) [h2](${BASE}/guide/second) [h3](${BASE}/guide/second#deep-heading)`,
-    // GitHub numbers the second "Examples" of the file; on the site each page has its own.
     `[first examples](${BASE}/guide/first#examples) [second examples](${BASE}/guide/second#examples)`,
     `[punctuation](${BASE}/guide/second#github-pat--minimal-permissions-v2) [moved](${BASE}/elsewhere/moved-section)`,
-    // An anchor the guide does not have is passed through, so that the site link check reports it.
     `[unknown](${BASE}/guide/introduction#no-such-heading) [upper case](${BASE}/guide/second#deep-heading)`,
   ]);
   assert.deepEqual(links(root, 'guide/Introduction.md'), [
     `[second](${BASE}/guide/second) [deep](${BASE}/guide/second#deep-heading) [the title](#_top)`,
   ]);
-  // On the page that holds the heading the anchor stays local; the section heading is the page title.
   assert.deepEqual(links(root, 'guide/First.md'), [
     `[deep](${BASE}/guide/second#deep-heading) [local](#local-heading) [myself](#_top)`,
   ]);

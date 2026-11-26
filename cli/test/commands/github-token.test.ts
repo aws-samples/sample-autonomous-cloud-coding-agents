@@ -219,15 +219,13 @@ describe('isGithubTokenConfigured', () => {
     await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(false);
   });
 
-  // What a deployed stack holds until someone stores a token: CDK creates the
-  // secret with CloudFormation's generated password (32 characters, at least one
-  // upper-case letter, lower-case letter, digit and punctuation character).
+  // CDK creates a secret that is given no value with CloudFormation's generated password: 32 characters,
+  // at least one upper-case letter, lower-case letter, digit and punctuation character.
   test('returns false for the generated password of a secret nobody has set', async () => {
     smSend.mockResolvedValueOnce({ SecretString: 'Aa1!'.repeat(8) });
     await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(false);
   });
 
-  // Built with repeat() so that no token-shaped literal sits in the source.
   test.each([
     ['classic personal access token', `ghp_${'a1B2'.repeat(9)}`],
     ['fine-grained personal access token', `github_pat_${'a1B2'.repeat(5)}aa_${'c3D4'.repeat(14)}ccc`],
@@ -241,8 +239,6 @@ describe('isGithubTokenConfigured', () => {
     await expect(isGithubTokenConfigured('us-east-1', 'arn:secret')).resolves.toBe(true);
   });
 
-  // One row per anchor of the pattern: the value has to start with the token,
-  // and the format without a prefix is 40 hex digits and no more.
   test.each([
     ['value that only contains a token', JSON.stringify({ token: `ghp_${'a1B2'.repeat(9)}` })],
     ['string of 41 hex digits', `${'a1b2c3d4e5'.repeat(4)}f`],

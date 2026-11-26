@@ -1,12 +1,3 @@
-# Custom semgrep rules: silent-success masking (AI004 / CA-09, issue #257).
-#
-# Detects catch/except blocks that swallow a failure and return a
-# plausible-but-empty default ([] / {} / null / undefined / None / "" ...)
-# instead of surfacing the error. Bare-except and empty-catch are covered by
-# existing gates (ruff E722/B, eslint); this targets the more dangerous
-# variant where the caller sees a "successful" empty result and cannot tell
-# it apart from a real one.
-#
 # Allowlist mechanism: intentional degraded-mode fallbacks get an inline
 #   // nosemgrep: <rule-id> -- <justification>     (TS)
 #   # nosemgrep: <rule-id> -- <justification>      (Py)
@@ -39,9 +30,6 @@
 # within* a catch block (e.g. `.map(i => ... return null ...)`) is flagged
 # even though it does not mask the outer failure. Rare in practice; use the
 # nosemgrep allowlist if it occurs.
-#
-# Run:  mise run security:sast:masking        (blocking; emits SARIF)
-# Test: semgrep test .semgrep/
 rules:
   - id: ts-silent-success-masking
     languages: [typescript, javascript]
@@ -72,12 +60,6 @@ rules:
               try { ... } catch ($E) { ... return $RET; ... } finally { ... }
           - pattern: |
               try { ... } catch { ... return $RET; ... } finally { ... }
-      # Classify-then-rethrow is NOT masking: a classified return that is
-      # followed by a throw on the catch's fallthrough surfaces every other
-      # error, so the caller can still distinguish failure from empty success.
-      # The order is load-bearing — it is exactly what separates this shape
-      # from the `maskedConditionalRethrow` fixture (throw guarded FIRST, then
-      # an unconditional masking return), which stays flagged.
       - pattern-not: |
           try { ... } catch ($E) { ... return $RET; ... throw $ERR; }
       - metavariable-regex:
@@ -105,10 +87,8 @@ rules:
       "# nosemgrep: py-silent-success-masking -- <why callers may safely
       treat this failure as an empty success>".
     patterns:
-      # `except ...:` matches every handler head: one type, a tuple of types,
-      # with or without `as`, a bare except. A try statement matches only a
-      # pattern that has the same optional clauses (`else:`, `finally:`), hence
-      # the four shapes.
+      # semgrep matches a try statement only against a pattern that has the same
+      # optional clauses (`else:`, `finally:`), hence the four shapes.
       - pattern-either:
           - pattern: |
               try:
@@ -142,12 +122,6 @@ rules:
                 ...
               finally:
                 ...
-      # Classify-then-reraise is NOT masking (see the TS twin above): a
-      # classified return followed by a `raise` on the fallthrough surfaces
-      # every other error. The order distinguishes it from
-      # masked_conditional_reraise (raise guarded FIRST, then a masking return).
-      # The exemption is as narrow as these two patterns: the handler binds the
-      # error (`as`), the try statement has no `else:` and no `finally:`.
       - pattern-not: |
           try:
             ...

@@ -80,7 +80,6 @@ describe('delete-api-key handler', () => {
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(404);
     expect(JSON.parse(result.body).error.code).toBe('API_KEY_NOT_FOUND');
-    // must not attempt the update
     expect(mockDdbSend).toHaveBeenCalledTimes(1);
   });
 

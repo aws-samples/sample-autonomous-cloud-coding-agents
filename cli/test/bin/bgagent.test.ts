@@ -39,15 +39,12 @@ describe('bgagent entry point', () => {
   const mockGetScoreboard = jest.fn();
 
   beforeEach(() => {
-    // The entry point sets process.exitCode; a value left behind becomes the
-    // exit code of the Jest worker.
     process.exitCode = undefined;
     logSpy = jest.spyOn(console, 'log').mockImplementation();
     errorSpy = jest.spyOn(console, 'error').mockImplementation();
     waitForTaskMock.mockReset();
     mockGetTask.mockReset().mockResolvedValue({ task_id: 't-1', status: 'RUNNING' });
     mockListWebhooks.mockReset().mockResolvedValue({ data: [], pagination: { next_token: null, has_more: false } });
-    // With its `current`: the command takes an answer without one for that of an older stack.
     mockGetScoreboard.mockReset().mockResolvedValue({ range: '7d', current: {} });
     (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
       getTask: mockGetTask,

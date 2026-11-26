@@ -17,14 +17,6 @@
  *  SOFTWARE.
  */
 
-// A signing secret must attest WHICH tenant sent a delivery, because the processor
-// routes from identifiers in the body. Two secrets fail that: the stack-wide one, which
-// is bound to no workspace, and a per-workspace one that is a copy of another
-// workspace's. Both are only dangerous once a second tenant exists to impersonate,
-// which is what these tests pivot on.
-//
-// A separate file from linear-webhook.test.ts because the registry table name is read
-// into a module-level const at import time, and these cases need it set.
 import * as crypto from 'crypto';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -101,20 +93,10 @@ function event(raw: string, key: string): APIGatewayProxyEvent {
   } as unknown as APIGatewayProxyEvent;
 }
 
-/**
- * Wire DynamoDB for a registry holding `activeCount` workspaces.
- *
- * `Get` answers the row for the workspace under test; `Scan` answers the count. `Put` is
- * the dedup claim, which must succeed or the receiver stops before verification matters.
- */
 function withRegistry(opts: { activeCount: number; row?: Record<string, unknown> | null }) {
   const selfRow = opts.row === undefined
     ? { linear_workspace_id: WS_ACME, workspace_slug: 'acme', oauth_secret_arn: OAUTH_ARN, status: 'active' }
     : opts.row;
-  // `activeCount` is the total the Scan reports. A workspace with no registry row of its
-  // own still shares the stack with the others, so the count must not shrink with it —
-  // getting this wrong is what made the multi-workspace fallback case look like it
-  // passed when the receiver had only ever seen one workspace.
   const otherCount = opts.activeCount - (selfRow ? 1 : 0);
   const others = Array.from({ length: Math.max(0, otherCount) }, (_, i) => ({
     linear_workspace_id: `org-other-${i}`, status: 'active',
@@ -155,9 +137,6 @@ describe('a secret shared with another workspace is not proof of this one', () =
   });
 
   test('accepts the very same request once ownership is recorded', async () => {
-    // The signature, the secret and the body are identical to the case above — only the
-    // provenance flag differs. That isolates the flag as the thing being tested rather
-    // than some incidental difference in the request.
     withRegistry({
       activeCount: 2,
       row: {
@@ -176,9 +155,6 @@ describe('a secret shared with another workspace is not proof of this one', () =
   });
 
   test('accepts an unrecorded provenance on a single-workspace stack', async () => {
-    // Absent provenance is the normal state for every row written before it existed.
-    // With one tenant the same secret cannot cross a boundary, so rejecting here would
-    // break healthy installs to no benefit.
     withRegistry({ activeCount: 1 });
 
     const res = await handler(event(body(), OWN_SECRET));
@@ -189,8 +165,6 @@ describe('a secret shared with another workspace is not proof of this one', () =
 
 describe('the stack-wide fallback cannot name a tenant among several', () => {
   test('refuses the fallback when more than one workspace is active', async () => {
-    // No per-workspace secret for this workspace, so verification falls through — and on
-    // a multi-tenant stack the stack-wide secret cannot say who sent this.
     withRegistry({ activeCount: 2, row: null });
 
     const res = await handler(event(body(), STACK_WIDE_SECRET));
@@ -219,8 +193,6 @@ describe('the stack-wide fallback cannot name a tenant among several', () => {
   });
 
   test('reports false when a per-workspace secret verified the delivery', async () => {
-    // The processor binds the workspace only on the stack-wide path, so a false positive
-    // here would make it discard a correctly attested organizationId and rebind it.
     withRegistry({
       activeCount: 1,
       row: {

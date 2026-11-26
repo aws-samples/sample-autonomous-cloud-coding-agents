@@ -24,15 +24,9 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { abcaUserAgent, makeClient, makeDocClient, sanitizeUaValue, SOLUTION_ID } from '../../../src/handlers/shared/ua';
 
-// Shared with cli/test/ua.test.ts and agent/tests/test_ua.py: the three UA
-// modules must agree on the solution id and on what the sanitiser lets through.
 const uaVectors = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'contracts', 'ua-vectors.json'), 'utf-8'),
 ) as { solution_id: string; sanitize: { input: string; expected: string; note: string }[] };
-
-// `abcaUserAgent` / `componentLabel` read process.env at call time, so a plain
-// import suffices — no module reload needed. The wire-capture cases likewise
-// rely on the SDK reading AWS_SDK_UA_APP_ID at client construction.
 
 describe('SOLUTION_ID', () => {
   test('matches contracts/ua-vectors.json', () => {
@@ -69,9 +63,6 @@ describe('abcaUserAgent', () => {
   });
 });
 
-// Per-surface lock-in for #319 review item 2: tasks 4/5 wired the Jira/api-key
-// handlers through the factory, so the `webhook`/`api` labels now land in a real
-// `md/` segment. These assert the exact emitted pair per surface.
 describe('component label lands in the md/ segment', () => {
   afterEach(() => {
     delete process.env.ABCA_COMPONENT;
@@ -89,14 +80,6 @@ describe('component label lands in the md/ segment', () => {
 });
 
 describe('wire-capture: emitted User-Agent header', () => {
-  /**
-   * Drive a real DynamoDBClient through its full middleware stack with a stub
-   * requestHandler that records the outbound `user-agent` header and returns a
-   * minimal response — no network. The header is captured before the (invalid)
-   * response is returned, so the later deserialization error is irrelevant.
-   * Asserts the md/ segment (from customUserAgent) and the app/ segment (from
-   * native AWS_SDK_UA_APP_ID).
-   */
   async function captureUserAgent(appId?: string): Promise<string> {
     const prevAppId = process.env.AWS_SDK_UA_APP_ID;
     if (appId === undefined) delete process.env.AWS_SDK_UA_APP_ID;
@@ -153,7 +136,7 @@ describe('makeClient', () => {
   it('spreads the md/ user-agent into the constructed client config', async () => {
     const c = makeClient(S3Client, { region: 'us-east-1' });
     const cfg = c.config;
-    expect(await cfg.region()).toBe('us-east-1'); // caller opt preserved
+    expect(await cfg.region()).toBe('us-east-1');
     expect((cfg as any).customUserAgent).toEqual(abcaUserAgent().customUserAgent);
   });
 
@@ -171,7 +154,6 @@ describe('makeClient', () => {
       region: 'us-east-1',
       customUserAgent: [['caller/1.0', 'x']],
     });
-    // Caller's pair survives, ABCA md/ pair is appended (not overwritten).
     expect((c.config as any).customUserAgent).toEqual([
       ['caller/1.0', 'x'],
       ...abcaUserAgent().customUserAgent,

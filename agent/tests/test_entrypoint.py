@@ -1,5 +1,3 @@
-"""Unit tests for pure functions in entrypoint.py."""
-
 import os
 import tempfile
 
@@ -24,15 +22,10 @@ from models import (
     TaskConfig,
 )
 
-# ---------------------------------------------------------------------------
-# AGENT_WORKSPACE
-# ---------------------------------------------------------------------------
-
 
 class TestAgentWorkspace:
     def test_defaults_to_workspace(self, monkeypatch):
         monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
-        # Re-import to pick up the env change
         import importlib
 
         import entrypoint
@@ -48,11 +41,6 @@ class TestAgentWorkspace:
 
         importlib.reload(entrypoint)
         assert entrypoint.AGENT_WORKSPACE == "/mnt/workspace"
-
-
-# ---------------------------------------------------------------------------
-# slugify
-# ---------------------------------------------------------------------------
 
 
 class TestSlugify:
@@ -77,11 +65,6 @@ class TestSlugify:
         assert slugify("  a--b  c  ") == "a-b-c"
 
 
-# ---------------------------------------------------------------------------
-# redact_secrets
-# ---------------------------------------------------------------------------
-
-
 class TestRedactSecrets:
     def test_ghp_token(self):
         assert "***" in redact_secrets("ghp_abc123XYZ")
@@ -98,11 +81,6 @@ class TestRedactSecrets:
     def test_no_secrets(self):
         text = "nothing secret here"
         assert redact_secrets(text) == text
-
-
-# ---------------------------------------------------------------------------
-# format_bytes
-# ---------------------------------------------------------------------------
 
 
 class TestFormatBytes:
@@ -122,11 +100,6 @@ class TestFormatBytes:
         assert "TB" in format_bytes(2 * 1024**4)
 
 
-# ---------------------------------------------------------------------------
-# truncate
-# ---------------------------------------------------------------------------
-
-
 class TestTruncate:
     def test_short_text(self):
         assert truncate("hello") == "hello"
@@ -134,7 +107,7 @@ class TestTruncate:
     def test_long_text(self):
         long = "a" * 300
         result = truncate(long, max_len=100)
-        assert len(result) == 103  # 100 + "..."
+        assert len(result) == 103
         assert result.endswith("...")
 
     def test_empty(self):
@@ -142,11 +115,6 @@ class TestTruncate:
 
     def test_newlines_replaced(self):
         assert truncate("line1\nline2") == "line1 line2"
-
-
-# ---------------------------------------------------------------------------
-# build_config
-# ---------------------------------------------------------------------------
 
 
 class TestBuildConfig:
@@ -160,7 +128,7 @@ class TestBuildConfig:
         )
         assert config.repo_url == "owner/repo"
         assert config.task_id == "test-id"
-        assert config.max_turns == 10  # default
+        assert config.max_turns == 10
 
     def test_missing_repo_url(self):
         with pytest.raises(ValueError, match="repo_url"):
@@ -195,7 +163,7 @@ class TestBuildConfig:
             github_token="ghp_test",
             aws_region="us-east-1",
         )
-        assert config.task_id  # non-empty
+        assert config.task_id
         assert len(config.task_id) == 12
 
     def test_env_fallback(self, monkeypatch):
@@ -206,11 +174,6 @@ class TestBuildConfig:
             github_token="ghp_test",
         )
         assert config.aws_region == "eu-west-1"
-
-
-# ---------------------------------------------------------------------------
-# assemble_prompt
-# ---------------------------------------------------------------------------
 
 
 class TestAssemblePrompt:
@@ -248,11 +211,6 @@ class TestAssemblePrompt:
         assert "@alice" in result
 
 
-# ---------------------------------------------------------------------------
-# _discover_project_config
-# ---------------------------------------------------------------------------
-
-
 class TestDiscoverProjectConfig:
     def test_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -261,7 +219,6 @@ class TestDiscoverProjectConfig:
 
     def test_finds_claude_md(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Top-level CLAUDE.md
             with open(os.path.join(tmpdir, "CLAUDE.md"), "w") as f:
                 f.write("instructions")
             result = _discover_project_config(tmpdir)
@@ -301,11 +258,6 @@ class TestDiscoverProjectConfig:
                 f.write("{}")
             result = _discover_project_config(tmpdir)
             assert "mcp_servers" in result
-
-
-# ---------------------------------------------------------------------------
-# _build_system_prompt
-# ---------------------------------------------------------------------------
 
 
 class TestBuildSystemPrompt:
@@ -373,7 +325,6 @@ class TestBuildSystemPrompt:
         assert "Additional instructions" in result
 
     def test_resolved_skill_fragment_appended_to_system_prompt(self):
-        # #246: a resolved skill's prompt_fragment must reach the system prompt.
         config = TaskConfig(
             repo_url="o/r",
             task_id="t1",
@@ -394,11 +345,6 @@ class TestBuildSystemPrompt:
         result = _build_system_prompt(config, setup, None, "")
         assert "## Skills" in result
         assert "Add an ABCA-REVIEWED marker." in result
-
-
-# ---------------------------------------------------------------------------
-# build_config — workflow resolution
-# ---------------------------------------------------------------------------
 
 
 class TestBuildConfigWorkflow:
@@ -456,11 +402,6 @@ class TestBuildConfigWorkflow:
                 aws_region="us-east-1",
                 resolved_workflow={"id": "coding/pr-review-v1", "version": "1.0.0"},
             )
-
-
-# ---------------------------------------------------------------------------
-# _build_system_prompt — workflow-driven prompt selection
-# ---------------------------------------------------------------------------
 
 
 class TestBuildSystemPromptWorkflow:
@@ -525,14 +466,7 @@ class TestBuildSystemPromptWorkflow:
         assert "55" in prompt
 
 
-# ---------------------------------------------------------------------------
-# _build_system_prompt — Linear channel addendum
-# ---------------------------------------------------------------------------
-
-
 class TestBuildSystemPromptLinearChannel:
-    """The Linear-channel addendum is appended only for channel_source=='linear'."""
-
     def _setup(self) -> RepoSetup:
         return RepoSetup(
             repo_dir="/workspace/t1",
@@ -583,9 +517,6 @@ class TestBuildSystemPromptLinearChannel:
         assert "ABC-42" in prompt
 
     def test_linear_addendum_references_no_mcp_tools(self):
-        # ADR-016: Linear is fully deterministic — the agent has no Linear MCP.
-        # The addendum must NOT name any mcp__linear-server__* tool (a leftover
-        # reference would send the agent groping for a tool that doesn't exist).
         config = TaskConfig(
             repo_url="o/r",
             task_id="t1",
@@ -599,8 +530,6 @@ class TestBuildSystemPromptLinearChannel:
         assert "mcp__linear-server" not in prompt
 
     def test_linear_addendum_states_context_prehydrated_and_status_automatic(self):
-        # The agent must be told (a) inbound context is already provided (nothing
-        # to fetch) and (b) not to post Linear comments or change state.
         config = TaskConfig(
             repo_url="o/r",
             task_id="t1",

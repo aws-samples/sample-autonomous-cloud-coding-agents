@@ -1,25 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""The ``--trace`` round trip across all three languages' halves (issue #61).
-
-    agent (Python)       writes the gzipped JSONL trace to S3 and records its
-                         URI on the task                      telemetry / pipeline / task_state
-    API handler (TS)     checks ownership, HEADs the object, presigns a GET
-                                                              cdk/src/handlers/get-trace-url.ts
-    CLI (TS)             asks the API, downloads through the URL, gunzips
-                                                              cli/src/commands/trace.ts
-
-``test_trace_key_contract.py`` pins the key shape by reading the TypeScript as
-text. Here the three halves run for real against one emulator: the Python side in
-this process, the TypeScript sides in Node from source (``tsx``, a dev dependency
-of ``@abca/cdk``). The only stand-ins are for what sits between them in a
-deployment: ``cdk/test/emulator/trace-api-shim.ts`` for API Gateway and its
-Cognito authorizer (so the CLI runs in API-key mode and its login path is not
-exercised), and a ``put_item`` for the task record the orchestrator would have
-created.
-"""
-
 from __future__ import annotations
 
 import gzip
@@ -66,7 +47,6 @@ def trace_api(emulator):
         shim.wait(timeout=30)
         shim.stdout.close()
         pytest.fail(f"trace API shim did not start: {first_line!r}")
-    # The handler logs to stdout; keep reading so a full pipe can never stall it.
     drain = threading.Thread(target=shim.stdout.read, daemon=True)
     drain.start()
 
@@ -89,7 +69,6 @@ def bgagent(trace_api, emulator, tmp_path):
         env = {
             **os.environ,
             "BGAGENT_CONFIG_DIR": str(config_dir),
-            # API-key mode skips the Cognito login; the shim reads it as the caller.
             "BGAGENT_API_KEY": user,
             "NODE_EXTRA_CA_CERTS": emulator.ca_bundle,
         }
@@ -176,8 +155,6 @@ class TestTraceUrlIsRefused:
 
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "FORBIDDEN"
-        # The key-prefix guard further down answers with the same status and code;
-        # the message is what shows that the record-ownership check refused this.
         assert response.json()["error"]["message"] == "You do not have access to this task."
 
     def test_until_the_agent_has_recorded_a_trace(

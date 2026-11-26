@@ -53,14 +53,12 @@ export function formatDurationShort(seconds: number | null | undefined): string 
   return twoUnits(Math.floor(hours / 24), 'd', hours % 24, 'h');
 }
 
-/** Between the two units of a duration, so that "2h 5m" never breaks across two lines of a sentence. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 
 function twoUnits(large: number, largeUnit: string, small: number, smallUnit: string): string {
   return small === 0 ? `${large}${largeUnit}` : `${large}${largeUnit}${NO_BREAK_SPACE}${small}${smallUnit}`;
 }
 
-/** Digits are grouped the same way for every reader ("$5,214.40"), as the dollar sign is fixed too. */
 const GROUPING_LOCALE = 'en-US';
 
 export function formatCost(usd: number | null | undefined): string {
@@ -101,7 +99,7 @@ function formatSpan(seconds: number): string {
 
 /**
  * What a person would call the task: the issue's title, else its description, else
- * the issue number. With an issue, the description is only extra guidance.
+ * the issue number.
  */
 export function taskTitle(task: {
   readonly task_description: string | null;

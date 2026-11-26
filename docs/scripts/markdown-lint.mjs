@@ -3,26 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { lint as markdownlint } from 'markdownlint/promise';
 
-/**
- * Structure only: each rule catches content that is lost or broken when the file is rendered.
- * Style rules stay off. The library is handed this object and reads no configuration file, so
- * no `.markdownlint*` file in the tree can switch a rule off or drop a file.
- */
 const config = {
   default: false,
-  // A heading goes at most one level deeper than the heading before it.
   MD001: true,
-  // No two headings with the same text under one parent heading: their anchors collide.
   MD024: { siblings_only: true },
-  // One top-level heading per file. A front matter `title` counts as that heading.
   MD025: true,
-  // Every image has alternative text.
   MD045: true,
-  // Every table row has as many cells as the header: renderers drop the extra ones.
   MD056: true,
 };
 
-/** `git ls-files` in `repoRoot`. A hook's GIT_DIR must not point git at another repository. */
+/** A hook's GIT_DIR must not point git at another repository. */
 function gitLsFiles(repoRoot, ...args) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
   return execFileSync('git', ['ls-files', '-z', ...args], { cwd: repoRoot, env, encoding: 'utf8' })
@@ -33,12 +23,10 @@ function gitLsFiles(repoRoot, ...args) {
 /**
  * Lints the structure of every tracked Markdown file below `repoRoot`: table rows that lose
  * cells, images without alt text, a second top-level heading, repeated sibling headings,
- * skipped heading levels. The list comes from git, so a new file or directory is covered as
- * soon as it is added, without touching this script.
+ * skipped heading levels.
  *
- * Not linted: the Starlight mirrors, generated from these sources into the subdirectories
- * of docs/src/content/docs. The home page at the top of that directory is written by hand,
- * so it is linted.
+ * Not linted: the Starlight mirrors in the subdirectories of docs/src/content/docs. The home
+ * page at the top of that directory is linted.
  *
  * Returns the exit code: 0 clean, 1 findings or a refused setup, 2 markdownlint failed.
  */
@@ -54,7 +42,6 @@ export async function lint(repoRoot, { log = console.log, error = console.error 
 
   let results;
   try {
-    // noInlineConfig: a `<!-- markdownlint-disable -->` comment in a file must not switch a rule off.
     results = await markdownlint({ files: files.map((file) => path.join(repoRoot, file)), config, noInlineConfig: true });
   } catch (failure) {
     error(failure);

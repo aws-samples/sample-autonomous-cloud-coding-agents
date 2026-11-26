@@ -20,7 +20,6 @@
 import * as crypto from 'crypto';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-// --- Mocks ---
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -147,9 +146,6 @@ describe('webhook-create-task handler', () => {
     expect(JSON.parse(result.body).error.message).toContain('X-Webhook-Signature');
   });
 
-  // The webhook authorizer finds the two webhook headers in any casing; this
-  // handler has to find the signature the same way, or a request that passed
-  // the authorizer is refused here.
   test.each(['x-webhook-signature', 'X-WEBHOOK-SIGNATURE'])('reads the signature header case-insensitively (%s)', async (name) => {
     const event = makeEvent();
     event.headers = { [name]: event.headers['X-Webhook-Signature'] };
@@ -170,7 +166,6 @@ describe('webhook-create-task handler', () => {
 
   test('returns 500 when Secrets Manager throws a transient error', async () => {
     mockSmSend.mockRejectedValueOnce(new Error('SM error'));
-    // Use unique webhook ID to avoid secret cache
     const event = makeEvent();
     event.requestContext.authorizer = { userId: 'user-abc', webhookId: 'wh-transient' };
     const result = await handler(event);
@@ -187,9 +182,6 @@ describe('webhook-create-task handler', () => {
     expect(result.statusCode).toBe(500);
   });
 
-  // Empty-secret fail-open guard: an attacker who learns the stored secret
-  // is empty/whitespace could compute HMAC('', body). The handler must
-  // refuse to verify against such a secret (500, not a forged 2xx).
   test('returns 500 when the stored secret is the empty string', async () => {
     mockSmSend.mockResolvedValueOnce({ SecretString: '' });
     const body = JSON.stringify({ repo: 'org/repo', task_description: 'Fix the bug' });
@@ -236,7 +228,6 @@ describe('webhook-create-task handler', () => {
 
   test('sets channel_source to webhook in event metadata', async () => {
     await handler(makeEvent());
-    // Second DDB call is the event write
     const putCalls = mockSend.mock.calls;
     const eventPut = putCalls[1][0];
     expect(eventPut.input.Item.metadata.channel_source).toBe('webhook');
@@ -244,7 +235,6 @@ describe('webhook-create-task handler', () => {
 
   test('includes webhook_id in channel_metadata', async () => {
     await handler(makeEvent());
-    // First DDB call is the task record write
     const putCalls = mockSend.mock.calls;
     const taskPut = putCalls[0][0];
     expect(taskPut.input.Item.channel_metadata.webhook_id).toBe('wh-123');
@@ -299,7 +289,6 @@ describe('webhook-create-task handler', () => {
     const result = await handler(event);
 
     expect(result.statusCode).toBe(201);
-    // The key reaches the lookup for an earlier task with the same key.
     const lookup = mockSend.mock.calls.map(([command]) => command).find((command) => command.input?.IndexName === 'IdempotencyIndex');
     expect(lookup?.input.ExpressionAttributeValues).toEqual({ ':key': 'wh-key-456' });
   });

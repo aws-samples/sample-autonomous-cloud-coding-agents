@@ -51,21 +51,9 @@ import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
 interface OrchestrateTaskEvent {
   readonly task_id: string;
-  /**
-   * Per-pickup nonce set by the admission-queue pickup Lambda (#441)
-   * when re-invoking after a QUEUED -> SUBMITTED flip. Unused by the
-   * handler; it exists so the re-invoke payload differs from the
-   * original create-task invocation and no layer (Lambda async dedup,
-   * durable-execution idempotency) can mistake it for a replay.
-   */
   readonly queue_pickup_id?: string;
 }
 
-/**
- * A MicroVM start that failed before registration. The start step never retries
- * (a retry could launch a second computer), so it returns the failure and a
- * separate retried step records it.
- */
 interface MicrovmStartFailure {
   readonly microvmStartFailure: { readonly fromStatus: TaskRecord['status']; readonly errorMessage: string };
 }
@@ -75,27 +63,20 @@ function isMicrovmStartFailure(result: StartSessionResult): result is MicrovmSta
   return result !== null && 'microvmStartFailure' in result;
 }
 
-const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
+const MAX_POLL_ATTEMPTS = 1020;
 const MAX_CONSECUTIVE_ECS_POLL_FAILURES = 3;
 const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
-/** Poll cadence when the blueprint doesn't override ``poll_interval_ms`` (seconds). */
 const DEFAULT_POLL_INTERVAL_SECONDS = 30;
 
 const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = async (event, context) => {
   const { task_id: taskId } = event;
 
-  // Step 1: Load task record
   const task = await context.step('load-task', async () => {
     return loadTask(taskId);
   });
 
-  // Correlation envelope: stamp {task_id, user_id, repo} on every lifecycle log
-  // line so admission→terminal transitions join to TaskEvents and the agent
-  // trace without hand-adding fields per call. `repo` is undefined for repo-less
-  // workflows (those with no target repository).
   const { log, correlation } = envelopeFor(task);
 
-  // Step 1b: Load blueprint config (per-repo overrides)
   const blueprintConfig = await context.step('load-blueprint', async () => {
     try {
       return await loadBlueprintConfig(task);
@@ -105,29 +86,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     }
   });
 
-  // Step 2: Admission control — check concurrency limit. At capacity the
-  // task is QUEUED (durable, FIFO on created_at) instead of FAILED (#441):
-  // the admission-queue pickup Lambda re-attempts admission as slots free
-  // up, flips QUEUED -> SUBMITTED, and re-invokes this orchestrator.
   const admitted = await context.step('admission-control', async () => {
-    // Re-read status to detect external cancellation between steps
     const current = await loadTask(taskId, true);
     if (TERMINAL_STATUSES.includes(current.status)) {
       return false;
     }
     const result = await admissionControl(task);
     if (!result) {
-      // Re-read for queue bookkeeping: `task` is the step-1 snapshot, but a
-      // pickup-cycle re-queue must preserve the CURRENT queued_at /
-      // admission_attempts, which the pickup Lambda may have advanced.
-      // queueTask emits the `admission_queued` event itself.
       const queued = await queueTask(current);
-      // Channel feedback only on the FIRST queue entry — a pickup-cycle
-      // re-queue (lost admission race) would otherwise spam the issue with
-      // one comment per cycle. Non-fatal: a throw here would re-run
-      // queueTask on the durable-execution retry, producing duplicate events.
-      // And only when the task WAS queued: queueTask answers false when a
-      // concurrent transition (a user cancel) won, and that task never starts.
       if (queued && current.queued_at === undefined) {
         try {
           await notifyLinearOnConcurrencyCap(task);
@@ -152,7 +118,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     return;
   }
 
-  // Step 2b: Pre-flight checks — verify external dependencies before consuming AgentCore runtime
   const preflightPassed = await context.step('pre-flight', async () => {
     try {
       const current = await loadTask(taskId, true);
@@ -187,35 +152,21 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     return;
   }
 
-  // Step 3: Context hydration — assemble payload and transition to HYDRATING
   const payload = await context.step('hydrate-context', async () => {
     try {
       return await hydrateAndTransition(task, blueprintConfig);
     } catch (err) {
-      // Hydration may fail due to external cancellation, guardrail blocking, or guardrail API failure — fail the task and release concurrency
       await failTask(taskId, TaskStatus.HYDRATING, `Hydration failed: ${String(err)}`, task.user_id, true, task.repo);
       throw err;
     }
   });
 
-  // Step 4: Start agent session — resolve compute strategy, invoke runtime, transition to RUNNING
-  // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
   const startResult: StartSessionResult = await context.step('start-session', async (): Promise<StartSessionResult> => {
     let autoRetried = false;
     let failureStatus: TaskRecord['status'] = TaskStatus.HYDRATING;
-    // Hoisted out of the `try` so the catch can reap a MicroVM that STARTED but
-    // whose registration did not complete — see the catch block.
     let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
     let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
-      // Re-read status with a strongly consistent read, as the admission and
-      // pre-flight steps do. It detects a cancel that landed during hydration,
-      // and a failure this step recorded itself: the catch below fails the task
-      // and rethrows, and Durable Execution then runs the step again. A session
-      // started now would run for a task that is already over. Not for a
-      // MicroVM: its strategy makes this check when it claims the start
-      // (`claimMicrovmStart`) and then also stops a computer that an interrupted
-      // run of this step saved, which a throw from here would skip.
       if (blueprintConfig.compute_type !== 'lambda-microvm') {
         const beforeStart = await loadTask(taskId, true);
         if (TERMINAL_STATUSES.includes(beforeStart.status)) {
@@ -228,16 +179,8 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         userId: task.user_id,
         payload,
         blueprintConfig,
-        // A read-only workflow (e.g. planning that only clones and reads the
-        // repo) runs on the smaller ECS planning task def. Ignored by AgentCore.
         readOnly: workflowIsReadOnly(task.resolved_workflow?.id ?? 'coding/new-task-v1'),
       };
-      // Transient-error AUTO-RETRY (once), extracted to startSessionWithRetry so
-      // its branches are unit-tested. The retry-event emit is best-effort and
-      // guarded there: a TaskEvents PutItem fault can't abort or mis-attribute
-      // the retry. The correlation envelope is threaded so the
-      // session_start_retry event carries the same trace context as
-      // session_started below.
       const { handle, autoRetried: retried } = await startSessionWithRetry(
         strategy,
         startInput,
@@ -251,9 +194,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       autoRetried = retried;
       startedHandle = handle;
 
-      // Build compute metadata for the task record so cancel-task can stop the
-      // right backend (and, for lambda-microvm, so the P3 approve/deny Lambdas
-      // can load the handle they resume from — ADR-021 sub-decision 2).
       const computeMetadata = buildComputeMetadata(handle);
 
       const current = handle.strategyType === 'lambda-microvm' ? await loadTask(taskId, true) : undefined;
@@ -272,14 +212,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         compute_metadata: computeMetadata,
         ...(handle.strategyType === 'agentcore' && { agent_runtime_arn: handle.runtimeArn }),
       });
-      // A MicroVM's session_started is its own durable step below: the guest can
-      // mark the task RUNNING before this point, and the event must not depend
-      // on which writer got there first.
       if (handle.strategyType !== 'lambda-microvm') {
-        // The transition above is the commit point: the session runs and the
-        // task row names it. A failed event write must not throw from here:
-        // Durable Execution would run the step again, the re-read above would
-        // see a RUNNING task, and every run would start another session.
         try {
           await emitTaskEvent(taskId, 'session_started', {
             session_id: handle.sessionId,
@@ -328,22 +261,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
           log.warn('Could not reconcile MicroVM registration after start failure', { error: String(readErr) });
         }
       }
-      // Registration failed and a strong read could not establish a committed
-      // RUNNING/approval-wait task. Reap the known computer. The start receipt
-      // retains its ID for recovery if cleanup itself fails; the service's
-      // eight-hour maximum duration remains the final lifetime bound.
-      //
-      // Best-effort in the strongest sense: `stopSession` is internally
-      // non-throwing for this backend, and the extra try/catch guarantees that
-      // even a surprise (a non-microvm strategy, a synchronous throw) cannot
-      // replace the ORIGINAL failure — which is the one the user needs to see.
-      //
-      // Scoped to `lambda-microvm` deliberately. ECS and AgentCore have the same
-      // structural window, but generalising here would issue `StopTask` /
-      // `StopRuntimeSession` calls the ORCHESTRATOR role may not be granted (those
-      // grants live on the cancel Lambda), turning a clean failure into a clean
-      // failure plus a misleading AccessDenied. Widening it is a follow-up that
-      // needs the IAM change reviewed alongside.
       if (startedHandle?.strategyType === 'lambda-microvm' && strategy) {
         try {
           log.warn('Session start failed after the MicroVM was created — terminating the orphan', {
@@ -359,28 +276,12 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         }
       }
 
-      // Carry the auto-retry fact into error_message: the `[auto-retried]` suffix
-      // is persisted verbatim (the error classifier ignores it — it does not
-      // affect classification). It is a breadcrumb for a failure renderer to
-      // detect and surface "I already tried again" to the channel.
-      //
-      // Stamp on BOTH paths where a retry ran: one path sets `autoRetried` above
-      // then a LATER step throws; the transient-then-transient path throws FROM
-      // startSessionWithRetry before `autoRetried` is assigned, so the local is
-      // still false — read the fact off the thrown error via isAutoRetried().
-      // Without this, a double-transient failure was told "reply to retry" instead
-      // of "I already retried" — the exact confusion the marker exists to prevent.
       const retriedNote = (autoRetried || isAutoRetried(err)) ? ' [auto-retried]' : '';
       const detail = err instanceof MicrovmStartUncertainError
         ? `MICROVM_START_OUTCOME_UNKNOWN: ${String(err)}`
         : String(err);
       const errorMessage = `Session start failed: ${detail}${retriedNote}`;
       if (blueprintConfig.compute_type === 'lambda-microvm') {
-        // This step never retries, so it cannot launch twice. Record FAILED here
-        // too, so a re-run of this step sees the closed task and launches
-        // nothing; a transient write error must not fail the step, so the
-        // retried `record-start-failure` step below makes the write stick. The
-        // terminal event and seat release stay with finalization.
         try {
           await transitionTask(taskId, failureStatus, TaskStatus.FAILED, {
             completed_at: new Date().toISOString(), error_message: errorMessage,
@@ -415,7 +316,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   const sessionHandle = isMicrovmStartFailure(startResult) ? null : startResult;
 
   if (sessionHandle?.strategyType === 'lambda-microvm') {
-    // Once per execution, after either writer registered the worker.
     await context.step('session-started-event', async () => {
       try {
         await emitTaskEvent(taskId, 'session_started', {
@@ -431,8 +331,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   }
 
   if (!sessionHandle) {
-    // The task ended before registration, including a persisted start failure.
-    // Reach normal finalization without starting another VM.
     await context.step('finalize-before-session', async () => {
       await finalizeTask(taskId, { attempts: 0 }, task.user_id);
       await deleteMicrovmPayload(taskId);
@@ -440,31 +338,18 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     return;
   }
 
-  // Resolve the compute strategy once and reuse it across poll iterations
-  // instead of constructing a new instance on every cycle.
   const computeStrategy = blueprintConfig.compute_type === 'ecs'
     ? resolveComputeStrategy(blueprintConfig)
     : undefined;
 
-  // ECS crash checks and MicroVM lifecycle supervision have separate policies.
   const microvmStrategy = blueprintConfig.compute_type === 'lambda-microvm'
     ? resolveComputeStrategy(blueprintConfig)
     : undefined;
 
-  // The poll window is a time, MAX_POLL_ATTEMPTS polls at the default interval
-  // (~8.5h), so the number of polls it allows depends on the blueprint's interval.
   const pollSeconds = blueprintConfig.poll_interval_ms
     ? Math.ceil(blueprintConfig.poll_interval_ms / 1000)
     : DEFAULT_POLL_INTERVAL_SECONDS;
   const maxPollAttempts = Math.ceil(MAX_POLL_ATTEMPTS * DEFAULT_POLL_INTERVAL_SECONDS / pollSeconds);
-
-  // Step 5: Wait for agent to finish
-  // Polls DynamoDB on each interval. The agent writes terminal status when done.
-  // While RUNNING, the runtime updates `agent_heartbeat_at`; if that timestamp
-  // goes stale, `pollTaskStatus` sets `sessionUnhealthy` so we fail fast instead
-  // of waiting the full MAX_POLL_ATTEMPTS window (~8.5h) after a silent crash.
-  // ECS/AgentCore retain their poll-count bound. MicroVM uses
-  // persisted wall-clock deadlines so faster transition polls cannot shorten a session.
 
   const finalPollState = await context.waitForCondition<PollState>(
     'await-agent-completion',
@@ -483,7 +368,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       const ddbState = await pollTaskStatus(taskId, state, blueprintConfig.compute_type);
       let consecutiveEcsPollFailures = 0;
       let consecutiveEcsCompletedPolls = 0;
-      // ECS compute-level crash detection: if DDB is not terminal, check ECS task status
       if (
         ddbState.lastStatus &&
         !TERMINAL_STATUSES.includes(ddbState.lastStatus) &&
@@ -502,8 +386,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
           if (ecsStatus.status === 'completed') {
             consecutiveEcsCompletedPolls = (state.consecutiveEcsCompletedPolls ?? 0) + 1;
             if (consecutiveEcsCompletedPolls >= MAX_CONSECUTIVE_ECS_COMPLETED_POLLS) {
-              // ECS task exited successfully but DDB never reached terminal — the agent
-              // likely crashed after container exit code 0 but before writing status.
               log.error('ECS task completed but DDB never caught up — failing task', {
                 consecutive_completed_polls: consecutiveEcsCompletedPolls,
               });
@@ -558,7 +440,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     },
   );
 
-  // Step 6: Finalize — update terminal status, emit events, release concurrency
   await context.step('finalize', async () => {
     let finalized = false;
     try {
@@ -566,7 +447,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         finalized = (await finalizeTask(taskId, finalPollState, task.user_id)) !== false;
       }
     } finally {
-      // Even a database finalization failure must not lose cleanup of this handle.
       if (microvmStrategy && sessionHandle.strategyType === 'lambda-microvm') {
         await stopMicrovmWithDiagnostics({
           taskId,
@@ -577,10 +457,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       }
     }
     if (!finalized) return;
-    // The task is terminal and the substrate has read its payload: delete the
-    // ephemeral S3 payload object. Best-effort; the bucket lifecycle rule is the
-    // backstop. The MicroVM execution role can read the whole payload bucket, so
-    // prompt deletion at finalize (not TTL alone) limits cross-task exposure.
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
     } else if (blueprintConfig.compute_type === 'lambda-microvm') {
@@ -594,22 +470,6 @@ export const handler = withDurableExecution(durableHandler);
 /**
  * Post a Linear comment when admission control queues a task on the user
  * concurrency cap (#441). Linear-only; silently no-ops for other channels.
- *
- * The processor side (`linear-webhook-processor.ts`) already covers
- * pre-`createTaskCore` rejections (unmapped project, unlinked actor, guardrail);
- * this hook covers the post-201 case where the orchestrator queues on
- * admission. Without this, the only Linear-side signal would be the 👀
- * reaction the agent never gets to add — looks like the integration silently
- * dropped the request.
- *
- * A comment only, not `reportIssueFailure`: that helper also adds the ❌
- * reaction, the marker of a failed task, and this task is queued.
- *
- * Best-effort: errors inside `postIssueComment` are swallowed at the helper
- * layer; we don't surface them here because Linear feedback must never block
- * the admission step.
- *
- * Exported for unit testing — the durable handler invokes it inline.
  */
 export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<void> {
   if (task.channel_source !== 'linear') return;
@@ -623,16 +483,7 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
     });
     return;
   }
-  // Wrap in try/catch matching the `safeReportIssueFailure` pattern in
-  // the webhook processor. `postIssueComment` itself is best-effort
-  // internally, but a synchronous throw bubbling up here would crash the
-  // durable-execution step on a transient DDB throttle during the
-  // workspace registry lookup. Suppress + log so the admission step is
-  // never blocked by Linear-feedback failures.
   try {
-    // Agent-session task (ADR-018 Phase 2): say it in the session. An issue
-    // comment would notify every subscriber once per queued task — dozens in a
-    // burst of delegations — and reads as a failure next to a live session.
     const agentSessionId = task.channel_metadata?.linear_agent_session_id;
     if (agentSessionId) {
       const token = await resolveToken({ linearWorkspaceId, registryTableName });
@@ -666,17 +517,6 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
 /**
  * Post a Jira issue comment when admission control queues a task on the
  * user concurrency cap (#441). Jira-only; silently no-ops for other channels.
- *
- * Parity with {@link notifyLinearOnConcurrencyCap}: the webhook processor
- * covers pre-`createTaskCore` rejections (unmapped project, unlinked actor,
- * guardrail), while this hook covers the post-201 case where the orchestrator
- * queues on admission. Without it, a Jira user who hits the cap sees the
- * integration silently drop the request (the agent — which would otherwise
- * comment — never starts).
- *
- * Best-effort: `reportIssueFailure` swallows its own errors; we wrap in
- * try/catch anyway because a transient throw during the registry lookup must
- * never block the admission step. Exported for unit testing.
  */
 export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void> {
   if (task.channel_source !== 'jira') return;

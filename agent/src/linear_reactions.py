@@ -1,29 +1,3 @@
-"""Linear issue-level reaction helper for Linear-origin tasks.
-
-Posts a 👀 reaction on the originating Linear issue at task start, then
-swaps it for ✅/❌ on terminal status — mirroring the Slack integration's
-terminal-emoji status signal (👀 → ✅/❌, no lingering "watching" marker).
-
-Implementation: ``react_task_started`` captures the reaction id returned by
-``reactionCreate`` and hands it back to the caller, which passes it into
-``react_task_finished`` so we can ``reactionDelete`` the 👀 before posting
-the terminal emoji.
-
-Gating: every function is a no-op unless ``channel_source == 'linear'``
-and the Linear issue id is present in ``channel_metadata``. All network
-errors are logged and swallowed — a transient Linear API failure must
-never fail the task itself (reactions are advisory UX, not load-bearing).
-
-Why a direct GraphQL call: under ADR-016 Linear is 100% deterministic —
-the agent has NO Linear tools and never calls Linear itself. Reactions
-and state transitions are posted by the platform on its own credential
-(here, on the agent tier; the Lambda tier owns the rest). This is the
-permanent design, not a stopgap: there is no future in which the agent
-drives Linear through an MCP tool, so this module is not "awaiting" one.
-
-See: ``agent/src/channel_mcp.py`` for why there is no Linear MCP.
-"""
-
 from __future__ import annotations
 
 import os
@@ -36,17 +10,10 @@ import requests
 
 from shell import log
 
-#: Linear GraphQL endpoint. Authenticated with the per-workspace
-#: ``actor=app`` OAuth token (``LINEAR_API_TOKEN``, set by config.py from the
-#: workspace's OAuth bundle) sent as the ``Authorization`` header.
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 
-#: Request timeout — reactions are fire-and-forget status UX; never block
-#: the task pipeline for more than a couple of seconds.
 REQUEST_TIMEOUT_SECONDS = 5.0
 
-#: Reactions in emoji short-code form (Linear accepts both emoji chars and
-#: short codes; short codes are more portable in logs).
 EMOJI_STARTED = "eyes"
 EMOJI_SUCCESS = "white_check_mark"
 EMOJI_FAILURE = "x"
@@ -66,8 +33,6 @@ mutation UnreactIssue($id: String!) {
 }
 """.strip()
 
-#: Fetch reactions on an issue plus each reaction's emoji + owning user id —
-#: enough to filter by viewer (the API-token owner) and emoji on re-runs.
 _ISSUE_REACTIONS_QUERY = """
 query IssueReactions($issueId: String!) {
   issue(id: $issueId) {
@@ -80,16 +45,10 @@ query IssueReactions($issueId: String!) {
 }
 """.strip()
 
-#: Resolve the API-token owner so the sweep only deletes our own reactions
-#: and never touches reactions a human added.
 _VIEWER_QUERY = """
 query Viewer { viewer { id } }
 """.strip()
 
-#: Workflow-state mirroring: fetch the issue's current state + its team's full
-#: workflow-state list,
-#: so we can pick the right target state (by type, with a name preference) and
-#: never move the issue BACKWARD along the lifecycle.
 _ISSUE_STATES_QUERY = """
 query IssueStates($id: String!) {
   issue(id: $id) {
@@ -99,19 +58,12 @@ query IssueStates($id: String!) {
 }
 """.strip()
 
-#: Set an issue's workflow state by id.
 _SET_STATE_MUTATION = """
 mutation SetIssueState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) { success }
 }
 """.strip()
 
-#: Lifecycle rank by Linear state TYPE (backlog → unstarted → started →
-#: completed/canceled). A move to a strictly higher rank — or a higher
-#: position within the same type — is FORWARD; anything else is a no-op so a
-#: human who already advanced/closed the issue is never demoted. Mirrors the
-#: platform's ``transitionIssueState`` guard so the single-task and
-#: orchestration paths agree.
 _STATE_TYPE_RANK = {
     "backlog": 0,
     "triage": 0,
@@ -121,37 +73,17 @@ _STATE_TYPE_RANK = {
     "canceled": 3,
 }
 
-#: Reactions we own and want to clear before a fresh run.
 _BGAGENT_EMOJIS = frozenset({EMOJI_STARTED, EMOJI_SUCCESS, EMOJI_FAILURE})
 
-#: Module-level cache of the API-token owner's id. Resolved once per
-#: container lifetime (Linear's `viewer { id }` is stable for the token).
 _viewer_id_cache: str | None = None
 
-#: Auth-failure circuit breaker. Linear API tokens can be revoked mid-run;
-#: without a circuit breaker, every subsequent ``_graphql`` call retries
-#: (within its 5s timeout) and floods CloudWatch with WARNs while wasting
-#: Linear's quota. After ``_AUTH_FAILURE_THRESHOLD`` consecutive 401/403
-#: responses, ``_auth_circuit_open`` flips to True and all later calls
-#: short-circuit (return None) without hitting the network. A successful
-#: 2xx response resets the counter. The lock guards the read-modify-write
-#: against the daemon sweep thread.
 _AUTH_FAILURE_THRESHOLD = 3
-# Annotated explicitly so ty doesn't narrow the initial values to
-# `Literal[0]` / `Literal[False]` — that narrowing would reject the
-# legitimate flips below (and any test that resets them).
 _consecutive_auth_failures: int = 0
 _auth_circuit_open: bool = False
 _auth_state_lock = threading.Lock()
 
 
 def _enabled(channel_source: str, channel_metadata: dict[str, str] | None) -> str | None:
-    """Return the Linear issue id if reactions should fire, else None.
-
-    Gating mirrors ``channel_mcp.configure_channel_mcp`` — the same
-    ``channel_source == 'linear'`` check, plus a metadata presence check so
-    we don't fire GraphQL calls we can't address.
-    """
     if channel_source != "linear":
         return None
     if not channel_metadata:
@@ -160,34 +92,14 @@ def _enabled(channel_source: str, channel_metadata: dict[str, str] | None) -> st
 
 
 def _is_agent_session(channel_metadata: dict[str, str] | None) -> bool:
-    """Whether the task was started from a native Linear agent session.
-
-    A session shows the run's state itself (ADR-018 Phase 2), so the 👀/✅/❌
-    issue reactions would only repeat it and notify the issue's subscribers a
-    second time. Workflow-state transitions still apply: the session does not
-    move the issue.
-    """
     return bool(channel_metadata and channel_metadata.get("linear_agent_session_id"))
 
 
 def _masked(text: str, token: str) -> str:
-    """``text`` with ``token``, when one was handed to the call, replaced by ``***``.
-    ``shell.log`` only knows the tokens that are in the environment."""
     return text.replace(token, "***") if token else text
 
 
 def _graphql(query: str, variables: dict[str, Any], token: str = "") -> dict[str, Any] | None:
-    """POST a GraphQL query. Return parsed data on success, None on any failure.
-
-    The request is authenticated with ``token`` when one is given, and with
-    ``LINEAR_API_TOKEN`` of the environment otherwise.
-
-    Swallows network / auth / schema errors with a WARN log — reactions are
-    advisory and never gate the pipeline. After
-    ``_AUTH_FAILURE_THRESHOLD`` consecutive auth failures (401/403), the
-    module-level circuit breaker flips open and all later calls short-circuit
-    without hitting the network. A successful 2xx response resets the counter.
-    """
     global _consecutive_auth_failures, _auth_circuit_open
 
     with _auth_state_lock:
@@ -241,14 +153,9 @@ def _graphql(query: str, variables: dict[str, Any], token: str = "") -> dict[str
         log("WARN", f"linear_reactions: HTTP {resp.status_code} from Linear")
         return None
 
-    # Successful 2xx — reset the auth failure counter so transient blips don't
-    # accumulate toward the threshold.
     with _auth_state_lock:
         _consecutive_auth_failures = 0
 
-    # A 200 whose body is not a JSON object (a proxy's HTML page, ``null``, a list)
-    # is one more failure of an advisory call. Raised out of here, the parse error
-    # or the ``.get`` below leaves the pipeline hook and the task is written FAILED.
     try:
         body = resp.json() if resp.content else {}
     except ValueError:
@@ -265,12 +172,6 @@ def _graphql(query: str, variables: dict[str, Any], token: str = "") -> dict[str
 
 
 def _get_viewer_id(token: str) -> str | None:
-    """Return the API-token owner's user id, cached for the container lifetime.
-
-    Used by ``_sweep_stale_reactions`` to scope deletes to bgagent-owned
-    reactions only — without this filter, a re-run would also wipe any 👀 / ✅
-    / ❌ reactions a human user happened to add for unrelated reasons.
-    """
     global _viewer_id_cache
     if _viewer_id_cache:
         return _viewer_id_cache
@@ -285,18 +186,6 @@ def _get_viewer_id(token: str) -> str | None:
 
 
 def _transition_issue_state(issue_id: str, target_type: str, preferred_names: list[str]) -> None:
-    """Move the issue to a workflow state of ``target_type``, forward-only.
-
-    A plain single task (a direct ``abca`` label) previously left the issue in
-    Backlog for its whole run — only orchestration parents got a state change (via the
-    epic panel). This is the missing single-task equivalent: on start move to
-    'started' (preferring "In Progress"), on clean finish to 'started' (preferring
-    "In Review") — the same targets the orchestration panel uses.
-
-    Forward-only via ``_STATE_TYPE_RANK`` (+ position within a type): never demote
-    an issue a human already advanced or closed. Best-effort — every failure is a
-    logged no-op (state mirroring is advisory UX, like the reaction).
-    """
     data = _graphql(_ISSUE_STATES_QUERY, {"id": issue_id})
     if not data:
         return
@@ -321,7 +210,7 @@ def _transition_issue_state(issue_id: str, target_type: str, preferred_names: li
 
     current = issue.get("state") or {}
     if current.get("id") == target.get("id"):
-        return  # already there — idempotent no-op
+        return
     cur_rank = _STATE_TYPE_RANK.get(current.get("type", ""), 0)
     tgt_rank = _STATE_TYPE_RANK.get(target.get("type", ""), 0)
     backward = cur_rank > tgt_rank or (
@@ -341,13 +230,6 @@ def _transition_issue_state(issue_id: str, target_type: str, preferred_names: li
 
 
 def _sweep_stale_reactions_safe(issue_id: str, token: str, exclude_id: str | None = None) -> None:
-    """Top-level wrapper for the sweep daemon thread.
-
-    Catches everything so an unexpected ``TypeError`` / ``AttributeError``
-    inside ``_sweep_stale_reactions`` doesn't kill the thread silently —
-    stderr from a daemon thread may not reach CloudWatch in containerized
-    environments.
-    """
     try:
         _sweep_stale_reactions(issue_id, token, exclude_id=exclude_id)
     except Exception as e:
@@ -358,22 +240,6 @@ def _sweep_stale_reactions_safe(issue_id: str, token: str, exclude_id: str | Non
 
 
 def _sweep_stale_reactions(issue_id: str, token: str, exclude_id: str | None = None) -> None:
-    """Delete bgagent-owned 👀/✅/❌ reactions on the issue.
-
-    Called from ``react_task_started`` *after* the new 👀 is posted, so
-    re-runs (label removed and re-applied; or pre-container ❌ from the
-    orchestrator/processor followed by a successful retry) don't accumulate
-    stale terminal markers next to the new 👀. Running after the post
-    means the user-visible 👀 lands fast even if the sweep's first call
-    hits cold-connection latency on Linear's API.
-
-    The just-posted 👀 must not be deleted by the sweep — pass its id as
-    ``exclude_id`` so the filter skips it.
-
-    Best-effort: any failure (viewer fetch, reactions query, individual
-    reactionDelete) is logged and swallowed — sweep is post-👀 cleanup
-    and never gates the pipeline.
-    """
     sweep_start = time.monotonic()
     viewer_id = _get_viewer_id(token)
     if not viewer_id:
@@ -408,7 +274,6 @@ def _sweep_stale_reactions(issue_id: str, token: str, exclude_id: str | None = N
         if not rid:
             continue
         if exclude_id is not None and rid == exclude_id:
-            # The 👀 we just posted — skip, it's the new marker.
             continue
         if _graphql(_DELETE_MUTATION, {"id": rid}, token=token) is not None:
             deletes += 1
@@ -426,18 +291,7 @@ def react_task_started(
     channel_metadata: dict[str, str] | None,
     transition_state: bool = False,
 ) -> str | None:
-    """Post 👀 on the Linear issue. Return the reaction id (or None on failure/no-op).
-
-    Order matters: the 👀 is posted *first*, then we sweep any stale
-    bgagent-owned 👀/✅/❌ from prior runs (excluding the one we just
-    posted). This keeps the user-visible signal fast — if Linear's API
-    is slow on a cold connection, the 5s timeout falls on a sweep call
-    and nobody waits, instead of falling on the 👀 post and gating it.
-
-    Sweep is best-effort; failure leaves stale terminal markers next to
-    the new 👀 (the visual-duplication bug we set out to fix), but the
-    pipeline proceeds unaffected.
-    """
+    """Post 👀 on the Linear issue. Return the reaction id (or None on failure/no-op)."""
     issue_id = _enabled(channel_source, channel_metadata)
     if not issue_id:
         return None
@@ -448,7 +302,6 @@ def react_task_started(
     log("TASK", f"linear_reactions: react_task_started ENTER issue_id={issue_id}")
     started_at = time.monotonic()
 
-    # Post 👀 first — this is the user-visible signal.
     create_start = time.monotonic()
     data = _graphql(_CREATE_MUTATION, {"issueId": issue_id, "emoji": EMOJI_STARTED})
     create_ms = int((time.monotonic() - create_start) * 1000)
@@ -468,12 +321,6 @@ def react_task_started(
         f"(eyes-visible at +{eyes_ms}ms)",
     )
 
-    # Sweep prior bgagent reactions in a background thread so the agent
-    # pipeline doesn't block on Linear API latency. Daemon=True so the
-    # thread doesn't keep the container alive past the agent's terminal
-    # status. The sweep filters out the just-posted reaction id so it
-    # never deletes itself. It is handed the token because it can still be
-    # running when ``run_task`` ends and restores the environment.
     threading.Thread(
         target=_sweep_stale_reactions_safe,
         args=(issue_id, os.environ.get("LINEAR_API_TOKEN", "")),
@@ -482,10 +329,6 @@ def react_task_started(
         name="linear-reactions-sweep",
     ).start()
 
-    # Workflow-state transition: a writeable single task moves the issue
-    # Backlog → In Progress, so it
-    # doesn't sit in Backlog for the whole run. Off for read-only/planning tasks
-    # (pr-review) — the orchestration panel owns the parent state.
     if transition_state:
         _transition_issue_state(issue_id, "started", ["In Progress"])
 
@@ -515,11 +358,5 @@ def react_task_finished(
             _CREATE_MUTATION,
             {"issueId": issue_id, "emoji": EMOJI_SUCCESS if success else EMOJI_FAILURE},
         )
-    # Workflow-state transition: on a clean finish, a writeable single task
-    # moves the issue to
-    # In Review (work done, awaiting human merge) — the same target the
-    # orchestration panel uses on clean completion. On failure, leave the
-    # state as-is (In Progress); the ❌ reaction conveys the outcome, and the
-    # user can reply to retry. Off for read-only/planning tasks.
     if transition_state and success:
         _transition_issue_state(issue_id, "started", ["In Review"])
