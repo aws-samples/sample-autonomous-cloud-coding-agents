@@ -7,7 +7,10 @@ operations are no-ops.
 
 import os
 import time
+from http import HTTPStatus
 from typing import NotRequired, TypedDict
+
+import requests
 
 from shell import log, log_error_cw
 
@@ -646,6 +649,20 @@ def _ddb_attr_to_py(attr):
     return attr
 
 
+# Waits before the second and third attempt of a create whose answer was lost.
+_CREATE_RETRY_DELAYS_S = (0.5, 1.0)
+
+
+def _answer_lost(exc: BaseException) -> bool:
+    """The writer may have committed: no answer arrived, or the service failed."""
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    response = getattr(exc, "response", None)
+    metadata = response.get("ResponseMetadata") if isinstance(response, dict) else None
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+    return isinstance(status, int) and status >= HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 def transact_write_approval_request(
     task_id: str,
     request_id: str,
@@ -677,18 +694,24 @@ def transact_write_approval_request(
     import approval_requests
 
     if approval_requests.configured():
-        try:
-            approval_requests.record_request(
-                "create", task_id, request_id, approval=dict(approval_row)
-            )
-            return
-        except Exception as exc:
-            if _extract_error_code(exc) == "TransactionCanceledException":
-                reasons = _extract_cancellation_reasons(exc)
-                raise ApprovalWriteError(
-                    f"approval write cancelled: reasons={reasons}", cancellation_reasons=reasons
-                ) from exc
-            raise
+        # The writer reports a repeat of a committed create as its success, so a
+        # create whose answer was lost is repeated with the same request id.
+        for retry_delay_s in (*_CREATE_RETRY_DELAYS_S, None):
+            try:
+                approval_requests.record_request(
+                    "create", task_id, request_id, approval=dict(approval_row)
+                )
+                return
+            except Exception as exc:
+                if _extract_error_code(exc) == "TransactionCanceledException":
+                    reasons = _extract_cancellation_reasons(exc)
+                    raise ApprovalWriteError(
+                        f"approval write cancelled: reasons={reasons}", cancellation_reasons=reasons
+                    ) from exc
+                if retry_delay_s is None or not _answer_lost(exc):
+                    raise
+                log("WARN", f"approval request {request_id} unconfirmed, repeating: {exc}")
+                time.sleep(retry_delay_s)
     # Compatibility with unscoped legacy/local deployments. configured() rejects
     # a missing service URL for cloud workers that use the session role.
     task_table, approvals_table = _require_tables()

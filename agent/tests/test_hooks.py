@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 # These tests must then fail, not drop out of the run.
 import cedarpy  # noqa: F401
 import pytest
+import requests
+from botocore.exceptions import ClientError
 
 import hooks
 from hooks import (
@@ -3173,7 +3175,8 @@ class TestWriteFailure:
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
         # Throttling, the network: neither of the two errors the hook knows by
-        # name. No request was written, so there is no answer to wait for.
+        # name. The request may have been written without the hook hearing so:
+        # it is timed out and the task restored, and no answer is waited for.
         _fast_poll(monkeypatch)
         _prime_approval(
             fake_task_state, {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"}
@@ -3200,7 +3203,144 @@ class TestWriteFailure:
         )
         assert "write_approval_write_failed" in progress.milestones()
         assert fake_task_state.get_calls == []
-        assert fake_task_state.resume_calls == []
+        request_id = fake_task_state.write_calls[0][1]
+        assert [call[:3] for call in fake_task_state.update_calls] == [
+            ("01KTASK", request_id, "TIMED_OUT")
+        ]
+        assert fake_task_state.resume_calls == [("01KTASK", request_id)]
+
+    @staticmethod
+    def _writer(monkeypatch, fake_task_state, outcomes):
+        """Route the create through the real client-side write, to a scripted writer."""
+        import approval_requests
+        import task_state
+
+        calls = []
+
+        def record_request(operation, task_id, request_id, **_kwargs):
+            # The last scripted outcome repeats.
+            calls.append((operation, task_id, request_id))
+            outcome = outcomes[min(len(calls), len(outcomes)) - 1]
+            if outcome is not None:
+                raise outcome
+
+        monkeypatch.setattr(approval_requests, "configured", lambda: True)
+        monkeypatch.setattr(approval_requests, "record_request", record_request)
+        monkeypatch.setattr(task_state.time, "sleep", lambda _seconds: None)
+
+        def write(task_id, request_id, approval_row, *, client=None):
+            fake_task_state.write_calls.append((task_id, request_id, approval_row))
+            task_state.transact_write_approval_request(task_id, request_id, approval_row)
+
+        fake_task_state.transact_write_approval_request = write
+        return calls
+
+    @pytest.mark.parametrize(
+        "lost",
+        [
+            requests.ReadTimeout("read timed out"),
+            requests.ConnectionError("connection reset by peer"),
+            ClientError(
+                {
+                    "Error": {"Code": "ApprovalServiceUnavailable"},
+                    "ResponseMetadata": {"HTTPStatusCode": 504},
+                },
+                "RecordApprovalRequest",
+            ),
+        ],
+        ids=["timeout", "reset", "gateway-504"],
+    )
+    def test_a_lost_create_response_is_retried_with_the_same_request(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, lost
+    ):
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state, {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"}
+        )
+        calls = self._writer(monkeypatch, fake_task_state, [lost, None])
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+        request_id = fake_task_state.write_calls[0][1]
+        assert calls == [("create", "01KTASK", request_id)] * 2
+        assert "write_approval_requested" in progress.milestones()
+        assert "write_approval_write_failed" not in progress.milestones()
+        assert {call[1] for call in fake_task_state.get_calls} == {request_id}
+        assert fake_task_state.update_calls == []
+        assert fake_task_state.resume_calls == [("01KTASK", request_id)]
+
+    def test_a_create_never_confirmed_is_timed_out_and_the_task_restored(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        calls = self._writer(monkeypatch, fake_task_state, [requests.ConnectionError("reset")])
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            result["hookSpecificOutput"]["permissionDecisionReason"]
+            == "approval system unavailable"
+        )
+        request_id = fake_task_state.write_calls[0][1]
+        assert calls == [("create", "01KTASK", request_id)] * 3
+        assert "write_approval_requested" not in progress.milestones()
+        assert fake_task_state.get_calls == []
+        assert [call[:3] for call in fake_task_state.update_calls] == [
+            ("01KTASK", request_id, "TIMED_OUT")
+        ]
+        assert fake_task_state.resume_calls == [("01KTASK", request_id)]
+
+    def test_a_rejected_create_is_not_retried(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        rejected = ClientError(
+            {
+                "Error": {"Code": "APPROVAL_REQUEST_INVALID"},
+                "ResponseMetadata": {"HTTPStatusCode": 400},
+            },
+            "RecordApprovalRequest",
+        )
+        calls = self._writer(monkeypatch, fake_task_state, [rejected])
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert len(calls) == 1
 
     def test_without_a_task_id_the_call_is_denied_and_nothing_is_written(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
