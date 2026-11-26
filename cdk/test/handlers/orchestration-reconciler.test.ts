@@ -126,6 +126,8 @@ process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
 import { TERMINAL_STATUSES } from '../../src/constructs/task-status';
 import { handler, parseTerminalTaskRecord, refreshPanelAndSettle } from '../../src/handlers/orchestration-reconciler';
+import type { Channel } from '../../src/handlers/shared/orchestration-channel';
+import { registerChannelFactory } from '../../src/handlers/shared/orchestration-channel-factory';
 
 beforeEach(() => {
   rollupTaskCostMock.mockReset().mockResolvedValue(false);
@@ -162,10 +164,15 @@ function taskRecord(fields: {
   sequenceNumber?: string;
   // When the write happened: the stream stamps it on the record, in seconds.
   written_at?: string;
+  // The task's own times, as its record carries them.
+  completed_at?: string;
+  updated_at?: string;
 }): DynamoDBRecord {
   const img: Record<string, unknown> = {};
   if (fields.task_id) img.task_id = { S: fields.task_id };
   if (fields.status) img.status = { S: fields.status };
+  if (fields.completed_at) img.completed_at = { S: fields.completed_at };
+  if (fields.updated_at) img.updated_at = { S: fields.updated_at };
   if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
   if (fields.code_changed !== undefined) img.code_changed = { BOOL: fields.code_changed };
   if (fields.answer_text) img.answer_text = { S: fields.answer_text };
@@ -654,8 +661,9 @@ describe('orchestration-reconciler handler', () => {
     }));
     expect(settled()).toEqual([2, 2]);
 
-    // A record from before #1048 has no completed_at: its updated_at is the write that ended the task.
-    await handler(write(minutesAfterEnd(6), { updated_at: { S: minutesAfterEnd(0) } }));
+    // A record without completed_at has no time of its task's end. Once the row holds the
+    // verdict it is a later write, also when it moved updated_at to its own time.
+    await handler(write(minutesAfterEnd(6), { updated_at: { S: minutesAfterEnd(6) } }));
     expect(settled()).toEqual([2, 2]);
 
     // The panel is refreshed every time: a late write is how a preview reaches it.
@@ -2234,6 +2242,7 @@ function orchestrationStore(
     child_task_id?: string;
     child_branch_name?: string;
     failure_reason?: string;
+    unsettled_task_id?: string;
   }>,
   meta: StoreRow = {},
 ) {
@@ -2306,6 +2315,9 @@ function orchestrationStore(
     },
   };
 }
+
+/** What the handler logs for a record whose late write leaves a failed child's issue as it is. */
+const LEFT_ALONE_AS_LATE = 'Reconciler left the issue of a failed child alone: a late write on its task record';
 
 describe('orchestration-reconciler handler — an event of a task that no longer decides its row', () => {
   // A terminal task record is written again long after its status was set: the
@@ -2436,6 +2448,15 @@ describe('orchestration-reconciler handler — an event of a task that no longer
     expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
     expect(revertIssueToNotStartedMock).not.toHaveBeenCalled();
     expect(swapIssueReactionMock).not.toHaveBeenCalledWith(expect.anything(), 'A', 'x');
+    // No earlier record settled the issue, which can now contradict the graph: a warning says so.
+    expect(loggerMock.warn).toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, {
+      orchestration_id: 'orch_1',
+      sub_issue_id: 'A',
+      task_id: 'TA',
+      completed_at: '2026-11-24T10:00:00Z',
+      written_at: '2026-11-24T10:06:00.000Z',
+      brought_verdict: true,
+    });
   });
 
   test.each([
@@ -2446,7 +2467,16 @@ describe('orchestration-reconciler handler — an event of a task that no longer
       { sub_issue_id: 'A', child_status: status, child_task_id: 'TA' },
       { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
     ]);
-    await handler(lateFailure());
+    // The write that ended the task. A redelivery is the same record again, with the same times.
+    await handler({
+      Records: [taskRecord({
+        task_id: 'TA',
+        status: 'FAILED',
+        orchestration_id: 'orch_1',
+        completed_at: '2026-11-24T10:00:00Z',
+        written_at: '2026-11-24T10:00:00Z',
+      })],
+    } as never);
 
     expect(store.status('A')).toBe('failed');
     expect(store.status('B')).toBe('skipped');
@@ -2471,6 +2501,392 @@ describe('orchestration-reconciler handler — an event of a task that no longer
     expect(store.status('B')).toBe('released');
     expect(store.status('C')).toBe('skipped');
     expect(revertIssueToNotStartedMock).toHaveBeenCalledWith(expect.anything(), 'A');
+  });
+});
+
+describe('orchestration-reconciler handler — the issue of a failed sub-issue and the time of the write (#1073)', () => {
+  // The handler moves the issue of a failed child back and replaces its reaction
+  // for every record of the task that is not late. Late is: written more than
+  // five minutes after completed_at or, for a record that lacks one of the two
+  // times, written when the row already held the verdict. A try that was not late
+  // and did not land is owed to the next record of the task, however late that
+  // one is. A late try is the last one.
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset();
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+  });
+
+  const ENDED = '2026-11-24T10:00:00Z';
+  const DAY = 24 * 3600;
+  /** The time that many seconds after the task ended. */
+  const after = (seconds: number) => new Date(Date.parse(ENDED) + seconds * 1000).toISOString();
+  /** The table with one sub-issue, A, whose task TA ended FAILED. */
+  const childA = (row: { child_status: string; unsettled_task_id?: string }, meta: StoreRow = {}) =>
+    orchestrationStore([{ sub_issue_id: 'A', child_task_id: 'TA', ...row }], meta);
+  /**
+   * The record of TA as a write made that many seconds after the task ended
+   * delivers it. ``times``: the times of the task that the record carries.
+   */
+  const write = (seconds: number, times: { completed_at?: string; updated_at?: string } = { completed_at: ENDED }) => ({
+    Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', written_at: after(seconds), ...times })],
+  }) as never;
+  /** How often A's issue was moved back, and how often its reaction was replaced. */
+  const settled = () => [revertIssueToNotStartedMock, swapIssueReactionMock]
+    .map((mock) => mock.mock.calls.filter((call) => call[1] === 'A').length);
+  const isMarkWrite = (cmd: StoreCommand) => String(cmd.input.UpdateExpression).includes('unsettled_task_id');
+  /** The writes of the mark that the handler sent, in order. */
+  const markWrites = () => ddbSend.mock.calls.map(([cmd]) => cmd as StoreCommand).filter(isMarkWrite).map((cmd) => cmd.input);
+  /** What the handler logs when it sets the mark, removes it, or fails to write it. */
+  const OWED = 'Settle of a failed child did not land: owed to the next record of its task';
+  const NO_LONGER_OWED = 'Settle of a failed child is no longer owed';
+  const MARK_NOT_WRITTEN = 'Could not record whether the settle of a failed child is owed (non-fatal)';
+  /** ... and for a late try that did not land. */
+  const LAST_TRY_DID_NOT_LAND = 'Settle of a failed child did not land on its last try: its issue can contradict the graph';
+  const IDS = { orchestration_id: 'orch_1', sub_issue_id: 'A', task_id: 'TA' };
+
+  test('the write that ends the task settles the issue, the next one 30 s later settles it again, one made days later does not', async () => {
+    const store = childA({ child_status: 'released' });
+    // The adapter moves the issue once: a repeat finds nothing to move and answers false.
+    revertIssueToNotStartedMock.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    await handler(write(0));
+    expect(settled()).toEqual([1, 1]);
+    // The orchestrator's ttl stamp, one poll later: the retry of a surface call that failed.
+    await handler(write(30));
+    expect(settled()).toEqual([2, 2]);
+    // The preview screenshot of a later push to the branch.
+    await handler(write(3 * DAY));
+    expect(settled()).toEqual([2, 2]);
+
+    expect(store.status('A')).toBe('failed');
+    // Every try landed: nothing is owed, and the row is not written for it.
+    expect(markWrites()).toEqual([]);
+    expect(loggerMock.info).toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, {
+      orchestration_id: 'orch_1',
+      sub_issue_id: 'A',
+      task_id: 'TA',
+      completed_at: ENDED,
+      written_at: after(3 * DAY),
+      brought_verdict: false,
+    });
+    expect(loggerMock.warn).not.toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, expect.anything());
+  });
+
+  test.each([
+    ['exactly five minutes after the end is not late: the issue is settled', 300, [1, 1]],
+    // The stream stamps the write in whole seconds.
+    ['five minutes and one second after the end is late: the issue is left alone', 301, [0, 0]],
+  ])('a record written %s', async (_name, seconds, expected) => {
+    childA({ child_status: 'failed' });
+    await handler(write(seconds));
+
+    expect(settled()).toEqual(expected);
+  });
+
+  test.each([
+    ['no time of its write', undefined],
+    // The stream writes a number of seconds. Some tools turn it into a date string.
+    ['a date string for the time of its write', after(0)],
+    // What a serializer writes for a member that is not there.
+    ['null for the time of its write', null],
+  ])('a record with completed_at and %s is judged by the row: it settles the issue when it brings the verdict and leaves it alone once the row holds it', async (_name, stamp) => {
+    const store = childA({ child_status: 'released' });
+    const record = taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', completed_at: ENDED });
+    if (stamp !== undefined) Object.assign(record.dynamodb!, { ApproximateCreationDateTime: stamp });
+
+    await handler({ Records: [record] } as never);
+    expect(store.status('A')).toBe('failed');
+    expect(settled()).toEqual([1, 1]);
+
+    // The same record again. Without both times it cannot be told from a write made days later.
+    await handler({ Records: [record] } as never);
+    expect(settled()).toEqual([1, 1]);
+    expect(loggerMock.info).toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, { ...IDS, completed_at: ENDED, written_at: null, brought_verdict: false });
+  });
+
+  test('a time of its write that comes as text is read as the number of seconds it is', async () => {
+    // The example record of the Lambda guide on event filtering carries the stamp as "1678831218.0".
+    childA({ child_status: 'failed' });
+    const written = (seconds: number) => {
+      const record = taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', completed_at: ENDED });
+      Object.assign(record.dynamodb!, { ApproximateCreationDateTime: `${Date.parse(after(seconds)) / 1000}.0` });
+      return { Records: [record] } as never;
+    };
+
+    await handler(written(30));
+    expect(settled()).toEqual([1, 1]);
+    await handler(written(301));
+    expect(settled()).toEqual([1, 1]);
+  });
+
+  test('a record without completed_at leaves the issue alone once the row holds the verdict, also when its write moved updated_at', async () => {
+    // Such a record has no time of its task's end. If updated_at were read in its
+    // place, a write that sets it to its own time would pass for the end of the task.
+    childA({ child_status: 'failed' });
+    await handler(write(3 * DAY, { updated_at: after(3 * DAY) }));
+
+    expect(settled()).toEqual([0, 0]);
+    expect(loggerMock.info).toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, expect.objectContaining({
+      completed_at: null,
+      written_at: after(3 * DAY),
+      brought_verdict: false,
+    }));
+  });
+
+  test('a late record that carries neither time is logged with null for both', async () => {
+    childA({ child_status: 'failed' });
+    await handler({ Records: [taskRecord({ task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1' })] } as never);
+
+    expect(settled()).toEqual([0, 0]);
+    expect(loggerMock.info).toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, { ...IDS, completed_at: null, written_at: null, brought_verdict: false });
+  });
+
+  test('a completed_at that is not a time counts as none: the row decides, not the time of the write', async () => {
+    childA({ child_status: 'failed' });
+    await handler(write(30, { completed_at: 'not a time' }));
+
+    expect(settled()).toEqual([0, 0]);
+  });
+
+  test('a record without completed_at settles the issue when it is the one that brings the verdict to the row', async () => {
+    const store = childA({ child_status: 'released' });
+    await handler(write(3 * DAY, { updated_at: after(3 * DAY) }));
+
+    expect(store.status('A')).toBe('failed');
+    expect(settled()).toEqual([1, 1]);
+  });
+
+  test('a settle that did not land is owed: the next write settles the issue however late it is, and the one after it leaves the issue alone', async () => {
+    const store = childA({ child_status: 'released' });
+    // The tracker is down. The Linear adapter does not throw then: both calls answer false.
+    revertIssueToNotStartedMock.mockResolvedValue(false);
+    swapIssueReactionMock.mockResolvedValue(false);
+    await handler(write(0));
+    await handler(write(30));
+    expect(settled()).toEqual([2, 2]);
+    expect(store.row('A').unsettled_task_id).toBe('TA');
+    expect(loggerMock.warn).toHaveBeenCalledWith(OWED, IDS);
+
+    // The tracker is back when the next write comes, long after the window.
+    revertIssueToNotStartedMock.mockResolvedValue(true);
+    swapIssueReactionMock.mockResolvedValue(true);
+    await handler(write(3 * DAY));
+    expect(settled()).toEqual([3, 3]);
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+    expect(loggerMock.info).toHaveBeenCalledWith(NO_LONGER_OWED, IDS);
+    // That record was tried, and its try landed: neither line of a late record is written for it.
+    expect(loggerMock.info).not.toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, expect.anything());
+    expect(loggerMock.warn).not.toHaveBeenCalledWith(LAST_TRY_DID_NOT_LAND, expect.anything());
+
+    await handler(write(4 * DAY));
+    expect(settled()).toEqual([3, 3]);
+
+    // The mark was set once and removed once, on condition, and nothing else was written with it.
+    const row = { TableName: 'OrchestrationTable', Key: { orchestration_id: 'orch_1', sub_issue_id: 'A' } };
+    expect(markWrites()).toEqual([
+      {
+        ...row,
+        UpdateExpression: 'SET unsettled_task_id = :tid',
+        ConditionExpression: 'child_task_id = :tid',
+        ExpressionAttributeValues: { ':tid': 'TA' },
+      },
+      {
+        ...row,
+        UpdateExpression: 'REMOVE unsettled_task_id',
+        ConditionExpression: 'unsettled_task_id = :tid',
+        ExpressionAttributeValues: { ':tid': 'TA' },
+      },
+    ]);
+  });
+
+  test('a try inside the window that lands removes the mark: a later write leaves the issue alone', async () => {
+    const store = childA({ child_status: 'released' });
+    swapIssueReactionMock.mockResolvedValueOnce(false);
+    await handler(write(0));
+    expect(store.row('A').unsettled_task_id).toBe('TA');
+
+    await handler(write(30));
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+    await handler(write(3 * DAY));
+    expect(settled()).toEqual([2, 2]);
+  });
+
+  test.each([
+    ['the tracker is still down', false],
+    ['a marker stays that cannot be removed', true],
+  ])('a late try is the last one whatever the surface answers (%s): a warning says that it did not land', async (_name, reverted) => {
+    const store = childA({ child_status: 'failed', unsettled_task_id: 'TA' });
+    // The reaction call answers false in both cases: its answer does not tell them apart.
+    revertIssueToNotStartedMock.mockResolvedValue(reverted);
+    swapIssueReactionMock.mockResolvedValue(false);
+    await handler(write(3 * DAY));
+    expect(settled()).toEqual([1, 1]);
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+    // Without it the last line would be the one that the settle is no longer owed.
+    expect(loggerMock.warn).toHaveBeenCalledWith(LAST_TRY_DID_NOT_LAND, { ...IDS, state_reverted: reverted });
+
+    await handler(write(4 * DAY));
+    expect(settled()).toEqual([1, 1]);
+  });
+
+  test.each([
+    // The state call throws: the reaction call is not made.
+    ['the state call', revertIssueToNotStartedMock, [1, 0], [2, 1]],
+    // The state is moved back, then the reaction call throws.
+    ['the reaction call', swapIssueReactionMock, [1, 1], [2, 2]],
+  ])('a throw of %s inside the window leaves the settle owed, and the next try makes both calls', async (_name, call, first, second) => {
+    const store = childA({ child_status: 'released' });
+    call.mockRejectedValueOnce(new Error('surface unavailable'));
+    await handler(write(0));
+    expect(settled()).toEqual(first);
+    expect(store.row('A').unsettled_task_id).toBe('TA');
+    // A try inside the window is not the last one: no line says that it was.
+    expect(loggerMock.warn).not.toHaveBeenCalledWith(LAST_TRY_DID_NOT_LAND, expect.anything());
+
+    await handler(write(3 * DAY));
+    expect(settled()).toEqual(second);
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+  });
+
+  test.each([
+    // What the state call did is not known when it threw: the line says null.
+    ['the state call', revertIssueToNotStartedMock, [1, 0], null],
+    ['the reaction call', swapIssueReactionMock, [1, 1], true],
+    // The state call found nothing to move, then the reaction call threw: the line says false.
+    ['the reaction call, after a state call that moved nothing,', swapIssueReactionMock, [1, 1], false],
+  ])('a late try is the last one also when %s throws: the mark is removed, a warning says that it did not land, and the next late write leaves the issue alone', async (_name, call, calls, stateReverted) => {
+    const store = childA({ child_status: 'failed', unsettled_task_id: 'TA' });
+    if (stateReverted === false) revertIssueToNotStartedMock.mockResolvedValue(false);
+    // On every try: if the mark stayed, every later write would try again.
+    call.mockRejectedValue(new Error('surface unavailable'));
+    await handler(write(3 * DAY));
+    expect(settled()).toEqual(calls);
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+    expect(loggerMock.warn).toHaveBeenCalledWith(LAST_TRY_DID_NOT_LAND, { ...IDS, state_reverted: stateReverted });
+
+    await handler(write(4 * DAY));
+    expect(settled()).toEqual(calls);
+  });
+
+  test('a mark that names another task is not this task\'s: a late write leaves the issue alone', async () => {
+    // What an earlier run of the sub-issue left on the row.
+    const store = childA({ child_status: 'failed', unsettled_task_id: 'T-earlier' });
+    await handler(write(3 * DAY));
+
+    expect(settled()).toEqual([0, 0]);
+    expect(store.row('A').unsettled_task_id).toBe('T-earlier');
+  });
+
+  test.each([
+    ['repaired by a comment', 'succeeded'],
+    ['skipped again after a retry of its predecessor', 'skipped'],
+  ])('a settle that is owed is not tried once the sub-issue was %s: the task no longer decides its row', async (_name, status) => {
+    const store = childA({ child_status: status, unsettled_task_id: 'TA' });
+    await handler(write(3 * DAY));
+
+    expect(settled()).toEqual([0, 0]);
+    expect(store.row('A').unsettled_task_id).toBe('TA');
+  });
+
+  test('a surface without a reaction on the issue owes nothing', async () => {
+    // Jira has neither of the two calls: there is no answer that could say "not landed".
+    childA({ child_status: 'released' }, { channel_source: 'jira' });
+    await handler(write(0));
+
+    expect(markWrites()).toEqual([]);
+  });
+
+  test('a surface that has neither call is not logged as left alone: the step does nothing there for any record', async () => {
+    childA({ child_status: 'released' }, { channel_source: 'jira' });
+    // Late and the first to reach the row, then late: on Linear a warning and an info line.
+    await handler(write(6 * 60));
+    await handler(write(3 * DAY));
+
+    expect(loggerMock.warn).not.toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, expect.anything());
+    expect(loggerMock.info).not.toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, expect.anything());
+  });
+
+  test.each<[string, Partial<Channel>]>([
+    ['the state call alone', { revertState: () => Promise.resolve(true) }],
+    ['the reaction call alone', { replaceIssueReaction: () => Promise.resolve(true) }],
+  ])('a surface that has %s is logged as left alone, like one that has both', async (_name, calls) => {
+    // Linear has both calls and Jira neither, and this handler is given no other surface.
+    // The registry takes any adapter: one with a single call stands in for Jira's here.
+    const restore = registerChannelFactory('jira', () => ({
+      kind: 'another-tracker',
+      postComment: () => Promise.resolve(null),
+      upsertComment: () => Promise.resolve({ commentId: 'panel-1' }),
+      reportFailure: () => Promise.resolve(),
+      ...calls,
+    }));
+    try {
+      childA({ child_status: 'failed' }, { channel_source: 'jira' });
+      await handler(write(3 * DAY));
+    } finally {
+      restore();
+    }
+
+    expect(loggerMock.info).toHaveBeenCalledWith(LEFT_ALONE_AS_LATE, expect.objectContaining({ brought_verdict: false }));
+  });
+
+  test('a mark that cannot be written is a warning: the record is processed to its end and not reported for retry', async () => {
+    const store = childA({ child_status: 'released' });
+    swapIssueReactionMock.mockResolvedValue(false);
+    store.before(isMarkWrite, () => { throw new Error('table unavailable'); });
+    const record = taskRecord({
+      task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', sequenceNumber: 'seq-1', completed_at: ENDED, written_at: ENDED,
+    });
+
+    await expect(handler({ Records: [record] } as never)).resolves.toEqual({ batchItemFailures: [] });
+
+    expect(loggerMock.warn).toHaveBeenCalledWith(MARK_NOT_WRITTEN, { ...IDS, owed: true, error: 'table unavailable' });
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+    expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a mark that cannot be removed stays: a warning, no retry of the record, and the next late write tries once more', async () => {
+    const store = childA({ child_status: 'failed', unsettled_task_id: 'TA' });
+    store.before(isMarkWrite, () => { throw new Error('table unavailable'); });
+    const record = taskRecord({
+      task_id: 'TA', status: 'FAILED', orchestration_id: 'orch_1', sequenceNumber: 'seq-1', completed_at: ENDED, written_at: after(3 * DAY),
+    });
+
+    await expect(handler({ Records: [record] } as never)).resolves.toEqual({ batchItemFailures: [] });
+
+    expect(settled()).toEqual([1, 1]);
+    expect(loggerMock.warn).toHaveBeenCalledWith(MARK_NOT_WRITTEN, { ...IDS, owed: false, error: 'table unavailable' });
+    expect(store.row('A').unsettled_task_id).toBe('TA');
+
+    await handler(write(4 * DAY));
+    expect(settled()).toEqual([2, 2]);
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+  });
+
+  test('the mark is not set on a row that was released again while the surface was called', async () => {
+    const store = childA({ child_status: 'released' });
+    swapIssueReactionMock.mockResolvedValue(false);
+    store.before(isMarkWrite, () => Object.assign(store.row('A'), { child_status: 'released', child_task_id: 'T2' }));
+    await handler(write(0));
+
+    expect(store.row('A')).not.toHaveProperty('unsettled_task_id');
+    // The store refused the write on its condition. That is its answer, not a failure: no line.
+    expect(loggerMock.warn).not.toHaveBeenCalledWith(OWED, expect.anything());
+    expect(loggerMock.warn).not.toHaveBeenCalledWith(MARK_NOT_WRITTEN, expect.anything());
+  });
+
+  test('a mark that has become another task\'s since the row was read is not removed', async () => {
+    const store = childA({ child_status: 'failed', unsettled_task_id: 'TA' });
+    store.before(isMarkWrite, () => Object.assign(store.row('A'), { child_task_id: 'T2', unsettled_task_id: 'T2' }));
+    await handler(write(3 * DAY));
+
+    expect(settled()).toEqual([1, 1]);
+    expect(store.row('A').unsettled_task_id).toBe('T2');
+    expect(loggerMock.info).not.toHaveBeenCalledWith(NO_LONGER_OWED, expect.anything());
+    expect(loggerMock.warn).not.toHaveBeenCalledWith(MARK_NOT_WRITTEN, expect.anything());
   });
 });
 

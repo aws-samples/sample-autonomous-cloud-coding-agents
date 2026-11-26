@@ -725,7 +725,8 @@ export async function appendOnceToComment(
  * Delete one of our own status markers, retrying ONCE on a transient failure.
  *
  * A marker we fail to remove is not cosmetic: it leaves two of our reactions on
- * the same item ("saw it" beside "done"), no caller inspects the swap's result,
+ * the same item ("saw it" beside "done"), no caller inspects the swap's result
+ * but the settle of a failed sub-issue (step 1b of `reconcileTerminalChild`),
  * and nothing else ever revisits it — so the contradiction is permanent. That is
  * exactly what happened live: a 5s request timeout aborted one delete and the
  * pair stayed. One retry costs a single call and covers the blip; anything
