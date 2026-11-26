@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { coerceNumericOrNull, type CoerceLogger } from '../../../src/handlers/shared/numeric';
+import { coerceNumericOrNull, completedTurnsOrNull, type CoerceLogger } from '../../../src/handlers/shared/numeric';
 
 function mkLogger(): { logger: CoerceLogger; warnCalls: Array<{ message: string; meta?: Record<string, unknown> }> } {
   const warnCalls: Array<{ message: string; meta?: Record<string, unknown> }> = [];
@@ -94,5 +94,15 @@ describe('coerceNumericOrNull', () => {
 
     expect(coerceNumericOrNull(value, { field: 'cost_usd' }, logger)).toBeNull();
     expect(warnCalls[0].meta?.raw).toBe('x'.repeat(length));
+  });
+});
+
+describe('completedTurnsOrNull', () => {
+  test.each([1, 27, 100])('keeps a count of %p', (turns) => {
+    expect(completedTurnsOrNull(turns)).toBe(turns);
+  });
+
+  test.each([undefined, null, 0, -0, -3, NaN, Infinity, -Infinity])('treats %p as no count', (turns) => {
+    expect(completedTurnsOrNull(turns)).toBeNull();
   });
 });

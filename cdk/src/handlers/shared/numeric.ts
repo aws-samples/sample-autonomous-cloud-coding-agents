@@ -94,3 +94,7 @@ export function coerceNumericOrNull(
   }
   return n;
 }
+
+export function completedTurnsOrNull(turns: number | null | undefined): number | null {
+  return typeof turns === 'number' && Number.isFinite(turns) && turns > 0 ? turns : null;
+}

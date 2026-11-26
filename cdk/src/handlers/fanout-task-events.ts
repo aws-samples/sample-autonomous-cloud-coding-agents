@@ -80,7 +80,7 @@ import {
   type LinearPostResult,
 } from './shared/linear-feedback';
 import { logger } from './shared/logger';
-import { coerceNumericOrNull } from './shared/numeric';
+import { coerceNumericOrNull, completedTurnsOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
 import { prNumberFromTask } from './shared/task-pr-number';
@@ -1689,11 +1689,11 @@ function linearFinalStatusArgs(
       { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
       logger,
     ),
-    turns: coerceNumericOrNull(
-      task.turns_attempted,
-      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+    turns: completedTurnsOrNull(coerceNumericOrNull(
+      task.turns_completed,
+      { field: 'turns_completed', task_id: task.task_id, event_id: event.event_id },
       logger,
-    ),
+    )),
     maxTurns: coerceNumericOrNull(
       task.max_turns,
       { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
@@ -2027,11 +2027,11 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
       logger,
     ),
-    turns: coerceNumericOrNull(
-      task.turns_attempted,
-      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+    turns: completedTurnsOrNull(coerceNumericOrNull(
+      task.turns_completed,
+      { field: 'turns_completed', task_id: task.task_id, event_id: event.event_id },
       logger,
-    ),
+    )),
     maxTurns: coerceNumericOrNull(
       task.max_turns,
       { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },

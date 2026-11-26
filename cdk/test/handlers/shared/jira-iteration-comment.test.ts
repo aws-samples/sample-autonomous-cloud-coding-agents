@@ -176,7 +176,7 @@ test('a preview on an older task that completed with a red build renders a failu
 
 test('completed runtime metrics stored as strings do not block the saved terminal status or preview', async () => {
   const f = fixture();
-  f.finish({ cost_usd: '0.20663065', turns_attempted: '12', duration_s: '69.3' });
+  f.finish({ cost_usd: '0.20663065', turns_completed: '12', duration_s: '69.3' });
   f.screenshot();
   await expect(f.update(status('✅ Finished — result posted below.', true))).resolves.toEqual({ ok: true });
   const body = JSON.stringify(put.mock.calls.at(-1)![3]);
@@ -188,7 +188,7 @@ test('completed runtime metrics stored as strings do not block the saved termina
 test('fallback status normalizes runtime metrics stored as strings', async () => {
   const f = fixture();
   await f.update(status('Working', false));
-  f.finish({ cost_usd: '0.20663065', turns_attempted: '12', max_turns: '30', duration_s: '69.3' });
+  f.finish({ cost_usd: '0.20663065', turns_attempted: '41', turns_completed: '12', max_turns: '30', duration_s: '69.3' });
   f.screenshot();
   await expect(f.update()).resolves.toEqual({ ok: true });
   const body = JSON.stringify(put.mock.calls.at(-1)![3]);
@@ -198,6 +198,15 @@ test('fallback status normalizes runtime metrics stored as strings', async () =>
   expect(body).toContain('1m 9s');
   expect(body).toContain('Open screenshot');
   expect(body).not.toContain('Working');
+});
+
+test.each([undefined, '0'])('fallback status shows no turns when turns_completed is %p', async (turnsCompleted) => {
+  const f = fixture();
+  f.finish({ turns_attempted: '41', turns_completed: turnsCompleted, max_turns: '30' });
+  await f.update();
+  const body = JSON.stringify(put.mock.calls.at(-1)![3]);
+  expect(body).toContain('turns: —');
+  expect(body).not.toContain('41 / 30');
 });
 
 test('malformed optional metrics do not prevent terminal feedback', async () => {

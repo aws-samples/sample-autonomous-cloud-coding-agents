@@ -1604,7 +1604,8 @@ describe('fanout-task-events: Linear dispatcher', () => {
     created_at: '2026-04-30T11:50:00Z',
     updated_at: '2026-04-30T12:00:00Z',
     cost_usd: 0.55,
-    turns_attempted: 27,
+    turns_attempted: 41,
+    turns_completed: '27',
     max_turns: 100,
     duration_s: 221,
     pr_url: 'https://github.com/owner/repo/pull/13',
@@ -1656,6 +1657,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
     expect(body).toContain('Task completed');
     expect(body).toContain('$0.55');
     expect(body).toContain('27 / 100');
+    expect(body).not.toContain('41 / 100');
     expect(body).toContain('3m 41s');
     // The PR URL IS rendered on the ✅ success path. The old
     // behavior omitted it, assuming the agent's own step-2 "PR opened" comment
@@ -1666,6 +1668,15 @@ describe('fanout-task-events: Linear dispatcher', () => {
     // cheaper than a missing PR.
     expect(body).toContain('https://github.com/owner/repo/pull/13');
     expect(body).toContain('t-lin');
+  });
+
+  test.each([undefined, 0, '0'])('turns_completed %p is no count, so turns_attempted is not shown', async (turnsCompleted) => {
+    mockGet({ ...TASK_RECORD_LINEAR, turns_completed: turnsCompleted });
+
+    await handler({ Records: [mkEvent('task_completed', 't-lin')] });
+
+    const [, , body] = mockPostIssueComment.mock.calls[0];
+    expect(body).toContain('turns: —');
   });
 
   test('task_failed without PR renders ❌ frame', async () => {
@@ -1696,6 +1707,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
       // classifier reads the error_message text to derive the title.
       error_message: 'Task did not succeed: agent_status="error_max_turns"',
       turns_attempted: 101,
+      turns_completed: 100,
       cost_usd: 3.44,
       duration_s: 1272,
     });
@@ -1708,7 +1720,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
     expect(body).toContain('Shipped a PR but stopped early');
     expect(body).toContain('https://github.com/owner/repo/pull/13');
     expect(body).toContain('$3.44');
-    expect(body).toContain('101 / 100');
+    expect(body).toContain('100 / 100');
     expect(body).toContain('21m 12s');
   });
 
@@ -2492,7 +2504,8 @@ describe('fanout-task-events: Jira dispatcher', () => {
     created_at: '2026-06-30T11:50:00Z',
     updated_at: '2026-06-30T12:00:00Z',
     cost_usd: 0.55,
-    turns_attempted: 27,
+    turns_attempted: 41,
+    turns_completed: '27',
     max_turns: 100,
     duration_s: 221,
     pr_url: 'https://github.com/owner/repo/pull/13',
@@ -2534,12 +2547,22 @@ describe('fanout-task-events: Jira dispatcher', () => {
     expect(text).toContain('Task completed');
     expect(text).toContain('$0.55');
     expect(text).toContain('27 / 100');
+    expect(text).not.toContain('41 / 100');
     expect(text).toContain('3m 41s');
     // Unlike Linear, the PR URL IS rendered on the ✅ success path — the
     // agent-side terminal comment (which carried it) was demoted to this
     // dispatcher, so this is Jira's only surviving PR-link surface.
     expect(text).toContain('https://github.com/owner/repo/pull/13');
     expect(text).toContain('t-jira');
+  });
+
+  test.each([undefined, 0, '0'])('turns_completed %p is no count, so turns_attempted is not shown', async (turnsCompleted) => {
+    mockGet({ ...TASK_RECORD_JIRA, turns_completed: turnsCompleted });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const [, , body] = mockPostIssueCommentAdf.mock.calls[0];
+    expect(adfText(body)).toContain('turns: —');
   });
 
   test('task_failed without PR renders ❌ frame', async () => {
@@ -2559,6 +2582,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
       ...TASK_RECORD_JIRA,
       error_message: 'Task did not succeed: agent_status="error_max_turns"',
       turns_attempted: 101,
+      turns_completed: 100,
       cost_usd: 3.44,
       duration_s: 1272,
     });
@@ -2572,7 +2596,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
     expect(text).toContain('Shipped a PR but stopped early');
     expect(text).toContain('https://github.com/owner/repo/pull/13');
     expect(text).toContain('$3.44');
-    expect(text).toContain('101 / 100');
+    expect(text).toContain('100 / 100');
     expect(text).toContain('21m 12s');
   });
 
