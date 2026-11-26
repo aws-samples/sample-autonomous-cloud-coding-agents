@@ -92,6 +92,24 @@ export function approvalRowTtl(createdAt: string, timeoutS: number): number {
 }
 
 /**
+ * A worker that lost the response to a committed create repeats it with the same
+ * request id. Report the first create's success to that repeat, and only to it:
+ * the row exists for this task, user and tool input, and the task still waits on it.
+ */
+async function createCommitted(input: RequestInput, userId: string, error: unknown): Promise<boolean> {
+  if ((error as { name?: string }).name !== 'TransactionCanceledException') return false;
+  const request = await ddb.send(new GetCommand({
+    TableName: APPROVALS, Key: { task_id: input.task_id, request_id: input.request_id }, ConsistentRead: true,
+  }));
+  const task = await ddb.send(new GetCommand({ TableName: TASKS, Key: { task_id: input.task_id }, ConsistentRead: true }));
+  return request.Item?.user_id === userId
+    && request.Item.tool_input_sha256 === input.approval?.tool_input_sha256
+    && task.Item?.user_id === userId
+    && task.Item.status === TaskStatus.AWAITING_APPROVAL
+    && task.Item.awaiting_approval_request_id === input.request_id;
+}
+
+/**
  * Worker-callable writer: creates pending requests or records a non-human timeout.
  * Human decisions remain exclusively in approve/deny handlers. Workers have no
  * direct approvals-table write permission, including whole-row replacement.
@@ -133,7 +151,10 @@ export async function recordWorkerRequest(input: RequestInput): Promise<Record<s
             },
           },
         }],
-      }));
+      })).catch(async (error: unknown) => {
+        // A repeat of a create whose response the worker lost.
+        if (!await createCommitted(input, task.user_id, error)) throw error;
+      });
     } else {
       // A worker may fail closed after a deadline or polling failure; it cannot
       // turn either into human DENIED/APPROVED or replace an existing decision.

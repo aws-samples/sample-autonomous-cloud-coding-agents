@@ -106,6 +106,49 @@ test('preserves cancellation reasons without returning request contents', async 
   });
 });
 
+describe('repeat create of the same request (the worker lost the first response)', () => {
+  const cancelled = { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'ConditionalCheckFailed' }] };
+  let stored: Record<string, unknown> | undefined;
+  beforeEach(() => {
+    task = { ...task, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'gate' };
+    stored = { ...approval };
+    send.mockImplementation(async command => {
+      if (command.constructor.name === 'TransactWriteCommand') throw cancelled;
+      return { Item: command.input.Key.request_id === undefined ? task : stored };
+    });
+  });
+
+  test('returns the success the committed create returned, from consistent reads', async () => {
+    expect(await recordWorkerRequest(input)).toEqual({ ok: true });
+    const reads = send.mock.calls.slice(2).map(([command]) => command.input);
+    expect(reads).toEqual(expect.arrayContaining([
+      expect.objectContaining({ Key: { task_id: 'task', request_id: 'gate' }, ConsistentRead: true }),
+      expect.objectContaining({ Key: { task_id: 'task' }, ConsistentRead: true }),
+    ]));
+  });
+
+  test.each([
+    ['the task awaits another request', () => { task.awaiting_approval_request_id = 'other'; }],
+    ['the task no longer awaits approval', () => { task.status = 'RUNNING'; }],
+    ['the task was cancelled', () => { task.status = 'CANCELLED'; }],
+    ['no request row exists', () => { stored = undefined; }],
+    ['the row belongs to another user', () => { stored = { ...approval, user_id: 'other' }; }],
+    ['the row is for another tool input', () => { stored = { ...approval, tool_input_sha256: 'b'.repeat(64) }; }],
+  ])('still fails when %s', async (_name, arrange) => {
+    arrange();
+    expect(await recordWorkerRequest(input)).toEqual({
+      ok: false,
+      code: 'TransactionCanceledException',
+      cancellation_reasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'ConditionalCheckFailed' }],
+    });
+  });
+
+  test('a different request id for the waiting task still fails', async () => {
+    const other = { ...input, request_id: 'other', approval: { ...approval, request_id: 'other' } };
+    expect(await recordWorkerRequest(other)).toMatchObject({ ok: false, code: 'TransactionCanceledException' });
+  });
+});
+
 test('requires IAM caller identity and refuses body/path task substitution', async () => {
   const event = {
     body: JSON.stringify(input),

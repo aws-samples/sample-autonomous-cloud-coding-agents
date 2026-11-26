@@ -157,6 +157,23 @@ local('Trusted approval writer against DynamoDB Local', () => {
     expect(result.cancellation_reasons).toEqual([{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }]);
     expect(await read(approvals)).toEqual(before);
   });
+  test('repeating a committed create succeeds and changes nothing', async () => {
+    const first = row();
+    const again = () => recordWorkerRequest({ operation: 'create', task_id: taskId, request_id: gate, approval: first });
+    expect(await again()).toEqual({ ok: true });
+    const [request, task] = [await read(approvals), await read(tasks)];
+    expect(await again()).toEqual({ ok: true });
+    expect(await read(approvals)).toEqual(request);
+    expect(await read(tasks)).toEqual(task);
+  });
+  test.each([
+    ['resumed', 'RUNNING'], ['cancelled', 'CANCELLED'],
+  ])('repeating a create after the task %s still fails', async (_name, status) => {
+    await create();
+    await change(tasks, 'status', status);
+    expect(await create()).toMatchObject({ ok: false, code: 'TransactionCanceledException' });
+    expect(await read(tasks)).toMatchObject({ status });
+  });
   test('a second request cannot replace the first while the task waits', async () => {
     await create();
     const result = await recordWorkerRequest({
