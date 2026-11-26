@@ -165,6 +165,8 @@ export interface SessionPromptActivity {
   readonly sessionId: string;
   readonly authorId: string;
   readonly body: string;
+  /** When the person wrote it (ISO), as Linear records it. */
+  readonly createdAt: string;
 }
 
 const SESSION_PROMPT_QUERY = `
@@ -172,6 +174,7 @@ query VerifySessionPrompt($id: String!) {
   organization { id }
   viewer { id }
   agentActivity(id: $id) {
+    createdAt
     agentSession { id }
     content { __typename ... on AgentActivityPromptContent { body } }
     user { id app }
@@ -199,6 +202,7 @@ export async function fetchSessionPromptActivity(
     organization?: { id?: string };
     viewer?: { id?: string };
     agentActivity?: {
+      createdAt?: string;
       agentSession?: { id?: string } | null;
       content?: { __typename?: string; body?: string } | null;
       user?: { id?: string; app?: boolean } | null;
@@ -213,7 +217,7 @@ export async function fetchSessionPromptActivity(
   const sessionId = activity?.agentSession?.id;
   if (activity?.content?.__typename !== 'AgentActivityPromptContent' || !sessionId
     || !author?.id || author.app || author.id === viewerId) return null;
-  return { sessionId, authorId: author.id, body: activity.content.body ?? '' };
+  return { sessionId, authorId: author.id, body: activity.content.body ?? '', createdAt: activity.createdAt ?? '' };
 }
 
 /** Separator + heading that introduces Linear's `promptContext` in the description. */

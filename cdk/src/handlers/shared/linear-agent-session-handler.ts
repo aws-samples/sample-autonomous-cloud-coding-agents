@@ -30,6 +30,7 @@ import {
   emitAgentActivity,
   fetchAgentSessionIssue,
   fetchSessionPromptActivity,
+  type SessionPromptActivity,
   type AgentActivityContent,
   type AgentSessionIssue,
 } from './linear-agent-session';
@@ -511,7 +512,7 @@ async function decideSessionApproval(
   accessToken: string,
 ): Promise<void> {
   const again = async (lead: string) => {
-    const activity = repeatedApprovalChoice(lead, requestId, await requestRuleIds(task.task_id, requestId));
+    const activity = repeatedApprovalChoice(lead, requestId, (await readOpenRequest(task.task_id, requestId)).ruleIds);
     await emit(activity.content, false, activity);
   };
   const answer = parseSessionApprovalAnswer(request.directive);
@@ -533,11 +534,20 @@ async function decideSessionApproval(
     await emit({ type: 'thought', body: 'Approvals can\'t be answered in Linear on this deployment. Use `bgagent approve` / `bgagent deny`.' });
     return;
   }
-  if (!await promptConfirmed(request, answer, accessToken)) {
+  const prompt = await confirmedPrompt(request, answer, accessToken);
+  if (!prompt) {
     logger.warn('Agent-session approval reply not confirmed by Linear — no decision recorded', {
       linear_agent_session_id: request.sessionId, task_id: task.task_id, request_id: requestId,
     });
     await again('I couldn\'t confirm this answer with Linear, so nothing was decided.');
+    return;
+  }
+  // An answer belongs to the request that was open when it was written. A delivery
+  // retried after that request closed and another opened (an async retry, a
+  // read-back that failed and retried) must not decide the newer one.
+  const open = await readOpenRequest(task.task_id, requestId);
+  if (open.openedAtMs === undefined || !(Date.parse(prompt.createdAt) >= open.openedAtMs)) {
+    await again('That answer was written before this request opened, so nothing was decided.');
     return;
   }
   // Loaded only when a session decides: other session deliveries do not need the
@@ -545,7 +555,7 @@ async function decideSessionApproval(
   const record = answer.decision === 'approve'
     ? (await import('../approve-task.js')).recordApprovalForUser
     : (await import('../deny-task.js')).recordDenialForUser;
-  const ruleIds = answer.wholeTask ? await requestRuleIds(task.task_id, requestId) : [];
+  const ruleIds = answer.wholeTask ? open.ruleIds : [];
   const ruleScope = ruleIds.length === 1 ? `rule:${ruleIds[0]}` : undefined;
   const result = await record({
     userId: platformUserId,
@@ -570,28 +580,37 @@ async function decideSessionApproval(
 }
 
 /**
- * True when Linear holds this delivery as a human's prompt in this session, from the
- * same person, with the same answer. The decision is consent, so it is taken from
- * Linear's copy, not the webhook's (see ``fetchSessionPromptActivity``).
+ * Linear's copy of this delivery when it is a human's prompt in this session, from
+ * the same person, with the same answer; else null. The decision is consent, so it
+ * is taken from Linear's copy, not the webhook's (see ``fetchSessionPromptActivity``).
  */
-async function promptConfirmed(
+async function confirmedPrompt(
   request: AgentSessionRequest, answer: SessionApprovalAnswer, accessToken: string,
-): Promise<boolean> {
+): Promise<SessionPromptActivity | null> {
   const prompt = await fetchSessionPromptActivity(accessToken, request.workspaceId, request.deliveryId);
   const echoed = prompt ? parseSessionApprovalAnswer(prompt.body) : null;
-  return prompt?.sessionId === request.sessionId && prompt.authorId === request.actorId
+  const same = prompt?.sessionId === request.sessionId && prompt.authorId === request.actorId
     && echoed?.decision === answer.decision && (echoed.reason ?? '') === (answer.reason ?? '')
     && Boolean(echoed.wholeTask) === Boolean(answer.wholeTask) && echoed.requestId === answer.requestId;
+  return same ? prompt : null;
 }
 
-/** The rules the request matched, read consistently from its row, never from the reply. */
-async function requestRuleIds(taskId: string, requestId: string): Promise<string[]> {
-  if (!TASK_APPROVALS_TABLE_NAME) return [];
+/**
+ * The open request's matched rules and when it opened, read consistently from its
+ * row, never from the reply. ``openedAtMs`` is undefined when the row has no
+ * readable ``created_at``, which the caller treats as not decidable.
+ */
+async function readOpenRequest(taskId: string, requestId: string): Promise<{ ruleIds: string[]; openedAtMs?: number }> {
+  if (!TASK_APPROVALS_TABLE_NAME) return { ruleIds: [] };
   const { Item } = await ddb.send(new GetCommand({
     TableName: TASK_APPROVALS_TABLE_NAME, Key: { task_id: taskId, request_id: requestId }, ConsistentRead: true,
   }));
   const ids: unknown[] = Array.isArray(Item?.matching_rule_ids) ? Item.matching_rule_ids : [];
-  return ids.filter((id): id is string => typeof id === 'string');
+  const openedAtMs = typeof Item?.created_at === 'string' ? Date.parse(Item.created_at) : NaN;
+  return {
+    ruleIds: ids.filter((id): id is string => typeof id === 'string'),
+    ...(Number.isFinite(openedAtMs) && { openedAtMs }),
+  };
 }
 
 /** The prior task as read from the base table (strongly consistent). */

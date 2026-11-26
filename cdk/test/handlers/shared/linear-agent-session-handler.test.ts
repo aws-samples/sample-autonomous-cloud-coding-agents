@@ -812,19 +812,24 @@ describe('channel_metadata builders', () => {
 
 describe('handleAgentSessionEvent — approval requests in the session (#1066)', () => {
   const OPEN = '01M89PC2Y1YDH7SJEVVYR0VCAX';
-  const waiting = (user = 'platform-user-1') => priorTask({
-    task_id: 't-1',
-    status: 'AWAITING_APPROVAL',
-    awaiting_approval_request_id: OPEN,
-    user_id: user,
-    linear_workspace_id: 'org-1',
-    session: 'session-1',
-  });
+  const OPENED = '2026-11-26T10:00:00Z';
+  const WRITTEN = '2026-11-26T10:05:00.000Z';
+  const waiting = (user = 'platform-user-1') => {
+    approvalRow = { task_id: 't-1', request_id: OPEN, created_at: OPENED, matching_rule_ids: [] };
+    priorTask({
+      task_id: 't-1',
+      status: 'AWAITING_APPROVAL',
+      awaiting_approval_request_id: OPEN,
+      user_id: user,
+      linear_workspace_id: 'org-1',
+      session: 'session-1',
+    });
+  };
   const lastEmit = () => emitAgentActivityMock.mock.calls.at(-1)!;
 
   /** Send a prompt that Linear holds as written: the same session, author and body. */
   const answer = async (body: string) => {
-    fetchSessionPromptActivityMock.mockResolvedValue({ sessionId: 'session-1', authorId: 'linear-user-1', body });
+    fetchSessionPromptActivityMock.mockResolvedValue({ sessionId: 'session-1', authorId: 'linear-user-1', body, createdAt: WRITTEN });
     await handleAgentSessionEvent(prompted({ content: { body } }));
   };
 
@@ -880,7 +885,7 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
 
   test('"Approve for this task" approves the request\'s one rule for the rest of the task', async () => {
     waiting();
-    approvalRow = { task_id: 't-1', request_id: OPEN, matching_rule_ids: ['write_env_files'] };
+    approvalRow = { ...approvalRow, matching_rule_ids: ['write_env_files'] };
     await answer('approve for this task');
     expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'approve', scope: 'rule:write_env_files' });
     expect(String(lastEmit()[2].body)).toContain('won\'t ask again for `rule:write_env_files`');
@@ -888,7 +893,7 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
 
   test('a whole-task answer to a request that matched several rules approves this action only', async () => {
     waiting();
-    approvalRow = { task_id: 't-1', request_id: OPEN, matching_rule_ids: ['force_push_any', 'force_push_main'] };
+    approvalRow = { ...approvalRow, matching_rule_ids: ['force_push_any', 'force_push_main'] };
     await answer('approve for this task');
     expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'approve' });
     expect(String(lastEmit()[2].body)).toMatch(/^Approved this action only/);
@@ -954,5 +959,15 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     fetchSessionPromptActivityMock.mockRejectedValue(new Error('Linear session prompt verification unavailable'));
     await expect(handleAgentSessionEvent(prompted({ content: { body: 'approve' } }))).rejects.toThrow('verification unavailable');
     expect(recordApprovalMock).not.toHaveBeenCalled();
+  });
+
+  test('an answer written before the open request was created decides nothing (a delayed retry)', async () => {
+    waiting();
+    fetchSessionPromptActivityMock.mockResolvedValue({
+      sessionId: 'session-1', authorId: 'linear-user-1', body: 'approve', createdAt: '2026-11-26T09:58:00.000Z',
+    });
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^That answer was written before this request opened/);
   });
 });

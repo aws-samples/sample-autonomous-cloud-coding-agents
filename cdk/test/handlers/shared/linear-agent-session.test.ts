@@ -293,12 +293,18 @@ describe('GraphQL helpers', () => {
       data: { organization: { id: org }, viewer: { id: 'app-user' }, agentActivity: activity },
     });
     const prompt = (author: unknown, typename = 'AgentActivityPromptContent') => ({
-      agentSession: { id: 's-1' }, content: { __typename: typename, body: 'approve' }, user: null, promptAuthor: author,
+      createdAt: '2026-11-26T10:05:00.000Z',
+      agentSession: { id: 's-1' },
+      content: { __typename: typename, body: 'approve' },
+      user: null,
+      promptAuthor: author,
     });
 
     test('a human\'s prompt comes back with its session, author and body', async () => {
       fetchMock.mockResolvedValueOnce(reply(prompt({ id: 'u-1', app: false })));
-      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toEqual({ sessionId: 's-1', authorId: 'u-1', body: 'approve' });
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toEqual({
+        sessionId: 's-1', authorId: 'u-1', body: 'approve', createdAt: '2026-11-26T10:05:00.000Z',
+      });
       expect(sentBody(0).variables).toEqual({ id: 'a-1' });
     });
 
