@@ -10,7 +10,7 @@ Agents are stateless by default: each task starts from scratch with no knowledge
 - **Fail-open** - Memory failures never block task execution, PR creation, or finalization. Memory is enrichment, not a prerequisite.
 - **Repo-scoped** - All memory is namespaced per repository. Cross-repo knowledge sharing is opt-in, not default.
 - **Lightweight writes** - Memory writes happen at task end and must not delay finalization.
-- **Swappable backend** - The core uses a `MemoryStore` interface so implementations can be swapped (AgentCore Memory today; DynamoDB, vector store, or others later).
+- **One backend** - Memory is read and written directly against AgentCore Memory; there is no storage interface in between. The orchestrator reads it and writes the fallback episode through `cdk/src/handlers/shared/memory.ts`; the agent writes through `agent/src/memory.py`.
 
 ## What the repo already provides
 
@@ -60,7 +60,7 @@ Before the agent touches code, the orchestrator loads external memory via two pa
 
 ### Phase 2: Work (agent execution)
 
-The agent operates with its loaded context. No additional memory reads are needed for most tasks. For complex tasks, the agent may query memory mid-execution.
+The agent operates with its loaded context. No additional memory reads are needed for most tasks.
 
 ### Phase 3: Write (task end)
 

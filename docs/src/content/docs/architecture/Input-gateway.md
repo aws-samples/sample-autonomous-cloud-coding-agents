@@ -4,9 +4,9 @@ title: "Input Gateway"
 
 ## What is the Input Gateway?
 
-The **input gateway** is the single entry point through which all user interactions reach the background agents platform. It sits between external **channels** (CLI, Slack, future: web UI, GitHub Actions, etc.) and the rest of the system (task creation, orchestration, agent execution).
+The **input gateway** is the single entry point through which all user interactions reach the background agents platform. It sits between external **channels** (CLI, operator console, Slack, Linear, Jira, webhooks; future: GitHub Actions, etc.) and the rest of the system (task creation, orchestration, agent execution).
 
-Users interact in different ways: from a terminal with a CLI, from Slack with a message or button, or later from a web dashboard or a webhook. Each channel has its own:
+Users interact in different ways: from a terminal with a CLI, from Slack with a message or button, or from the operator console or a webhook. Each channel has its own:
 
 - **Authentication** (e.g. Cognito JWT for CLI, Slack signing secret for Slack)
 - **Message shape** (Slack block kit, CLI flags, web form JSON)
@@ -164,7 +164,7 @@ Adapters are responsible for rendering this into channel-specific formats (e.g. 
 - **Gateway:**
   Verifies JWT, normalizes to “cancel task” with task_id and user_id, validates ownership (or delegates to a downstream service), dispatches. The task pipeline marks the task cancelled and stops the agent run. Outbound notifications (if any) can inform the user that the task was cancelled.
 
-### Example 4: Future  - User submits a task from Slack
+### Example 4: User submits a task from Slack
 
 - User sends: “Implement the feature from issue #42 in org/myapp” in a Slack channel (or via a slash command).
 - Slack sends an HTTP POST to the gateway (e.g. `/channels/slack/events`) with its own signing and payload.

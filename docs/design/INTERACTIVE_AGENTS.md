@@ -1,7 +1,8 @@
 # Interactive Agents: Async Interaction Design
 
-> **Status:** Active design
-> **Branch:** `feature/interactive-background-agents`
+> **Status:** Partly implemented.
+> **Shipped:** `bgagent status`, `bgagent watch`, `bgagent nudge`, and the approval commands `bgagent approve`, `bgagent deny` and `bgagent pending`.
+> **Not implemented:** `bgagent ask`, Slack approval buttons, email dispatch and the per-task notification config.
 > **Last updated:** 2026-04-29 (rev 6)
 
 ---
@@ -95,7 +96,7 @@ This document describes the interactivity surfaces layered on top of that model 
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            CLIENT SURFACES                              │
 │                                                                         │
-│  bgagent CLI     Slack bot      GitHub webhook      Web UI (future)     │
+│  bgagent CLI     Slack bot      GitHub webhook      Operator console    │
 │       │             │                │                    │             │
 │       └─────────────┴────────────────┴────────────────────┘             │
 │                                │                                        │
@@ -645,7 +646,7 @@ Exactly one runtime, invoked via SigV4 from the orchestrator. The CLI never talk
 
 Every durable signal from the agent flows through this table. Every consumer reads from it.
 
-*Why:* Decouples the agent from every consumer. CLI, Slack bot, GitHub integration, and any future web UI all read the same substrate without touching the runtime.
+*Why:* Decouples the agent from every consumer. CLI, Slack bot, GitHub integration, and the operator console all read the same substrate without touching the runtime.
 
 ### AD-4. Notification plane as first-class
 
