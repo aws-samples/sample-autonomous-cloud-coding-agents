@@ -30,36 +30,36 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
 
 process.env.REPO_TABLE_NAME = 'RepoConfig';
 
-import { checkRepoOnboarded, loadRepoConfig } from '../../../src/handlers/shared/repo-config';
+import { loadRepoConfig, lookupRepo } from '../../../src/handlers/shared/repo-config';
 
 beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe('checkRepoOnboarded', () => {
-  test('returns true for active repos', async () => {
+describe('lookupRepo', () => {
+  test('onboarded is true for active repos', async () => {
     mockSend.mockResolvedValueOnce({ Item: { status: 'active' } });
-    const result = await checkRepoOnboarded('org/repo');
+    const result = await lookupRepo('org/repo');
     expect(result.onboarded).toBe(true);
   });
 
-  test('returns false for missing repos', async () => {
+  test('onboarded is false for missing repos', async () => {
     mockSend.mockResolvedValueOnce({ Item: undefined });
-    const result = await checkRepoOnboarded('org/missing');
+    const result = await lookupRepo('org/missing');
     expect(result.onboarded).toBe(false);
   });
 
-  test('returns false for removed repos', async () => {
+  test('onboarded is false for removed repos', async () => {
     mockSend.mockResolvedValueOnce({ Item: { status: 'removed' } });
-    const result = await checkRepoOnboarded('org/removed');
+    const result = await lookupRepo('org/removed');
     expect(result.onboarded).toBe(false);
   });
 
-  test('returns true when REPO_TABLE_NAME is not set', async () => {
+  test('onboarded is true when REPO_TABLE_NAME is not set', async () => {
     const original = process.env.REPO_TABLE_NAME;
     delete process.env.REPO_TABLE_NAME;
     try {
-      const result = await checkRepoOnboarded('org/any');
+      const result = await lookupRepo('org/any');
       expect(result.onboarded).toBe(true);
       expect(mockSend).not.toHaveBeenCalled();
     } finally {
@@ -69,7 +69,7 @@ describe('checkRepoOnboarded', () => {
 
   test('throws on DynamoDB error', async () => {
     mockSend.mockRejectedValueOnce(new Error('DynamoDB throttle'));
-    await expect(checkRepoOnboarded('org/repo')).rejects.toThrow(
+    await expect(lookupRepo('org/repo')).rejects.toThrow(
       "Unable to look up repo config for 'org/repo'",
     );
   });

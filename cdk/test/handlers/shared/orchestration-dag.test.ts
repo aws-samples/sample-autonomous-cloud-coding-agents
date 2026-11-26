@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { validateDag, topologicalOrder, type DagNode } from '../../../src/handlers/shared/orchestration-dag';
+import { validateDag, type DagNode } from '../../../src/handlers/shared/orchestration-dag';
 
 const node = (id: string, ...depends_on: string[]): DagNode => ({ id, depends_on });
 
@@ -133,16 +133,5 @@ describe('validateDag — rejected graphs', () => {
       expect(result.message).toMatch(/cycle/i);
       expect(result.message.length).toBeGreaterThan(0);
     }
-  });
-});
-
-describe('topologicalOrder', () => {
-  test('returns a flat valid order for an accepted graph', () => {
-    const order = topologicalOrder([node('C', 'B'), node('B', 'A'), node('A')]);
-    expect(order).toEqual(['A', 'B', 'C']);
-  });
-
-  test('throws on an invalid graph', () => {
-    expect(() => topologicalOrder([node('A', 'B'), node('B', 'A')])).toThrow(/invalid dependency graph/i);
   });
 });
