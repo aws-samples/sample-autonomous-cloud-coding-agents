@@ -1276,8 +1276,9 @@ describe('AgentStack', () => {
     // The guardrail's own Version attribute is DRAFT, which follows every edit instead of pinning one.
     expect(pinned).toEqual(pinned.map(() => published));
 
-    // The version is named after the guardrail as CloudFormation receives it. A change made to
-    // the guardrail after its version was published fails the synthesis; this pins the name itself.
+    // The version is named after the guardrail as CloudFormation receives it. The tests of
+    // publishGuardrailVersion() cover a guardrail that is changed after its version was
+    // published; this pins the name itself.
     const [guardrail] = Object.values(template.findResources('AWS::Bedrock::Guardrail'));
     const { Tags: _tags, ...properties } = guardrail.Properties;
     const [[versionId, version]] = Object.entries(versions);
@@ -1338,6 +1339,149 @@ describe('publishGuardrailVersion (#1079)', () => {
       outputStrength: bedrock.ContentFilterStrength.NONE,
     });
     expect(() => Template.fromStack(stack)).toThrow('it was changed after publishGuardrailVersion()');
+  });
+
+  const contentFilter = (type: bedrock.ContentFilterType): bedrock.ContentFilter => ({
+    type,
+    inputStrength: bedrock.ContentFilterStrength.MEDIUM,
+    outputStrength: bedrock.ContentFilterStrength.NONE,
+  });
+  const topic = (name: string) => bedrock.Topic.custom({ name, definition: `Advice on ${name}.`, examples: [`What should I do about ${name}?`] });
+  const piiFilter = (type: bedrock.PIIType): bedrock.PIIFilter => ({ type, action: bedrock.GuardrailAction.BLOCK });
+  const regexFilter = (name: string): bedrock.RegexFilter => ({ name, pattern: `${name}-[0-9]+`, action: bedrock.GuardrailAction.BLOCK });
+  const groundingFilter = (type: bedrock.ContextualGroundingFilterType): bedrock.ContextualGroundingFilter => ({ type, threshold: 0.5 });
+  const guardrailProfile = (geography: string) => `arn:aws:bedrock:us-east-1:123456789012:guardrail-profile/${geography}.guardrail.v1:0`;
+
+  // The alpha construct keeps its first rendering of a policy that is not empty, and the
+  // function renders the guardrail at the call. Of the changes below, only the first two
+  // still show in the rendered properties after that: the function finds the others in the
+  // members that the construct renders those properties from.
+  test.each<[string, Omit<bedrock.GuardrailProps, 'guardrailName'>, (guardrail: bedrock.Guardrail) => unknown]>([
+    [
+      'has a property of its resource overridden',
+      {},
+      guardrail => guardrail.node.children.find(child => child instanceof CfnGuardrail)!.addPropertyOverride('BlockedInputMessaging', 'No.'),
+    ],
+    [
+      'gets a second content filter',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => guardrail.addContentFilter(contentFilter(bedrock.ContentFilterType.HATE)),
+    ],
+    [
+      'gets a second denied topic',
+      { deniedTopics: [topic('investments')] },
+      guardrail => guardrail.addDeniedTopicFilter(topic('medication')),
+    ],
+    [
+      'gets a second PII filter',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => guardrail.addPIIFilter(piiFilter(bedrock.GeneralPIIType.EMAIL)),
+    ],
+    [
+      'gets a second regex filter',
+      { regexFilters: [regexFilter('ticket')] },
+      guardrail => guardrail.addRegexFilter(regexFilter('invoice')),
+    ],
+    [
+      'gets a second word filter',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => guardrail.addWordFilter({ text: 'second' }),
+    ],
+    [
+      // The library has one managed word list, and accepts it twice.
+      'gets a second managed word list',
+      { managedWordListFilters: [{ type: bedrock.ManagedWordFilterType.PROFANITY }] },
+      guardrail => guardrail.addManagedWordListFilter({ type: bedrock.ManagedWordFilterType.PROFANITY }),
+    ],
+    [
+      'gets a second contextual grounding filter',
+      { contextualGroundingFilters: [groundingFilter(bedrock.ContextualGroundingFilterType.GROUNDING)] },
+      guardrail => guardrail.addContextualGroundingFilter(groundingFilter(bedrock.ContextualGroundingFilterType.RELEVANCE)),
+    ],
+    // Words and managed word lists share a policy, as regex and PII filters do. Once the
+    // policy is rendered, the empty list of the pair is kept as well.
+    [
+      'gets its first word filter beside a managed word list',
+      { managedWordListFilters: [{ type: bedrock.ManagedWordFilterType.PROFANITY }] },
+      guardrail => guardrail.addWordFilter({ text: 'first' }),
+    ],
+    [
+      'gets its first managed word list beside a word filter',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => guardrail.addManagedWordListFilter({ type: bedrock.ManagedWordFilterType.PROFANITY }),
+    ],
+    [
+      'gets its first regex filter beside a PII filter',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => guardrail.addRegexFilter(regexFilter('ticket')),
+    ],
+    [
+      'gets its first PII filter beside a regex filter',
+      { regexFilters: [regexFilter('ticket')] },
+      guardrail => guardrail.addPIIFilter(piiFilter(bedrock.GeneralPIIType.ADDRESS)),
+    ],
+    // No method of the construct makes the changes below: they are written to the object
+    // that the caller passed in, or to a member that TypeScript declares readonly.
+    [
+      'has one of its filters changed in place',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => Object.assign(guardrail.wordFilters[0], { text: 'other' }),
+    ],
+    [
+      'has the type of its PII filter changed in place',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => Object.assign(guardrail.piiFilters[0], { type: bedrock.GeneralPIIType.EMAIL }),
+    ],
+    [
+      'has its cross-Region profile changed in place',
+      { crossRegionConfig: { guardrailProfileArn: guardrailProfile('us') } },
+      guardrail => Object.assign(guardrail.crossRegionConfig!, { guardrailProfileArn: guardrailProfile('eu') }),
+    ],
+    [
+      'has its list of content filters replaced',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => Object.assign(guardrail, { contentFilters: [contentFilter(bedrock.ContentFilterType.HATE)] }),
+    ],
+    [
+      'has the tier of its content filters changed',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => Object.assign(guardrail, { contentFiltersTierConfig: bedrock.TierConfig.STANDARD }),
+    ],
+    [
+      'has the tier of its denied topics changed',
+      { deniedTopics: [topic('investments')] },
+      guardrail => Object.assign(guardrail, { topicsTierConfig: bedrock.TierConfig.STANDARD }),
+    ],
+  ])('fails the synthesis when the guardrail %s after its version was published', (_case, configured, change) => {
+    const stack = new Stack(new App(), 'Stack');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', { guardrailName: 'input', ...configured });
+    publishGuardrailVersion(guardrail, 'Initial version');
+    change(guardrail);
+    expect(() => Template.fromStack(stack)).toThrow('it was changed after publishGuardrailVersion()');
+  });
+
+  // The function compares the ten members that the alpha library renders the guardrail's
+  // properties from. A later version of the library that renders from one more can keep its
+  // first rendering of that one as well, and no test above would fail. This one fails when
+  // the new member is a list, or is read by a `generateCfn...` method as these ten are: name
+  // it in `sources` of the function, give it a row in the table above, and add it here.
+  test('knows the members that the alpha construct renders the properties from', () => {
+    const guardrail = new bedrock.Guardrail(new Stack(new App(), 'Stack'), 'InputGuardrail', { guardrailName: 'input' });
+    const members = new Set<string>();
+    // What its `generateCfn...` methods read. The exported class is the one that its decorator
+    // returns, so the methods are further up. In their text, `this.generateCfn...` is a call
+    // of another of them, and no member.
+    for (let proto = Object.getPrototypeOf(guardrail); proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+      for (const method of Object.getOwnPropertyNames(proto).filter(name => name.startsWith('generateCfn'))) {
+        for (const [, member] of String(proto[method]).matchAll(/\bthis\.(?!generateCfn)(\w+)/g)) members.add(member);
+      }
+    }
+    // And every list that the construct holds, whichever way a later version renders it.
+    for (const [member, value] of Object.entries(guardrail)) if (Array.isArray(value)) members.add(member);
+    expect([...members].sort()).toEqual([
+      'contentFilters', 'contentFiltersTierConfig', 'contextualGroundingFilters', 'crossRegionConfig', 'deniedTopics',
+      'managedWordListFilters', 'piiFilters', 'regexFilters', 'topicsTierConfig', 'wordFilters',
+    ]);
   });
 });
 

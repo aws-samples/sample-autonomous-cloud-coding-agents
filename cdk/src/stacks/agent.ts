@@ -112,9 +112,13 @@ const GUARDRAIL_VERSION_HASH_LENGTH = 16;
  * token (aws/aws-cdk#38674), whose text differs from one synthesis to the next: nearly
  * every deploy published a version, until the guardrail reached its version quota (#1079).
  *
- * The properties are rendered here, not at synthesis: call this once the guardrail is
- * fully configured, or synthesis fails. Tags are left out, because a deploy tag does not
- * change the guardrail.
+ * The properties are rendered here, not at synthesis, and the alpha construct keeps what
+ * it rendered: a filter added after this call can be missing from the template. A cached
+ * `Lazy` value in a property keeps what it produces here. Call this once the guardrail is
+ * fully configured. A validation that this call adds to the guardrail fails the synthesis
+ * when the rendered properties, or the JSON text of the filters, tiers and cross-Region
+ * configuration that the construct renders them from, are no longer what they were at this
+ * call. Tags are left out, because a deploy tag does not change the guardrail.
  */
 export function publishGuardrailVersion(guardrail: bedrock.Guardrail, description: string): string {
   const resource = guardrail.node.children.find(child => child instanceof CfnGuardrail)!;
@@ -126,16 +130,27 @@ export function publishGuardrailVersion(guardrail: bedrock.Guardrail, descriptio
     const { Tags: _tags, ...properties } = Object.values(rendered.Resources)[0].Properties;
     return JSON.stringify([properties, description]);
   };
+  // What the alpha construct renders the policies and the cross-Region configuration from.
+  // It keeps the first rendering of each that is not empty, so once `configuration()` has
+  // run, a change of these members can be missing from every later rendering, the template
+  // included.
+  const sources = (): string => JSON.stringify([
+    guardrail.contentFilters, guardrail.deniedTopics, guardrail.piiFilters, guardrail.regexFilters, guardrail.wordFilters,
+    guardrail.managedWordListFilters, guardrail.contextualGroundingFilters,
+    guardrail.contentFiltersTierConfig, guardrail.topicsTierConfig, guardrail.crossRegionConfig,
+  ]);
   const published = configuration();
+  const publishedSources = sources();
   const hash = createHash('sha256').update(published).digest('hex');
   const version = new CfnGuardrailVersion(guardrail, `Version${hash.slice(0, GUARDRAIL_VERSION_HASH_LENGTH)}`, {
     guardrailIdentifier: guardrail.guardrailId,
     description,
   });
-  // The name is fixed now: a later change of the guardrail would reach the draft and no version.
-  // A property that takes a value from another stack renders differently by then, and fails too.
+  // The name is fixed now: a later change of the guardrail would reach the draft at most, and
+  // no version. A property that takes a value from another stack renders differently by then,
+  // and fails too.
   guardrail.node.addValidation({
-    validate: () => configuration() === published ? [] : [
+    validate: () => configuration() === published && sources() === publishedSources ? [] : [
       'The guardrail does not have the properties its version was named after: it was changed after '
       + 'publishGuardrailVersion(), or one of its properties takes a value from another stack.',
     ],
@@ -589,8 +604,8 @@ export class AgentStack extends Stack {
 
     // The version every consumer pins: `inputGuardrail.guardrailVersion` is the working
     // draft. The guardrail gets its whole configuration in the constructor above: a
-    // change made to it after this line would reach the draft and no published version,
-    // and synthesis fails on it.
+    // change made to it after this line would reach no published version. The comment
+    // of publishGuardrailVersion() says which changes fail the synthesis.
     const inputGuardrailVersion = publishGuardrailVersion(inputGuardrail, 'Initial version');
 
     // --- TaskApi is constructed before the orchestrator (which it needs the

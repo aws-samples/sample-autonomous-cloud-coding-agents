@@ -525,7 +525,7 @@ In that call, `ModelInvocationLogging` writes the stack's log group and role to 
 
 ### Deploys stop once the input guardrail reaches its version quota (#1079)
 
-**Affects:** a stack deployed from a version between [#904](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/904) and the fix of [#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079). Nearly every deploy of such a version published a new version of the input guardrail and kept the one before it, also when the guardrail had not changed.
+**Affects:** a stack deployed from a version between [#904](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/904) and the fix of [#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079). Nearly every deploy of such a version published a new version of the input guardrail and kept the one before it, also when the guardrail had not changed. Before the first deploy with the fix, count the guardrail's versions with the first two commands under **Resolution**: that deploy publishes one more version, and on a guardrail that is already at its quota it fails and the stack rolls back.
 
 **Symptom:** the deploy fails on the guardrail version and the stack rolls back to `UPDATE_ROLLBACK_COMPLETE`. Nearly every later deploy fails in the same way until old versions are deleted.
 
