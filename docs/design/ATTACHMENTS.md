@@ -1,27 +1,27 @@
 # Task Attachments (Multimodal)
 
-End-to-end support for attaching files, images, and URLs to agent tasks. Attachments let users provide non-text context — screenshots of bugs, design mockups, CSV data, log files, code snippets — that the agent can reference during execution. Every channel (CLI, webhook, Slack, Linear) feeds the same schema; every attachment passes through security screening before reaching the agent.
+This design covers end-to-end support for attaching files, images, and URLs to agent tasks. Attachments let users provide non-text context that the agent can reference during execution, such as screenshots of bugs, design mockups, CSV data, log files, and code snippets. Every channel (CLI, webhook, Slack, Linear) feeds the same schema. Every attachment passes through security screening before it reaches the agent.
 
 - **Use this doc for:** understanding the attachment data model, upload flow, security screening pipeline, storage layout, agent consumption, and per-channel behaviour.
-- **Related docs:** [API_CONTRACT.md](./API_CONTRACT.md) for the `attachments` request schema (must be updated in tandem — see [API contract sync](#api-contract-sync)), [ORCHESTRATOR.md](./ORCHESTRATOR.md) for the task lifecycle this extends, [SECURITY.md](./SECURITY.md) for guardrail and Cedar context, [ARCHITECTURE.md](./ARCHITECTURE.md) for the platform overview.
+- **Related docs:** [API_CONTRACT.md](./API_CONTRACT.md) for the `attachments` request schema (must be updated in tandem, see [API contract sync](#api-contract-sync)), [ORCHESTRATOR.md](./ORCHESTRATOR.md) for the task lifecycle this extends, [SECURITY.md](./SECURITY.md) for guardrail and Cedar context, [ARCHITECTURE.md](./ARCHITECTURE.md) for the platform overview.
 
 ## Motivation
 
-Today, task context is limited to text: a `task_description`, an `issue_number` (whose body is text), or a `pr_number`. Users cannot show the agent what they see. Common situations where text alone is insufficient:
+Today, task context is limited to text: a `task_description`, an `issue_number` (whose body is text), or a `pr_number`. Users cannot show the agent what they see. Text alone is insufficient in these common situations:
 
-1. **Bug reports with screenshots** — "The button is misaligned" means nothing without the screenshot. The user must upload the image to GitHub, create an issue, and reference it — friction that discourages use.
-2. **Design mockups** — "Implement this design" requires a mockup image. Today the agent can only read text descriptions of designs.
-3. **Log files and data** — A 500-line stack trace or CSV dataset is awkward to paste into a 10,000-char `task_description`.
-4. **Code snippets from other repos** — "Port this function from repo X" requires the user to paste code into an issue.
-5. **Integration payloads** — Linear issues or Slack threads may contain images, files, or links that are lost when only the text body is forwarded to the agent.
+1. **Bug reports with screenshots.** "The button is misaligned" means nothing without the screenshot. The user must upload the image to GitHub, create an issue, and reference it. That friction discourages use.
+2. **Design mockups.** "Implement this design" requires a mockup image. Today the agent can only read text descriptions of designs.
+3. **Log files and data.** A 500-line stack trace or CSV dataset is awkward to paste into a 10,000-char `task_description`.
+4. **Code snippets from other repos.** "Port this function from repo X" requires the user to paste code into an issue.
+5. **Integration payloads.** Linear issues or Slack threads may contain images, files, or links that are lost when only the text body is forwarded to the agent.
 
-Attachments solve this by providing a unified carrier for all non-text task context.
+Attachments solve this with one carrier for all non-text task context.
 
 ## Design principles
 
-1. **Store once, reference everywhere.** Binary data lives in S3. Every downstream consumer (orchestrator, agent, audit log) uses S3 references, never inline blobs. The primary upload path bypasses the API entirely (presigned POST policies with size enforcement); a convenience inline path exists for small attachments only.
-2. **No unscreened binary content in S3.** Every attachment passes through security screening before its binary content is written to durable S3 storage. DynamoDB metadata (attachment ID, filename, pending status) may be written before screening completes, but the actual blob is gated on a passing screen result.
-3. **Fail closed, fail loud.** If screening is unavailable, the task fails. If any attachment fails screening (inline, URL, or presigned), the task fails with a clear error — attachments are not silently dropped. Users can re-submit without the problematic attachment. This principle extends to the hydration fallback path — attachment resolution errors must propagate and fail the task, never be caught by the generic infrastructure fallback (see [Hydration error handling](#hydration-error-handling)). [ADR-026](../decisions/ADR-026-content-screening-failure-posture.md) records an exception for a Linear epic's sub-issue, whose own files are dropped and whose task still runs when one of them is blocked or cannot be screened.
+1. **Store once, reference everywhere.** Binary data lives in S3. Every downstream consumer (orchestrator, agent, audit log) uses S3 references, never inline blobs. The primary upload path bypasses the API entirely (presigned POST policies with size enforcement). A convenience inline path exists for small attachments only.
+2. **No unscreened binary content in S3.** Every attachment passes through security screening before its binary content is written to durable S3 storage. DynamoDB metadata (attachment ID, filename, pending status) may be written before screening completes, but the blob itself is written only after screening passes.
+3. **Fail closed, fail loud.** If screening is unavailable, the task fails. If any attachment fails screening (inline, URL, or presigned), the task fails with a clear error. Attachments are not silently dropped. Users can re-submit without the problematic attachment. This principle extends to the hydration fallback path. Attachment resolution errors must propagate and fail the task. The generic infrastructure fallback must never catch them (see [Hydration error handling](#hydration-error-handling)). [ADR-026](../decisions/ADR-026-content-screening-failure-posture.md) records an exception for a Linear epic's sub-issue, whose own files are dropped and whose task still runs when one of them is blocked or cannot be screened.
 4. **Channel-agnostic schema.** The `Attachment` type is the same whether the source is a CLI flag, a webhook JSON field, a Slack file upload, or a Linear issue image. Channel-specific adapters normalize to this schema before entering the shared path.
 5. **Agent sees files, not infrastructure.** The agent receives attachments as local files in its workspace (images, documents) or as prompt content blocks (images for multimodal models). It does not interact with S3 directly.
 
@@ -29,7 +29,7 @@ Attachments solve this by providing a unified carrier for all non-text task cont
 
 ### Shared types
 
-Extract a shared `AttachmentType` literal union, reused across all attachment-related interfaces (same pattern as `TaskType` and `ChannelSource`):
+Extract a shared `AttachmentType` literal union and reuse it across all attachment-related interfaces. `TaskType` and `ChannelSource` follow the same pattern:
 
 ```typescript
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
@@ -38,9 +38,9 @@ export type AttachmentType = 'image' | 'file' | 'url';
 
 ### Attachment schema (API layer)
 
-The existing `Attachment` interface in `types.ts` is a flat union of optional fields. For deserialization from untrusted JSON this is fine, but downstream consumers benefit from a validated discriminated union. The design uses two layers:
+The existing `Attachment` interface in `types.ts` is a flat union of optional fields. A flat shape is fine for deserialization from untrusted JSON, but downstream consumers benefit from a validated discriminated union. The design uses two layers:
 
-**Wire format (deserialization):** The existing `Attachment` interface in `types.ts` (lines 283-289) is modified in-place — adding `expected_size_bytes` for presigned upload budget pre-checks. This is a non-breaking change (new optional field). All fields beyond `type` remain optional because the input is untrusted:
+**Wire format (deserialization).** The existing `Attachment` interface in `types.ts` (lines 283-289) is modified in place. It gains `expected_size_bytes` for the budget pre-check of presigned uploads. The change is non-breaking (a new optional field). All fields beyond `type` remain optional because the input is untrusted:
 
 ```typescript
 /** Wire format — parsed from untrusted JSON. Validate before use. */
@@ -54,7 +54,7 @@ interface Attachment {
 }
 ```
 
-**Validated format (post-validation):** After `validateAttachments()` succeeds, the result is a discriminated union that makes illegal states unrepresentable:
+**Validated format (post-validation).** After `validateAttachments()` succeeds, the result is a discriminated union that makes illegal states unrepresentable:
 
 ```typescript
 // Delivery mechanism — `delivery` is the discriminant for the three upload paths:
@@ -97,11 +97,11 @@ interface UrlAttachment extends BaseAttachment {
 type ValidatedAttachment = InlineAttachment | PresignedAttachment | UrlAttachment;
 ```
 
-The `delivery` field is the primary discriminant for exhaustive `switch` statements: `switch (att.delivery)` branches into the three upload paths without nested `if ('data' in att)` checks. The `type` field (`'image' | 'file' | 'url'`) describes the content kind. The `never` fields prevent accidental inclusion of forbidden properties at compile time. Note: `never` only provides compile-time protection — the validation function must construct each variant explicitly (see [Validation changes](#validation-changes)) to guarantee forbidden fields are absent at runtime.
+The `delivery` field is the primary discriminant for exhaustive `switch` statements. `switch (att.delivery)` branches into the three upload paths without nested `if ('data' in att)` checks. The `type` field (`'image' | 'file' | 'url'`) describes the content kind. The `never` fields prevent accidental inclusion of forbidden properties at compile time. `never` provides compile-time protection only. To guarantee that forbidden fields are absent at runtime, the validation function must construct each variant explicitly (see [Validation changes](#validation-changes)).
 
 ### Attachment record (persisted metadata)
 
-After upload and screening, each attachment becomes an `AttachmentRecord` stored as part of the `TaskRecord` in DynamoDB. The `screening` field is a discriminated union that prevents nonsensical states (e.g., a `passed` record with blocking categories):
+After upload and screening, each attachment becomes an `AttachmentRecord` stored as part of the `TaskRecord` in DynamoDB. The `screening` field is a discriminated union that prevents nonsensical states (for example, a `passed` record with blocking categories):
 
 ```typescript
 /** Screening outcome — discriminated union prevents invalid combinations.
@@ -126,13 +126,13 @@ interface AttachmentRecord {
 }
 ```
 
-**Runtime validation note:** The `ScreeningResult` discriminated union and the `[string, ...string[]]` non-empty tuple provide compile-time safety, but data read from DynamoDB is untyped at runtime. The `createAttachmentRecord` factory (below) validates these invariants at construction time. For records read back from DynamoDB, a `parseScreeningResult(raw: unknown): ScreeningResult` function must validate: (a) `status` is one of the three allowed values, (b) `screened_at` is present when status is `passed` or `blocked`, (c) `categories` is a non-empty array when status is `blocked`. This parser is called in the DynamoDB → `AttachmentRecord` mapper (same pattern as the existing `toTaskDetail` mapper). Invalid data throws rather than silently returning a malformed object.
+**Runtime validation note.** The `ScreeningResult` discriminated union and the `[string, ...string[]]` non-empty tuple provide compile-time safety, but data read from DynamoDB is untyped at runtime. The `createAttachmentRecord` factory (below) validates these invariants at construction time. For records read back from DynamoDB, a `parseScreeningResult(raw: unknown): ScreeningResult` function must validate three things: (a) `status` is one of the three allowed values, (b) `screened_at` is present when status is `passed` or `blocked`, (c) `categories` is a non-empty array when status is `blocked`. The mapper from DynamoDB to `AttachmentRecord` calls this parser, in the same pattern as the existing `toTaskDetail` mapper. The parser throws on invalid data. It does not silently return a malformed object.
 
-**Changes from prior version:** `s3_key` and `size_bytes` are now `undefined` when pending (not sentinel values `'pending'` and `0`). This is idiomatic TypeScript — the compiler forces null-checks on consumers instead of relying on documentation about magic values.
+**Changes from prior version.** `s3_key` and `size_bytes` are now `undefined` when pending (not the sentinel values `'pending'` and `0`). An absent value is idiomatic TypeScript. The compiler forces null-checks on consumers, where sentinel values would rely on documentation about magic values.
 
-The `TaskRecord` gains an `attachments?: AttachmentRecord[]` field. This stores metadata only — binary content lives in S3.
+The `TaskRecord` gains an `attachments?: AttachmentRecord[]` field. The field stores metadata only. Binary content lives in S3.
 
-**Construction (Phase 1 — ships with the type definitions):** A factory function `createAttachmentRecord(params)` centralizes construction validation, matching the codebase pattern of mapper functions like `toTaskDetail`. This ships in Phase 1 alongside the type definitions — not deferred — because cross-field invariants (`s3_key` required when screening passed, `checksum_sha256` required when screening passed, `token_estimate` required for images) are too dangerous to leave unenforced during 4 phases of development:
+**Construction (Phase 1, ships with the type definitions).** A factory function `createAttachmentRecord(params)` centralizes construction validation, following the codebase pattern of mapper functions like `toTaskDetail`. The factory ships in Phase 1 alongside the type definitions and is not deferred, because the cross-field invariants (`s3_key` required when screening passed, `checksum_sha256` required when screening passed, `token_estimate` required for images) are too dangerous to leave unenforced during 4 phases of development:
 
 ```typescript
 function createAttachmentRecord(params: CreateAttachmentRecordParams): AttachmentRecord {
@@ -154,7 +154,7 @@ function createAttachmentRecord(params: CreateAttachmentRecordParams): Attachmen
 
 ### Agent payload type
 
-A named TypeScript interface for the orchestrator → agent payload (not an anonymous `.map()` shape). This enables test contracts and prevents silent drift between the TypeScript producer and Python consumer:
+The payload that the orchestrator sends to the agent has a named TypeScript interface (not an anonymous `.map()` shape). A named interface enables test contracts and prevents silent drift between the TypeScript producer and the Python consumer:
 
 ```typescript
 /** Attachment descriptor sent to the agent runtime. Exported for test assertions. */
@@ -182,34 +182,34 @@ attachments/<user_id>/<task_id>/<attachment_id>/<filename>
 
 Example: `attachments/us-east-1:abc123/01J5X7.../01J5X8.../screenshot.png`
 
-The `<attachment_id>` segment ensures uniqueness even if multiple attachments share the same filename. The `<filename>` suffix preserves the original name for human-readable S3 console browsing and for the agent (which receives the file under its original name).
+The `<attachment_id>` segment keeps keys unique even if multiple attachments share the same filename. The `<filename>` suffix preserves the original name, both for browsing in the S3 console and for the agent, which receives the file under its original name.
 
 ## Limits
 
 | Limit | Value | Rationale |
 |---|---|---|
 | Max attachments per task | 10 | Bounds screening cost and agent context size |
-| Max size per attachment (decoded) | 10 MB | Bedrock image input limit; practical for screenshots/logs |
+| Max size per attachment (decoded) | 10 MB | Bedrock image input limit. Practical for screenshots and logs. |
 | Max inline data per attachment | 500 KB decoded | The Lambda synchronous invocation payload limit is **6 MB**. At 500 KB decoded (~667 KB base64) per attachment, even 5 inline attachments plus request JSON stays under 6 MB. The presigned path handles anything larger. |
-| Max total inline data per request | 3 MB decoded | Hard cap on total base64-decoded bytes in a single request. Even with base64 overhead (~4 MB encoded) plus JSON fields, this stays under the 6 MB Lambda payload limit. |
-| Max total size per task | 50 MB | Prevents abuse; bounds total screening and transfer time |
-| Max task_description length | 10,000 chars | Increased from 2,000. **This is a standalone API change that affects all tasks** (not just attachment tasks). Rationale: (a) attachments need rich explanatory context ("implement this design per the attached mockup, paying attention to the header layout"), (b) multiple users have reported the 2K limit as a friction point for complex task descriptions even without attachments, (c) the guardrail screening cost increase is minimal (text screening is cheap), (d) DynamoDB item size impact is negligible (~8 KB vs ~2 KB for the description field). **Requires updating [API_CONTRACT.md](./API_CONTRACT.md) line 82 in tandem.** |
-| Allowed image MIME types | `image/png`, `image/jpeg` | Bedrock-supported formats; GIF/WebP removed to eliminate native image processing dependency |
-| Allowed file MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log` | Useful for code/data context; no executables |
+| Max total inline data per request | 3 MB decoded | Hard cap on total base64-decoded bytes in a single request. Even with base64 overhead (~4 MB encoded) plus JSON fields, the request stays under the 6 MB Lambda payload limit. |
+| Max total size per task | 50 MB | Prevents abuse. Bounds total screening and transfer time. |
+| Max task_description length | 10,000 chars | Increased from 2,000. **This is a standalone API change that affects all tasks** (not only attachment tasks). Rationale: (a) attachments need rich explanatory context ("implement this design per the attached mockup, paying attention to the header layout"), (b) multiple users have reported the 2K limit as a friction point for complex task descriptions even without attachments, (c) the guardrail screening cost increase is minimal (text screening is cheap), (d) DynamoDB item size impact is negligible (~8 KB vs ~2 KB for the description field). **Requires updating [API_CONTRACT.md](./API_CONTRACT.md) line 82 in tandem.** |
+| Allowed image MIME types | `image/png`, `image/jpeg` | Bedrock-supported formats. GIF and WebP were removed to eliminate the native image processing dependency. |
+| Allowed file MIME types | `text/plain`, `text/csv`, `text/markdown`, `application/json`, `application/pdf`, `text/x-log` | Useful for code and data context. No executables. |
 | Max URL fetch size | 10 MB | Same per-attachment limit for fetched content |
 | URL fetch timeout | 10 seconds | Prevent SSRF-style long-poll attacks |
-| URL attachments, total time per task | 30 seconds | No request for a URL attachment starts or runs after this time; name lookups and screening are counted but not cut off. The orchestrator function has 60 seconds for its whole invocation |
+| URL attachments, total time per task | 30 seconds | No request for a URL attachment starts or runs after this time. Name lookups and screening are counted but not cut off. The orchestrator function has 60 seconds for its whole invocation. |
 | URL scheme | `https` only | No `http`, `file`, `ftp`, or custom schemes |
 
-**Payload limit note:** The binding constraint for the inline path is **not** the API Gateway 10 MB body limit — it is the **Lambda synchronous invocation payload limit of 6 MB**. API Gateway REST API forwards the request body to Lambda as part of the invocation payload, which includes the body plus API Gateway metadata. The limits above are set conservatively to ensure the full payload stays under 6 MB.
+**Payload limit note.** The binding constraint for the inline path is the **Lambda synchronous invocation payload limit of 6 MB**, **not** the API Gateway 10 MB body limit. The API Gateway REST API forwards the request body to Lambda as part of the invocation payload, which includes the body plus API Gateway metadata. The limits above are set conservatively so that the full payload stays under 6 MB.
 
 ## Upload flows
 
-The design provides three upload paths, unified by a common screening + S3 storage backend. The presigned upload is the primary path for files > 500 KB; inline base64 is a convenience for small attachments; URL fetch handles remote resources.
+The design provides three upload paths that share one screening and S3 storage backend. The presigned upload is the primary path for files > 500 KB. Inline base64 is a convenience for small attachments. URL fetch handles remote resources.
 
 ### Primary path: Presigned URL upload
 
-For attachments > 500 KB (or any attachment where the client prefers not to base64-encode), the client requests a presigned POST policy and uploads directly to S3. This bypasses the Lambda payload limit entirely. S3 enforces the `content-length-range` condition server-side, rejecting oversized uploads before storing them.
+For attachments > 500 KB (or any attachment where the client prefers not to base64-encode), the client requests a presigned POST policy and uploads directly to S3. The upload bypasses the Lambda payload limit entirely. S3 enforces the `content-length-range` condition server-side and rejects oversized uploads before it stores them.
 
 ```mermaid
 sequenceDiagram
@@ -253,20 +253,20 @@ sequenceDiagram
 **Key details:**
 
 - **New task status: `PENDING_UPLOADS`.** Tasks with presigned-upload attachments are created in `PENDING_UPLOADS` status. They do not enter the orchestration pipeline until uploads are confirmed. See [State machine changes](#state-machine-changes) for the full transition table.
-- **Declared sizes for early budget validation.** Clients must include `expected_size_bytes` for presigned attachments. The create-task handler validates total declared size against the 50 MB limit immediately, preventing the user from uploading 100 MB only to be rejected at confirm-uploads.
-- **Presigned POST policy generation.** S3 presigned POST policies (via `createPresignedPost` from `@aws-sdk/s3-presigned-post`) support **`content-length-range` conditions**, enforcing the 10 MB per-attachment limit at the S3 layer. This is preferred over presigned PUT URLs, which cannot enforce `Content-Length`. The presigned POST also fixes `Content-Type` and the S3 key. The 10-minute policy expiry bounds the upload window. Clients must use `multipart/form-data` POST (not PUT) to upload.
-- **Confirm-uploads endpoint.** `POST /v1/tasks/{task_id}/confirm-uploads` triggers screening and transitions to `SUBMITTED`. See [Confirm-uploads concurrency](#confirm-uploads-concurrency) for the race-condition handling.
-- **Parallel screening with bounded concurrency.** Attachments are screened in parallel (max 3 concurrent) to reduce wall time. Sequential screening of 10 large images can exceed the Lambda timeout; parallel processing with concurrency 3 keeps worst-case under the timeout budget (see [CDK construct changes](#cdk-construct-changes)).
-- **Atomic failure.** If any attachment fails screening, the entire task fails. All uploaded objects are deleted. The user gets a clear error identifying which attachment was blocked and why.
-- **HeadObject retry for incomplete uploads.** When `confirm-uploads` is called immediately after the client receives 200 from S3, there is a brief S3 eventual-consistency window where `HeadObject` may return 404. The handler retries `HeadObject` up to 3 times with 1-second delays before concluding the object is truly missing. After retries exhaust, the handler returns `400 ATTACHMENT_SIZE_MISMATCH` with message: "Upload for `{filename}` not found. Ensure the upload completed successfully before calling confirm-uploads." This differentiates "upload in progress" from "upload never happened" (the latter should not retry indefinitely).
+- **Declared sizes for early budget validation.** Clients must include `expected_size_bytes` for presigned attachments. The create-task handler validates the total declared size against the 50 MB limit immediately, so a user cannot upload 100 MB only to be rejected at confirm-uploads.
+- **Presigned POST policy generation.** S3 presigned POST policies (created with `createPresignedPost` from `@aws-sdk/s3-presigned-post`) support **`content-length-range` conditions**, which enforce the 10 MB per-attachment limit at the S3 layer. The design prefers them over presigned PUT URLs, which cannot enforce `Content-Length`. The presigned POST also fixes `Content-Type` and the S3 key. The 10-minute policy expiry bounds the upload window. Clients must use `multipart/form-data` POST (not PUT) to upload.
+- **Confirm-uploads endpoint.** `POST /v1/tasks/{task_id}/confirm-uploads` triggers screening and transitions the task to `SUBMITTED`. See [Confirm-uploads concurrency](#confirm-uploads-concurrency) for the race-condition handling.
+- **Parallel screening with bounded concurrency.** The handler screens attachments in parallel (max 3 concurrent) to reduce wall time. Sequential screening of 10 large images can exceed the Lambda timeout. Parallel processing with concurrency 3 keeps the worst case under the timeout budget (see [CDK construct changes](#cdk-construct-changes)).
+- **Atomic failure.** If any attachment fails screening, the entire task fails. The handler deletes all uploaded objects. The user gets a clear error that identifies which attachment was blocked and why.
+- **HeadObject retry for incomplete uploads.** When a client calls `confirm-uploads` immediately after it receives 200 from S3, there is a brief S3 eventual-consistency window in which `HeadObject` may return 404. The handler retries `HeadObject` up to 3 times with 1-second delays before it concludes that the object is missing. After the retries are exhausted, the handler returns `400 ATTACHMENT_SIZE_MISMATCH` with the message: "Upload for `{filename}` not found. Ensure the upload completed successfully before calling confirm-uploads." The retries distinguish "upload in progress" from "upload never happened" (the latter should not retry indefinitely).
 
 ### Confirm-uploads concurrency
 
 Two concurrent `confirm-uploads` calls can race. The design prevents corruption through three mechanisms:
 
-1. **Early short-circuit:** The handler reads the task status first. If status is not `PENDING_UPLOADS`, return the current task status immediately (idempotent success for `SUBMITTED`, error for `FAILED`/`CANCELLED`). This avoids redundant screening work.
-2. **Conditional DynamoDB write:** The final status transition uses `ConditionExpression: 'status = :pending_uploads'`. Only one caller wins the write. The loser gets `ConditionalCheckFailedException`, which the handler maps to an idempotent success response (re-read the task and return current status).
-3. **Safe cleanup via conditional write result:** On screening failure, the handler attempts a conditional DynamoDB write to `FAILED` (`ConditionExpression: 'status = PENDING_UPLOADS'`). If the write **succeeds**, this caller owns the failure — proceed with S3 cleanup. If the write **fails** (`ConditionalCheckFailedException`), another caller already transitioned to `SUBMITTED` — skip cleanup entirely (those objects are needed by the running agent). The conditional write result is the authoritative signal, eliminating the TOCTOU window that would exist with a separate "read status then delete" approach.
+1. **Early short-circuit.** The handler reads the task status first. If the status is not `PENDING_UPLOADS`, the handler returns the current task status immediately (idempotent success for `SUBMITTED`, error for `FAILED` or `CANCELLED`). The early return avoids redundant screening work.
+2. **Conditional DynamoDB write.** The final status transition uses `ConditionExpression: 'status = :pending_uploads'`. Only one caller wins the write. The loser gets `ConditionalCheckFailedException`, which the handler maps to an idempotent success response (it re-reads the task and returns the current status).
+3. **Safe cleanup via conditional write result.** On screening failure, the handler attempts a conditional DynamoDB write to `FAILED` (`ConditionExpression: 'status = PENDING_UPLOADS'`). If the write **succeeds**, this caller owns the failure and proceeds with S3 cleanup. If the write **fails** (`ConditionalCheckFailedException`), another caller has already transitioned the task to `SUBMITTED`, and the handler skips cleanup entirely because the running agent needs those objects. The result of the conditional write is the authoritative signal. It eliminates the TOCTOU window that a separate "read status then delete" approach would have.
 
 ```typescript
 // In confirm-uploads handler:
@@ -298,15 +298,15 @@ When a client retries a task creation with the same idempotency key, the existin
 | `SUBMITTED` or later | Return existing task (standard idempotency) |
 | `FAILED` / `CANCELLED` | Return existing task (standard idempotency) |
 
-This prevents the deadlock where a client crash leaves an unreachable `PENDING_UPLOADS` task blocking retries for 30 minutes.
+The special case prevents the deadlock in which a client crash leaves an unreachable `PENDING_UPLOADS` task that blocks retries for 30 minutes.
 
-**Presigned POST policy expiry and clock skew:** The 10-minute policy expiry uses the server's clock (AWS SigV4 signing time). Clients with clock skew > 5 minutes may find policies expire earlier than expected. The 10-minute window provides ~5 minutes of effective skew tolerance. Clients that consistently fail uploads should check their system clock (AWS SDK requests also fail with > 15 minutes skew). The CLI should log the server's `Date` header on upload failure to help users diagnose clock issues.
+**Presigned POST policy expiry and clock skew.** The 10-minute policy expiry uses the server's clock (AWS SigV4 signing time). Clients with clock skew > 5 minutes may find that policies expire earlier than expected. The 10-minute window provides ~5 minutes of effective skew tolerance. Clients that consistently fail uploads should check their system clock (AWS SDK requests also fail with > 15 minutes skew). The CLI should log the server's `Date` header on upload failure to help users diagnose clock issues.
 
-**Why the same S3 keys on retry:** The attachment records stay as they are, so a first client instance that is still alive (e.g., network partition, not a crash) and the retrying one can both finish: `confirm-uploads` looks each upload up under the key of its record. The bucket is versioned and `confirm-uploads` stores the version it screened on the record, which is the version the agent downloads, so an upload that arrives later under the same key is a new version that nothing reads. New attachment IDs would need a conditional write of the records and would strand the uploads of the first instance. A policy issued late in the 30-minute window can outlive the task by up to 10 minutes; an upload made after the auto-cancel rule has cleaned up stays until the 90-day lifecycle removes it.
+**Why the same S3 keys on retry.** The attachment records stay as they are. A first client instance that is still alive (for example, after a network partition, not a crash) and the retrying instance can therefore both finish, because `confirm-uploads` looks each upload up under the key of its record. The bucket is versioned, and `confirm-uploads` stores the version it screened on the record. The agent downloads that version, so an upload that arrives later under the same key is a new version that nothing reads. New attachment IDs would need a conditional write of the records and would strand the uploads of the first instance. A policy issued late in the 30-minute window can outlive the task by up to 10 minutes. An upload made after the auto-cancel rule has cleaned up stays until the 90-day lifecycle removes it.
 
 ### Convenience path: Inline base64 (small attachments)
 
-For attachments <= 500 KB decoded, clients can include base64-encoded content directly in the `POST /v1/tasks` body. This avoids the two-phase round trip for small files like cropped screenshots and short logs.
+For attachments <= 500 KB decoded, clients can include base64-encoded content directly in the `POST /v1/tasks` body. The inline path avoids the two-phase round trip for small files such as cropped screenshots and short logs.
 
 ```mermaid
 sequenceDiagram
@@ -335,15 +335,15 @@ sequenceDiagram
     H-->>C: 201 Created
 ```
 
-**Limit rationale:** The binding constraint is the **6 MB Lambda synchronous invocation payload limit** (not the 10 MB API Gateway body limit). The API Gateway forwards the full request body to Lambda as part of the invocation payload. At 500 KB decoded per inline attachment (~667 KB base64), with 3 MB total decoded (~4 MB base64), plus JSON overhead and API Gateway metadata, the total stays safely under 6 MB. In practice, most inline attachments are small screenshots (100-300 KB) where one or two are included alongside a task description.
+**Limit rationale.** The binding constraint is the **6 MB Lambda synchronous invocation payload limit** (not the 10 MB API Gateway body limit). The API Gateway forwards the full request body to Lambda as part of the invocation payload. At 500 KB decoded per inline attachment (~667 KB base64), with 3 MB total decoded (~4 MB base64), plus JSON overhead and API Gateway metadata, the total stays under 6 MB. In practice, most inline attachments are small screenshots (100-300 KB), and a request includes one or two of them alongside a task description.
 
 ### URL fetch (deferred download)
 
-For `type: 'url'` attachments, the content is fetched during context hydration (not at submission time), because:
+For `type: 'url'` attachments, the orchestrator fetches the content during context hydration (not at submission time), for three reasons:
 
-1. The URL may require the repo's GitHub token to access (e.g., private repo assets).
+1. The URL may require the repo's GitHub token to access (for example, private repo assets).
 2. Fetching at submission time blocks the API response on external network calls.
-3. The content should be fresh at agent execution time, not stale from hours-ago submission.
+3. The content should be fresh at agent execution time, not stale from a submission made hours earlier.
 
 ```mermaid
 sequenceDiagram
@@ -369,23 +369,23 @@ sequenceDiagram
     end
 ```
 
-**Failure semantics:** A blocked or unfetchable URL attachment **fails the task** — same as inline attachments. The user chose the URL; they expect it to work. The error message identifies the problematic URL and reason (blocked content, fetch timeout, DNS failure, SSRF violation). The user can re-submit without the problematic URL.
+**Failure semantics.** A blocked or unfetchable URL attachment **fails the task**, the same as an inline attachment. The user chose the URL and expects it to work. The error message identifies the problematic URL and the reason (blocked content, fetch timeout, DNS failure, SSRF violation). The user can re-submit without the problematic URL.
 
-**User notification for async failures:** URL fetch failures occur during hydration (minutes after submission). The user has already received a `201 Created` response. The failure surfaces through:
-- Task status transitions to `FAILED` with `error_message` identifying the attachment and reason.
+**User notification for async failures.** URL fetch failures occur during hydration (minutes after submission). The user has already received a `201 Created` response. The failure surfaces in these ways:
+- The task status transitions to `FAILED`, with an `error_message` that identifies the attachment and the reason.
 - A `task_failed` event is written to `TaskEventsTable`.
 - Notifications (if configured): Slack reply, Linear comment, or webhook callback.
-- The CLI `bgagent submit` with URL attachments should poll for the `HYDRATING → RUNNING` transition before returning, surfacing early failures inline.
+- The CLI command `bgagent submit` with URL attachments should poll for the `HYDRATING → RUNNING` transition before it returns, so that early failures surface inline.
 
-**SSRF protections** (applied at fetch-time in the orchestrator Lambda):
+**SSRF protections** (applied at fetch time in the orchestrator Lambda):
 
-1. **URL scheme:** Only `https` is allowed. No `http`, `file`, `ftp`, or custom schemes. Validated synchronously at submission time.
-2. **DNS resolution pinning (prevents DNS rebinding):** The fetch implementation must: (a) resolve DNS manually (e.g., via `dns.resolve4`/`dns.resolve6`), (b) validate the resolved IP against private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `127.0.0.0/8`, `::1`, `fd00::/8`), (c) connect to the validated IP directly using `undici`'s `connect` option or equivalent — **pinning** the connection to the resolved IP and preventing the HTTP library from doing a second DNS lookup that could return a different (malicious) IP. This technique is called "DNS resolution pinning" and it mitigates the DNS rebinding attack, where an attacker's DNS server returns a public IP on the first lookup (passing validation) then a private IP on the second lookup (reaching internal services).
+1. **URL scheme:** Only `https` is allowed. No `http`, `file`, `ftp`, or custom schemes. The scheme is validated synchronously at submission time.
+2. **DNS resolution pinning (prevents DNS rebinding):** The fetch implementation must do three things: (a) resolve DNS manually (for example, with `dns.resolve4` or `dns.resolve6`), (b) validate the resolved IP against private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `127.0.0.0/8`, `::1`, `fd00::/8`), (c) connect to the validated IP directly with `undici`'s `connect` option or an equivalent. Step (c) **pins** the connection to the resolved IP and prevents the HTTP library from doing a second DNS lookup that could return a different (malicious) IP. This technique is called "DNS resolution pinning". It mitigates the DNS rebinding attack, in which an attacker's DNS server returns a public IP on the first lookup (which passes validation) and then a private IP on the second lookup (which reaches internal services).
 3. **Redirect limits:** Follow at most 2 redirects. Re-validate the target URL and resolved IP after each redirect.
-4. **Timeout and size:** 10-second timeout per request, 30 seconds for all URL attachments of a task, 10 MB max response body. No request for a URL attachment starts or runs after the 30 seconds; name lookups and screening are counted but not cut off. Stream the response and abort if the size limit is exceeded.
+4. **Timeout and size:** 10-second timeout per request, 30 seconds for all URL attachments of a task, 10 MB max response body. No request for a URL attachment starts or runs after the 30 seconds. Name lookups and screening are counted but not cut off. Stream the response and abort if it exceeds the size limit.
 5. **No auth headers to non-GitHub URLs:** Only GitHub URLs (matching the repo's installation) receive the GitHub token. All other URLs are fetched without credentials.
 
-**URL fetch policy (open fetch with SSRF protection):** The default policy allows fetching from any public HTTPS URL that passes SSRF validation. This supports real-world use cases (Figma exports, Google Docs, Confluence, etc.) without requiring per-deployment configuration. Repos can optionally restrict to a URL allowlist via blueprint config:
+**URL fetch policy (open fetch with SSRF protection).** The default policy allows fetching from any public HTTPS URL that passes SSRF validation. The default supports real-world use cases (such as Figma exports, Google Docs, and Confluence) without per-deployment configuration. A repo can restrict fetches to a URL allowlist in its blueprint config:
 
 ```json
 {
@@ -396,22 +396,22 @@ sequenceDiagram
 }
 ```
 
-When `url_allowlist` is set, only matching URLs are allowed. When absent (default), any public HTTPS URL passing SSRF checks is permitted. `url_denylist` is always evaluated regardless of allowlist.
+When `url_allowlist` is set, only matching URLs are allowed. When it is absent (the default), any public HTTPS URL that passes the SSRF checks is permitted. `url_denylist` is always evaluated, whether or not an allowlist is set.
 
 ## Security screening pipeline
 
-Every attachment passes through a type-specific screening pipeline before its binary content reaches durable S3 storage or the agent. The pipeline is fail-closed: if any screening step is unavailable after retries, the attachment (and the task) is rejected.
+Every attachment passes through a type-specific screening pipeline before its binary content reaches durable S3 storage or the agent. The pipeline fails closed. If any screening step is unavailable after retries, the attachment is rejected, and the task with it.
 
 ### Retry strategy
 
-All Bedrock `ApplyGuardrailCommand` calls use exponential backoff before failing closed:
+All Bedrock `ApplyGuardrailCommand` calls use exponential backoff before they fail closed:
 
 - **Max retries:** 3
 - **Backoff:** 200ms, 400ms, 800ms
 - **Retryable errors:** HTTP 429 (throttling), HTTP 5xx (transient service errors)
 - **Non-retryable errors:** HTTP 4xx (except 429), validation errors, content policy violations (`INTERVENED`)
 
-This prevents a single transient Bedrock hiccup from failing an entire task after the user waited for 10 attachments to upload.
+The retries prevent a single transient Bedrock error from failing an entire task after the user waited for 10 attachments to upload.
 
 ### Image screening
 
@@ -431,15 +431,15 @@ flowchart TD
     G -->|Error after retries| F[FAIL CLOSED: 503]
 ```
 
-**Supported formats:** Only `image/png` and `image/jpeg` are accepted. GIF and WebP are rejected at the validation layer. This eliminates the need for a native image processing library (sharp/libvips) — raw image bytes are passed directly to Bedrock for screening.
+**Supported formats.** Only `image/png` and `image/jpeg` are accepted. GIF and WebP are rejected at the validation layer. The restriction removes the need for a native image processing library (sharp, libvips). Raw image bytes are passed directly to Bedrock for screening.
 
-**Magic bytes validation:** Verify the first bytes against known image signatures before any further processing. A file claiming to be `image/png` must start with `\x89PNG\r\n\x1a\n`. This prevents polyglot files (e.g., an image header followed by executable code) from reaching the screening pipeline.
+**Magic bytes validation.** Verify the first bytes against known image signatures before any further processing. A file that claims to be `image/png` must start with `\x89PNG\r\n\x1a\n`. The check prevents polyglot files (for example, an image header followed by executable code) from reaching the screening pipeline.
 
-**Dimension checks:** Image dimensions are read from PNG IHDR chunks and JPEG SOF markers using pure buffer parsing (no native dependencies). Images exceeding 8000px on either side are rejected before the Bedrock call. For PNGs, a missing IHDR chunk is a hard failure (the file is corrupt or incomplete). For JPEGs, if the SOF marker cannot be found: files > 5 MB are rejected (fail-closed — an unparseable large JPEG is too risky to forward without dimension verification); smaller files are allowed through with a logged warning, relying on Bedrock's own validation to reject oversized images.
+**Dimension checks.** Image dimensions are read from PNG IHDR chunks and JPEG SOF markers with pure buffer parsing (no native dependencies). Images that exceed 8000px on either side are rejected before the Bedrock call. For PNGs, a missing IHDR chunk is a hard failure (the file is corrupt or incomplete). For JPEGs whose SOF marker cannot be found, the outcome depends on the file size. Files > 5 MB are rejected (fail-closed), because an unparseable large JPEG is too risky to forward without dimension verification. Smaller files are allowed through with a logged warning, and the pipeline relies on Bedrock's own validation to reject oversized images.
 
-**Bedrock image screening:** The `ApplyGuardrailCommand` supports `image` content blocks with `png` and `jpeg` formats. Raw image bytes are passed directly — no re-encoding or format conversion needed.
+**Bedrock image screening.** The `ApplyGuardrailCommand` supports `image` content blocks with `png` and `jpeg` formats. Raw image bytes are passed directly, with no re-encoding or format conversion.
 
-**No EXIF stripping:** Images are stored as-is after screening passes. EXIF metadata (GPS, camera info) is not stripped since attachments are uploaded by the task submitter for their own agent. This trade-off eliminates the native `sharp`/`libvips` dependency, which caused cross-platform build issues and Lambda ARM64 decode failures.
+**No EXIF stripping.** Images are stored unchanged after screening passes. EXIF metadata (GPS, camera info) is not stripped, because the task submitter uploads attachments for their own agent. This trade-off eliminates the native `sharp`/`libvips` dependency, which caused cross-platform build issues and Lambda ARM64 decode failures.
 
 ### File screening
 
@@ -456,7 +456,7 @@ flowchart TD
     TG -->|Error after retries| FC[FAIL CLOSED: 503]
 ```
 
-**Magic bytes validation:** Don't trust `content_type` from the client. Validate the first bytes of the content against known signatures for allowed types:
+**Magic bytes validation.** Don't trust `content_type` from the client. Validate the first bytes of the content against known signatures for allowed types:
 
 | MIME type | Expected magic bytes |
 |---|---|
@@ -466,24 +466,24 @@ flowchart TD
 | `image/png` | `\x89PNG\r\n\x1a\n` |
 | `image/jpeg` | `\xFF\xD8\xFF` |
 
-A file claiming to be `text/plain` but starting with `MZ` (PE executable) or `PK` (ZIP) is rejected immediately.
+A file that claims to be `text/plain` but starts with `MZ` (PE executable) or `PK` (ZIP) is rejected immediately.
 
-**Text content screening:** For text-based files (plain text, CSV, Markdown, JSON), the full content is screened through the same Bedrock Guardrail used for task descriptions. For PDFs, text is extracted first (using `pdf-parse`, capped at 50 pages and 1 MB extracted text output to prevent decompression bombs) and then screened.
+**Text content screening.** For text-based files (plain text, CSV, Markdown, JSON), the full content is screened through the same Bedrock Guardrail used for task descriptions. For PDFs, text is extracted first (with `pdf-parse`, capped at 50 pages and 1 MB of extracted text output to prevent decompression bombs) and then screened.
 
-**PDF extraction failure handling:** `pdf-parse` is wrapped in a try-catch with a 15-second timeout. Corrupt PDFs, deeply nested objects, or excessive embedded fonts can cause OOM before the page limit takes effect. On any `pdf-parse` failure (exception, timeout, or OOM), the attachment is **rejected** with `ATTACHMENT_INVALID_CONTENT` and message: "PDF could not be processed. It may be corrupt or use unsupported features. Try exporting to a simpler PDF format." Consider running `pdf-parse` in a child process with a memory limit to prevent Lambda OOM when the confirm-uploads Lambda is processing multiple PDFs concurrently.
+**PDF extraction failure handling.** `pdf-parse` is wrapped in a try-catch with a 15-second timeout. Corrupt PDFs, deeply nested objects, or excessive embedded fonts can exhaust memory (OOM) before the page limit takes effect. On any `pdf-parse` failure (exception, timeout, or OOM), the attachment is **rejected** with `ATTACHMENT_INVALID_CONTENT` and the message: "PDF could not be processed. It may be corrupt or use unsupported features. Try exporting to a simpler PDF format." Consider running `pdf-parse` in a child process with a memory limit, to prevent Lambda OOM when the confirm-uploads Lambda processes multiple PDFs concurrently.
 
-**No executable content:** The MIME allowlist explicitly excludes executables, archives, and scripts. This is a hard boundary — there is no override. If a user needs to share a shell script, they should paste it as text in the task description or commit it to the repo.
+**No executable content.** The MIME allowlist excludes executables, archives, and scripts. This boundary has no override. If a user needs to share a shell script, they should paste it as text in the task description or commit it to the repo.
 
 ### Screening result caching
 
-Screening results are not cached. Each attachment is screened exactly once, at upload/fetch time. The `screening` field in `AttachmentRecord` records the outcome for audit purposes. Re-screening is not needed because:
+Screening results are not cached. Each attachment is screened exactly once, at upload or fetch time. The `screening` field in `AttachmentRecord` records the outcome for audit. Re-screening is not needed, for two reasons:
 
 - Attachments are immutable once stored (no update API).
 - Guardrail policies may change, but retroactive re-screening of existing attachments is a separate concern (batch job, not inline).
 
 ## Storage: Attachments S3 bucket
 
-A new CDK construct, `AttachmentsBucket`, following the same pattern as `TraceArtifactsBucket`:
+A new CDK construct, `AttachmentsBucket`, follows the same pattern as `TraceArtifactsBucket`:
 
 ```typescript
 // cdk/src/constructs/attachments-bucket.ts
@@ -519,25 +519,25 @@ export class AttachmentsBucket extends Construct {
 }
 ```
 
-**S3 versioning (TOCTOU prevention):** The bucket has versioning enabled. This prevents a class of attack where a client uploads benign content (passes screening), then replaces the S3 object with malicious content before the agent downloads it. The mitigation flow:
+**S3 versioning (TOCTOU prevention).** The bucket has versioning enabled. Versioning prevents a class of attack in which a client uploads benign content that passes screening, then replaces the S3 object with malicious content before the agent downloads it. The mitigation works as follows:
 
 1. At `confirm-uploads` time, `HeadObject` records the `VersionId`.
-2. `GetObject` for screening specifies `VersionId` — screens exactly the uploaded version.
+2. `GetObject` for screening specifies `VersionId`, so the handler screens exactly the uploaded version.
 3. After screening passes, the `VersionId` is stored in `AttachmentRecord.s3_version_id`.
 4. The `AgentAttachmentPayload` includes `s3_version_id`. The agent downloads with `VersionId` pinned.
 5. Even if the presigned URL is still valid and the client uploads a second version, the agent always downloads the screened version.
-6. `noncurrentVersionExpiration: 7 days` — old versions are cleaned up after a safe window. The 7-day retention ensures that even the longest-running tasks (max_turns=500 with slow models, potentially 24-48 hours) can always access the screened version. After 7 days, any task still referencing a noncurrent version is either completed or stuck in a terminal state.
+6. `noncurrentVersionExpiration: 7 days` cleans up old versions after a safe window. With the 7-day retention, even the longest-running tasks (max_turns=500 with slow models, potentially 24-48 hours) can always access the screened version. After 7 days, any task that still references a noncurrent version is either completed or stuck in a terminal state.
 
-**Lifecycle:** 90 days, matching the task record TTL (confirmed: `TASK_RETENTION_DAYS` defaults to 90 in `task-api.ts`). When a task expires from DynamoDB, its attachments expire from S3 around the same time. No cross-resource cleanup needed.
+**Lifecycle:** 90 days, which matches the task record TTL (confirmed: `TASK_RETENTION_DAYS` defaults to 90 in `task-api.ts`). When a task expires from DynamoDB, its attachments expire from S3 around the same time. No cross-resource cleanup is needed.
 
 **IAM grants:**
 
 | Principal | Grant | Purpose |
 |---|---|---|
-| Create-task Lambda | `grantPut`, `grantDelete` | Upload inline attachments; delete on partial failure cleanup |
-| Confirm-uploads Lambda | `grantRead`, `grantPut`, `grantDelete` | Read for screening; re-upload cleaned images; delete blocked content |
-| Orchestrator Lambda | `grantReadWrite` | Fetch URL attachments during hydration; write screened content |
-| Agent runtime (AgentCore / ECS) | `grantRead` | Download attachments into workspace via IAM role |
+| Create-task Lambda | `grantPut`, `grantDelete` | Upload inline attachments. Delete on partial failure cleanup. |
+| Confirm-uploads Lambda | `grantRead`, `grantPut`, `grantDelete` | Read for screening. Re-upload cleaned images. Delete blocked content. |
+| Orchestrator Lambda | `grantReadWrite` | Fetch URL attachments during hydration. Write screened content. |
+| Agent runtime (AgentCore / ECS) | `grantRead` | Download attachments into the workspace with the IAM role |
 
 **Presigned POST policy generation:**
 
@@ -562,21 +562,21 @@ const { url, fields } = await createPresignedPost(s3Client, {
 // Clients must POST with multipart/form-data (not PUT).
 ```
 
-**Why presigned POST over presigned PUT:** Presigned PUT URLs (`getSignedUrl` with `PutObjectCommand`) **cannot enforce `Content-Length` conditions** — the only way to limit upload size with PUT is a bucket resource policy using `s3:content-length-range`, but this condition key is **not documented for `s3:PutObject` actions in bucket policies** and its behavior is unreliable. Presigned POST policies, in contrast, have `content-length-range` as a [documented, first-class condition](https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-HTTPPOSTConstructPolicy.html#sigv4-PolicyConditions) that S3 enforces server-side before writing the object. This provides reliable, documented size enforcement at the S3 layer.
+**Why presigned POST over presigned PUT.** Presigned PUT URLs (`getSignedUrl` with `PutObjectCommand`) **cannot enforce `Content-Length` conditions**. The only way to limit upload size with PUT is a bucket resource policy that uses `s3:content-length-range`, but this condition key is **not documented for `s3:PutObject` actions in bucket policies** and its behavior is unreliable. Presigned POST policies, in contrast, have `content-length-range` as a [documented, first-class condition](https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-HTTPPOSTConstructPolicy.html#sigv4-PolicyConditions) that S3 enforces server-side before it writes the object.
 
-**Client upload format:** Clients upload via `POST` with `multipart/form-data`, including the policy fields returned in the creation response. The CLI and webhook documentation include code examples. This is a minor ergonomic tradeoff (form-data POST vs raw PUT) for guaranteed size enforcement.
+**Client upload format.** Clients upload with `POST` and `multipart/form-data`, and include the policy fields returned in the creation response. The CLI and webhook documentation include code examples. The format is a minor ergonomic tradeoff (form-data POST instead of raw PUT) for guaranteed size enforcement.
 
-**Defense-in-depth:** Even with presigned POST size enforcement, the `confirm-uploads` handler still validates object sizes via `HeadObject` (defense-in-depth against implementation bugs). The auto-cancel cleanup Lambda also deletes ALL objects under a task's `attachments/<user>/<task>/` prefix (not just confirmed ones), catching objects from tasks that were never confirmed.
+**Defense-in-depth.** Even with presigned POST size enforcement, the `confirm-uploads` handler still validates object sizes with `HeadObject` (defense-in-depth against implementation bugs). The auto-cancel cleanup Lambda also deletes ALL objects under a task's `attachments/<user>/<task>/` prefix (not only confirmed ones), so objects from tasks that were never confirmed are removed too.
 
 ## Orchestrator integration
 
 ### Hydration error handling
 
-The existing `hydrateContext()` has a broad infrastructure-failure catch block (context-hydration.ts lines 1157-1189) that returns minimal context (task_description only) and sets `fallback_error` — allowing the task to proceed with degraded context. This is acceptable for optional context (e.g., a memory lookup failure), but **not acceptable for attachments**.
+The existing `hydrateContext()` has a broad infrastructure-failure catch block (context-hydration.ts lines 1157-1189) that returns minimal context (task_description only) and sets `fallback_error`, so the task proceeds with degraded context. The fallback is acceptable for optional context (for example, a memory lookup failure), but **not acceptable for attachments**.
 
-If the user explicitly provided attachments, proceeding without them produces incorrect agent output. Attachment resolution errors must **propagate and fail the task**, not be caught by the generic fallback.
+If the user provided attachments, a task that proceeds without them produces incorrect agent output. Attachment resolution errors must **propagate and fail the task**. The generic fallback must not catch them.
 
-**Implementation (Phase 1, step 10 — ships before any code throws these errors):** Create an `AttachmentError` base class. All attachment-related errors (`AttachmentResolutionError`, `AttachmentBudgetExceededError`, `AttachmentDownloadError`, `AttachmentIntegrityError`) extend this base class. A single `instanceof AttachmentError` check in the hydration catch block covers all current and future attachment error types, avoiding a growing allowlist. This is wired into the catch block in Phase 1 (alongside the class definitions), not deferred — ensuring no deployment window exists where typed errors are thrown but not re-thrown:
+**Implementation (Phase 1, step 10, ships before any code throws these errors).** Create an `AttachmentError` base class. All attachment-related errors (`AttachmentResolutionError`, `AttachmentBudgetExceededError`, `AttachmentDownloadError`, `AttachmentIntegrityError`) extend this base class. A single `instanceof AttachmentError` check in the hydration catch block covers all current and future attachment error types, so the catch block needs no growing allowlist. The check is wired into the catch block in Phase 1 (alongside the class definitions) and is not deferred. No deployment window then exists in which typed errors are thrown but not re-thrown:
 
 ```typescript
 // Error class hierarchy:
@@ -600,11 +600,11 @@ export class AttachmentBudgetExceededError extends AttachmentError { }
 }
 ```
 
-Using a base class instead of individual `instanceof` checks prevents the bug where a new error type (e.g., `AttachmentBudgetExceededError`) is added to `resolveAttachments()` but not to the re-throw list — causing it to be silently swallowed by the infrastructure fallback.
+A base class instead of individual `instanceof` checks prevents the bug in which a new error type (for example, `AttachmentBudgetExceededError`) is added to `resolveAttachments()` but not to the re-throw list, and the infrastructure fallback silently swallows it.
 
 ### Context hydration changes
 
-The `hydrateContext()` function gains an attachment resolution step that runs in parallel with issue/PR/memory fetching:
+The `hydrateContext()` function gains an attachment resolution step that runs in parallel with the issue, PR, and memory fetches:
 
 ```typescript
 // In hydrateContext(), added to the parallel fetch block:
@@ -617,15 +617,15 @@ const resolvedAttachments = await resolveAttachments(
 );
 ```
 
-`resolveAttachments()` handles:
+`resolveAttachments()` handles three things:
 
-1. **Inline/presigned attachments (already screened, already in S3):** Validate S3 key exists, compute `s3_uri` for the agent.
-2. **URL attachments (not yet fetched):** Fetch (with SSRF protections), screen (with retry), upload to S3, compute `s3_uri`. On any failure, throw `AttachmentResolutionError` which fails the task.
-3. **Token budget accounting:** Estimate token cost of image attachments and deduct from the available prompt budget (see [Token budget](#token-budget-accounting)).
+1. **Inline and presigned attachments (already screened, already in S3).** Validate that the S3 key exists, and compute `s3_uri` for the agent.
+2. **URL attachments (not yet fetched).** Fetch (with SSRF protections), screen (with retry), upload to S3, and compute `s3_uri`. On any failure, throw `AttachmentResolutionError`, which fails the task.
+3. **Token budget accounting.** Estimate the token cost of image attachments and deduct it from the available prompt budget (see [Token budget](#token-budget-accounting)).
 
 ### Payload changes
 
-The orchestrator payload to the agent gains a top-level `attachments` field using the named `AgentAttachmentPayload` interface:
+The orchestrator payload to the agent gains a top-level `attachments` field that uses the named `AgentAttachmentPayload` interface:
 
 ```typescript
 const payload = {
@@ -645,45 +645,45 @@ const payload = {
 };
 ```
 
-**Top-level placement rationale:** Attachments are placed at the top level of the agent payload (alongside `repo_url`, `task_type`, etc.), **not** inside `HydratedContext`. This avoids:
+**Top-level placement rationale.** Attachments are placed at the top level of the agent payload (alongside fields such as `repo_url` and `task_type`), **not** inside `HydratedContext`. Top-level placement avoids three problems:
 
-- A `HydratedContext` version bump and the deployment ordering constraint it creates (agent image must deploy before orchestrator).
-- Pydantic `extra="forbid"` rejection — `HydratedContext` uses `extra="forbid"` (models.py line 68), so adding a field there without updating the agent would crash it. The `TaskConfig` model (models.py line 94) uses only `validate_assignment=True` without `extra="forbid"`, so Pydantic v2's default behaviour (`extra="ignore"`) silently discards unrecognized top-level fields on old agents.
+- A `HydratedContext` version bump and the deployment ordering constraint it creates (the agent image must deploy before the orchestrator).
+- Pydantic `extra="forbid"` rejection. `HydratedContext` uses `extra="forbid"` (models.py line 68), so a field added there without an agent update would crash the agent. The `TaskConfig` model (models.py line 94) uses only `validate_assignment=True` without `extra="forbid"`, so Pydantic v2's default behaviour (`extra="ignore"`) silently discards unrecognized top-level fields on old agents.
 - Conflating raw inputs (attachments) with assembled prompt context (issue body, PR comments, memory).
 
 ### Agent capability check (FUTURE — not yet implemented)
 
-> **Status: deferred design item.** The capability/version gate described below is **not** implemented today. There is no `ATTACHMENT_UNSUPPORTED_AGENT` error code in `cdk/src/handlers/shared/response.ts`, no `agent_capabilities` field, and no version check across `cdk/src/handlers/`. This section captures a proposed mechanism for a future incremental-rollout window; it does not describe current shipped behavior.
+> **Status: deferred design item.** The capability/version gate described below is **not** implemented today. There is no `ATTACHMENT_UNSUPPORTED_AGENT` error code in `cdk/src/handlers/shared/response.ts`, no `agent_capabilities` field, and no version check across `cdk/src/handlers/`. This section captures a proposed mechanism for a future incremental-rollout window. It does not describe current shipped behavior.
 
-While old agents silently ignore the `attachments` top-level field (due to Pydantic `extra="ignore"` default), this produces a bad user experience: the user's attachments have no effect, with no error or warning. To prevent this during incremental rollout, the following mechanism is **proposed** (not yet built):
+Old agents silently ignore the top-level `attachments` field (because of the Pydantic `extra="ignore"` default). The user experience is bad, because the user's attachments have no effect and the user gets no error or warning. To prevent this outcome during incremental rollout, the following mechanism is **proposed** (not yet built):
 
-**The orchestrator would check the agent's deployment version before including attachments in the payload.** The proposed mechanism:
+**The orchestrator would check the agent's deployment version before it includes attachments in the payload.** The proposed mechanism:
 
-1. The agent container image is tagged with a version identifier (already tracked via `prompt_version` in the payload).
+1. The agent container image is tagged with a version identifier (already tracked through `prompt_version` in the payload).
 2. The orchestrator checks the `prompt_version` (or a new `agent_capabilities` field in the blueprint config) to determine attachment support.
 3. If the agent does not support attachments AND the task has attachments, the orchestrator fails the task with: `"Agent runtime version does not support attachments. A deployment is required to enable this feature for repository {repo}."`.
 4. If the task has no attachments, the orchestrator proceeds normally regardless of agent version.
 
-This would ensure users never silently lose their attachments during the rollout window. Until it is implemented, old agents fall back to the `extra="ignore"` behavior described above.
+With this check, users would never silently lose their attachments during the rollout window. Until it is implemented, old agents fall back to the `extra="ignore"` behavior described above.
 
 ### No HydratedContext version bump needed
 
-Because attachments live at the top level of the payload (not inside `hydrated_context`), no version bump is required. The `HydratedContext` Pydantic model with `extra="forbid"` and `version: 1` remains unchanged. This eliminates the deployment ordering constraint.
+Because attachments live at the top level of the payload (not inside `hydrated_context`), no version bump is required. The `HydratedContext` Pydantic model with `extra="forbid"` and `version: 1` remains unchanged. No deployment ordering constraint arises.
 
 ### Token budget accounting
 
-Images consume tokens when sent as multimodal content blocks. The system's `USER_PROMPT_TOKEN_BUDGET` (default 100K tokens, configured via environment variable) must account for image token costs.
+Images consume tokens when they are sent as multimodal content blocks. The system's `USER_PROMPT_TOKEN_BUDGET` (default 100K tokens, configured through an environment variable) must account for image token costs.
 
 **Image token estimation:**
 
-Claude resizes images before tokenizing. The estimation must apply the same resizing rules. Per Anthropic's documentation (as of May 2025):
+Claude resizes images before it tokenizes them. The estimate must apply the same resizing rules. According to Anthropic's documentation (as of May 2025):
 
 1. If either dimension exceeds 1568px, scale down proportionally to fit 1568px on the longest side.
 2. Pad each dimension up to the next multiple of 28 pixels.
 3. Apply: `ceil(resized_width * resized_height / 750)` tokens, capped at 1568 tokens.
 4. Apply a **1.2x safety margin** to account for padding imprecision and API changes.
 
-**Note:** The documentation describes a single resize step (fit 1568px longest side) and a hard token cap at 1568. An earlier version of this design included a separate 1.15 megapixel step; that has been removed to match the documented behaviour. If targeting Claude Opus 4.7 (which supports 2576px / 4784 tokens max), the constants should be made configurable.
+**Note.** The documentation describes a single resize step (fit 1568px longest side) and a hard token cap at 1568. An earlier version of this design included a separate 1.15 megapixel step, which has been removed to match the documented behaviour. If the target is Claude Opus 4.7 (which supports 2576px / 4784 tokens max), the constants should be made configurable.
 
 ```typescript
 const MAX_IMAGE_SIDE = 1568;       // Standard models; Opus 4.7 uses 2576
@@ -713,7 +713,7 @@ function estimateImageTokens(width: number, height: number): number {
 }
 ```
 
-For standard image sizes (after resizing):
+The estimates for standard image sizes (after resizing) are:
 
 | Original dimensions | Resized to (pre-pad) | Padded to | Estimated tokens (with margin) |
 |---|---|---|---|
@@ -722,7 +722,7 @@ For standard image sizes (after resizing):
 | 800x600 (cropped screenshot) | 800x600 (no resize) | 812x616 | ~800 |
 | 4096x4096 (max-size design) | 1568x1568 | 1568x1568 | ~1,568 (capped) |
 
-**Note:** The 4K screenshot and full HD screenshot produce the **same** token cost after resizing — both scale down to the same dimensions. The hard cap at MAX_IMAGE_TOKENS (1568) means very large or square images plateau rather than growing linearly.
+**Note.** The 4K screenshot and full HD screenshot produce the **same** token cost after resizing, because both scale down to the same dimensions. Because of the hard cap at MAX_IMAGE_TOKENS (1568), the token cost of very large or square images stops at the cap and does not grow linearly.
 
 **Budget enforcement in attachment resolution:**
 
@@ -759,19 +759,19 @@ async function resolveAttachments(attachments, ...) {
 }
 ```
 
-**Policy:** If image attachments consume more than `USER_PROMPT_TOKEN_BUDGET - MIN_TEXT_TOKEN_BUDGET` tokens (i.e., they would leave fewer than 20K tokens for text context), the task fails with a clear error. The user can reduce image count or downscale images before resubmitting. When dimensions are unparseable, `MAX_IMAGE_TOKENS` (1568) is used as a conservative budget estimate — this may slightly overcount, but ensures the budget check never underestimates token cost due to parsing limitations.
+**Policy.** If image attachments consume more than `USER_PROMPT_TOKEN_BUDGET - MIN_TEXT_TOKEN_BUDGET` tokens (that is, they would leave fewer than 20K tokens for text context), the task fails with a clear error. The user can reduce the image count or downscale images before resubmitting. When dimensions are unparseable, `MAX_IMAGE_TOKENS` (1568) is used as a conservative budget estimate. The estimate may overcount slightly, but the budget check never underestimates token cost because of parsing limitations.
 
-**Token budget vs. payload size:** The token budget above measures **vision tokens** (based on pixel dimensions). This is separate from the **API payload size**, which is affected by base64 encoding overhead (~33% expansion). Image attachments are sent as multimodal content blocks with base64-encoded data, so a 10 MB image becomes ~13.3 MB in the API request. The Anthropic API has its own request size limits (separate from our Lambda payload limits). The `MAX_ATTACHMENT_SIZE_BYTES` (10 MB) is chosen to ensure that even after base64 expansion, individual images stay within the Anthropic API's per-image limits. For multiple large images, the total base64-encoded payload is bounded by the 50 MB total task limit (which produces ~67 MB base64), but in practice the vision token budget is the binding constraint — 10 full-resolution images would consume ~18,820 vision tokens (well within the 100K budget) but produce a very large API payload. The agent should stream images from local files rather than holding all base64 data in memory simultaneously.
+**Token budget vs. payload size.** The token budget above measures **vision tokens** (based on pixel dimensions). The token budget is separate from the **API payload size**, which grows with base64 encoding overhead (~33% expansion). Image attachments are sent as multimodal content blocks with base64-encoded data, so a 10 MB image becomes ~13.3 MB in the API request. The Anthropic API has its own request size limits (separate from our Lambda payload limits). `MAX_ATTACHMENT_SIZE_BYTES` (10 MB) is chosen so that, even after base64 expansion, individual images stay within the Anthropic API's per-image limits. For multiple large images, the 50 MB total task limit (which produces ~67 MB base64) bounds the total base64-encoded payload, but in practice the vision token budget is the binding constraint. 10 full-resolution images would consume ~18,820 vision tokens (well within the 100K budget) but produce a very large API payload. The agent should stream images from local files and not hold all base64 data in memory at once.
 
 The `availableForText` budget is passed to the existing text trimming logic (`enforceTokenBudget`), which trims issue comments and PR threads to fit within the remaining allocation.
 
 ## Agent consumption
 
-The agent pipeline (`pipeline.py`) gains an attachment preparation step that runs after repo clone and before the agent session:
+The agent pipeline (`pipeline.py`) gains an attachment preparation step that runs after the repo clone and before the agent session.
 
 ### Step 1: Download attachments from S3 with integrity verification
 
-The agent runtime has an IAM role with `s3:GetObject` permission on the attachments bucket. It downloads attachments using the AWS SDK — no presigned URLs, no expiry concerns.
+The agent runtime has an IAM role with `s3:GetObject` permission on the attachments bucket. It downloads attachments with the AWS SDK, so there are no presigned URLs and no expiry concerns.
 
 ```python
 async def prepare_attachments(
@@ -818,11 +818,11 @@ async def prepare_attachments(
     return prepared
 ```
 
-**Error handling:** `AttachmentDownloadError` and `AttachmentIntegrityError` are fatal — the task fails with a clear error. The agent does not proceed with missing or corrupted attachments.
+**Error handling.** `AttachmentDownloadError` and `AttachmentIntegrityError` are fatal. The task fails with a clear error. The agent does not proceed with missing or corrupted attachments.
 
-Attachments are downloaded to `.attachments/` in the workspace root. For a task with a repository, the agent lists this directory in the clone's `.git/info/exclude`, a local file that is never committed, so git ignores it; that prevents accidentally committing binary attachments.
+Attachments are downloaded to `.attachments/` in the workspace root. For a task with a repository, the agent lists this directory in the clone's `.git/info/exclude`, a local file that is never committed, so git ignores the directory. Binary attachments therefore cannot be committed by accident.
 
-**No presigned URL expiry problem:** Because the agent downloads via IAM role credentials (which auto-rotate via the instance metadata service or ECS task role), there is no expiry window. Whether the task starts immediately or after a 4-hour approval wait (Change Manifest `AWAITING_APPROVAL` state), the download works identically.
+**No presigned URL expiry problem.** Because the agent downloads with IAM role credentials (which rotate automatically through the instance metadata service or the ECS task role), there is no expiry window. The download works the same whether the task starts immediately or after a 4-hour approval wait (Change Manifest `AWAITING_APPROVAL` state).
 
 ### Python models
 
@@ -874,7 +874,7 @@ class PreparedAttachment(BaseModel):
         return self
 ```
 
-Both models use `frozen=True` and `extra="forbid"`, matching existing patterns in `models.py` (`HydratedContext`, `GitHubIssue`, `MemoryContext`).
+Both models use `frozen=True` and `extra="forbid"`, as existing models in `models.py` do (`HydratedContext`, `GitHubIssue`, `MemoryContext`).
 
 `TaskConfig` gains an optional field:
 
@@ -886,9 +886,9 @@ class TaskConfig(BaseModel):
 
 ### Step 2: Inject into agent prompt
 
-Attachments are referenced in the system prompt and optionally injected as multimodal content blocks in the user message:
+Attachments are referenced in the system prompt and optionally injected as multimodal content blocks in the user message.
 
-**Image attachments → multimodal content blocks:**
+**Image attachments become multimodal content blocks:**
 
 ```python
 # In build_user_message():
@@ -911,7 +911,7 @@ attachment_listing = build_attachment_listing(prepared_attachments)
 content_blocks[0]["text"] += f"\n\n{attachment_listing}"
 ```
 
-**File attachments → local file references:**
+**File attachments become local file references:**
 
 ```
 The following attachments are available in .attachments/:
@@ -922,13 +922,13 @@ The following attachments are available in .attachments/:
 
 ### Agent tool access
 
-No new tools are needed. The agent uses its existing `Read` tool to access file attachments and sees image attachments directly in the conversation (multimodal content blocks). The `.attachments/` directory is within the workspace and already covered by the agent's filesystem access policy.
+No new tools are needed. The agent uses its existing `Read` tool to read file attachments and sees image attachments directly in the conversation (multimodal content blocks). The `.attachments/` directory is within the workspace, and the agent's filesystem access policy already covers it.
 
 ## Channel-specific behaviour
 
 ### CLI (`bgagent submit`)
 
-New `--attachment` flag (repeatable):
+The command gains a repeatable `--attachment` flag:
 
 ```bash
 # Local files (auto-detects inline vs presigned based on size)
@@ -941,18 +941,18 @@ bgagent submit --repo org/app --task "Implement this design" \
   --attachment https://figma.com/file/abc123/export.png
 ```
 
-The CLI detects whether the argument is a local file path or URL:
-- **Local file <= 500 KB, while the inline files of the request stay within 3 MB in total:** Read, base64-encode, take the MIME type from the file extension, send inline as `{ type: 'image'|'file', data: '...', content_type: '...', filename: '...' }`
-- **Any other local file (> 500 KB, or one that would take the inline total over 3 MB):** Send metadata only (with `expected_size_bytes`) in task creation, receive presigned POST policy (URL + form fields), upload directly to S3 via multipart form POST, call confirm-uploads.
-- **URL:** Send as `{ type: 'url', url: '...' }`
+The CLI detects whether the argument is a local file path or a URL:
+- **Local file <= 500 KB, while the inline files of the request stay within 3 MB in total:** Read the file, base64-encode it, take the MIME type from the file extension, and send it inline as `{ type: 'image'|'file', data: '...', content_type: '...', filename: '...' }`.
+- **Any other local file (> 500 KB, or one that would take the inline total over 3 MB):** Send metadata only (with `expected_size_bytes`) in task creation, receive a presigned POST policy (URL and form fields), upload directly to S3 with a multipart form POST, and call confirm-uploads.
+- **URL:** Send as `{ type: 'url', url: '...' }`.
 
-The CLI enforces size limits client-side (fail fast with a clear error rather than uploading 10 MB only to get a rejection). Progress bars show upload status for large files.
+The CLI enforces size limits client-side, so that it fails fast with a clear error and does not upload 10 MB only to get a rejection. Progress bars show upload status for large files.
 
-**URL attachment polling:** When the task includes URL attachments (fetched asynchronously during hydration), the CLI polls for the `HYDRATING → RUNNING` transition before returning. If the task fails during hydration (attachment fetch/screening failure), the error is surfaced inline to the user.
+**URL attachment polling.** When the task includes URL attachments (fetched asynchronously during hydration), the CLI polls for the `HYDRATING → RUNNING` transition before it returns. If the task fails during hydration (an attachment fetch or screening failure), the CLI shows the error inline to the user.
 
 ### Webhook
 
-Same `attachments` array in the JSON body. For attachments > 500 KB, webhook callers must use the presigned upload flow (same two-phase pattern as CLI). The webhook documentation will include code examples in Python and Node.js.
+The webhook takes the same `attachments` array in the JSON body. For attachments > 500 KB, webhook callers must use the presigned upload flow (the same two-phase pattern as the CLI). The webhook documentation will include code examples in Python and Node.js.
 
 ### Slack
 
@@ -963,7 +963,7 @@ When a user mentions `@Shoof` in a message that contains file uploads or image a
 3. It downloads each file that passed from its `url_private_download` with the workspace's bot token, and checks the downloaded size against the same two limits (the size Slack declares can differ from what arrives).
 4. The files are passed to `createTaskCore()` as inline attachments (`data` in base64), the shape a client sends on the [inline path](#convenience-path-inline-base64-small-attachments), and are validated there like any other inline attachment.
 
-**Slack error surface — atomic failure (consistent with design principle 3):** If any file fails a check or its download, the **entire task is rejected** — no partial attachment submission. This matches the behaviour of all other channels (CLI, webhook, API). The Slack reply lists every file that failed so the user can fix them in one re-submission:
+**Slack error surface, atomic failure (consistent with design principle 3).** If any file fails a check or its download, the **entire task is rejected**. There is no partial attachment submission. All other channels (CLI, webhook, API) behave the same way. The Slack reply lists every file that failed so the user can fix them in one re-submission:
 
 | Failure | Slack reply |
 |---|---|
@@ -975,7 +975,7 @@ When a user mentions `@Shoof` in a message that contains file uploads or image a
 | Multiple failures | ":x: Task not created. 2 attachment errors: `{file1}` (too large, 600 KB > 500 KB limit), `{file2}` has unsupported type `{mime}`. Fix or remove these files and try again." |
 | Refused by `createTaskCore()` (for example blocked by content screening) | ":x: Failed to create task: {error message}" |
 
-**Note:** Slack files take the inline path, not the presigned one: the processor hands their bytes to `createTaskCore()`, so the inline limits apply (500 KB per file, 3 MB per message), not the 10 MB of an uploaded attachment.
+**Note.** Slack files take the inline path, not the presigned one. The processor hands their bytes to `createTaskCore()`, so the inline limits apply (500 KB per file, 3 MB per message), not the 10 MB of an uploaded attachment.
 
 ### Linear
 
@@ -985,13 +985,13 @@ When a Linear issue triggers task creation and the issue body contains embedded 
 2. Each image URL becomes `{ type: 'url', url: '...' }` in the attachments array.
 3. Images are fetched and screened during context hydration, following the URL fetch flow.
 
-Linear issue attachments (non-inline files) are not supported in v1, as the Linear API requires separate API calls to list attachments per issue. This can be added later.
+Linear issue attachments (non-inline files) are not supported in v1, because the Linear API requires separate API calls to list attachments per issue. Support can be added later.
 
 ## Validation changes
 
-Validation is split into two steps to preserve the existing codebase pattern where validation functions are synchronous pure functions:
+Validation is split into two steps to preserve the existing codebase pattern, in which validation functions are synchronous pure functions:
 
-**Step 1 — Synchronous validation** (in `validation.ts`):
+**Step 1. Synchronous validation** (in `validation.ts`):
 
 ```typescript
 const MAX_ATTACHMENTS_PER_TASK = 10;
@@ -1140,7 +1140,7 @@ function isValidFilename(filename: string): boolean {
 }
 ```
 
-**Step 2 — Async pre-checks** (separate function, called after sync validation):
+**Step 2. Async pre-checks** (separate function, called after sync validation):
 
 ```typescript
 /** Async validation step: SSRF DNS resolution for URL attachments. */
@@ -1164,7 +1164,7 @@ export async function validateAttachmentUrls(
 }
 ```
 
-This split preserves the existing pattern where `validation.ts` functions are synchronous pure functions (no I/O), while keeping the async SSRF check fail-closed with a 5-second timeout.
+The split preserves the existing pattern in which `validation.ts` functions are synchronous pure functions (no I/O), and it keeps the async SSRF check fail-closed with a 5-second timeout.
 
 ## Partial failure cleanup
 
@@ -1199,17 +1199,17 @@ async function cleanupOrphanedAttachments(uploadedKeys: string[]): Promise<void>
 }
 ```
 
-**Strategy:** The inline upload path accumulates S3 keys as it processes attachments. If any attachment fails screening (or any other error occurs), the error handler calls `cleanupOrphanedAttachments` before returning the error response. The function handles both partial and total cleanup failures gracefully — it never re-throws (we're already in an error handler), instead emitting metrics for operational visibility.
+**Strategy.** The inline upload path accumulates S3 keys as it processes attachments. If any attachment fails screening (or any other error occurs), the error handler calls `cleanupOrphanedAttachments` before it returns the error response. The function handles both partial and total cleanup failures. It never re-throws, because it already runs in an error handler. It emits metrics instead, so that operators can see the failures.
 
-For the presigned upload path, cleanup happens in `confirm-uploads`: if screening fails for any attachment, the handler attempts a conditional DynamoDB write to `FAILED` (`ConditionExpression: 'status = PENDING_UPLOADS'`). Only if the write succeeds does the handler delete S3 objects. If the write fails (concurrent `confirm-uploads` already transitioned to `SUBMITTED`), cleanup is skipped — those objects are needed by the running agent.
+For the presigned upload path, cleanup happens in `confirm-uploads`. If screening fails for any attachment, the handler attempts a conditional DynamoDB write to `FAILED` (`ConditionExpression: 'status = PENDING_UPLOADS'`). The handler deletes S3 objects only if the write succeeds. If the write fails (a concurrent `confirm-uploads` already transitioned the task to `SUBMITTED`), the handler skips cleanup, because the running agent needs those objects.
 
-**Lifecycle as safety net:** Even if cleanup fails, the 90-day lifecycle expiration ensures objects are eventually removed. The `OrphanedAttachmentCleanupFailure` metric tracks these cases for alerting.
+**Lifecycle as fallback.** Even if cleanup fails, the 90-day lifecycle expiration eventually removes the objects. The `OrphanedAttachmentCleanupFailure` metric tracks these cases for alerting.
 
-**Pre-DynamoDB-write orphans:** If the inline upload path fails BEFORE the TaskRecord is written to DynamoDB (e.g., S3 PutObject succeeds for attachment 1, then screening crashes for attachment 2, and the task was never persisted), the orphaned S3 objects have no task record to correlate them with. The cleanup function still runs and emits `OrphanedAttachmentNoTask` (distinct from `OrphanedAttachmentCleanupFailure`). Structured logs include the S3 keys so operators can identify these objects. The 90-day lifecycle is the final safety net.
+**Pre-DynamoDB-write orphans.** If the inline upload path fails BEFORE the TaskRecord is written to DynamoDB (for example, S3 PutObject succeeds for attachment 1, then screening crashes for attachment 2, and the task was never persisted), the orphaned S3 objects have no task record to correlate them with. The cleanup function still runs and emits `OrphanedAttachmentNoTask` (distinct from `OrphanedAttachmentCleanupFailure`). Structured logs include the S3 keys so operators can identify these objects. The 90-day lifecycle is the final fallback.
 
 ## State machine changes
 
-Adding `PENDING_UPLOADS` requires updating `task-status.ts`. The full impact:
+Adding `PENDING_UPLOADS` requires an update of `task-status.ts`. The sections below give the full impact.
 
 ### New status
 
@@ -1232,7 +1232,7 @@ export const VALID_TRANSITIONS: Record<TaskStatusType, TaskStatusType[]> = {
 
 ### Status classification
 
-`PENDING_UPLOADS` is **neither active nor terminal**. It is a new category: **pre-active**. It does not count against user concurrency limits (no agent resources allocated), but it is visible in task lists and can be cancelled.
+`PENDING_UPLOADS` is **neither active nor terminal**. It belongs to a new category, **pre-active**. A `PENDING_UPLOADS` task does not count against user concurrency limits (no agent resources are allocated), but it is visible in task lists and can be cancelled.
 
 ```typescript
 export const ACTIVE_STATUSES: TaskStatusType[] = [
@@ -1268,36 +1268,36 @@ stateDiagram-v2
     FINALIZING --> FAILED : Agent failure
 ```
 
-**Relationship to AWAITING_APPROVAL:** `PENDING_UPLOADS` and `AWAITING_APPROVAL` (Cedar HITL) are independent lifecycle stages with no transition path between them. `PENDING_UPLOADS` is pre-pipeline (no compute allocated, no concurrency slot consumed). `AWAITING_APPROVAL` is mid-pipeline (container alive, concurrency slot held, paused on a human decision). A task with presigned attachments may later hit an approval gate: `PENDING_UPLOADS → SUBMITTED → ... → RUNNING → AWAITING_APPROVAL → RUNNING → ...`. The agent's IAM-based attachment downloads are unaffected by approval wait time (no presigned URL expiry).
+**Relationship to AWAITING_APPROVAL.** `PENDING_UPLOADS` and `AWAITING_APPROVAL` (Cedar HITL) are independent lifecycle stages with no transition path between them. `PENDING_UPLOADS` is pre-pipeline (no compute allocated, no concurrency slot consumed). `AWAITING_APPROVAL` is mid-pipeline (container alive, concurrency slot held, paused on a human decision). A task with presigned attachments may later reach an approval gate: `PENDING_UPLOADS → SUBMITTED → ... → RUNNING → AWAITING_APPROVAL → RUNNING → ...`. Approval wait time does not affect the agent's IAM-based attachment downloads (no presigned URL expiry).
 
 ### Auto-cancel mechanism
 
-Tasks in `PENDING_UPLOADS` for > 30 minutes are auto-cancelled via an **EventBridge scheduled rule** (not DynamoDB TTL — TTL would delete the record, losing audit trail). The rule:
+An **EventBridge scheduled rule** auto-cancels tasks that stay in `PENDING_UPLOADS` for > 30 minutes. DynamoDB TTL is not used, because TTL would delete the record and lose the audit trail. The rule does the following:
 
-1. Runs every 5 minutes.
-2. Queries `TaskTable` for tasks with `status = PENDING_UPLOADS` and `created_at < (now - 30 minutes)`.
-3. For each expired task, attempts a **conditional DynamoDB write**: `ConditionExpression: 'status = PENDING_UPLOADS'`. If the condition fails (task already transitioned to `SUBMITTED` by a concurrent `confirm-uploads` call), the Lambda skips that task — no cleanup, no overwrite.
-4. On successful conditional write: transitions to `CANCELLED` with `error_message: "Upload window expired (30 minutes). Please re-submit the task."`.
-5. Cleans up ALL S3 objects under the task's `attachments/<user>/<task>/` prefix (not just confirmed ones — catches oversized abuse uploads too).
-6. Writes a `pending_upload_expired` event to `TaskEventsTable`.
+1. It runs every 5 minutes.
+2. It queries `TaskTable` for tasks with `status = PENDING_UPLOADS` and `created_at < (now - 30 minutes)`.
+3. For each expired task, it attempts a **conditional DynamoDB write**: `ConditionExpression: 'status = PENDING_UPLOADS'`. If the condition fails (a concurrent `confirm-uploads` call already transitioned the task to `SUBMITTED`), the Lambda skips that task, with no cleanup and no overwrite.
+4. On a successful conditional write, it transitions the task to `CANCELLED` with `error_message: "Upload window expired (30 minutes). Please re-submit the task."`.
+5. It cleans up ALL S3 objects under the task's `attachments/<user>/<task>/` prefix (not only confirmed ones, so oversized abuse uploads are removed too).
+6. It writes a `pending_upload_expired` event to `TaskEventsTable`.
 
-**Race safety:** The conditional write ensures the auto-cancel Lambda and `confirm-uploads` cannot both succeed. If `confirm-uploads` wins the race (transitions to `SUBMITTED` first), the auto-cancel Lambda's conditional write fails harmlessly. If the auto-cancel Lambda wins, `confirm-uploads`'s conditional write fails and returns the current `CANCELLED` status to the client. There is no window where S3 objects are deleted from under a running task.
+**Race safety.** Because of the conditional write, the auto-cancel Lambda and `confirm-uploads` cannot both succeed. If `confirm-uploads` wins the race (transitions to `SUBMITTED` first), the auto-cancel Lambda's conditional write fails and changes nothing. If the auto-cancel Lambda wins, the conditional write of `confirm-uploads` fails, and `confirm-uploads` returns the current `CANCELLED` status to the client. There is no window in which S3 objects are deleted while a running task needs them.
 
-The task record is preserved with status `CANCELLED` — `bgagent status <task_id>` returns a clear explanation, not a 404.
+The task record is preserved with status `CANCELLED`, so `bgagent status <task_id>` returns a clear explanation, not a 404.
 
 ### Impact on ORCHESTRATOR.md
 
-`ORCHESTRATOR.md` must be updated to include `PENDING_UPLOADS` in the state diagram and describe the confirm-uploads → SUBMITTED transition. This is a documentation-only change (the orchestrator Lambda itself does not handle `PENDING_UPLOADS` — it only sees tasks that have already reached `SUBMITTED`).
+`ORCHESTRATOR.md` must be updated to include `PENDING_UPLOADS` in the state diagram and to describe the transition from confirm-uploads to SUBMITTED. The change is documentation-only. The orchestrator Lambda itself does not handle `PENDING_UPLOADS`. It sees only tasks that have already reached `SUBMITTED`.
 
 ### Concurrency tracking changes
 
-The existing codebase increments user concurrency at task creation time (in `create-task-core.ts`), since tasks currently always start in `SUBMITTED`. With `PENDING_UPLOADS`, this must change:
+The existing codebase increments user concurrency at task creation time (in `create-task-core.ts`), because tasks currently always start in `SUBMITTED`. With `PENDING_UPLOADS`, the tracking must change:
 
-- **Create-task handler (PENDING_UPLOADS path):** Skip concurrency increment. No agent resources are allocated; the task may never be confirmed.
-- **Confirm-uploads handler (PENDING_UPLOADS → SUBMITTED):** Increment user concurrency. If the concurrency limit is reached at this point, the confirm-uploads call fails with `429 RATE_LIMIT_EXCEEDED` (the user concurrency gate on the confirm-uploads path; there is no separate `CONCURRENCY_LIMIT_EXCEEDED` code). The task remains in `PENDING_UPLOADS` and the user must wait for a slot or cancel another running task.
-- **Auto-cancel Lambda (PENDING_UPLOADS → CANCELLED):** No concurrency decrement needed (was never incremented).
+- **Create-task handler (PENDING_UPLOADS path).** Skip the concurrency increment. No agent resources are allocated, and the task may never be confirmed.
+- **Confirm-uploads handler (from PENDING_UPLOADS to SUBMITTED).** Increment user concurrency. If the concurrency limit is reached at this point, the confirm-uploads call fails with `429 RATE_LIMIT_EXCEEDED`, the user concurrency gate on the confirm-uploads path. There is no separate `CONCURRENCY_LIMIT_EXCEEDED` code. The task remains in `PENDING_UPLOADS`, and the user must wait for a slot or cancel another running task.
+- **Auto-cancel Lambda (from PENDING_UPLOADS to CANCELLED).** No concurrency decrement is needed, because the count was never incremented.
 
-This ensures `PENDING_UPLOADS` tasks never count against the user's concurrency limit, while still enforcing the limit at the point where agent resources would actually be allocated.
+As a result, `PENDING_UPLOADS` tasks never count against the user's concurrency limit, and the limit is still enforced at the point where agent resources would be allocated.
 
 ### Impact on existing code that assumes binary status classification
 
@@ -1327,50 +1327,50 @@ interface TaskRecord {
 
 The `status` field gains the new `PENDING_UPLOADS` value (see [State machine changes](#state-machine-changes)).
 
-No new DynamoDB tables are needed. The `AttachmentRecord[]` is stored as a nested attribute in the existing `TaskTable`. This is appropriate because:
+No new DynamoDB tables are needed. The `AttachmentRecord[]` is stored as a nested attribute in the existing `TaskTable`. A nested attribute is appropriate for four reasons:
 
 - Attachments are always accessed with their parent task (never queried independently).
 - The metadata is small (< 1 KB per attachment, max 10 attachments = < 10 KB total).
 - No secondary index is needed on attachment fields.
-- The TaskRecord with 39 fields + 10 attachment records stays well under DynamoDB's 400 KB item size limit.
+- The TaskRecord with 39 fields and 10 attachment records stays well under DynamoDB's 400 KB item size limit.
 
 ## CDK construct changes
 
 ### New: `AttachmentsBucket`
 
-New construct at `cdk/src/constructs/attachments-bucket.ts`. Follows `TraceArtifactsBucket` patterns (see [Storage](#storage-attachments-s3-bucket) above).
+The new construct is at `cdk/src/constructs/attachments-bucket.ts`. It follows the patterns of `TraceArtifactsBucket` (see [Storage](#storage-attachments-s3-bucket) above).
 
 ### New: `ConfirmUploadsFunction`
 
-A separate Lambda for the `confirm-uploads` endpoint, with:
-- **Memory:** 1024 MB (holds up to 10 MB raw image bytes in memory for Bedrock screening; no native image processing)
-- **Timeout:** 180 seconds (3 minutes). Attachments are screened in **parallel with bounded concurrency of 3**. Worst-case: 4 batches of ~45s each (S3 read + Bedrock screen with retries + S3 write). The 180s budget accommodates Bedrock retry delays.
-- **Internal deadline timer:** The handler sets a deadline at `Lambda timeout - 15 seconds` (165s). If the screening loop has not completed by this deadline, remaining unscreened attachments are aborted and the handler returns a 503 with `Retry-After: 30` header and body: "Attachment screening did not complete within the time limit. Reduce the number or size of attachments and try again, or retry after 30 seconds (already-screened attachments will be skipped on retry)." The `Retry-After` header enables clients to implement automatic backoff. On retry, the per-attachment screening state (above) ensures only unscreened attachments are re-processed, so retries make forward progress. This prevents opaque Lambda timeout errors.
-- **Per-attachment screening state with atomic DynamoDB + S3 ordering:** Each attachment's screening pipeline follows a strict order: (1) screen content via Bedrock Guardrail, (2) PutObject to S3, (3) update the attachment's `screening` status to `passed` in DynamoDB (with `s3_version_id` from the PutObject response). The DynamoDB write is the **commit point** — if any prior step fails, the attachment remains in `pending` status. On retry (after a timeout or Lambda restart), the handler skips attachments with `screening.status === 'passed'` (already committed to both S3 and DynamoDB). Attachments still in `pending` are re-processed from step 1 — this is safe because S3 PutObject is idempotent and the version ID from the new put supersedes any orphaned partial upload.
+A separate Lambda serves the `confirm-uploads` endpoint, with these settings:
+- **Memory:** 1024 MB. The function holds up to 10 MB of raw image bytes in memory for Bedrock screening and does no native image processing.
+- **Timeout:** 180 seconds (3 minutes). Attachments are screened in **parallel with bounded concurrency of 3**. The worst case is 4 batches of ~45s each (S3 read, Bedrock screen with retries, and S3 write). The 180s budget leaves room for Bedrock retry delays.
+- **Internal deadline timer:** The handler sets a deadline at `Lambda timeout - 15 seconds` (165s). If the screening loop has not completed by this deadline, the handler aborts the remaining unscreened attachments and returns a 503 with a `Retry-After: 30` header and the body: "Attachment screening did not complete within the time limit. Reduce the number or size of attachments and try again, or retry after 30 seconds (already-screened attachments will be skipped on retry)." The `Retry-After` header lets clients implement automatic backoff. On retry, because of the per-attachment screening state (above), only unscreened attachments are re-processed, so retries make progress. The deadline prevents opaque Lambda timeout errors.
+- **Per-attachment screening state with atomic DynamoDB + S3 ordering:** Each attachment's screening pipeline follows a strict order: (1) screen the content with Bedrock Guardrail, (2) PutObject to S3, (3) update the attachment's `screening` status to `passed` in DynamoDB (with `s3_version_id` from the PutObject response). The DynamoDB write is the **commit point**. If any prior step fails, the attachment remains in `pending` status. On retry (after a timeout or Lambda restart), the handler skips attachments with `screening.status === 'passed'` (already committed to both S3 and DynamoDB). Attachments still in `pending` are re-processed from step 1. Re-processing is safe because S3 PutObject is idempotent and the version ID from the new put supersedes any orphaned partial upload.
 - **Bundled dependencies:** `pdf-parse` (for PDF text extraction)
 
-Separating this from the create-task Lambda keeps the common path (task creation without attachments) lean and fast.
+A Lambda separate from the create-task Lambda keeps the common path (task creation without attachments) small and fast.
 
 ### New: `PendingUploadCleanupRule`
 
-EventBridge scheduled rule for auto-cancelling stale `PENDING_UPLOADS` tasks. Runs every 5 minutes, backed by a lightweight Lambda (256 MB, 30s timeout) that queries and transitions expired tasks.
+An EventBridge scheduled rule auto-cancels stale `PENDING_UPLOADS` tasks. It runs every 5 minutes and invokes a small Lambda (256 MB, 30s timeout) that queries and transitions expired tasks.
 
 ### Modified: `CreateTaskFunction`
 
-- **Memory:** 256 MB (increased from CDK default 128 MB — needed for base64 decode of inline attachments + screening + S3 upload)
-- **Timeout:** 15 seconds (increased from CDK default 3s — inline screening of small attachments plus S3 operations)
-- Pass the attachments bucket as `ATTACHMENTS_BUCKET` environment variable.
+- **Memory:** 256 MB, increased from the CDK default of 128 MB. The increase is needed for the base64 decode of inline attachments, screening, and the S3 upload.
+- **Timeout:** 15 seconds, increased from the CDK default of 3s for inline screening of small attachments plus S3 operations.
+- Pass the attachments bucket as the `ATTACHMENTS_BUCKET` environment variable.
 - Grant `grantPut` and `grantDelete` on the attachments bucket.
 
 ### Modified: `TaskOrchestrator`
 
-- Grant `grantReadWrite` on the attachments bucket (for URL attachment fetch/screen/upload).
-- Pass the bucket name as `ATTACHMENTS_BUCKET` environment variable.
+- Grant `grantReadWrite` on the attachments bucket (to fetch, screen, and upload URL attachments).
+- Pass the bucket name as the `ATTACHMENTS_BUCKET` environment variable.
 
 ### Modified: `TaskApi` (API Gateway)
 
-- New resource: `POST /v1/tasks/{task_id}/confirm-uploads` → `ConfirmUploadsFunction`
-- No body size limit changes needed (presigned uploads bypass the gateway entirely; inline bodies stay under the default limit).
+- New resource: `POST /v1/tasks/{task_id}/confirm-uploads`, routed to `ConfirmUploadsFunction`.
+- No body size limit changes are needed. Presigned uploads bypass the gateway entirely, and inline bodies stay under the default limit.
 - The `confirm-uploads` endpoint uses the same Cognito authorizer as other task endpoints.
 
 ## API response changes
@@ -1428,9 +1428,9 @@ interface AttachmentUploadInstruction {
 }
 ```
 
-Note: `task_expires_at` (30-minute auto-cancel window) is distinct from `upload_expires_at` (10-minute presigned POST policy expiry). Both are communicated to the client.
+`task_expires_at` (30-minute auto-cancel window) is distinct from `upload_expires_at` (10-minute presigned POST policy expiry). The client receives both.
 
-The `upload_url` and `upload_expires_at` fields are only present in the initial creation response. They are not returned on subsequent `GET /v1/tasks/{task_id}` calls.
+The `upload_url` and `upload_expires_at` fields are present only in the initial creation response. They are not returned on subsequent `GET /v1/tasks/{task_id}` calls.
 
 ## API contract sync
 
@@ -1440,23 +1440,23 @@ This design introduces changes that conflict with the current [API_CONTRACT.md](
 |---|---|---|
 | Conventions: max body | "max 1 MB body" | "max 1 MB body (6 MB for task creation with inline attachments)" |
 | Create task: `data` field | "max 10 MB decoded" | "max 500 KB decoded (inline); use presigned upload for larger files (up to 10 MB)" |
-| Create task: `task_description` | "max 2,000 chars" | "max 10,000 chars" (standalone API change — benefits all tasks, not just attachment tasks) |
+| Create task: `task_description` | "max 2,000 chars" | "max 10,000 chars" (standalone API change that benefits all tasks, not only attachment tasks) |
 | Endpoints table | — | Add `POST /v1/tasks/{task_id}/confirm-uploads` |
 | Error codes | — | Add all `ATTACHMENT_*` error codes |
 
 ## CLI type sync
 
-The CLI `types.ts` must be updated to match the server types. The CDK `CreateTaskRequest` already includes `attachments?: Attachment[]` (types.ts line 275), but the CLI mirror at `cli/src/types.ts` lacks it — a pre-existing sync gap that this implementation must close.
+The CLI `types.ts` must be updated to match the server types. The CDK `CreateTaskRequest` already includes `attachments?: Attachment[]` (types.ts line 275), but the CLI mirror at `cli/src/types.ts` lacks it. This implementation must close that pre-existing sync gap.
 
 1. Add `attachments?: Attachment[]` to `CreateTaskRequest`.
-2. Add `AttachmentType`, `AttachmentSummary`, `AttachmentUploadInstruction` types.
+2. Add the `AttachmentType`, `AttachmentSummary`, and `AttachmentUploadInstruction` types.
 3. Add `attachments?: AttachmentSummary[]` to `TaskDetail`.
 4. Add `PresignedUploadResponse` type for the two-phase flow.
 5. Update `MAX_TASK_DESCRIPTION_LENGTH` to 10,000.
 
 ## Error codes
 
-Error codes for attachment-related failures. The following are the codes
+The following error codes for attachment-related failures are
 **currently defined** in `cdk/src/handlers/shared/response.ts` (`ErrorCode`):
 
 | Code | Status | Description |
@@ -1474,7 +1474,7 @@ Error codes for attachment-related failures. The following are the codes
 | `SCREENING_DEADLINE_EXCEEDED` | 503 | Confirm-uploads hit the internal deadline before all attachments were screened |
 | `UPLOADS_NOT_PENDING` | 409 | Task is not in the PENDING_UPLOADS state expected by confirm-uploads |
 
-**Proposed / future codes (NOT yet defined in `response.ts`).** These appear in
+**Proposed or future codes (NOT yet defined in `response.ts`).** These appear in
 the surrounding design discussion but are not implemented. Do not treat them as
 part of the current API contract:
 
@@ -1486,7 +1486,7 @@ part of the current API contract:
 | `ATTACHMENT_DOWNLOAD_FAILED` | 500 | Agent could not download attachment from S3 |
 | `ATTACHMENT_INTEGRITY_FAILED` | 500 | Attachment checksum mismatch after download |
 | `ATTACHMENT_UNSUPPORTED_AGENT` | 422 | Agent runtime version does not support attachments (see "Agent capability check (FUTURE)") |
-| `UPLOADS_EXPIRED` | 410 | Upload window expired (> 30 minutes); re-submit the task |
+| `UPLOADS_EXPIRED` | 410 | Upload window expired (> 30 minutes). Re-submit the task. |
 
 ## Observability
 
@@ -1505,7 +1505,7 @@ part of the current API contract:
 | `AttachmentBudgetExceeded` | — | Tasks failed due to image token budget overflow |
 | `OrphanedAttachmentCleanupFailure` | — | Cleanup failures (orphaned S3 objects) |
 | `OrphanedAttachmentCleanupPartialFailure` | — | Partial cleanup failures |
-| `OrphanedAttachmentNoTask` | — | Objects uploaded before task was persisted to DynamoDB (pre-write failures); no task record to correlate |
+| `OrphanedAttachmentNoTask` | — | Objects uploaded before the task was persisted to DynamoDB (pre-write failures). No task record to correlate. |
 | `PendingUploadExpired` | — | Tasks that expired in PENDING_UPLOADS (never confirmed) |
 | `ConfirmUploadsRace` | — | Concurrent confirm-uploads detected (condition check failed) |
 | `ScreeningDeadlineExceeded` | — | Confirm-uploads hit internal deadline timer before all attachments screened |
@@ -1530,19 +1530,19 @@ New event types in `TaskEventsTable`:
 
 | Threat | Vector | Mitigation |
 |---|---|---|
-| Malicious image (steganography, exploit payload) | Inline upload or URL | Magic bytes validation; dimension checks; Bedrock Guardrail image screening (detects harmful visual content); only PNG/JPEG accepted (no executable formats) |
-| Prompt injection via file content | Text file containing adversarial instructions | Magic bytes validation; Bedrock Guardrail text screening with retry (same as task descriptions); content trust tagging as `untrusted-external` |
-| SSRF via URL attachment | URL pointing to internal network | HTTPS-only; DNS resolution with manual connect to resolved IP (prevents rebinding TOCTOU); redirect validation; private IP blocking; applied at fetch time; content-type allowlist + magic bytes validation after fetch (prevents attacker-controlled Content-Type header from bypassing type restrictions) |
-| Data exfiltration via URL attachment | URL pointing to attacker-controlled server (leaks request headers/IP) | No auth headers sent to non-GitHub URLs; minimal request headers; no cookies |
-| Denial of service via large attachments | Many large base64 payloads | 500 KB inline limit; 3 MB total inline; 10 MB per-attachment; 50 MB total; 10 count limit; 6 MB Lambda payload limit |
-| Path traversal via filename | `filename: "../../etc/passwd"` | Filename sanitization regex; reject path separators, dots-prefix, null bytes; use `attachment_id` as primary path component |
-| Zip bomb / decompression bomb | Compressed content that expands massively | No archive types in MIME allowlist; PDF text extraction capped at 50 pages and 1 MB output |
-| Polyglot files | File with valid image header + appended executable | Magic bytes validation at upload; only PNG/JPEG image types accepted; Bedrock screens the actual image content |
-| Presigned URL abuse | Leaked presigned POST policy used to upload different content | Content-Type fixed in presigned POST policy; `content-length-range` enforced by S3 (rejects > 10 MB before writing); 10-minute expiry; screening runs after upload regardless; size verified via HeadObject (defense-in-depth) |
-| S3 object replacement (TOCTOU) | Client uploads benign content (passes screening), then replaces object with malicious content before agent downloads | S3 versioning enabled; `VersionId` pinned at screening time and stored in `AttachmentRecord`; agent downloads with pinned `VersionId`; `noncurrentVersionExpiration: 7 days` prevents storage bloat while allowing long-running tasks to complete |
-| Upload slot exhaustion | Create many tasks in PENDING_UPLOADS, never confirm | 30-minute EventBridge auto-cancel with S3 cleanup; PENDING_UPLOADS does not count against concurrency; rate limiting on task creation already exists |
-| Confirm-uploads race | Two concurrent confirm-uploads corrupt state | Early status check short-circuit; DynamoDB conditional write; safe cleanup skips if already SUBMITTED |
-| DNS rebinding | DNS returns public IP at first lookup (passes validation), private IP at second lookup (reaches internal services) | DNS resolution pinning: resolve DNS manually, validate IP, connect directly to the validated IP (preventing a second DNS lookup); re-validate resolved IP after each redirect |
+| Malicious image (steganography, exploit payload) | Inline upload or URL | Magic bytes validation. Dimension checks. Bedrock Guardrail image screening (detects harmful visual content). Only PNG and JPEG accepted (no executable formats). |
+| Prompt injection via file content | Text file containing adversarial instructions | Magic bytes validation. Bedrock Guardrail text screening with retry (same as task descriptions). Content trust tagging as `untrusted-external`. |
+| SSRF via URL attachment | URL pointing to internal network | HTTPS-only. DNS resolution with manual connect to resolved IP (prevents rebinding TOCTOU). Redirect validation. Private IP blocking. Applied at fetch time. Content-type allowlist and magic bytes validation after fetch (prevents an attacker-controlled Content-Type header from bypassing type restrictions). |
+| Data exfiltration via URL attachment | URL pointing to attacker-controlled server (leaks request headers and IP) | No auth headers sent to non-GitHub URLs. Minimal request headers. No cookies. |
+| Denial of service via large attachments | Many large base64 payloads | 500 KB inline limit. 3 MB total inline. 10 MB per-attachment. 50 MB total. 10 count limit. 6 MB Lambda payload limit. |
+| Path traversal via filename | `filename: "../../etc/passwd"` | Filename sanitization regex. Reject path separators, dots-prefix, null bytes. Use `attachment_id` as primary path component. |
+| Zip bomb or decompression bomb | Compressed content that expands massively | No archive types in MIME allowlist. PDF text extraction capped at 50 pages and 1 MB output. |
+| Polyglot files | File with valid image header and appended executable | Magic bytes validation at upload. Only PNG and JPEG image types accepted. Bedrock screens the actual image content. |
+| Presigned URL abuse | Leaked presigned POST policy used to upload different content | Content-Type fixed in presigned POST policy. `content-length-range` enforced by S3 (rejects > 10 MB before writing). 10-minute expiry. Screening runs after upload regardless. Size verified via HeadObject (defense-in-depth). |
+| S3 object replacement (TOCTOU) | Client uploads benign content (passes screening), then replaces object with malicious content before agent downloads | S3 versioning enabled. `VersionId` pinned at screening time and stored in `AttachmentRecord`. Agent downloads with pinned `VersionId`. `noncurrentVersionExpiration: 7 days` prevents storage bloat while allowing long-running tasks to complete. |
+| Upload slot exhaustion | Create many tasks in PENDING_UPLOADS, never confirm | 30-minute EventBridge auto-cancel with S3 cleanup. PENDING_UPLOADS does not count against concurrency. Rate limiting on task creation already exists. |
+| Confirm-uploads race | Two concurrent confirm-uploads corrupt state | Early status check short-circuit. DynamoDB conditional write. Safe cleanup skips if already SUBMITTED. |
+| DNS rebinding | DNS returns public IP at first lookup (passes validation), private IP at second lookup (reaches internal services) | DNS resolution pinning: resolve DNS manually, validate IP, connect directly to the validated IP (preventing a second DNS lookup). Re-validate resolved IP after each redirect. |
 
 ### Content trust
 
@@ -1555,7 +1555,7 @@ Content trust levels:
 - attachments: untrusted-external (user-provided binary/text content, security-screened)
 ```
 
-This is correct even for inline uploads from authenticated users. The content of a file is fundamentally different from the task description: a user might upload a file they received from an untrusted source (e.g., a customer's screenshot, a downloaded log file). Screening catches known-bad content; trust tagging handles the residual risk by ensuring the agent treats attachment content as context, not as instructions.
+The label is correct even for inline uploads from authenticated users. The content of a file differs from the task description, because a user might upload a file that they received from an untrusted source (for example, a customer's screenshot or a downloaded log file). Screening catches known-bad content. Trust tagging handles the residual risk, because the agent then treats attachment content as context, not as instructions.
 
 ## Cost impact
 
@@ -1568,18 +1568,18 @@ This is correct even for inline uploads from authenticated users. The content of
 | Lambda compute (confirm-uploads) | ~$0.005-0.03 | 30-180s at 1024 MB for screening (no image re-encoding) |
 | Lambda compute (create-task, inline) | ~$0.001 | Additional 1-3s at 256 MB for small inline attachments |
 | Lambda compute (auto-cancel rule) | ~$0.0001 | 5-minute schedule, mostly no-op |
-| Data transfer (URL fetch) | ~$0.001 | Outbound fetch within region is free; cross-region is negligible |
+| Data transfer (URL fetch) | ~$0.001 | Outbound fetch within the region is free. Cross-region is negligible. |
 | Claude vision (image in prompt) | ~$0.01-0.05 per image | Multimodal input token cost |
 
 **Total additional cost per task with attachments:** ~$0.05-0.35, heavily dependent on attachment count and types. Tasks without attachments have zero additional cost.
 
 ## Implementation plan
 
-The implementation is ordered to deliver value incrementally while maintaining system safety. Security protections ship with the attack vectors they defend against — not deferred to a later phase.
+The implementation is ordered so that each phase delivers value and the system stays safe. Security protections ship with the attack vectors they defend against. They are not deferred to a later phase.
 
 ### Phase 1: Storage + validation + inline upload (small attachments)
 
-1. Verify `@aws-sdk/client-bedrock-runtime` supports image content blocks in `ApplyGuardrail` (specifically `GuardrailImageBlock` with `format: 'png' | 'jpeg'`); upgrade if needed
+1. Verify `@aws-sdk/client-bedrock-runtime` supports image content blocks in `ApplyGuardrail` (specifically `GuardrailImageBlock` with `format: 'png' | 'jpeg'`). Upgrade if needed
 2. Create `AttachmentsBucket` construct (with versioning enabled, props interface)
 3. Extract `AttachmentType` shared type in `types.ts` (the delivery mechanism needs no type of its own: each validated attachment interface carries its `delivery` literal)
 4. Add `ValidatedAttachment` discriminated union types (with `delivery` discriminant)
@@ -1588,12 +1588,12 @@ The implementation is ordered to deliver value incrementally while maintaining s
 7. Add `AttachmentSummary` and `AttachmentUploadInstruction` response types
 8. Add `AgentAttachmentPayload` named interface (with `checksum_sha256` and `s3_version_id`)
 9. Add `AttachmentError` base class hierarchy (`AttachmentResolutionError`, `AttachmentBudgetExceededError`)
-10. Add `AttachmentError` base class to hydration catch block re-throw list (single `instanceof` check — ships with the error classes so the re-throw is in place before any code throws these errors in Phase 3)
+10. Add `AttachmentError` base class to hydration catch block re-throw list (single `instanceof` check, ships with the error classes so that the re-throw is in place before any code throws these errors in Phase 3)
 11. Add attachment validation to `validation.ts` (sync: schema, limits, magic bytes, content_type detection, filename generation; async: SSRF DNS pre-check with differentiated error messages)
-12. Increase `MAX_TASK_DESCRIPTION_LENGTH` to 10,000 (standalone API change — update API_CONTRACT.md)
+12. Increase `MAX_TASK_DESCRIPTION_LENGTH` to 10,000 (standalone API change, update API_CONTRACT.md)
 13. Add Bedrock screening retry logic (3 retries, exponential backoff)
-14. ~~Add GIF/WebP → PNG conversion~~ — Removed: only PNG/JPEG accepted (no native image dependency)
-15. Add inline upload path to `create-task-core.ts` (base64 → magic bytes → dimension check → screen with retry → S3 with versioning)
+14. ~~Add conversion of GIF and WebP to PNG~~. Removed, because only PNG and JPEG are accepted (no native image dependency)
+15. Add inline upload path to `create-task-core.ts` (in this order: base64, magic bytes, dimension check, screen with retry, S3 with versioning)
 16. Add SHA-256 checksum computation at upload time (stored in AttachmentRecord, required by factory)
 17. Add partial failure cleanup with proper `DeleteObjects` error handling and metrics
 18. Add `attachments` field to `TaskRecord`
@@ -1607,7 +1607,7 @@ The implementation is ordered to deliver value incrementally while maintaining s
 ### Phase 2: Presigned upload + state machine (large attachments)
 
 23. Add `PENDING_UPLOADS` to `task-status.ts` (status, transitions, `PRE_ACTIVE_STATUSES` classification)
-24. Update all code paths that assume binary status classification (active vs terminal) — see [Impact on existing code](#impact-on-existing-code-that-assumes-binary-status-classification)
+24. Update all code paths that assume binary status classification (active vs terminal), see [Impact on existing code](#impact-on-existing-code-that-assumes-binary-status-classification)
 25. Add `confirm-uploads` Lambda (1024 MB, 180s timeout) with parallel screening (concurrency 3), internal deadline timer, per-attachment screening state
 26. Add `POST /v1/tasks/{task_id}/confirm-uploads` API endpoint with concurrent-call safety (early short-circuit, conditional DynamoDB write for both success and failure paths)
 27. Move concurrency increment from create-task to confirm-uploads for presigned-upload tasks
@@ -1623,16 +1623,16 @@ The implementation is ordered to deliver value incrementally while maintaining s
 34. Add `AttachmentConfig` and `PreparedAttachment` Pydantic models to agent `models.py` (with validators, `s3_version_id` required, `checksum_sha256` required as lowercase hex)
 35. Add attachment download from S3 with pinned `VersionId` (via IAM role) and mandatory SHA-256 integrity verification
 36. Add multimodal content blocks for image attachments in agent prompt
-37. Add token budget accounting with resize-aware formula matching Anthropic docs (1568px cap, 28px tile padding, 1568 token cap, 1.2x safety margin), with conservative `MAX_IMAGE_TOKENS` fallback when dimensions are unparseable (non-fatal — avoids rejecting valid images with unusual JPEG encoders)
-38. Add `AttachmentBudgetExceededError` (extends `AttachmentError` base class — already caught by hydration re-throw list from Phase 1 step 10)
+37. Add token budget accounting with resize-aware formula matching Anthropic docs (1568px cap, 28px tile padding, 1568 token cap, 1.2x safety margin), with conservative `MAX_IMAGE_TOKENS` fallback when dimensions are unparseable (non-fatal, avoids rejecting valid images with unusual JPEG encoders)
+38. Add `AttachmentBudgetExceededError` (extends `AttachmentError` base class, already caught by hydration re-throw list from Phase 1 step 10)
 39. Add agent capability check in orchestrator (fail task if agent doesn't support attachments)
 40. Add parity test: `AgentAttachmentPayload` fields match `AttachmentConfig` fields (including `s3_version_id` and `checksum_sha256`)
 
 ### Phase 4: URL fetch + channels
 
-41. Add URL fetch in orchestrator hydration with full SSRF suite (manual DNS resolve → IP check → connect to resolved IP via undici; differentiated error messages: "DNS failed" vs "SSRF blocked")
+41. Add URL fetch in orchestrator hydration with full SSRF suite (manual DNS resolve, then IP check, then connect to the resolved IP through undici), with differentiated error messages ("DNS failed" vs "SSRF blocked")
 42. Add `--attachment` flag to `bgagent submit` (auto-detect file vs URL, size-based routing to inline vs presigned, URL attachment polling)
-43. Add Slack file extraction in `slack-events.ts` with atomic failure semantics (consistent with design principle 3 — all-or-nothing)
+43. Add Slack file extraction in `slack-events.ts` with atomic failure semantics (all-or-nothing, consistent with design principle 3)
 44. Add Linear image URL extraction in `linear-webhook-processor.ts`
 
 **Security included in Phase 4:** Full SSRF protection suite with DNS resolution pinning (TOCTOU mitigation).
@@ -1644,5 +1644,5 @@ The implementation is ordered to deliver value incrementally while maintaining s
 47. Add alerting on `OrphanedAttachmentCleanupFailure` and `PendingUploadExpired`
 48. Add comprehensive integration tests (all upload paths, all failure modes, all channels, concurrent confirm-uploads, auto-cancel racing with confirm-uploads)
 49. Add load testing for screening pipeline (sustained 10-attachment tasks at peak rate)
-50. ~~Add monitoring for sharp native module health~~ — Removed: no native image dependencies
-51. ~~Add monitoring for format conversion size expansion~~ — Removed: no format conversion
+50. ~~Add monitoring for sharp native module health~~. Removed, because there are no native image dependencies
+51. ~~Add monitoring for format conversion size expansion~~. Removed, because there is no format conversion

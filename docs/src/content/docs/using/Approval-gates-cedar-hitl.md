@@ -2,23 +2,23 @@
 title: "Approval gates (Cedar HITL)"
 ---
 
-The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, ...) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly-marked set of rules, the decision is **require-approval**: the agent pauses, the task transitions to `AWAITING_APPROVAL`, and you are asked to make the call.
+The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, and others) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly marked set of rules, the decision is **require-approval**. The agent pauses, the task transitions to `AWAITING_APPROVAL`, and the platform asks you to decide.
 
-The mechanism is Cedar HITL gates — "Human-In-The-Loop." It is the same policy language you can already author at the blueprint level, with one added annotation (`@tier("soft")`) that flips a rule from hard-deny to require-approval.
+The mechanism is called Cedar HITL gates. HITL stands for "Human-In-The-Loop". The gates use the same policy language that you can already author at the blueprint level, with one added annotation, `@tier("soft")`, that changes a rule from hard-deny to require-approval.
 
-For the full design and guarantees (atomicity, fail-closed posture, timeout semantics, late-approval handling), see [Cedar HITL gates design doc](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). For writing policies, see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
+For the full design and its guarantees (atomicity, fail-closed posture, timeout semantics, and late-approval handling), see the [Cedar HITL gates design doc](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). To write policies, see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
 
 ### When a gate fires
 
 When a rule marked `@tier("soft")` matches a tool call:
 
 1. The agent stops before invoking the tool.
-2. A row is atomically written to the approvals table and the task status flips to `AWAITING_APPROVAL`.
-3. A progress event (`approval_requested`) is emitted so `bgagent watch` shows the gate in real time.
-4. The task waits for your decision up to the rule's timeout (default 300 s, configurable per-rule and per-task).
-5. On approval, the agent proceeds; on denial, the deny reason is best-effort injected back into the agent's context so it can adapt; on timeout, the gate is treated as a denial with `timed_out` as the reason.
+2. A row is written atomically to the approvals table, and the task status changes to `AWAITING_APPROVAL`.
+3. A progress event (`approval_requested`) is emitted, so that `bgagent watch` shows the gate in real time.
+4. The task waits for your decision up to the rule's timeout (default 300 s, configurable per rule and per task).
+5. On approval, the agent proceeds. On denial, the deny reason is injected back into the agent's context on a best-effort basis, so that the agent can adapt. On timeout, the gate is treated as a denial with `timed_out` as the reason.
 
-A decision is recorded at most once per request. Replaying approve/deny on the same `(task_id, request_id)` is idempotent.
+A decision is recorded at most once per request. A repeated approve or deny on the same `(task_id, request_id)` is idempotent.
 
 ### Listing pending approvals
 
@@ -26,7 +26,7 @@ A decision is recorded at most once per request. Replaying approve/deny on the s
 node lib/bin/bgagent.js pending
 ```
 
-Lists every approval across your tasks that is currently awaiting your decision. The default text output gives you the `request_id`, tool, severity, the reason the rule matched, the tool-input preview, the expiry time, and ready-to-run `approve` / `deny` command lines. Pipe through `--output json` for scripting.
+The command lists every approval across your tasks that currently awaits your decision. The default text output gives you the `request_id`, the tool, the severity, the reason the rule matched, the tool-input preview, the expiry time, and ready-to-run `approve` and `deny` command lines. Use `--output json` for scripting.
 
 ```text
 1 pending approval(s):
@@ -52,20 +52,20 @@ node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope rule:force_push_a
 node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID> --scope all_session --yes
 ```
 
-The `--scope` flag controls how long the approval carries forward within the running task:
+The `--scope` flag controls how far the approval extends within the running task:
 
 | Scope | Effect |
 |---|---|
 | `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
-| `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
+| `tool_type_session` | Approves every call to the same tool type (for example `Bash`) for the rest of this task. |
 | `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
 | `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`tool_group:file_write` covers `Edit` and `Write`). For a tool that is in no group, `tool_group_session` covers that call only. |
-| `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
-| `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
+| `bash_pattern:<glob>` | Approves Bash commands matching a glob (for example `bash_pattern:pytest*`). |
+| `write_path:<glob>` | Approves Write and Edit calls whose target path matches the glob (for example `write_path:tests/**`). |
 | `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
-| `all_session` | Nuclear option — approves every subsequent gate in the task. Requires `--yes`. |
+| `all_session` | The broadest scope. Approves every subsequent gate in the task. Requires `--yes`. |
 
-Approvals only affect the current task; they do not persist across tasks.
+Approvals affect only the current task. They do not persist across tasks.
 
 ### Denying a gate
 
@@ -75,7 +75,7 @@ node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason "run the migration 
 node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
 ```
 
-The optional `--reason` text is sanitized and truncated server-side, then best-effort injected into the agent's Stop-hook context so it can adapt (try a different approach, ask you a question, or stop gracefully) instead of retrying blindly. Use `--reason-file` when the reason is multi-line and would otherwise require careful shell quoting.
+The optional `--reason` text is sanitized and truncated server-side, then injected into the agent's Stop-hook context on a best-effort basis. With the reason, the agent can adapt (try a different approach, ask you a question, or stop cleanly) instead of retrying without guidance. Use `--reason-file` when the reason has several lines and would otherwise need careful shell quoting.
 
 A deny tells the agent to stop trying that kind of action, not only that one call. With the refused call the agent gets your reason, the name of the rule that gated the call, and an instruction not to retry the action with variations. It has to find another way to do the task, or report why it is blocked.
 
@@ -95,11 +95,11 @@ node lib/bin/bgagent.js policies list --repo owner/repo --tier soft
 node lib/bin/bgagent.js policies show --repo owner/repo --rule force_push_any
 ```
 
-`policies list` prints both tiers: **hard-deny** rules are absolute (even `--pre-approve` cannot bypass them), **soft-deny** rules are the approvable ones. `policies show` prints the full detail for a specific rule (severity, timeout, category, summary).
+`policies list` prints both tiers. **Hard-deny** rules are absolute, and even `--pre-approve` cannot bypass them. **Soft-deny** rules are the rules you can approve. `policies show` prints the full detail of a specific rule (severity, timeout, category, and summary).
 
 ### Pre-approving scopes at submit time
 
-If you trust a task to make a certain class of changes without interactive confirmation, pre-approve them up front:
+If you trust a task to make a certain class of changes without interactive confirmation, pre-approve that class when you submit:
 
 ```bash
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
@@ -110,9 +110,9 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
-`--pre-approve` can be repeated up to 20 times. Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+`--pre-approve` can be repeated up to 20 times. Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced. `--pre-approve` bypasses only soft-deny rules.
 
-`--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+`--approval-timeout` sets the task-wide default. A rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
 
 For Lambda MicroVM tasks, a waiting approval can put the worker to sleep so it
 stops billing compute. With the defaults (a 300-second approval window and a
@@ -120,7 +120,7 @@ stops billing compute. With the defaults (a 300-second approval window and a
 answer, or 60 seconds before the deadline so a timeout is still recorded
 normally. `--microvm-sleep-after 120` selects two minutes and
 `--microvm-sleep-after off` keeps the worker awake. The delay starts when each
-approval request is created; sleep never extends the approval deadline. The API
+approval request is created. Sleep never extends the approval deadline. The API
 equivalent is `microvm_sleep_after_s` (zero means off), and task details return
 the saved setting. Automatic sleep is disabled by default for new deployments.
 An operator enables it after [verifying the deployed image and

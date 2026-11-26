@@ -5,9 +5,9 @@
 
 ## Context
 
-Multiple agents working on related features in the same area must serialize — one waits for the other to merge. Incomplete features either block the main branch or require long-lived branches that diverge. SRE needs kill switches without reverting commits.
+Multiple agents that work on related features in the same area must serialize. One waits for the other to merge. Incomplete features either block the main branch or require long-lived branches that diverge. SRE needs kill switches that do not require reverting commits.
 
-Feature flags enable trunk-based development where incomplete work merges safely behind toggles, and concurrent contributors avoid blocking each other.
+Feature flags enable trunk-based development, in which incomplete work merges safely behind toggles and concurrent contributors do not block each other.
 
 ## Decision
 
@@ -30,18 +30,18 @@ Feature flags enable trunk-based development where incomplete work merges safely
 
 ### Separation of concerns
 
-- **Planners** decide which features get flags (issue/RFC level)
-- **Implementors** add/use flags in code (PR level)
-- **SRE/operators** toggle flags in production (runtime level)
-- **No self-approval** — the person who introduces a flag cannot approve its removal
+- **Planners** decide which features get flags (issue or RFC level).
+- **Implementors** add and use flags in code (PR level).
+- **SRE and operators** toggle flags in production (runtime level).
+- **No self-approval.** The person who introduces a flag cannot approve its removal.
 
 ### Flag lifecycle
 
-1. **Proposed** — issue identifies the need for a flag
-2. **Introduced** — PR adds the flag (default: off)
-3. **Active** — feature behind flag is in development
-4. **Verified** — feature complete, flag toggled on in testing
-5. **Permanent** — flag removed, feature is always-on (or removed entirely)
+1. **Proposed.** An issue identifies the need for a flag.
+2. **Introduced.** A PR adds the flag (default: off).
+3. **Active.** The feature behind the flag is in development.
+4. **Verified.** The feature is complete, and the flag is toggled on in testing.
+5. **Permanent.** The flag is removed, and the feature is always on (or removed entirely).
 
 ### Lifecycle metadata
 
@@ -59,16 +59,16 @@ Each flag must track:
 
 ### Maximum lifetime
 
-Flags must be removed within the declared max lifetime (default: 4 weeks) of the feature being verified. The max lifetime can be overridden per-flag with justification in the issue. Stale flags are treated as technical debt and surfaced in periodic reviews.
+Flags must be removed within the declared max lifetime (default: 4 weeks) of the feature being verified. The max lifetime can be overridden for a single flag, with a justification in the issue. Stale flags are treated as technical debt and surfaced in periodic reviews.
 
 ### Mechanism constraint
 
-Flags MUST be resolvable at synth time for infrastructure flags and at runtime for behavior flags. The specific storage mechanism (CDK context, DynamoDB, SSM Parameter Store, env vars) is context-dependent and follows from this split — it is not prescribed by this ADR.
+Infrastructure flags MUST be resolvable at synth time, and behavior flags MUST be resolvable at runtime. The specific storage mechanism (CDK context, DynamoDB, SSM Parameter Store, env vars) depends on the context and follows from this split. This ADR does not prescribe it.
 
 ## Consequences
 
 - (+) Concurrent work proceeds without blocking
-- (+) Trunk-based development: main stays deployable
+- (+) Trunk-based development keeps main deployable
 - (+) SRE can disable features without code changes
 - (+) Partial features merge safely
 - (-) Flag management overhead
@@ -77,6 +77,6 @@ Flags MUST be resolvable at synth time for infrastructure flags and at runtime f
 
 ## References
 
-- Issue #137 — full RFC with open questions on mechanism (CDK context vs. DynamoDB vs. env vars)
-- ADR-003 — governance (flag introduction requires approval)
-- ADR-005 — feedback loop (reviewer may flag-gate a feature during review)
+- Issue #137, the full RFC with open questions on the mechanism (CDK context, DynamoDB, or env vars)
+- ADR-003, governance (flag introduction requires approval)
+- ADR-005, the feedback loop (a reviewer may flag-gate a feature during review)

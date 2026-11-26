@@ -2,7 +2,7 @@
 title: "Per-repo overrides"
 ---
 
-Blueprints can configure per-repository settings that override platform defaults. For how `model_id` is layered against the platform default, per-task overrides, and the IAM invoke allowlist — plus the cost tradeoffs of picking a different model — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).
+Blueprints can configure per-repository settings that override platform defaults. [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) explains how `model_id` is layered against the platform default, per-task overrides, and the IAM invoke allowlist. It also covers the cost tradeoffs of picking a different model.
 
 | Setting | Description | Default |
 |---|---|---|
@@ -10,28 +10,28 @@ Blueprints can configure per-repository settings that override platform defaults
 | `runtime_arn` | AgentCore runtime ARN override | Platform default |
 | `model_id` | Bedrock inference-profile ID (geo-prefixed, matching the deployment's `bedrockGeoRegion`) | `global.anthropic.claude-opus-5-5` |
 | `max_turns` | Default turn limit for tasks | 100 |
-| `max_budget_usd` | Default cost budget in USD per task, `0.01`–`100` (Blueprint `agent.maxBudgetUsd`) | None (unlimited) |
-| `memory_token_budget` | Token budget for the memory context (repository knowledge and past task episodes) loaded into the agent's prompt; a positive integer (Blueprint `agent.memoryTokenBudget`) | 2000 |
+| `max_budget_usd` | Default cost budget in USD per task, `0.01` to `100` (Blueprint `agent.maxBudgetUsd`) | None (unlimited) |
+| `memory_token_budget` | Token budget for the memory context (repository knowledge and past task episodes) loaded into the agent's prompt. A positive integer (Blueprint `agent.memoryTokenBudget`) | 2000 |
 | `system_prompt_overrides` | Additional system prompt instructions | None |
 | `github_token_secret_arn` | Per-repo GitHub token (Secrets Manager ARN) | Platform default |
-| `poll_interval_ms` | Poll interval for awaiting completion (5000–300000) | 30000 |
+| `poll_interval_ms` | Poll interval for awaiting completion (5000 to 300000) | 30000 |
 
-> `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.9.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs` — see the [Deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#lambda-microvms-backend-experimental).
+> `lambda-microvm` is **experimental** and requires operator setup (a re-bootstrap to policy bundle ≥ 1.9.0 and a supported Region) before a repo can select it. Keep production repos on `agentcore` or `ecs`. See the [Deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#lambda-microvms-backend-experimental).
 
-When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) is used. The same override pattern applies to `--max-budget` / `max_budget_usd`, except there is no platform default  - if neither the task nor the Blueprint specifies a budget, no cost limit is applied.
+When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value takes precedence over the Blueprint default. If neither is specified, the platform default (100) applies. The same override pattern applies to `--max-budget` and `max_budget_usd`, except that there is no platform default. If neither the task nor the Blueprint specifies a budget, the platform applies no cost limit.
 
-`memory_token_budget` has no per-task override: the value in the repository's record applies to every task on it, and the platform default (2000) applies to a repository whose record has none. The budget trims what context hydration retrieves from memory (at most five knowledge records and three episodes); it does not retrieve more. A value that is not a positive integer fails at CDK synth. `bgagent repo show <owner/repo>` prints the value in effect.
+`memory_token_budget` has no per-task override. The value in the repository's record applies to every task on the repository, and the platform default (2000) applies to a repository whose record has none. The budget trims what context hydration retrieves from memory (at most five knowledge records and three episodes). It does not retrieve more. A value that is not a positive integer fails at CDK synth. `bgagent repo show <owner/repo>` prints the value in effect.
 
 ### Removing a per-repo override
 
-Deleting an override from the Blueprint and redeploying does not remove it. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value: a deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) are removed from the record when the Blueprint stops declaring them.
+If you delete an override from the Blueprint and redeploy, the override stays. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value. A deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) are removed from the record when the Blueprint stops declaring them.
 
 `bgagent repo onboard` has no option that removes a setting. When you run it again for an onboarded repository, it keeps the stored value of every option you leave out, and a stored `max_budget_usd` or `memory_token_budget`.
 
 To change an override, set the new value in the Blueprint and redeploy. To remove one, so that the platform default applies again:
 
 1. Delete the setting from the Blueprint. Otherwise the next deploy writes it back.
-2. Remove the attribute from the repository's record. The table is the `RepoTableName` stack output (`bgagent platform outputs` prints it), and the attribute has the name of the setting in the table above; the design document linked below names the attributes that are not in that table. The condition makes a mistyped repository name fail instead of writing a new, empty record:
+2. Remove the attribute from the repository's record. The table is the `RepoTableName` stack output (`bgagent platform outputs` prints it), and the attribute has the name of the setting in the table above. The design document linked below names the attributes that are not in that table. The condition makes a mistyped repository name fail instead of writing a new, empty record:
 
    ```bash
    aws dynamodb update-item \
@@ -44,23 +44,23 @@ To change an override, set the new value in the Blueprint and redeploy. To remov
 
    The command prints the value it removed. No output means that the record had no attribute of that name.
 
-3. Run `bgagent repo show <owner/repo>`: the setting is no longer marked `(per-blueprint override)`. `bgagent repo show` does not list `build_command` or `lint_command`: for these two, the output of step 2 is the check.
+3. Run `bgagent repo show <owner/repo>`. The setting is no longer marked `(per-blueprint override)`. `bgagent repo show` does not list `build_command` or `lint_command`. For these two, the output of step 2 is the check.
 
 The change applies to tasks submitted after it. A task that is already running keeps the values it started with. [Repository onboarding](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding#blueprint-construct) lists every attribute that behaves this way and explains why a redeploy leaves them alone.
 
 ### Where can I set `max_budget_usd`?
 
-Every place a per-task runtime budget can come from:
+These are all the places a per-task runtime budget can come from:
 
-| Surface | How | Scope | Notes |
+| Source | How | Scope | Notes |
 |---|---|---|---|
-| Per task, CLI | `bgagent submit --max-budget <dollars>` | One task | Range `0.01`–`100`; rejected client-side before the request is sent |
-| Per task, REST | `max_budget_usd` in the `POST /v1/tasks` body | One task | Same `0.01`–`100` range, validated server-side |
-| Per repo, Blueprint | `agent.maxBudgetUsd` on the repo's `Blueprint` construct | Every task on that repo | Persisted to `RepoTable.max_budget_usd`; same `0.01`–`100` range, enforced at CDK synth so an out-of-range value cannot deploy |
-| Local batch runs | `MAX_BUDGET_USD` shell env | One local run | **Local `entrypoint.py` batch mode only.** The deployed AgentCore **server** mode ignores this variable — it reads the budget from the `/invocations` request body, so setting it on the runtime has no effect |
+| Per task, CLI | `bgagent submit --max-budget <dollars>` | One task | Range `0.01` to `100`. An out-of-range value is rejected client-side before the request is sent |
+| Per task, REST | `max_budget_usd` in the `POST /v1/tasks` body | One task | Same `0.01` to `100` range, validated server-side |
+| Per repo, Blueprint | `agent.maxBudgetUsd` on the repo's `Blueprint` construct | Every task on that repo | Persisted to `RepoTable.max_budget_usd`. Same `0.01` to `100` range, enforced at CDK synth, so an out-of-range value cannot deploy |
+| Local batch runs | `MAX_BUDGET_USD` shell env | One local run | **Local `entrypoint.py` batch mode only.** The deployed AgentCore **server** mode ignores this variable. It reads the budget from the `/invocations` request body, so setting the variable on the runtime has no effect |
 | Platform-wide per-task default | — | — | **None exists.** Unset means unlimited (see below) |
 
-The two that apply to a deployed task resolve in this order: **per-task value wins, then the repo's Blueprint default, then no budget at all.** A mid-task Blueprint edit does not move a running task's budget.
+The two that apply to a deployed task resolve in this order: **the per-task value wins, then the repo's Blueprint default, then no budget at all.** A Blueprint edit during a task does not change the budget of the running task.
 
 Administrators set the Blueprint default in the CDK stack:
 
@@ -72,26 +72,26 @@ new Blueprint(this, 'MyRepo', {
 });
 ```
 
-Run `bgagent repo show <owner/repo>` to see which value is in effect; the `max_budget_usd` line reads `(per-blueprint override)` when the repo pins one and `(platform default) unlimited` when it does not. Deleting `agent.maxBudgetUsd` from the Blueprint does not lift the budget: see [Removing a per-repo override](#removing-a-per-repo-override).
+Run `bgagent repo show <owner/repo>` to see which value is in effect. The `max_budget_usd` line reads `(per-blueprint override)` when the repo sets one and `(platform default) unlimited` when it does not. Deleting `agent.maxBudgetUsd` from the Blueprint does not remove the budget. See [Removing a per-repo override](#removing-a-per-repo-override).
 
 ### Per-task budgets are unlimited by default
 
-There is intentionally no platform-wide **per-task runtime** ceiling. A hard runtime cap kills a long-running task mid-change — the failure mode is a half-finished branch and no PR. The intended runtime controls are the per-repo Blueprint default above, the per-task flag, and `max_turns`. Administrators can separately configure monthly user/team admission budgets below; those reject new work instead of interrupting work already in progress.
+By design, there is no platform-wide **per-task runtime** ceiling. A hard runtime cap stops a long-running task in the middle of a change, and the result is a half-finished branch and no PR. The intended runtime controls are the per-repo Blueprint default above, the per-task flag, and `max_turns`. Separately, administrators can configure the monthly user and team admission budgets described below. Those budgets reject new work instead of interrupting work already in progress.
 
-The documented escape hatch for cost is **choosing a lighter-token model** rather than relying on a cap:
+The documented way to reduce cost is to **choose a lighter-token model** instead of relying on a cap:
 
-- **Per repo:** Blueprint `agent.modelId` — no code change and no agent redeploy
-- **Per task:** `model_id` in the task payload
+- **Per repo.** Set Blueprint `agent.modelId`. This needs no code change and no agent redeploy.
+- **Per task.** Set `model_id` in the task payload.
 
-The model you pick must be in the platform's Bedrock IAM grant list, or the task fails at turn 0 with `AccessDenied` — the grant is the gate, so a lighter model is only reachable if it has been granted. For how the model layers resolve, the grant list, and the measured cost comparison, see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).
+The model you pick must be in the platform's Bedrock IAM grant list, or the task fails at turn 0 with `AccessDenied`. You can use a lighter model only if the grant list includes it. For how the model layers resolve, the grant list, and the measured cost comparison, see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).
 
-Note that the reported `cost_usd` is a client-side estimate, not authoritative billing — see [Cost attribution](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution).
+The reported `cost_usd` is a client-side estimate, not authoritative billing. See [Cost attribution](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution).
 
 ### Monthly user and team budgets
 
 Operators can set recurring monthly USD limits for a Cognito user or team. Team IDs are Cognito group names, and every configured group budget applies to each member. Standard users can inspect their personal limit but cannot change it or view other users' budgets.
 
-For the lowest-overhead organization-wide control, create one Cognito group such as `Everyone`, add every existing user, and make group assignment part of the new-user onboarding process. The budget command validates an existing group; it does not create the group or manage membership.
+For the lowest-overhead organization-wide control, create one Cognito group such as `Everyone`, add every existing user, and make group assignment part of the new-user onboarding process. The budget command validates that the group exists. It does not create the group or manage membership.
 
 ```bash
 # One shared organization pool. Every member contributes to the same limit.
@@ -113,14 +113,14 @@ bgagent budget status --me
 bgagent budget status --me --output json
 ```
 
-`budget set` and operator-scoped `budget status` use AWS credentials and discover `BudgetTableName` and `UserPoolId` from the deployed CloudFormation stack. A user may be supplied by email or Cognito username/subject; a team must already exist as a Cognito group. Running `budget set` again replaces the recurring limit and enables or disables the hard stop for that scope.
+`budget set` and operator-scoped `budget status` use AWS credentials and discover `BudgetTableName` and `UserPoolId` from the deployed CloudFormation stack. You can identify a user by email, Cognito username, or Cognito subject. A team must already exist as a Cognito group. Running `budget set` again replaces the recurring limit and enables or disables the hard stop for that scope.
 
-`budget status --me` is different: it uses the caller's cached Cognito login and the authenticated REST API, requires no operator AWS credentials, and never permits mutation. It reports personal estimated spend even when no personal limit is configured. Team and organization budgets are not exposed by this view and may still block new work.
+`budget status --me` is different. It uses the caller's cached Cognito login and the authenticated REST API, requires no operator AWS credentials, and never permits a change. It reports personal estimated spend even when no personal limit is configured. This view does not show team and organization budgets, and those budgets may still block new work.
 
-Monthly accounting uses terminal task `cost_usd` estimates and UTC calendar months. A task is attributed to its submitting user and the user's Cognito groups captured when the task was created. Failed tasks count when they report a positive cost. Running tasks do not count until they finish, so concurrent or long-running work can overshoot a limit.
+Monthly accounting uses the `cost_usd` estimates of terminal tasks and UTC calendar months. A task is attributed to the user who submitted it and to that user's Cognito groups as captured when the task was created. Failed tasks count when they report a positive cost. Running tasks do not count until they finish, so concurrent or long-running work can overshoot a limit.
 
-At 80% and 100%, each scope claims a CloudWatch threshold metric for the UTC month. The metric is emitted before the claim is persisted so a crash cannot permanently suppress an alert; a concurrent or crash retry can rarely emit a harmless duplicate. The aggregate threshold alarms notify the shared `OperationalAlerts` SNS topic; simultaneous scope crossings may be coalesced into one alarm notification, so inspect the `OrchestrationReconciler` Lambda logs for exact scope and spend details. `--hard-stop` rejects new task creation at 100% with `429 BUDGET_EXCEEDED`. Existing tasks, same-user idempotent replays, and tasks already awaiting upload confirmation are not interrupted.
+At 80% and 100%, each scope claims a CloudWatch threshold metric for the UTC month. The platform emits the metric before it persists the claim, so a crash cannot permanently suppress an alert. In rare cases, a concurrent retry or a retry after a crash can emit a harmless duplicate. The aggregate threshold alarms notify the shared `OperationalAlerts` SNS topic. Simultaneous scope crossings may be coalesced into one alarm notification, so inspect the `OrchestrationReconciler` Lambda logs for the exact scope and spend. `--hard-stop` rejects new task creation at 100% with `429 BUDGET_EXCEEDED`. It does not interrupt existing tasks, same-user idempotent replays, or tasks that already await upload confirmation.
 
 Like `max_budget_usd`, monthly spend is based on the Claude Agent SDK's estimated `cost_usd`, not the AWS invoice. Use AWS Cost Explorer or CUR 2.0 for authoritative financial controls.
 
-Administrative overhead is one budget command per controlled scope. A single `Everyone` group needs one initial bulk membership pass and one group assignment for each new user; the recurring limit and UTC-month reset require no monthly maintenance. See [Cost attribution](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#setting-up-cost-controls) for the setup checklist and incremental AWS cost.
+Administrative overhead is one budget command per controlled scope. A single `Everyone` group needs one initial bulk membership pass and one group assignment for each new user. The recurring limit and UTC-month reset require no monthly maintenance. See [Cost attribution](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#setting-up-cost-controls) for the setup checklist and incremental AWS cost.

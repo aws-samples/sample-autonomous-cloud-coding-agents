@@ -1,30 +1,30 @@
 # Contributing Guidelines
 
-Thank you for your interest in contributing. Whether it's a bug report, new feature, or documentation improvement, we value contributions from the community.
+Thank you for your interest in contributing. We value bug reports, new features, and documentation improvements from the community.
 
 ## Reporting bugs and requesting features
 
-Use the [GitHub issue tracker](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) to report bugs or suggest features. Before filing, check [existing open](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) and [recently closed](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues?q=is%3Aissue%20state%3Aclosed) issues. For bug reports, include reproduction steps, expected vs actual behavior, and your environment details.
+Use the [GitHub issue tracker](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) to report bugs or suggest features. Before filing, check [existing open](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) and [recently closed](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues?q=is%3Aissue%20state%3Aclosed) issues. In a bug report, include reproduction steps, the expected and the actual behavior, and your environment details.
 
 ## Contributing code
 
 ### 1. Open an issue first
 
-Describe what you intend to contribute. This avoids duplicate work and gives maintainers a chance to provide early feedback on approach.
+Describe what you intend to contribute. An issue avoids duplicate work and lets maintainers give early feedback on the approach.
 
 ### 2. Set up your environment
 
 Follow the [Quick Start](./docs/guides/QUICK_START.mdx) to clone, install, and build the project. See the [Developer guide](./docs/guides/DEVELOPER_GUIDE.md) for local testing and the development workflow.
 
-Use **[AGENTS.md](./AGENTS.md)** to understand where to make changes (CDK vs CLI vs web console vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `web/`, `agent/`, and `docs/`.
+Use [AGENTS.md](./AGENTS.md) to understand where to make changes (CDK, CLI, web console, agent, or docs), which tests to extend, and which pitfalls are common (generated docs, mirrored API types, `mise` tasks). Package-specific detail is in the `AGENTS.md` files under `cdk/`, `cli/`, `web/`, `agent/`, and `docs/`.
 
 ### 3. Implement your change
 
 Guidelines:
 
-- One logical change per pull request. Related changes (e.g. a feature + its tests) are fine together; unrelated changes should be separate PRs.
+- One logical change per pull request. Related changes, such as a feature and its tests, are fine together. Put unrelated changes in separate PRs.
 - Every change requires a unit test. Tests live alongside the code they cover (`cdk/test/` mirrors `cdk/src/`, `agent/tests/`, `cli/test/`).
-- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python, shellcheck for shell scripts); an ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`), and `mise run lint` runs the lint and type checks of agent, cdk, cli and web, and the agent's dead-code check, the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web, and in the agent `# pragma: no cover` and `# pragma: no branch` have no effect: test the code, or leave it counted as uncovered.
+- Follow the code style around you. Linters run on every PR: ESLint for TypeScript, Ruff for Python, and shellcheck for shell scripts. An ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`). `mise run lint` runs the lint and type checks of agent, cdk, cli and web, and the agent's dead-code check, the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web. In the agent, `# pragma: no cover` and `# pragma: no branch` have no effect. Test the code, or leave it counted as uncovered.
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match, and `web/src/core/api/types.ts` where the console mirrors the type. `mise run check:types-sync` fails the build on drift.
 - If you change docs sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, `CONTRIBUTING.md`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
@@ -44,7 +44,7 @@ Closes #123
 ```
 
 Rules:
-- Title format: `feat(module):`, `fix(module):`, or `chore(module):` - lowercase, no period at the end.
+- Title format: `feat(module):`, `fix(module):`, or `chore(module):`. Use lowercase and no period at the end.
 - Body: describe the motivation (why, not what). Reference issues with `Fixes #xxx` or `Closes #xxx`.
 - Breaking changes: add `BREAKING CHANGE: description` at the end of the body.
 
@@ -54,7 +54,7 @@ Rules:
 - The PR title and description become the squash commit message, so keep them accurate throughout the review.
 - The CI `build` workflow runs `mise run install` then `mise run build` (lint, type checks and tests of every package, the CDK synth, the docs build, and the drift and file-hygiene checks). The security scans run in a second required workflow, as the job `Secrets, deps, and workflow scan`.
 - Iterate on review feedback by pushing new commits to the same branch. Maintainers squash-merge when approved.
-- For structured reviews (human or agent), use the [`review_pr` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_pr.md) — including the **human review heuristics** (Proportionality, Coherence, Clarity, Appropriateness) for smell dimensions automation cannot catch. To review a queue of PRs in one pass, use the [`review_prs` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_prs.md), which derives a filtered work-list and runs `review_pr` across each.
+- For structured reviews by a human or an agent, use the [`review_pr` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_pr.md). It includes the **human review heuristics** (Proportionality, Coherence, Clarity, Appropriateness) for the smell dimensions that automation cannot catch. To review a queue of PRs in one pass, use the [`review_prs` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_prs.md), which derives a filtered work-list and runs `review_pr` on each PR.
 
 ### PR checklist
 
@@ -82,22 +82,22 @@ Common commands:
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
 | `mise run upgrade` | Upgrade dependencies within declared ranges (Yarn workspaces + agent `uv.lock`) |
 
-Keep settings for one machine out of the repository: mise reads an untracked `mise.local.toml` next to a `mise.toml`. Committing that file, or a `.mise.toml`, `.miserc.toml`, `.yarnrc`, `.yarnrc.yml` or `.npmrc`, in the repository root or a package directory fails `mise run check:coverage-thresholds-sync`, because such a file can change how a pinned test command runs without changing its text (the exact names and directories are `LAUNCHER_CONFIGS` in `scripts/check-coverage-thresholds-sync.ts`).
+Keep settings for one machine out of the repository. Put them in an untracked `mise.local.toml`, which mise reads next to a `mise.toml`. Committing that file, or a `.mise.toml`, `.miserc.toml`, `.yarnrc`, `.yarnrc.yml` or `.npmrc`, in the repository root or a package directory fails `mise run check:coverage-thresholds-sync`, because such a file can change how a pinned test command runs without changing its text. The exact names and directories are `LAUNCHER_CONFIGS` in `scripts/check-coverage-thresholds-sync.ts`.
 
 ### Dependency upgrades
 
-The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR labeled `auto-approve` when lockfiles change. Upgrades stay within the ranges declared in each manifest — exact pins are never rewritten, which keeps the Cedar engine parity pair (`cedarpy` / `@cedar-policy/cedar-wasm`) untouched; those move only together, by hand, with refreshed parity fixtures.
+The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR labeled `auto-approve` when lockfiles change. Upgrades stay within the ranges declared in each manifest. Exact pins are never rewritten, so the Cedar engine parity pair (`cedarpy` and `@cedar-policy/cedar-wasm`) stays untouched. Those two move only together, by hand, with refreshed parity fixtures.
 
-PRs labeled `auto-approve` are approved automatically by the `auto-approve` workflow; only apply the label to automated PRs whose changes are gated by the full build (e.g. the dependency-upgrade PRs).
+The `auto-approve` workflow approves PRs labeled `auto-approve` automatically. Apply the label only to automated PRs whose changes are gated by the full build, such as the dependency-upgrade PRs.
 
-The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `uv`, `semgrep`, `osv-scanner`, `grype`, `zizmor` and `shellcheck` are pinned to exact versions in the root `mise.toml` (`uv` and `trivy` in `agent/mise.toml`), and every workflow that installs mise pins the mise version (`version:` under `jdx/mise-action`). Nothing bumps these pins automatically: bump them by pull request, to a release that is at least 7 days old, and keep `uv` the same in both files and in the `uv` image that `agent/Dockerfile` copies from. After pulling a change to a pin, run `mise install`.
+The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `uv`, `semgrep`, `osv-scanner`, `grype`, `zizmor` and `shellcheck` are pinned to exact versions in the root `mise.toml` (`uv` and `trivy` in `agent/mise.toml`), and every workflow that installs mise pins the mise version (`version:` under `jdx/mise-action`). Nothing bumps these pins automatically. Bump them by pull request, to a release that is at least 7 days old. Keep `uv` the same in both files and in the `uv` image that `agent/Dockerfile` copies from. After you pull a change to a pin, run `mise install`.
 
 ### Git hooks
 
-`mise run install` automatically installs [prek](https://github.com/j178/prek) git hooks. These run on every commit and push:
+`mise run install` installs [prek](https://github.com/j178/prek) git hooks. The hooks run on every commit and push:
 
-- **pre-commit** - File-hygiene checks (trailing whitespace, final newline, conflict markers, YAML and JSON syntax), gitleaks on staged changes, and the checks that belong to the files you staged: ESLint and the type check (`tsc --noEmit`) for cdk, cli and web, the agent quality task for Python (it includes `ty check`), shellcheck for shell scripts, the docs sync and `astro check`, the Markdown structure lint, the docs script tests, and the drift checks for API types and shared constants. The coverage contract check runs on every commit.
-- **pre-push** - Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
+- **pre-commit.** File-hygiene checks (trailing whitespace, final newline, conflict markers, YAML and JSON syntax), gitleaks on staged changes, and the checks that belong to the files you staged. Those checks are ESLint and the type check (`tsc --noEmit`) for cdk, cli and web, the agent quality task for Python (it includes `ty check`), shellcheck for shell scripts, the docs sync and `astro check`, the Markdown structure lint, the docs script tests, and the drift checks for API types and shared constants. The coverage contract check runs on every commit.
+- **pre-push.** Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
 
 Each type-check hook runs when a TypeScript file of its package is staged and checks the whole package (`mise //cdk:typecheck`, `mise //cli:typecheck`, `mise //web:typecheck`: about 9, 5 and 2 seconds), because the compiler cannot check one file under the settings of its project.
 
@@ -109,8 +109,8 @@ If `core.hooksPath` is set outside this repository (in your global or system git
 
 The build's transaction tests use DynamoDB Local through
 `ABCA_DDB_LOCAL_ENDPOINT` (a loopback HTTP endpoint). CI starts a Docker service
-pinned by image digest and supplies its mapped port to both CDK and Python tests;
-those tests fail if `CI=true` without an endpoint. To reproduce locally, start
+pinned by image digest and supplies its mapped port to both CDK and Python tests.
+Those tests fail if `CI=true` without an endpoint. To reproduce locally, start
 DynamoDB Local with `-inMemory -sharedDb`, bind port 8000 to loopback, and run
 `ABCA_DDB_LOCAL_ENDPOINT=http://127.0.0.1:8000 mise run build`.
 
@@ -118,8 +118,8 @@ DynamoDB Local with `-inMemory -sharedDb`, bind port 8000 to loopback, and run
 
 A language server shows a type error while you write, before the commit hook does. It reports what the gate reports only when it runs the same checker with the same settings:
 
-- **TypeScript** - Use the TypeScript of the workspace (`node_modules/typescript`, the version the type-check tasks run), not the copy bundled with the editor. In VS Code that is the command **TypeScript: Select TypeScript Version**. The language server reads the `tsconfig.json` of the package a file belongs to: `cdk/src/`, `cli/src/` and the TypeScript of `web/` (`src/`, `test/`, `vite.config.ts`) are checked with the settings of the build. Files under `cdk/test/`, `cdk/scripts/`, `cli/test/` and the root `scripts/` belong to no `tsconfig.json`: the tasks that check them (`mise //cdk:typecheck`, `mise //cli:typecheck`, `mise run check:scripts`) take their settings from a file or from flags that a language server does not look for. The editor checks those files without these settings, and with TypeScript 6 it reports `describe`, `__dirname` or `node:fs` as unknown names. For them the tasks are the check.
-- **Python** - Use the language server of ty, the checker of the gate, in the version that `agent/pyproject.toml` pins: `uv run --locked ty server` in `agent/`, or the ty extension of your editor pointed at `agent/.venv/bin/ty`. Open `agent/` as a workspace folder, alone or next to the repository root in a multi-root workspace: the server reads `[tool.ty]` from the `pyproject.toml` of the workspace folder, and with the repository root as the only folder it reports the agent's own modules as unresolved imports. Another Python language server applies its own rules (Pyright, which `.claude/settings.json` enables for Claude Code, or Pylance): what it reports and what `ty check` reports can differ.
+- **TypeScript.** Use the TypeScript of the workspace (`node_modules/typescript`, the version the type-check tasks run), not the copy bundled with the editor. In VS Code that is the command **TypeScript: Select TypeScript Version**. The language server reads the `tsconfig.json` of the package a file belongs to, so `cdk/src/`, `cli/src/` and the TypeScript of `web/` (`src/`, `test/`, `vite.config.ts`) are checked with the settings of the build. Files under `cdk/test/`, `cdk/scripts/`, `cli/test/` and the root `scripts/` belong to no `tsconfig.json`. The tasks that check them (`mise //cdk:typecheck`, `mise //cli:typecheck`, `mise run check:scripts`) take their settings from a file or from flags that a language server does not look for. The editor checks those files without these settings, and with TypeScript 6 it reports `describe`, `__dirname` or `node:fs` as unknown names. For those files, the tasks are the check.
+- **Python.** Use the language server of ty, the checker of the gate, in the version that `agent/pyproject.toml` pins. Run `uv run --locked ty server` in `agent/`, or point the ty extension of your editor at `agent/.venv/bin/ty`. Open `agent/` as a workspace folder, alone or next to the repository root in a multi-root workspace. The server reads `[tool.ty]` from the `pyproject.toml` of the workspace folder, and with the repository root as the only folder it reports the agent's own modules as unresolved imports. Another Python language server, such as Pyright (which `.claude/settings.json` enables for Claude Code) or Pylance, applies its own rules. What it reports and what `ty check` reports can differ.
 
 ## Versioning
 

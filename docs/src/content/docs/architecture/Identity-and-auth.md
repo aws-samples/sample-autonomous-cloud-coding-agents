@@ -2,9 +2,9 @@
 title: "Identity and authentication — worked examples"
 ---
 
-ABCA today carries its own inbound identity (Amazon Cognito for the CLI and REST API, HMAC-SHA256 for webhooks) and resolves outbound credentials per integration through hand-rolled Secrets Manager resolvers (`resolve_github_token`, `resolve_linear_api_token`, and the Jira OAuth/Forge resolver). This doc maps each of those integration shapes onto the [Amazon Bedrock AgentCore Identity](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) primitives: workload identity, the token vault, and the three outbound flows. A contributor adding a new integration can then see which flow to pick and what the wire looks like at each hop. Every code block below is grounded in the [AgentCore developer guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) and the [CreateOauth2CredentialProvider API reference](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_CreateOauth2CredentialProvider.html); the binding decision for ABCA is captured in [ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth).
+ABCA today has its own inbound identity: Amazon Cognito for the CLI and REST API, and HMAC-SHA256 for webhooks. It resolves outbound credentials per integration through hand-written Secrets Manager resolvers (`resolve_github_token`, `resolve_linear_api_token`, and the Jira OAuth and Forge resolver). This doc maps each of those integration shapes onto the building blocks of [Amazon Bedrock AgentCore Identity](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html): workload identity, the token vault, and the three outbound flows. A contributor who adds a new integration can then see which flow to pick and what is sent at each hop. Every code block below follows the [AgentCore developer guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) and the [CreateOauth2CredentialProvider API reference](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_CreateOauth2CredentialProvider.html). [ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth) records the binding decision for ABCA.
 
-- **Use this doc for:** picking the right outbound flow (USER_FEDERATION / M2M / OBO) for a new integration, reading the principal at each hop of a webhook-triggered async agent, and seeing the Linear before/after the token vault replaces.
+- **Use this doc for:** picking the right outbound flow (USER_FEDERATION, M2M, or OBO) for a new integration, reading the principal at each hop of a webhook-triggered async agent, and seeing Linear before and after the token vault replaces its resolver.
 - **Related docs:** [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for the security boundaries and the shared-PAT limitation, [ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth) for the two-seam pluggable-auth decision, and the Authentication page (`/using/authentication`) for ABCA's current inbound auth.
 
 ## Design principle
@@ -13,30 +13,30 @@ ABCA today carries its own inbound identity (Amazon Cognito for the CLI and REST
 
 ## The model in one line
 
-- **One vault.** AgentCore Identity stores every outbound OAuth token in a managed token vault, keyed to `(workload_identity, user_id)`. Client secrets live in Secrets Manager under `arn:aws:secretsmanager:<region>:<account>:secret:bedrock-agentcore-identity!default/oauth2/<provider>*`; user access and refresh tokens live inside the vault with service-managed encryption.
-- **Two seams.** Inbound is `SigV4` (default; the end-user identity rides in the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header) or a `CUSTOM_JWT` authorizer (`Authorization: Bearer <jwt>`, identity in the `iss`+`sub` claims). They are mutually exclusive per resource and chosen at create time. Workload identity is a first-class non-human subject, not an IAM role: the IAM role still governs AWS-API access, the workload identity governs access to the vault.
-- **Three flows.** Outbound is `USER_FEDERATION` (3LO authorization code, user consents in a browser), `M2M` (client_credentials, no user), or `ON_BEHALF_OF_TOKEN_EXCHANGE` (RFC 8693 / RFC 7523, the agent acts as the inbound user against a downstream API).
+- **One vault.** AgentCore Identity stores every outbound OAuth token in a managed token vault, keyed to `(workload_identity, user_id)`. Client secrets are in Secrets Manager under `arn:aws:secretsmanager:<region>:<account>:secret:bedrock-agentcore-identity!default/oauth2/<provider>*`. User access tokens and refresh tokens are inside the vault, under service-managed encryption.
+- **Two seams.** Inbound is `SigV4` or a `CUSTOM_JWT` authorizer. `SigV4` is the default, and with it the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header carries the end-user identity. A `CUSTOM_JWT` authorizer takes `Authorization: Bearer <jwt>` and reads the identity from the `iss`+`sub` claims. The two are mutually exclusive per resource, and you choose one at create time. Workload identity is a non-human subject of its own, not an IAM role. The IAM role still governs access to AWS APIs, and the workload identity governs access to the vault.
+- **Three flows.** Outbound is `USER_FEDERATION` (3LO authorization code, user consents in a browser), `M2M` (client_credentials, no user), or `ON_BEHALF_OF_TOKEN_EXCHANGE` (RFC 8693 or RFC 7523, the agent acts as the inbound user against a downstream API).
 
 ## ABCA today
 
-The current implementation uses ABCA's own Cognito and HMAC inbound authentication, not AgentCore's inbound authorizers. Outbound credentials are selected by per-integration Secrets Manager resolvers. The AgentCore workload-access-token path is wired through the whole pipeline but stays dormant.
+The current implementation uses ABCA's own Cognito and HMAC inbound authentication, not AgentCore's inbound authorizers. Per-integration Secrets Manager resolvers select the outbound credentials. The AgentCore workload-access-token path is wired through the whole pipeline but stays dormant.
 
 | Integration | Inbound | Outbound credential | File | Scope |
 |---|---|---|---|---|
-| CLI / REST API | Cognito User Pool JWT, validated by API Gateway Cognito authorizer; handler reads `sub` as `user_id` | n/a | `using/Authentication.md` | per-user |
+| CLI / REST API | Cognito User Pool JWT, validated by API Gateway Cognito authorizer. The handler reads `sub` as `user_id` | n/a | `using/Authentication.md` | per-user |
 | Webhooks (GitHub, Linear, Jira) | HMAC-SHA256, per-integration shared secret in Secrets Manager, Lambda REQUEST authorizer | n/a | `using/Authentication.md` | per-tenant |
-| Webhook management (headless) | Platform API key **or** Cognito JWT — one unified Lambda REQUEST authorizer branches on `X-API-Key` vs `Authorization`. Keys are `bgak_<key_id>_<secret>`; the SHA-256 of the secret is stored in DynamoDB keyed by `key_id` (looked up per request), and the authorizer returns the key's owner `user_id` + scopes as context. Scoped to `webhooks:manage`. | n/a | `cdk/src/handlers/api-key-authorizer.ts` | per-user (key inherits creator's `user_id`) |
+| Webhook management (headless) | Platform API key **or** Cognito JWT. One unified Lambda REQUEST authorizer branches on whether the request carries `X-API-Key` or `Authorization`. Keys are `bgak_<key_id>_<secret>`. The SHA-256 of the secret is stored in DynamoDB keyed by `key_id` (looked up per request), and the authorizer returns the `user_id` of the key's owner and the scopes as context. Scoped to `webhooks:manage`. | n/a | `cdk/src/handlers/api-key-authorizer.ts` | per-user (key inherits creator's `user_id`) |
 | GitHub | n/a | Single shared PAT from Secrets Manager (`GITHUB_TOKEN_SECRET_ARN`), cached in `os.environ["GITHUB_TOKEN"]` | `agent/src/config.py:resolve_github_token()` | one token, all repos and users |
 | Linear | n/a | Per-workspace OAuth token (`actor=app`), DDB registry keyed by `linearWorkspaceId` → Secrets Manager, Lambda resolver refreshes within 60s of expiry | `cdk/src/handlers/shared/linear-oauth-resolver.ts` (594 LOC) + `agent/src/config.py:resolve_linear_api_token()` | per-workspace, not per-user |
-| Jira (PR #302, issue #642) | n/a | Per-tenant bundle: OAuth 3LO for inbound reads/human lookup; HMAC-signed Forge proxy for app-authored writes; 3LO write fallback only before Forge migration | `cdk/src/handlers/shared/jira-oauth-resolver.ts`, `cdk/src/handlers/shared/jira-app-actor.ts`, `agent/src/jira_reactions.py` | per-tenant |
+| Jira (PR #302, issue #642) | n/a | Per-tenant bundle: OAuth 3LO for inbound reads and human lookup, HMAC-signed Forge proxy for app-authored writes, 3LO write fallback only before Forge migration | `cdk/src/handlers/shared/jira-oauth-resolver.ts`, `cdk/src/handlers/shared/jira-app-actor.ts`, `agent/src/jira_reactions.py` | per-tenant |
 
-**The dormant AgentCore path.** ABCA runs on AgentCore Runtime and the workload-access-token (WAT) propagation path is wired through the whole pipeline but unused. The orchestrator sets `runtimeUserId` on `InvokeAgentRuntimeCommand` (`agentcore-strategy.ts:56`), holds `InvokeAgentRuntimeForUser` (`task-orchestrator.ts:288-289`), and the agent reads the `WorkloadAccessToken` header and re-injects it across the pipeline thread (`server.py:283-310, 387-413`). `bedrock-agentcore` stays in `agent/pyproject.toml` as a vestigial dependency. ADR-016 resumes this path; it does not build from scratch.
+**The dormant AgentCore path.** ABCA runs on AgentCore Runtime. The path that propagates the workload access token (WAT) is wired through the whole pipeline but unused. The orchestrator sets `runtimeUserId` on `InvokeAgentRuntimeCommand` (`agentcore-strategy.ts:58`) and holds `InvokeAgentRuntimeForUser` (`task-orchestrator.ts:429-430`). The agent reads the `WorkloadAccessToken` header and re-injects it in the pipeline thread (`server.py:214-220, 301-314`). `bedrock-agentcore` stays in `agent/pyproject.toml` as a leftover dependency. ADR-016 resumes this path and does not build a new one.
 
 > The `agent/src/config.py` comment records why the path is dormant: *"Phase 2.0a (parked) used AgentCore Identity. Phase 2.0b-O2 reads Secrets Manager directly because AgentCore Identity's USER_FEDERATION flow has an open service-side bug."* OBO reached GA in April 2026 across 14 regions, so the post-GA re-validation in ADR-016 Phase 0 is the gate that reopens this path.
 
 ## The seams
 
-Who calls whom across the three planes: the credential plane is Identity, the execution plane is Runtime, the tool plane is Gateway. Read top to bottom for one request's path.
+The table shows who calls whom across the three planes. The credential plane is Identity, the execution plane is Runtime, and the tool plane is Gateway. Read it from top to bottom to follow the path of one request.
 
 | Caller | Callee | API / payload | Credential |
 |---|---|---|---|
@@ -49,11 +49,11 @@ Who calls whom across the three planes: the credential plane is Identity, the ex
 | Gateway (internal) | Identity | `GetResourceOauth2Token` per target provider | Gateway service role |
 | Gateway | Backend | signed SigV4 or injected Bearer / API key | per target type |
 
-The WAT is the only key the agent needs. Runtime exchanges the inbound JWT for it via `GetWorkloadAccessTokenForJWT`, injects it as the `WorkloadAccessToken` payload header, and the `@requires_access_token` decorator carries it into every outbound vault call. The WAT binds `(workload_identity, end_user_identity)` and is not usable against external APIs. It only buys vault tokens.
+The WAT is the only credential the agent needs. Runtime exchanges the inbound JWT for the WAT through `GetWorkloadAccessTokenForJWT` and injects it as the `WorkloadAccessToken` payload header. The `@requires_access_token` decorator passes the WAT to every outbound vault call. The WAT binds `(workload_identity, end_user_identity)`, and external APIs do not accept it. It can be exchanged only for vault tokens.
 
 ## Example A — user-initiated 3LO (GitHub PR assistant)
 
-A user asks the agent to act on their GitHub PRs. The agent needs the user's GitHub identity, so it runs the 3LO authorization-code flow: the user consents once in a browser, AgentCore caches the token keyed to that user, and later invocations hit the cache.
+A user asks the agent to act on their GitHub PRs. The agent needs the user's GitHub identity, so it runs the 3LO authorization-code flow. The user consents once in a browser, AgentCore caches the token keyed to that user, and later invocations read the cached token.
 
 One-time setup creates the credential provider and copies the vault's callback URL into the GitHub OAuth App:
 
@@ -73,7 +73,7 @@ provider = cp.create_oauth2_credential_provider(
 # into the GitHub OAuth App's "Authorization callback URL".
 ```
 
-The agent function is decorated; the decorator injects `access_token`:
+The agent function carries the decorator, which injects `access_token`:
 
 ```python
 @requires_access_token(
@@ -89,22 +89,22 @@ async def list_my_prs(*, access_token: str):
     ...
 ```
 
-The wire flow, first call (no cached token):
+The requests on the first call, when no token is cached:
 
 1. Browser sends a Cognito JWT to Runtime.
-2. Runtime validates the JWT against `discoveryUrl`, extracts `iss`+`sub`.
-3. Runtime calls `GetWorkloadAccessTokenForJWT`, injects the WAT into the agent.
+2. Runtime validates the JWT against `discoveryUrl` and extracts `iss`+`sub`.
+3. Runtime calls `GetWorkloadAccessTokenForJWT` and injects the WAT into the agent.
 4. The decorator calls `GetResourceOauth2Token(...)`.
 5. The vault has no cached token for `(workload, cognito+user123)`, so it returns `{authorizationUrl, sessionUri}`.
-6. The decorator invokes `on_auth_url`; the user consents on `github.com`.
-7. GitHub redirects to the vault `callbackUrl` with an authorization code; AgentCore exchanges it for access + refresh tokens keyed to `(workload, cognito+user123)`.
-8. The poller calls `GetResourceOauth2Token` again with the same `sessionUri` and gets `{accessToken}`. Future invocations return the cached token, refreshing automatically.
+6. The decorator invokes `on_auth_url`, and the user consents on `github.com`.
+7. GitHub redirects to the vault `callbackUrl` with an authorization code. AgentCore exchanges the code for access and refresh tokens keyed to `(workload, cognito+user123)`.
+8. The poller calls `GetResourceOauth2Token` again with the same `sessionUri` and gets `{accessToken}`. Later invocations return the cached token, which is refreshed automatically.
 
-> **Namespace your user IDs.** Vault keys are not auto-namespaced by IdP. If two IdPs issue the same `sub`, their tokens collide. Prefix `user_id` yourself: `cognito+user123`, `auth0+user123`. This is the same IdP-namespaced form ABCA uses for log attribution (#245), so token binding and log attribution stay aligned.
+> **Namespace your user IDs.** The vault does not namespace keys by IdP. If two IdPs issue the same `sub`, their tokens collide. Prefix `user_id` yourself: `cognito+user123`, `auth0+user123`. ABCA uses the same IdP-namespaced form for log attribution (#245), so token binding and log attribution stay aligned.
 
 ## Example B — M2M scheduled job (no user)
 
-A nightly ingest fires from EventBridge at 04:00 UTC. There is no user, so there is no consent step. Use `M2M` (client_credentials): the vault returns an app token immediately and caches it until expiry.
+EventBridge starts a nightly ingest at 04:00 UTC. There is no user, so there is no consent step. Use `M2M` (client_credentials). The vault returns an app token immediately and caches it until expiry.
 
 Setup creates a workload identity manually (not Runtime-managed) and a `CustomOauth2` provider for the internal data API:
 
@@ -136,13 +136,13 @@ async def run_nightly_ingest(*, access_token: str):
     ...
 ```
 
-The seams differ from 3LO. The SDK calls `GetWorkloadAccessToken(workloadName)` with no `userToken`, using the scheduler host's ambient IAM role; the token binds to the *workload* only. The scheduler role needs `bedrock-agentcore:GetWorkloadAccessToken` on the workload-identity ARN plus `bedrock-agentcore:GetResourceOauth2Token` on the provider ARN.
+The seams differ from 3LO. The SDK calls `GetWorkloadAccessToken(workloadName)` with no `userToken` and uses the ambient IAM role of the scheduler host. The token binds to the *workload* only. The scheduler role needs `bedrock-agentcore:GetWorkloadAccessToken` on the workload-identity ARN and `bedrock-agentcore:GetResourceOauth2Token` on the provider ARN.
 
-> **Cognito as an M2M IdP.** A Cognito user pool used for M2M needs `generate_secret=true`, `client_credentials` in `allowed_oauth_flows`, and custom scopes with a resource-server prefix (for example `data-api/read`). `client_credentials` issues no refresh tokens; the vault caches the app token client-side.
+> **Cognito as an M2M IdP.** A Cognito user pool used for M2M needs `generate_secret=true`, `client_credentials` in `allowed_oauth_flows`, and custom scopes with a resource-server prefix (for example `data-api/read`). `client_credentials` issues no refresh tokens. The vault caches the app token client-side.
 
 ## Example C — OBO token exchange (Microsoft Graph)
 
-A user is logged in and the agent calls a downstream API that needs the *user's* identity (Microsoft Graph). Use `ON_BEHALF_OF_TOKEN_EXCHANGE`: the vault exchanges the inbound JWT for a downstream token scoped to that user, not to the agent.
+A user is logged in, and the agent calls a downstream API that needs the *user's* identity (Microsoft Graph). Use `ON_BEHALF_OF_TOKEN_EXCHANGE`. The vault exchanges the inbound JWT for a downstream token scoped to that user, not to the agent.
 
 ```python
 cp.create_oauth2_credential_provider(
@@ -175,16 +175,16 @@ The OBO grant maps to one of two RFCs:
 
 | Axis | RFC 8693 (Token Exchange) | RFC 7523 + Microsoft OBO |
 |---|---|---|
-| Published | Jan 2020, vendor-neutral, modern | May 2015, older; Microsoft predates 8693 and never migrated |
+| Published | Jan 2020, vendor-neutral, modern | May 2015, older. Microsoft predates 8693 and never migrated |
 | Wire grant | `urn:ietf:params:oauth:grant-type:token-exchange` | `urn:ietf:params:oauth:grant-type:jwt-bearer` |
 | Inputs | `subject_token` (the who), optional `actor_token` (who is acting) | `assertion` = inbound JWT; auto-appends `requested_token_use=on_behalf_of` |
 | AgentCore `grantType` | `TOKEN_EXCHANGE` | `JWT_AUTHORIZATION_GRANT` |
 
-The config field is `grantType`, singular. The nested actor field is `actorTokenContent`, which takes `M2M`, `AWS_IAM_ID_TOKEN_JWT`, or `NONE` and decides delegation versus impersonation. With `M2M` the issued token carries an `act` claim, a nested JWT-in-JWT recording `user ← agent`, so the audit chain stays intact. That is delegation. With `NONE` the issued token looks like the user acted directly and the audit chain is lost. That is impersonation. Pick delegation for agentic systems.
+The config field is `grantType`, singular. The nested actor field is `actorTokenContent`. It takes `M2M`, `AWS_IAM_ID_TOKEN_JWT`, or `NONE`, and its value decides between delegation and impersonation. With `M2M` the issued token carries an `act` claim, a nested JWT-in-JWT recording `user ← agent`, so the audit chain stays intact. That is delegation. With `NONE` the issued token looks like the user acted directly and the audit chain is lost. That is impersonation. Pick delegation for agentic systems.
 
 ## Example D — ticket-label → async agent
 
-A human creates a ticket and adds a label (`agent:triage` on Jira; the same shape covers the GitHub-issue-label trigger the ABCA team is discussing in #abca). Automation fires a webhook, the agent triages, comments, and maybe closes, acting on the user's behalf where write-back matters. This is the realistic trigger pattern: no interactive browser, identity arrives as webhook payload, and consent happens later when the agent calls back.
+A human creates a ticket and adds a label, `agent:triage` on Jira. The same shape covers the GitHub issue-label trigger that the ABCA team is discussing in #abca. Automation fires a webhook. The agent triages the ticket, comments, and may close it, and it acts on the user's behalf where write-back matters. This is the realistic trigger pattern. There is no interactive browser, the identity arrives as webhook payload, and consent happens later, when the agent calls back.
 
 > **Illustrative target, not the shipped Jira write path.** The flow below shows a future user-bound token-vault design. Current ABCA Jira uses 3LO only for inbound reads and human lookup. Outbound writes go to an HMAC-signed Forge web trigger, which calls Jira with `api.asApp()` so the actor is the installed `bgagent` app. The human Jira account remains task-attribution data, not the outbound credential. See [ADR-015](/sample-autonomous-cloud-coding-agents/decisions/adr-015-jira-integration).
 
@@ -222,22 +222,22 @@ The principal at each hop:
 | Runtime → agent process | Runtime-managed workload identity (SLR) | WorkloadAccessToken payload header | internal |
 | Agent → ticket REST (illustrative target) | user via 3LO cached token OR workload identity via M2M | Authorization: Bearer <user-token \| service-token> | consent-gated at the real OAuth boundary |
 
-**The honest caveat.** A plain webhook authenticates *the tenant*, not the user. The user identity (`user.accountId`) arrives as *data* in the payload, not as a verifiable credential. A malicious tenant admin could fabricate events. Treat the webhook's authenticated identity and the user identity as two different things and reconcile downstream. The real OAuth consent moment happens when the agent calls the ticket system back, not at the webhook.
+**The caveat.** A plain webhook authenticates *the tenant*, not the user. The user identity (`user.accountId`) arrives as *data* in the payload, not as a verifiable credential. A malicious tenant admin could fabricate events. Treat the webhook's authenticated identity and the user identity as two different things, and reconcile them downstream. The real OAuth consent happens when the agent calls the ticket system back, not at the webhook.
 
 Two mitigations:
 
-1. **Prefer a signed app over a plain webhook when verifiable inbound user identity is required.** An Atlassian Connect / Forge app can receive an Atlassian-signed user context. ABCA's current Jira webhook remains tenant-authenticated HMAC, while its separate Forge app is outbound-only and deliberately acts as the app rather than the triggering user.
+1. **Prefer a signed app over a plain webhook when verifiable inbound user identity is required.** An Atlassian Connect or Forge app can receive an Atlassian-signed user context. ABCA's current Jira webhook remains tenant-authenticated HMAC, while its separate Forge app is outbound-only and deliberately acts as the app rather than the triggering user.
 2. **Gate write-back on fresh consent.** If `(workload, user_id)` has no cached token, post a consent URL as a ticket comment and wait. Read-only triage can run under `M2M` with a service account.
 
-**The IAM gate on impersonation.** The dispatcher role needs `bedrock-agentcore:InvokeAgentRuntimeForUser` to send the user header. Keep two IAM statements separate, each with explicit resource ARNs: `InvokeAgentRuntime` invokes as self, `InvokeAgentRuntimeForUser` invokes while asserting a user. A too-broad policy lets any caller act as any user.
+**The IAM gate on impersonation.** The dispatcher role needs `bedrock-agentcore:InvokeAgentRuntimeForUser` to send the user header. Keep two separate IAM statements, each with explicit resource ARNs. `InvokeAgentRuntime` invokes as the caller itself, and `InvokeAgentRuntimeForUser` invokes while it asserts a user. A policy that is too broad lets any caller act as any user.
 
 > For a headless or batch variant with no user, skip OBO. Run under a manually-created workload identity, configure a service-account OAuth provider with pre-consented scopes, and use `auth_flow="M2M"` against your own IdP. Atlassian Cloud does not expose `client_credentials` to tenant apps, so proxy through a resource server rather than calling Atlassian directly.
 
 ## Example E — raw boto3 without the helper
 
-The `@requires_access_token` decorator is convenient, not required. AgentCore Identity is a standalone primitive that works on ECS and Lambda, not only on Runtime. Dropping the decorator means two explicit boto3 calls and rolling your own poller, in exchange for the full agent loop composed with anything else (FastAPI middleware, tracing, durable queues, custom retry). The two implementations below run the same agent code; the delta is who validates the inbound JWT and where the WAT comes from.
+The `@requires_access_token` decorator is convenient, not required. AgentCore Identity is a standalone service that works on ECS and Lambda, not only on Runtime. Without the decorator you make two explicit boto3 calls and write your own poller. In exchange, you can compose the full agent loop with anything else (FastAPI middleware, tracing, durable queues, custom retry). The two implementations below run the same agent code. They differ in who validates the inbound JWT and where the WAT comes from.
 
-**Impl A — ECS Fargate behind an ALB.** A long-lived FastAPI service. Cognito verifies the JWT at the ALB edge; the ECS task role authenticates the Identity calls; the workload identity is created manually and *can* self-vend tokens.
+**Impl A, ECS Fargate behind an ALB.** This is a long-lived FastAPI service. Cognito verifies the JWT at the ALB edge. The ECS task role authenticates the Identity calls. The workload identity is created manually and *can* self-vend tokens.
 
 ```python
 # main.py — ALB already verified the JWT; decode the user and namespace it.
@@ -267,14 +267,14 @@ if "accessToken" not in resp:
 
 For the M2M variant, swap step 1 for `identity.get_workload_access_token(workloadName)` (no JWT, no user) and set step 2's `oauth2Flow="M2M"`.
 
-**Impl B — same code inside AgentCore Runtime.** Ship the same container as ARM64. Runtime does JWT validation and the WAT exchange for you; the agent lifts the WAT off the request header and goes straight to step 2.
+**Impl B, same code inside AgentCore Runtime.** Ship the same container as ARM64. Runtime does the JWT validation and the WAT exchange for you. The agent reads the WAT from the request header and goes straight to step 2.
 
 ```python
 wat = request.headers["WorkloadAccessToken"]  # literal name, no X-Amzn- prefix
 resp = identity.get_resource_oauth2_token(workloadIdentityToken=wat, ...)
 ```
 
-Side by side:
+The two implementations side by side:
 
 | Axis | Impl A (ECS Fargate) | Impl B (AgentCore Runtime) |
 |---|---|---|
@@ -282,19 +282,19 @@ Side by side:
 | Who calls `GetWorkloadAccessTokenForJWT` | you, via task-role IAM | Runtime, via SLR |
 | WAT source | boto3 result (step 1) | `request.headers["WorkloadAccessToken"]` |
 | Workload-identity provenance | manually created, self-vendable | auto-created, refuses self-vend |
-| Scheduled M2M variant | `GetWorkloadAccessToken` (no user) | wrong substrate — put M2M on ECS / Lambda / Batch |
+| Scheduled M2M variant | `GetWorkloadAccessToken` (no user) | wrong substrate. Put M2M on ECS, Lambda, or Batch |
 | Execution-role Identity actions | 5 | 2 (`GetResourceOauth2Token`, `GetResourceApiKey`) |
 | Architecture | AMD64 or ARM64 | ARM64 only |
 
-**Picker.** Pick ECS when you want boring: you already have FastAPI + ALB + Cognito, you need full control of cold start, concurrency, and request-response shape, your workloads do not map to an 8-hour sticky microVM session, or AMD64 is a hard constraint. Pick Runtime when you want the platform to do the work: per-session microVM isolation and 8-hour session affinity for free, automatic JWT validation and WAT exchange, you are fine building ARM64, and you want OBO / 3LO / M2M via the decorator or its boto3 equivalents.
+**Picker.** Pick ECS when you want the conventional setup. That is the case when you already have FastAPI, an ALB, and Cognito, when you need full control of cold start, concurrency, and the request-response shape, when your workloads do not map to an 8-hour sticky microVM session, or when AMD64 is a hard constraint. Pick Runtime when you want the platform to do the work. Runtime gives you per-session microVM isolation and 8-hour session affinity without extra work, and automatic JWT validation and WAT exchange. It fits when you can build for ARM64 and you want OBO, 3LO, or M2M through the decorator or its boto3 equivalents.
 
-The five execution-role Identity actions for Impl A (same list works pre- and post-SLR-cutover): `GetWorkloadAccessToken`, `GetWorkloadAccessTokenForJWT`, `GetWorkloadAccessTokenForUserId`, `GetResourceOauth2Token`, `GetResourceApiKey`, on the workload-identity-directory and token-vault ARNs.
+Impl A needs five Identity actions on the execution role, on the workload-identity-directory and token-vault ARNs: `GetWorkloadAccessToken`, `GetWorkloadAccessTokenForJWT`, `GetWorkloadAccessTokenForUserId`, `GetResourceOauth2Token`, `GetResourceApiKey`. The same list works before and after the SLR cutover.
 
 ## Linear before/after
 
-**Before (shipped).** Linear is a per-workspace OAuth token in Secrets Manager with manual refresh. `cli/src/jira-oauth.ts`'s sibling, `bgagent linear setup`, runs the Linear 3LO flow with `actor=app` and writes a per-workspace secret keyed by `linearWorkspaceId` in a DDB registry. The Lambda resolver (`cdk/src/handlers/shared/linear-oauth-resolver.ts`, 594 LOC) fetches the secret, refreshes it within 60 seconds of expiry with one-shot refresh-rotation race handling, and writes the new token back. The token is workspace-scoped, not user-scoped.
+**Before (shipped).** Linear uses a per-workspace OAuth token in Secrets Manager with manual refresh. `bgagent linear setup`, the sibling of `cli/src/jira-oauth.ts`, runs the Linear 3LO flow with `actor=app` and writes a per-workspace secret keyed by `linearWorkspaceId` in a DDB registry. The Lambda resolver (`cdk/src/handlers/shared/linear-oauth-resolver.ts`, 594 LOC) fetches the secret, refreshes it within 60 seconds of expiry with one-shot handling of the refresh-rotation race, and writes the new token back. The token is workspace-scoped, not user-scoped.
 
-**After (proposed).** Linear becomes a vault `CustomOauth2` provider reached through `@requires_access_token`. There is no built-in `LinearOauth2` vendor in the `credentialProviderVendor` enum (verified against the bedrock-agentcore-control service model, API version 2023-06-05), so Linear is wired as `CustomOauth2` with Linear's own endpoints. The 594-LOC resolver and its refresh-rotation race handling are replaced by the vault's managed refresh, and tokens isolate per `(workload, user_id)` instead of per workspace.
+**After (proposed).** Linear becomes a vault `CustomOauth2` provider reached through `@requires_access_token`. The `credentialProviderVendor` enum has no built-in `LinearOauth2` vendor (verified against the bedrock-agentcore-control service model, API version 2023-06-05), so Linear is configured as `CustomOauth2` with Linear's own endpoints. The vault's managed refresh replaces the 594-LOC resolver and its refresh-rotation race handling, and tokens are isolated per `(workload, user_id)` instead of per workspace.
 
 ```python
 cp.create_oauth2_credential_provider(
@@ -314,7 +314,7 @@ cp.create_oauth2_credential_provider(
 # Copy provider['callbackUrl'] into the Linear OAuth app's redirect URIs.
 ```
 
-Linear's authorize URL takes `actor=app` (and `prompt=consent`) to mint app/workspace-actor tokens, matching the `actor=app` flow `linear-oauth-resolver.ts` already runs. Pass these as extra authorization-request parameters. Use `auth_flow="USER_FEDERATION"` for the per-workspace consent:
+Linear's authorize URL takes `actor=app` (and `prompt=consent`) to mint app/workspace-actor tokens. This matches the `actor=app` flow that `linear-oauth-resolver.ts` already runs. Pass these as extra authorization-request parameters. Use `auth_flow="USER_FEDERATION"` for the per-workspace consent:
 
 ```python
 @requires_access_token(
@@ -327,21 +327,21 @@ async def triage_linear_issue(*, access_token: str):
     ...
 ```
 
-The scope list is illustrative: set it to the scopes configured on your Linear OAuth app. The grounding sources do not fix a specific Linear scope set, so treat the values as a placeholder rather than a verified list.
+The scope list is illustrative. Set it to the scopes configured on your Linear OAuth app. The source documents do not specify a Linear scope set, so treat the values as a placeholder, not a verified list.
 
 This is the same `CustomOauth2` shape as the Example B M2M data API, with a 3LO flow instead of client_credentials.
 
 ## Gotchas
 
 - **ARM64 only on Runtime.** AMD64-only container images fail to start. ECS and Lambda accept either.
-- **JWT inbound callers cannot use boto3.** A `CUSTOM_JWT` authorizer means raw HTTPS with a Bearer token; the SDK boto3 path is SigV4 only.
-- **The WAT header name is exactly `WorkloadAccessToken`** with no `X-Amzn-` prefix and no suffix. Any other name is a custom bridge, not AgentCore Runtime.
-- **Session IDs must be 33–256 chars.** `runtimeSessionId` rejects short UUIDs; pad it (the `jira-{issue_key}-{uuid}` form in Example D clears the floor).
-- **Semantic tool search is create-time only.** Set `protocolConfiguration.mcp.searchType="SEMANTIC"` at Gateway creation; it cannot be toggled later, and it is rate-limited to 25 transactions per minute per account.
-- **Runtime-managed workload identities cannot self-vend.** A Runtime auto-created identity refuses to vend its own tokens; M2M needs a manually-created workload identity, so put scheduled jobs on ECS / Lambda / Batch.
+- **JWT inbound callers cannot use boto3.** A `CUSTOM_JWT` authorizer means raw HTTPS with a Bearer token. The SDK boto3 path is SigV4 only.
+- **The WAT header name is exactly `WorkloadAccessToken`.** It has no `X-Amzn-` prefix and no suffix. Any other name is a custom bridge, not AgentCore Runtime.
+- **Session IDs must be 33 to 256 chars.** `runtimeSessionId` rejects short UUIDs, so pad the ID. The `jira-{issue_key}-{uuid}` form in Example D meets the minimum.
+- **Semantic tool search is create-time only.** Set `protocolConfiguration.mcp.searchType="SEMANTIC"` at Gateway creation. You cannot toggle it later, and it is rate-limited to 25 transactions per minute per account.
+- **Runtime-managed workload identities cannot self-vend.** An identity that Runtime creates automatically refuses to vend its own tokens. M2M needs a manually-created workload identity, so put scheduled jobs on ECS, Lambda, or Batch.
 - **AgentCore cannot detect out-of-band revocation.** If a token is revoked upstream, use `forceAuthentication=true` on the *first* call of a session to purge and re-consent. Never set it globally, or users loop through consent on every invocation.
-- **Microsoft Entra can issue encrypted tokens.** App registrations with confidential optional claims or audience-scoped encryption produce tokens the JWT authorizer cannot decrypt, and it fails silently. Configure the Entra app to issue plain JWTs (v2 with a custom exposed API scope, or v1 with `<application-id>/.default`).
-- **OpenAPI Gateway targets are constrained.** Each operation needs an `operationId`; Swagger 2.0 is rejected; only `application/json`, `application/xml`, and form-encoded bodies are accepted.
+- **Microsoft Entra can issue encrypted tokens.** App registrations with confidential optional claims or audience-scoped encryption produce tokens that the JWT authorizer cannot decrypt, and the authorizer fails silently. Configure the Entra app to issue plain JWTs (v2 with a custom exposed API scope, or v1 with `<application-id>/.default`).
+- **OpenAPI Gateway targets are constrained.** Each operation needs an `operationId`. Swagger 2.0 is rejected. Only `application/json`, `application/xml`, and form-encoded bodies are accepted.
 - **One credential provider per Gateway target.** `credentialProviderConfigurations` is a one-element array by API contract. To expose the same backend with two credential models, create two targets.
 
 ## Pricing to budget
@@ -354,13 +354,13 @@ This is the same `CustomOauth2` shape as the Example B M2M data API, with a 3LO 
 | Gateway tool indexing | $0.02 / 100 tools / month | — |
 | WAT exchange | included | `GetWorkloadAccessTokenForJWT` |
 
-Runtime per-session pricing is separate; verify it on the official pricing page (it was sparse at the 2026-05-06 capture).
+Runtime per-session pricing is separate. Verify it on the official pricing page, which was sparse at the 2026-05-06 capture.
 
 ## Decision tree
 
 Pick the outbound flow with four questions:
 
-1. **Is there a user in the loop?** No → `M2M` (client_credentials, no consent). Yes → continue.
-2. **Is the downstream the same identity ecosystem, and do you want the user's identity to propagate?** Yes → `ON_BEHALF_OF_TOKEN_EXCHANGE` (Microsoft Graph, AWS Identity Center, Okta-native). No → continue.
-3. **Does the downstream need the user to consent in its own app?** Yes → `USER_FEDERATION` (3LO; GitHub, Slack, Linear via `CustomOauth2`).
-4. **Is the vendor in the `credentialProviderVendor` enum?** Yes → use the built-in vendor (`GithubOauth2`, `SlackOauth2`, `MicrosoftOauth2`, `AtlassianOauth2`, …). No → `CustomOauth2` with explicit endpoints or an `oauthDiscovery` URL (this is the Linear case).
+1. **Is there a user in the loop?** If no, use `M2M` (client_credentials, no consent). If yes, continue.
+2. **Is the downstream the same identity ecosystem, and do you want the user's identity to propagate?** If yes, use `ON_BEHALF_OF_TOKEN_EXCHANGE` (Microsoft Graph, AWS Identity Center, Okta-native). If no, continue.
+3. **Does the downstream need the user to consent in its own app?** If yes, use `USER_FEDERATION`, the 3LO flow (GitHub, Slack, Linear via `CustomOauth2`).
+4. **Is the vendor in the `credentialProviderVendor` enum?** If yes, use the built-in vendor (`GithubOauth2`, `SlackOauth2`, `MicrosoftOauth2`, `AtlassianOauth2`, …). If no, use `CustomOauth2` with explicit endpoints or an `oauthDiscovery` URL. This is the Linear case.

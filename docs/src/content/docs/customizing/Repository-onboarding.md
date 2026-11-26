@@ -2,7 +2,7 @@
 title: "Repository onboarding"
 ---
 
-Before submitting tasks against a repository, the repository must be **onboarded** to the platform. Onboarding is managed by the platform administrator through CDK  - each repository is registered as a `Blueprint` construct in the CDK stack, which writes a configuration record to the `RepoTable` DynamoDB table.
+Before you submit tasks against a repository, the repository must be **onboarded** to the platform. The platform administrator manages onboarding through CDK. The administrator registers each repository as a `Blueprint` construct in the CDK stack, and the construct writes a configuration record to the `RepoTable` DynamoDB table.
 
 If you submit a task against a repository that has not been onboarded, the API returns a `422` error with code `REPO_NOT_ONBOARDED`:
 
@@ -15,4 +15,4 @@ If you submit a task against a repository that has not been onboarded, the API r
 }
 ```
 
-Contact your platform administrator to onboard a new repository. For details on how administrators register repositories, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation).
+To onboard a new repository, contact your platform administrator. For details on how administrators register repositories, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation).

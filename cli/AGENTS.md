@@ -17,20 +17,20 @@ mise //cli:eslint:check     # ESLint without --fix: reports only; a warning fail
 
 ## Testing
 
-- **Full suite:** `cd cli && mise run test` or `mise //cli:build`. The coverage floors apply; they count every file in `src/`, tested or not.
+- **Full suite:** `cd cli && mise run test` or `mise //cli:build`. The coverage floors apply. They count every file in `src/`, tested or not.
 - **Single file:** `cd cli && npx jest --coverage=false test/commands/status.test.ts`
 - **Pattern:** `cd cli && npx jest --coverage=false --testPathPatterns=auth`
-- **Types:** `mise //cli:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/`; the build, `mise run lint` and the `cli-typecheck` commit hook run it. A fixture has to match the type from `src/types.ts` it is declared with.
+- **Types:** `mise //cli:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/`. The build, `mise run lint` and the `cli-typecheck` commit hook run it. A fixture has to match the type from `src/types.ts` it is declared with.
 
 Without `--coverage=false` a partial run fails on the coverage floors after its tests pass.
 
-Mock `ApiClient` in command tests; reset `process.exitCode` in `beforeEach`/`afterEach` (commands set exit codes — see `status.test.ts`).
+Mock `ApiClient` in command tests. Reset `process.exitCode` in `beforeEach`/`afterEach`, because commands set exit codes. See `status.test.ts`.
 
-The suite is sealed off from the machine it runs on (`test/setup/`):
+The suite is isolated from the machine it runs on (`test/setup/`):
 
-- **No home, no AWS identity** — `HOME` is an empty scratch directory and every `AWS_*` and `BGAGENT_*` variable is removed before the first test, so no test sees `~/.bgagent`, `~/.aws` or `~/.cdk.json`. A test that needs a config creates a directory and points `BGAGENT_CONFIG_DIR` at it (see `test/config.test.ts`).
-- **No network** — a connection to anything but loopback throws `cli tests must not open network connections…`. Mock the client or `fetch` call that sends the request; do not add hosts to the list.
-- **Snapshots** — the suite runs with `--ci`, which fails on a missing or changed snapshot instead of writing it. To add or update one on purpose: `npx jest --coverage=false -u <file>`, then commit the snapshot.
+- **No home, no AWS identity.** `HOME` is an empty scratch directory and every `AWS_*` and `BGAGENT_*` variable is removed before the first test, so no test sees `~/.bgagent`, `~/.aws` or `~/.cdk.json`. A test that needs a config creates a directory and points `BGAGENT_CONFIG_DIR` at it (see `test/config.test.ts`).
+- **No network.** A connection to anything but loopback throws `cli tests must not open network connections…`. Mock the client or `fetch` call that sends the request. Do not add hosts to the list.
+- **Snapshots.** The suite runs with `--ci`, which fails on a missing or changed snapshot instead of writing it. To add or update one on purpose, run `npx jest --coverage=false -u <file>`, then commit the snapshot.
 
 ## Primary locations
 
@@ -42,11 +42,11 @@ The suite is sealed off from the machine it runs on (`test/setup/`):
 | `cli/src/auth.ts` | WRITE | Cognito login, token cache (`~/.bgagent/credentials.json`) |
 | `cli/src/types.ts` | WRITE | API types (mirror of `cdk/.../types.ts`) |
 | `cli/test/` | WRITE | Jest tests |
-| `cli/test/emulator/` | WRITE | Emulator-backed tests (`*.emulator.ts`): real CLI code against a local AWS Emulator. Not part of the unit run: `mise run test:integration` from the repository root (needs Docker). Rules and known differences from AWS: [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md). |
+| `cli/test/emulator/` | WRITE | Emulator-backed tests (`*.emulator.ts`): real CLI code against a local AWS Emulator. Not part of the unit run. Run `mise run test:integration` from the repository root (needs Docker). For the rules and the known differences from AWS, see [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md). |
 
 ## Code style
 
-**New command** — factory function + `Command` from commander; throw `CliError` for user-facing errors:
+**New command.** Use a factory function and `Command` from commander. Throw `CliError` for user-facing errors:
 
 ```typescript
 // ✅ Good — factory, validated options, CliError
@@ -69,7 +69,7 @@ export const status = new Command('status').action(() => {
 });
 ```
 
-**Command tests** — mock `ApiClient`, spy `console.log`:
+**Command tests.** Mock `ApiClient` and spy on `console.log`:
 
 ```typescript
 // ✅ Good
@@ -83,23 +83,23 @@ test('renders snapshot from combined payload', async () => {
 });
 ```
 
-**Conventions:** `no-console` ESLint rule is disabled in CLI source (console output is the product). API URL from stack output includes `/v1/` — append only resource paths (`/tasks`, `/tasks/{id}`).
+**Conventions.** The `no-console` ESLint rule is disabled in CLI source, because console output is the product. The API URL from the stack output includes `/v1/`. Append only resource paths (`/tasks`, `/tasks/{id}`).
 
 ## Boundaries
 
-- ✅ **Always:** Add tests in `cli/test/` for new commands; keep `types.ts` in sync with CDK; use `CliError` / `ApiError` for failures
-- ⚠️ **Ask first:** New runtime dependencies, changes to auth/token storage format
+- ✅ **Always:** Add tests in `cli/test/` for new commands; keep `types.ts` in sync with CDK; use `CliError` or `ApiError` for failures
+- ⚠️ **Ask first:** New runtime dependencies, changes to the auth or token storage format
 - 🚫 **Never:** Change `cli/src/types.ts` without updating `cdk/src/handlers/shared/types.ts`; hardcode API URLs with stage prefix duplicated
 
 ## Common mistakes
 
-- **Coverage-ignore comment** — ESLint (`no-warning-comments`) rejects a comment that contains `istanbul ignore`, `c8 ignore`, `v8 ignore` or `node:coverage`, in `src/` and `test/`: such a comment takes code out of what the coverage floors measure. Test the code, or leave it counted as uncovered and say why in a plain comment.
-- **API type drift** — Update both `cli/src/types.ts` and `cdk/src/handlers/shared/types.ts` in the same PR. `TERMINAL_STATUSES` and `DEFAULT_CODING_WORKFLOW_ID` in `cli/src/types.ts` are declared elsewhere in the CDK (`cdk/src/constructs/task-status.ts`, `cdk/src/handlers/shared/workflows.ts`) and are compared with those declarations (`CANON_ELSEWHERE` in `scripts/check-types-sync.ts`). See [cdk/AGENTS.md](../cdk/AGENTS.md).
-- **Import that leaves the package** — ESLint (`import-x/no-restricted-paths`) rejects an import in `src/` of a file of this repository outside `cli/`: a source or the build output of `cdk/` or `web/`, a file of `contracts/`, whether the import gives a path or the name of a workspace package (`@abca/cdk/...`). The CLI ships only `lib/`, compiled from `src/`, so such a file is not part of an installed CLI, and the compiler (`rootDir`) refuses only a TypeScript source. Do not declare the other package as a dependency, as `import-x/no-extraneous-dependencies` proposes for an import by name: the import stays rejected. Mirror an API type or constant of the CDK in `src/types.ts` (see **API type drift** above). Copy any other value into `src/` and pin the copy with a test that reads the original as text, as `test/constants-parity.test.ts` and `test/model-id.test.ts` do.
-- **Function above the complexity ceiling** — ESLint (`complexity`) fails any function whose cyclomatic complexity is above 40 and names it, or gives the line of an anonymous one: every `if`, loop, `case`, `catch`, `&&`, `||`, `??`, `?:`, `?.` and default value adds one. Split the function; do not add an `eslint-disable`. The `eslint-disable-next-line complexity` lines in `src/` mark the functions that predate the ceiling. The first number in the parenthesis of such a line is the record of its function: the function must not grow past it, and `test/eslint-config.test.ts` fails when it does, with the file, the line, the function, its value and the record (`cd cli && ../node_modules/.bin/eslint --no-inline-config <file>` prints the current value). When a change makes the function smaller, lower the record in the same change, in the form `(97, down from 115 when it landed)`. Once such a function fits, its directive no longer applies: `mise //cli:eslint` (`--fix`) deletes it and `mise //cli:eslint:check` reports it as unused. Commit the deletion.
-- **Import cycle** — ESLint (`import-x/no-cycle`) fails an import that leads back to its own module. `Dependency cycle detected` means the imported module imports this one; `Dependency cycle via "./b:12=>./c:7"` means it imports `./b` (written on its line 12), `b` imports `./c` (line 7) and `c` imports this one. Move what the modules need from each other into a module that imports none of them. Where only types cross, mark the import: `import type`, or `type` on each imported name, takes it out of the count; `export type … from` and `import()` stay in.
-- **Test that cannot fail** — ESLint (`eslint-plugin-jest`) rejects the shapes that pass without checking anything. `fail()` does not exist in Jest: assert the rejection (`await expect(promise).rejects.toThrow(...)`), or keep the error from a `.catch()` and assert on it. Every test needs its own `expect()` call, with a matcher, and an async assertion must be awaited; the fake-timer idiom that keeps `expect(p).rejects…` and awaits it after advancing the timers takes `// eslint-disable-next-line jest/valid-expect -- <reason>`, because the autofix would `await` it on the spot and hang the test. No `expect` outside a test, and no title twice in one `describe`.
-- **Exit code leaks** — Command tests must reset `process.exitCode` or Jest exits non-zero despite green assertions.
-- **Un-attributed AWS SDK client (#319)** — build clients via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` from `src/ua.ts`; a naked `new XxxClient({})` silently drops solution attribution. ESLint rejects `new XxxClient(...)` in `src/` (`no-restricted-syntax`); it matches the name at the `new` site, so it does not see an alias or a service class without the `Client` suffix.
-- **Scoreboard wording** — `bgagent stats` and the console page are two copies of the same sentences (`src/scoreboard.ts`, `web/src/core/util/scoreboard.ts`). `test/scoreboard.test.ts` loads the page module and fails when they diverge. The load is a computed path so this package's compiler and its dead-code check do not follow it into the console. If that module imports anything but types and `./format`, Jest reports `Jest encountered an unexpected token` at the import in `web/src/core/util/scoreboard.ts`, before any sentence is compared.
-- **ESM-only dependency** — `commander` is an ES module from 15 on. The compiled CLI loads it with `require()`, which Node allows from 22.12 (`test/commander-load.test.ts` asks a plain Node process to do that). Jest cannot on the Node this repository pins, so the `jest` block of `package.json` has ts-jest compile that one package to CommonJS (the second `transform` entry) and lets it through `transformIgnorePatterns`. `contracts/coverage-thresholds.json` carries the same `transformIgnorePatterns`, and `mise run check:coverage-thresholds-sync` fails when the two differ. Another dependency that ships ES modules only fails the suites with `Must use import to load ES Module`: add it to that `transform` pattern and to `transformIgnorePatterns`, the latter in the contract as well.
+- **Coverage-ignore comment.** ESLint (`no-warning-comments`) rejects a comment that contains `istanbul ignore`, `c8 ignore`, `v8 ignore` or `node:coverage`, in `src/` and `test/`. Such a comment takes code out of what the coverage floors measure. Test the code, or leave it counted as uncovered and say why in a plain comment.
+- **API type drift.** Update both `cli/src/types.ts` and `cdk/src/handlers/shared/types.ts` in the same PR. `TERMINAL_STATUSES` and `DEFAULT_CODING_WORKFLOW_ID` in `cli/src/types.ts` are declared elsewhere in the CDK (`cdk/src/constructs/task-status.ts`, `cdk/src/handlers/shared/workflows.ts`) and are compared with those declarations (`CANON_ELSEWHERE` in `scripts/check-types-sync.ts`). See [cdk/AGENTS.md](../cdk/AGENTS.md).
+- **Import that leaves the package.** ESLint (`import-x/no-restricted-paths`) rejects an import in `src/` of a file of this repository outside `cli/`. That covers a source or the build output of `cdk/` or `web/` and a file of `contracts/`, whether the import gives a path or the name of a workspace package (`@abca/cdk/...`). The CLI ships only `lib/`, compiled from `src/`, so such a file is not part of an installed CLI, and the compiler (`rootDir`) refuses only a TypeScript source. Do not declare the other package as a dependency, as `import-x/no-extraneous-dependencies` proposes for an import by name. The import stays rejected. Mirror an API type or constant of the CDK in `src/types.ts` (see **API type drift** above). Copy any other value into `src/` and pin the copy with a test that reads the original as text, as `test/constants-parity.test.ts` and `test/model-id.test.ts` do.
+- **Function above the complexity ceiling.** ESLint (`complexity`) fails any function whose cyclomatic complexity is above 40 and names it, or gives the line of an anonymous one. Every `if`, loop, `case`, `catch`, `&&`, `||`, `??`, `?:`, `?.` and default value adds one. Split the function. Do not add an `eslint-disable`. The `eslint-disable-next-line complexity` lines in `src/` mark the functions that predate the ceiling. The first number in the parenthesis of such a line is the record of its function. The function must not grow past it, and `test/eslint-config.test.ts` fails when it does, with the file, the line, the function, its value and the record. `cd cli && ../node_modules/.bin/eslint --no-inline-config <file>` prints the current value. When a change makes the function smaller, lower the record in the same change, in the form `(97, down from 115 when it landed)`. Once such a function fits, its directive no longer applies. `mise //cli:eslint` (`--fix`) deletes it and `mise //cli:eslint:check` reports it as unused. Commit the deletion.
+- **Import cycle.** ESLint (`import-x/no-cycle`) fails an import that leads back to its own module. `Dependency cycle detected` means the imported module imports this one. `Dependency cycle via "./b:12=>./c:7"` means it imports `./b` (written on its line 12), `b` imports `./c` (line 7) and `c` imports this one. Move what the modules need from each other into a module that imports none of them. Where only types cross, mark the import. `import type`, or `type` on each imported name, takes it out of the count. `export type … from` and `import()` stay in.
+- **Test that cannot fail.** ESLint (`eslint-plugin-jest`) rejects the shapes that pass without checking anything. `fail()` does not exist in Jest. Assert the rejection (`await expect(promise).rejects.toThrow(...)`), or keep the error from a `.catch()` and assert on it. Every test needs its own `expect()` call, with a matcher, and an async assertion must be awaited. The fake-timer idiom that keeps `expect(p).rejects…` and awaits it after advancing the timers takes `// eslint-disable-next-line jest/valid-expect -- <reason>`, because the autofix would `await` it on the spot and hang the test. No `expect` outside a test, and no title twice in one `describe`.
+- **Exit code leaks.** Command tests must reset `process.exitCode`, or Jest exits non-zero despite passing assertions.
+- **Un-attributed AWS SDK client (#319).** Build clients via `makeClient(Ctor, cfg)` or `makeDocClient(cfg)` from `src/ua.ts`. A client built directly with `new XxxClient({})` silently drops solution attribution. ESLint rejects `new XxxClient(...)` in `src/` (`no-restricted-syntax`). It matches the name at the `new` site, so it does not see an alias or a service class without the `Client` suffix.
+- **Scoreboard wording.** `bgagent stats` and the console page are two copies of the same sentences (`src/scoreboard.ts`, `web/src/core/util/scoreboard.ts`). `test/scoreboard.test.ts` loads the page module and fails when they diverge. The load is a computed path so this package's compiler and its dead-code check do not follow it into the console. If that module imports anything but types and `./format`, Jest reports `Jest encountered an unexpected token` at the import in `web/src/core/util/scoreboard.ts`, before any sentence is compared.
+- **ESM-only dependency.** `commander` is an ES module from 15 on. The compiled CLI loads it with `require()`, which Node allows from 22.12 (`test/commander-load.test.ts` asks a plain Node process to do that). Jest cannot on the Node this repository pins, so the `jest` block of `package.json` has ts-jest compile that one package to CommonJS (the second `transform` entry) and lets it through `transformIgnorePatterns`. `contracts/coverage-thresholds.json` carries the same `transformIgnorePatterns`, and `mise run check:coverage-thresholds-sync` fails when the two differ. Another dependency that ships ES modules only fails the suites with `Must use import to load ES Module`. Add it to that `transform` pattern and to `transformIgnorePatterns`, the latter in the contract as well.

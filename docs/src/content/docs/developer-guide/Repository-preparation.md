@@ -6,18 +6,18 @@ The [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-s
 
 ### Pre-flight checks
 
-After deployment, the orchestrator calls the GitHub API before starting each task to verify your token has enough privilege. This catches common mistakes (like a read-only PAT) before compute is consumed. If the check fails, the task transitions to `FAILED` with a clear reason like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` instead of failing deep inside the agent run.
+After deployment, the orchestrator calls the GitHub API before it starts each task, to verify that your token has enough privilege. The check catches common mistakes, such as a read-only PAT, before the task consumes compute. If the check fails, the task transitions to `FAILED` with a reason such as `INSUFFICIENT_GITHUB_REPO_PERMISSIONS`, instead of failing later inside the agent run.
 
 Permission requirements vary by task type:
 
 - `new_task` and `pr_iteration` require Contents (read/write) and Pull requests (read/write).
-- `pr_review` only needs Triage or higher since it does not push branches.
+- `pr_review` needs only Triage or higher, because it does not push branches.
 
-Classic PATs with `repo` + `read:org` scopes also work and are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/README.md#github-pat--minimal-permissions) for when to use which token type.
+Classic PATs with the `repo` and `read:org` scopes also work. They are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/README.md#github-pat--minimal-permissions) for when to use which token type.
 
 ### Quick setup (single repo)
 
-To point the default Blueprint at your own repo without editing code, pass it as a CDK context variable or environment variable:
+To point the default Blueprint at your own repo without editing code, pass the repo as a CDK context variable or as an environment variable:
 
 ```bash
 # Context variable (preferred)
@@ -27,11 +27,11 @@ mise //cdk:deploy -- -c blueprintRepo=your-org/your-repo
 BLUEPRINT_REPO=your-org/your-repo mise //cdk:deploy
 ```
 
-The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that repo and pass your fork (e.g. `-c blueprintRepo=jane-doe/agent-plugins`).
+The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that repo and pass your fork (for example, `-c blueprintRepo=jane-doe/agent-plugins`).
 
 ### Multiple repositories
 
-To onboard additional repositories, add entries to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`. The app resolves these plain inputs before constructing either stack, so repository provisioning and DNS egress policy use the same configuration:
+To onboard more repositories, add entries to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`. The app resolves these plain inputs before it constructs either stack, so repository provisioning and the DNS egress policy use the same configuration:
 
 ```typescript
 definitions.push({
@@ -40,7 +40,7 @@ definitions.push({
 });
 ```
 
-Each entry supports the per-repo overrides from `BlueprintProps` in `cdk/src/constructs/blueprint.ts`, without a table reference. Keep its `id` stable across releases:
+Each entry supports the per-repo overrides from `BlueprintProps` in `cdk/src/constructs/blueprint.ts`, without a table reference. Keep the `id` of each entry stable across releases:
 
 ```typescript
 definitions.push({
@@ -61,45 +61,45 @@ definitions.push({
 });
 ```
 
-If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full model.
+If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` through `additionalRuntimeArns` and `additionalSecretArns`, so that the Lambda has IAM permission. See [Repo onboarding](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full model.
 
 #### Build-regression gating (important for non-mise repos)
 
-Before opening a PR, the agent runs a **build** and **lint** command in its cloud container — once on the clean clone (baseline) and again after its changes. If the build was green before and fails after, the task fails (a build-**regression** gate). This is a compile/test verification, **not** a deployment — your app's actual deploy stays in your own CI/CD after the PR merges.
+Before it opens a PR, the agent runs a **build** command and a **lint** command in its cloud container. It runs them once on the clean clone, as the baseline, and again after its changes. If the build passed before and fails after, the task fails. That check is the build-**regression** gate. The gate is a compile and test verification, **not** a deployment. Your app's deploy stays in your own CI/CD after the PR merges.
 
-The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set `pipeline.buildCommand`** (and optionally `lintCommand`) to its real command — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
+The commands default to **`mise run build`** and **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` and `lint` tasks needs no configuration for the gate. A repo that uses another build tool, such as npm, gradle, cargo, or make, **must set `pipeline.buildCommand`** to its real command, and can also set `lintCommand`. Otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens, the agent puts a `⚠️ Build-regression gating is OFF` warning on the PR so that the gap is visible, but the fix is to configure the command. The gap matters twice over for #247 orchestration. Dependent sub-issues stack onto the branch of a predecessor, so a broken predecessor that was not verified passes its breakage to every sub-issue that depends on it.
 
-Redeploy after changing Blueprints: `mise //cdk:deploy`. A redeploy writes the overrides a definition declares. It does not clear one that was deleted from the definition: see [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
+After you change Blueprints, redeploy with `mise //cdk:deploy`. A redeploy writes the overrides that a definition declares. It does not clear an override that was deleted from the definition. See [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
 
 ### Stack decomposition and synthesis budgets
 
-`networkTopology` defaults to `inline`, preserving existing network ownership. For a new installation, `split` puts AgentVpc and DnsFirewall in `${stackName}-network`; the application consumes VPC, subnet and security-group exports. The network has no application dependencies. Plain Blueprint definitions are resolved once in `cdk/src/blueprints/definitions.ts` so DNS and repository provisioning use the same domains without cross-stack coupling. Task API routes, authorizers, permissions, CORS and deployment remain together in `AgentStack`.
+`networkTopology` defaults to `inline`. That value preserves existing network ownership. For a new installation, `split` puts AgentVpc and DnsFirewall in `${stackName}-network`, and the application consumes the VPC, subnet and security-group exports. The network has no application dependencies. `cdk/src/blueprints/definitions.ts` resolves the plain Blueprint definitions once, so DNS and repository provisioning use the same domains without cross-stack coupling. Task API routes, authorizers, permissions, CORS and deployment remain together in `AgentStack`.
 
-The CDK build and offline census share 142 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, legacy additive selectors, and [deployment-profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles) cells (minimal, each optional feature alone, Linear+Jira, Linear+screenshots, all features). The feature cells also assert that disabled features leave no resources, outputs, routes or Lambda permissions, and that each feature's catalogued footprint stays within 15% of synthesis. The census ignores `abca.deployment.json` (`deploymentProfile=none`). Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and of three synthesis warnings (template size, a custom resource left on CDK's default of downloading the latest SDK, a cdk-nag rule that could not be evaluated), backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add synthetic IDs to the platform defaults and assert that CDK generates IAM overflow policies for the SessionRole and for each backend's compute role, and that those policies pass the audit; these fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
+The CDK build and offline census share 142 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, legacy additive selectors, and [deployment-profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles) cells (minimal, each optional feature alone, Linear+Jira, Linear+screenshots, all features). The feature cells also assert that disabled features leave no resources, outputs, routes or Lambda permissions, and that each feature's catalogued footprint stays within 15% of synthesis. The census ignores `abca.deployment.json` (`deploymentProfile=none`). Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, the absence of console test-invoke grants and of three synthesis warnings (template size, a custom resource left on CDK's default of downloading the latest SDK, a cdk-nag rule that could not be evaluated), backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add synthetic IDs to the platform defaults and assert that CDK generates IAM overflow policies for the SessionRole and for each backend's compute role, and that those policies pass the audit. These fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling. Unrelated errors cannot satisfy the gate.
 
 ```bash
 mise //cdk:census -- --output /tmp/stack-census
 ```
 
-Use `--list` to see the profiles and `--profile NAME` to select them. The census runs the production app with fixed account/AZ inputs, CDK metadata enabled and bundling/staging disabled. It records template inventories, counts, bytes, dependencies and source provenance. The production app sets CDK's `@aws-cdk/core:stackResourceLimit` before any stack is constructed, so actual operator configurations outside the census also fail above 490. Context overrides may tighten but cannot raise the limit. `--max-resources` can only tighten the census audit ceiling.
+Use `--list` to see the profiles and `--profile NAME` to select them. The census runs the production app with fixed account and AZ inputs, with CDK metadata enabled, and with bundling and staging disabled. It records template inventories, counts, bytes, dependencies and source provenance. The production app sets CDK's `@aws-cdk/core:stackResourceLimit` before it constructs any stack, so operator configurations outside the census also fail above 490. Context overrides can tighten the limit but cannot raise it. `--max-resources` can only tighten the census audit ceiling.
 
-`--check-stability` runs each selected profile twice in independent processes and fails on differences. It does not normalize away timestamps, logical IDs or asset hashes. The existing Blueprint callbacks embed synthesis-time timestamps; unchanged source can therefore fail this optional diagnostic. The version of the input guardrail no longer differs between two syntheses: its logical ID contains a hash of the guardrail's configuration ([#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079)). Deterministic Blueprint provisioning and Docker build-context changes are deferred. Passing the budget gate is not a claim of repeatable synthesis or live resource preservation.
+`--check-stability` runs each selected profile twice in independent processes and fails on differences. It does not normalize away timestamps, logical IDs or asset hashes. The existing Blueprint callbacks embed synthesis-time timestamps, so unchanged source can fail this optional diagnostic. The version of the input guardrail no longer differs between two syntheses, because its logical ID contains a hash of the guardrail's configuration ([#1079](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1079)). Deterministic Blueprint provisioning and Docker build-context changes are deferred. Passing the budget gate is not a claim of repeatable synthesis or live resource preservation.
 
-Network tests compare the moved definitions, generated Name tags, endpoint security-group descriptions, exports, application service properties, shared API resources, solution attribution and provenance tags. Comparison tests fix the clock; the census does not, and reports the Blueprint timestamps. The tests also map one immutable version ID that differs between the topologies: on ECS the orchestrator's environment names the private subnets, by reference inline and by import in the split topology, and the logical ID of its function version hashes that. `networkReservedAzs` reserves unused address slots so removing a trailing AZ need not shift remaining subnet CIDRs. Follow the [staged AZ reduction procedure](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#reducing-azs-in-an-existing-split-network) to release old imports before changing the network.
+Network tests compare the moved definitions, generated Name tags, endpoint security-group descriptions, exports, application service properties, shared API resources, solution attribution and provenance tags. Comparison tests fix the clock. The census does not, and it reports the Blueprint timestamps. The tests also map one immutable version ID that differs between the topologies. On ECS, the orchestrator's environment names the private subnets, by reference in the inline topology and by import in the split topology, and the logical ID of the orchestrator's function version hashes that environment. `networkReservedAzs` reserves unused address slots, so that removing a trailing AZ need not shift the remaining subnet CIDRs. Before you change the network, follow the [staged AZ reduction procedure](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#reducing-azs-in-an-existing-split-network) to release old imports.
 
-Existing inline-to-split migration remains deferred under [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852). A populated `cdk refactor`/import and rollback rehearsal is still required before a supported migration procedure can be published. Retention and Blueprint ownership handoff must be separately reviewed and released; this change keeps existing removal policies and the existing Blueprint provider. The concrete follow-up requirements are recorded in [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries#deferred-migration-work). See [Network stack topology](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) for fresh-install guidance and migration limits.
+Migration of an existing inline deployment to split remains deferred under [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852). A populated `cdk refactor`/import and rollback rehearsal is still required before a supported migration procedure can be published. Retention and the Blueprint ownership handoff must be reviewed and released separately. This change keeps the existing removal policies and the existing Blueprint provider. [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries#deferred-migration-work) records the concrete follow-up requirements. See [Network stack topology](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) for fresh-install guidance and migration limits.
 
 ### Customizing the agent image
 
-The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
+The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need more runtimes, such as Java, Go, or native libs, extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
 
 ### Writing Cedar policies for the repo
 
-A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
+A blueprint can declare its own `security.cedarPolicies` rules in addition to the built-in starter set of hard-deny and soft-deny rules. A hard-deny rule always blocks a tool call. A soft-deny rule pauses the agent and asks a human before the agent proceeds.
 
-See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/tree/main/contracts/cedar-parity) fixtures.
+See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference. It covers the vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), the annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with the [`contracts/cedar-parity/`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/tree/main/contracts/cedar-parity) fixtures.
 
 ### Other options
 
-- **Stack name** - The default is `backgroundagent-dev` (set in `cdk/src/main.ts`). If you rename it, update all `--stack-name` references.
-- **Making repos agent-friendly** - Add `CLAUDE.md`, `.claude/rules/`, and clear build commands. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-instructions) for details.
+- **Stack name.** The default is `backgroundagent-dev` (set in `cdk/src/main.ts`). If you rename it, update all `--stack-name` references.
+- **Making repos agent-friendly.** Add `CLAUDE.md`, `.claude/rules/`, and clear build commands. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-instructions) for details.

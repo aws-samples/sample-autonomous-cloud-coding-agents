@@ -1,20 +1,20 @@
 # Evaluation
 
-The evaluation pipeline measures agent performance and feeds learnings back into prompts, memory, and configuration. In MVP, evaluation is manual (inspect PRs and logs). Automated evaluation is built incrementally across iterations.
+The evaluation pipeline measures agent performance and feeds what it learns back into prompts, memory, and configuration. In the MVP, evaluation is manual. You inspect PRs and logs. Automated evaluation is built incrementally across iterations.
 
 - **Use this doc for:** understanding what gets evaluated, the tiered validation pipeline, memory effectiveness metrics, and the feedback loop.
 - **Related docs:** [MEMORY.md](./MEMORY.md) for how evaluation insights are stored, [OBSERVABILITY.md](./OBSERVABILITY.md) for telemetry data sources, [ORCHESTRATOR.md](./ORCHESTRATOR.md) for prompt versioning in the data model.
 
 ## What to evaluate
 
-The evaluation pipeline categorizes task outcomes to identify systemic issues and improvement opportunities:
+The evaluation pipeline categorizes task outcomes to find systemic issues and opportunities to improve:
 
 | Category | Description |
 |----------|-------------|
 | Reasoning errors | Agent misunderstood the task or made incorrect assumptions |
 | Instruction non-compliance | Task spec was clear but agent did not follow it (skipped tests, wrong scope) |
 | Missing verification | Agent did not run tests, linters, or document how to verify the change |
-| Timeout | Hit 8-hour or idle timeout before completing; partial work may be on the branch |
+| Timeout | Hit the 8-hour or idle timeout before completing. Partial work may be on the branch |
 | Environment failure | GitHub API errors, clone failures, build failures the agent could not recover from |
 
 ## Data sources
@@ -26,26 +26,26 @@ Evaluation consumes the same data that observability and code attribution captur
 | Task outcomes | Status, error message, PR URL, branch state |
 | TaskEvents | Audit log: state transitions, step events, guardrail events |
 | Agent logs and traces | CloudWatch logs, X-Ray spans, tool calls, reasoning steps |
-| Code artifacts | PR description, commits, diff, repo/branch/issue links |
-| PR outcome signals | Merged vs. closed-without-merge, read from GitHub once an hour and recorded on the task record and as a `pr_outcome_recorded` task event (see [Pull-request outcomes](./OBSERVABILITY.md#pull-request-outcomes)). Writing it as a positive/negative signal on task episodes is a later step. |
-| Review feedback | PR review comments captured via the review feedback memory loop (see [MEMORY.md](./MEMORY.md)) |
+| Code artifacts | PR description, commits, diff, and repo, branch, and issue links |
+| PR outcome signals | Merged or closed without merge, read from GitHub once an hour and recorded on the task record and as a `pr_outcome_recorded` task event (see [Pull-request outcomes](./OBSERVABILITY.md#pull-request-outcomes)). Writing the outcome as a positive or negative signal on task episodes is a later step. |
+| Review feedback | PR review comments captured by the review feedback memory loop (see [MEMORY.md](./MEMORY.md)) |
 
 ## Agent self-feedback
 
-At task end, the platform prompts the agent: *"What information, context, or instructions were missing that would have helped you complete this task more effectively?"* The response is stored in long-term memory with `insight_type: "agent_self_feedback"` and retrieved during context hydration for future tasks on the same repo.
+At the end of a task, the platform asks the agent: *"What information, context, or instructions were missing that would have helped you complete this task more effectively?"* The platform stores the response in long-term memory with `insight_type: "agent_self_feedback"` and retrieves it during context hydration for future tasks on the same repo.
 
-Recurring themes (e.g. "I needed to know this repo uses a custom linter") are surfaced in evaluation dashboards and used to update per-repo system prompts or onboarding artifacts. The cost is a single additional turn per task.
+Recurring themes, such as "I needed to know this repo uses a custom linter", appear in evaluation dashboards and are used to update per-repo system prompts or onboarding artifacts. The cost is one additional turn per task.
 
 ## Prompt versioning
 
-System prompts are treated as versioned, testable artifacts. Each task records the `prompt_version` (SHA-256 hash of deterministic prompt parts) in the task record, enabling correlation: "did merge rates improve after prompt version X?"
+System prompts are versioned, testable artifacts. Each task records the `prompt_version` (a SHA-256 hash of the deterministic prompt parts) in the task record. The recorded version lets you correlate outcomes with prompts: "did merge rates improve after prompt version X?"
 
-- **A/B comparison (planned)** - Run the same task type with two prompt variants and compare outcomes (merge rate, failure rate, token usage). Requires variant assignment and a comparison dashboard. The merge or close of a followed pull request is recorded on the task, beside its `prompt_version`; nothing compares by variant yet.
-- **Change tracking** - Prompt diffs between versions are reviewable. Versions stored in a versioned store for audit and rollback.
+- **A/B comparison (planned).** Run the same task type with two prompt variants and compare outcomes (merge rate, failure rate, token usage). The comparison requires variant assignment and a comparison dashboard. The merge or close of a followed pull request is recorded on the task, beside its `prompt_version`. Nothing compares by variant yet.
+- **Change tracking.** Prompt diffs between versions are reviewable. Versions are stored in a versioned store for audit and rollback.
 
 ## Memory effectiveness metrics
 
-The primary measure of memory's value: **does the agent produce better PRs over time?**
+The primary measure of memory's value is whether the agent produces better PRs over time.
 
 | Metric | How to measure | Improvement signal |
 |--------|----------------|-------------------|
@@ -56,13 +56,13 @@ The primary measure of memory's value: **does the agent produce better PRs over 
 | Repeated mistakes | Same reviewer feedback across multiple PRs | Drops to zero after feedback loop captures the rule |
 | Time to PR | Duration from task submission to PR creation | Decreases as agent reuses past approaches |
 
-The factory scoreboard has a number close to the first of these, under its own name: "Merged without being sent back" (see [The numbers](./OBSERVABILITY.md#the-numbers)). For revision cycles it has the raw material only: the number of change requests is recorded for each pull request, and no average of it is shown.
+The factory scoreboard has a number close to the first of these metrics, under its own name: "Merged without being sent back" (see [The numbers](./OBSERVABILITY.md#the-numbers)). For revision cycles the scoreboard has only the raw data. The number of change requests is recorded for each pull request, and no average is shown.
 
-**Repeated mistakes** is the most telling metric. If a reviewer says "don't use `any` types" on PR #10 and the agent repeats it on PR #15, the review feedback memory has failed. Detection requires embedding-based similarity between review comments (simple string matching is insufficient). The review feedback extraction prompt normalizes comments into canonical rule forms, and new comments are compared against stored rules via semantic search.
+**Repeated mistakes** is the most telling metric. If a reviewer says "don't use `any` types" on PR #10 and the agent repeats the mistake on PR #15, the review feedback memory has failed. Detection requires embedding-based similarity between review comments, because string matching is not enough. The review feedback extraction prompt normalizes comments into canonical rule forms, and semantic search compares new comments against the stored rules.
 
 ## Tiered validation pipeline
 
-The platform validates agent-created content through three sequential tiers before PR finalization. Each tier targets a different class of defect. Tiers run as post-agent steps in the blueprint execution framework.
+The platform validates agent-created content in three sequential tiers before it finalizes the PR. Each tier targets a different class of defect. Tiers run as post-agent steps in the blueprint execution framework.
 
 ```mermaid
 flowchart LR
@@ -73,13 +73,13 @@ flowchart LR
 
 ### Tier 1 - Tool validation
 
-Deterministic, binary pass/fail signals from the repo's own tooling: test suites, linters, type checkers, SAST scanners, and build verification. Validation commands are discovered during onboarding or configured in the blueprint's `custom_steps`.
+Tier 1 collects deterministic pass or fail signals from the repo's own tooling: test suites, linters, type checkers, SAST scanners, and build verification. Validation commands are discovered during onboarding or configured in the blueprint's `custom_steps`.
 
-**On failure:** Tool output is fed back to the agent for a fix cycle (up to 2 retries). If unresolved, the PR is created with failures documented in the validation report.
+**On failure.** The platform feeds the tool output back to the agent for a fix cycle (up to 2 retries). If the failures remain, the PR is created with the failures documented in the validation report.
 
 ### Tier 2 - Code quality analysis
 
-Structural and design quality beyond what linters catch, using a combination of static analysis tools and LLM-based review:
+Tier 2 checks structural and design quality beyond what linters catch. It combines static analysis tools with LLM-based review:
 
 | Dimension | Example finding |
 |-----------|----------------|
@@ -90,11 +90,11 @@ Structural and design quality beyond what linters catch, using a combination of 
 | Naming conventions | "`get_data` uses snake_case but codebase convention is camelCase" |
 | Repo-specific rules | "TypeScript `any` type used - repo policy requires explicit types" |
 
-Findings have severity levels: `error` (blocking, triggers fix cycle), `warning`/`info` (advisory, included in PR report). The blocking severity threshold is configurable per repo.
+Findings have severity levels. `error` is blocking and triggers a fix cycle. `warning` and `info` are advisory and are included in the PR report. The blocking severity threshold is configurable per repo.
 
 ### Tier 3 - Risk and blast radius analysis
 
-Scope, impact, and regression risk of the agent's changes:
+Tier 3 assesses the scope, impact, and regression risk of the agent's changes:
 
 | Dimension | Method |
 |-----------|--------|
@@ -116,13 +116,13 @@ Every agent-created PR receives a computed risk level:
 | High | Large surface, API changes, shared infra, low coverage | `risk:high` label + blast radius report |
 | Critical | Breaking API changes, schema modifications, CI/CD changes | `risk:critical` label + optional hold for human approval |
 
-Risk level is stored in the task record and emitted as a `TaskEvent`, enabling trending by repo, user, and prompt version.
+The risk level is stored in the task record and emitted as a `TaskEvent`, so that it can be trended by repo, user, and prompt version.
 
-The combined output of all three tiers is posted to the PR as a structured validation report (comment or GitHub Check Run).
+The combined output of all three tiers is posted to the PR as a structured validation report, either a comment or a GitHub Check Run.
 
 ## PR outcome tracking and `bgagent stats`
 
-Two requests named these things in their own words. What stands for each of them:
+Two requests named these features in their own words. The tables below show what stands for each item that the requests named:
 
 | PR outcome tracking (#473) asked for | What is built |
 |--------------------------------------|---------------|
@@ -131,7 +131,7 @@ Two requests named these things in their own words. What stands for each of them
 | `merged_at` | `pr_closed_at`: GitHub's merge time, or its close time |
 | `revision_count` | `pr_changes_requested`: the reviews that requested changes. `pr_first_review_at` is recorded beside it |
 | The event `pr_outcome_recorded` | Written to the task's events when a merge or a close is recorded |
-| The outcome in `bgagent stats` and in an API | `bgagent stats` (see the [user guide](../guides/USER_GUIDE.md#reading-your-scoreboard-stats)) and `GET /v1/tasks?view=scoreboard` (see [API_CONTRACT.md](./API_CONTRACT.md#list-tasks)); for one task, the `pr_outcome_recorded` event of `GET /v1/tasks/{task_id}/events` |
+| The outcome in `bgagent stats` and in an API | `bgagent stats` (see the [user guide](../guides/USER_GUIDE.md#reading-your-scoreboard-stats)) and `GET /v1/tasks?view=scoreboard` (see [API_CONTRACT.md](./API_CONTRACT.md#list-tasks)). For one task, the `pr_outcome_recorded` event of `GET /v1/tasks/{task_id}/events` |
 | Signals that feed the memory systems | Not built: the outcome is not written to task episodes |
 
 | `bgagent stats` (#412) asked for | What answers it |
@@ -154,7 +154,7 @@ Two requests named these things in their own words. What stands for each of them
 
 | Phase | What it adds |
 |-------|-------------|
-| Current | No automated evaluation. Manual inspection of PRs and logs. The state of the new pull requests that ABCA follows (merged, closed, still open) is read from GitHub once an hour and shown on the factory scoreboard and by `bgagent stats`; a merge or a close is also recorded as a task event. |
+| Current | No automated evaluation. Manual inspection of PRs and logs. The state of the new pull requests that ABCA follows (merged, closed, still open) is read from GitHub once an hour and shown on the factory scoreboard and by `bgagent stats`. A merge or a close is also recorded as a task event. |
 | Next | Agent self-feedback. Prompt versioning (hash stored with task records). Tiered validation pipeline (Tiers 1-3). PR risk level and validation reports. |
 | Later | Review feedback memory loop. The outcome of a pull request as a signal on task episodes. Failure categorization. Memory effectiveness metrics. |
 | Future | LLM-based trace analysis. A/B prompt comparison. Learned rules from memory in Tier 2. Historical risk correlation in Tier 3. Risk trending dashboards. |
