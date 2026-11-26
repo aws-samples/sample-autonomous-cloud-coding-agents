@@ -82,19 +82,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // Verify Slack signing secret for every request — including url_verification.
     // Slack signs all requests; skipping verification exposes the endpoint.
-    // The only reason to bypass is initial setup before the signing secret is populated.
     const signature = event.headers['X-Slack-Signature'] ?? event.headers['x-slack-signature'] ?? '';
     const timestamp = event.headers['X-Slack-Request-Timestamp'] ?? event.headers['x-slack-request-timestamp'] ?? '';
     const signingSecret = await getSlackSecret(SIGNING_SECRET_ARN);
 
     if (!signingSecret) {
-      // Secret hasn't been populated yet — allow url_verification so the Slack App can be
-      // wired up during initial setup, but reject anything else.
-      logger.warn('Slack signing secret not populated — bypassing verification for url_verification only');
-      const payload: SlackEventPayload = JSON.parse(event.body);
-      if (payload.type === 'url_verification' && payload.challenge) {
-        return jsonResponse(200, { challenge: payload.challenge });
-      }
+      logger.error('Slack signing secret not found');
       return jsonResponse(500, { error: 'Internal configuration error' });
     }
 

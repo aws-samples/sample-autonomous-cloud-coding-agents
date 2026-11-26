@@ -34,8 +34,7 @@ const secretCache = cachedSecrets(
   // app) cannot be read until its recovery window ends: it is as absent as
   // one that does not exist. Bot tokens are the secrets read by name under
   // SLACK_SECRET_PREFIX. Any other secret in that state stays an error (the
-  // signing secret and the OAuth credentials are read by ARN), so that a
-  // signing secret never looks "not populated yet" to its callers.
+  // signing secret and the OAuth credentials are read by ARN).
   (err, secretId) => err?.name === 'InvalidRequestException'
     && secretId.startsWith(SLACK_SECRET_PREFIX)
     && String(err.message).includes('marked for deletion'),
