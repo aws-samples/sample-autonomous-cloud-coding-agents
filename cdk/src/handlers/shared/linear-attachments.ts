@@ -54,13 +54,12 @@
 
 import { createHash } from 'crypto';
 import * as dns from 'dns/promises';
-import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
-import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
-import { estimateImageTokensFromBuffer } from './image-tokens';
+import type { S3Client } from '@aws-sdk/client-s3';
+import type { ScreeningConfig } from './attachment-screening';
+import { deleteStoredObjects, screenAndStore } from './attachment-store';
 import { logger } from './logger';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
-import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
-import { EXTENSION_TO_MIME, isAllowedMimeType, isPrivateIp, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK, SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL } from './validation';
+import type { PassedAttachmentRecord } from './types';
+import { EXTENSION_TO_MIME, isAllowedMimeType, isPrivateIp, isValidFilename, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK, SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL } from './validation';
 
 /** Per-request timeout for a single attachment download. */
 const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
@@ -527,105 +526,23 @@ export async function downloadScreenAndStoreLinearAttachments(
           `(supported: ${SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL}).`,
         );
       }
-      // Confirm the bytes match the resolved type (blocks a masquerading/polyglot
-      // payload). Text types have no signature — validateMagicBytes checks for
-      // valid, null-free UTF-8 instead.
-      if (!validateMagicBytes(content, mimeType)) {
-        throw new LinearAttachmentError(
-          `Attachment '${upload.displayName}' content does not match its declared type '${mimeType}'.`,
-        );
-      }
 
-      // Screen through the same Bedrock Guardrail pipeline as every other
-      // attachment — images visually, files as text. Any block or screening
-      // failure is fail-closed. (Pass displayName — screening uses it only in
-      // its own error text, never as a path.)
-      let screenResult;
-      try {
-        screenResult = isImage
-          ? await screenImage(content, mimeType, upload.displayName, ctx.screeningConfig)
-          : await screenTextFile(content, mimeType, upload.displayName, ctx.screeningConfig);
-      } catch (err) {
-        if (err instanceof AttachmentScreeningError) {
-          throw new LinearAttachmentError(
-            `Attachment '${upload.displayName}' was blocked by content screening: ${err.message}`,
-            { cause: err },
-          );
-        }
-        // Not a verdict on the file: the screening call itself failed (throttled,
-        // denied). The SDK's text can name the role and the account, and this
-        // error's message is posted on the Linear issue, so it stays in the log.
-        logger.error('Screening call failed for Linear attachment', {
-          linear_workspace_id: ctx.linearWorkspaceId,
-          attachment_filename: upload.displayName,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        throw new LinearAttachmentError(
-          `Attachment '${upload.displayName}' could not be screened: the content screening service is unavailable.`,
-          { cause: err },
-        );
-      }
-      if (screenResult.screening.status === 'blocked') {
-        throw new LinearAttachmentError(
-          `Attachment '${upload.displayName}' was blocked by content policy: ${screenResult.screening.categories.join(', ')}`,
-        );
-      }
-
-      // S3 key + record filename stay path-safe (upload.filename) — the agent
-      // writes the attachment to disk at `<dir>/<filename>` (agent/src/attachments.py),
-      // so it must never carry the raw user label.
-      const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${ctx.userId}/${ctx.taskId}/${upload.id}/${upload.filename}`;
-      let putResult;
-      try {
-        putResult = await ctx.s3Client.send(new PutObjectCommand({
-          Bucket: ctx.bucketName,
-          Key: s3Key,
-          Body: screenResult.content,
-          ContentType: mimeType,
-        }));
-      } catch (s3Err) {
-        logger.error('S3 upload failed for Linear attachment', {
-          linear_workspace_id: ctx.linearWorkspaceId,
-          attachment_filename: upload.displayName,
-          s3_key: s3Key,
-          error: s3Err instanceof Error ? s3Err.message : String(s3Err),
-          metric_type: 'linear_attachment_upload_failure',
-        });
-        throw new LinearAttachmentError(
-          `Attachment '${upload.displayName}' could not be stored.`,
-          { cause: s3Err },
-        );
-      }
-      uploadedKeys.push(s3Key);
-
-      // Only images carry a token estimate (files aren't fed to the model as
-      // vision tokens). Mirrors jira-attachments.
-      const tokenEstimate = isImage
-        ? estimateImageTokensFromBuffer(screenResult.content, mimeType)
-        : undefined;
-
-      records.push(createAttachmentRecord({
-        attachment_id: upload.id,
-        type: attachmentType,
-        content_type: mimeType,
+      records.push(await screenAndStore({
+        surface: 'Linear',
+        content,
+        mimeType,
+        attachmentId: upload.id,
         filename: upload.filename,
-        s3_key: s3Key,
-        s3_version_id: putResult.VersionId ?? 'unversioned',
-        size_bytes: screenResult.content.length,
-        screening: { status: 'passed', screened_at: new Date().toISOString() },
-        checksum_sha256: screenResult.checksum,
-        ...(tokenEstimate !== undefined && { token_estimate: tokenEstimate }),
-      }) as PassedAttachmentRecord);
-
-      logger.info('Linear attachment downloaded, screened, and stored', {
-        linear_workspace_id: ctx.linearWorkspaceId,
-        attachment_filename: upload.displayName,
-        s3_key: s3Key,
-      });
+        displayName: upload.displayName,
+        store: ctx,
+        uploadedKeys,
+        logFields: { linear_workspace_id: ctx.linearWorkspaceId },
+        fail: (message, cause) => new LinearAttachmentError(message, cause === undefined ? undefined : { cause }),
+      }));
     }
   } catch (err) {
     // Fail-closed: a mid-batch failure must not orphan objects already uploaded.
-    await deleteS3Objects(ctx.s3Client, ctx.bucketName, uploadedKeys);
+    await deleteStoredObjects(ctx.s3Client, ctx.bucketName, uploadedKeys, 'Linear');
     throw err;
   }
 
@@ -648,7 +565,7 @@ function startsWith(content: Buffer, magic: readonly number[]): boolean {
  *   3. the label extension, but ONLY when it maps to a TEXT type. Binary
  *      extensions are ignored here — a `[x.pdf]` label can't make a non-PDF a
  *      PDF; only step 2's magic bytes can. Text is safe to key on the label
- *      because the caller then runs validateMagicBytes, whose UTF-8 check
+ *      because `screenAndStore` then runs validateMagicBytes, whose UTF-8 check
  *      rejects a binary payload wearing a `.txt`/`.csv` label.
  * Returns '' if none applies (caller rejects the upload as unsupported).
  */
@@ -676,31 +593,6 @@ function inferMime(contentType: string, label: string, content: Buffer): string 
   return '';
 }
 
-/**
- * Best-effort deletion of S3 objects by key. Never throws — cleanup failure is
- * logged and left to the bucket's 90-day lifecycle. Mirrors
- * `jira-attachments.deleteS3Objects`.
- */
-async function deleteS3Objects(s3Client: S3Client, bucketName: string, keys: readonly string[]): Promise<void> {
-  if (keys.length === 0) return;
-  try {
-    const result = await s3Client.send(new DeleteObjectsCommand({
-      Bucket: bucketName,
-      Delete: { Objects: keys.map((Key) => ({ Key })) },
-    }));
-    if (result.Errors && result.Errors.length > 0) {
-      logger.error('Partial cleanup of Linear attachment objects — some remain', {
-        failed_keys: result.Errors.map((e) => e.Key),
-      });
-    }
-  } catch (err) {
-    logger.error('Cleanup of Linear attachment objects failed (90-day lifecycle is backstop)', {
-      keys,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
-
 /** Delete previously-stored pre-screened Linear attachment objects (for the
  *  processor to call when createTaskCore rejects the task after upload). */
 export async function cleanupPreScreenedAttachments(
@@ -708,5 +600,5 @@ export async function cleanupPreScreenedAttachments(
   bucketName: string,
   records: readonly PassedAttachmentRecord[],
 ): Promise<void> {
-  await deleteS3Objects(s3Client, bucketName, records.map((r) => r.s3_key).filter((k): k is string => Boolean(k)));
+  await deleteStoredObjects(s3Client, bucketName, records.map((r) => r.s3_key).filter((k): k is string => Boolean(k)), 'Linear');
 }
