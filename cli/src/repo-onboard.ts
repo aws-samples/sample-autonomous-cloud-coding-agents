@@ -121,7 +121,7 @@ export async function onboardRepo(
   }
   if (existing?.egress_allowlist?.length) item.egress_allowlist = existing.egress_allowlist;
   if (existing?.cedar_policies?.length) item.cedar_policies = existing.cedar_policies;
-  for (const key of ['approval_gate_cap', 'max_budget_usd', 'memory_token_budget'] as const) {
+  for (const key of ['approval_gate_cap', 'approval_timeout_s', 'max_budget_usd', 'memory_token_budget'] as const) {
     if (existing?.[key] !== undefined) item[key] = existing[key];
   }
 
